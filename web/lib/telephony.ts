@@ -15,10 +15,9 @@ function sid(): string {
 }
 
 function auth(): string {
-  const key = process.env.TWILIO_API_KEY_SID;
-  const secret = process.env.TWILIO_API_KEY_SECRET;
-  if (key && secret) return Buffer.from(`${key}:${secret}`).toString("base64");
-  return Buffer.from(`${sid()}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
+  // Account token first — the provided SK key pair belongs to a different Twilio account.
+  if (process.env.TWILIO_AUTH_TOKEN) return Buffer.from(`${sid()}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
+  return Buffer.from(`${process.env.TWILIO_API_KEY_SID}:${process.env.TWILIO_API_KEY_SECRET}`).toString("base64");
 }
 
 async function twilio(path: string, form?: Record<string, string>): Promise<Record<string, unknown>> {
