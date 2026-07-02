@@ -65,6 +65,7 @@ type CallRow = {
   experiment_id: string | null;
   variant: string | null;
   agent_version: number;
+  flow_id: string | null;
 };
 
 /** Honors a stamped experiment variant, or lazily picks one (covers PSTN calls created outside buildVoiceSession). */
@@ -139,13 +140,20 @@ export async function sessionUpdateForCall(
   const scope = signScope({ callId, agentId: agent.agent_id, orgId: agent.org_id });
 
   const call = await qOne<CallRow>(
-    "SELECT direction, from_number, to_number, experiment_id, variant, agent_version FROM calls WHERE id = $1",
+    "SELECT direction, from_number, to_number, experiment_id, variant, agent_version, flow_id FROM calls WHERE id = $1",
     [callId]
   );
-  const [effective, callerContext] = await Promise.all([
+  let [effective, callerContext] = await Promise.all([
     resolveVariant(agent, callId, call),
     callerContextBlock(agent.org_id, callId, call),
   ]);
+  // Campaign/recall calls run a named outbound flow: its instructions replace the inbound default.
+  if (call?.flow_id) {
+    const named = await qOne<{ instructions: string }>(
+      "SELECT instructions FROM flows WHERE id = $1 AND org_id = $2", [call.flow_id, agent.org_id]
+    );
+    if (named) effective = { ...effective, instructions: named.instructions };
+  }
 
   const tools: Record<string, unknown>[] = [
     {

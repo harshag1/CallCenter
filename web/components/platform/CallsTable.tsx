@@ -4,6 +4,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CornerDownLeft, RotateCcw } from "lucide-react";
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
 import CallTimeline from "./CallTimeline";
@@ -21,7 +22,9 @@ export type CallFocus = {
   holdCountdown: { until: string } | null;
 };
 
-const HEADERS = ["time", "agent", "dir", "from", "duration", "sat", "resolution", "review"];
+const HEADERS = ["time", "agent", "dir", "number", "duration", "sat", "resolution", "review"];
+
+const isMissed = (c: CallRow) => c.status === "no-answer" || c.status === "failed";
 
 async function fetchCalls(): Promise<CallRow[] | null> {
   try {
@@ -75,6 +78,20 @@ export default function CallsTable({
     setExpanded(null);
     setEvents([]);
   }, []);
+
+  // Recall lineage: child rows carry parent_call_id; parents with a recall child get a hint.
+  const recalledParents = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of calls) if (c.parent_call_id) set.add(c.parent_call_id);
+    return set;
+  }, [calls]);
+
+  const jumpToCall = useCallback((id: string) => {
+    void openCall(id);
+    requestAnimationFrame(() =>
+      document.getElementById(`call-row-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+    );
+  }, [openCall]);
 
   // Parent can hand us a call to auto-expand (e.g. clicked on the home board).
   useEffect(() => {
@@ -151,13 +168,48 @@ export default function CallsTable({
           {calls.map((c) => (
             <Fragment key={c.id}>
               <tr
+                id={`call-row-${c.id}`}
                 onClick={() => (expanded === c.id ? closeCall() : void openCall(c.id))}
-                className={`cursor-pointer border-b border-[var(--border)] transition-colors duration-[160ms] last:border-0 hover:bg-neutral-50 ${expanded === c.id ? "bg-neutral-50" : ""}`}
+                className={`cursor-pointer border-b border-[var(--border)] transition-colors duration-[160ms] last:border-0 ${
+                  isMissed(c)
+                    ? `bg-red-50/60 hover:bg-red-50 ${expanded === c.id ? "bg-red-50" : ""}`
+                    : `hover:bg-neutral-50 ${expanded === c.id ? "bg-neutral-50" : ""}`
+                }`}
               >
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">{fmtTime(c.started_at)}</td>
-                <td className="px-4 py-2.5">{c.agent}</td>
-                <td className="px-4 py-2.5"><DirIcon d={c.direction} /></td>
-                <td className="px-4 py-2.5 tabular-nums text-neutral-500">{c.from_number ?? "—"}</td>
+                <td className="px-4 py-2.5">
+                  <span className="inline-flex max-w-full items-center gap-1.5">
+                    {c.agent}
+                    {c.campaign_id && (
+                      <span className="max-w-[110px] truncate rounded-full border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-neutral-500">
+                        {c.campaign ?? "campaign"}
+                      </span>
+                    )}
+                  </span>
+                </td>
+                <td className="px-4 py-2.5">
+                  <span className="inline-flex items-center gap-1.5">
+                    <DirIcon d={c.direction} />
+                    {c.parent_call_id && (
+                      <Tooltip content="recall — jump to original call">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); jumpToCall(c.parent_call_id!); }}
+                          className="inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-neutral-500 transition-colors duration-[160ms] hover:border-neutral-900 hover:text-neutral-900"
+                        >
+                          <RotateCcw size={9} /> recall
+                        </button>
+                      </Tooltip>
+                    )}
+                    {recalledParents.has(c.id) && (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-neutral-400">
+                        recalled <CornerDownLeft size={9} />
+                      </span>
+                    )}
+                  </span>
+                </td>
+                <td className="px-4 py-2.5 tabular-nums text-neutral-500">
+                  {(c.direction === "outbound" ? c.to_number : c.from_number) ?? "—"}
+                </td>
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">
                   {c.status === "active" ? (
                     <span className="flex items-center gap-1.5"><PulseDot /> {mmss(now - Date.parse(c.started_at))}</span>
@@ -166,7 +218,11 @@ export default function CallsTable({
                   )}
                 </td>
                 <td className="px-4 py-2.5">
-                  {c.satisfaction != null ? (
+                  {isMissed(c) ? (
+                    <span className="inline-flex h-5 items-center rounded-full bg-red-500 px-2 text-[10px] font-medium text-white">
+                      missed
+                    </span>
+                  ) : c.satisfaction != null ? (
                     <Tooltip variant="panel" content={<SatGlance call={c} />}>
                       <SatChip n={c.satisfaction} />
                     </Tooltip>

@@ -6,7 +6,7 @@ import { waitUntil } from "@vercel/functions";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { ingestDocument } from "@/lib/knowledge";
-import { uploadKindFor, extOf } from "@/lib/files";
+import { uploadKindFor, extOf, mimeFor } from "@/lib/files";
 
 export const maxDuration = 300;
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -20,15 +20,20 @@ export async function POST(req: Request) {
   if (!files.length) return NextResponse.json({ error: "no files" }, { status: 400 });
 
   const created: { id: string; filename: string; kind: string }[] = [];
+  const rejected: { filename: string; reason: string }[] = [];
   for (const file of files.slice(0, 10)) {
-    if (file.size > MAX_BYTES) continue;
+    if (file.size > MAX_BYTES) {
+      rejected.push({ filename: file.name, reason: `exceeds ${MAX_BYTES / (1024 * 1024)}MB limit` });
+      continue;
+    }
     const buf = Buffer.from(await file.arrayBuffer());
     const kind = uploadKindFor(file.name);
+    const mime = file.type || mimeFor(file.name);
 
     if (kind === "knowledge") {
       const row = await qOne<{ id: string }>(
         `INSERT INTO documents (org_id, filename, mime, size_bytes) VALUES ($1,$2,$3,$4) RETURNING id`,
-        [session.orgId, file.name, file.type || "application/octet-stream", file.size]
+        [session.orgId, file.name, mime, file.size]
       );
       created.push({ id: row!.id, filename: file.name, kind });
       waitUntil(ingestDocument(row!.id, buf));
@@ -41,14 +46,14 @@ export async function POST(req: Request) {
       `INSERT INTO documents (org_id, filename, mime, size_bytes, kind, data, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
       [
-        session.orgId, file.name, file.type || "application/octet-stream", file.size,
+        session.orgId, file.name, mime, file.size,
         kind, buf, embedCsv ? "ingesting" : "ready",
       ]
     );
     created.push({ id: row!.id, filename: file.name, kind });
     if (embedCsv) waitUntil(ingestDocument(row!.id, buf));
   }
-  return NextResponse.json({ ok: true, documents: created });
+  return NextResponse.json({ ok: true, documents: created, rejected });
 }
 
 export async function GET() {

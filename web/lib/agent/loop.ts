@@ -17,7 +17,7 @@ export type LoopEvent =
   | { type: "text"; delta: string }
   | { type: "tool"; name: string; status: "start" | "done" | "error" }
   | { type: "surface"; surface: unknown }
-  | { type: "flow"; flow: unknown }
+  | { type: "flow"; flow: unknown; flowMeta?: { id: string; label: string } }
   | { type: "notice"; text: string }
   | { type: "done" };
 
@@ -33,7 +33,8 @@ export async function* runOperator(
   threadId: string,
   userText: string,
   agentId: string | null,
-  origin: string
+  origin: string,
+  openFlow: { id?: string; label?: string } | null = null
 ): AsyncGenerator<LoopEvent> {
   const ctx: ToolCtx = { orgId: session.orgId, email: session.email, agentId, origin };
 
@@ -42,7 +43,7 @@ export async function* runOperator(
     [threadId, session.orgId, HISTORY_LIMIT]
   );
   const messages: ChatMessage[] = [
-    { role: "system", content: operatorPrompt(session, agentId) },
+    { role: "system", content: operatorPrompt(session, agentId, openFlow) },
     ...history.reverse().map((m) => m.content as ChatMessage),
     { role: "user", content: userText },
   ];
@@ -85,7 +86,7 @@ export async function* runOperator(
         const result = await tool.execute(args, ctx);
         output = result.output;
         if (result.surface) yield { type: "surface", surface: result.surface };
-        if (result.flow) yield { type: "flow", flow: result.flow };
+        if (result.flow) yield { type: "flow", flow: result.flow, flowMeta: result.flowMeta };
         if (result.notice) yield { type: "notice", text: result.notice };
         yield { type: "tool", name: call.name, status: "error" in (result.output as object ?? {}) ? "error" : "done" };
       } catch (e) {

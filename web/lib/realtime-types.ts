@@ -34,4 +34,9 @@ export type LiveCallUpdate = {
   direction: "web" | "inbound" | "outbound";
 };
 
-export type LiveEvent = LiveCallEvent | LiveCallUpdate;
+export type LiveDatasetUpdate = {
+  kind: "dataset_update";
+  datasetId: string;
+};
+
+export type LiveEvent = LiveCallEvent | LiveCallUpdate | LiveDatasetUpdate;

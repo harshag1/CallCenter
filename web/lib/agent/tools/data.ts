@@ -43,7 +43,7 @@ export const queryData: OperatorTool = {
 export const manageTable: OperatorTool = {
   name: "manage_table",
   description:
-    "Create/alter tables and insert/update/delete rows — ONLY inside the agent_data schema (your sandbox for custom storage). Every table reference must be schema-qualified as agent_data.<table>.",
+    "Low-level SQL sandbox (agent_data schema) for internal tool storage — NOT visible in the user's Tables page. When the user asks for a table of records, use create_dataset/write_dataset instead. Every table reference must be schema-qualified as agent_data.<table>.",
   parameters: {
     type: "object",
     properties: { sql: { type: "string", description: "DDL or DML statement(s), all schema-qualified with agent_data." } },

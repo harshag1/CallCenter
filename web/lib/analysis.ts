@@ -10,12 +10,14 @@ const L = log("analysis");
 const RESOLUTIONS = new Set(["ai_resolved", "human_resolved", "unresolved"]);
 
 const SYSTEM = `You are a rigorous call-center QA analyst. Given a voice-call transcript, reply with JSON only:
-{"satisfaction": <int 1-10>, "resolution": "ai_resolved" | "human_resolved" | "unresolved", "review": "<3-5 sentences>"}
+{"satisfaction": <int 1-10>, "resolution": "ai_resolved" | "human_resolved" | "unresolved", "review": "<3-5 sentences>", "cutoff": <boolean>, "cutoff_context": "<string or empty>"}
 - satisfaction: judge ONLY the customer's emotional state from their own words. 5 = normal/neutral, 1 = furious, 10 = delighted. Do not grade the agent here.
 - resolution: "ai_resolved" if the AI agent fully handled the issue; "human_resolved" if the call was transferred to a human and the issue concluded there; "unresolved" otherwise (hung up, dead end, follow-up still needed).
-- review: 3-5 sentences covering what happened, what went wrong or went great, and why.`;
+- review: 3-5 sentences covering what happened, what went wrong or went great, and why.
+- cutoff: true ONLY if the call clearly dropped mid-conversation — the caller was cut off mid-sentence or mid-thought while still engaged (NOT a natural goodbye, NOT the caller deliberately hanging up after being done).
+- cutoff_context: when cutoff is true, 1-2 sentences: where the conversation stood and what the caller was in the middle of saying/doing, so a callback agent can resume seamlessly. Empty string otherwise.`;
 
-type Analysis = { satisfaction: number; resolution: string; review: string };
+type Analysis = { satisfaction: number; resolution: string; review: string; cutoff?: boolean; cutoff_context?: string };
 
 function firstSentence(text: string): string {
   const m = text.match(/^.*?[.!?](?:\s|$)/);
@@ -70,6 +72,7 @@ export async function analyzeCall(callId: string): Promise<void> {
       "UPDATE calls SET resolution = COALESCE(resolution, 'unresolved') WHERE id = $1",
       [callId]
     );
+    await fireEndOfCallTasks(callId);
     return;
   }
 
@@ -92,11 +95,18 @@ export async function analyzeCall(callId: string): Promise<void> {
       [callId, satisfaction, resolution, review, firstSentence(review), sentimentFor(satisfaction)]
     );
     L.info("call analyzed", { callId, data: { satisfaction, resolution } });
+
+    // Cut-off mid-sentence? The agent's recall policy decides whether we call them back.
+    if (a.cutoff) await maybeScheduleRecall(callId, String(a.cutoff_context ?? "")).catch(() => {});
   } catch (e) {
     L.warn("analysis failed", { callId, err: (e as Error).message });
   }
 
-  // Fire any end-of-call background tasks queued during the conversation.
+  await fireEndOfCallTasks(callId);
+}
+
+/** Fires end-of-call background tasks queued during the conversation (cron sweep is the backstop). */
+async function fireEndOfCallTasks(callId: string): Promise<void> {
   try {
     const { runCallTask } = await import("./tasks");
     const queued = await q<{ id: string }>(
@@ -105,4 +115,38 @@ export async function analyzeCall(callId: string): Promise<void> {
     );
     for (const t of queued) await runCallTask(t.id).catch(() => {});
   } catch { /* cron sweep is the backstop */ }
+}
+
+
+/** Policy-driven callback for calls that dropped mid-conversation (agents.recall_policy). */
+async function maybeScheduleRecall(callId: string, cutoffContext: string): Promise<void> {
+  const call = await qOne<{
+    agent_id: string; direction: string; from_number: string | null; to_number: string | null;
+    flow_id: string | null; parent_call_id: string | null;
+    enabled: boolean | null; instructions: string | null;
+  }>(
+    `SELECT c.agent_id, c.direction, c.from_number, c.to_number, c.flow_id, c.parent_call_id,
+            (a.recall_policy->>'enabled')::boolean AS enabled, a.recall_policy->>'instructions' AS instructions
+     FROM calls c JOIN agents a ON a.id = c.agent_id WHERE c.id = $1`,
+    [callId]
+  );
+  if (!call || call.enabled === false) return;
+  if (call.parent_call_id) return; // never recall a recall — one retry max
+  const number = call.direction === "outbound" ? call.to_number : call.from_number;
+  if (!number || !/^\+\d{7,15}$/.test(number)) return;
+  const already = await qOne(
+    "SELECT id FROM scheduled_calls WHERE parent_call_id = $1 LIMIT 1", [callId]
+  );
+  if (already) return;
+
+  const reason =
+    `CUT-OFF RECALL. The previous call with this person disconnected mid-conversation. ` +
+    `Where it stood: ${cutoffContext || "unknown"}. ` +
+    `Policy: ${call.instructions ?? "Apologize for the disconnect and pick up where the conversation left off."}`;
+  await q(
+    `INSERT INTO scheduled_calls (agent_id, to_number, run_at, reason, parent_call_id, created_by, flow_id)
+     VALUES ($1,$2, now() + interval '2 minutes', $3, $4, 'recall-policy', $5)`,
+    [call.agent_id, number, reason, callId, call.flow_id]
+  );
+  L.info("cut-off recall scheduled", { callId, data: { to: number } });
 }

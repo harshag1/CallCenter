@@ -16,7 +16,8 @@ export const listDatasetsTool: OperatorTool = {
 
 export const createDatasetTool: OperatorTool = {
   name: "create_dataset",
-  description: "Create a new data table. Columns can be plain names or {key,label,type:text|number|phone|date}.",
+  description:
+    "Create a new data table (dataset). ALWAYS use this — never manage_table — when the user asks for a table: datasets appear in their Tables page and are readable by voice bots. Columns can be plain names or {key,label,type:text|number|phone|date}.",
   parameters: {
     type: "object",
     properties: {

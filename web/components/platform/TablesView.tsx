@@ -3,8 +3,10 @@
 
 "use client";
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronLeft, MessageSquare, Phone, Plus, Star, Table2, Trash2, Users } from "lucide-react";
+import { useLiveEvents } from "@/components/hooks/useLiveEvents";
+import type { LiveEvent } from "@/lib/realtime-types";
 import { fmtTime } from "./shared";
 
 type Dataset = {
@@ -41,17 +43,40 @@ async function fetchRows(datasetId: string): Promise<Row[] | null> {
   }
 }
 
+/** org_events row-write fanout (migrations/006) — not yet in the LiveEvent union. */
+type DatasetUpdateEvent = { kind: "dataset_update"; datasetId?: string };
+
 export default function TablesView() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [sel, setSel] = useState<Dataset | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [creating, setCreating] = useState(false);
+  const selRef = useRef<Dataset | null>(null);
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => { selRef.current = sel; }, [sel]);
 
   useEffect(() => {
     let live = true;
     void fetchDatasets().then((d) => { if (live && d) setDatasets(d); });
-    return () => { live = false; };
+    return () => {
+      live = false;
+      if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    };
   }, []);
+
+  // Live sync: rows written mid-campaign (scores etc.) appear without user action.
+  useLiveEvents((ev: LiveEvent) => {
+    const e = ev as LiveEvent | DatasetUpdateEvent;
+    if (e.kind !== "dataset_update" || refetchTimer.current) return;
+    if (!selRef.current || (e.datasetId && e.datasetId !== selRef.current.id)) return;
+    refetchTimer.current = setTimeout(() => {
+      refetchTimer.current = null;
+      const open = selRef.current;
+      if (!open) return;
+      void fetchRows(open.id).then((r) => { if (r && selRef.current?.id === open.id) setRows(r); });
+    }, 1000);
+  });
 
   if (sel) {
     return (
@@ -83,7 +108,9 @@ export default function TablesView() {
             >
               <Icon size={15} className="text-neutral-500" />
               <div className="mt-2.5 text-[13px] font-semibold">{d.name}</div>
-              <div className="mt-0.5 text-[11px] tabular-nums text-neutral-400">{d.row_count ?? 0} rows</div>
+              <div className="mt-0.5 text-[11px] tabular-nums text-neutral-400">
+                {d.row_count ?? 0} {(d.row_count ?? 0) === 1 ? "row" : "rows"}
+              </div>
             </button>
           );
         })}

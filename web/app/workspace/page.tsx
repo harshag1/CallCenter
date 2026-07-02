@@ -5,23 +5,27 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUpLeft, Home, Layers, LogOut, Phone, Table2, X } from "lucide-react";
+import { ArrowUpLeft, CalendarClock, Home, Layers, LogOut, Phone, Table2, X } from "lucide-react";
 import Tooltip from "@/components/ui/Tooltip";
 import SurfaceView from "@/components/surface/SurfaceView";
 import FlowPanel from "@/components/flow/FlowPanel";
+import FlowPicker from "@/components/flow/FlowPicker";
 import ChatPanel, { type ChatItem } from "@/components/chat/ChatPanel";
 import HomeBoard from "@/components/platform/HomeBoard";
 import CallsTable, { type CallFocus } from "@/components/platform/CallsTable";
 import TablesView from "@/components/platform/TablesView";
 import ScreensView from "@/components/platform/ScreensView";
+import ScheduledView from "@/components/platform/ScheduledView";
+import { useScheduled } from "@/components/hooks/useScheduled";
 import type { Surface } from "@/lib/surface-dsl";
 
-type Tab = "home" | "calls" | "tables" | "screens";
+type Tab = "home" | "calls" | "tables" | "screens" | "scheduled";
 type FlowLike = {
   nodes: { id: string; label: string; kind?: string }[];
   edges: { from: string; to: string; label?: string }[];
 } | null;
 type AgentInfo = { id: string; name: string; phone_number: string | null; flow: FlowLike };
+type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike };
 
 const TABS: { id: Tab; icon: typeof Home; title: string }[] = [
   { id: "home", icon: Home, title: "home" },
@@ -38,11 +42,13 @@ export default function Workspace() {
   const [streaming, setStreaming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [surface, setSurface] = useState<Surface | null>(null); // adhoc operator surface
-  const [chatFlow, setChatFlow] = useState<FlowLike>(null);     // operator-pushed flow
+  const [flows, setFlows] = useState<FlowEntry[]>([]);          // named flows for the flow picker
+  const [openFlow, setOpenFlow] = useState<FlowEntry | null>(null); // picker selection (chat can switch it)
   const [focus, setFocus] = useState<CallFocus | null>(null);   // expanded call trace
   const [callFlow, setCallFlow] = useState<FlowLike>(null);     // exact version flow of the focused call
   const [expandCallId, setExpandCallId] = useState<string | null>(null);
   const threadId = useRef("");
+  const { scheduled, campaigns, reload: reloadScheduled, hasPending } = useScheduled();
 
   const setTab = useCallback((t: Tab) => {
     setTabState(t);
@@ -55,7 +61,7 @@ export default function Workspace() {
     threadId.current = localStorage.getItem("threadId") ?? crypto.randomUUID();
     localStorage.setItem("threadId", threadId.current);
     const t = new URLSearchParams(window.location.search).get("tab") as Tab | null;
-    if (t && TABS.some((x) => x.id === t)) setTabState(t);
+    if (t && (TABS.some((x) => x.id === t) || t === "scheduled")) setTabState(t);
     fetch("/api/workspace")
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((j) => setAgents(j.agents ?? []))
@@ -74,6 +80,28 @@ export default function Workspace() {
     return () => { live = false; };
   }, [focusCallId]);
 
+  // Named flows for the picker: inbound default first, then outbound flows.
+  const primaryAgentId = agents[0]?.id ?? null;
+  useEffect(() => {
+    if (!primaryAgentId) return;
+    let live = true;
+    fetch(`/api/flows?agentId=${primaryAgentId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { flows?: { id: string; name: string; kind?: string; flow: FlowLike }[] } | null) => {
+        if (!live || !j?.flows) return;
+        const list = j.flows.map((f) => ({ id: f.id, label: f.name, kind: f.kind, flow: f.flow }));
+        setFlows(list);
+        setOpenFlow((prev) => prev ?? list[0] ?? null);
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [primaryAgentId]);
+
+  const selectFlow = useCallback((id: string) => {
+    const f = flows.find((x) => x.id === id);
+    if (f) setOpenFlow(f);
+  }, [flows]);
+
   const focusAgentId = focus?.agentId ?? null;
   const send = useCallback(async (text: string) => {
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
@@ -82,7 +110,12 @@ export default function Workspace() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, threadId: threadId.current, agentId: focusAgentId ?? agents[0]?.id ?? null }),
+        body: JSON.stringify({
+          message: text,
+          threadId: threadId.current,
+          agentId: focusAgentId ?? agents[0]?.id ?? null,
+          openFlow: openFlow ? { id: openFlow.id, label: openFlow.label } : null,
+        }),
       });
       if (!res.ok || !res.body) throw new Error(`chat failed (${res.status})`);
       const reader = res.body.getReader();
@@ -118,7 +151,24 @@ export default function Workspace() {
           } else if (ev.type === "surface") {
             setSurface(ev.surface);
           } else if (ev.type === "flow") {
-            setChatFlow(ev.flow);
+            const meta = ev.flowMeta as { id: string; label: string } | undefined;
+            if (meta) {
+              // Operator opened/updated a named flow → switch the picker to it (adding if new).
+              const entry: FlowEntry = {
+                id: meta.id,
+                label: meta.label,
+                kind: meta.id.startsWith("inbound:") ? "inbound" : "outbound",
+                flow: ev.flow,
+              };
+              setFlows((prev) =>
+                prev.some((f) => f.id === entry.id)
+                  ? prev.map((f) => (f.id === entry.id ? entry : f))
+                  : [...prev, entry]
+              );
+              setOpenFlow(entry);
+            } else {
+              setOpenFlow({ id: "adhoc", label: "operator flow", flow: ev.flow });
+            }
           } else if (ev.type === "notice") {
             setNotice(ev.text);
             setTimeout(() => setNotice(null), 3500);
@@ -130,7 +180,7 @@ export default function Workspace() {
     } finally {
       setStreaming(false);
     }
-  }, [agents, focusAgentId]);
+  }, [agents, focusAgentId, openFlow]);
 
   const onFocus = useCallback((info: CallFocus | null) => setFocus(info), []);
   const openCall = useCallback((id: string) => { setExpandCallId(id); setTab("calls"); }, [setTab]);
@@ -142,7 +192,7 @@ export default function Workspace() {
 
   const panelFlow = focus
     ? callFlow ?? agents.find((a) => a.id === focus.agentId)?.flow ?? null
-    : chatFlow ?? agents[0]?.flow ?? null;
+    : openFlow?.flow ?? agents[0]?.flow ?? null;
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -173,6 +223,18 @@ export default function Workspace() {
               </button>
             </Tooltip>
           ))}
+          {(hasPending || tab === "scheduled") && (
+            <Tooltip content="scheduled" placement="right">
+              <button
+                onClick={() => setTab("scheduled")}
+                className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-[160ms] ${
+                  tab === "scheduled" && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
+                }`}
+              >
+                <CalendarClock size={15} />
+              </button>
+            </Tooltip>
+          )}
           <div className="flex-1" />
           <Tooltip content="studio" placement="right">
             <button
@@ -210,6 +272,8 @@ export default function Workspace() {
               <CallsTable onFocus={onFocus} expandCallId={expandCallId} />
             ) : tab === "tables" ? (
               <TablesView />
+            ) : tab === "scheduled" ? (
+              <ScheduledView scheduled={scheduled} campaigns={campaigns} reload={reloadScheduled} />
             ) : (
               <ScreensView send={send} />
             )}
@@ -218,7 +282,15 @@ export default function Workspace() {
 
         {/* Right: flow + operator chat */}
         <div className="flex w-[400px] shrink-0 flex-col border-l border-[var(--border)]">
-          <div className="h-[38%] shrink-0 border-b border-[var(--border)]">
+          <div className="relative h-[38%] shrink-0 border-b border-[var(--border)]">
+            {!focus && flows.length > 0 && (
+              <FlowPicker
+                options={flows.map(({ id, label, kind }) => ({ id, label, kind }))}
+                selectedId={openFlow?.id ?? null}
+                label={openFlow?.label ?? flows[0].label}
+                onSelect={selectFlow}
+              />
+            )}
             <FlowPanel
               flow={panelFlow}
               visited={focus?.visited}

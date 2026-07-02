@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { LogOut, Phone, ArrowUp, Play, Loader2, LayoutGrid } from "lucide-react";
 import { ASSISTANT_PROSE, PixelLoader, ToolLine, USER_BUBBLE } from "@/components/chat/ChatPanel";
 import Tooltip from "@/components/ui/Tooltip";
@@ -295,7 +296,7 @@ export default function Studio() {
             ) : (
               <div key={i} className="flex justify-start">
                 <div className={ASSISTANT_PROSE}>
-                  <ReactMarkdown>{item.text}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
                 </div>
               </div>
             )

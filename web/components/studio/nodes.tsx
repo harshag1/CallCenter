@@ -52,7 +52,7 @@ export const TopicNode = memo(function TopicNode({ data }: NodeProps) {
   const Icon = ICONS[(data.icon as string) ?? "life-buoy"] ?? LifeBuoy;
   const steps = (data.steps as { label: string }[]) ?? [];
   return (
-    <div className={`${shell(data.active as boolean)} min-w-[170px]`}>
+    <div className={`${shell(data.active as boolean)} min-w-[170px] max-w-[192px]`}>
       <Handle type="target" position={Position.Top} className="!bg-neutral-300" />
       <div className="flex items-center gap-2.5">
         <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-neutral-100 bg-neutral-50 text-neutral-700">
@@ -66,7 +66,7 @@ export const TopicNode = memo(function TopicNode({ data }: NodeProps) {
             <span
               key={i}
               className={`rounded-full border px-2 py-0.5 text-[10px] ${
-                data.activeStep === i ? "border-neutral-900 bg-neutral-900 text-white" : "border-neutral-150 border-neutral-200 text-neutral-500"
+                data.activeStep === i ? "border-neutral-900 bg-neutral-900 text-white" : "border-neutral-200 text-neutral-500"
               }`}
             >
               {s.label}

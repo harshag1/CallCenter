@@ -16,6 +16,7 @@ export type ToolResult = {
   /** Workspace mutations streamed to the client. */
   surface?: Surface;
   flow?: Flow;
+  flowMeta?: { id: string; label: string };
   notice?: string;
 };
 

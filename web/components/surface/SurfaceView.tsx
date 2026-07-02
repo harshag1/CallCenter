@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -126,7 +127,7 @@ function BlockView({ block, send }: { block: Block; send: Send }) {
     case "markdown":
       return (
         <div className="prose prose-sm prose-neutral max-w-none text-sm leading-relaxed [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm">
-          <ReactMarkdown>{block.body as string}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.body as string}</ReactMarkdown>
         </div>
       );
     case "actions": {

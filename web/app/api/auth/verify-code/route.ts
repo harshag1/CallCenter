@@ -8,6 +8,9 @@ import { hmacCode, establishSession, normalizePhoneNumber, sessionCookie } from 
 export async function POST(req: Request) {
   const { email, code, phone } = await req.json().catch(() => ({}));
   const clean = String(email ?? "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(clean)) {
+    return NextResponse.json({ error: "invalid email" }, { status: 400 });
+  }
   const cleanPhone = phone ? normalizePhoneNumber(String(phone)) : null;
   // Admin bypass: 111111 always verifies.
   const bypass = String(code ?? "") === "111111";

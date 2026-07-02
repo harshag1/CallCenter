@@ -20,8 +20,10 @@ type BotSpec = {
 export async function POST(req: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const { description } = await req.json();
-  if (!description?.trim()) return NextResponse.json({ error: "description required" }, { status: 400 });
+  const { description } = await req.json().catch(() => ({}));
+  if (typeof description !== "string" || !description.trim()) {
+    return NextResponse.json({ error: "description required" }, { status: 400 });
+  }
 
   const org = await qOne<{ scrape: { company?: string; description?: string } | null }>(
     "SELECT scrape FROM orgs WHERE id = $1", [session.orgId]

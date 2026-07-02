@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { AlertCircle, ArrowDownLeft, ArrowUpRight, Globe, Pause, Sparkles, UserCheck } from "lucide-react";
+import { AlertCircle, Globe, Pause, PhoneIncoming, PhoneOutgoing, Sparkles, UserCheck } from "lucide-react";
 
 export type CallRow = {
   id: string;
@@ -24,6 +24,10 @@ export type CallRow = {
   experiment_id: string | null;
   variant: string | null;
   summary?: string | null;
+  flow_id?: string | null;
+  campaign_id?: string | null;
+  parent_call_id?: string | null;
+  campaign?: string | null;
 };
 
 export type CallEvent = { id: number; ts: string; type: string; payload: Record<string, unknown> };
@@ -59,6 +63,18 @@ export function fmtTime(iso: string): string {
     : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${hm}`;
 }
 
+/** Compact relative time toward/since an ISO instant: "in 2m" / "3h ago". */
+export function fmtRel(iso: string, now = Date.now()): string {
+  const diff = Date.parse(iso) - now;
+  const abs = Math.abs(diff);
+  const s =
+    abs < 60_000 ? `${Math.max(1, Math.round(abs / 1000))}s`
+    : abs < 3_600_000 ? `${Math.round(abs / 60_000)}m`
+    : abs < 86_400_000 ? `${Math.round(abs / 3_600_000)}h`
+    : `${Math.round(abs / 86_400_000)}d`;
+  return diff >= 0 ? `in ${s}` : `${s} ago`;
+}
+
 /** 1–10 satisfaction → red scale below 5, neutral at 5, emerald scale above. */
 export function satisfactionStyle(n: number): CSSProperties {
   if (n < 5) return { background: `rgba(239,68,68,${(0.12 + (5 - n) * 0.13).toFixed(2)})`, color: "#7f1d1d" };
@@ -86,7 +102,7 @@ export function ResIcon({ r }: { r: string | null }) {
 }
 
 export function DirIcon({ d }: { d: string }) {
-  const Icon = d === "inbound" ? ArrowDownLeft : d === "outbound" ? ArrowUpRight : Globe;
+  const Icon = d === "inbound" ? PhoneIncoming : d === "outbound" ? PhoneOutgoing : Globe;
   return (
     <span title={d} className="inline-flex">
       <Icon size={13} className="text-neutral-400" />

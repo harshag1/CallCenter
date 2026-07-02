@@ -13,11 +13,12 @@ import { PulseDot } from "./shared";
 
 type VariantMetric = {
   key: string; label: string; calls: number; avg_satisfaction: number | null;
-  resolutions: { ai_resolved: number; human_resolved: number; unresolved: number };
+  resolution: { ai_resolved: number; human_resolved: number; unresolved: number };
 };
 type Payload = {
   experiment: { id: string; name: string; hypothesis: string | null; status: string };
-  metrics: { variants: VariantMetric[]; series: { day: string; variant: string; avg: number }[] };
+  variants: VariantMetric[];
+  daily: { day: string; variant: string; avg_satisfaction: number | null }[];
 };
 
 const LINE_COLORS = ["#111", "#9ca3af", "#d1d5db", "#6b7280"];
@@ -57,15 +58,15 @@ export default function ExperimentDashboard({
   });
 
   if (!data?.experiment) return <div className="py-16 text-center text-xs text-neutral-300">…</div>;
-  const { experiment, metrics } = data;
-  const variants = metrics?.variants ?? [];
-  const series = metrics?.series ?? [];
+  const { experiment } = data;
+  const variants = data.variants ?? [];
+  const series = data.daily ?? [];
   const running = experiment.status === "running";
 
   const days = [...new Set(series.map((s) => String(s.day)))].sort();
   const chart = days.map((day) => {
     const row: Record<string, unknown> = { day: day.slice(5, 10) };
-    for (const s of series) if (String(s.day) === day) row[s.variant] = s.avg;
+    for (const s of series) if (String(s.day) === day) row[s.variant] = s.avg_satisfaction;
     return row;
   });
 
@@ -89,7 +90,7 @@ export default function ExperimentDashboard({
 
       <div className="flex gap-3">
         {variants.map((v) => {
-          const res = v.resolutions ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
+          const res = v.resolution ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
           const total = Math.max(res.ai_resolved + res.human_resolved + res.unresolved, 1);
           return (
             <Tooltip key={v.key} variant="panel" className="min-w-0 flex-1" content={<VariantGlance v={v} />}>
@@ -124,7 +125,7 @@ export default function ExperimentDashboard({
 
 /** Panel-tooltip body: calls, avg satisfaction, resolution split mini-bars. */
 function VariantGlance({ v }: { v: VariantMetric }) {
-  const res = v.resolutions ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
+  const res = v.resolution ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
   const total = Math.max(res.ai_resolved + res.human_resolved + res.unresolved, 1);
   const rows: [string, number, string][] = [
     ["ai", res.ai_resolved, "#111111"],

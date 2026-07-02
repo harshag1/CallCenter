@@ -16,6 +16,7 @@ import { createExperimentTool, stopExperimentTool, experimentResults } from "./e
 import { createScreen } from "./screens-tools";
 import { listFiles, parseCsv, importCsv, runJs, setHoldMusic } from "./files-tools";
 import { sendEmailTool, sendSmsTool } from "./comms";
+import { createFlowTool, updateFlowTool, openFlowTool, listFlowsTool, runCampaignTool, listCampaignsTool, cancelCampaignTool, getRecallPolicy, setRecallPolicy } from "./flows-tools";
 
 export const OPERATOR_TOOLS: OperatorTool[] = [
   renderSurface, showFlow,
@@ -31,6 +32,7 @@ export const OPERATOR_TOOLS: OperatorTool[] = [
   createScreen,
   listFiles, parseCsv, importCsv, runJs, setHoldMusic,
   sendEmailTool, sendSmsTool,
+  createFlowTool, updateFlowTool, openFlowTool, listFlowsTool, runCampaignTool, listCampaignsTool, cancelCampaignTool, getRecallPolicy, setRecallPolicy,
 ];
 
 export const byName = new Map(OPERATOR_TOOLS.map((t) => [t.name, t]));

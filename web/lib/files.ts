@@ -14,6 +14,23 @@ export function extOf(filename: string): string {
   return filename.toLowerCase().split(".").pop() ?? "";
 }
 
+const MIME_BY_EXT: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  md: "text/markdown",
+  txt: "text/plain",
+  csv: "text/csv",
+  json: "application/json",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  m4a: "audio/mp4",
+};
+
+/** Best-effort content type from the filename; used when the client omits File.type. */
+export function mimeFor(filename: string): string {
+  return MIME_BY_EXT[extOf(filename)] ?? "application/octet-stream";
+}
+
 /** Routes an upload to its documents.kind: media (audio), data (tabular), knowledge (embed path). */
 export function uploadKindFor(filename: string): "media" | "data" | "knowledge" {
   const ext = extOf(filename);

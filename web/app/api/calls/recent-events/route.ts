@@ -19,8 +19,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ events: [], last: Number(head?.max ?? 0) });
   }
 
-  const after = Number.parseInt(afterRaw, 10);
-  if (!Number.isFinite(after) || after < 0) {
+  // Clamp to a bigint-safe integer — huge cursors otherwise overflow pg's int8 parse.
+  const after = Math.min(Number.parseInt(afterRaw, 10), Number.MAX_SAFE_INTEGER);
+  if (!Number.isSafeInteger(after) || after < 0) {
     return NextResponse.json({ error: "bad cursor" }, { status: 400 });
   }
 

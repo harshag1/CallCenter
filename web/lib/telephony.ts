@@ -35,7 +35,14 @@ async function twilio(path: string, form?: Record<string, string>): Promise<Reco
 }
 
 /** Places an outbound call: Twilio dials the callee; on answer the leg streams into the bridge. */
-export async function originateCall(agentId: string, toNumber: string, reason: string | null): Promise<string> {
+export type OriginateOpts = { flowId?: string | null; campaignId?: string | null; parentCallId?: string | null };
+
+export async function originateCall(
+  agentId: string,
+  toNumber: string,
+  reason: string | null,
+  opts: OriginateOpts = {}
+): Promise<string> {
   const agent = await qOne<{ org_id: string; phone_number: string | null; version: number }>(
     "SELECT org_id, phone_number, active_version AS version FROM agents WHERE id = $1",
     [agentId]
@@ -46,16 +53,25 @@ export async function originateCall(agentId: string, toNumber: string, reason: s
   if (!process.env.BRIDGE_WS_URL) throw new Error("BRIDGE_WS_URL not configured");
 
   const call = await qOne<{ id: string }>(
-    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, metadata)
-     VALUES ($1,$2,'outbound',$3,$4,$5) RETURNING id`,
-    [agentId, agent.version, from, toNumber, JSON.stringify({ reason })]
+    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, metadata, flow_id, campaign_id, parent_call_id)
+     VALUES ($1,$2,'outbound',$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [
+      agentId, agent.version, from, toNumber, JSON.stringify({ reason }),
+      opts.flowId ?? null, opts.campaignId ?? null, opts.parentCallId ?? null,
+    ]
   );
   const scope = signScope({ callId: call!.id, agentId, orgId: agent.org_id });
   const origin = process.env.PUBLIC_ORIGIN!;
   const twimlUrl = `${origin}/api/telephony/twiml?callId=${call!.id}&scope=${encodeURIComponent(scope)}`;
 
   try {
-    const res = await twilio("/Calls.json", { To: toNumber, From: from, Url: twimlUrl, Method: "POST" });
+    const res = await twilio("/Calls.json", {
+      To: toNumber, From: from, Url: twimlUrl, Method: "POST",
+      // Missed/failed legs report back so the log can mark them (red, no-answer).
+      StatusCallback: `${origin}/api/telephony/status?callId=${call!.id}`,
+      StatusCallbackMethod: "POST",
+      Timeout: "25",
+    });
     await q("UPDATE calls SET twilio_call_sid = $2 WHERE id = $1", [call!.id, String(res.sid)]);
   } catch (e) {
     await q("UPDATE calls SET status = 'failed' WHERE id = $1", [call!.id]);

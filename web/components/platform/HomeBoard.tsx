@@ -50,14 +50,16 @@ export default function HomeBoard({
 
   useLiveEvents((ev: LiveEvent) => {
     if (ev.kind === "call_update") {
+      const scheduleReload = () => {
+        if (reloadTimer.current) return;
+        reloadTimer.current = setTimeout(() => {
+          reloadTimer.current = null;
+          void fetchCalls().then((rows) => rows && setCalls(rows));
+        }, 800);
+      };
       setCalls((prev) => {
         if (!prev.some((c) => c.id === ev.callId)) {
-          if (!reloadTimer.current) {
-            reloadTimer.current = setTimeout(() => {
-              reloadTimer.current = null;
-              void fetchCalls().then((rows) => rows && setCalls(rows));
-            }, 800);
-          }
+          scheduleReload();
           return prev;
         }
         return prev.map((c) =>
@@ -65,6 +67,8 @@ export default function HomeBoard({
         );
       });
       if (ev.status && ev.status !== "active") {
+        // Call closing out — duration/review land async, refetch for the recent row.
+        scheduleReload();
         setNodeByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });
         setHoldByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });
         setLineByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });

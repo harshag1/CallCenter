@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { ulawToWav } from "@/lib/audio";
+import { isUuid } from "@/lib/http";
 
 const MAX_BYTES = 25 * 1024 * 1024;
 
@@ -12,6 +13,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { id } = await params;
+  if (!isUuid(id)) return NextResponse.json({ error: "not found" }, { status: 404 });
   const owned = await qOne(
     "SELECT c.id FROM calls c JOIN agents a ON a.id = c.agent_id WHERE c.id = $1 AND a.org_id = $2",
     [id, session.orgId]
@@ -33,6 +35,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { id } = await params;
+  if (!isUuid(id)) return NextResponse.json({ error: "not found" }, { status: 404 });
   const rec = await qOne<{ mime: string; data: Buffer }>(
     `SELECT r.mime, r.data FROM call_recordings r
      JOIN calls c ON c.id = r.call_id JOIN agents a ON a.id = c.agent_id

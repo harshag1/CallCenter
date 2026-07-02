@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ArrowUp } from "lucide-react";
 import { toolDisplay } from "./tool-display";
 
@@ -59,7 +60,8 @@ export const ASSISTANT_PROSE =
   "[&_p]:my-[0.52em] [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 " +
   "[&_strong]:font-extrabold [&_strong]:text-neutral-900 " +
   "[&_code]:font-mono [&_code]:text-[11.5px] " +
-  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-neutral-50 [&_pre]:p-3";
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-neutral-50 [&_pre]:p-3 " +
+  "[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_th]:border-b [&_th]:border-neutral-200 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:text-[11px] [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-neutral-400 [&_td]:border-b [&_td]:border-neutral-100 [&_td]:px-2 [&_td]:py-1";
 
 export default function ChatPanel({
   items, streaming, onSend,
@@ -96,7 +98,7 @@ export default function ChatPanel({
           ) : (
             <div key={i} className="flex justify-start">
               <div className={ASSISTANT_PROSE}>
-                <ReactMarkdown>{item.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
               </div>
             </div>
           )

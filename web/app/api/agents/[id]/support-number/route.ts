@@ -5,11 +5,13 @@ import { NextResponse } from "next/server";
 import { getSession, normalizePhoneNumber } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { AgentFlowSchema } from "@/lib/flow";
+import { isUuid } from "@/lib/http";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { id } = await params;
+  if (!isUuid(id)) return NextResponse.json({ error: "agent not found" }, { status: 404 });
   const { number } = await req.json().catch(() => ({}));
   const clean = normalizePhoneNumber(String(number ?? ""));
   if (!clean) return NextResponse.json({ error: "invalid phone number" }, { status: 400 });
