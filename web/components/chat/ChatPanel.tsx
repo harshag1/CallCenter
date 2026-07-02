@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, MessageSquare } from "lucide-react";
 import { toolDisplay } from "./tool-display";
 
 export type ChatItem =
@@ -84,8 +84,8 @@ export default function ChatPanel({
     <div className="flex h-full flex-col">
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
         {!items.length && (
-          <div className="mt-8 text-center text-xs leading-5 text-neutral-300">
-            dashboards · tools · calls · analysis
+          <div className="mt-10 flex justify-center">
+            <MessageSquare size={18} strokeWidth={1.8} className="text-neutral-200" />
           </div>
         )}
         {items.map((item, i) =>
@@ -115,7 +115,7 @@ export default function ChatPanel({
             <textarea
               rows={1}
               value={input}
-              placeholder="ask the operator"
+              placeholder="Create or modify voice agents"
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
