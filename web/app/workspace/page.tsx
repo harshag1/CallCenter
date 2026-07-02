@@ -1,88 +1,79 @@
 // Author: Harsha Gundala
-// workspace — the shell: header, dynamic surface (left), flow + operator chat (right).
+// workspace — platform shell: icon rail, tabbed views, live flow + operator chat column.
 
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, Phone, PhoneCall } from "lucide-react";
+import { ArrowUpLeft, Home, Layers, LogOut, Phone, Table2, X } from "lucide-react";
 import SurfaceView from "@/components/surface/SurfaceView";
 import FlowPanel from "@/components/flow/FlowPanel";
 import ChatPanel, { type ChatItem } from "@/components/chat/ChatPanel";
-import CallWidget from "@/components/call/CallWidget";
-import type { Surface, Flow } from "@/lib/surface-dsl";
+import HomeBoard from "@/components/platform/HomeBoard";
+import CallsTable, { type CallFocus } from "@/components/platform/CallsTable";
+import TablesView from "@/components/platform/TablesView";
+import ScreensView from "@/components/platform/ScreensView";
+import type { Surface } from "@/lib/surface-dsl";
 
-type AgentInfo = {
-  id: string; name: string; purpose: string | null; phone_number: string | null;
-  voice: string; flow: Flow; instructions: string;
-};
-type CallRow = {
-  id: string; agent: string; direction: string; status: string;
-  started_at: string; duration_s: number | null; sentiment: string | null; summary: string | null;
-};
+type Tab = "home" | "calls" | "tables" | "screens";
+type FlowLike = {
+  nodes: { id: string; label: string; kind?: string }[];
+  edges: { from: string; to: string; label?: string }[];
+} | null;
+type AgentInfo = { id: string; name: string; phone_number: string | null; flow: FlowLike };
 
-function overviewSurface(agents: AgentInfo[], calls: CallRow[]): Surface {
-  return {
-    title: "Overview",
-    blocks: [
-      {
-        kind: "stat_row",
-        stats: [
-          { label: "bots", value: String(agents.length) },
-          { label: "calls", value: String(calls.length) },
-          {
-            label: "avg duration",
-            value: calls.length
-              ? `${Math.round(calls.reduce((a, c) => a + (c.duration_s ?? 0), 0) / calls.length)}s`
-              : "—",
-          },
-        ],
-      },
-      {
-        kind: "table",
-        columns: [
-          { key: "agent", label: "bot" },
-          { key: "direction", label: "dir" },
-          { key: "started_at", label: "when" },
-          { key: "duration_s", label: "sec" },
-          { key: "sentiment", label: "sentiment" },
-          { key: "summary", label: "summary" },
-        ],
-        rows: calls.map((c) => ({ ...c, started_at: new Date(c.started_at).toLocaleString(), summary: c.summary?.slice(0, 80) })),
-        rowAction: { prompt: "Show me call {{id}} in full detail — transcript, tools used, recording, and the path it took through the flow." },
-      },
-    ],
-  };
-}
+const TABS: { id: Tab; icon: typeof Home; title: string }[] = [
+  { id: "home", icon: Home, title: "home" },
+  { id: "calls", icon: Phone, title: "calls" },
+  { id: "tables", icon: Table2, title: "tables" },
+  { id: "screens", icon: Layers, title: "screens" },
+];
 
 export default function Workspace() {
   const router = useRouter();
+  const [tab, setTabState] = useState<Tab>("home");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [focused, setFocused] = useState<string | null>(null);
-  const [surface, setSurface] = useState<Surface | null>(null);
-  const [flow, setFlow] = useState<Flow | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [activeCall, setActiveCall] = useState<AgentInfo | null>(null);
-  const threadId = useRef<string>("");
+  const [surface, setSurface] = useState<Surface | null>(null); // adhoc operator surface
+  const [chatFlow, setChatFlow] = useState<FlowLike>(null);     // operator-pushed flow
+  const [focus, setFocus] = useState<CallFocus | null>(null);   // expanded call trace
+  const [callFlow, setCallFlow] = useState<FlowLike>(null);     // exact version flow of the focused call
+  const [expandCallId, setExpandCallId] = useState<string | null>(null);
+  const threadId = useRef("");
+
+  const setTab = useCallback((t: Tab) => {
+    setTabState(t);
+    setSurface(null);
+    if (t !== "calls") setExpandCallId(null);
+    window.history.replaceState(null, "", `?tab=${t}`);
+  }, []);
 
   useEffect(() => {
     threadId.current = localStorage.getItem("threadId") ?? crypto.randomUUID();
     localStorage.setItem("threadId", threadId.current);
+    const t = new URLSearchParams(window.location.search).get("tab") as Tab | null;
+    if (t && TABS.some((x) => x.id === t)) setTabState(t);
     fetch("/api/workspace")
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((j) => {
-        setAgents(j.agents);
-        setSurface(overviewSurface(j.agents, j.calls));
-        if (j.agents.length) {
-          setFocused(j.agents[0].id);
-          setFlow(j.agents[0].flow);
-        }
-      })
+      .then((j) => setAgents(j.agents ?? []))
       .catch((s) => s === 401 && router.push("/login"));
   }, [router]);
 
+  // Focused call → fetch the exact agent-version flow it ran against.
+  const focusCallId = focus?.callId ?? null;
+  useEffect(() => {
+    if (!focusCallId) { setCallFlow(null); return; }
+    let live = true;
+    fetch(`/api/calls?call=${focusCallId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (live && j?.flow) setCallFlow(j.flow); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [focusCallId]);
+
+  const focusAgentId = focus?.agentId ?? null;
   const send = useCallback(async (text: string) => {
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
     setStreaming(true);
@@ -90,7 +81,7 @@ export default function Workspace() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, threadId: threadId.current, agentId: focused }),
+        body: JSON.stringify({ message: text, threadId: threadId.current, agentId: focusAgentId ?? agents[0]?.id ?? null }),
       });
       if (!res.ok || !res.body) throw new Error(`chat failed (${res.status})`);
       const reader = res.body.getReader();
@@ -126,7 +117,7 @@ export default function Workspace() {
           } else if (ev.type === "surface") {
             setSurface(ev.surface);
           } else if (ev.type === "flow") {
-            setFlow(ev.flow);
+            setChatFlow(ev.flow);
           } else if (ev.type === "notice") {
             setNotice(ev.text);
             setTimeout(() => setNotice(null), 3500);
@@ -138,14 +129,19 @@ export default function Workspace() {
     } finally {
       setStreaming(false);
     }
-  }, [focused]);
+  }, [agents, focusAgentId]);
+
+  const onFocus = useCallback((info: CallFocus | null) => setFocus(info), []);
+  const openCall = useCallback((id: string) => { setExpandCallId(id); setTab("calls"); }, [setTab]);
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     router.push("/login");
   }
 
-  const focusedAgent = agents.find((a) => a.id === focused);
+  const panelFlow = focus
+    ? callFlow ?? agents.find((a) => a.id === focus.agentId)?.flow ?? null
+    : chatFlow ?? agents[0]?.flow ?? null;
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -160,39 +156,68 @@ export default function Workspace() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* Left: dynamic surface */}
-        <div className="flex min-w-0 flex-[2] flex-col border-r border-[var(--border)]">
-          <div className="flex h-11 shrink-0 items-center gap-1.5 border-b border-[var(--border)] px-4">
-            {agents.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => { setFocused(a.id); setFlow(a.flow); }}
-                className={`rounded-full px-3 py-1 text-xs transition-colors ${
-                  a.id === focused ? "bg-neutral-900 text-white" : "text-neutral-500 hover:bg-neutral-100"
-                }`}
-              >
-                {a.name}
-              </button>
-            ))}
-            <div className="flex-1" />
-            {focusedAgent && !activeCall && (
-              <button
-                onClick={() => setActiveCall(focusedAgent)}
-                className="flex items-center gap-1.5 rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-700 transition-colors hover:border-emerald-500 hover:text-emerald-600"
-              >
-                <PhoneCall size={11} /> test call
-              </button>
+        {/* Icon rail */}
+        <nav className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-[var(--border)] py-3">
+          {TABS.map(({ id, icon: Icon, title }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              title={title}
+              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
+                tab === id && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
+              }`}
+            >
+              <Icon size={15} />
+            </button>
+          ))}
+          <div className="flex-1" />
+          <button
+            onClick={() => router.push("/studio")}
+            title="studio"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors hover:text-neutral-900"
+          >
+            <ArrowUpLeft size={15} />
+          </button>
+          <button
+            onClick={logout}
+            title="log out"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors hover:text-neutral-900"
+          >
+            <LogOut size={15} />
+          </button>
+        </nav>
+
+        {/* Main view */}
+        <main className="min-w-0 flex-1 overflow-y-auto">
+          <div className="p-6">
+            {surface ? (
+              <div>
+                <button onClick={() => setSurface(null)} title="close" className="mb-3 text-neutral-300 transition-colors hover:text-neutral-900">
+                  <X size={14} />
+                </button>
+                <SurfaceView surface={surface} send={send} />
+              </div>
+            ) : tab === "home" ? (
+              <HomeBoard agents={agents} onOpenCall={openCall} />
+            ) : tab === "calls" ? (
+              <CallsTable onFocus={onFocus} expandCallId={expandCallId} />
+            ) : tab === "tables" ? (
+              <TablesView />
+            ) : (
+              <ScreensView send={send} />
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-5">
-            {surface && <SurfaceView surface={surface} send={send} />}
-          </div>
-        </div>
+        </main>
 
         {/* Right: flow + operator chat */}
-        <div className="flex w-[420px] shrink-0 flex-col">
+        <div className="flex w-[400px] shrink-0 flex-col border-l border-[var(--border)]">
           <div className="h-[38%] shrink-0 border-b border-[var(--border)]">
-            <FlowPanel flow={flow} />
+            <FlowPanel
+              flow={panelFlow}
+              visited={focus?.visited}
+              activeNode={focus?.activeNode}
+              holdCountdown={focus?.holdCountdown}
+            />
           </div>
           <div className="min-h-0 flex-1">
             <ChatPanel items={items} streaming={streaming} onSend={send} />
@@ -204,16 +229,6 @@ export default function Workspace() {
         <div className="fixed bottom-5 right-5 z-50 rounded-lg bg-neutral-900 px-4 py-2 text-xs text-white shadow-lg">
           {notice}
         </div>
-      )}
-      {activeCall && (
-        <CallWidget
-          agentId={activeCall.id}
-          agentName={activeCall.name}
-          onEnded={(callId) => {
-            setActiveCall(null);
-            if (callId) send(`The test call ${callId} just ended — show me how it went.`);
-          }}
-        />
       )}
     </div>
   );
