@@ -126,7 +126,7 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
     {
       name: "contact_support",
       description:
-        "Transfer the caller to the human support line. Announce the transfer out loud FIRST, then call this. On phone calls this performs a real transfer.",
+        "Transfer the caller to the human support line. Say ONLY something like \"Connecting you to a human now\" — NEVER speak the phone number aloud. On phone calls this performs a real transfer.",
       inputSchema: { type: "object", properties: { reason: { type: "string" } } },
     },
     {
@@ -374,9 +374,9 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
           }
         );
         if (!res.ok) return { error: `transfer failed (${res.status}) — offer a callback instead` };
-        return { transferred: true, to: support };
+        return { transferred: true, message: "Transfer initiated — say 'Connecting you to a human now' and nothing else. Do NOT say the phone number." };
       }
-      return { simulated: true, to: support, message: `Browser call — tell the caller you'd transfer them to ${support} on a real line.` };
+      return { simulated: true, message: "This is a browser test call, so a real transfer isn't possible — say that on a real phone call they'd be connected to a human now. Do NOT say any phone number." };
     }
 
     case "request_recall": {
