@@ -118,6 +118,41 @@ export async function* chatStream(messages: ChatMessage[], opts: ChatOpts = {}):
   yield { type: "done" };
 }
 
+/** Web-grounded completion via the Responses API with server-side web_search (live search successor). */
+export async function research(system: string, user: string, maxTokens = 1200): Promise<string> {
+  const res = await fetch(`${BASE}/responses`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      model: "grok-4.3",
+      input: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      tools: [{ type: "web_search" }],
+      max_output_tokens: maxTokens,
+    }),
+  });
+  if (!res.ok) throw new Error(`xai research ${res.status}: ${(await res.text()).slice(0, 400)}`);
+  const json = await res.json();
+  if (typeof json.output_text === "string" && json.output_text) return json.output_text;
+  const texts: string[] = [];
+  for (const item of json.output ?? []) {
+    for (const part of item.content ?? []) {
+      if (part.type === "output_text" && part.text) texts.push(part.text);
+    }
+  }
+  return texts.join("\n");
+}
+
+/** research() + tolerant JSON extraction. */
+export async function researchJSON<T>(system: string, user: string, maxTokens = 1200): Promise<T> {
+  const text = (await research(system, user, maxTokens)).trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const raw = fenced ? fenced[1] : text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  return JSON.parse(raw) as T;
+}
+
 /** Mints a short-lived client secret for browser realtime (voice) sessions. */
 export async function mintEphemeralToken(expiresSeconds = 300): Promise<string> {
   const res = await fetch(`${BASE}/realtime/client_secrets`, {

@@ -5,13 +5,13 @@ import { z } from "zod";
 
 const Action = z.object({ label: z.string().optional(), prompt: z.string() });
 
-const Stat = z.object({ label: z.string(), value: z.string(), delta: z.string().optional() });
+const Stat = z.object({ label: z.string(), value: z.coerce.string(), delta: z.coerce.string().optional() });
 
 const Column = z.object({ key: z.string(), label: z.string() });
 
 const Series = z.object({
   name: z.string(),
-  points: z.array(z.object({ x: z.union([z.string(), z.number()]), y: z.number() })),
+  points: z.array(z.object({ x: z.union([z.string(), z.number()]), y: z.coerce.number() })),
 });
 
 const Field = z.object({
@@ -26,8 +26,21 @@ export type Block = {
   [key: string]: unknown;
 };
 
+const KINDS = new Set([
+  "stat_row", "table", "chart", "tabs", "transcript", "audio", "code", "form", "markdown", "actions",
+]);
+
+/** Models naturally emit `type` for the discriminator — accept it as an alias for `kind`. */
+function normalizeBlock(v: unknown): unknown {
+  if (v && typeof v === "object" && !("kind" in v) && KINDS.has((v as { type?: string }).type ?? "")) {
+    const { type, ...rest } = v as Record<string, unknown>;
+    return { kind: type, ...rest };
+  }
+  return v;
+}
+
 const BlockSchema: z.ZodType<Block> = z.lazy(() =>
-  z.discriminatedUnion("kind", [
+  z.preprocess(normalizeBlock, z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("stat_row"), stats: z.array(Stat) }),
     z.object({
       kind: z.literal("table"),
@@ -50,7 +63,7 @@ const BlockSchema: z.ZodType<Block> = z.lazy(() =>
     z.object({ kind: z.literal("form"), fields: z.array(Field), submit: Action }),
     z.object({ kind: z.literal("markdown"), body: z.string() }),
     z.object({ kind: z.literal("actions"), actions: z.array(Action) }),
-  ]) as z.ZodType<Block>
+  ])) as z.ZodType<Block>
 );
 
 export const SurfaceSchema = z.object({
@@ -62,12 +75,21 @@ export type Surface = z.infer<typeof SurfaceSchema>;
 
 export const FlowSchema = z.object({
   nodes: z.array(
-    z.object({
-      id: z.string(),
-      label: z.string(),
-      kind: z.enum(["start", "state", "tool", "decision", "end"]).default("state"),
-      active: z.boolean().optional(),
-    })
+    z.preprocess(
+      (v) => {
+        if (v && typeof v === "object" && !("kind" in v) && "type" in v) {
+          const { type, ...rest } = v as Record<string, unknown>;
+          return { kind: type, ...rest };
+        }
+        return v;
+      },
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        kind: z.enum(["start", "state", "tool", "decision", "end"]).default("state"),
+        active: z.boolean().optional(),
+      })
+    )
   ),
   edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string().optional() })),
 });

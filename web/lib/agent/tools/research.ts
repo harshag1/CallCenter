@@ -1,7 +1,7 @@
 // Author: Harsha Gundala
 // research.ts — operator tool: web research via Grok live search.
 
-import { chat, MODELS } from "../../xai";
+import { research } from "../../xai";
 import type { OperatorTool } from "../types";
 
 export const webSearch: OperatorTool = {
@@ -13,13 +13,10 @@ export const webSearch: OperatorTool = {
     required: ["query"],
   },
   async execute(args) {
-    const msg = await chat(
-      [
-        { role: "system", content: "Research the query on the live web. Reply with dense factual findings and source URLs. No preamble." },
-        { role: "user", content: String(args.query) },
-      ],
-      { model: MODELS.fast, search: true, maxTokens: 1200 }
+    const text = await research(
+      "Research the query on the live web. Reply with dense factual findings and source URLs. No preamble.",
+      String(args.query)
     );
-    return { output: msg.content };
+    return { output: text };
   },
 };

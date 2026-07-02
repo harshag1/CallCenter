@@ -17,14 +17,22 @@ function team(): string {
 
 async function ensureProject(): Promise<void> {
   const get = await fetch(`${API}/v9/projects/${PROJECT}?${team()}`, { headers: headers() });
-  if (get.ok) return;
-  const res = await fetch(`${API}/v11/projects?${team()}`, {
-    method: "POST",
+  if (!get.ok) {
+    const res = await fetch(`${API}/v11/projects?${team()}`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ name: PROJECT }),
+    });
+    if (!res.ok) throw new Error(`vercel project create ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    L.info("created tools project");
+  }
+  // Tools are called by xAI/our gateway, not browsers — auth is our bearer secret,
+  // so Vercel's SSO deployment protection must be off or every call 401s.
+  await fetch(`${API}/v9/projects/${PROJECT}?${team()}`, {
+    method: "PATCH",
     headers: headers(),
-    body: JSON.stringify({ name: PROJECT }),
-  });
-  if (!res.ok) throw new Error(`vercel project create ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  L.info("created tools project");
+    body: JSON.stringify({ ssoProtection: null }),
+  }).catch(() => {});
 }
 
 /** Upserts env vars on the tools project (encrypted at Vercel, production target). */
