@@ -332,12 +332,18 @@ export class BridgeSession {
     await this.flushRecording();
 
     if (this.callId) {
-      await q(
+      const closed = await q(
         `UPDATE calls SET status = 'completed', ended_at = now(),
          duration_s = EXTRACT(EPOCH FROM (now() - started_at))::int
-         WHERE id = $1 AND status IN ('active','dialing')`,
+         WHERE id = $1 AND status IN ('active','dialing') RETURNING id`,
         [this.callId]
-      ).catch(() => {});
+      ).catch(() => []);
+      // Observe-mode teardown must not analyze (agent leg already did / will).
+      if (closed.length && this.mode === "agent") {
+        const { waitUntil } = await import("@vercel/functions");
+        const { analyzeCall } = await import("./analysis");
+        waitUntil(analyzeCall(this.callId).catch(() => {}));
+      }
     }
   }
 }
