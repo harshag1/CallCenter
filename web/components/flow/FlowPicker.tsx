@@ -1,5 +1,5 @@
 // Author: Harsha Gundala
-// FlowPicker.tsx — minimal flow selector: backdrop pill + popover list floating over the flow graph.
+// FlowPicker.tsx — quiet flow selector: plain name + chevron with a popover list over the flow graph.
 
 "use client";
 
@@ -24,16 +24,16 @@ export default function FlowPicker({
   }, [open]);
 
   return (
-    <div ref={ref} className="absolute left-3 top-3 z-10">
+    <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white/95 py-1 pl-2.5 pr-2 text-[12px] font-medium shadow-[0_4px_20px_rgba(15,15,15,0.05)] backdrop-blur transition-colors duration-[160ms] hover:border-neutral-300"
+        className="flex items-center gap-1 text-[13px] font-medium text-neutral-900 transition-opacity duration-[160ms] hover:opacity-70"
       >
         <span className="max-w-[180px] truncate">{label}</span>
-        <ChevronDown size={12} className={`text-neutral-400 transition-transform duration-[160ms] ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={13} className={`text-neutral-400 transition-transform duration-[160ms] ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1.5 w-56 rounded-xl border border-neutral-200 bg-white/95 p-1 shadow-[0_18px_44px_rgba(0,0,0,0.12)] backdrop-blur">
+        <div className="absolute left-0 top-full z-20 mt-1.5 w-56 rounded-xl border border-neutral-200 bg-white/95 p-1 shadow-[0_18px_44px_rgba(0,0,0,0.12)] backdrop-blur">
           {options.map((o) => {
             const Kind = o.kind === "inbound" ? PhoneIncoming : PhoneOutgoing;
             const selected = o.id === selectedId;

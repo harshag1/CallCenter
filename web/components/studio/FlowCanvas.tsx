@@ -23,11 +23,11 @@ export default function FlowCanvas({
 }: Props) {
   const graph = useMemo(() => {
     const branches = flow.nodes.filter((n) => n.kind !== "incoming_call");
-    const rowH = 118;
+    const rowH = 168;
     const nodes: Node[] = flow.nodes.map((n) => {
       if (n.kind === "incoming_call") {
         return {
-          id: n.id, type: "incoming_call", position: { x: 0, y: ((branches.length - 1) * rowH) / 2 - 20 },
+          id: n.id, type: "incoming_call", position: { x: 0, y: ((branches.length - 1) * rowH) / 2 + 14 },
           data: { number, numberStatus, active: activeNode === n.id },
           draggable: false,
         };
@@ -37,7 +37,7 @@ export default function FlowCanvas({
       return {
         id: n.id,
         type: n.kind === "fallback" ? "fallback" : "topic", // unknown kinds degrade to topic cards
-        position: { x: 300, y: idx * rowH },
+        position: { x: 340, y: idx * rowH },
         data: {
           label: n.label, icon: n.icon, steps: n.steps,
           active: activeNode === n.id,
@@ -49,7 +49,7 @@ export default function FlowCanvas({
       };
     });
     const edges: Edge[] = flow.edges.map((e, i) => ({
-      id: `e${i}`, source: e.from, target: e.to, label: e.label, type: "smoothstep",
+      id: `e${i}`, source: e.from, target: e.to, label: e.label,
       style: { stroke: activeNode === e.to ? "#111" : "#d9d9d9", strokeWidth: activeNode === e.to ? 1.6 : 1.2 },
       animated: activeNode === e.to,
     }));

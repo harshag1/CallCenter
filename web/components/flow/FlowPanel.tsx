@@ -1,14 +1,18 @@
 // Author: Harsha Gundala
-// FlowPanel.tsx — read-only flow graph: layered auto-layout, per-call visited trace, live hold badge.
+// FlowPanel.tsx — read-only flow graph with the studio's card nodes: horizontal layout, trace ring, live hold chip.
 
 "use client";
 
-import { useMemo, type CSSProperties, type ReactNode } from "react";
-import { ReactFlow, Background, BackgroundVariant, type Node, type Edge } from "@xyflow/react";
+import { memo, useMemo } from "react";
+import { ReactFlow, Background, BackgroundVariant, type Node, type Edge, type NodeProps } from "@xyflow/react";
+import { nodeTypes as studioNodeTypes } from "@/components/studio/nodes";
 import { HoldChip } from "@/components/platform/shared";
 
 type FlowLike = {
-  nodes: { id: string; label: string; kind?: string; active?: boolean }[];
+  nodes: {
+    id: string; label: string; kind?: string; icon?: string; active?: boolean;
+    steps?: { label: string }[]; support_number?: string;
+  }[];
   edges: { from: string; to: string; label?: string }[];
 };
 
@@ -17,24 +21,31 @@ type Props = {
   visited?: string[];
   activeNode?: string | null;
   holdCountdown?: { until: string } | null;
+  number?: string | null;
 };
 
-const KIND_STYLE: Record<string, CSSProperties> = {
-  start: { background: "#111", color: "#fff", border: "none" },
-  incoming_call: { background: "#111", color: "#fff", border: "none" },
-  end: { background: "#f5f5f5", color: "#999", border: "1px solid #e5e5e5" },
-  decision: { background: "#fff", border: "1px dashed #bbb", borderRadius: 999 },
-  fallback: { background: "#fff", border: "1px dashed #ccc" },
-  tool: { background: "#fafafa", border: "1px solid #ddd", fontFamily: "var(--font-mono)", fontSize: 10 },
-  topic: { background: "#fff", border: "1px solid #e5e5e5" },
-  state: { background: "#fff", border: "1px solid #e5e5e5" },
-};
+const HoldNode = memo(function HoldNode({ data }: NodeProps) {
+  return <HoldChip until={data.until as string} />;
+});
+
+const nodeTypes = { ...studioNodeTypes, hold: HoldNode };
+
+const COL_W = 300;
+const ROW_H = 118;
+
+/** Legacy kinds degrade onto the studio cards: start → incoming_call, fallback stays, the rest → topic. */
+function cardType(kind?: string): "incoming_call" | "topic" | "fallback" {
+  if (kind === "incoming_call" || kind === "start") return "incoming_call";
+  if (kind === "fallback") return "fallback";
+  return "topic";
+}
 
 function layout(
   flow: FlowLike,
   visited: Set<string>,
   activeNode: string | null,
-  holdCountdown: { until: string } | null
+  holdCountdown: { until: string } | null,
+  number: string | null
 ): { nodes: Node[]; edges: Edge[] } {
   const depth = new Map<string, number>();
   const incoming = new Map(flow.nodes.map((n) => [n.id, 0]));
@@ -58,44 +69,46 @@ function layout(
     levels.set(d, [...(levels.get(d) ?? []), n.id]);
   });
 
+  let activePos: { x: number; y: number } | null = null;
   const nodes: Node[] = flow.nodes.map((n) => {
     const d = depth.get(n.id) ?? 0;
     const siblings = levels.get(d)!;
     const idx = siblings.indexOf(n.id);
-    const base = KIND_STYLE[n.kind ?? "state"] ?? KIND_STYLE.state;
-    const isActive = activeNode === n.id || !!n.active;
-    const label: ReactNode =
-      isActive && holdCountdown ? (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-          {n.label} <HoldChip until={holdCountdown.until} />
-        </span>
-      ) : (
-        n.label
-      );
-    return {
-      id: n.id,
-      position: { x: d * 190, y: (idx - (siblings.length - 1) / 2) * 74 },
-      data: { label },
-      style: {
-        ...base,
-        ...(visited.has(n.id) ? { background: "#111", color: "#fff", border: "none" } : {}),
-        width: 150,
-        padding: "6px 10px",
-        borderRadius: base.borderRadius ?? 10,
-        fontSize: 11,
-        textAlign: "center" as const,
-        ...(isActive ? { boxShadow: "0 0 0 2px rgba(17,17,17,0.9)" } : {}),
-      },
-    };
+    const type = cardType(n.kind);
+    const active = activeNode === n.id || !!n.active || visited.has(n.id);
+    const position = { x: d * COL_W, y: (idx - (siblings.length - 1) / 2) * ROW_H };
+    if (activeNode === n.id) activePos = position;
+    const data =
+      type === "incoming_call"
+        ? { number, numberStatus: undefined, active }
+        : type === "fallback"
+          ? { label: n.label, supportNumber: n.support_number ?? null, active } // no onSaveNumber → read-only card
+          : { label: n.label, icon: n.icon, steps: n.steps, active };
+    return { id: n.id, type, position, data, draggable: false, selectable: false };
   });
+
+  if (activePos && holdCountdown) {
+    const pos = activePos as { x: number; y: number };
+    nodes.push({
+      id: "__hold",
+      type: "hold",
+      position: { x: pos.x + 6, y: pos.y - 28 },
+      data: { until: holdCountdown.until },
+      draggable: false,
+      selectable: false,
+      zIndex: 20,
+    });
+  }
+
   const edges: Edge[] = flow.edges.map((e, i) => ({
     id: `e${i}`,
     source: e.from,
     target: e.to,
     label: e.label,
+    type: "smoothstep",
     style: {
-      stroke: e.to === activeNode ? "#111" : visited.has(e.to) ? "#a3a3a3" : "#ddd",
-      strokeWidth: e.to === activeNode ? 1.6 : 1,
+      stroke: e.to === activeNode ? "#111" : visited.has(e.to) ? "#a3a3a3" : "#d9d9d9",
+      strokeWidth: e.to === activeNode ? 1.6 : 1.2,
     },
     labelStyle: { fontSize: 9, fill: "#999" },
     animated: e.to === activeNode,
@@ -103,24 +116,25 @@ function layout(
   return { nodes, edges };
 }
 
-export default function FlowPanel({ flow, visited, activeNode, holdCountdown }: Props) {
+export default function FlowPanel({ flow, visited, activeNode, holdCountdown, number }: Props) {
   const graph = useMemo(
     () =>
       flow?.nodes.length
-        ? layout(flow, new Set(visited ?? []), activeNode ?? null, holdCountdown ?? null)
+        ? layout(flow, new Set(visited ?? []), activeNode ?? null, holdCountdown ?? null, number ?? null)
         : null,
-    [flow, visited, activeNode, holdCountdown]
+    [flow, visited, activeNode, holdCountdown, number]
   );
   if (!graph) {
-    return <div className="flex h-full items-center justify-center text-xs text-neutral-300">no flow</div>;
+    return <div className="flex h-full items-center justify-center bg-[#f7f7f6] text-xs text-neutral-300">no flow</div>;
   }
   return (
     <ReactFlow
       className="!bg-[#f7f7f6]"
       nodes={graph.nodes}
       edges={graph.edges}
+      nodeTypes={nodeTypes}
       fitView
-      fitViewOptions={{ padding: 0.15 }}
+      fitViewOptions={{ padding: 0.2 }}
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}
@@ -128,7 +142,7 @@ export default function FlowPanel({ flow, visited, activeNode, holdCountdown }: 
       panOnDrag
       proOptions={{ hideAttribution: true }}
     >
-      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.3} />
+      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.4} />
     </ReactFlow>
   );
 }

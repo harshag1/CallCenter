@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LogOut, Phone, ArrowUp, Play, Loader2, LayoutGrid } from "lucide-react";
+import { LogOut, Phone, ArrowUp, ArrowRight, Play, Loader2, LayoutGrid } from "lucide-react";
 import { ASSISTANT_PROSE, PixelLoader, ToolLine, USER_BUBBLE } from "@/components/chat/ChatPanel";
 import Tooltip from "@/components/ui/Tooltip";
 import FlowCanvas from "@/components/studio/FlowCanvas";
@@ -17,11 +17,11 @@ import CallWidget from "@/components/call/CallWidget";
 import { AgentFlowSchema, type AgentFlow, type FlowNode } from "@/lib/flow";
 import { shortBrand } from "@/lib/brand";
 import NodeEditor from "@/components/studio/NodeEditor";
+import TracePanel, { type TraceEvent } from "@/components/studio/TracePanel";
 
 type ChatItem =
   | { kind: "text"; role: "user" | "assistant"; text: string }
-  | { kind: "tool"; name: string; status: "start" | "done" | "error" }
-  | { kind: "trace"; text: string };
+  | { kind: "tool"; name: string; status: "start" | "done" | "error" };
 
 type Status = {
   onboarding: { agent_id?: string; company?: string; number_status?: string; number?: string; flow_ready?: boolean };
@@ -44,6 +44,7 @@ export default function Studio() {
   const [trying, setTrying] = useState(false);
   const [holdMusicUrl, setHoldMusicUrl] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<string | null>(null);
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [editingNode, setEditingNode] = useState<FlowNode | null>(null);
   const [activeStep, setActiveStep] = useState<string | null>(null);
   const threadId = useRef("");
@@ -145,33 +146,68 @@ export default function Studio() {
     }
   }, [agentId]);
 
-  // Live trace during Try mode: state + tool events → node highlight + feed lines.
+  // Live trace during Try mode: state + tool events → node highlight + sidebar feed.
   const traceCall = useCallback((callId: string) => {
     traceCursor.current = 0;
+    setTraceEvents([]);
     const iv = setInterval(async () => {
       try {
         const res = await fetch(`/api/calls/${callId}/events?after=${traceCursor.current}`);
         if (!res.ok) return;
         const { events } = await res.json();
+        const ops: (TraceEvent | { kind: "hold_end" })[] = [];
         for (const e of events as { id: number; type: string; payload: Record<string, unknown> }[]) {
           traceCursor.current = e.id;
           if (e.type === "state") {
-            if (e.payload.node) { setActiveNode(String(e.payload.node)); setActiveStep(null); }
+            if (e.payload.node) {
+              setActiveNode(String(e.payload.node));
+              setActiveStep(null);
+              ops.push({ kind: "node", node: String(e.payload.node) });
+            }
             if (e.payload.step) setActiveStep(String(e.payload.step));
-            if (e.payload.hold) setItems((p) => [...p, { kind: "trace", text: `on hold ${e.payload.hold}s` }]);
-            if (e.payload.transfer) setItems((p) => [...p, { kind: "trace", text: `→ transfer ${e.payload.transfer}` }]);
+            if (e.payload.hold) ops.push({ kind: "hold", seconds: Number(e.payload.hold) });
+            if (e.payload.transfer) ops.push({ kind: "transfer", to: String(e.payload.transfer) });
           } else if (e.type === "tool_call") {
-            const name = String(e.payload.name);
-            const args = e.payload.args as Record<string, unknown>;
-            const arg = args?.topic ?? args?.step ?? args?.query ?? args?.seconds ?? "";
-            setItems((p) => [...p, { kind: "trace", text: `${name}(${String(arg).slice(0, 40)})` }]);
+            const args = e.payload.args as Record<string, unknown> | undefined;
+            const arg = args?.topic ?? args?.step ?? args?.query ?? args?.seconds ?? args?.table ?? "";
+            ops.push({ kind: "tool", name: String(e.payload.name), arg: String(arg).slice(0, 40) });
+          } else if (e.type === "hold_start") {
+            ops.push({
+              kind: "hold",
+              until: typeof e.payload.until === "string" ? e.payload.until : undefined,
+              seconds: e.payload.seconds ? Number(e.payload.seconds) : undefined,
+            });
+          } else if (e.type === "hold_end") {
+            ops.push({ kind: "hold_end" });
           }
+        }
+        if (ops.length) {
+          setTraceEvents((prev) => {
+            let next = prev;
+            for (const op of ops) {
+              if (op.kind === "hold_end") {
+                const i = next.findLastIndex((ev) => ev.kind === "hold" && !ev.ended);
+                if (i >= 0) { next = [...next]; next[i] = { ...next[i], ended: true } as TraceEvent; }
+              } else {
+                next = [...next, op];
+              }
+            }
+            return next;
+          });
         }
       } catch { /* keep polling */ }
     }, 1200);
     return () => clearInterval(iv);
   }, []);
   const stopTrace = useRef<(() => void) | null>(null);
+
+  // Review hook: /studio?traceCall=<callId> replays a call's event feed into the trace panel.
+  useEffect(() => {
+    const callId = new URLSearchParams(window.location.search).get("traceCall");
+    if (!callId) return;
+    const stop = traceCall(callId);
+    return stop;
+  }, [traceCall]);
 
   async function toggleInternet(v: boolean) {
     setStatus((s) => s && { ...s, internet_enabled: v });
@@ -294,22 +330,23 @@ export default function Studio() {
           )}
           {flow && !trying && (
             <button
-              onClick={() => setTrying(true)}
-              className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform hover:scale-[1.03]"
+              onClick={() => { setTraceEvents([]); setTrying(true); }}
+              className={`absolute bottom-3 z-10 flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-[transform,right] duration-[240ms] hover:scale-[1.03] ${
+                traceEvents.length > 0 ? "right-[296px]" : "right-3"
+              }`}
             >
               <Play size={11} fill="currentColor" /> Try
             </button>
+          )}
+          {(trying || traceEvents.length > 0) && (
+            <TracePanel events={traceEvents} live={trying} onClose={() => setTraceEvents([])} />
           )}
         </div>
 
         {/* Inline chat — flows straight on the page */}
         <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto py-5">
           {items.map((item, i) =>
-            item.kind === "trace" ? (
-              <div key={i} className="flex items-center gap-2 pl-1 font-mono text-[11px] text-neutral-400">
-                <span className="h-1 w-1 rounded-full bg-emerald-400" /> {item.text}
-              </div>
-            ) : item.kind === "tool" ? (
+            item.kind === "tool" ? (
               <ToolLine key={i} name={item.name} status={item.status} />
             ) : item.role === "user" ? (
               <div key={i} className="flex justify-end">
@@ -331,8 +368,8 @@ export default function Studio() {
         </div>
 
         {/* Input */}
-        <div className="shrink-0 pb-5">
-          <div className="relative rounded-2xl border border-neutral-200/75 bg-white/70 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-[160ms] focus-within:border-neutral-900/25 focus-within:bg-white focus-within:shadow-[0_0_0_1px_rgba(0,0,0,0.07)]">
+        <div className="flex shrink-0 items-end gap-2 pb-5">
+          <div className="relative flex-1 rounded-2xl border border-neutral-200/75 bg-white/70 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-[160ms] focus-within:border-neutral-900/25 focus-within:bg-white focus-within:shadow-[0_0_0_1px_rgba(0,0,0,0.07)]">
             <div className="flex items-end gap-2">
               <textarea
                 rows={1}
@@ -357,6 +394,14 @@ export default function Studio() {
               </button>
             </div>
           </div>
+          <Tooltip content="Open the dashboard">
+            <button
+              onClick={() => router.push("/workspace")}
+              className="inline-flex h-[50px] shrink-0 items-center gap-1.5 rounded-2xl bg-neutral-950 px-4 text-[13px] font-medium text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800"
+            >
+              Next <ArrowRight size={14} strokeWidth={2.1} />
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -373,6 +418,7 @@ export default function Studio() {
             stopTrace.current?.();
             setActiveNode(null);
             setActiveStep(null);
+            setTraceEvents((p) => (p.length ? [...p, { kind: "ended" }] : p));
           }}
         />
       )}

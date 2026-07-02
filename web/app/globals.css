@@ -68,6 +68,14 @@ html, body {
   .pixel-loader-cell { animation: none; opacity: 0.55; }
 }
 
+/* Trace sidebar — slides in from the canvas's right edge */
+@keyframes trace-in {
+  from { transform: translateX(calc(100% + 12px)); }
+  to { transform: translateX(0); }
+}
+.animate-trace-in { animation: trace-in 240ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .animate-trace-in { animation: none; } }
+
 /* Wrong-code feedback: quick horizontal jiggle instead of an error message */
 @keyframes jiggle {
   0%, 100% { transform: translateX(0); }

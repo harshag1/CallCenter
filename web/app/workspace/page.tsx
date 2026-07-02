@@ -16,7 +16,10 @@ import CallsTable, { type CallFocus } from "@/components/platform/CallsTable";
 import TablesView from "@/components/platform/TablesView";
 import ScreensView from "@/components/platform/ScreensView";
 import ScheduledView from "@/components/platform/ScheduledView";
+import OrgPills from "@/components/studio/OrgPills";
+import FilesModal from "@/components/studio/FilesModal";
 import { useScheduled } from "@/components/hooks/useScheduled";
+import { useOrgSettings } from "@/components/hooks/useOrgSettings";
 import type { Surface } from "@/lib/surface-dsl";
 
 type Tab = "home" | "calls" | "tables" | "screens" | "scheduled";
@@ -47,8 +50,40 @@ export default function Workspace() {
   const [focus, setFocus] = useState<CallFocus | null>(null);   // expanded call trace
   const [callFlow, setCallFlow] = useState<FlowLike>(null);     // exact version flow of the focused call
   const [expandCallId, setExpandCallId] = useState<string | null>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [sidebarW, setSidebarW] = useState(420);
   const threadId = useRef("");
   const { scheduled, campaigns, reload: reloadScheduled, hasPending } = useScheduled();
+  const org = useOrgSettings();
+
+  useEffect(() => {
+    const w = Number(localStorage.getItem("sidebarW"));
+    if (w >= 320 && w <= 680) setSidebarW(w);
+  }, []);
+
+  const startResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarW;
+    const clamp = (w: number) => Math.min(680, Math.max(320, w));
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const move = (ev: PointerEvent) => setSidebarW(clamp(startW + startX - ev.clientX));
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      localStorage.setItem("sidebarW", String(clamp(startW + startX - ev.clientX)));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, [sidebarW]);
+
+  const resetSidebar = useCallback(() => {
+    setSidebarW(420);
+    localStorage.setItem("sidebarW", "420");
+  }, []);
 
   const setTab = useCallback((t: Tab) => {
     setTabState(t);
@@ -193,6 +228,9 @@ export default function Workspace() {
   const panelFlow = focus
     ? callFlow ?? agents.find((a) => a.id === focus.agentId)?.flow ?? null
     : openFlow?.flow ?? agents[0]?.flow ?? null;
+  const panelNumber = focus
+    ? agents.find((a) => a.id === focus.agentId)?.phone_number ?? null
+    : agents[0]?.phone_number ?? null;
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -280,19 +318,46 @@ export default function Workspace() {
           </div>
         </main>
 
-        {/* Right: flow + operator chat */}
-        <div className="flex w-[400px] shrink-0 flex-col border-l border-[var(--border)]">
+        {/* Right: flow + operator chat (drag left edge to resize) */}
+        <div style={{ width: sidebarW }} className="relative flex shrink-0 flex-col border-l border-[var(--border)]">
+          <div
+            onPointerDown={startResize}
+            onDoubleClick={resetSidebar}
+            className="group absolute inset-y-0 left-0 z-20 w-[3px] cursor-col-resize hover:bg-neutral-200"
+          >
+            <span className="absolute -left-px top-1/2 hidden h-9 w-[5px] -translate-y-1/2 rounded-full bg-neutral-300 group-hover:block" />
+          </div>
           <div className="relative h-[38%] shrink-0 border-b border-[var(--border)]">
-            {!focus && flows.length > 0 && (
-              <FlowPicker
-                options={flows.map(({ id, label, kind }) => ({ id, label, kind }))}
-                selectedId={openFlow?.id ?? null}
-                label={openFlow?.label ?? flows[0].label}
-                onSelect={selectFlow}
-              />
+            {!focus && (
+              <div className="absolute left-3 top-3 z-10 flex items-center gap-3">
+                {flows.length > 0 && (
+                  <FlowPicker
+                    options={flows.map(({ id, label, kind }) => ({ id, label, kind }))}
+                    selectedId={openFlow?.id ?? null}
+                    label={openFlow?.label ?? flows[0].label}
+                    onSelect={selectFlow}
+                  />
+                )}
+                {org.loaded && (
+                  <div className="flex items-center gap-1.5">
+                    <OrgPills
+                      compact
+                      enabled={org.enabled}
+                      domains={org.domains}
+                      faviconUrl={org.faviconUrl}
+                      onToggle={org.toggle}
+                      onAddDomain={org.addDomain}
+                      onRemoveDomain={org.removeDomain}
+                      onOpenFiles={() => setFilesOpen(true)}
+                      docCount={org.docCount}
+                    />
+                  </div>
+                )}
+              </div>
             )}
             <FlowPanel
               flow={panelFlow}
+              number={panelNumber}
               visited={focus?.visited}
               activeNode={focus?.activeNode}
               holdCountdown={focus?.holdCountdown}
@@ -303,6 +368,8 @@ export default function Workspace() {
           </div>
         </div>
       </div>
+
+      <FilesModal open={filesOpen} onClose={() => setFilesOpen(false)} onCountChange={org.setDocCount} />
 
       {notice && (
         <div className="fixed bottom-5 right-5 z-50 rounded-lg bg-neutral-900 px-4 py-2 text-xs text-white shadow-lg">

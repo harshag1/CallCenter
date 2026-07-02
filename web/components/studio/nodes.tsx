@@ -78,7 +78,7 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const number = data.supportNumber as string | null;
-  const save = data.onSaveNumber as (n: string) => Promise<boolean>;
+  const save = data.onSaveNumber as ((n: string) => Promise<boolean>) | undefined;
 
   return (
     <div className={`${shell(data.active as boolean)} min-w-[180px]`}>
@@ -90,7 +90,9 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
           <div className="text-[11px] text-neutral-400">contact support</div>
         </div>
       </div>
-      {editing ? (
+      {!save ? (
+        number && <div className="mt-2 text-[11px] tabular-nums text-neutral-500">{number}</div>
+      ) : editing ? (
         <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           <input
             autoFocus
