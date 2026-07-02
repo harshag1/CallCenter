@@ -27,7 +27,7 @@ export default function TopPills({
     <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex items-start justify-center gap-2">
       <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-neutral-200 bg-white/95 py-1.5 pl-3 pr-2 shadow-[0_4px_20px_rgba(15,15,15,0.05)] backdrop-blur">
         <Globe size={14} strokeWidth={2.2} className="text-neutral-950" />
-        <span className="text-[12px] font-medium">Enabled Internet Access</span>
+        <span className="text-[12px] font-medium">Internet</span>
         <button
           onClick={() => onToggle(!enabled)}
           className={`relative h-[18px] w-8 rounded-full transition-colors ${enabled ? "bg-neutral-950" : "bg-neutral-200"}`}

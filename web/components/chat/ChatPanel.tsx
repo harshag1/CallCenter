@@ -85,7 +85,7 @@ export default function ChatPanel({
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
         {!items.length && (
           <div className="mt-8 text-center text-xs leading-5 text-neutral-300">
-            ask for anything —<br />dashboards · tools · calls · analysis
+            dashboards · tools · calls · analysis
           </div>
         )}
         {items.map((item, i) =>

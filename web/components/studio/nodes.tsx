@@ -33,7 +33,7 @@ export const IncomingCallNode = memo(function IncomingCallNode({ data }: NodePro
           <Phone size={15} strokeWidth={2.2} />
         </span>
         <div>
-          <div className="text-[13px] font-semibold">Incoming Call</div>
+          <div className="text-[13px] font-semibold">Incoming call</div>
           {number ? (
             <div className="text-[12px] tabular-nums text-neutral-500">{number}</div>
           ) : status === "failed" ? (

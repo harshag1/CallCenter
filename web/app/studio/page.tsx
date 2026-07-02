@@ -277,11 +277,6 @@ export default function Studio() {
 
         {/* Inline chat — flows straight on the page */}
         <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto py-5">
-          {!items.length && (
-            <p className="pt-2 text-center text-[12px] text-neutral-300">
-              ask for changes — topics, steps, tone, tools — and watch the flow update
-            </p>
-          )}
           {items.map((item, i) =>
             item.kind === "trace" ? (
               <div key={i} className="flex items-center gap-2 pl-1 font-mono text-[11px] text-neutral-400">

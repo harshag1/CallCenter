@@ -52,7 +52,6 @@ export default function Onboarding() {
       <div className="w-full max-w-[560px] overflow-hidden rounded-[16px] border border-neutral-200 bg-white shadow-[0_10px_30px_rgba(15,15,15,0.035)]">
         <div className="p-4 text-center">
           <h1 className="text-[18px] font-semibold">Describe your agent</h1>
-          <p className="mt-1 text-[12px] leading-5 text-neutral-400">One clear request is enough. We&apos;ll turn it into a working voice flow.</p>
         </div>
         <textarea
           autoFocus
@@ -79,7 +78,7 @@ export default function Onboarding() {
             disabled={building || text.trim().length < 10}
             className="flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 px-5 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:bg-neutral-200 disabled:text-neutral-400"
           >
-            {building ? <><Loader2 size={14} className="animate-spin" /> Building…</> : "Build my first agent"}
+            {building ? <><Loader2 size={14} className="animate-spin" /> Building…</> : "Build my agent"}
           </button>
         </div>
         {error && <p className="mt-3 text-center text-xs text-red-500">{error}</p>}

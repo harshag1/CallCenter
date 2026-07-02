@@ -67,7 +67,7 @@ export default function ScreensView({ send }: { send: (prompt: string) => void }
       <section>
         <div className="mb-2 text-[11px] uppercase tracking-wide text-neutral-400">screens</div>
         {plain.map((s) => <ScreenRow key={s.id} s={s} onOpen={setOpen} />)}
-        {!plain.length && <div className="px-3 py-4 text-xs text-neutral-300">none yet — ask the operator</div>}
+        {!plain.length && <div className="px-3 py-4 text-xs text-neutral-300">none yet</div>}
       </section>
       {experiments.length > 0 && (
         <section>
