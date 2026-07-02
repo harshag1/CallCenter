@@ -41,7 +41,7 @@ export const IncomingCallNode = memo(function IncomingCallNode({ data }: NodePro
           )}
         </div>
       </div>
-      <Handle type="source" position={Position.Right} className="!bg-neutral-300" />
+      <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-0 !bg-transparent" />
     </div>
   );
 });
@@ -51,7 +51,7 @@ export const TopicNode = memo(function TopicNode({ data }: NodeProps) {
   const steps = (data.steps as { label: string }[]) ?? [];
   return (
     <div className={`${shell(data.active as boolean)} min-w-[170px] max-w-[200px]`}>
-      <Handle type="target" position={Position.Left} className="!bg-neutral-300" />
+      <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-0 !bg-transparent" />
       <div className="flex items-center gap-2.5">
         <Icon size={16} strokeWidth={2.1} className="shrink-0 text-neutral-950" />
         <div className="text-[13px] font-semibold">{data.label as string}</div>
@@ -82,7 +82,7 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
 
   return (
     <div className={`${shell(data.active as boolean)} min-w-[180px]`}>
-      <Handle type="target" position={Position.Left} className="!bg-neutral-300" />
+      <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-0 !bg-transparent" />
       <div className="flex items-center gap-2.5">
         <PhoneForwarded size={16} strokeWidth={2.1} className="shrink-0 text-neutral-950" />
         <div className="min-w-0">

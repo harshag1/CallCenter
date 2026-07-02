@@ -30,8 +30,8 @@ const HoldNode = memo(function HoldNode({ data }: NodeProps) {
 
 const nodeTypes = { ...studioNodeTypes, hold: HoldNode };
 
-const COL_W = 300;
-const ROW_H = 118;
+const COL_W = 340;
+const ROW_H = 168;
 
 /** Legacy kinds degrade onto the studio cards: start → incoming_call, fallback stays, the rest → topic. */
 function cardType(kind?: string): "incoming_call" | "topic" | "fallback" {
@@ -105,7 +105,6 @@ function layout(
     source: e.from,
     target: e.to,
     label: e.label,
-    type: "smoothstep",
     style: {
       stroke: e.to === activeNode ? "#111" : visited.has(e.to) ? "#a3a3a3" : "#d9d9d9",
       strokeWidth: e.to === activeNode ? 1.6 : 1.2,
