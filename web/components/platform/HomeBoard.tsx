@@ -6,10 +6,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
+import Tooltip, { TipDivider, TipStat } from "@/components/ui/Tooltip";
 import {
   DirIcon, HoldChip, PulseDot, SatChip, fmtDur, fmtTime, mmss, useNow,
   type CallRow,
 } from "./shared";
+
+type LastLine = { who: string; text: string };
 
 type AgentLite = { id: string; name: string; flow?: { nodes?: { id: string; label: string }[] } | null };
 
@@ -31,6 +34,7 @@ export default function HomeBoard({
   const [experiments, setExperiments] = useState<{ id: string; status: string }[]>([]);
   const [nodeByCall, setNodeByCall] = useState<Record<string, string>>({});
   const [holdByCall, setHoldByCall] = useState<Record<string, string>>({});
+  const [lineByCall, setLineByCall] = useState<Record<string, LastLine>>({});
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const now = useNow(1000);
 
@@ -63,8 +67,13 @@ export default function HomeBoard({
       if (ev.status && ev.status !== "active") {
         setNodeByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });
         setHoldByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });
+        setLineByCall((p) => { const rest = { ...p }; delete rest[ev.callId]; return rest; });
       }
     } else if (ev.kind === "call_event") {
+      if ((ev.type === "user_said" || ev.type === "agent_said") && ev.payload?.text) {
+        const line: LastLine = { who: ev.type === "user_said" ? "caller" : "agent", text: String(ev.payload.text) };
+        setLineByCall((p) => ({ ...p, [ev.callId]: line }));
+      }
       if (ev.type === "state" && ev.payload?.node) {
         const node = String(ev.payload.node);
         setNodeByCall((p) => ({ ...p, [ev.callId]: node }));
@@ -106,31 +115,47 @@ export default function HomeBoard({
         <div className="mb-3 text-[11px] uppercase tracking-wide text-neutral-400">live calls</div>
         {active.length ? (
           <div className="grid grid-cols-2 gap-3 xl:grid-cols-3">
-            {active.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onOpenCall?.(c.id)}
-                className="rounded-2xl border border-[var(--border)] p-4 text-left transition-colors hover:border-neutral-300"
-              >
-                <div className="flex items-center gap-2">
-                  <PulseDot />
-                  <span className="text-[13px] font-semibold">{c.agent}</span>
-                  <span className="ml-auto text-[12px] tabular-nums text-neutral-500">{mmss(now - Date.parse(c.started_at))}</span>
-                </div>
-                <div className="mt-2 flex items-center gap-2 text-[12px] text-neutral-500">
-                  <DirIcon d={c.direction} />
-                  <span className="tabular-nums">{c.from_number ?? "browser"}</span>
-                </div>
-                <div className="mt-2.5 flex min-h-5 items-center gap-1.5">
-                  {nodeByCall[c.id] && (
-                    <span className="max-w-[70%] truncate rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-600">
-                      {nodeLabel.get(nodeByCall[c.id]) ?? nodeByCall[c.id]}
-                    </span>
-                  )}
-                  {holdByCall[c.id] && <HoldChip until={holdByCall[c.id]} />}
-                </div>
-              </button>
-            ))}
+            {active.map((c) => {
+              const node = nodeByCall[c.id] ? nodeLabel.get(nodeByCall[c.id]) ?? nodeByCall[c.id] : null;
+              return (
+                <Tooltip
+                  key={c.id}
+                  variant="panel"
+                  className="min-w-0"
+                  content={
+                    <LiveCallGlance
+                      call={c}
+                      elapsed={mmss(now - Date.parse(c.started_at))}
+                      node={node}
+                      line={lineByCall[c.id]}
+                    />
+                  }
+                >
+                  <button
+                    onClick={() => onOpenCall?.(c.id)}
+                    className="w-full rounded-2xl border border-[var(--border)] p-4 text-left transition-colors duration-[160ms] hover:border-neutral-300"
+                  >
+                    <div className="flex items-center gap-2">
+                      <PulseDot />
+                      <span className="text-[13px] font-semibold">{c.agent}</span>
+                      <span className="ml-auto text-[12px] tabular-nums text-neutral-500">{mmss(now - Date.parse(c.started_at))}</span>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 text-[12px] text-neutral-500">
+                      <DirIcon d={c.direction} />
+                      <span className="tabular-nums">{c.from_number ?? "browser"}</span>
+                    </div>
+                    <div className="mt-2.5 flex min-h-5 items-center gap-1.5">
+                      {node && (
+                        <span className="max-w-[70%] truncate rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-600">
+                          {node}
+                        </span>
+                      )}
+                      {holdByCall[c.id] && <HoldChip until={holdByCall[c.id]} />}
+                    </div>
+                  </button>
+                </Tooltip>
+              );
+            })}
           </div>
         ) : (
           <div className="flex items-center gap-2.5 rounded-2xl border border-[var(--border)] px-4 py-6 text-xs text-neutral-400">
@@ -146,7 +171,7 @@ export default function HomeBoard({
             <button
               key={c.id}
               onClick={() => onOpenCall?.(c.id)}
-              className="flex items-center gap-2.5 rounded-xl border border-[var(--border)] px-3 py-2 text-[12px] transition-colors hover:border-neutral-300"
+              className="flex items-center gap-2.5 rounded-xl border border-[var(--border)] px-3 py-2 text-[12px] transition-colors duration-[160ms] hover:border-neutral-300"
             >
               <span className="font-medium">{c.agent}</span>
               <span className="tabular-nums text-neutral-400">{fmtTime(c.started_at)}</span>
@@ -158,6 +183,34 @@ export default function HomeBoard({
         </div>
       </section>
     </div>
+  );
+}
+
+/** Panel-tooltip body: caller, agent, elapsed, current node, last transcript line. */
+function LiveCallGlance({
+  call, elapsed, node, line,
+}: { call: CallRow; elapsed: string; node: string | null; line?: LastLine }) {
+  return (
+    <span className="block">
+      <span className="mb-2 flex items-center gap-2">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-neutral-900">{call.agent}</span>
+        <span className="text-[10px] text-neutral-400 tabular-nums">{elapsed}</span>
+      </span>
+      <span className="block space-y-1">
+        <TipStat label="From" value={call.from_number ?? "browser"} />
+        <TipStat label="Node" value={node ?? "—"} />
+      </span>
+      {line && (
+        <>
+          <TipDivider />
+          <span className="block truncate text-[10px] leading-[1.45] text-neutral-500">
+            <span className="mr-1.5 text-[8px] font-medium uppercase tracking-[0.14em] text-neutral-400">{line.who}</span>
+            {line.text}
+          </span>
+        </>
+      )}
+    </span>
   );
 }
 

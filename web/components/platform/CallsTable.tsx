@@ -7,6 +7,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
 import CallTimeline from "./CallTimeline";
+import Tooltip, { TipDivider, TipStat } from "@/components/ui/Tooltip";
 import {
   DirIcon, PulseDot, ResIcon, SatChip, fmtDur, fmtTime, mmss, useNow,
   type CallEvent, type CallRow,
@@ -151,7 +152,7 @@ export default function CallsTable({
             <Fragment key={c.id}>
               <tr
                 onClick={() => (expanded === c.id ? closeCall() : void openCall(c.id))}
-                className={`cursor-pointer border-b border-[var(--border)] last:border-0 hover:bg-neutral-50 ${expanded === c.id ? "bg-neutral-50" : ""}`}
+                className={`cursor-pointer border-b border-[var(--border)] transition-colors duration-[160ms] last:border-0 hover:bg-neutral-50 ${expanded === c.id ? "bg-neutral-50" : ""}`}
               >
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">{fmtTime(c.started_at)}</td>
                 <td className="px-4 py-2.5">{c.agent}</td>
@@ -164,7 +165,15 @@ export default function CallsTable({
                     fmtDur(c.duration_s)
                   )}
                 </td>
-                <td className="px-4 py-2.5"><SatChip n={c.satisfaction} /></td>
+                <td className="px-4 py-2.5">
+                  {c.satisfaction != null ? (
+                    <Tooltip variant="panel" content={<SatGlance call={c} />}>
+                      <SatChip n={c.satisfaction} />
+                    </Tooltip>
+                  ) : (
+                    <SatChip n={c.satisfaction} />
+                  )}
+                </td>
                 <td className="px-4 py-2.5"><ResIcon r={c.resolution} /></td>
                 <td className="max-w-[240px] truncate px-4 py-2.5 text-neutral-500">{c.review ?? ""}</td>
               </tr>
@@ -183,6 +192,44 @@ export default function CallsTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+const RES_LABEL: Record<string, string> = {
+  ai_resolved: "ai resolved",
+  human_resolved: "human resolved",
+  unresolved: "unresolved",
+};
+
+/** Panel-tooltip body: 10-segment satisfaction bar, resolution, review snippet. */
+function SatGlance({ call }: { call: CallRow }) {
+  const n = call.satisfaction ?? 0;
+  const fill = n < 5 ? "#ef4444" : n > 5 ? "#10b981" : "#a3a3a3";
+  return (
+    <span className="block">
+      <span className="mb-1 flex justify-between">
+        <span className="text-[8px] font-medium uppercase tracking-[0.22em] text-neutral-400">Satisfaction</span>
+        <span className="text-[10px] text-neutral-900 tabular-nums">{n}/10</span>
+      </span>
+      <span className="flex gap-[3px]">
+        {Array.from({ length: 10 }, (_, i) => (
+          <span
+            key={i}
+            className="h-1.5 flex-1 rounded-[1px]"
+            style={{ background: i < n ? fill : "#f0f0f0" }}
+          />
+        ))}
+      </span>
+      <span className="mt-2 block">
+        <TipStat label="Resolution" value={RES_LABEL[call.resolution ?? ""] ?? "—"} />
+      </span>
+      {call.review && (
+        <>
+          <TipDivider />
+          <span className="block truncate text-[10px] leading-[1.45] text-neutral-500">{call.review}</span>
+        </>
+      )}
+    </span>
   );
 }
 

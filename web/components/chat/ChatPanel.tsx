@@ -1,15 +1,65 @@
 // Author: Harsha Gundala
-// ChatPanel.tsx — operator chat: streamed replies, inline tool activity, one input.
+// ChatPanel.tsx — operator chat: dark-ink user bubbles, bare assistant prose, shimmer tool lines.
 
 "use client";
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { ArrowUp, Wrench, Check, X } from "lucide-react";
+import { ArrowUp } from "lucide-react";
+import { toolDisplay } from "./tool-display";
 
 export type ChatItem =
   | { kind: "text"; role: "user" | "assistant"; text: string }
   | { kind: "tool"; name: string; status: "start" | "done" | "error" };
+
+/** Bare single-line tool activity: pulsing icon + shimmering label while running. */
+export function ToolLine({ name, status }: { name: string; status: "start" | "done" | "error" }) {
+  const d = toolDisplay(name);
+  const Icon = d.icon;
+  const running = status === "start";
+  return (
+    <div className="my-1 ml-0.5">
+      <span className="inline-flex max-w-full items-center gap-2 whitespace-nowrap py-0.5 text-[14px] font-semibold text-neutral-500">
+        <Icon
+          size={15}
+          strokeWidth={2.25}
+          aria-hidden
+          className={`shrink-0 text-neutral-500 ${running ? "animate-tool-pulse" : ""}`}
+        />
+        <span className={`max-w-[56ch] truncate ${running ? "tool-shimmer" : ""}`}>
+          {running ? d.running : d.done}
+        </span>
+        {status === "error" && (
+          <span
+            aria-label="Error"
+            className="ml-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500 shadow-[0_0_0_2px_rgba(255,255,255,0.92)]"
+          />
+        )}
+      </span>
+    </div>
+  );
+}
+
+/** Three blinking cells — the streaming indicator. */
+export function PixelLoader() {
+  return (
+    <span className="pixel-loader" aria-label="Thinking">
+      <span className="pixel-loader-cell" />
+      <span className="pixel-loader-cell" style={{ animationDelay: "0.3s" }} />
+      <span className="pixel-loader-cell" style={{ animationDelay: "0.6s" }} />
+    </span>
+  );
+}
+
+export const USER_BUBBLE =
+  "max-w-[76%] select-text whitespace-pre-wrap rounded-[18px] rounded-br-[8px] bg-neutral-900 px-3.5 py-2 text-[12.5px] leading-[1.5] text-white border border-neutral-900/10 shadow-[0_8px_24px_rgba(0,0,0,0.05)]";
+
+export const ASSISTANT_PROSE =
+  "max-w-[92%] select-text px-1 py-0.5 text-[13px] leading-[1.62] font-[450] text-neutral-800 " +
+  "[&_p]:my-[0.52em] [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 " +
+  "[&_strong]:font-extrabold [&_strong]:text-neutral-900 " +
+  "[&_code]:font-mono [&_code]:text-[11.5px] " +
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-neutral-50 [&_pre]:p-3";
 
 export default function ChatPanel({
   items, streaming, onSend,
@@ -30,7 +80,7 @@ export default function ChatPanel({
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+      <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
         {!items.length && (
           <div className="mt-8 text-center text-xs leading-5 text-neutral-300">
             ask for anything —<br />dashboards · tools · calls · analysis
@@ -38,47 +88,47 @@ export default function ChatPanel({
         )}
         {items.map((item, i) =>
           item.kind === "tool" ? (
-            <div key={i} className="flex items-center gap-1.5 pl-1 font-mono text-[11px] text-neutral-400">
-              {item.status === "start" ? (
-                <Wrench size={11} className="animate-pulse" />
-              ) : item.status === "done" ? (
-                <Check size={11} className="text-emerald-500" />
-              ) : (
-                <X size={11} className="text-red-400" />
-              )}
-              {item.name}
-            </div>
+            <ToolLine key={i} name={item.name} status={item.status} />
           ) : item.role === "user" ? (
-            <div key={i} className="ml-8 rounded-2xl rounded-br-md bg-neutral-100 px-3.5 py-2 text-sm text-neutral-800">
-              {item.text}
+            <div key={i} className="flex justify-end">
+              <div className={USER_BUBBLE}>{item.text}</div>
             </div>
           ) : (
-            <div key={i} className="pr-4 text-sm leading-relaxed text-neutral-800 [&_code]:font-mono [&_code]:text-xs [&_p]:mb-1.5">
-              <ReactMarkdown>{item.text}</ReactMarkdown>
+            <div key={i} className="flex justify-start">
+              <div className={ASSISTANT_PROSE}>
+                <ReactMarkdown>{item.text}</ReactMarkdown>
+              </div>
             </div>
           )
         )}
-        {streaming && <div className="pl-1 text-xs text-neutral-300">…</div>}
+        {streaming && (
+          <div className="pl-1 pt-1">
+            <PixelLoader />
+          </div>
+        )}
       </div>
-      <div className="border-t border-[var(--border)] p-3">
-        <div className="flex items-end gap-2 rounded-xl border border-neutral-200 px-3 py-2 focus-within:border-neutral-400">
-          <textarea
-            rows={1}
-            value={input}
-            placeholder="ask the operator"
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
-            }}
-            className="max-h-32 flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-neutral-300"
-          />
-          <button
-            onClick={submit}
-            disabled={!input.trim() || streaming}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white disabled:opacity-20"
-          >
-            <ArrowUp size={13} />
-          </button>
+      <div className="shrink-0 border-t border-neutral-200/70 bg-white/85 px-3 pb-3 pt-2">
+        <div className="relative rounded-2xl border border-neutral-200/75 bg-white/70 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-[160ms] focus-within:border-neutral-900/25 focus-within:bg-white focus-within:shadow-[0_0_0_1px_rgba(0,0,0,0.07)]">
+          <div className="flex items-end gap-2">
+            <textarea
+              rows={1}
+              value={input}
+              placeholder="ask the operator"
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+              }}
+              className="max-h-32 min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
+            />
+            <button
+              aria-label="Send"
+              onClick={submit}
+              disabled={!input.trim() || streaming}
+              className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full border border-neutral-900 bg-neutral-900 text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800 disabled:translate-y-0 disabled:opacity-40"
+            >
+              <ArrowUp size={16} strokeWidth={2.1} />
+            </button>
+          </div>
         </div>
       </div>
     </div>

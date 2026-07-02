@@ -6,7 +6,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
-import { LogOut, Phone, ArrowUp, Play, Wrench, Check, X, Loader2, LayoutGrid } from "lucide-react";
+import { LogOut, Phone, ArrowUp, Play, Loader2, LayoutGrid } from "lucide-react";
+import { ASSISTANT_PROSE, PixelLoader, ToolLine, USER_BUBBLE } from "@/components/chat/ChatPanel";
+import Tooltip from "@/components/ui/Tooltip";
 import FlowCanvas from "@/components/studio/FlowCanvas";
 import TopPills from "@/components/studio/TopPills";
 import FilesModal from "@/components/studio/FilesModal";
@@ -219,12 +221,16 @@ export default function Studio() {
           <span className="text-sm font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</span>
         </div>
         <div className="flex items-center gap-4">
-          <button onClick={() => router.push("/workspace")} className="text-neutral-300 transition-colors hover:text-neutral-900" title="workspace">
-            <LayoutGrid size={15} />
-          </button>
-          <button onClick={logout} className="text-neutral-400 transition-colors hover:text-neutral-900" title="log out">
-            <LogOut size={15} />
-          </button>
+          <Tooltip content="workspace" placement="bottom">
+            <button onClick={() => router.push("/workspace")} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
+              <LayoutGrid size={15} />
+            </button>
+          </Tooltip>
+          <Tooltip content="log out" placement="bottom">
+            <button onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
+              <LogOut size={15} />
+            </button>
+          </Tooltip>
         </div>
       </header>
 
@@ -269,7 +275,7 @@ export default function Studio() {
         </div>
 
         {/* Inline chat — flows straight on the page */}
-        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto py-5">
+        <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto py-5">
           {!items.length && (
             <p className="pt-2 text-center text-[12px] text-neutral-300">
               ask for changes — topics, steps, tone, tools — and watch the flow update
@@ -281,46 +287,52 @@ export default function Studio() {
                 <span className="h-1 w-1 rounded-full bg-emerald-400" /> {item.text}
               </div>
             ) : item.kind === "tool" ? (
-              <div key={i} className="flex items-center gap-1.5 pl-1 font-mono text-[11px] text-neutral-400">
-                {item.status === "start" ? <Wrench size={11} className="animate-pulse" /> : item.status === "done" ? <Check size={11} className="text-emerald-500" /> : <X size={11} className="text-red-400" />}
-                {item.name}
-              </div>
+              <ToolLine key={i} name={item.name} status={item.status} />
             ) : item.role === "user" ? (
-              <div key={i} className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-md bg-neutral-100 px-3.5 py-2 text-[13.5px]">
-                {item.text}
+              <div key={i} className="flex justify-end">
+                <div className={USER_BUBBLE}>{item.text}</div>
               </div>
             ) : (
-              <div key={i} className="max-w-[92%] text-[13.5px] leading-relaxed text-neutral-800 [&_p]:mb-1.5">
-                <ReactMarkdown>{item.text}</ReactMarkdown>
+              <div key={i} className="flex justify-start">
+                <div className={ASSISTANT_PROSE}>
+                  <ReactMarkdown>{item.text}</ReactMarkdown>
+                </div>
               </div>
             )
           )}
-          {streaming && <div className="pl-1 text-xs text-neutral-300">…</div>}
+          {streaming && (
+            <div className="pl-1 pt-1">
+              <PixelLoader />
+            </div>
+          )}
         </div>
 
         {/* Input */}
         <div className="shrink-0 pb-5">
-          <div className="flex items-end gap-2 rounded-[18px] border border-neutral-200 px-4 py-2.5 focus-within:border-neutral-400">
-            <textarea
-              rows={1}
-              value={input}
-              placeholder={company ? `refine ${company}'s agent` : "refine your agent"}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  if (input.trim() && !streaming) { send(input.trim()); setInput(""); }
-                }
-              }}
-              className="max-h-32 flex-1 resize-none bg-transparent text-[13.5px] outline-none placeholder:text-neutral-300"
-            />
-            <button
-              onClick={() => { if (input.trim() && !streaming) { send(input.trim()); setInput(""); } }}
-              disabled={!input.trim() || streaming}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-950 text-white disabled:opacity-20"
-            >
-              <ArrowUp size={13} />
-            </button>
+          <div className="relative rounded-2xl border border-neutral-200/75 bg-white/70 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-[160ms] focus-within:border-neutral-900/25 focus-within:bg-white focus-within:shadow-[0_0_0_1px_rgba(0,0,0,0.07)]">
+            <div className="flex items-end gap-2">
+              <textarea
+                rows={1}
+                value={input}
+                placeholder={company ? `refine ${company}'s agent` : "refine your agent"}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (input.trim() && !streaming) { send(input.trim()); setInput(""); }
+                  }
+                }}
+                className="max-h-32 min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
+              />
+              <button
+                aria-label="Send"
+                onClick={() => { if (input.trim() && !streaming) { send(input.trim()); setInput(""); } }}
+                disabled={!input.trim() || streaming}
+                className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full border border-neutral-900 bg-neutral-900 text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800 disabled:translate-y-0 disabled:opacity-40"
+              >
+                <ArrowUp size={16} strokeWidth={2.1} />
+              </button>
+            </div>
           </div>
         </div>
       </div>

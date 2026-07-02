@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpLeft, Home, Layers, LogOut, Phone, Table2, X } from "lucide-react";
+import Tooltip from "@/components/ui/Tooltip";
 import SurfaceView from "@/components/surface/SurfaceView";
 import FlowPanel from "@/components/flow/FlowPanel";
 import ChatPanel, { type ChatItem } from "@/components/chat/ChatPanel";
@@ -150,41 +151,45 @@ export default function Workspace() {
           <Phone size={15} strokeWidth={2.4} />
           <span className="text-sm font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</span>
         </div>
-        <button onClick={logout} className="text-neutral-400 transition-colors hover:text-neutral-900" title="log out">
-          <LogOut size={15} />
-        </button>
+        <Tooltip content="log out" placement="bottom">
+          <button onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
+            <LogOut size={15} />
+          </button>
+        </Tooltip>
       </header>
 
       <div className="flex min-h-0 flex-1">
         {/* Icon rail */}
         <nav className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-[var(--border)] py-3">
           {TABS.map(({ id, icon: Icon, title }) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              title={title}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
-                tab === id && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
-              }`}
-            >
-              <Icon size={15} />
-            </button>
+            <Tooltip key={id} content={title} placement="right">
+              <button
+                onClick={() => setTab(id)}
+                className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-[160ms] ${
+                  tab === id && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
+                }`}
+              >
+                <Icon size={15} />
+              </button>
+            </Tooltip>
           ))}
           <div className="flex-1" />
-          <button
-            onClick={() => router.push("/studio")}
-            title="studio"
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors hover:text-neutral-900"
-          >
-            <ArrowUpLeft size={15} />
-          </button>
-          <button
-            onClick={logout}
-            title="log out"
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors hover:text-neutral-900"
-          >
-            <LogOut size={15} />
-          </button>
+          <Tooltip content="studio" placement="right">
+            <button
+              onClick={() => router.push("/studio")}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900"
+            >
+              <ArrowUpLeft size={15} />
+            </button>
+          </Tooltip>
+          <Tooltip content="log out" placement="right">
+            <button
+              onClick={logout}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900"
+            >
+              <LogOut size={15} />
+            </button>
+          </Tooltip>
         </nav>
 
         {/* Main view */}
@@ -192,9 +197,11 @@ export default function Workspace() {
           <div className="p-6">
             {surface ? (
               <div>
-                <button onClick={() => setSurface(null)} title="close" className="mb-3 text-neutral-300 transition-colors hover:text-neutral-900">
-                  <X size={14} />
-                </button>
+                <Tooltip content="close" placement="right" className="mb-3">
+                  <button onClick={() => setSurface(null)} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
+                    <X size={14} />
+                  </button>
+                </Tooltip>
                 <SurfaceView surface={surface} send={send} />
               </div>
             ) : tab === "home" ? (

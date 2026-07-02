@@ -20,3 +20,50 @@ html, body {
 }
 
 .react-flow__attribution { display: none; }
+
+/* ---- chat tool-line motion (gpu-hub pattern) ---- */
+
+/* RUNNING — icon pulse (opacity 0.55→1, scale 1.05, 4.2s) */
+@keyframes tool-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+.animate-tool-pulse { animation: tool-pulse 4.2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+/* RUNNING — lighter band sweeps across the bold label */
+.tool-shimmer {
+  background-image: linear-gradient(90deg,
+    #525252 0%, #525252 35%, #d4d4d4 50%, #525252 65%, #525252 100%);
+  background-size: 220% 100%;
+  background-position: 200% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: tool-shimmer 4.8s linear infinite;
+}
+@keyframes tool-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Streaming indicator — 3 blinking cells, not a spinner */
+.pixel-loader { display: inline-flex; align-items: center; gap: 2px; height: 12px; color: #a3a3a3; }
+.pixel-loader-cell {
+  width: 3px; height: 3px; background: currentColor; border-radius: 0.5px;
+  opacity: 0.18; animation: pixel-blink 1.8s steps(2, end) infinite;
+}
+@keyframes pixel-blink {
+  0%, 100% { opacity: 0.18; transform: scaleY(1); }
+  35% { opacity: 0.95; transform: scaleY(1.6); }
+  60% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-tool-pulse { animation: none; opacity: 0.85; }
+  .tool-shimmer {
+    animation: none; background: none;
+    -webkit-text-fill-color: #525252; color: #525252;
+  }
+  .pixel-loader-cell { animation: none; opacity: 0.55; }
+}

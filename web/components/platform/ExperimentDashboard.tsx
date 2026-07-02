@@ -5,9 +5,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Square } from "lucide-react";
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
+import Tooltip, { TipDivider, TipStat } from "@/components/ui/Tooltip";
 import { PulseDot } from "./shared";
 
 type VariantMetric = {
@@ -77,7 +78,7 @@ export default function ExperimentDashboard({
         {running && (
           <button
             onClick={() => send(`Stop the experiment "${experiment.name}" (${experiment.id}).`)}
-            className="flex items-center gap-1.5 rounded-full border border-neutral-200 px-2.5 py-1 text-[11px] text-neutral-600 transition-colors hover:border-red-400 hover:text-red-500"
+            className="flex items-center gap-1.5 rounded-full border border-neutral-200 px-2.5 py-1 text-[11px] text-neutral-600 transition-colors duration-[160ms] hover:border-red-400 hover:text-red-500"
           >
             <Square size={9} fill="currentColor" /> stop
           </button>
@@ -91,20 +92,22 @@ export default function ExperimentDashboard({
           const res = v.resolutions ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
           const total = Math.max(res.ai_resolved + res.human_resolved + res.unresolved, 1);
           return (
-            <div key={v.key} className="flex-1 rounded-2xl border border-[var(--border)] p-4">
-              <div className="text-[11px] uppercase tracking-wide text-neutral-400">{v.label}</div>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="text-3xl font-semibold tabular-nums tracking-tight">
-                  {v.avg_satisfaction != null ? Number(v.avg_satisfaction).toFixed(1) : "—"}
-                </span>
-                <span className="text-[11px] tabular-nums text-neutral-400">{v.calls} calls</span>
+            <Tooltip key={v.key} variant="panel" className="min-w-0 flex-1" content={<VariantGlance v={v} />}>
+              <div className="w-full rounded-2xl border border-[var(--border)] p-4">
+                <div className="text-[11px] uppercase tracking-wide text-neutral-400">{v.label}</div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-3xl font-semibold tabular-nums tracking-tight">
+                    {v.avg_satisfaction != null ? Number(v.avg_satisfaction).toFixed(1) : "—"}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-neutral-400">{v.calls} calls</span>
+                </div>
+                <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-neutral-100">
+                  <div style={{ width: `${(res.ai_resolved / total) * 100}%`, background: "#111" }} />
+                  <div style={{ width: `${(res.human_resolved / total) * 100}%`, background: "#6366f1" }} />
+                  <div style={{ width: `${(res.unresolved / total) * 100}%`, background: "#e5e5e5" }} />
+                </div>
               </div>
-              <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-neutral-100">
-                <div title={`ai resolved · ${res.ai_resolved}`} style={{ width: `${(res.ai_resolved / total) * 100}%`, background: "#111" }} />
-                <div title={`human resolved · ${res.human_resolved}`} style={{ width: `${(res.human_resolved / total) * 100}%`, background: "#6366f1" }} />
-                <div title={`unresolved · ${res.unresolved}`} style={{ width: `${(res.unresolved / total) * 100}%`, background: "#e5e5e5" }} />
-              </div>
-            </div>
+            </Tooltip>
           );
         })}
         {!variants.length && (
@@ -113,27 +116,70 @@ export default function ExperimentDashboard({
       </div>
 
       {chart.length > 0 && (
-        <div className="h-60 rounded-2xl border border-[var(--border)] p-4">
-          <ResponsiveContainer>
-            <LineChart data={chart} margin={{ top: 8, right: 8, bottom: 0, left: -22 }}>
-              <XAxis dataKey="day" tick={{ fontSize: 10 }} stroke="#ddd" />
-              <YAxis domain={[1, 10]} tick={{ fontSize: 10 }} stroke="#ddd" />
-              <Tooltip />
-              {variants.map((v, i) => (
-                <Line
-                  key={v.key}
-                  dataKey={v.key}
-                  name={v.label}
-                  stroke={LINE_COLORS[i % LINE_COLORS.length]}
-                  strokeWidth={i === 0 ? 2 : 1.4}
-                  dot={false}
-                  connectNulls
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+        <ChartCard chart={chart} variants={variants} />
       )}
+    </div>
+  );
+}
+
+/** Panel-tooltip body: calls, avg satisfaction, resolution split mini-bars. */
+function VariantGlance({ v }: { v: VariantMetric }) {
+  const res = v.resolutions ?? { ai_resolved: 0, human_resolved: 0, unresolved: 0 };
+  const total = Math.max(res.ai_resolved + res.human_resolved + res.unresolved, 1);
+  const rows: [string, number, string][] = [
+    ["ai", res.ai_resolved, "#111111"],
+    ["human", res.human_resolved, "#6366f1"],
+    ["open", res.unresolved, "#d4d4d4"],
+  ];
+  return (
+    <span className="block">
+      <span className="mb-2 block truncate text-[11px] font-medium text-neutral-900">{v.label}</span>
+      <span className="block space-y-1">
+        <TipStat label="Calls" value={v.calls} />
+        <TipStat
+          label="Avg satisfaction"
+          value={v.avg_satisfaction != null ? Number(v.avg_satisfaction).toFixed(1) : "—"}
+        />
+      </span>
+      <TipDivider />
+      <span className="block space-y-1.5">
+        {rows.map(([label, count, color]) => (
+          <span key={label} className="flex items-center gap-2">
+            <span className="w-12 shrink-0 text-[8px] font-medium uppercase tracking-[0.22em] text-neutral-400">{label}</span>
+            <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-neutral-100">
+              <span className="block h-full" style={{ width: `${(count / total) * 100}%`, background: color }} />
+            </span>
+            <span className="w-6 shrink-0 text-right text-[10px] text-neutral-900 tabular-nums">{count}</span>
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+function ChartCard({
+  chart, variants,
+}: { chart: Record<string, unknown>[]; variants: VariantMetric[] }) {
+  return (
+    <div className="h-60 rounded-2xl border border-[var(--border)] p-4">
+      <ResponsiveContainer>
+        <LineChart data={chart} margin={{ top: 8, right: 8, bottom: 0, left: -22 }}>
+          <XAxis dataKey="day" tick={{ fontSize: 10 }} stroke="#ddd" />
+          <YAxis domain={[1, 10]} tick={{ fontSize: 10 }} stroke="#ddd" />
+          <ChartTooltip />
+          {variants.map((v, i) => (
+            <Line
+              key={v.key}
+              dataKey={v.key}
+              name={v.label}
+              stroke={LINE_COLORS[i % LINE_COLORS.length]}
+              strokeWidth={i === 0 ? 2 : 1.4}
+              dot={false}
+              connectNulls
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
