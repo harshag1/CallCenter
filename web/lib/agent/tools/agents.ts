@@ -2,7 +2,7 @@
 // agents.ts — operator tools: bot roster and append-only bot configuration (prompt, voice, flow, tools).
 
 import { q, qOne } from "../../db";
-import { FlowSchema } from "../../surface-dsl";
+import { AgentFlowSchema, type AgentFlow } from "../../flow";
 import type { OperatorTool } from "../types";
 
 export const listAgents: OperatorTool = {
@@ -24,7 +24,7 @@ export const listAgents: OperatorTool = {
 export const updateAgent: OperatorTool = {
   name: "update_agent",
   description:
-    "Update a bot by creating a new immutable version (append-only; old versions remain revertible). Provide only the fields to change. `flow` is the call-flow graph rendered in the UI: {nodes:[{id,label,kind:start|state|tool|decision|end}],edges:[{from,to,label?}]}. Keep flows honest — they should mirror the instructions.",
+    "Update a bot by creating a new immutable version (append-only; old versions remain revertible). Provide only the fields to change. `flow` shape: {nodes:[{id,label,kind:\"incoming_call\"|\"topic\"|\"fallback\",icon?,context?,steps?:[{id,label,instructions}],support_number?}],edges:[{from,to}]}. Topic nodes MUST keep their context and steps (copy them from the current flow when unchanged). The incoming_call and fallback nodes are preserved automatically if you omit them.",
   parameters: {
     type: "object",
     properties: {
@@ -48,9 +48,11 @@ export const updateAgent: OperatorTool = {
 
     let flow = cur.flow;
     if (args.flow) {
-      const parsed = FlowSchema.safeParse(args.flow);
+      const parsed = AgentFlowSchema.safeParse(args.flow);
       if (!parsed.success) return { output: { error: `invalid flow: ${parsed.error.message.slice(0, 300)}` } };
-      flow = parsed.data;
+      const healed = healFlow(parsed.data, AgentFlowSchema.parse(cur.flow));
+      if ("error" in healed) return { output: healed };
+      flow = healed.flow;
     }
     const next = cur.version + 1;
     await q(
@@ -77,3 +79,56 @@ export const updateAgent: OperatorTool = {
     };
   },
 };
+
+
+/** Structural guardrails: an updated flow may never collapse the graph.
+ *  Preserves incoming_call/fallback from the current flow when omitted, merges missing
+ *  topic context/steps from same-id nodes, prunes dangling edges, reconnects orphans. */
+function healFlow(next: AgentFlow, current: AgentFlow): { flow: AgentFlow } | { error: string } {
+  const nodes = [...next.nodes];
+
+  // Old-vocabulary rescue: start→incoming_call, decision/state with no better match → topic.
+  for (const n of nodes) {
+    if ((n.kind as string) === "start") n.kind = "incoming_call";
+    else if (!["incoming_call", "topic", "fallback"].includes(n.kind)) {
+      const wasFallback = current.nodes.find((c) => c.id === n.id)?.kind === "fallback";
+      n.kind = wasFallback ? "fallback" : "topic";
+    }
+  }
+
+  if (!nodes.some((n) => n.kind === "incoming_call")) {
+    const inc = current.nodes.find((n) => n.kind === "incoming_call");
+    if (inc) nodes.unshift(inc);
+  }
+  if (!nodes.some((n) => n.kind === "fallback")) {
+    const fb = current.nodes.find((n) => n.kind === "fallback");
+    if (fb) nodes.push(fb);
+  }
+
+  // Merge lost topic payloads from the current flow.
+  for (const n of nodes) {
+    if (n.kind !== "topic") continue;
+    const prev = current.nodes.find((c) => c.id === n.id);
+    if (prev) {
+      n.context ??= prev.context;
+      n.steps ??= prev.steps;
+      n.icon ??= prev.icon;
+    }
+  }
+
+  if (!nodes.some((n) => n.kind === "topic")) {
+    return { error: "flow must keep at least one topic node — include the topics that should remain" };
+  }
+
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = next.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+  const incoming = nodes.find((n) => n.kind === "incoming_call");
+  if (incoming) {
+    for (const n of nodes) {
+      if (n.id !== incoming.id && !edges.some((e) => e.to === n.id)) {
+        edges.push({ from: incoming.id, to: n.id });
+      }
+    }
+  }
+  return { flow: { nodes, edges } };
+}

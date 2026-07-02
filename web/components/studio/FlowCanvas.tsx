@@ -22,7 +22,7 @@ export default function FlowCanvas({
   flow, number, numberStatus, activeNode, activeStep, onSaveSupportNumber, onNodeClick,
 }: Props) {
   const graph = useMemo(() => {
-    const branches = flow.nodes.filter((n) => n.kind === "topic" || n.kind === "fallback");
+    const branches = flow.nodes.filter((n) => n.kind !== "incoming_call");
     const rowH = 118;
     const nodes: Node[] = flow.nodes.map((n) => {
       if (n.kind === "incoming_call") {
@@ -36,7 +36,7 @@ export default function FlowCanvas({
       const stepIdx = n.steps?.findIndex((s) => s.id === activeStep) ?? -1;
       return {
         id: n.id,
-        type: n.kind === "fallback" ? "fallback" : "topic",
+        type: n.kind === "fallback" ? "fallback" : "topic", // unknown kinds degrade to topic cards
         position: { x: 300, y: idx * rowH },
         data: {
           label: n.label, icon: n.icon, steps: n.steps,
