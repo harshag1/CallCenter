@@ -119,7 +119,14 @@ export async function* chatStream(messages: ChatMessage[], opts: ChatOpts = {}):
 }
 
 /** Web-grounded completion via the Responses API with server-side web_search (live search successor). */
-export async function research(system: string, user: string, maxTokens = 1200): Promise<string> {
+export async function research(
+  system: string,
+  user: string,
+  maxTokens = 1200,
+  allowedDomains?: string[]
+): Promise<string> {
+  const tool: Record<string, unknown> = { type: "web_search" };
+  if (allowedDomains?.length) tool.allowed_domains = allowedDomains;
   const res = await fetch(`${BASE}/responses`, {
     method: "POST",
     headers: headers(),
@@ -129,7 +136,7 @@ export async function research(system: string, user: string, maxTokens = 1200): 
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      tools: [{ type: "web_search" }],
+      tools: [tool],
       max_output_tokens: maxTokens,
     }),
   });

@@ -48,11 +48,11 @@ export default function Onboarding() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f7f7f7] px-5">
-      <div className="w-full max-w-[600px] rounded-[30px] border border-neutral-200 bg-white p-4 shadow-[0_18px_70px_rgba(15,15,15,0.055)]">
-        <div className="px-2 pb-4 pt-2 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">Describe your agent</h1>
-          <p className="mt-1 text-xs text-neutral-400">One clear request is enough. We&apos;ll turn it into a working voice flow.</p>
+    <main className="flex min-h-screen items-center justify-center bg-[#f8f8f8] px-5 text-neutral-950">
+      <div className="w-full max-w-[560px] overflow-hidden rounded-[16px] border border-neutral-200 bg-white shadow-[0_10px_30px_rgba(15,15,15,0.035)]">
+        <div className="p-4 text-center">
+          <h1 className="text-[18px] font-semibold">Describe your agent</h1>
+          <p className="mt-1 text-[12px] leading-5 text-neutral-400">One clear request is enough. We&apos;ll turn it into a working voice flow.</p>
         </div>
         <textarea
           autoFocus
@@ -60,24 +60,24 @@ export default function Onboarding() {
           onChange={(e) => setText(e.target.value)}
           rows={4}
           placeholder={company ? `What should your ${company} agent handle?` : "A voice agent that..."}
-          className="w-full resize-none rounded-[22px] border border-neutral-100 p-4 text-[15px] leading-relaxed outline-none placeholder:text-neutral-300 focus:border-neutral-400"
+          className="min-h-[148px] w-full resize-none border-y border-neutral-100 bg-transparent p-4 text-[15px] leading-6 outline-none placeholder:text-neutral-300"
         />
-        <div className="mt-3 flex min-h-8 flex-wrap justify-center gap-2">
+        <div className="flex min-h-0 flex-wrap justify-center gap-2 px-3 py-2">
           {suggestions.map((s) => (
             <button
               key={s.label}
               onClick={() => setText(s.prompt)}
-              className="flex items-center gap-1.5 rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-600 transition-colors hover:border-neutral-900 hover:text-neutral-900"
+              className="flex items-center gap-1.5 rounded-[10px] border border-neutral-200 px-3 py-1.5 text-[12px] text-neutral-600 transition-colors hover:border-neutral-900 hover:text-neutral-900"
             >
               <Sparkles size={11} /> {s.label}
             </button>
           ))}
         </div>
-        <div className="mt-6 flex justify-center">
+        <div className="border-t border-neutral-100 p-2">
           <button
             onClick={build}
             disabled={building || text.trim().length < 10}
-            className="flex h-11 items-center gap-2 rounded-[17px] bg-neutral-950 px-5 text-sm font-medium text-white transition-opacity disabled:opacity-30"
+            className="flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 px-5 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:bg-neutral-200 disabled:text-neutral-400"
           >
             {building ? <><Loader2 size={14} className="animate-spin" /> Building…</> : "Build my first agent"}
           </button>

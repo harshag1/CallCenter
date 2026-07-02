@@ -35,6 +35,5 @@ export async function POST(req: Request) {
   await q("UPDATE phone_codes SET used = true WHERE id = $1", [row.id]);
   await q("UPDATE users SET phone_number = $2, phone_verified_at = now() WHERE email = $1", [session.email, clean]);
 
-  const hasAgents = await qOne("SELECT id FROM agents WHERE org_id = $1 LIMIT 1", [session.orgId]);
-  return NextResponse.json({ ok: true, next: hasAgents ? "/workspace" : "/onboarding" });
+  return NextResponse.json({ ok: true, next: "/studio" });
 }

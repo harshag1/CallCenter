@@ -22,19 +22,20 @@ function normalizePhone(value: string) {
 
 export default function Login() {
   const router = useRouter();
-  const emailRef = useRef<HTMLInputElement>(null);
   const phoneRef = useRef<HTMLInputElement>(null);
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const showPhone = email.trim().length > 0;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
-    const cleanEmail = emailRef.current?.value.trim().toLowerCase() ?? "";
-    const cleanPhone = normalizePhone(phoneRef.current?.value ?? "");
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPhone = normalizePhone(phone);
     if (!looksLikeEmail(cleanEmail)) {
       setError("enter a valid work email");
-      emailRef.current?.focus();
       return;
     }
     if (!cleanPhone) {
@@ -62,59 +63,68 @@ export default function Login() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f7f7f7] px-5 text-neutral-950">
-      <div className="w-full max-w-[430px]">
-        <div className="mb-6 flex items-center justify-center gap-2.5 text-neutral-900">
-          <Phone size={17} strokeWidth={2.35} />
-          <span className="text-sm font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</span>
+    <main className="flex min-h-screen items-center justify-center bg-[#f8f8f8] px-5 text-neutral-950">
+      <div className="w-full max-w-[408px]">
+        <div className="mb-5 text-center">
+          <div className="text-[16px] font-semibold text-neutral-950">Harsha&apos;s Amazing Call Center</div>
         </div>
 
-        <form onSubmit={submit} className="rounded-[28px] border border-neutral-200 bg-white p-3 shadow-[0_18px_70px_rgba(15,15,15,0.06)]">
-          <div className="rounded-[22px] border border-neutral-100 bg-white px-4 py-3">
-            <label htmlFor="email" className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-neutral-400">
-              <Mail size={13} /> Work email
-            </label>
+        <form onSubmit={submit} className="overflow-hidden rounded-[16px] border border-neutral-200 bg-white shadow-[0_10px_30px_rgba(15,15,15,0.035)]">
+          <div className="flex h-16 items-center gap-3 px-4">
+            <Mail size={17} strokeWidth={1.9} className="shrink-0 text-neutral-400" />
             <input
               id="email"
               autoFocus
               type="email"
-              ref={emailRef}
-              placeholder="you@company.com"
+              aria-label="Work email"
+              value={email}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setError(null);
+              }}
+              placeholder="Work email"
               autoComplete="email"
-              className="w-full bg-transparent text-[22px] font-medium tracking-tight outline-none placeholder:text-neutral-200"
+              className="min-w-0 flex-1 bg-transparent text-[17px] font-medium outline-none placeholder:text-neutral-300"
             />
           </div>
 
-          <div className="mt-2 grid grid-rows-[1fr] opacity-100 transition-[grid-template-rows,opacity,margin] duration-500 ease-out">
+          <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${showPhone ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`}>
             <div className="min-h-0 overflow-hidden">
-              <div className="rounded-[22px] border border-neutral-100 bg-white px-4 py-3">
-                <label htmlFor="phone" className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-neutral-400">
-                  <Phone size={13} /> Phone number
-                </label>
-                <input
-                  id="phone"
-                  inputMode="tel"
-                  ref={phoneRef}
-                  placeholder="+1 415 555 0123"
-                  autoComplete="tel"
-                  className="w-full bg-transparent text-[22px] font-medium tracking-tight outline-none placeholder:text-neutral-200"
-                />
-              </div>
+              {showPhone && (
+                <>
+                  <div className="flex h-16 items-center gap-3 border-t border-neutral-100 px-4">
+                    <Phone size={17} strokeWidth={1.9} className="shrink-0 text-neutral-400" />
+                    <input
+                      id="phone"
+                      inputMode="tel"
+                      ref={phoneRef}
+                      aria-label="Phone number"
+                      value={phone}
+                      onChange={(e) => {
+                        setPhone(e.target.value);
+                        setError(null);
+                      }}
+                      placeholder="Phone number"
+                      autoComplete="tel"
+                      className="min-w-0 flex-1 bg-transparent text-[17px] font-medium outline-none placeholder:text-neutral-300"
+                    />
+                  </div>
+
+                  <div className="border-t border-neutral-100 p-2">
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
+                    >
+                      {busy ? <Loader2 size={15} className="animate-spin" /> : <>Continue <ArrowRight size={15} strokeWidth={2} /></>}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
-
-          <button
-            type="submit"
-            disabled={busy}
-            className="mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-[18px] bg-neutral-950 text-sm font-medium text-white transition-all hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
-          >
-            {busy ? <Loader2 size={15} className="animate-spin" /> : <>Continue <ArrowRight size={15} /></>}
-          </button>
         </form>
 
-        <p className="mx-auto mt-4 max-w-[340px] text-center text-xs leading-5 text-neutral-400">
-          We use this to verify the builder and prepare company-specific agent suggestions while you confirm access.
-        </p>
         {error && <p className="mt-3 text-center text-xs text-red-500">{error}</p>}
       </div>
     </main>

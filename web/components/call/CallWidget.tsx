@@ -8,8 +8,13 @@ import { PhoneOff, Mic } from "lucide-react";
 import { RealtimeCall } from "./realtime";
 
 export default function CallWidget({
-  agentId, agentName, onEnded,
-}: { agentId: string; agentName: string; onEnded: (callId: string) => void }) {
+  agentId, agentName, onEnded, onStarted,
+}: {
+  agentId: string;
+  agentName: string;
+  onEnded: (callId: string) => void;
+  onStarted?: (callId: string) => void;
+}) {
   const [state, setState] = useState<"connecting" | "live" | "ended" | "error">("connecting");
   const [caption, setCaption] = useState("");
   const callRef = useRef<RealtimeCall | null>(null);
@@ -20,7 +25,7 @@ export default function CallWidget({
       onTranscript: (who, text) => setCaption(`${who === "caller" ? "you" : agentName}: ${text}`),
     });
     callRef.current = call;
-    call.start(agentId).catch(() => setState("error"));
+    call.start(agentId).then(() => onStarted?.(call.callId)).catch(() => setState("error"));
     return () => { void call.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
