@@ -14,11 +14,38 @@ function twiml(body: string) {
 }
 
 /**
+ * Transfer: contact_support (lib/mcp.ts) redirects the live call to
+ * `{PUBLIC_ORIGIN}/api/telephony/twiml?transfer=<E.164>&scope=<scope>` (GET or POST).
+ * We fork media to the bridge in observe mode (both tracks) and Dial the human line.
+ * Note: `<Start><Stream>` custom parameters arrive in start.customParameters, same as `<Connect><Stream>`.
+ */
+function transferTwiml(url: URL): Response | null {
+  const transfer = url.searchParams.get("transfer");
+  const scope = url.searchParams.get("scope");
+  if (!transfer || !scope) return null;
+  const bridge = process.env.BRIDGE_WS_URL;
+  if (!bridge) return twiml("<Say>Bridge is not configured.</Say><Hangup/>");
+  const number = transfer.replace(/[^+\d]/g, "");
+  return twiml(
+    `<Start><Stream url="${bridge}" track="both_tracks">` +
+      `<Parameter name="scope" value="${scope}"/>` +
+      `<Parameter name="mode" value="observe"/>` +
+      `</Stream></Start><Dial>${number}</Dial>`
+  );
+}
+
+export async function GET(req: Request) {
+  return transferTwiml(new URL(req.url)) ?? twiml("<Hangup/>");
+}
+
+/**
  * Inbound: Twilio POSTs To/From — we resolve the bot by dialed number and create the call.
  * Outbound: originateCall() passes ?callId&scope so the answered leg joins its existing call row.
  */
 export async function POST(req: Request) {
   const url = new URL(req.url);
+  const transfer = transferTwiml(url);
+  if (transfer) return transfer;
   const form = await req.formData().catch(() => new FormData());
   const bridge = process.env.BRIDGE_WS_URL;
   if (!bridge) return twiml("<Say>Bridge is not configured.</Say><Hangup/>");

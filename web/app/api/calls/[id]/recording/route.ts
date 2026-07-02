@@ -4,6 +4,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
+import { ulawToWav } from "@/lib/audio";
 
 const MAX_BYTES = 25 * 1024 * 1024;
 
@@ -39,6 +40,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     [id, session.orgId]
   );
   if (!rec) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (rec.mime.startsWith("audio/basic")) {
+    // Bridge recordings are raw 8kHz μ-law — wrap in a WAV container for browser playback.
+    // No max-age: the body grows while the call is live.
+    return new Response(new Uint8Array(ulawToWav(rec.data)), {
+      headers: { "Content-Type": "audio/wav", "Cache-Control": "private, no-store" },
+    });
+  }
   return new Response(new Uint8Array(rec.data), {
     headers: { "Content-Type": rec.mime, "Cache-Control": "private, max-age=3600" },
   });
