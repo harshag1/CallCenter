@@ -37,6 +37,7 @@ export default function Studio() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [docCount, setDocCount] = useState(0);
   const [trying, setTrying] = useState(false);
+  const [holdMusicUrl, setHoldMusicUrl] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<string | null>(null);
   const threadId = useRef("");
@@ -71,6 +72,19 @@ export default function Studio() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [items]);
+
+  // Resolve the org's designated hold-music file for browser Try calls.
+  useEffect(() => {
+    fetch("/api/knowledge")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        const doc = j?.documents?.find(
+          (d: { kind?: string; meta?: { hold_music?: unknown } }) => d.kind === "media" && d.meta?.hold_music
+        );
+        setHoldMusicUrl(doc ? `/api/files/${doc.id}/raw` : null);
+      })
+      .catch(() => {});
+  }, [filesOpen]);
 
   const send = useCallback(async (text: string) => {
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
@@ -317,6 +331,7 @@ export default function Studio() {
         <CallWidget
           agentId={agentId}
           agentName={status.agent.name}
+          holdMusicUrl={holdMusicUrl}
           onStarted={(callId) => { stopTrace.current = traceCall(callId); }}
           onEnded={() => {
             setTrying(false);

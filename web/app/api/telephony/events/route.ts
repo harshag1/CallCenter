@@ -2,8 +2,10 @@
 // telephony/events — scope-authenticated event ingestion + call completion from the bridge.
 
 import { NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { q } from "@/lib/db";
 import { verifyScope } from "@/lib/voice";
+import { analyzeCall } from "@/lib/analysis";
 
 export async function POST(req: Request) {
   const { scope: token, events, complete } = await req.json().catch(() => ({}));
@@ -16,12 +18,13 @@ export async function POST(req: Request) {
     ]);
   }
   if (complete) {
-    await q(
+    const closed = await q<{ id: string }>(
       `UPDATE calls SET status = 'completed', ended_at = now(),
        duration_s = EXTRACT(EPOCH FROM (now() - started_at))::int
-       WHERE id = $1 AND status IN ('active','dialing')`,
+       WHERE id = $1 AND status IN ('active','dialing') RETURNING id`,
       [scope.callId]
     );
+    if (closed.length) waitUntil(analyzeCall(scope.callId));
   }
   return NextResponse.json({ ok: true });
 }

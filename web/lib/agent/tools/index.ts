@@ -11,6 +11,10 @@ import { setEnvVar, listEnvVars, addMcpServer } from "./secrets";
 import { scheduleCall, listScheduledCalls, cancelScheduledCall, placeCall, provisionPhoneNumber } from "./telephony";
 import { renderSurface, showFlow } from "./ui";
 import { webSearch } from "./research";
+import { listDatasetsTool, createDatasetTool, queryDataset, writeDataset } from "./datasets";
+import { createExperimentTool, stopExperimentTool, experimentResults } from "./experiments-tools";
+import { createScreen } from "./screens-tools";
+import { listFiles, parseCsv, importCsv, runJs, setHoldMusic } from "./files-tools";
 
 export const OPERATOR_TOOLS: OperatorTool[] = [
   renderSurface, showFlow,
@@ -21,6 +25,10 @@ export const OPERATOR_TOOLS: OperatorTool[] = [
   setEnvVar, listEnvVars, addMcpServer,
   scheduleCall, listScheduledCalls, cancelScheduledCall, placeCall, provisionPhoneNumber,
   webSearch,
+  listDatasetsTool, createDatasetTool, queryDataset, writeDataset,
+  createExperimentTool, stopExperimentTool, experimentResults,
+  createScreen,
+  listFiles, parseCsv, importCsv, runJs, setHoldMusic,
 ];
 
 export const byName = new Map(OPERATOR_TOOLS.map((t) => [t.name, t]));

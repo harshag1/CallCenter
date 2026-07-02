@@ -7,10 +7,14 @@ import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
 import { AgentFlowSchema, topicNodes, fallbackNode, type AgentFlow } from "./flow";
 import { invokeTool } from "./toolfactory/deploy";
+import { ensureDefaults, queryRows, upsertRow } from "./datasets";
+import { signScope } from "./voice";
 import { log } from "./log";
 
 const L = log("mcp");
 const MAX_HOLD_S = 20;
+const MAX_HOLD_MUSIC_S = 30;
+const PROTECTED_TABLES = new Set(["calls", "call_events", "logs"]);
 
 type Scope = { callId: string; agentId: string; orgId: string };
 type McpToolDef = { name: string; description: string; inputSchema: Record<string, unknown> };
@@ -20,11 +24,13 @@ type CallCtx = {
   internetEnabled: boolean;
   allowedDomains: string[];
   docsReady: boolean;
+  datasetSlugs: string[];
+  holdMusic: boolean;
   mintedTools: { slug: string; description: string; input_schema: Record<string, unknown> }[];
 };
 
 async function loadCtx(scope: Scope): Promise<CallCtx> {
-  const [agentRow, org, docsReady] = await Promise.all([
+  const [agentRow, org, docsReady, datasets, holdMusic] = await Promise.all([
     qOne<{ flow: unknown; tool_ids: string[] }>(
       `SELECT v.flow, v.tool_ids FROM agents a
        JOIN agent_versions v ON v.agent_id = a.id AND v.version = a.active_version
@@ -35,6 +41,12 @@ async function loadCtx(scope: Scope): Promise<CallCtx> {
       "SELECT internet_enabled, allowed_domains FROM orgs WHERE id = $1", [scope.orgId]
     ),
     hasReadyDocuments(scope.orgId),
+    q<{ slug: string }>("SELECT slug FROM datasets WHERE org_id = $1 ORDER BY created_at", [scope.orgId]),
+    qOne(
+      `SELECT 1 AS ok FROM media_renditions mr JOIN documents d ON d.id = mr.document_id
+       WHERE d.org_id = $1 AND d.meta->>'hold_music' = 'true' AND mr.kind = 'ulaw8k' LIMIT 1`,
+      [scope.orgId]
+    ),
   ]);
   const parsed = AgentFlowSchema.safeParse(agentRow?.flow ?? { nodes: [], edges: [] });
   const mintedTools = agentRow?.tool_ids?.length
@@ -48,6 +60,8 @@ async function loadCtx(scope: Scope): Promise<CallCtx> {
     internetEnabled: org?.internet_enabled ?? false,
     allowedDomains: org?.allowed_domains ?? [],
     docsReady,
+    datasetSlugs: datasets.map((d) => d.slug),
+    holdMusic: !!holdMusic,
     mintedTools,
   };
 }
@@ -59,6 +73,7 @@ function saveEvent(scope: Scope, type: string, payload: unknown) {
 }
 
 export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
+  await ensureDefaults(scope.orgId).catch(() => {});
   const ctx = await loadCtx(scope);
   const topics = topicNodes(ctx.flow);
   const tools: McpToolDef[] = [];
@@ -122,8 +137,43 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
         properties: { note: { type: "string" }, tags: { type: "array", items: { type: "string" } } },
         required: ["note"],
       },
+    },
+    {
+      name: "read_table",
+      description: `Read rows from a company data table. Tables: ${ctx.datasetSlugs.join(", ") || "none yet"}. Filter is exact-match on column values, e.g. {"phone": "+15551234567"}.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          table: { type: "string", ...(ctx.datasetSlugs.length ? { enum: ctx.datasetSlugs } : {}) },
+          filter: { type: "object" },
+          limit: { type: "number" },
+        },
+        required: ["table"],
+      },
+    },
+    {
+      name: "write_table",
+      description:
+        "Insert or update a row in a company data table (save caller details to customers, log feedback, etc). Provide match (column equality) to update the existing row instead of inserting a duplicate.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          table: { type: "string", ...(ctx.datasetSlugs.length ? { enum: ctx.datasetSlugs } : {}) },
+          row: { type: "object" },
+          match: { type: "object" },
+        },
+        required: ["table", "row"],
+      },
     }
   );
+
+  if (ctx.holdMusic) {
+    tools.push({
+      name: "play_hold_music",
+      description: `Put the caller on hold WITH music (max ${MAX_HOLD_MUSIC_S}s) while you work. Say you'll be a moment first. Returns when the hold is over.`,
+      inputSchema: { type: "object", properties: { seconds: { type: "number" } } },
+    });
+  }
 
   if (ctx.internetEnabled) {
     tools.push({
@@ -187,14 +237,51 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
       const step = node?.steps?.find((s) => s.id === String(args.step));
       if (!step) return { error: "unknown step — use ids returned by classify" };
       await saveEvent(scope, "state", { node: node!.id, step: step.id });
-      return { instructions: step.instructions, always_available: ["search", "search_knowledge", "contact_support", "hold", "request_recall"] };
+      return { instructions: step.instructions, always_available: ["search", "search_knowledge", "read_table", "write_table", "contact_support", "hold", "request_recall"] };
     }
 
     case "hold": {
       const s = Math.min(Math.max(Number(args.seconds) || 5, 1), MAX_HOLD_S);
-      await saveEvent(scope, "state", { hold: s });
+      await saveEvent(scope, "hold_start", { seconds: s, until: new Date(Date.now() + s * 1000).toISOString() });
       await new Promise((r) => setTimeout(r, s * 1000));
+      await saveEvent(scope, "hold_end", {});
       return { resumed: true, message: `Hold complete after ${s}s — thank the caller for waiting and continue.` };
+    }
+
+    case "play_hold_music": {
+      if (!ctx.holdMusic) return { error: "no hold music configured for this org" };
+      const s = Math.min(Math.max(Number(args.seconds) || 15, 1), MAX_HOLD_MUSIC_S);
+      await saveEvent(scope, "hold_start", { seconds: s, until: new Date(Date.now() + s * 1000).toISOString(), music: true });
+      await new Promise((r) => setTimeout(r, s * 1000));
+      await saveEvent(scope, "hold_end", {});
+      return { resumed: true, message: `Hold music finished after ${s}s — thank the caller for waiting and continue.` };
+    }
+
+    case "read_table": {
+      const table = String(args.table ?? "");
+      const res = await queryRows(
+        scope.orgId, table,
+        (args.filter as Record<string, unknown>) ?? undefined,
+        Math.min(Math.max(Number(args.limit) || 20, 1), 50)
+      );
+      if (!res) return { error: `unknown table "${table}". Available: ${ctx.datasetSlugs.join(", ")}` };
+      return { table: res.dataset.slug, count: res.rows.length, rows: res.rows.map((r) => ({ id: r.id, ...r.data })) };
+    }
+
+    case "write_table": {
+      const table = String(args.table ?? "");
+      if (PROTECTED_TABLES.has(table)) return { error: `"${table}" is not writable — datasets only` };
+      if (!args.row || typeof args.row !== "object") return { error: "row object required" };
+      try {
+        const res = await upsertRow(
+          scope.orgId, table,
+          args.row as Record<string, unknown>,
+          (args.match as Record<string, unknown>) ?? undefined
+        );
+        return { ok: true, id: res.id, updated: res.updated };
+      } catch (e) {
+        return { error: (e as Error).message };
+      }
     }
 
     case "contact_support": {
@@ -205,13 +292,17 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
         "SELECT twilio_call_sid FROM calls WHERE id = $1", [scope.callId]
       );
       if (call?.twilio_call_sid && process.env.TWILIO_ACCOUNT_SID) {
+        // Observe-mode transfer: redirect the Twilio leg to our TwiML so the bridge keeps listening.
+        const transferUrl =
+          `${process.env.PUBLIC_ORIGIN}/api/telephony/twiml` +
+          `?transfer=${encodeURIComponent(support)}&scope=${encodeURIComponent(signScope(scope))}`;
         const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
         const res = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Calls/${call.twilio_call_sid}.json`,
           {
             method: "POST",
             headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ Twiml: `<Response><Dial>${support}</Dial></Response>` }),
+            body: new URLSearchParams({ Url: transferUrl, Method: "GET" }),
           }
         );
         if (!res.ok) return { error: `transfer failed (${res.status}) — offer a callback instead` };

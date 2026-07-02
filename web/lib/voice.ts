@@ -1,8 +1,11 @@
 // Author: Harsha Gundala
 // voice.ts — builds xAI realtime session configs for bots; scoped MCP tokens; call rows.
+// Session build also resolves A/B experiment variants and injects caller CRM context.
 
 import { createHmac } from "node:crypto";
 import { q, qOne } from "./db";
+import { pickVariant } from "./experiments";
+import { findCustomerByPhone, phoneDigits } from "./datasets";
 
 export type AgentVersionRow = {
   agent_id: string;
@@ -27,6 +30,15 @@ export async function loadActiveAgent(agentId: string, orgId: string): Promise<A
   );
 }
 
+async function loadAgentVersion(agent: AgentVersionRow, version: number): Promise<AgentVersionRow | null> {
+  const v = await qOne<Pick<AgentVersionRow, "version" | "instructions" | "voice" | "flow" | "tool_ids" | "mcp_server_ids" | "settings">>(
+    `SELECT version, instructions, voice, flow, tool_ids, mcp_server_ids, settings
+     FROM agent_versions WHERE agent_id = $1 AND version = $2`,
+    [agent.agent_id, version]
+  );
+  return v ? { ...agent, ...v } : null;
+}
+
 /** Signed scope embedded in the MCP gateway URL so xAI's server-side calls are org+call bound. */
 export function signScope(payload: { callId: string; agentId: string; orgId: string }): string {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -46,6 +58,76 @@ export function verifyScope(token: string): { callId: string; agentId: string; o
   }
 }
 
+type CallRow = {
+  direction: string;
+  from_number: string | null;
+  to_number: string | null;
+  experiment_id: string | null;
+  variant: string | null;
+  agent_version: number;
+};
+
+/** Honors a stamped experiment variant, or lazily picks one (covers PSTN calls created outside buildVoiceSession). */
+async function resolveVariant(agent: AgentVersionRow, callId: string, call: CallRow | null): Promise<AgentVersionRow> {
+  if (!call) return agent;
+  let version: number | null = call.experiment_id ? call.agent_version : null;
+  if (!call.experiment_id) {
+    const pick = await pickVariant(agent.agent_id).catch(() => null);
+    if (pick) {
+      version = pick.agentVersion;
+      await q(
+        "UPDATE calls SET experiment_id = $2, variant = $3, agent_version = $4 WHERE id = $1",
+        [callId, pick.experimentId, pick.variant, pick.agentVersion]
+      );
+    }
+  }
+  if (version && version !== agent.version) {
+    return (await loadAgentVersion(agent, version)) ?? agent;
+  }
+  return agent;
+}
+
+/** CRM lookup + recent-call history for the caller's number; empty string when unknown (web calls). */
+async function callerContextBlock(orgId: string, callId: string, call: CallRow | null): Promise<string> {
+  const number = call?.direction === "outbound" ? call?.to_number : call?.from_number;
+  if (!number) return "";
+  const digits = phoneDigits(number);
+  if (digits.length < 7) return "";
+
+  const [customer, recent] = await Promise.all([
+    findCustomerByPhone(orgId, number).catch(() => null),
+    q<{ started_at: string; summary: string | null; satisfaction: number | null }>(
+      `SELECT c.started_at, c.summary, c.satisfaction
+       FROM calls c JOIN agents a ON a.id = c.agent_id
+       WHERE a.org_id = $1 AND c.id <> $2 AND c.status = 'completed'
+         AND RIGHT(regexp_replace(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_number ELSE c.from_number END, ''), '\\D', '', 'g'), 10) = RIGHT($3, 10)
+       ORDER BY c.started_at DESC LIMIT 3`,
+      [orgId, callId, digits]
+    ).catch(() => []),
+  ]);
+  if (!customer && !recent.length) return "";
+
+  const lines = ["CALLER CONTEXT (from CRM):"];
+  if (customer) {
+    const bits = ["name", "email", "notes"]
+      .filter((k) => customer[k])
+      .map((k) => `${k}: ${String(customer[k]).slice(0, 200)}`);
+    lines.push(bits.length ? bits.join(", ") : "known customer (no details on file)");
+  } else {
+    lines.push("not in the customers table");
+  }
+  if (recent.length) {
+    lines.push("recent calls:");
+    for (const r of recent) {
+      lines.push(
+        `- ${new Date(r.started_at).toISOString().slice(0, 10)}: ${r.summary ?? "no summary"}${r.satisfaction != null ? ` (satisfaction ${r.satisfaction}/10)` : ""}`
+      );
+    }
+  }
+  lines.push("Greet them by name if known.");
+  return `${lines.join("\n")}\n\n`;
+}
+
 /** Builds the session.update payload for an existing call. Audio "pcmu" targets telephony (8kHz μ-law). */
 export async function sessionUpdateForCall(
   agent: AgentVersionRow,
@@ -56,6 +138,15 @@ export async function sessionUpdateForCall(
 ): Promise<Record<string, unknown>> {
   const scope = signScope({ callId, agentId: agent.agent_id, orgId: agent.org_id });
 
+  const call = await qOne<CallRow>(
+    "SELECT direction, from_number, to_number, experiment_id, variant, agent_version FROM calls WHERE id = $1",
+    [callId]
+  );
+  const [effective, callerContext] = await Promise.all([
+    resolveVariant(agent, callId, call),
+    callerContextBlock(agent.org_id, callId, call),
+  ]);
+
   const tools: Record<string, unknown>[] = [
     {
       type: "mcp",
@@ -63,10 +154,10 @@ export async function sessionUpdateForCall(
       server_url: `${origin}/api/mcp?scope=${scope}`,
     },
   ];
-  const mcpRows = agent.mcp_server_ids.length
+  const mcpRows = effective.mcp_server_ids.length
     ? await q<{ label: string; server_url: string; allowed_tools: string[] | null }>(
         "SELECT label, server_url, allowed_tools FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
-        [agent.mcp_server_ids, agent.org_id]
+        [effective.mcp_server_ids, effective.org_id]
       )
     : [];
   for (const m of mcpRows) {
@@ -81,9 +172,9 @@ export async function sessionUpdateForCall(
   return {
     type: "session.update",
     session: {
-      voice: agent.voice,
+      voice: effective.voice,
       instructions:
-        `${agent.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
+        `${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
         `If the caller asks for a callback at a specific time, use the request_recall tool.`,
       turn_detection: { type: "server_vad" },
       tools,
@@ -95,22 +186,26 @@ export async function sessionUpdateForCall(
             },
           }
         : {}),
-      ...agent.settings,
+      ...effective.settings,
     },
   };
 }
 
-/** Creates the call row and the session.update payload a realtime client sends after connecting. */
+/** Creates the call row (experiment variant stamped at insert) and the session.update payload. */
 export async function buildVoiceSession(
   agent: AgentVersionRow,
   direction: "web" | "inbound" | "outbound",
   origin: string,
   numbers: { from?: string; to?: string } = {}
 ): Promise<{ callId: string; sessionUpdate: Record<string, unknown> }> {
+  const pick = await pickVariant(agent.agent_id).catch(() => null);
   const call = await qOne<{ id: string }>(
-    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [agent.agent_id, agent.version, direction, numbers.from ?? null, numbers.to ?? null]
+    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, experiment_id, variant)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [
+      agent.agent_id, pick?.agentVersion ?? agent.version, direction,
+      numbers.from ?? null, numbers.to ?? null, pick?.experimentId ?? null, pick?.variant ?? null,
+    ]
   );
   const callId = call!.id;
   const sessionUpdate = await sessionUpdateForCall(agent, callId, direction, origin);

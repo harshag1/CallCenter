@@ -77,3 +77,13 @@ export function pcm16ToWav(pcm: Int16Array, rate = 8000): Buffer {
 export function ulawToWav(ulaw: Uint8Array, rate = 8000): Buffer {
   return pcm16ToWav(ulawDecode(ulaw), rate);
 }
+
+/** Encodes float PCM (-1..1) to a μ-law byte buffer (hold-music transcode path). */
+export function floatToUlawBuffer(samples: Float32Array): Buffer {
+  const out = Buffer.alloc(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    out[i] = ulawEncodeSample(Math.round(clamped * 32_767));
+  }
+  return out;
+}
