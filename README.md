@@ -11,6 +11,10 @@ Next.js on Vercel · Supabase (Postgres + Storage) · xAI Grok (`grok-voice-late
 - `web/` — the app (UI, API routes, MCP gateway, cron)
 - `docs/plans/` — architecture + implementation plan
 
+## Live
+
+Production: https://callcenter-dun.vercel.app — agent-minted tools deploy to the separate `callcenter-tools` Vercel project.
+
 ## Run
 
 ```bash
