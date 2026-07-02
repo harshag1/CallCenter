@@ -22,7 +22,7 @@ const body = Buffer.from(JSON.stringify({ callId: call.id, agentId: agent.id, or
 const scope = `${body}.${createHmac("sha256", env.MCP_GATEWAY_SECRET).update(body).digest("base64url")}`;
 console.log("callId:", call.id);
 
-const ws = new WebSocket("ws://localhost:8787/stream");
+const ws = new WebSocket(process.env.BRIDGE_URL ?? "ws://localhost:8787/stream");
 let mediaFrames = 0, mediaBytes = 0, cleared = 0;
 const silence = Buffer.alloc(160, 0xff).toString("base64"); // 20ms μ-law silence
 

@@ -9,7 +9,7 @@ Next.js on Vercel · Supabase (Postgres + Storage) · xAI Grok (`grok-voice-late
 ## Layout
 
 - `web/` — the app (UI, API routes, MCP gateway, cron)
-- `bridge/` — Twilio Media Streams ↔ xAI realtime audio bridge (μ-law passthrough; Dockerfile included). Run: `XAI_API_KEY=… APP_ORIGIN=… node bridge/server.js`, verify with `node bridge/simulate-call.mjs`
+- `bridge/` — Twilio Media Streams ↔ xAI realtime audio bridge (μ-law passthrough; Dockerfile included). Production runs in-app at `/api/bridge` on Vercel Fluid compute; `bridge/` is the self-host variant (set BRIDGE_WS_URL to `wss://host/stream`)
 - `docs/plans/` — architecture + implementation plan
 
 ## Live

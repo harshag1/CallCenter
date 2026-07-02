@@ -47,7 +47,7 @@ export async function POST(req: Request) {
   }
 
   return twiml(
-    `<Connect><Stream url="${bridge}/stream">` +
+    `<Connect><Stream url="${bridge}">` +
       `<Parameter name="callId" value="${callId}"/>` +
       `<Parameter name="scope" value="${scope}"/>` +
       `</Stream></Connect>`
