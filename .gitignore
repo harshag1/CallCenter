@@ -1,0 +1,18 @@
+CLAUDE.md
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies / builds
+node_modules/
+.next/
+.vercel/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
