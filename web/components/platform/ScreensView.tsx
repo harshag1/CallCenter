@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronLeft, FileText, FlaskConical, Layout, LayoutDashboard, Table2 } from "lucide-react";
+import { ChevronLeft, FileText, FlaskConical, Layout, LayoutDashboard, Table2, X } from "lucide-react";
 import SurfaceView from "@/components/surface/SurfaceView";
 import ExperimentDashboard from "./ExperimentDashboard";
 import type { Surface } from "@/lib/surface-dsl";
@@ -67,7 +67,12 @@ export default function ScreensView({ send }: { send: (prompt: string) => void }
       <section>
         <div className="mb-2 text-[11px] uppercase tracking-wide text-neutral-400">screens</div>
         {plain.map((s) => <ScreenRow key={s.id} s={s} onOpen={setOpen} />)}
-        {!plain.length && <div className="px-3 py-4 text-xs text-neutral-300">none yet</div>}
+        {!plain.length && (
+          <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
+            <X size={18} strokeWidth={1.8} className="text-neutral-300" />
+            <span className="text-xs text-neutral-400">Request A/B tests or special views from the agent</span>
+          </div>
+        )}
       </section>
       {experiments.length > 0 && (
         <section>
