@@ -125,6 +125,7 @@ export class BridgeSession {
 
     void this.loadHoldClip(scope.orgId);
     this.holdPoll = setInterval(() => void this.pollHold(), HOLD_POLL_MS);
+    void this.armOutboundGuard(scope.callId);
     await this.connectXai(scope);
   }
 
@@ -183,9 +184,16 @@ export class BridgeSession {
         void this.save("speech", { who: "caller", at: new Date().toISOString() });
         this.sendTwilio({ event: "clear", streamSid: this.streamSid }); // barge-in
         break;
-      case "conversation.item.input_audio_transcription.completed":
-        void this.save("user_said", { text: ev.transcript });
+      case "conversation.item.input_audio_transcription.completed": {
+        // xAI re-emits completed transcriptions as an item grows — keep one event per utterance.
+        const text = String(ev.transcript ?? "");
+        if (this.lastUserSaid && (text.startsWith(this.lastUserSaid) || this.lastUserSaid.startsWith(text))) {
+          void this.updateLastUserSaid(text);
+        } else {
+          void this.saveUserSaid(text);
+        }
         break;
+      }
       case "response.output_audio_transcript.done":
       case "response.audio_transcript.done":
         void this.save("agent_said", { text: ev.transcript });
@@ -303,6 +311,28 @@ export class BridgeSession {
 
   // ---- plumbing ------------------------------------------------------------
 
+  private lastUserSaid = "";
+  private lastUserSaidEventId: number | null = null;
+
+  private async saveUserSaid(text: string) {
+    this.lastUserSaid = text;
+    const rows = await q<{ id: string }>(
+      "INSERT INTO call_events (call_id, type, payload) VALUES ($1,'user_said',$2) RETURNING id",
+      [this.callId, JSON.stringify({ text })]
+    ).catch(() => []);
+    this.lastUserSaidEventId = rows[0] ? Number(rows[0].id) : null;
+  }
+
+  private async updateLastUserSaid(text: string) {
+    const longer = text.length >= this.lastUserSaid.length ? text : this.lastUserSaid;
+    this.lastUserSaid = longer;
+    if (this.lastUserSaidEventId) {
+      await q("UPDATE call_events SET payload = $2 WHERE id = $1", [
+        this.lastUserSaidEventId, JSON.stringify({ text: longer }),
+      ]).catch(() => {});
+    }
+  }
+
   private sendTwilio(obj: unknown) {
     try {
       this.twilio.send(JSON.stringify(obj));
@@ -314,6 +344,33 @@ export class BridgeSession {
     await q("INSERT INTO call_events (call_id, type, payload) VALUES ($1,$2,$3)", [
       this.callId, type, JSON.stringify(payload ?? {}),
     ]).catch(() => {});
+  }
+
+  /** Outbound campaign calls get a hard cap — a runaway conversation must not burn the line. */
+  private async armOutboundGuard(callId: string) {
+    const row = await qOne<{ direction: string; campaign_id: string | null; twilio_call_sid: string | null }>(
+      "SELECT direction, campaign_id, twilio_call_sid FROM calls WHERE id = $1", [callId]
+    ).catch(() => null);
+    if (row?.direction !== "outbound") return;
+    const capMs = (row.campaign_id ? 4 : 10) * 60_000; // campaign calls 4 min, ad-hoc outbound 10 min
+    setTimeout(() => {
+      if (this.done) return;
+      void this.save("state", { state: "duration_cap" });
+      const sid = row.twilio_call_sid;
+      if (sid && process.env.TWILIO_ACCOUNT_SID) {
+        const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
+        void fetch(
+          `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Calls/${sid}.json`,
+          {
+            method: "POST",
+            headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ Status: "completed" }),
+          }
+        ).catch(() => {});
+      } else {
+        void this.teardown();
+      }
+    }, capMs);
   }
 
   private async teardown() {

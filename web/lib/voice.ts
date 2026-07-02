@@ -177,12 +177,16 @@ export async function sessionUpdateForCall(
     });
   }
 
+  const humanNumber = call ? (call.direction === "outbound" ? call.to_number : call.from_number) : null;
+  const callFacts = humanNumber
+    ? `CALL FACTS: the number on this call is ${humanNumber} — use it whenever a step needs the caller's phone number; never ask them for it.\n\n`
+    : "";
   return {
     type: "session.update",
     session: {
       voice: effective.voice,
       instructions:
-        `${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
+        `${callFacts}${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
         `If the caller asks for a callback at a specific time, use the request_recall tool.`,
       turn_detection: { type: "server_vad" },
       tools,

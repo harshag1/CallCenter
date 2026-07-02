@@ -153,6 +153,12 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
       },
     },
     {
+      name: "end_call",
+      description:
+        "Hang up the call. Use ONLY after the conversation has naturally concluded. CHECK FIRST: if any flow step told you to record data (write_table etc.) and you have not called that tool yet, record it NOW before ending — unrecorded answers are lost forever.",
+      inputSchema: { type: "object", properties: { reason: { type: "string" } } },
+    },
+    {
       name: "send_email",
       description:
         "Email the caller (or another address). Omit `to` to use the caller's email from the customers table — if it isn't on file, ask for it out loud, save it with write_table, then send. Confirm before sending.",
@@ -268,6 +274,15 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
     case "classify": {
       const id = String(args.topic);
       const node = id === "other" ? fallbackNode(ctx.flow) : ctx.flow.nodes.find((n) => n.id === id && n.kind === "topic");
+      if (!node && id === "other") {
+        // Flow has no fallback node (common for outbound flows) — give generic off-topic guidance.
+        await saveEvent(scope, "state", { node: "other" });
+        return {
+          context: "Off-topic request for this call.",
+          next_steps: [],
+          guidance: "Politely steer back to the purpose of this call. If the caller needs real support, offer request_recall or suggest they call the main line.",
+        };
+      }
       if (!node) return { error: `unknown topic ${id}. Valid: ${topicNodes(ctx.flow).map((t) => t.id).join(", ")}, other` };
       await saveEvent(scope, "state", { node: node.id });
       if (node.kind === "fallback") {
@@ -379,6 +394,29 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
         JSON.stringify({ notes: [{ note: args.note, tags: args.tags ?? [], ts: new Date().toISOString() }] }),
       ]);
       return { ok: true };
+
+    case "end_call": {
+      await saveEvent(scope, "state", { state: "ending", reason: args.reason ?? null });
+      const call = await qOne<{ twilio_call_sid: string | null }>(
+        "SELECT twilio_call_sid FROM calls WHERE id = $1", [scope.callId]
+      );
+      if (call?.twilio_call_sid && process.env.TWILIO_ACCOUNT_SID) {
+        const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
+        // Fire-and-return so the agent can finish speaking its goodbye before the leg drops.
+        setTimeout(() => {
+          void fetch(
+            `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Calls/${call.twilio_call_sid}.json`,
+            {
+              method: "POST",
+              headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ Status: "completed" }),
+            }
+          ).catch(() => {});
+        }, 4000);
+        return { ok: true, message: "Call will end in a few seconds — say your goodbye now if you haven't." };
+      }
+      return { ok: true, simulated: true, message: "Browser call — the caller ends it from their side." };
+    }
 
     case "send_email": {
       let to = args.to ? String(args.to).trim() : null;

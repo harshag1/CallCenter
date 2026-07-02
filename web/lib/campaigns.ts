@@ -152,6 +152,10 @@ async function closeFinishedCampaigns(): Promise<void> {
          SELECT 1 FROM scheduled_calls s
          WHERE s.campaign_id = campaigns.id AND s.status IN ('pending','dialing')
        )
+       AND NOT EXISTS (
+         SELECT 1 FROM calls x
+         WHERE x.campaign_id = campaigns.id AND x.status IN ('active','dialing')
+       )
        AND EXISTS (SELECT 1 FROM scheduled_calls s WHERE s.campaign_id = campaigns.id)`
   ).catch(() => {});
 }
