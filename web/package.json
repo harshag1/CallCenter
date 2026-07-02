@@ -13,7 +13,9 @@
     "@xyflow/react": "^12.11.1",
     "lucide-react": "^1.23.0",
     "mammoth": "^1.12.0",
+    "mpg123-decoder": "^1.0.3",
     "next": "16.2.10",
+    "papaparse": "^5.5.4",
     "pdf-parse": "^2.4.5",
     "pg": "^8.22.0",
     "react": "19.2.4",
@@ -27,6 +29,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/papaparse": "^5.5.2",
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
