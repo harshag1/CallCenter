@@ -63,11 +63,22 @@ export const ASSISTANT_PROSE =
   "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-neutral-50 [&_pre]:p-3 " +
   "[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_th]:border-b [&_th]:border-neutral-200 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:text-[11px] [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-neutral-400 [&_td]:border-b [&_td]:border-neutral-100 [&_td]:px-2 [&_td]:py-1";
 
+const MAX_INPUT_PX = 330; // ~15 lines before scrolling
+
 export default function ChatPanel({
   items, streaming, onSend,
 }: { items: ChatItem[]; streaming: boolean; onSend: (text: string) => void }) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  function autoGrow() {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_PX)}px`;
+    el.style.overflowY = el.scrollHeight > MAX_INPUT_PX ? "auto" : "hidden";
+  }
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -78,6 +89,7 @@ export default function ChatPanel({
     if (!text || streaming) return;
     setInput("");
     onSend(text);
+    requestAnimationFrame(() => autoGrow());
   }
 
   return (
@@ -109,18 +121,19 @@ export default function ChatPanel({
           </div>
         )}
       </div>
-      <div className="shrink-0 border-t border-neutral-200/70 bg-white/85 px-3 pb-3 pt-2">
+      <div className="shrink-0 bg-white/85 px-3 pb-3 pt-2">
         <div className="relative rounded-2xl border border-neutral-200/75 bg-white/70 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-[160ms] focus-within:border-neutral-900/25 focus-within:bg-white focus-within:shadow-[0_0_0_1px_rgba(0,0,0,0.07)]">
           <div className="flex items-end gap-2">
             <textarea
               rows={1}
+              ref={inputRef}
               value={input}
               placeholder="Create or modify voice agents"
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => { setInput(e.target.value); autoGrow(); }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
               }}
-              className="max-h-32 min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
+              className="min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
             />
             <button
               aria-label="Send"
