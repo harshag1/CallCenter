@@ -15,6 +15,7 @@ import { listDatasetsTool, createDatasetTool, queryDataset, writeDataset } from 
 import { createExperimentTool, stopExperimentTool, experimentResults } from "./experiments-tools";
 import { createScreen } from "./screens-tools";
 import { listFiles, parseCsv, importCsv, runJs, setHoldMusic } from "./files-tools";
+import { sendEmailTool, sendSmsTool } from "./comms";
 
 export const OPERATOR_TOOLS: OperatorTool[] = [
   renderSurface, showFlow,
@@ -29,6 +30,7 @@ export const OPERATOR_TOOLS: OperatorTool[] = [
   createExperimentTool, stopExperimentTool, experimentResults,
   createScreen,
   listFiles, parseCsv, importCsv, runJs, setHoldMusic,
+  sendEmailTool, sendSmsTool,
 ];
 
 export const byName = new Map(OPERATOR_TOOLS.map((t) => [t.name, t]));

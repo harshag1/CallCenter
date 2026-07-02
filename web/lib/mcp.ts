@@ -7,9 +7,20 @@ import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
 import { AgentFlowSchema, topicNodes, fallbackNode, type AgentFlow } from "./flow";
 import { invokeTool } from "./toolfactory/deploy";
-import { ensureDefaults, queryRows, upsertRow } from "./datasets";
+import { ensureDefaults, queryRows, upsertRow, findCustomerByPhone } from "./datasets";
 import { signScope } from "./voice";
+import { sendAgentEmail } from "./email";
+import { sendSms } from "./sms";
 import { log } from "./log";
+
+/** The human's number on this call, direction-aware. */
+async function callerNumber(callId: string): Promise<string | null> {
+  const call = await qOne<{ direction: string; from_number: string | null; to_number: string | null }>(
+    "SELECT direction, from_number, to_number FROM calls WHERE id = $1", [callId]
+  );
+  if (!call) return null;
+  return (call.direction === "outbound" ? call.to_number : call.from_number) ?? null;
+}
 
 const L = log("mcp");
 const MAX_HOLD_S = 20;
@@ -136,6 +147,45 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
         type: "object",
         properties: { note: { type: "string" }, tags: { type: "array", items: { type: "string" } } },
         required: ["note"],
+      },
+    },
+    {
+      name: "send_email",
+      description:
+        "Email the caller (or another address). Omit `to` to use the caller's email from the customers table — if it isn't on file, ask for it out loud, save it with write_table, then send. Confirm before sending.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Email address; omit to use the caller's email on file." },
+          subject: { type: "string" },
+          message: { type: "string", description: "Plain-text body; line breaks preserved." },
+        },
+        required: ["subject", "message"],
+      },
+    },
+    {
+      name: "send_sms",
+      description: "Text the caller (or another number). Omit `to` to text the number they're calling from. Keep it short.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "E.164 number; omit for the caller's number." },
+          message: { type: "string" },
+        },
+        required: ["message"],
+      },
+    },
+    {
+      name: "launch_task",
+      description:
+        "Hand work to a background assistant that has this call's full transcript plus the same email/text/table/search tools — for heavier reasoning or follow-ups that shouldn't block the conversation. `when:'now'` runs immediately in parallel; `when:'end_of_call'` runs after hangup (e.g. 'email this caller a summary of the call').",
+      inputSchema: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "Instruction for the background assistant, e.g. 'email the caller a summary and next steps'." },
+          when: { type: "string", enum: ["now", "end_of_call"], default: "end_of_call" },
+        },
+        required: ["command"],
       },
     },
     {
@@ -326,6 +376,45 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
         JSON.stringify({ notes: [{ note: args.note, tags: args.tags ?? [], ts: new Date().toISOString() }] }),
       ]);
       return { ok: true };
+
+    case "send_email": {
+      let to = args.to ? String(args.to).trim() : null;
+      if (!to) {
+        const number = await callerNumber(scope.callId);
+        const customer = number ? await findCustomerByPhone(scope.orgId, number).catch(() => null) : null;
+        to = customer?.email ? String(customer.email) : null;
+        if (!to) return { error: "no email on file for this caller — ask for their email, save it with write_table on customers, then send_email again" };
+      }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return { error: "invalid email address" };
+      const org = await qOne<{ name: string | null }>("SELECT name FROM orgs WHERE id = $1", [scope.orgId]);
+      await sendAgentEmail({ to, subject: String(args.subject), message: String(args.message), brand: org?.name });
+      return { ok: true, sent_to: to };
+    }
+
+    case "send_sms": {
+      let to = args.to ? String(args.to).trim() : null;
+      if (!to) to = await callerNumber(scope.callId);
+      if (!to || !/^\+\d{7,15}$/.test(to)) return { error: "no valid number — provide `to` in E.164" };
+      await sendSms(to, String(args.message));
+      return { ok: true, sent_to: to };
+    }
+
+    case "launch_task": {
+      const when = args.when === "now" ? "now" : "end_of_call";
+      const row = await qOne<{ id: string }>(
+        `INSERT INTO call_tasks (call_id, org_id, agent_id, command, trigger_at)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [scope.callId, scope.orgId, scope.agentId, String(args.command), when]
+      );
+      if (when === "now") {
+        const [{ waitUntil }, { runCallTask }] = await Promise.all([import("@vercel/functions"), import("./tasks")]);
+        waitUntil(runCallTask(row!.id).catch(() => {}));
+      }
+      return {
+        ok: true, task_id: row!.id,
+        message: when === "now" ? "Background assistant started — it works in parallel, continue the call." : "Queued — it will run right after this call ends.",
+      };
+    }
 
     case "search": {
       if (!ctx.internetEnabled) return { error: "internet access is disabled for this org" };

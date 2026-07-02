@@ -5,7 +5,7 @@ import {
   AudioLines, Braces, CalendarClock, CalendarDays, CalendarX, ChartColumn,
   CircleStop, Database, DatabaseZap, FileSpreadsheet, FileUp, Files,
   FlaskConical, Globe, Hammer, Hash, KeyRound, LayoutDashboard, Layers,
-  Music, PenLine, Phone, PhoneIncoming, PhoneOutgoing, Plug, ScrollText,
+  Mail, MessageSquare, Music, PenLine, Phone, PhoneIncoming, PhoneOutgoing, Plug, Rocket, ScrollText,
   Search, Split, Table2, UserCog, Users, Workflow, Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -48,6 +48,9 @@ const REGISTRY: Record<string, ToolDisplay> = {
   import_csv:            { icon: FileUp,          running: "Importing the CSV",         done: "Imported the CSV" },
   run_js:                { icon: Braces,          running: "Running code",              done: "Ran code" },
   set_hold_music:        { icon: Music,           running: "Setting the hold music",    done: "Set the hold music" },
+  send_email:             { icon: Mail,            running: "Sending an email",          done: "Sent an email" },
+  send_sms:               { icon: MessageSquare,   running: "Sending a text",            done: "Sent a text" },
+  launch_task:            { icon: Rocket,          running: "Launching a background task", done: "Launched a background task" },
 };
 
 /** Resolve a tool name to its display; unknown names get a readable fallback. */

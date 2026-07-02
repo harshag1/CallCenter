@@ -6,6 +6,7 @@ import { q } from "@/lib/db";
 import { log } from "@/lib/log";
 import { originateCall } from "@/lib/telephony";
 import { analyzeCall } from "@/lib/analysis";
+import { sweepCallTasks } from "@/lib/tasks";
 
 const L = log("cron/scheduler");
 export const maxDuration = 120;
@@ -57,5 +58,7 @@ export async function GET(req: Request) {
     await analyzeCall(c.id).catch((e) => L.warn("sweep analysis failed", { callId: c.id, err: (e as Error).message }));
   }
 
-  return NextResponse.json({ processed: due.length, analyzed: unanalyzed.length, results });
+  const tasksRun = await sweepCallTasks().catch(() => 0);
+
+  return NextResponse.json({ processed: due.length, analyzed: unanalyzed.length, tasks: tasksRun, results });
 }

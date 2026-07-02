@@ -31,3 +31,19 @@ export async function sendPhoneCode(toNumber: string, code: string): Promise<voi
     throw new Error(`twilio sms ${res.status}: ${(await res.text()).slice(0, 240)}`);
   }
 }
+
+/** Generic agent-composed SMS from the platform number. */
+export async function sendSms(toNumber: string, body: string): Promise<void> {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+  if (!accountSid || !fromNumber || !process.env.TWILIO_AUTH_TOKEN) throw new Error("Twilio SMS is not configured");
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${accountSid}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ To: toNumber, From: fromNumber, Body: body.slice(0, 1500) }),
+  });
+  if (!res.ok) throw new Error(`twilio sms ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}

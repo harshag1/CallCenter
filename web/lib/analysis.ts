@@ -95,4 +95,14 @@ export async function analyzeCall(callId: string): Promise<void> {
   } catch (e) {
     L.warn("analysis failed", { callId, err: (e as Error).message });
   }
+
+  // Fire any end-of-call background tasks queued during the conversation.
+  try {
+    const { runCallTask } = await import("./tasks");
+    const queued = await q<{ id: string }>(
+      "SELECT id FROM call_tasks WHERE call_id = $1 AND trigger_at = 'end_of_call' AND status = 'pending' ORDER BY created_at",
+      [callId]
+    );
+    for (const t of queued) await runCallTask(t.id).catch(() => {});
+  } catch { /* cron sweep is the backstop */ }
 }
