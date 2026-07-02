@@ -63,12 +63,14 @@ export default function Login() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f8f8f8] px-5 text-neutral-950">
-      <div className="w-full max-w-[408px]">
-        <div className="mb-5 text-center">
-          <div className="text-[16px] font-semibold text-neutral-950">Harsha&apos;s Amazing Call Center</div>
-        </div>
+    <main className="flex min-h-screen flex-col bg-[#f8f8f8] px-5 text-neutral-950">
+      <header className="flex items-center justify-center gap-2.5 pt-10">
+        <Phone size={17} strokeWidth={2.35} />
+        <h1 className="text-[15px] font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</h1>
+      </header>
 
+      <div className="flex flex-1 items-center justify-center">
+      <div className="w-full max-w-[408px]">
         <form onSubmit={submit} className="overflow-hidden rounded-[16px] border border-neutral-200 bg-white shadow-[0_10px_30px_rgba(15,15,15,0.035)]">
           <div className="flex h-16 items-center gap-3 px-4">
             <Mail size={17} strokeWidth={1.9} className="shrink-0 text-neutral-400" />
@@ -126,6 +128,7 @@ export default function Login() {
         </form>
 
         {error && <p className="mt-3 text-center text-xs text-red-500">{error}</p>}
+      </div>
       </div>
     </main>
   );

@@ -12,8 +12,10 @@ export async function sendPhoneCode(toNumber: string, code: string): Promise<voi
     throw new Error("Twilio SMS is not configured");
   }
 
-  const username = apiKey && apiSecret ? apiKey : accountSid;
-  const password = apiKey && apiSecret ? apiSecret : authToken!;
+  // Account token first — the provided SK key pair belongs to a different Twilio account
+  // (same fix as lib/telephony.ts; the API-key path 401s with Twilio code 20003).
+  const username = authToken ? accountSid : apiKey!;
+  const password = authToken ?? apiSecret!;
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
     method: "POST",
     headers: {

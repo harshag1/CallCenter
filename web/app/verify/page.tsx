@@ -3,9 +3,9 @@
 
 "use client";
 
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Check, Loader2, Mail, Phone } from "lucide-react";
+import { ArrowRight, Check, Loader2, Mail, Phone, RotateCw } from "lucide-react";
 
 type Stage = "email" | "phone" | "done";
 
@@ -18,10 +18,12 @@ function CodeInput({
   inputRef,
   onEnter,
   disabled,
+  shaking,
 }: {
   inputRef: RefObject<HTMLInputElement | null>;
   onEnter: () => void;
   disabled?: boolean;
+  shaking?: boolean;
 }) {
   return (
     <input
@@ -32,7 +34,7 @@ function CodeInput({
       placeholder="000000"
       onInput={(e) => { e.currentTarget.value = e.currentTarget.value.replace(/\D/g, ""); }}
       onKeyDown={(e) => e.key === "Enter" && onEnter()}
-      className="w-full bg-transparent text-center text-[26px] font-semibold tracking-[0.18em] outline-none placeholder:text-neutral-200 disabled:text-neutral-300"
+      className={`w-full bg-transparent text-center text-[26px] font-semibold tracking-[0.18em] outline-none placeholder:text-neutral-200 disabled:text-neutral-300 ${shaking ? "animate-jiggle" : ""}`}
     />
   );
 }
@@ -54,8 +56,14 @@ export default function VerifyPage() {
   const phoneCodeRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<"email" | "phone" | "resend" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [shaking, setShaking] = useState<"email" | "phone" | null>(null);
   const emailDone = stage === "phone" || stage === "done";
   const phoneDone = stage === "done";
+
+  function jiggle(which: "email" | "phone") {
+    setShaking(which);
+    window.setTimeout(() => setShaking(null), 450);
+  }
 
   useEffect(() => {
     const nextEmail = readParam("email") || sessionStorage.getItem("onboarding:email") || "";
@@ -116,7 +124,10 @@ export default function VerifyPage() {
         body: JSON.stringify({ email, code, phone }),
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error ?? "wrong code");
+      if (!res.ok) {
+        if (res.status === 401) { jiggle("email"); return; }
+        throw new Error(json.error ?? "verification failed");
+      }
       setStage("phone");
       // Kick the full background prep: favicon, demo flow, agent, phone number.
       void fetch("/api/onboarding/prepare", { method: "POST" }).catch(() => {});
@@ -140,101 +151,102 @@ export default function VerifyPage() {
         body: JSON.stringify({ phone, code }),
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error ?? "wrong code");
+      if (!res.ok) {
+        if (res.status === 401) { jiggle("phone"); return; }
+        throw new Error(json.error ?? "verification failed");
+      }
       setStage("done");
       router.push(json.next ?? "/studio");
     } catch (e) {
       setError((e as Error).message);
-      setBusy(null);
+    } finally {
+      if (stage !== "done") setBusy(null);
     }
   }
 
-  const caption = useMemo(() => {
-    if (stage === "email") return "Email first. Phone unlocks right after.";
-    if (stage === "phone") return "Company research is running in the background now.";
-    return "Verified.";
-  }, [stage]);
-
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f8f8f8] px-5 text-neutral-950">
-      <div className="w-full max-w-[440px]">
-        <div className="mb-5 text-center">
-          <h1 className="text-[18px] font-semibold">Verify your builder</h1>
-          <p className="mt-1 text-[12px] leading-5 text-neutral-400">{caption}</p>
+    <main className="flex min-h-screen flex-col bg-[#f8f8f8] px-5 text-neutral-950">
+      <header className="flex items-center justify-center gap-2.5 pt-10">
+        <Phone size={17} strokeWidth={2.35} />
+        <h1 className="text-[15px] font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</h1>
+      </header>
+
+      <div className="flex flex-1 items-center justify-center">
+        <div className="w-full max-w-[440px]">
+          <div className="space-y-2.5">
+            <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.025)] transition-all ${stage === "email" ? "border-neutral-300" : "border-neutral-200"}`}>
+              <div className="flex items-center gap-3">
+                <StatusIcon done={emailDone} active={stage === "email"} type="email" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[14px] font-medium">{emailDone ? "Verified email" : "Verify email"}</div>
+                  {!emailDone && (
+                    <div className="truncate text-[12px] leading-5 text-neutral-400">{email || "work email"}</div>
+                  )}
+                </div>
+              </div>
+
+              <div
+                aria-hidden={stage !== "email"}
+                className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "email" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
+              >
+                <div className="min-h-0 overflow-hidden">
+                  {stage === "email" && (
+                    <>
+                      <CodeInput inputRef={emailCodeRef} onEnter={verifyEmail} disabled={busy !== null} shaking={shaking === "email"} />
+                      <button
+                        onClick={verifyEmail}
+                        disabled={busy !== null}
+                        className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
+                      >
+                        {busy === "email" || busy === "resend" ? <Loader2 size={15} className="animate-spin" /> : <>Verify email <ArrowRight size={15} strokeWidth={2} /></>}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.02)] transition-all ${stage === "phone" ? "border-neutral-300" : "border-neutral-200"} ${stage === "email" ? "opacity-45" : "opacity-100"}`}>
+              <div className="flex items-center gap-3">
+                <StatusIcon done={phoneDone} active={stage === "phone"} type="phone" />
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate text-[14px] font-medium ${stage === "email" ? "text-neutral-400" : "text-neutral-950"}`}>
+                    {phoneDone ? "Verified phone" : `Verify ${phone || "phone"}`}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                aria-hidden={stage !== "phone"}
+                className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "phone" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
+              >
+                <div className="min-h-0 overflow-hidden">
+                  {stage === "phone" && (
+                    <>
+                      <CodeInput inputRef={phoneCodeRef} onEnter={verifyPhone} disabled={busy !== null} shaking={shaking === "phone"} />
+                      <button
+                        onClick={verifyPhone}
+                        disabled={busy !== null}
+                        className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
+                      >
+                        {busy === "phone" ? <Loader2 size={15} className="animate-spin" /> : <>Verify phone <ArrowRight size={15} strokeWidth={2} /></>}
+                      </button>
+                      <button
+                        onClick={sendPhoneCode}
+                        disabled={busy !== null}
+                        className="mt-2 flex w-full items-center justify-center gap-1.5 text-center text-[12px] text-neutral-400 transition-colors hover:text-neutral-900 disabled:opacity-40"
+                      >
+                        <RotateCw size={11} className={busy === "resend" ? "animate-spin" : ""} /> Resend
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+
+          {error && <p className="mt-4 text-center text-xs text-red-500">{error}</p>}
         </div>
-
-        <div className="space-y-2.5">
-          <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.025)] transition-all ${stage === "email" ? "border-neutral-300" : "border-neutral-200"}`}>
-            <div className="flex items-center gap-3">
-              <StatusIcon done={emailDone} active={stage === "email"} type="email" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-medium">Verify email</div>
-                <div className="truncate text-[12px] leading-5 text-neutral-400">{email || "work email"}</div>
-              </div>
-              {emailDone && <span className="text-[12px] font-medium text-emerald-600">Done</span>}
-            </div>
-
-            <div
-              aria-hidden={stage !== "email"}
-              className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "email" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
-            >
-              <div className="min-h-0 overflow-hidden">
-                {stage === "email" && (
-                  <>
-                    <CodeInput inputRef={emailCodeRef} onEnter={verifyEmail} disabled={busy !== null} />
-                    <button
-                      onClick={verifyEmail}
-                      disabled={busy !== null}
-                      className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
-                    >
-                      {busy === "email" || busy === "resend" ? <Loader2 size={15} className="animate-spin" /> : <>Verify email <ArrowRight size={15} strokeWidth={2} /></>}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </section>
-
-          <section className={`rounded-[16px] border bg-white p-4 shadow-[0_8px_24px_rgba(15,15,15,0.02)] transition-all ${stage === "phone" ? "border-neutral-300" : "border-neutral-200"} ${stage === "email" ? "opacity-45" : "opacity-100"}`}>
-            <div className="flex items-center gap-3">
-              <StatusIcon done={phoneDone} active={stage === "phone"} type="phone" />
-              <div className="min-w-0 flex-1">
-                <div className={`text-[14px] font-medium ${stage === "email" ? "text-neutral-400" : "text-neutral-950"}`}>Verify phone number</div>
-                <div className="truncate text-[12px] leading-5 text-neutral-400">{phone || "phone number"}</div>
-              </div>
-              {phoneDone && <span className="text-[12px] font-medium text-emerald-600">Done</span>}
-            </div>
-
-            <div
-              aria-hidden={stage !== "phone"}
-              className={`grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out ${stage === "phone" ? "mt-3 grid-rows-[1fr] opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] opacity-0"}`}
-            >
-              <div className="min-h-0 overflow-hidden">
-                {stage === "phone" && (
-                  <>
-                    <CodeInput inputRef={phoneCodeRef} onEnter={verifyPhone} disabled={busy !== null} />
-                    <button
-                      onClick={verifyPhone}
-                      disabled={busy !== null}
-                      className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-neutral-950 text-[14px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400"
-                    >
-                      {busy === "phone" ? <Loader2 size={15} className="animate-spin" /> : <>Verify phone <ArrowRight size={15} strokeWidth={2} /></>}
-                    </button>
-                    <button
-                      onClick={sendPhoneCode}
-                      disabled={busy !== null}
-                      className="mt-2 w-full text-center text-[12px] text-neutral-400 transition-colors hover:text-neutral-900 disabled:opacity-40"
-                    >
-                      Send a new phone code
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </section>
-        </div>
-
-        {error && <p className="mt-4 text-center text-xs text-red-500">{error}</p>}
       </div>
     </main>
   );
