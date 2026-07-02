@@ -25,6 +25,15 @@ export default function TopPills({
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex items-start justify-center gap-2">
+      {!enabled ? (
+        <button
+          onClick={() => onToggle(true)}
+          aria-label="enable internet access"
+          className="pointer-events-auto flex h-8 w-8 items-center justify-center rounded-full border border-neutral-200 bg-white/95 shadow-[0_4px_20px_rgba(15,15,15,0.05)] backdrop-blur transition-colors hover:border-neutral-400"
+        >
+          <Globe size={14} strokeWidth={2.2} className="text-neutral-300" />
+        </button>
+      ) : (
       <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-neutral-200 bg-white/95 py-1.5 pl-3 pr-2 shadow-[0_4px_20px_rgba(15,15,15,0.05)] backdrop-blur">
         <Globe size={14} strokeWidth={2.2} className="text-neutral-950" />
         <span className="text-[12px] font-medium">Internet</span>
@@ -80,6 +89,7 @@ export default function TopPills({
           )}
         </div>
       </div>
+      )}
 
       <button
         onClick={onOpenFiles}

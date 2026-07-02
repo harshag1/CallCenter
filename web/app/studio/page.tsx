@@ -14,7 +14,9 @@ import FlowCanvas from "@/components/studio/FlowCanvas";
 import TopPills from "@/components/studio/TopPills";
 import FilesModal from "@/components/studio/FilesModal";
 import CallWidget from "@/components/call/CallWidget";
-import { AgentFlowSchema, type AgentFlow } from "@/lib/flow";
+import { AgentFlowSchema, type AgentFlow, type FlowNode } from "@/lib/flow";
+import { shortBrand } from "@/lib/brand";
+import NodeEditor from "@/components/studio/NodeEditor";
 
 type ChatItem =
   | { kind: "text"; role: "user" | "assistant"; text: string }
@@ -42,6 +44,7 @@ export default function Studio() {
   const [trying, setTrying] = useState(false);
   const [holdMusicUrl, setHoldMusicUrl] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<string | null>(null);
+  const [editingNode, setEditingNode] = useState<FlowNode | null>(null);
   const [activeStep, setActiveStep] = useState<string | null>(null);
   const threadId = useRef("");
   const traceCursor = useRef(0);
@@ -213,6 +216,7 @@ export default function Studio() {
   }
 
   const company = status?.onboarding.company;
+  const brand = shortBrand(company);
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -237,7 +241,10 @@ export default function Studio() {
 
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6">
         {/* Flow */}
-        <div className="relative mt-4 h-[46vh] shrink-0 overflow-hidden rounded-[24px] border border-neutral-100">
+        <p className="mt-5 shrink-0 text-center text-[13px] text-neutral-500">
+          Here&apos;s a starting point for your new agent — edit it with the chat below, or try it out.
+        </p>
+        <div className="relative mt-3 h-[44vh] shrink-0 overflow-hidden rounded-[24px] border border-neutral-200">
           {status && (
             <TopPills
               enabled={status.internet_enabled}
@@ -258,12 +265,32 @@ export default function Studio() {
               activeNode={activeNode}
               activeStep={activeStep}
               onSaveSupportNumber={saveSupportNumber}
+              onNodeClick={(n) => setEditingNode(n)}
             />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-neutral-300">
               <Loader2 size={18} className="animate-spin" />
-              <span className="text-xs">{company ? `designing ${company}'s agent…` : "researching your company…"}</span>
+              <span className="text-xs">{brand ? `Designing the ${brand} Agent…` : "Researching your company…"}</span>
             </div>
+          )}
+          {editingNode && agentId && (
+            <NodeEditor
+              node={editingNode}
+              onClose={() => setEditingNode(null)}
+              onSave={async (patch) => {
+                const res = await fetch(`/api/agents/${agentId}/flow-node`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ node: patch }),
+                });
+                if (res.ok) {
+                  const j = await res.json();
+                  const parsed = AgentFlowSchema.safeParse(j.flow);
+                  if (parsed.success) setFlow(parsed.data);
+                }
+                return res.ok;
+              }}
+            />
           )}
           {flow && !trying && (
             <button
@@ -310,7 +337,7 @@ export default function Studio() {
               <textarea
                 rows={1}
                 value={input}
-                placeholder={company ? `refine ${company}'s agent` : "refine your agent"}
+                placeholder={brand ? `Refine the ${brand} Agent` : "Refine your agent"}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {

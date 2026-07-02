@@ -6,7 +6,7 @@ import { waitUntil } from "@vercel/functions";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { ingestDocument } from "@/lib/knowledge";
-import { uploadKindFor, extOf, mimeFor } from "@/lib/files";
+import { uploadKindFor, extOf, mimeFor, autoImportCsv } from "@/lib/files";
 
 export const maxDuration = 300;
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -52,6 +52,8 @@ export async function POST(req: Request) {
     );
     created.push({ id: row!.id, filename: file.name, kind });
     if (embedCsv) waitUntil(ingestDocument(row!.id, buf));
+    // CSVs also become a first-class table: viewable, editable, agent-readable.
+    if (kind === "data" && extOf(file.name) === "csv") waitUntil(autoImportCsv(row!.id));
   }
   return NextResponse.json({ ok: true, documents: created, rejected });
 }

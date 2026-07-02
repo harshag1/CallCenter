@@ -4,7 +4,7 @@
 "use client";
 
 import { useMemo, type CSSProperties, type ReactNode } from "react";
-import { ReactFlow, Background, type Node, type Edge } from "@xyflow/react";
+import { ReactFlow, Background, BackgroundVariant, type Node, type Edge } from "@xyflow/react";
 import { HoldChip } from "@/components/platform/shared";
 
 type FlowLike = {
@@ -74,7 +74,7 @@ function layout(
       );
     return {
       id: n.id,
-      position: { x: (idx - (siblings.length - 1) / 2) * 170, y: d * 78 },
+      position: { x: d * 190, y: (idx - (siblings.length - 1) / 2) * 74 },
       data: { label },
       style: {
         ...base,
@@ -116,6 +116,7 @@ export default function FlowPanel({ flow, visited, activeNode, holdCountdown }: 
   }
   return (
     <ReactFlow
+      className="!bg-[#f7f7f6]"
       nodes={graph.nodes}
       edges={graph.edges}
       fitView
@@ -127,7 +128,7 @@ export default function FlowPanel({ flow, visited, activeNode, holdCountdown }: 
       panOnDrag
       proOptions={{ hideAttribution: true }}
     >
-      <Background color="#f3f3f3" gap={18} />
+      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.3} />
     </ReactFlow>
   );
 }

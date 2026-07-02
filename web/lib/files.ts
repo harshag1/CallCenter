@@ -90,3 +90,39 @@ export async function transcodeHoldMusic(documentId: string): Promise<void> {
     L.error("hold-music transcode failed", { orgId: doc.org_id, err: (e as Error).message, data: { documentId } });
   }
 }
+
+
+/** Auto-imports an uploaded CSV into a viewable/editable dataset (named from the file). */
+export async function autoImportCsv(documentId: string): Promise<void> {
+  const { qOne } = await import("./db");
+  const { default: Papa } = await import("papaparse");
+  const { getDatasetBySlug, createDataset, insertRows, slugify } = await import("./datasets");
+  const { log } = await import("./log");
+  const L = log("files/auto-import");
+
+  const doc = await qOne<{ org_id: string; filename: string; data: Buffer | null }>(
+    "SELECT org_id, filename, data FROM documents WHERE id = $1", [documentId]
+  );
+  if (!doc?.data) return;
+  try {
+    const parsed = Papa.parse<Record<string, string>>(doc.data.toString("utf8"), {
+      header: true, skipEmptyLines: true,
+    });
+    const headers = (parsed.meta.fields ?? []).filter(Boolean);
+    if (!headers.length || !parsed.data.length) return;
+
+    const base = doc.filename.replace(/\.[^.]+$/, "");
+    let slug = slugify(base);
+    if (await getDatasetBySlug(doc.org_id, slug)) slug = `${slug}-${documentId.slice(0, 4)}`;
+    const dataset = await createDataset(doc.org_id, slug, headers.map((h) => slugify(h)), "csv-upload");
+    const rows = parsed.data.slice(0, 2000).map((r) => {
+      const mapped: Record<string, unknown> = {};
+      for (const h of headers) mapped[slugify(h)] = r[h] ?? "";
+      return mapped;
+    });
+    const n = await insertRows(doc.org_id, dataset.id, rows);
+    L.info("csv auto-imported", { orgId: doc.org_id, data: { documentId, table: slug, rows: n } });
+  } catch (e) {
+    L.warn("csv auto-import failed", { orgId: doc.org_id, err: (e as Error).message });
+  }
+}

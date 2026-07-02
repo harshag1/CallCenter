@@ -1,12 +1,12 @@
 // Author: Harsha Gundala
-// FlowCanvas.tsx — the studio flow graph: agent topology with live provisioning + call tracing.
+// FlowCanvas.tsx — the studio flow graph: horizontal agent topology on a dotted canvas.
 
 "use client";
 
 import { useMemo } from "react";
-import { ReactFlow, Background, type Node, type Edge } from "@xyflow/react";
+import { ReactFlow, Background, BackgroundVariant, type Node, type Edge } from "@xyflow/react";
 import { nodeTypes } from "./nodes";
-import type { AgentFlow } from "@/lib/flow";
+import type { AgentFlow, FlowNode } from "@/lib/flow";
 
 type Props = {
   flow: AgentFlow;
@@ -15,26 +15,29 @@ type Props = {
   activeNode?: string | null;
   activeStep?: string | null;
   onSaveSupportNumber: (n: string) => Promise<boolean>;
+  onNodeClick?: (node: FlowNode) => void;
 };
 
-export default function FlowCanvas({ flow, number, numberStatus, activeNode, activeStep, onSaveSupportNumber }: Props) {
+export default function FlowCanvas({
+  flow, number, numberStatus, activeNode, activeStep, onSaveSupportNumber, onNodeClick,
+}: Props) {
   const graph = useMemo(() => {
-    const topics = flow.nodes.filter((n) => n.kind === "topic" || n.kind === "fallback");
-    const width = 210;
+    const branches = flow.nodes.filter((n) => n.kind === "topic" || n.kind === "fallback");
+    const rowH = 118;
     const nodes: Node[] = flow.nodes.map((n) => {
       if (n.kind === "incoming_call") {
         return {
-          id: n.id, type: "incoming_call", position: { x: -95, y: 0 },
+          id: n.id, type: "incoming_call", position: { x: 0, y: ((branches.length - 1) * rowH) / 2 - 20 },
           data: { number, numberStatus, active: activeNode === n.id },
           draggable: false,
         };
       }
-      const idx = topics.findIndex((t) => t.id === n.id);
+      const idx = branches.findIndex((t) => t.id === n.id);
       const stepIdx = n.steps?.findIndex((s) => s.id === activeStep) ?? -1;
       return {
         id: n.id,
         type: n.kind === "fallback" ? "fallback" : "topic",
-        position: { x: (idx - (topics.length - 1) / 2) * width - 85, y: 150 },
+        position: { x: 300, y: idx * rowH },
         data: {
           label: n.label, icon: n.icon, steps: n.steps,
           active: activeNode === n.id,
@@ -46,8 +49,8 @@ export default function FlowCanvas({ flow, number, numberStatus, activeNode, act
       };
     });
     const edges: Edge[] = flow.edges.map((e, i) => ({
-      id: `e${i}`, source: e.from, target: e.to, label: e.label,
-      style: { stroke: activeNode === e.to ? "#111" : "#e2e2e2", strokeWidth: activeNode === e.to ? 1.6 : 1.2 },
+      id: `e${i}`, source: e.from, target: e.to, label: e.label, type: "smoothstep",
+      style: { stroke: activeNode === e.to ? "#111" : "#d9d9d9", strokeWidth: activeNode === e.to ? 1.6 : 1.2 },
       animated: activeNode === e.to,
     }));
     return { nodes, edges };
@@ -59,14 +62,19 @@ export default function FlowCanvas({ flow, number, numberStatus, activeNode, act
       edges={graph.edges}
       nodeTypes={nodeTypes}
       fitView
-      fitViewOptions={{ padding: 0.25 }}
+      fitViewOptions={{ padding: 0.22 }}
       nodesConnectable={false}
-      elementsSelectable={false}
+      elementsSelectable
       zoomOnScroll={false}
       panOnDrag
       proOptions={{ hideAttribution: true }}
+      onNodeClick={(_, rfNode) => {
+        const n = flow.nodes.find((x) => x.id === rfNode.id);
+        if (n && onNodeClick) onNodeClick(n);
+      }}
+      className="!bg-[#f7f7f6]"
     >
-      <Background color="#f4f4f4" gap={20} />
+      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.4} />
     </ReactFlow>
   );
 }

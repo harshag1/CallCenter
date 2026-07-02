@@ -27,11 +27,9 @@ export const IncomingCallNode = memo(function IncomingCallNode({ data }: NodePro
   const number = data.number as string | null;
   const status = data.numberStatus as string | undefined;
   return (
-    <div className={`${shell(data.active as boolean)} min-w-[190px]`}>
+    <div className={`${shell(data.active as boolean)} min-w-[180px]`}>
       <div className="flex items-center gap-3">
-        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-950 text-white">
-          <Phone size={15} strokeWidth={2.2} />
-        </span>
+        <Phone size={17} strokeWidth={2.2} className="shrink-0 text-neutral-950" />
         <div>
           <div className="text-[13px] font-semibold">Incoming call</div>
           {number ? (
@@ -43,7 +41,7 @@ export const IncomingCallNode = memo(function IncomingCallNode({ data }: NodePro
           )}
         </div>
       </div>
-      <Handle type="source" position={Position.Bottom} className="!bg-neutral-300" />
+      <Handle type="source" position={Position.Right} className="!bg-neutral-300" />
     </div>
   );
 });
@@ -52,12 +50,10 @@ export const TopicNode = memo(function TopicNode({ data }: NodeProps) {
   const Icon = ICONS[(data.icon as string) ?? "life-buoy"] ?? LifeBuoy;
   const steps = (data.steps as { label: string }[]) ?? [];
   return (
-    <div className={`${shell(data.active as boolean)} min-w-[170px] max-w-[192px]`}>
-      <Handle type="target" position={Position.Top} className="!bg-neutral-300" />
+    <div className={`${shell(data.active as boolean)} min-w-[170px] max-w-[200px]`}>
+      <Handle type="target" position={Position.Left} className="!bg-neutral-300" />
       <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-neutral-100 bg-neutral-50 text-neutral-700">
-          <Icon size={14} strokeWidth={2} />
-        </span>
+        <Icon size={16} strokeWidth={2.1} className="shrink-0 text-neutral-950" />
         <div className="text-[13px] font-semibold">{data.label as string}</div>
       </div>
       {steps.length > 0 && (
@@ -85,19 +81,17 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
   const save = data.onSaveNumber as (n: string) => Promise<boolean>;
 
   return (
-    <div className={`${shell(data.active as boolean)} min-w-[190px]`}>
-      <Handle type="target" position={Position.Top} className="!bg-neutral-300" />
+    <div className={`${shell(data.active as boolean)} min-w-[180px]`}>
+      <Handle type="target" position={Position.Left} className="!bg-neutral-300" />
       <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-neutral-100 bg-neutral-50 text-neutral-700">
-          <PhoneForwarded size={14} strokeWidth={2} />
-        </span>
+        <PhoneForwarded size={16} strokeWidth={2.1} className="shrink-0 text-neutral-950" />
         <div className="min-w-0">
           <div className="text-[13px] font-semibold">Other</div>
           <div className="text-[11px] text-neutral-400">contact support</div>
         </div>
       </div>
       {editing ? (
-        <div className="mt-2 flex items-center gap-1">
+        <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           <input
             autoFocus
             value={value}
@@ -118,7 +112,7 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
         </div>
       ) : (
         <button
-          onClick={() => { setValue(number ?? ""); setEditing(true); }}
+          onClick={(e) => { e.stopPropagation(); setValue(number ?? ""); setEditing(true); }}
           className="mt-2 flex items-center gap-1.5 rounded-full border border-neutral-200 px-2.5 py-1 text-[11px] tabular-nums text-neutral-600 transition-colors hover:border-neutral-900"
         >
           {number ?? "set number"} <Pencil size={10} className="text-neutral-300" />
