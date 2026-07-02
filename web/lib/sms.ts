@@ -1,5 +1,35 @@
 // Author: Harsha Gundala
-// sms.ts — Twilio SMS delivery for staged onboarding phone verification.
+// sms.ts — Twilio SMS delivery: Verify-service OTP (carrier-approved) + generic agent SMS.
+
+function verifyAuth(): string {
+  return Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
+}
+
+/** Starts an OTP via Twilio Verify — pre-registered infrastructure, no A2P filtering (error 30034). */
+export async function startPhoneVerification(toNumber: string): Promise<void> {
+  const service = process.env.TWILIO_VERIFY_SERVICE_SID;
+  if (!service || !process.env.TWILIO_ACCOUNT_SID) throw new Error("Twilio Verify is not configured");
+  const res = await fetch(`https://verify.twilio.com/v2/Services/${service}/Verifications`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${verifyAuth()}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ To: toNumber, Channel: "sms" }),
+  });
+  if (!res.ok) throw new Error(`twilio verify ${res.status}: ${(await res.text()).slice(0, 240)}`);
+}
+
+/** Checks an OTP against Twilio Verify. */
+export async function checkPhoneVerification(toNumber: string, code: string): Promise<boolean> {
+  const service = process.env.TWILIO_VERIFY_SERVICE_SID;
+  if (!service) throw new Error("Twilio Verify is not configured");
+  const res = await fetch(`https://verify.twilio.com/v2/Services/${service}/VerificationCheck`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${verifyAuth()}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ To: toNumber, Code: code }),
+  });
+  if (!res.ok) return false; // 404 = no pending verification (expired) — treat as wrong
+  const json = await res.json();
+  return json.status === "approved";
+}
 
 export async function sendPhoneCode(toNumber: string, code: string): Promise<void> {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;

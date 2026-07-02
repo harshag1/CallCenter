@@ -3,8 +3,8 @@
 
 import { NextResponse } from "next/server";
 import { q } from "@/lib/db";
-import { generateCode, getSession, hmacCode, normalizePhoneNumber } from "@/lib/auth";
-import { sendPhoneCode } from "@/lib/sms";
+import { getSession, normalizePhoneNumber } from "@/lib/auth";
+import { startPhoneVerification } from "@/lib/sms";
 import { log } from "@/lib/log";
 
 const L = log("auth/send-phone-code");
@@ -25,10 +25,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "too many codes requested — wait a few minutes" }, { status: 429 });
   }
 
-  const code = generateCode();
+  // Twilio Verify generates and stores the code; keep a marker row for our rate limiting.
   await q(
-    "INSERT INTO phone_codes (phone_number, code_hmac, expires_at) VALUES ($1,$2, now() + interval '10 minutes')",
-    [clean, hmacCode(code)]
+    "INSERT INTO phone_codes (phone_number, code_hmac, expires_at) VALUES ($1,'twilio-verify', now() + interval '10 minutes')",
+    [clean]
   );
   await q(
     "UPDATE users SET phone_number = $2, phone_verified_at = CASE WHEN phone_number = $2 THEN phone_verified_at ELSE NULL END WHERE email = $1",
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
   );
 
   try {
-    await sendPhoneCode(clean, code);
+    await startPhoneVerification(clean);
   } catch (e) {
     L.error("send failed", { orgId: session.orgId, err: (e as Error).message });
     return NextResponse.json({ error: "could not send text message" }, { status: 502 });
