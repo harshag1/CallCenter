@@ -3,11 +3,12 @@
 
 import { NextResponse } from "next/server";
 import { q, qOne } from "@/lib/db";
-import { hmacCode, establishSession, sessionCookie } from "@/lib/auth";
+import { hmacCode, establishSession, normalizePhoneNumber, sessionCookie } from "@/lib/auth";
 
 export async function POST(req: Request) {
-  const { email, code } = await req.json().catch(() => ({}));
+  const { email, code, phone } = await req.json().catch(() => ({}));
   const clean = String(email ?? "").trim().toLowerCase();
+  const cleanPhone = phone ? normalizePhoneNumber(String(phone)) : null;
   const row = await qOne<{ id: string; attempts: number }>(
     `SELECT id, attempts FROM auth_codes
      WHERE email = $1 AND used = false AND expires_at > now()
@@ -26,13 +27,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "wrong code" }, { status: 401 });
   }
   await q("UPDATE auth_codes SET used = true WHERE id = $1", [row.id]);
-  const token = await establishSession(clean);
+  const token = await establishSession(clean, cleanPhone);
 
   const hasAgents = await qOne(
     `SELECT a.id FROM agents a JOIN users u ON u.org_id = a.org_id WHERE u.email = $1 LIMIT 1`,
     [clean]
   );
-  const res = NextResponse.json({ ok: true, next: hasAgents ? "/workspace" : "/onboarding" });
+  const res = NextResponse.json({
+    ok: true,
+    next: cleanPhone ? "/verify" : hasAgents ? "/workspace" : "/onboarding",
+  });
   res.cookies.set(sessionCookie(token));
   return res;
 }

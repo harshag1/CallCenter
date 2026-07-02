@@ -1,0 +1,14 @@
+{
+  "name": "callcenter-bridge",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Twilio Media Streams <-> xAI realtime audio bridge",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

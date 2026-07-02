@@ -2,7 +2,58 @@
 // telephony.ts — operator tools: immediate outbound calls and timed recalls.
 
 import { q, qOne } from "../../db";
+import { originateCall, purchaseNumber } from "../../telephony";
 import type { OperatorTool } from "../types";
+
+export const provisionPhoneNumber: OperatorTool = {
+  name: "provision_phone_number",
+  description:
+    "Buy a real phone number (via Twilio) and attach it to a bot. Callers dialing it reach the bot; the bot uses it as caller ID for outbound. ~$1.15/mo per number.",
+  parameters: {
+    type: "object",
+    properties: {
+      agent_id: { type: "string" },
+      area_code: { type: "string", description: "Optional 3-digit US area code preference." },
+    },
+    required: ["agent_id"],
+  },
+  async execute(args, ctx) {
+    const owned = await qOne("SELECT id FROM agents WHERE id = $1 AND org_id = $2", [args.agent_id, ctx.orgId]);
+    if (!owned) return { output: { error: "agent not found" } };
+    try {
+      const number = await purchaseNumber(args.area_code ? String(args.area_code) : undefined);
+      await q("UPDATE agents SET phone_number = $2 WHERE id = $1", [args.agent_id, number]);
+      return { output: { ok: true, phone_number: number }, notice: `${number} is live` };
+    } catch (e) {
+      return { output: { error: (e as Error).message } };
+    }
+  },
+};
+
+export const placeCall: OperatorTool = {
+  name: "place_call",
+  description: "Place an outbound call RIGHT NOW from a bot to a phone number. For future calls use schedule_call.",
+  parameters: {
+    type: "object",
+    properties: {
+      agent_id: { type: "string" },
+      to_number: { type: "string", description: "E.164, e.g. +14155551234" },
+      reason: { type: "string", description: "Why the bot is calling — it opens the call with this context." },
+    },
+    required: ["agent_id", "to_number", "reason"],
+  },
+  async execute(args, ctx) {
+    const owned = await qOne("SELECT id FROM agents WHERE id = $1 AND org_id = $2", [args.agent_id, ctx.orgId]);
+    if (!owned) return { output: { error: "agent not found" } };
+    if (!/^\+\d{7,15}$/.test(String(args.to_number))) return { output: { error: "to_number must be E.164 (+1...)" } };
+    try {
+      const callId = await originateCall(String(args.agent_id), String(args.to_number), String(args.reason));
+      return { output: { ok: true, call_id: callId }, notice: `Dialing ${args.to_number}…` };
+    } catch (e) {
+      return { output: { error: (e as Error).message } };
+    }
+  },
+};
 
 export const scheduleCall: OperatorTool = {
   name: "schedule_call",

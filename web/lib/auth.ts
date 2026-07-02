@@ -23,7 +23,22 @@ export function generateToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-export type Session = { email: string; orgId: string; orgDomain: string | null };
+export type Session = {
+  email: string;
+  orgId: string;
+  orgDomain: string | null;
+  phoneNumber: string | null;
+  phoneVerifiedAt: string | null;
+};
+
+export function normalizePhoneNumber(value: string): string | null {
+  const raw = value.trim();
+  if (/^\+\d{7,15}$/.test(raw)) return raw;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
+}
 
 export async function getSession(): Promise<Session | null> {
   const token = (await cookies()).get("session_token")?.value;
@@ -38,12 +53,19 @@ export async function getSession(): Promise<Session | null> {
   if (Date.now() - new Date(row.last_used_at).getTime() > 60_000) {
     void q("UPDATE sessions_auth SET last_used_at = now() WHERE token = $1", [token]).catch(() => {});
   }
-  const user = await qOne<{ org_id: string; domain: string | null }>(
-    "SELECT u.org_id, o.domain FROM users u JOIN orgs o ON o.id = u.org_id WHERE u.email = $1",
+  const user = await qOne<{ org_id: string; domain: string | null; phone_number: string | null; phone_verified_at: string | null }>(
+    `SELECT u.org_id, o.domain, u.phone_number, u.phone_verified_at
+     FROM users u JOIN orgs o ON o.id = u.org_id WHERE u.email = $1`,
     [row.email]
   );
   if (!user) return null;
-  return { email: row.email, orgId: user.org_id, orgDomain: user.domain };
+  return {
+    email: row.email,
+    orgId: user.org_id,
+    orgDomain: user.domain,
+    phoneNumber: user.phone_number,
+    phoneVerifiedAt: user.phone_verified_at,
+  };
 }
 
 export async function requireSession(): Promise<Session> {
@@ -53,7 +75,7 @@ export async function requireSession(): Promise<Session> {
 }
 
 /** Creates the user (and its org, keyed by email domain) if missing; returns a session token. */
-export async function establishSession(email: string): Promise<string> {
+export async function establishSession(email: string, phoneNumber?: string | null): Promise<string> {
   const domain = email.split("@")[1].toLowerCase();
   const orgDomain = PERSONAL_DOMAINS.has(domain) ? null : domain;
 
@@ -68,8 +90,10 @@ export async function establishSession(email: string): Promise<string> {
     );
   }
   await q(
-    "INSERT INTO users (email, org_id) VALUES ($1, $2) ON CONFLICT (email) DO NOTHING",
-    [email, org!.id]
+    `INSERT INTO users (email, org_id, phone_number) VALUES ($1, $2, $3)
+     ON CONFLICT (email) DO UPDATE SET
+       phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number)`,
+    [email, org!.id, phoneNumber ?? null]
   );
   const token = generateToken();
   await q(

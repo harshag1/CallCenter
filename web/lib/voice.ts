@@ -46,19 +46,14 @@ export function verifyScope(token: string): { callId: string; agentId: string; o
   }
 }
 
-/** Creates the call row and the session.update payload a realtime client sends after connecting. */
-export async function buildVoiceSession(
+/** Builds the session.update payload for an existing call. Audio "pcmu" targets telephony (8kHz μ-law). */
+export async function sessionUpdateForCall(
   agent: AgentVersionRow,
+  callId: string,
   direction: "web" | "inbound" | "outbound",
   origin: string,
-  numbers: { from?: string; to?: string } = {}
-): Promise<{ callId: string; sessionUpdate: Record<string, unknown> }> {
-  const call = await qOne<{ id: string }>(
-    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [agent.agent_id, agent.version, direction, numbers.from ?? null, numbers.to ?? null]
-  );
-  const callId = call!.id;
+  audio: "pcm" | "pcmu" = "pcm"
+): Promise<Record<string, unknown>> {
   const scope = signScope({ callId, agentId: agent.agent_id, orgId: agent.org_id });
 
   const tools: Record<string, unknown>[] = [
@@ -83,7 +78,7 @@ export async function buildVoiceSession(
     });
   }
 
-  const sessionUpdate = {
+  return {
     type: "session.update",
     session: {
       voice: agent.voice,
@@ -92,8 +87,32 @@ export async function buildVoiceSession(
         `If the caller asks for a callback at a specific time, use the request_recall tool.`,
       turn_detection: { type: "server_vad" },
       tools,
+      ...(audio === "pcmu"
+        ? {
+            audio: {
+              input: { format: { type: "audio/pcmu", rate: 8000 } },
+              output: { format: { type: "audio/pcmu", rate: 8000 } },
+            },
+          }
+        : {}),
       ...agent.settings,
     },
   };
+}
+
+/** Creates the call row and the session.update payload a realtime client sends after connecting. */
+export async function buildVoiceSession(
+  agent: AgentVersionRow,
+  direction: "web" | "inbound" | "outbound",
+  origin: string,
+  numbers: { from?: string; to?: string } = {}
+): Promise<{ callId: string; sessionUpdate: Record<string, unknown> }> {
+  const call = await qOne<{ id: string }>(
+    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [agent.agent_id, agent.version, direction, numbers.from ?? null, numbers.to ?? null]
+  );
+  const callId = call!.id;
+  const sessionUpdate = await sessionUpdateForCall(agent, callId, direction, origin);
   return { callId, sessionUpdate };
 }

@@ -11,5 +11,7 @@ export default async function Home() {
   const session = await getSession();
   if (!session) redirect("/login");
   const hasAgents = await qOne("SELECT id FROM agents WHERE org_id = $1 LIMIT 1", [session.orgId]);
-  redirect(hasAgents ? "/workspace" : "/onboarding");
+  if (hasAgents) redirect("/workspace");
+  if (!session.phoneVerifiedAt) redirect("/verify");
+  redirect("/onboarding");
 }

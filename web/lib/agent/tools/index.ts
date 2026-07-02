@@ -8,7 +8,7 @@ import { listCalls, getCall, getRecording } from "./calls";
 import { listAgents, updateAgent } from "./agents";
 import { createTool, testTool, listTools } from "./factory";
 import { setEnvVar, listEnvVars, addMcpServer } from "./secrets";
-import { scheduleCall, listScheduledCalls, cancelScheduledCall } from "./telephony";
+import { scheduleCall, listScheduledCalls, cancelScheduledCall, placeCall, provisionPhoneNumber } from "./telephony";
 import { renderSurface, showFlow } from "./ui";
 import { webSearch } from "./research";
 
@@ -19,7 +19,7 @@ export const OPERATOR_TOOLS: OperatorTool[] = [
   listAgents, updateAgent,
   createTool, testTool, listTools,
   setEnvVar, listEnvVars, addMcpServer,
-  scheduleCall, listScheduledCalls, cancelScheduledCall,
+  scheduleCall, listScheduledCalls, cancelScheduledCall, placeCall, provisionPhoneNumber,
   webSearch,
 ];
 

@@ -48,16 +48,19 @@ export default function Onboarding() {
   }
 
   return (
-    <main className="flex h-screen items-center justify-center bg-white">
-      <div className="w-[560px] px-6">
-        <h1 className="mb-6 text-center text-2xl font-semibold tracking-tight">Describe your bot</h1>
+    <main className="flex min-h-screen items-center justify-center bg-[#f7f7f7] px-5">
+      <div className="w-full max-w-[600px] rounded-[30px] border border-neutral-200 bg-white p-4 shadow-[0_18px_70px_rgba(15,15,15,0.055)]">
+        <div className="px-2 pb-4 pt-2 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight">Describe your agent</h1>
+          <p className="mt-1 text-xs text-neutral-400">One clear request is enough. We&apos;ll turn it into a working voice flow.</p>
+        </div>
         <textarea
           autoFocus
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={4}
           placeholder={company ? `What should your ${company} agent handle?` : "A voice agent that..."}
-          className="w-full resize-none rounded-xl border border-neutral-200 p-4 text-[15px] leading-relaxed outline-none placeholder:text-neutral-300 focus:border-neutral-400"
+          className="w-full resize-none rounded-[22px] border border-neutral-100 p-4 text-[15px] leading-relaxed outline-none placeholder:text-neutral-300 focus:border-neutral-400"
         />
         <div className="mt-3 flex min-h-8 flex-wrap justify-center gap-2">
           {suggestions.map((s) => (
@@ -74,7 +77,7 @@ export default function Onboarding() {
           <button
             onClick={build}
             disabled={building || text.trim().length < 10}
-            className="flex h-10 items-center gap-2 rounded-lg bg-neutral-900 px-5 text-sm text-white transition-opacity disabled:opacity-30"
+            className="flex h-11 items-center gap-2 rounded-[17px] bg-neutral-950 px-5 text-sm font-medium text-white transition-opacity disabled:opacity-30"
           >
             {building ? <><Loader2 size={14} className="animate-spin" /> Building…</> : "Build my first agent"}
           </button>
