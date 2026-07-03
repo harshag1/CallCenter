@@ -1,0 +1,3 @@
+.venv/
+.embed-secret.tmp
+__pycache__/
