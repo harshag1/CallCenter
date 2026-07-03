@@ -166,8 +166,30 @@ async function assertCap(datasetId: string): Promise<void> {
   if ((c?.n ?? 0) >= ROW_CAP) throw new Error(`row cap of ${ROW_CAP} reached`);
 }
 
+/** Flexible schema: unknown row keys auto-become columns so written data is never invisible. */
+async function ensureColumns(orgId: string, datasetId: string, rows: Record<string, unknown>[]): Promise<void> {
+  const ds = await qOne<{ columns: { key: string; label: string; type: string }[] }>(
+    "SELECT columns FROM datasets WHERE id = $1 AND org_id = $2", [datasetId, orgId]
+  );
+  if (!ds) return;
+  const known = new Set(ds.columns.map((c) => c.key));
+  const added: { key: string; label: string; type: string }[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!known.has(key) && known.size + added.length < 32) {
+        known.add(key);
+        added.push({ key, label: key.replace(/_/g, " ").replace(/(^|\s)\S/g, (c) => c.toUpperCase()), type: "text" });
+      }
+    }
+  }
+  if (added.length) {
+    await q("UPDATE datasets SET columns = columns || $2::jsonb WHERE id = $1", [datasetId, JSON.stringify(added)]);
+  }
+}
+
 export async function insertRow(orgId: string, datasetId: string, data: Record<string, unknown>): Promise<DatasetRow> {
   await assertCap(datasetId);
+  await ensureColumns(orgId, datasetId, [data]);
   const row = await qOne<DatasetRow>(
     `INSERT INTO dataset_rows (dataset_id, org_id, data)
      SELECT d.id, d.org_id, $3 FROM datasets d WHERE d.id = $1 AND d.org_id = $2
@@ -180,6 +202,7 @@ export async function insertRow(orgId: string, datasetId: string, data: Record<s
 
 /** Multi-row insert for imports; respects ROW_CAP, batches of 200. Returns inserted count. */
 export async function insertRows(orgId: string, datasetId: string, rows: Record<string, unknown>[]): Promise<number> {
+  await ensureColumns(orgId, datasetId, rows);
   const c = await qOne<{ n: number }>("SELECT count(*)::int AS n FROM dataset_rows WHERE dataset_id = $1", [datasetId]);
   const room = ROW_CAP - (c?.n ?? 0);
   const batch = rows.slice(0, Math.max(room, 0));
@@ -224,6 +247,7 @@ export async function upsertRow(
 ): Promise<{ id: string; data: Record<string, unknown>; updated: boolean }> {
   const dataset = await getDatasetBySlug(orgId, slug);
   if (!dataset) throw new Error(`unknown table "${slug}"`);
+  await ensureColumns(orgId, dataset.id, [{ ...(match ?? {}), ...data }]);
   if (match && Object.keys(match).length) {
     const updated = await qOne<{ id: string; data: Record<string, unknown> }>(
       `UPDATE dataset_rows SET data = data || $3::jsonb, updated_at = now()
