@@ -23,6 +23,7 @@ type VariantData = {
   key: string; label: string; calls: number;
   avg_satisfaction: number | null; avg_duration_s: number | null;
   flow: FlowLike | null;
+  instructions_patch: string | null;
 };
 type CallPoint = {
   id: string; variant: string; satisfaction: number; duration_s: number | null;
@@ -72,6 +73,16 @@ function diffNodeIds(variants: VariantData[]): Set<string> {
       return n ? sig(n) : "__absent__";
     });
     if (new Set(sigs).size > 1) out.add(id);
+  }
+  if (out.size === 0) {
+    // Instruction-level experiment: identical flows, only the prompt differs → the entry node is what changed.
+    const patches = new Set(variants.map((v) => v.instructions_patch ?? ""));
+    if (patches.size > 1) {
+      for (const f of flows) {
+        const entry = f.nodes.find((n) => n.kind === "incoming_call" || n.kind === "start") ?? f.nodes[0];
+        if (entry) out.add(entry.id);
+      }
+    }
   }
   return out;
 }
@@ -198,12 +209,15 @@ function VariantCard({
   );
   return (
     <div className="min-w-0">
-      <div className="mb-2 flex items-baseline gap-2">
+      <div className="mb-1 flex items-baseline gap-2">
         <span className="text-2xl font-extrabold leading-none tracking-tight" style={{ color }}>
           {v.key.toUpperCase()}
         </span>
         {showLabel && <span className="truncate text-[12px] text-neutral-400">{v.label}</span>}
       </div>
+      <p className="mb-2 line-clamp-2 min-h-[2.1rem] text-[12px] leading-snug text-neutral-600" title={v.instructions_patch ?? undefined}>
+        {v.instructions_patch ? <>&ldquo;{v.instructions_patch}&rdquo;</> : <span className="text-neutral-400">Control — unchanged</span>}
+      </p>
       <div className="h-[200px] overflow-hidden rounded-2xl border border-[var(--border)]">
         {v.flow ? (
           <FlowPanel flow={v.flow} number={number} interactive={false} fitPadding={0.1} diffNodeIds={diffIds} diffColor={color} />

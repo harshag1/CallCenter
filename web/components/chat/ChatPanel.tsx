@@ -148,7 +148,7 @@ export default function ChatPanel({
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
         {!items.length && (
           <div className="mt-10 flex justify-center">
-            <MessageSquare size={18} strokeWidth={1.8} className="text-neutral-200" />
+            <MessageSquare size={28} strokeWidth={1.6} className="text-neutral-200" />
           </div>
         )}
         {groupItems(items, streaming).map((g, i) =>

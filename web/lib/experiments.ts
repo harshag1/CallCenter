@@ -118,6 +118,8 @@ export type VariantMetrics = {
   avg_duration_s: number | null;
   resolution: { ai_resolved: number; human_resolved: number; unresolved: number; pending: number };
   flow: AgentFlow | null;
+  /** Behavioral delta of this variant: instruction tail after the last VARIANT ADJUSTMENT marker. */
+  instructions_patch: string | null;
 };
 
 export type ExperimentCall = {
@@ -179,10 +181,17 @@ export async function experimentMetrics(orgId: string, id: string): Promise<Expe
      ORDER BY started_at`,
     [id]
   );
-  const flows = await q<{ version: number; flow: AgentFlow }>(
-    "SELECT version, flow FROM agent_versions WHERE agent_id = $1 AND version = ANY($2)",
+  const versions = await q<{ version: number; flow: AgentFlow; instructions: string }>(
+    "SELECT version, flow, instructions FROM agent_versions WHERE agent_id = $1 AND version = ANY($2)",
     [experiment.agent_id, experiment.variants.map((v) => v.agent_version)]
   );
+  const MARKER = "VARIANT ADJUSTMENT:";
+  const patchOf = (instructions: string | undefined): string | null => {
+    if (!instructions) return null;
+    const at = instructions.lastIndexOf(MARKER);
+    if (at < 0) return null;
+    return instructions.slice(at + MARKER.length).trim() || null;
+  };
 
   const variants: VariantMetrics[] = experiment.variants.map((v) => {
     const a = agg.find((r) => r.variant === v.key);
@@ -200,7 +209,8 @@ export async function experimentMetrics(orgId: string, id: string): Promise<Expe
         unresolved: a?.unresolved ?? 0,
         pending: (a?.calls ?? 0) - (a?.ai_resolved ?? 0) - (a?.human_resolved ?? 0) - (a?.unresolved ?? 0),
       },
-      flow: flows.find((f) => f.version === v.agent_version)?.flow ?? null,
+      flow: versions.find((f) => f.version === v.agent_version)?.flow ?? null,
+      instructions_patch: patchOf(versions.find((f) => f.version === v.agent_version)?.instructions),
     };
   });
   return { experiment, agent, variants, daily, calls };
