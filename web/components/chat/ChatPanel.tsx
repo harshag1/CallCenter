@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp, MessageSquare } from "lucide-react";
+import { ArrowUp, ChevronRight, MessageSquare, Wrench } from "lucide-react";
 import { toolDisplay } from "./tool-display";
 
 export type ChatItem =
@@ -63,6 +63,57 @@ export const ASSISTANT_PROSE =
   "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-neutral-50 [&_pre]:p-3 " +
   "[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_th]:border-b [&_th]:border-neutral-200 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:text-[11px] [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-neutral-400 [&_td]:border-b [&_td]:border-neutral-100 [&_td]:px-2 [&_td]:py-1";
 
+type TextItem = Extract<ChatItem, { kind: "text" }>;
+type ToolItem = Extract<ChatItem, { kind: "tool" }>;
+type Grouped =
+  | { kind: "single"; item: TextItem | ToolItem }
+  | { kind: "toolgroup"; items: ToolItem[]; live: boolean };
+
+/** Consecutive tool calls collapse into one expandable group once the turn has moved on. */
+export function groupItems(items: ChatItem[], streaming: boolean): Grouped[] {
+  const out: Grouped[] = [];
+  let run: ToolItem[] = [];
+  const flush = (isTail: boolean) => {
+    if (!run.length) return;
+    const live = isTail && streaming;
+    if (run.length === 1 && live) out.push({ kind: "single", item: run[0] });
+    else out.push({ kind: "toolgroup", items: run, live });
+    run = [];
+  };
+  for (const item of items) {
+    if (item.kind === "tool") run.push(item);
+    else { flush(false); out.push({ kind: "single", item }); }
+  }
+  flush(true);
+  return out;
+}
+
+/** Live groups show every line; finished groups condense to "Ran N toolcalls". */
+export function ToolGroup({ items, live }: { items: ToolItem[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (live || open) {
+    return (
+      <div>
+        {!live && (
+          <button onClick={() => setOpen(false)} className="mb-0.5 flex items-center gap-1.5 text-[12px] font-medium text-neutral-400 hover:text-neutral-700">
+            <ChevronRight size={12} className="rotate-90 transition-transform" /> Ran {items.length} toolcall{items.length === 1 ? "" : "s"}
+          </button>
+        )}
+        {items.map((t, i) => <ToolLine key={i} name={t.name} status={t.status} />)}
+      </div>
+    );
+  }
+  const errors = items.filter((t) => t.status === "error").length;
+  return (
+    <button onClick={() => setOpen(true)} className="my-1 flex items-center gap-1.5 text-[12px] font-medium text-neutral-400 transition-colors hover:text-neutral-700">
+      <ChevronRight size={12} className="transition-transform" />
+      <Wrench size={12} />
+      Ran {items.length} toolcall{items.length === 1 ? "" : "s"}
+      {errors > 0 && <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-red-500" />}
+    </button>
+  );
+}
+
 const MAX_INPUT_PX = 330; // ~15 lines before scrolling
 
 export default function ChatPanel({
@@ -100,17 +151,19 @@ export default function ChatPanel({
             <MessageSquare size={18} strokeWidth={1.8} className="text-neutral-200" />
           </div>
         )}
-        {items.map((item, i) =>
-          item.kind === "tool" ? (
-            <ToolLine key={i} name={item.name} status={item.status} />
-          ) : item.role === "user" ? (
+        {groupItems(items, streaming).map((g, i) =>
+          g.kind === "toolgroup" ? (
+            <ToolGroup key={i} items={g.items} live={g.live} />
+          ) : g.item.kind === "tool" ? (
+            <ToolLine key={i} name={g.item.name} status={g.item.status} />
+          ) : g.item.role === "user" ? (
             <div key={i} className="flex justify-end">
-              <div className={USER_BUBBLE}>{item.text}</div>
+              <div className={USER_BUBBLE}>{g.item.text}</div>
             </div>
           ) : (
             <div key={i} className="flex justify-start">
               <div className={ASSISTANT_PROSE}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{g.item.text}</ReactMarkdown>
               </div>
             </div>
           )

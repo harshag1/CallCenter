@@ -115,7 +115,14 @@ export class BridgeSession {
     );
     this.lastHoldEventId = Number(head?.max ?? 0);
 
-    await this.save("audio_start", { at: new Date().toISOString() });
+    // An observe leg (post-transfer) continues the original call's recording, so keep the
+    // timeline origin stable: only the first stream on a call emits audio_start.
+    await q(
+      `INSERT INTO call_events (call_id, type, payload)
+       SELECT $1, 'audio_start', $2::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'audio_start')`,
+      [scope.callId, JSON.stringify({ at: new Date().toISOString() })]
+    ).catch(() => {});
     this.recFlush = setInterval(() => void this.flushRecording(), REC_FLUSH_MS);
 
     if (this.mode === "observe") {

@@ -3,10 +3,10 @@
 
 import { q, qOne } from "../../db";
 import { createFlow, updateFlow, listFlows, launchCampaign, kickCampaign, cancelCampaign, campaignStats } from "../../campaigns";
-import { slimInstructions, AgentFlowSchema } from "../../flow";
+import { slimInstructions, AgentFlowSchema, normalizeFlow } from "../../flow";
 import type { OperatorTool } from "../types";
 
-const FLOW_DOC = `Flow shape: {nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,steps?:[{id,label,instructions}],support_number?}],edges:[{from,to}]}. For OUTBOUND flows the first node should be kind "incoming_call" with label like "Outbound Call" (it renders as the entry point); topics carry the script: context = what this part of the call covers, steps = exact things to do (e.g. ask the question, record the answer with write_table into a specific table/column).`;
+const FLOW_DOC = `Flow shape: {nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,steps?:[{id,label,instructions}],support_number?,table?}],edges:[{from,to}]}. RULES: exactly one entry node kind "incoming_call" (label "Outgoing call" for outbound flows) with NO steps on it; the conversation lives on topic nodes (context = what this part covers, steps = exact things to do); when a topic records data, set its \`table\` to the dataset slug AND spell out write_table usage in the step instructions; edges connect NODE ids only.`;
 
 export const createFlowTool: OperatorTool = {
   name: "create_flow",
@@ -26,15 +26,17 @@ export const createFlowTool: OperatorTool = {
     if (!owned) return { output: { error: "agent not found" } };
     try {
       const parsed = AgentFlowSchema.parse(args.flow);
+      const normalized = normalizeFlow(parsed, "outbound");
+      if ("error" in normalized) return { output: normalized };
       const row = await createFlow(ctx.orgId, String(args.agent_id), {
         name: String(args.name),
-        flow: parsed,
-        instructions: slimInstructions(String(args.persona), parsed),
+        flow: normalized.flow,
+        instructions: slimInstructions(String(args.persona), normalized.flow),
         createdBy: `operator (${ctx.email})`,
       });
       return {
         output: { ok: true, flow_id: row.id, name: row.name },
-        flow: parsed as never,
+        flow: normalized.flow as never,
         flowMeta: { id: row.id, label: row.name },
         notice: `Flow "${row.name}" created`,
       };
@@ -59,7 +61,12 @@ export const updateFlowTool: OperatorTool = {
   },
   async execute(args, ctx) {
     try {
-      const parsed = args.flow ? AgentFlowSchema.parse(args.flow) : null;
+      let parsed = args.flow ? AgentFlowSchema.parse(args.flow) : null;
+      if (parsed) {
+        const normalized = normalizeFlow(parsed, "outbound");
+        if ("error" in normalized) return { output: normalized };
+        parsed = normalized.flow;
+      }
       const instructions = parsed && args.persona ? slimInstructions(String(args.persona), parsed) : undefined;
       const ok = await updateFlow(ctx.orgId, String(args.flow_id), {
         name: args.name ? String(args.name) : undefined,

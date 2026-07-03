@@ -22,12 +22,12 @@ export class RealtimeCall {
 
   constructor(private handlers: Handlers) {}
 
-  async start(agentId: string): Promise<void> {
+  async start(agentId: string, opts: { flowId?: string | null } = {}): Promise<void> {
     this.handlers.onState("connecting");
     const res = await fetch("/api/voice/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId }),
+      body: JSON.stringify({ agentId, ...(opts.flowId ? { flowId: opts.flowId } : {}) }),
     });
     if (!res.ok) throw new Error((await res.json()).error ?? "token failed");
     const { token, callId, sessionUpdate, wsUrl } = await res.json();

@@ -9,13 +9,14 @@ import { RealtimeCall } from "./realtime";
 import { mmss } from "@/components/platform/shared";
 
 export default function CallWidget({
-  agentId, agentName, onEnded, onStarted, holdMusicUrl,
+  agentId, agentName, onEnded, onStarted, holdMusicUrl, flowId,
 }: {
   agentId: string;
   agentName: string;
   onEnded: (callId: string) => void;
   onStarted?: (callId: string) => void;
   holdMusicUrl?: string | null;
+  flowId?: string | null;
 }) {
   const [state, setState] = useState<"connecting" | "live" | "ended" | "error">("connecting");
   const [caption, setCaption] = useState("");
@@ -33,7 +34,7 @@ export default function CallWidget({
     callRef.current = call;
     let iv: ReturnType<typeof setInterval> | null = null;
     call
-      .start(agentId)
+      .start(agentId, { flowId })
       .then(() => {
         onStarted?.(call.callId);
         // Lightweight event poll: watch for hold_start/hold_end during the live call.

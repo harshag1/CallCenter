@@ -18,6 +18,8 @@ export type ToolResult = {
   flow?: Flow;
   flowMeta?: { id: string; label: string };
   notice?: string;
+  /** Client-side navigation request (e.g. jump to a freshly created experiment screen). */
+  navigate?: { tab: string; screenId?: string; experimentId?: string };
 };
 
 export type OperatorTool = {

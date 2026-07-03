@@ -203,20 +203,22 @@ export async function sessionUpdateForCall(
   };
 }
 
-/** Creates the call row (experiment variant stamped at insert) and the session.update payload. */
+/** Creates the call row (experiment variant + optional named flow stamped at insert) and the session.update payload. */
 export async function buildVoiceSession(
   agent: AgentVersionRow,
   direction: "web" | "inbound" | "outbound",
   origin: string,
-  numbers: { from?: string; to?: string } = {}
+  numbers: { from?: string; to?: string } = {},
+  opts: { flowId?: string | null } = {}
 ): Promise<{ callId: string; sessionUpdate: Record<string, unknown> }> {
   const pick = await pickVariant(agent.agent_id).catch(() => null);
   const call = await qOne<{ id: string }>(
-    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, experiment_id, variant)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, experiment_id, variant, flow_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
     [
       agent.agent_id, pick?.agentVersion ?? agent.version, direction,
       numbers.from ?? null, numbers.to ?? null, pick?.experimentId ?? null, pick?.variant ?? null,
+      opts.flowId ?? null,
     ]
   );
   const callId = call!.id;

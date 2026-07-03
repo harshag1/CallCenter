@@ -34,6 +34,8 @@ export const FlowNodeSchema = z.preprocess(
     steps: z.array(FlowStepSchema).optional(),
     // fallback node
     support_number: z.string().optional(),
+    // dataset this node records into (rendered as a table chip)
+    table: z.string().optional(),
   })
 );
 
@@ -72,4 +74,57 @@ ${topics}
 4. hold(seconds) when you need to pause (e.g. "let me check that").
 5. Keep every reply to one or two short sentences — this is a phone call.
 6. RECORDING IS SACRED: the moment you have data a step told you to record (write_table etc.), call that tool immediately — you can do it while still talking. NEVER end a call with unrecorded answers, even if the caller is saying goodbye. Record first, then say goodbye, then end_call.`;
+}
+
+
+/** Structural normalization for agent-authored flows (create_flow/update_flow).
+ *  Entry node guaranteed and step-free, legacy end nodes dropped, edges pruned to real
+ *  node ids, entry auto-connected, ≥1 topic required. */
+export function normalizeFlow(
+  input: AgentFlow,
+  kind: "inbound" | "outbound"
+): { flow: AgentFlow } | { error: string } {
+  let nodes = [...input.nodes];
+  const entryLabel = kind === "outbound" ? "Outgoing call" : "Incoming call";
+
+  // Drop legacy terminal nodes — hangup is a tool, not a place.
+  nodes = nodes.filter((n) => (n.kind as string) !== "end");
+  for (const n of nodes) {
+    if ((n.kind as string) === "start") n.kind = "incoming_call";
+    else if (!["incoming_call", "topic", "fallback"].includes(n.kind)) n.kind = "topic";
+  }
+
+  let entry = nodes.find((n) => n.kind === "incoming_call");
+  if (!entry) {
+    entry = { id: "entry", label: entryLabel, kind: "incoming_call" };
+    nodes.unshift(entry);
+  }
+  if (!/call/i.test(entry.label)) entry.label = entryLabel;
+
+  // Steps belong on topic nodes: migrate any steps stashed on the entry node.
+  if (entry.steps?.length) {
+    nodes.push({
+      id: "main",
+      label: "Conversation",
+      kind: "topic",
+      context: entry.context ?? "The main body of this call.",
+      steps: entry.steps,
+      table: entry.table,
+    });
+    delete entry.steps;
+    delete entry.context;
+  }
+
+  if (!nodes.some((n) => n.kind === "topic")) {
+    return { error: "flow needs at least one topic node (kind 'topic') carrying the conversation's context and steps — steps must live on topic nodes, not the entry node" };
+  }
+
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = input.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+  for (const n of nodes) {
+    if (n.id !== entry.id && !edges.some((e) => e.to === n.id)) {
+      edges.push({ from: entry.id, to: n.id });
+    }
+  }
+  return { flow: { nodes, edges } };
 }

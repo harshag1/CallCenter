@@ -3,6 +3,7 @@
 
 import { q, qOne } from "./db";
 import { log } from "./log";
+import type { AgentFlow } from "./flow";
 
 const L = log("experiments");
 const VARIANT_KEYS = "abcdefgh";
@@ -31,7 +32,7 @@ export async function createExperiment(
   hypothesis: string | null,
   variants: VariantInput[],
   createdBy = "operator"
-): Promise<Experiment> {
+): Promise<Experiment & { screen_id: string }> {
   if (variants.length < 2 || variants.length > VARIANT_KEYS.length) {
     throw new Error(`experiments need 2-${VARIANT_KEYS.length} variants`);
   }
@@ -72,13 +73,13 @@ export async function createExperiment(
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
     [orgId, agentId, name, hypothesis, JSON.stringify(built), createdBy]
   );
-  await q(
+  const screen = await qOne<{ id: string }>(
     `INSERT INTO screens (org_id, title, icon, kind, experiment_id, created_by)
-     VALUES ($1,$2,'flask-conical','experiment',$3,$4)`,
+     VALUES ($1,$2,'flask-conical','experiment',$3,$4) RETURNING id`,
     [orgId, name, exp!.id, createdBy]
   );
   L.info("experiment created", { orgId, data: { experimentId: exp!.id, variants: built.length } });
-  return exp!;
+  return { ...exp!, screen_id: screen!.id };
 }
 
 export async function stopExperiment(orgId: string, id: string): Promise<Experiment | null> {
@@ -114,29 +115,47 @@ export type VariantMetrics = {
   calls: number;
   scored: number;
   avg_satisfaction: number | null;
+  avg_duration_s: number | null;
   resolution: { ai_resolved: number; human_resolved: number; unresolved: number; pending: number };
+  flow: AgentFlow | null;
+};
+
+export type ExperimentCall = {
+  id: string;
+  variant: string;
+  satisfaction: number;
+  duration_s: number | null;
+  started_at: string;
+  resolution: string | null;
+  review: string | null;
 };
 
 export type ExperimentMetrics = {
   experiment: Experiment;
+  agent: { id: string; name: string; phone_number: string | null } | null;
   variants: VariantMetrics[];
   daily: { day: string; variant: string; avg_satisfaction: number; calls: number }[];
+  calls: ExperimentCall[];
 };
 
-/** Per-variant aggregates + daily satisfaction series over calls stamped with this experiment. */
+/** Per-variant aggregates (incl. variant flows) + daily series + scored call points. */
 export async function experimentMetrics(orgId: string, id: string): Promise<ExperimentMetrics | null> {
   const experiment = await qOne<Experiment>(
     "SELECT * FROM experiments WHERE id = $1 AND org_id = $2", [id, orgId]
   );
   if (!experiment) return null;
 
+  const agent = await qOne<{ id: string; name: string; phone_number: string | null }>(
+    "SELECT id, name, phone_number FROM agents WHERE id = $1", [experiment.agent_id]
+  );
   const agg = await q<{
-    variant: string; calls: number; scored: number; avg_satisfaction: number | null;
+    variant: string; calls: number; scored: number; avg_satisfaction: number | null; avg_duration_s: number | null;
     ai_resolved: number; human_resolved: number; unresolved: number;
   }>(
     `SELECT variant, count(*)::int AS calls,
             count(satisfaction)::int AS scored,
             ROUND(AVG(satisfaction)::numeric, 2)::float AS avg_satisfaction,
+            ROUND(AVG(duration_s)::numeric, 0)::float AS avg_duration_s,
             count(*) FILTER (WHERE resolution = 'ai_resolved')::int AS ai_resolved,
             count(*) FILTER (WHERE resolution = 'human_resolved')::int AS human_resolved,
             count(*) FILTER (WHERE resolution = 'unresolved')::int AS unresolved
@@ -150,6 +169,16 @@ export async function experimentMetrics(orgId: string, id: string): Promise<Expe
      GROUP BY 1, 2 ORDER BY 1`,
     [id]
   );
+  const calls = await q<ExperimentCall>(
+    `SELECT id, variant, satisfaction, duration_s, started_at, resolution, review
+     FROM calls WHERE experiment_id = $1 AND satisfaction IS NOT NULL
+     ORDER BY started_at`,
+    [id]
+  );
+  const flows = await q<{ version: number; flow: AgentFlow }>(
+    "SELECT version, flow FROM agent_versions WHERE agent_id = $1 AND version = ANY($2)",
+    [experiment.agent_id, experiment.variants.map((v) => v.agent_version)]
+  );
 
   const variants: VariantMetrics[] = experiment.variants.map((v) => {
     const a = agg.find((r) => r.variant === v.key);
@@ -160,13 +189,15 @@ export async function experimentMetrics(orgId: string, id: string): Promise<Expe
       calls: a?.calls ?? 0,
       scored: a?.scored ?? 0,
       avg_satisfaction: a?.avg_satisfaction ?? null,
+      avg_duration_s: a?.avg_duration_s ?? null,
       resolution: {
         ai_resolved: a?.ai_resolved ?? 0,
         human_resolved: a?.human_resolved ?? 0,
         unresolved: a?.unresolved ?? 0,
         pending: (a?.calls ?? 0) - (a?.ai_resolved ?? 0) - (a?.human_resolved ?? 0) - (a?.unresolved ?? 0),
       },
+      flow: flows.find((f) => f.version === v.agent_version)?.flow ?? null,
     };
   });
-  return { experiment, variants, daily };
+  return { experiment, agent, variants, daily, calls };
 }

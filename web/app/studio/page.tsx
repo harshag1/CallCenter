@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { LogOut, Phone, ArrowUp, ArrowRight, Play, Loader2, LayoutGrid } from "lucide-react";
-import { ASSISTANT_PROSE, PixelLoader, ToolLine, USER_BUBBLE } from "@/components/chat/ChatPanel";
+import { ASSISTANT_PROSE, PixelLoader, ToolGroup, USER_BUBBLE, groupItems } from "@/components/chat/ChatPanel";
 import Tooltip from "@/components/ui/Tooltip";
 import FlowCanvas from "@/components/studio/FlowCanvas";
 import TopPills from "@/components/studio/TopPills";
@@ -50,6 +50,15 @@ export default function Studio() {
   const threadId = useRef("");
   const traceCursor = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  function autoGrow() {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 330)}px`;
+    el.style.overflowY = el.scrollHeight > 330 ? "auto" : "hidden";
+  }
   const agentId = status?.onboarding.agent_id ?? null;
 
   // Boot + poll until prep (flow + number) lands; keep a slow poll for number status.
@@ -331,11 +340,9 @@ export default function Studio() {
           {flow && !trying && (
             <button
               onClick={() => { setTraceEvents([]); setTrying(true); }}
-              className={`absolute bottom-3 z-10 flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-[transform,right] duration-[240ms] hover:scale-[1.03] ${
-                traceEvents.length > 0 ? "right-[296px]" : "right-3"
-              }`}
+              className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
             >
-              <Play size={11} fill="currentColor" /> Try
+              <Play size={11} fill="currentColor" /> Test
             </button>
           )}
           {(trying || traceEvents.length > 0) && (
@@ -345,17 +352,19 @@ export default function Studio() {
 
         {/* Inline chat — flows straight on the page */}
         <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto py-5">
-          {items.map((item, i) =>
-            item.kind === "tool" ? (
-              <ToolLine key={i} name={item.name} status={item.status} />
-            ) : item.role === "user" ? (
+          {groupItems(items as never, streaming).map((g, i) =>
+            g.kind === "toolgroup" ? (
+              <ToolGroup key={i} items={g.items} live={g.live} />
+            ) : g.item.kind === "tool" ? (
+              <ToolGroup key={i} items={[g.item]} live />
+            ) : g.item.role === "user" ? (
               <div key={i} className="flex justify-end">
-                <div className={USER_BUBBLE}>{item.text}</div>
+                <div className={USER_BUBBLE}>{g.item.text}</div>
               </div>
             ) : (
               <div key={i} className="flex justify-start">
                 <div className={ASSISTANT_PROSE}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{g.item.text}</ReactMarkdown>
                 </div>
               </div>
             )
@@ -373,20 +382,21 @@ export default function Studio() {
             <div className="flex items-end gap-2">
               <textarea
                 rows={1}
+                ref={inputRef}
                 value={input}
                 placeholder={brand ? `Refine the ${brand} Agent` : "Refine your agent"}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => { setInput(e.target.value); autoGrow(); }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    if (input.trim() && !streaming) { send(input.trim()); setInput(""); }
+                    if (input.trim() && !streaming) { send(input.trim()); setInput(""); requestAnimationFrame(() => autoGrow()); }
                   }
                 }}
-                className="max-h-32 min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
+                className="min-w-0 flex-1 resize-none bg-transparent px-1 py-[7px] text-[14px] leading-[1.55] text-neutral-900 outline-none placeholder:text-neutral-400"
               />
               <button
                 aria-label="Send"
-                onClick={() => { if (input.trim() && !streaming) { send(input.trim()); setInput(""); } }}
+                onClick={() => { if (input.trim() && !streaming) { send(input.trim()); setInput(""); requestAnimationFrame(() => autoGrow()); } }}
                 disabled={!input.trim() || streaming}
                 className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full border border-neutral-900 bg-neutral-900 text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800 disabled:translate-y-0 disabled:opacity-40"
               >

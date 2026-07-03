@@ -16,7 +16,7 @@ export async function GET() {
        FROM scheduled_calls s
        JOIN agents a ON a.id = s.agent_id
        LEFT JOIN campaigns c ON c.id = s.campaign_id
-       WHERE a.org_id = $1 AND (s.status = 'pending' OR s.created_at > now() - interval '24 hours')
+       WHERE a.org_id = $1 AND s.status IN ('pending','dialing')
        ORDER BY (s.status = 'pending') DESC, s.run_at DESC LIMIT 200`,
       [session.orgId]
     ),

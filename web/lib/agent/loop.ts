@@ -19,6 +19,7 @@ export type LoopEvent =
   | { type: "surface"; surface: unknown }
   | { type: "flow"; flow: unknown; flowMeta?: { id: string; label: string } }
   | { type: "notice"; text: string }
+  | { type: "navigate"; tab: string; screenId?: string; experimentId?: string }
   | { type: "done" };
 
 async function saveMessage(orgId: string, threadId: string, role: string, content: unknown) {
@@ -88,6 +89,7 @@ export async function* runOperator(
         if (result.surface) yield { type: "surface", surface: result.surface };
         if (result.flow) yield { type: "flow", flow: result.flow, flowMeta: result.flowMeta };
         if (result.notice) yield { type: "notice", text: result.notice };
+        if (result.navigate) yield { type: "navigate", ...result.navigate };
         yield { type: "tool", name: call.name, status: "error" in (result.output as object ?? {}) ? "error" : "done" };
       } catch (e) {
         output = { error: (e as Error).message };

@@ -1,5 +1,6 @@
 // Author: Harsha Gundala
-// FlowPanel.tsx — read-only flow graph with the studio's card nodes: horizontal layout, trace ring, live hold chip.
+// FlowPanel.tsx — read-only flow graph with the studio's card nodes: horizontal layout, trace ring, live hold chip,
+// running-experiment badge and variant-diff accents for mini renders.
 
 "use client";
 
@@ -11,10 +12,12 @@ import { HoldChip } from "@/components/platform/shared";
 type FlowLike = {
   nodes: {
     id: string; label: string; kind?: string; icon?: string; active?: boolean;
-    steps?: { label: string }[]; support_number?: string;
+    steps?: { label: string }[]; support_number?: string; table?: string;
   }[];
   edges: { from: string; to: string; label?: string }[];
 };
+
+export type ExperimentBadge = { id: string; name: string; screenId: string | null };
 
 type Props = {
   flow: FlowLike | null;
@@ -22,6 +25,17 @@ type Props = {
   activeNode?: string | null;
   holdCountdown?: { until: string } | null;
   number?: string | null;
+  /** Entry node renders as an outgoing call (named outbound flows). */
+  outbound?: boolean;
+  /** Running A/B test on this agent — hangs a violet badge node off the entry node. */
+  experiment?: ExperimentBadge | null;
+  onOpenExperiment?: (exp: ExperimentBadge) => void;
+  /** Variant-diff accents (mini experiment renders). */
+  diffNodeIds?: string[];
+  diffColor?: string;
+  /** false = static mini render: no pan/zoom, page scroll passes through. */
+  interactive?: boolean;
+  fitPadding?: number;
 };
 
 const HoldNode = memo(function HoldNode({ data }: NodeProps) {
@@ -32,6 +46,7 @@ const nodeTypes = { ...studioNodeTypes, hold: HoldNode };
 
 const COL_W = 340;
 const ROW_H = 168;
+const EXPERIMENT_DY = 118;
 
 /** Legacy kinds degrade onto the studio cards: start → incoming_call, fallback stays, the rest → topic. */
 function cardType(kind?: string): "incoming_call" | "topic" | "fallback" {
@@ -45,7 +60,15 @@ function layout(
   visited: Set<string>,
   activeNode: string | null,
   holdCountdown: { until: string } | null,
-  number: string | null
+  number: string | null,
+  opts: {
+    outbound: boolean;
+    experiment: ExperimentBadge | null;
+    onOpenExperiment?: (exp: ExperimentBadge) => void;
+    diff: Set<string>;
+    diffColor?: string;
+    interactive: boolean;
+  }
 ): { nodes: Node[]; edges: Edge[] } {
   const depth = new Map<string, number>();
   const incoming = new Map(flow.nodes.map((n) => [n.id, 0]));
@@ -70,6 +93,7 @@ function layout(
   });
 
   let activePos: { x: number; y: number } | null = null;
+  let entry: { id: string; pos: { x: number; y: number } } | null = null;
   const nodes: Node[] = flow.nodes.map((n) => {
     const d = depth.get(n.id) ?? 0;
     const siblings = levels.get(d)!;
@@ -78,12 +102,17 @@ function layout(
     const active = activeNode === n.id || !!n.active || visited.has(n.id);
     const position = { x: d * COL_W, y: (idx - (siblings.length - 1) / 2) * ROW_H };
     if (activeNode === n.id) activePos = position;
+    if (type === "incoming_call" && !entry) entry = { id: n.id, pos: position };
+    const diffColor = opts.diff.has(n.id) ? opts.diffColor : undefined;
     const data =
       type === "incoming_call"
-        ? { number, numberStatus: undefined, active }
+        ? {
+            label: n.label, number, active, diffColor, outbound: opts.outbound,
+            numberStatus: number || opts.interactive ? undefined : "none", // minis never show the provisioning skeleton
+          }
         : type === "fallback"
-          ? { label: n.label, supportNumber: n.support_number ?? null, active } // no onSaveNumber → read-only card
-          : { label: n.label, icon: n.icon, steps: n.steps, active };
+          ? { label: n.label, supportNumber: n.support_number ?? null, active, diffColor } // no onSaveNumber → read-only card
+          : { label: n.label, icon: n.icon, steps: n.steps, table: n.table, active, diffColor };
     return { id: n.id, type, position, data, draggable: false, selectable: false };
   });
 
@@ -112,16 +141,49 @@ function layout(
     labelStyle: { fontSize: 9, fill: "#999" },
     animated: e.to === activeNode,
   }));
+
+  const exp = opts.experiment;
+  if (exp && entry) {
+    const anchor = entry as { id: string; pos: { x: number; y: number } };
+    nodes.push({
+      id: "__experiment",
+      type: "experiment",
+      position: { x: anchor.pos.x, y: anchor.pos.y + EXPERIMENT_DY },
+      data: {
+        label: exp.name,
+        onOpen: opts.onOpenExperiment ? () => opts.onOpenExperiment!(exp) : undefined,
+      },
+      draggable: false,
+      selectable: false,
+    });
+    edges.push({
+      id: "e__experiment",
+      source: anchor.id,
+      sourceHandle: "b",
+      target: "__experiment",
+      style: { stroke: "#8b5cf6", strokeWidth: 1.3, strokeDasharray: "4 4" },
+    });
+  }
   return { nodes, edges };
 }
 
-export default function FlowPanel({ flow, visited, activeNode, holdCountdown, number }: Props) {
+export default function FlowPanel({
+  flow, visited, activeNode, holdCountdown, number, outbound,
+  experiment, onOpenExperiment, diffNodeIds, diffColor, interactive = true, fitPadding = 0.2,
+}: Props) {
   const graph = useMemo(
     () =>
       flow?.nodes.length
-        ? layout(flow, new Set(visited ?? []), activeNode ?? null, holdCountdown ?? null, number ?? null)
+        ? layout(flow, new Set(visited ?? []), activeNode ?? null, holdCountdown ?? null, number ?? null, {
+            outbound: !!outbound,
+            experiment: experiment ?? null,
+            onOpenExperiment,
+            diff: new Set(diffNodeIds ?? []),
+            diffColor,
+            interactive,
+          })
         : null,
-    [flow, visited, activeNode, holdCountdown, number]
+    [flow, visited, activeNode, holdCountdown, number, outbound, experiment, onOpenExperiment, diffNodeIds, diffColor, interactive]
   );
   if (!graph) {
     return <div className="flex h-full items-center justify-center bg-[#f7f7f6] text-xs text-neutral-300">no flow</div>;
@@ -133,12 +195,16 @@ export default function FlowPanel({ flow, visited, activeNode, holdCountdown, nu
       edges={graph.edges}
       nodeTypes={nodeTypes}
       fitView
-      fitViewOptions={{ padding: 0.2 }}
+      fitViewOptions={{ padding: fitPadding }}
       nodesDraggable={false}
       nodesConnectable={false}
+      nodesFocusable={false}
       elementsSelectable={false}
       zoomOnScroll={false}
-      panOnDrag
+      zoomOnPinch={interactive}
+      zoomOnDoubleClick={interactive}
+      panOnDrag={interactive}
+      preventScrolling={interactive}
       proOptions={{ hideAttribution: true }}
     >
       <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.4} />

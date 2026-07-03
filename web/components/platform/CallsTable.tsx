@@ -22,7 +22,7 @@ export type CallFocus = {
   holdCountdown: { until: string } | null;
 };
 
-const HEADERS = ["", "time", "agent", "origin", "duration", "sat", "resolution", "review"];
+const HEADERS = ["", "time", "flow", "origin", "duration", "sat", "resolution", "review"];
 
 const isMissed = (c: CallRow) => c.status === "no-answer" || c.status === "failed";
 
@@ -183,13 +183,8 @@ export default function CallsTable({
                 <td className="w-8 py-2.5 pl-4 pr-0"><DirIcon d={c.direction} size={14} /></td>
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">{fmtTime(c.started_at)}</td>
                 <td className="px-4 py-2.5">
-                  <span className="inline-flex max-w-full items-center gap-1.5">
-                    {c.agent}
-                    {c.campaign_id && (
-                      <span className="max-w-[110px] truncate rounded-full border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-neutral-500">
-                        {c.campaign ?? "campaign"}
-                      </span>
-                    )}
+                  <span className="inline-flex max-w-[180px] items-center truncate">
+                    {c.flow_name ?? c.agent}
                   </span>
                 </td>
                 <td className="px-4 py-2.5">

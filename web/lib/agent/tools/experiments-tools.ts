@@ -36,8 +36,9 @@ export const createExperimentTool: OperatorTool = {
         `operator (${ctx.email})`
       );
       return {
-        output: { ok: true, experiment_id: experiment.id, variants: experiment.variants },
+        output: { ok: true, experiment_id: experiment.id, screen_id: experiment.screen_id, variants: experiment.variants },
         notice: `Experiment "${experiment.name}" is live`,
+        navigate: { tab: "screens", screenId: experiment.screen_id, experimentId: experiment.id },
       };
     } catch (e) {
       return { output: { error: (e as Error).message } };
@@ -110,7 +111,7 @@ export const experimentResults: OperatorTool = {
     return {
       output: {
         experiment: { id: m.experiment.id, name: m.experiment.name, status: m.experiment.status, hypothesis: m.experiment.hypothesis },
-        variants: m.variants,
+        variants: m.variants.map(({ flow: _flow, ...rest }) => rest), // flows are bulky — keep model context lean
         daily: m.daily,
       },
       surface,

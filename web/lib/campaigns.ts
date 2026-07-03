@@ -184,7 +184,7 @@ export async function campaignStats(orgId: string) {
        (SELECT count(*) FROM calls x WHERE x.campaign_id = c.id AND x.status IN ('failed','no-answer')) AS missed,
        (SELECT round(avg(x.satisfaction),1) FROM calls x WHERE x.campaign_id = c.id AND x.satisfaction IS NOT NULL) AS avg_satisfaction
      FROM campaigns c JOIN flows f ON f.id = c.flow_id JOIN agents a ON a.id = c.agent_id
-     WHERE c.org_id = $1 ORDER BY c.created_at DESC LIMIT 50`,
+     WHERE c.org_id = $1 AND c.status IN ('running','scheduled') ORDER BY c.created_at DESC LIMIT 50`,
     [orgId]
   );
 }

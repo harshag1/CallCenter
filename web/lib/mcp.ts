@@ -236,7 +236,7 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
   if (ctx.internetEnabled) {
     tools.push({
       name: "search",
-      description: `Search the live web for current facts${ctx.allowedDomains.length ? ` (restricted to: ${ctx.allowedDomains.join(", ")})` : ""}. Use when the caller asks something outside tool-provided context.`,
+      description: `Search the live web for current facts${ctx.allowedDomains.length ? ` (restricted to: ${ctx.allowedDomains.join(", ")})` : ""}. Takes several seconds — ALWAYS say a short natural line first ("Let me look that up for you…") so the caller is never in silence, THEN call this.`,
       inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     });
   }
@@ -459,9 +459,9 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
     case "search": {
       if (!ctx.internetEnabled) return { error: "internet access is disabled for this org" };
       const text = await research(
-        `Answer for a live phone agent: 2-4 dense factual sentences, no preamble.${ctx.allowedDomains.length ? ` Only use information from these domains: ${ctx.allowedDomains.join(", ")}.` : ""}`,
+        `Answer for a live phone agent: 2-3 dense factual sentences, no preamble. Run AT MOST ONE web search.${ctx.allowedDomains.length ? ` Only use information from these domains: ${ctx.allowedDomains.join(", ")}.` : ""}`,
         String(args.query),
-        600,
+        400,
         ctx.allowedDomains.length ? ctx.allowedDomains : undefined
       );
       return { findings: text };

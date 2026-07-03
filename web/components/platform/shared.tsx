@@ -29,6 +29,7 @@ export type CallRow = {
   campaign_id?: string | null;
   parent_call_id?: string | null;
   campaign?: string | null;
+  flow_name?: string | null;
 };
 
 export type CallEvent = { id: number; ts: string; type: string; payload: Record<string, unknown> };

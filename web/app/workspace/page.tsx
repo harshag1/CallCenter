@@ -5,8 +5,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUpLeft, CalendarClock, Home, Layers, LogOut, Phone, Table2, X } from "lucide-react";
+import { ArrowUpLeft, CalendarClock, Home, Layers, LogOut, Phone, Play, Table2, X } from "lucide-react";
 import Tooltip from "@/components/ui/Tooltip";
+import CallWidget from "@/components/call/CallWidget";
 import SurfaceView from "@/components/surface/SurfaceView";
 import FlowPanel from "@/components/flow/FlowPanel";
 import FlowPicker from "@/components/flow/FlowPicker";
@@ -28,7 +29,7 @@ type FlowLike = {
   edges: { from: string; to: string; label?: string }[];
 } | null;
 type AgentInfo = { id: string; name: string; phone_number: string | null; flow: FlowLike };
-type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike };
+type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike; agentId?: string | null };
 
 const TABS: { id: Tab; icon: typeof Home; title: string }[] = [
   { id: "home", icon: Home, title: "home" },
@@ -122,9 +123,9 @@ export default function Workspace() {
     let live = true;
     fetch(`/api/flows?agentId=${primaryAgentId}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { flows?: { id: string; name: string; kind?: string; flow: FlowLike }[] } | null) => {
+      .then((j: { flows?: { id: string; agent_id?: string; name: string; kind?: string; flow: FlowLike }[] } | null) => {
         if (!live || !j?.flows) return;
-        const list = j.flows.map((f) => ({ id: f.id, label: f.name, kind: f.kind, flow: f.flow }));
+        const list = j.flows.map((f) => ({ id: f.id, label: f.name, kind: f.kind, flow: f.flow, agentId: f.agent_id ?? null }));
         setFlows(list);
         setOpenFlow((prev) => prev ?? list[0] ?? null);
       })
@@ -194,6 +195,7 @@ export default function Workspace() {
                 label: meta.label,
                 kind: meta.id.startsWith("inbound:") ? "inbound" : "outbound",
                 flow: ev.flow,
+                agentId: meta.id.startsWith("inbound:") ? meta.id.slice("inbound:".length) : null,
               };
               setFlows((prev) =>
                 prev.some((f) => f.id === entry.id)
@@ -219,6 +221,44 @@ export default function Workspace() {
 
   const onFocus = useCallback((info: CallFocus | null) => setFocus(info), []);
   const openCall = useCallback((id: string) => { setExpandCallId(id); setTab("calls"); }, [setTab]);
+
+  // In-canvas test call of the open flow: node highlighting only (captions live in the CallWidget).
+  const [testing, setTesting] = useState(false);
+  const [testNode, setTestNode] = useState<string | null>(null);
+  const testCursor = useRef(0);
+  const testPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startTestTrace = useCallback((callId: string) => {
+    testCursor.current = 0;
+    testPoll.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/calls/${callId}/events?after=${testCursor.current}`);
+        if (!res.ok) return;
+        const { events } = await res.json();
+        for (const e of events as { id: number; type: string; payload: Record<string, unknown> }[]) {
+          testCursor.current = e.id;
+          if (e.type === "state" && e.payload.node) setTestNode(String(e.payload.node));
+        }
+      } catch { /* keep polling */ }
+    }, 1200);
+  }, []);
+
+  const endTest = useCallback(() => {
+    if (testPoll.current) clearInterval(testPoll.current);
+    testPoll.current = null;
+    setTesting(false);
+    setTestNode(null);
+  }, []);
+
+  // Outbound flows carry their own id; 'inbound:<agentId>' entries test the agent's default flow.
+  const testTarget = (() => {
+    const fallback = agents[0] ? { agentId: agents[0].id, flowId: null as string | null } : null;
+    if (!openFlow) return fallback;
+    if (openFlow.id.startsWith("inbound:")) {
+      return { agentId: openFlow.agentId ?? openFlow.id.slice("inbound:".length), flowId: null };
+    }
+    return openFlow.agentId ? { agentId: openFlow.agentId, flowId: openFlow.id } : fallback;
+  })();
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -359,9 +399,17 @@ export default function Workspace() {
               flow={panelFlow}
               number={panelNumber}
               visited={focus?.visited}
-              activeNode={focus?.activeNode}
+              activeNode={focus?.activeNode ?? testNode}
               holdCountdown={focus?.holdCountdown}
             />
+            {!focus && !testing && panelFlow && testTarget && (
+              <button
+                onClick={() => setTesting(true)}
+                className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
+              >
+                <Play size={11} fill="currentColor" /> Test
+              </button>
+            )}
           </div>
           <div className="min-h-0 flex-1">
             <ChatPanel items={items} streaming={streaming} onSend={send} />
@@ -370,6 +418,16 @@ export default function Workspace() {
       </div>
 
       <FilesModal open={filesOpen} onClose={() => setFilesOpen(false)} onCountChange={org.setDocCount} />
+
+      {testing && testTarget && (
+        <CallWidget
+          agentId={testTarget.agentId}
+          agentName={agents.find((a) => a.id === testTarget.agentId)?.name ?? openFlow?.label ?? "agent"}
+          flowId={testTarget.flowId}
+          onStarted={startTestTrace}
+          onEnded={endTest}
+        />
+      )}
 
       {notice && (
         <div className="fixed bottom-5 right-5 z-50 rounded-lg bg-neutral-900 px-4 py-2 text-xs text-white shadow-lg">

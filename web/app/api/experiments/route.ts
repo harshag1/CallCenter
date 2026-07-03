@@ -11,6 +11,7 @@ export async function GET() {
   const experiments = await q(
     `SELECT e.id, e.agent_id, e.name, e.hypothesis, e.status, e.variants, e.created_by, e.created_at,
             a.name AS agent_name,
+            (SELECT s.id FROM screens s WHERE s.experiment_id = e.id ORDER BY s.created_at LIMIT 1) AS screen_id,
             (SELECT count(*) FROM calls c WHERE c.experiment_id = e.id)::int AS calls,
             (SELECT ROUND(AVG(satisfaction)::numeric, 2)::float FROM calls c WHERE c.experiment_id = e.id) AS avg_satisfaction
      FROM experiments e JOIN agents a ON a.id = e.agent_id
