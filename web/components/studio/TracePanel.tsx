@@ -52,7 +52,6 @@ export default function TracePanel({
     >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-100 px-3">
         <PulseDot live={live} />
-        <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-neutral-400">live trace</span>
         {!live && (
           <button
             aria-label="Close trace"

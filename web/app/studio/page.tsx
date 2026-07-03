@@ -287,7 +287,7 @@ export default function Studio() {
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6">
         {/* Flow */}
         <p className="mt-5 shrink-0 text-center text-[13px] text-neutral-500">
-          Here&apos;s a starting point for your new agent — edit it with the chat below, or try it out.
+          Here&apos;s a starting point for your new agent. Edit it with the chat below, or try it out.
         </p>
         <div className="relative mt-3 h-[44vh] shrink-0 overflow-hidden rounded-[24px] border border-neutral-200">
           {status && (
