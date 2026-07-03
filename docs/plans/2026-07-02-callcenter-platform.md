@@ -1,7 +1,5 @@
 # Harsha's Amazing Call Center — Platform Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan phase-by-phase. Each phase produces working, testable software; write the per-task TDD breakdown at the top of each phase before executing it. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** An agent-centric enterprise voice-agent builder: a Grok-powered operator agent with maximal authority — it generates UIs, builds and deploys tools, creates storage tables, edits voice-agent prompts/flows, inspects calls/logs/recordings, places outbound calls, and schedules recalls — all driven from a single chat box in an incredibly clean, all-white UI.
 
 **Architecture:** Next.js (App Router) on Vercel, Supabase Postgres + Storage, Grok everywhere: `grok-voice-latest` over the xAI Realtime WebSocket for calls (browser via ephemeral tokens, phones via xAI SIP + Twilio), and `grok-4-latest` as the operator agent running a server-side tool loop. Agent-minted tools are deployed as Vercel edge functions via the Vercel API and exposed to voice sessions through our own MCP gateway — which xAI executes server-side, so custom tools work identically on browser calls and phone calls with zero long-lived infrastructure on our side.
@@ -373,7 +371,7 @@ MCP gateway (`/api/mcp`): streamable-HTTP MCP server; `tools/list` reflects the 
 
 ## 9. Implementation Phases
 
-Each phase ends with working, deployable software and a git push. Expand each into bite-sized TDD tasks at execution time (per superpowers:writing-plans granularity rules).
+Each phase ends with working, deployable software and a git push. Expand each into bite-sized TDD tasks at execution time.
 
 - [ ] **Phase 0 — Foundation:** migrations runner + schema above; `lib/db.ts`, `lib/log.ts`, `lib/vault.ts` (+ unit tests for vault/HMAC); Vercel project "CallCenter" (rootDirectory=web) + `callcenter-tools` project; CI-less deploy via CLI.
 - [ ] **Phase 1 — Auth:** OTP routes + login page + middleware; Resend wiring; session cookie; logout.
@@ -395,4 +393,4 @@ Each phase ends with working, deployable software and a git push. Expand each in
 5. **Resend domain check** — the provided key must belong to the account where `auth.meshia.io` is verified, else sends from `callcenter@auth.meshia.io` will 403. One test send confirms.
 6. Covered, for the record: web search (xAI built-in — no extra key), scheduling (Vercel cron — no extra service), flow chart / UI (no external service), env-vault + cron + MCP secrets (generated, in `.env`).
 
-Security note: all keys arrived in plaintext chat — `.env` is gitignored (verified), and everything should be rotated before real traffic.
+Security note: `.env` is gitignored (verified); all provisioned keys should be rotated before real traffic.

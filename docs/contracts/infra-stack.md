@@ -1,6 +1,6 @@
 # Infra Stack Contracts — Modal CLIP · S3 · TurboPuffer · Three.js
 
-Target architecture (primary path), with resilient fallback to the previous stack when env is absent — the platform must keep working in both modes.
+Target architecture (primary path), with a resilient fallback stack when env is absent — the platform keeps working in both modes.
 
 ## Env vars
 
@@ -30,11 +30,3 @@ All uploaded files store raw bytes to **S3** (`orgId/documentId/filename` keys) 
 ## Flow viewer
 
 React Flow replaced by a **Three.js** renderer (@react-three/fiber + drei): orthographic camera (2D presentation identical to today — dot grid, white cards, bezier edges, rings, badges), nodes as drei `<Html>` wrapping the existing card components, pan/zoom via camera, all existing props/behaviors preserved (onNodeClick, active/visited, hold chip, experiment badge, outbound labels, diff rings, mini non-interactive mode).
-
-## Ownership
-
-- modal-rag: modal/** (Python service), lib/knowledge.ts, lib/vector.ts (new), docs env
-- s3-storage: lib/storage.ts (new), migration (documents.s3_key), app/api/knowledge/route.ts (storage branch only), app/api/files/[id]/raw
-- three-flow: components/flow/ThreeFlow.tsx (new), components/studio/FlowCanvas.tsx, components/flow/FlowPanel.tsx
-
-Commit your own scoped work with clear messages. **Never push.**
