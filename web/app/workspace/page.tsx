@@ -31,7 +31,7 @@ type FlowLike = {
   edges: { from: string; to: string; label?: string }[];
 } | null;
 type AgentInfo = { id: string; name: string; phone_number: string | null; flow: FlowLike };
-type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike; agentId?: string | null };
+type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike; agentId?: string | null; instructions?: string | null };
 type ExperimentInfo = { id: string; agent_id: string; name: string; status: string; screen_id: string | null };
 
 const ALL_TABS: Tab[] = ["home", "calls", "tables", "screens", "experiments", "scheduled"];
@@ -165,9 +165,9 @@ export default function Workspace() {
     let live = true;
     fetch(`/api/flows?agentId=${primaryAgentId}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { flows?: { id: string; agent_id?: string; name: string; kind?: string; flow: FlowLike }[] } | null) => {
+      .then((j: { flows?: { id: string; agent_id?: string; name: string; kind?: string; flow: FlowLike; instructions?: string | null }[] } | null) => {
         if (!live || !j?.flows) return;
-        const list = j.flows.map((f) => ({ id: f.id, label: f.name, kind: f.kind, flow: f.flow, agentId: f.agent_id ?? null }));
+        const list = j.flows.map((f) => ({ id: f.id, label: f.name, kind: f.kind, flow: f.flow, agentId: f.agent_id ?? null, instructions: f.instructions ?? null }));
         setFlows(list);
         setOpenFlow((prev) => prev ?? list[0] ?? null);
       })
@@ -525,7 +525,29 @@ export default function Workspace() {
               onNodeClick={focus ? undefined : handleNodeClick}
             />
             {editNode && !focus && (
-              <NodeEditor node={editNode} onSave={saveNode} onClose={() => setEditNode(null)} />
+              <NodeEditor
+                node={editNode}
+                agentId={
+                  !openFlow || openFlow.id.startsWith("inbound:")
+                    ? openFlow?.agentId ?? openFlow?.id.slice("inbound:".length) ?? agents[0]?.id ?? null
+                    : null
+                }
+                flowInstructions={
+                  openFlow && !openFlow.id.startsWith("inbound:") ? openFlow.instructions ?? "" : null
+                }
+                onSave={saveNode}
+                onSaveInstructions={async (instructions) => {
+                  const agentId = openFlow?.agentId ?? openFlow?.id.slice("inbound:".length) ?? agents[0]?.id;
+                  if (!agentId) return false;
+                  const r = await fetch(`/api/agents/${agentId}/flow-node`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ instructions }),
+                  });
+                  return r.ok;
+                }}
+                onClose={() => setEditNode(null)}
+              />
             )}
             {!focus && !testing && panelFlow && testTarget && (
               <button
