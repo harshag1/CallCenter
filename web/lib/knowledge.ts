@@ -26,14 +26,10 @@ async function embed(texts: string[]): Promise<number[][]> {
 async function extractText(buf: Buffer, mime: string, filename: string): Promise<string> {
   const ext = filename.toLowerCase().split(".").pop() ?? "";
   if (mime.includes("pdf") || ext === "pdf") {
-    const { PDFParse } = await import("pdf-parse");
-    const parser = new PDFParse({ data: new Uint8Array(buf) });
-    try {
-      const result = await parser.getText();
-      return result.text;
-    } finally {
-      await parser.destroy();
-    }
+    // unpdf ships a serverless pdfjs build — no DOM globals needed (pdf-parse broke on Vercel).
+    const { extractText } = await import("unpdf");
+    const { text } = await extractText(new Uint8Array(buf), { mergePages: true });
+    return Array.isArray(text) ? text.join("\n") : text;
   }
   if (mime.includes("wordprocessingml") || ext === "docx") {
     const mammoth = await import("mammoth");
