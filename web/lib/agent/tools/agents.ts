@@ -54,7 +54,11 @@ export const updateAgent: OperatorTool = {
       if ("error" in healed) return { output: healed };
       flow = healed.flow;
     }
-    const next = cur.version + 1;
+    // Next version = MAX+1, not active+1 — active may have been reverted below existing versions.
+    const nextRow = await qOne<{ next: number }>(
+      "SELECT COALESCE(MAX(version),0) + 1 AS next FROM agent_versions WHERE agent_id = $1", [args.agent_id]
+    );
+    const next = nextRow!.next;
     await q(
       `INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, tool_ids, mcp_server_ids, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
