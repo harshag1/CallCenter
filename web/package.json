@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1079.0",
+    "@aws-sdk/s3-request-presigner": "^3.1079.0",
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.6.1",
     "@vercel/functions": "^3.7.5",
     "@xyflow/react": "^12.11.1",
     "lucide-react": "^1.23.0",
@@ -24,6 +28,7 @@
     "recharts": "^3.9.1",
     "remark-gfm": "^4.0.1",
     "resend": "^6.16.0",
+    "three": "^0.185.1",
     "unpdf": "^1.6.2",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
@@ -35,6 +40,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.185.0",
     "@types/ws": "^8.18.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
