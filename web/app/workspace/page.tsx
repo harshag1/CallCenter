@@ -5,37 +5,40 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUpLeft, CalendarClock, Home, Layers, LogOut, Phone, Play, Table2, X } from "lucide-react";
+import { ArrowUpLeft, CalendarClock, FlaskConical, Home, Layers, LogOut, Phone, Play, Table2, X } from "lucide-react";
 import Tooltip from "@/components/ui/Tooltip";
 import CallWidget from "@/components/call/CallWidget";
 import SurfaceView from "@/components/surface/SurfaceView";
-import FlowPanel from "@/components/flow/FlowPanel";
+import FlowPanel, { type ExperimentBadge } from "@/components/flow/FlowPanel";
 import FlowPicker from "@/components/flow/FlowPicker";
 import ChatPanel, { type ChatItem } from "@/components/chat/ChatPanel";
 import HomeBoard from "@/components/platform/HomeBoard";
 import CallsTable, { type CallFocus } from "@/components/platform/CallsTable";
 import TablesView from "@/components/platform/TablesView";
-import ScreensView from "@/components/platform/ScreensView";
+import ScreensView, { type Screen } from "@/components/platform/ScreensView";
 import ScheduledView from "@/components/platform/ScheduledView";
 import OrgPills from "@/components/studio/OrgPills";
 import FilesModal from "@/components/studio/FilesModal";
+import NodeEditor from "@/components/studio/NodeEditor";
+import type { FlowNode } from "@/lib/flow";
 import { useScheduled } from "@/components/hooks/useScheduled";
 import { useOrgSettings } from "@/components/hooks/useOrgSettings";
 import type { Surface } from "@/lib/surface-dsl";
 
-type Tab = "home" | "calls" | "tables" | "screens" | "scheduled";
+type Tab = "home" | "calls" | "tables" | "screens" | "experiments" | "scheduled";
 type FlowLike = {
   nodes: { id: string; label: string; kind?: string }[];
   edges: { from: string; to: string; label?: string }[];
 } | null;
 type AgentInfo = { id: string; name: string; phone_number: string | null; flow: FlowLike };
 type FlowEntry = { id: string; label: string; kind?: string; flow: FlowLike; agentId?: string | null };
+type ExperimentInfo = { id: string; agent_id: string; name: string; status: string; screen_id: string | null };
 
-const TABS: { id: Tab; icon: typeof Home; title: string }[] = [
+const ALL_TABS: Tab[] = ["home", "calls", "tables", "screens", "experiments", "scheduled"];
+const BASE_TABS: { id: Tab; icon: typeof Home; title: string }[] = [
   { id: "home", icon: Home, title: "home" },
   { id: "calls", icon: Phone, title: "calls" },
   { id: "tables", icon: Table2, title: "tables" },
-  { id: "screens", icon: Layers, title: "screens" },
 ];
 
 export default function Workspace() {
@@ -51,6 +54,9 @@ export default function Workspace() {
   const [focus, setFocus] = useState<CallFocus | null>(null);   // expanded call trace
   const [callFlow, setCallFlow] = useState<FlowLike>(null);     // exact version flow of the focused call
   const [expandCallId, setExpandCallId] = useState<string | null>(null);
+  const [screens, setScreens] = useState<Screen[]>([]);
+  const [screenId, setScreenId] = useState<string | null>(null); // deep-linked screen within screens/experiments tab
+  const [experiments, setExperiments] = useState<ExperimentInfo[]>([]);
   const [filesOpen, setFilesOpen] = useState(false);
   const [sidebarW, setSidebarW] = useState(420);
   const threadId = useRef("");
@@ -89,15 +95,51 @@ export default function Workspace() {
   const setTab = useCallback((t: Tab) => {
     setTabState(t);
     setSurface(null);
+    setScreenId(null);
     if (t !== "calls") setExpandCallId(null);
     window.history.replaceState(null, "", `?tab=${t}`);
   }, []);
 
+  /** Jump straight to a screen/experiment page (navigate events, flow badge, deep links). */
+  const openScreen = useCallback((t: "screens" | "experiments", id: string) => {
+    setSurface(null);
+    setTabState(t);
+    setScreenId(id);
+    setExpandCallId(null);
+    window.history.replaceState(null, "", `?tab=${t}&screen=${id}`);
+  }, []);
+
+  const syncScreenUrl = useCallback((id: string | null) => {
+    setScreenId(id);
+    const t = new URLSearchParams(window.location.search).get("tab") ?? "screens";
+    window.history.replaceState(null, "", id ? `?tab=${t}&screen=${id}` : `?tab=${t}`);
+  }, []);
+
+  const loadScreens = useCallback(() => {
+    fetch("/api/screens")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => j && setScreens(Array.isArray(j) ? j : j.screens ?? []))
+      .catch(() => {});
+    fetch("/api/experiments")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => j?.experiments && setExperiments(j.experiments))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadScreens();
+    const iv = setInterval(loadScreens, 12_000);
+    return () => clearInterval(iv);
+  }, [loadScreens]);
+
   useEffect(() => {
     threadId.current = localStorage.getItem("threadId") ?? crypto.randomUUID();
     localStorage.setItem("threadId", threadId.current);
-    const t = new URLSearchParams(window.location.search).get("tab") as Tab | null;
-    if (t && (TABS.some((x) => x.id === t) || t === "scheduled")) setTabState(t);
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get("tab") as Tab | null;
+    if (t && ALL_TABS.includes(t)) setTabState(t);
+    const s = params.get("screen");
+    if (s) setScreenId(s);
     fetch("/api/workspace")
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((j) => setAgents(j.agents ?? []))
@@ -206,6 +248,12 @@ export default function Workspace() {
             } else {
               setOpenFlow({ id: "adhoc", label: "operator flow", flow: ev.flow });
             }
+          } else if (ev.type === "navigate") {
+            // Tool created something screen-shaped — land the user on it.
+            const t: "screens" | "experiments" = ev.tab === "experiments" ? "experiments" : "screens";
+            if (ev.screenId) openScreen(t, ev.screenId);
+            else setTab(t);
+            loadScreens();
           } else if (ev.type === "notice") {
             setNotice(ev.text);
             setTimeout(() => setNotice(null), 3500);
@@ -217,10 +265,10 @@ export default function Workspace() {
     } finally {
       setStreaming(false);
     }
-  }, [agents, focusAgentId, openFlow]);
+  }, [agents, focusAgentId, openFlow, openScreen, setTab, loadScreens]);
 
   const onFocus = useCallback((info: CallFocus | null) => setFocus(info), []);
-  const openCall = useCallback((id: string) => { setExpandCallId(id); setTab("calls"); }, [setTab]);
+  const openCall = useCallback((id: string) => { setExpandCallId(id); setTabState("calls"); setSurface(null); setScreenId(null); window.history.replaceState(null, "", "?tab=calls"); }, []);
 
   // In-canvas test call of the open flow: node highlighting only (captions live in the CallWidget).
   const [testing, setTesting] = useState(false);
@@ -272,6 +320,66 @@ export default function Workspace() {
     ? agents.find((a) => a.id === focus.agentId)?.phone_number ?? null
     : agents[0]?.phone_number ?? null;
 
+  // Running A/B test on the agent behind the visible flow → violet badge node in the graph.
+  const panelAgentId =
+    focusAgentId
+    ?? openFlow?.agentId
+    ?? (openFlow?.id.startsWith("inbound:") ? openFlow.id.slice("inbound:".length) : null)
+    ?? agents[0]?.id
+    ?? null;
+  const runningExp = experiments.find((e) => e.status === "running" && e.agent_id === panelAgentId);
+  const panelExperiment: ExperimentBadge | null = runningExp
+    ? { id: runningExp.id, name: runningExp.name, screenId: runningExp.screen_id }
+    : null;
+  const onOpenExperiment = useCallback((exp: ExperimentBadge) => {
+    if (exp.screenId) openScreen("experiments", exp.screenId);
+  }, [openScreen]);
+
+  // Click-to-edit flow nodes (live views only — a focused call shows a historical version).
+  const [editNode, setEditNode] = useState<FlowNode | null>(null);
+  const handleNodeClick = useCallback((n: { id: string; label: string; kind?: string }) => {
+    if (focus) return;
+    setEditNode(n as FlowNode);
+  }, [focus]);
+  useEffect(() => { setEditNode(null); }, [openFlow?.id, focusCallId]); // context switch closes the editor
+
+  const saveNode = useCallback(async (patch: FlowNode): Promise<boolean> => {
+    const inbound = !openFlow || openFlow.id.startsWith("inbound:");
+    const url = inbound
+      ? `/api/agents/${openFlow?.agentId ?? openFlow?.id.slice("inbound:".length) ?? agents[0]?.id}/flow-node`
+      : `/api/flows/${openFlow.id}`;
+    try {
+      const r = await fetch(url, {
+        method: inbound ? "POST" : "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node: patch }),
+      });
+      if (!r.ok) return false;
+      const j = await r.json() as { flow?: FlowLike };
+      if (j.flow) {
+        const flow = j.flow;
+        const openId = openFlow?.id;
+        setOpenFlow((prev) => (prev ? { ...prev, flow } : prev));
+        if (openId) setFlows((prev) => prev.map((f) => (f.id === openId ? { ...f, flow } : f)));
+        if (inbound) {
+          const agentId = openFlow?.agentId ?? openFlow?.id.slice("inbound:".length) ?? agents[0]?.id;
+          setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, flow } : a)));
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, [openFlow, agents]);
+
+  const plainScreenCount = screens.filter((s) => s.kind !== "experiment").length;
+  const experimentScreenCount = screens.filter((s) => s.kind === "experiment").length;
+  const railTabs: { id: Tab; icon: typeof Home; title: string }[] = [
+    ...BASE_TABS,
+    ...(plainScreenCount > 0 || tab === "screens" ? [{ id: "screens" as Tab, icon: Layers, title: "screens" }] : []),
+    ...(experimentScreenCount > 0 || tab === "experiments" ? [{ id: "experiments" as Tab, icon: FlaskConical, title: "experiments" }] : []),
+  ];
+
   return (
     <div className="flex h-screen flex-col bg-white">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-5">
@@ -289,7 +397,7 @@ export default function Workspace() {
       <div className="flex min-h-0 flex-1">
         {/* Icon rail */}
         <nav className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-[var(--border)] py-3">
-          {TABS.map(({ id, icon: Icon, title }) => (
+          {railTabs.map(({ id, icon: Icon, title }) => (
             <Tooltip key={id} content={title} placement="right">
               <button
                 onClick={() => setTab(id)}
@@ -353,7 +461,15 @@ export default function Workspace() {
             ) : tab === "scheduled" ? (
               <ScheduledView scheduled={scheduled} campaigns={campaigns} reload={reloadScheduled} />
             ) : (
-              <ScreensView send={send} />
+              <ScreensView
+                send={send}
+                screens={screens}
+                kind={tab === "experiments" ? "experiment" : "screen"}
+                openScreenId={screenId}
+                onScreenChange={syncScreenUrl}
+                onOpenCall={openCall}
+                reload={loadScreens}
+              />
             )}
           </div>
         </main>
@@ -401,7 +517,14 @@ export default function Workspace() {
               visited={focus?.visited}
               activeNode={focus?.activeNode ?? testNode}
               holdCountdown={focus?.holdCountdown}
+              outbound={!focus && openFlow?.kind === "outbound"}
+              experiment={panelExperiment}
+              onOpenExperiment={onOpenExperiment}
+              onNodeClick={focus ? undefined : handleNodeClick}
             />
+            {editNode && !focus && (
+              <NodeEditor node={editNode} onSave={saveNode} onClose={() => setEditNode(null)} />
+            )}
             {!focus && !testing && panelFlow && testTarget && (
               <button
                 onClick={() => setTesting(true)}

@@ -30,6 +30,8 @@ type Props = {
   /** Running A/B test on this agent — hangs a violet badge node off the entry node. */
   experiment?: ExperimentBadge | null;
   onOpenExperiment?: (exp: ExperimentBadge) => void;
+  /** Click on a regular flow node (experiment badge keeps its own navigate behavior). */
+  onNodeClick?: (node: FlowLike["nodes"][number]) => void;
   /** Variant-diff accents (mini experiment renders). */
   diffNodeIds?: string[];
   diffColor?: string;
@@ -169,7 +171,7 @@ function layout(
 
 export default function FlowPanel({
   flow, visited, activeNode, holdCountdown, number, outbound,
-  experiment, onOpenExperiment, diffNodeIds, diffColor, interactive = true, fitPadding = 0.2,
+  experiment, onOpenExperiment, onNodeClick, diffNodeIds, diffColor, interactive = true, fitPadding = 0.2,
 }: Props) {
   const graph = useMemo(
     () =>
@@ -196,6 +198,20 @@ export default function FlowPanel({
       nodeTypes={nodeTypes}
       fitView
       fitViewOptions={{ padding: fitPadding }}
+      minZoom={0.15}
+      onNodeClick={
+        (experiment && onOpenExperiment) || onNodeClick
+          ? (_, node) => {
+              if (node.id === "__experiment") {
+                if (experiment && onOpenExperiment) onOpenExperiment(experiment);
+                return;
+              }
+              if (node.id === "__hold" || !onNodeClick) return;
+              const src = flow?.nodes.find((n) => n.id === node.id);
+              if (src) onNodeClick(src);
+            }
+          : undefined
+      }
       nodesDraggable={false}
       nodesConnectable={false}
       nodesFocusable={false}

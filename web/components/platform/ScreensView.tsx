@@ -1,15 +1,15 @@
 // Author: Harsha Gundala
-// ScreensView.tsx — Notion-like screens: saved surfaces + grouped experiment dashboards.
+// ScreensView.tsx — kind-scoped screen list (plain surfaces or experiment dashboards), deep-linkable.
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronLeft, FileText, FlaskConical, Layout, LayoutDashboard, Table2, X } from "lucide-react";
 import SurfaceView from "@/components/surface/SurfaceView";
 import ExperimentDashboard from "./ExperimentDashboard";
 import type { Surface } from "@/lib/surface-dsl";
 
-type Screen = {
+export type Screen = {
   id: string; title: string; icon: string; kind: string;
   spec: { blocks?: unknown[] } | null; experiment_id: string | null;
 };
@@ -19,28 +19,53 @@ const ICONS: Record<string, typeof Layout> = {
   table: Table2, flask: FlaskConical, "flask-conical": FlaskConical,
 };
 
-export default function ScreensView({ send }: { send: (prompt: string) => void }) {
-  const [screens, setScreens] = useState<Screen[]>([]);
-  const [open, setOpen] = useState<Screen | null>(null);
+export default function ScreensView({
+  send, screens, kind, openScreenId, onScreenChange, onOpenCall, reload,
+}: {
+  send: (prompt: string) => void;
+  screens: Screen[];
+  /** Which slice this tab shows: plain screens or experiment dashboards. */
+  kind: "screen" | "experiment";
+  /** Deep-link target (navigate events, ?screen=): opened as soon as it appears in the list. */
+  openScreenId?: string | null;
+  onScreenChange?: (id: string | null) => void;
+  onOpenCall?: (callId: string) => void;
+  reload?: () => void;
+}) {
+  // undefined → follow the deep link; null → explicitly closed; string → manually opened.
+  const [manualId, setManualId] = useState<string | null | undefined>(undefined);
+  const [prevDeepLink, setPrevDeepLink] = useState(openScreenId);
+  if (openScreenId !== prevDeepLink) {
+    // New deep-link target takes over any manual navigation (adjust-during-render).
+    setPrevDeepLink(openScreenId);
+    setManualId(undefined);
+  }
+  const currentId = manualId === undefined ? openScreenId ?? null : manualId;
+  const open = currentId ? screens.find((s) => s.id === currentId) ?? null : null;
 
+  const setOpen = useCallback((s: Screen | null) => {
+    setManualId(s?.id ?? null);
+    onScreenChange?.(s?.id ?? null);
+  }, [onScreenChange]);
+
+  const list = screens.filter((s) => (kind === "experiment" ? s.kind === "experiment" : s.kind !== "experiment"));
+
+  // Deep-linked screen not in the list yet (just created) → refetch.
   useEffect(() => {
-    let live = true;
-    const load = async () => {
-      try {
-        const r = await fetch("/api/screens");
-        if (!r.ok) return;
-        const j = await r.json();
-        if (live) setScreens(Array.isArray(j) ? j : j.screens ?? []);
-      } catch { /* keep list */ }
-    };
-    void load();
-    const iv = setInterval(load, 12_000);
-    return () => { live = false; clearInterval(iv); };
-  }, []);
+    if (currentId && !screens.some((s) => s.id === currentId)) reload?.();
+  }, [currentId, screens, reload]);
 
   if (open) {
-    const Icon = open.kind === "experiment" ? FlaskConical : ICONS[open.icon] ?? Layout;
-    const isExperiment = open.kind === "experiment" && open.experiment_id;
+    if (open.kind === "experiment" && open.experiment_id) {
+      return (
+        <ExperimentDashboard
+          experimentId={open.experiment_id}
+          onBack={() => setOpen(null)}
+          onOpenCall={onOpenCall}
+        />
+      );
+    }
+    const Icon = ICONS[open.icon] ?? Layout;
     return (
       <div>
         <div className="mb-5 flex items-center gap-2">
@@ -48,37 +73,22 @@ export default function ScreensView({ send }: { send: (prompt: string) => void }
             <ChevronLeft size={15} />
           </button>
           <Icon size={14} className="text-neutral-500" />
-          {isExperiment && <span className="text-[13px] font-semibold">{open.title}</span>}
         </div>
-        {isExperiment ? (
-          <ExperimentDashboard experimentId={open.experiment_id!} send={send} />
-        ) : (
-          <SurfaceView surface={{ title: open.title, blocks: (open.spec?.blocks ?? []) as Surface["blocks"] }} send={send} />
-        )}
+        <SurfaceView surface={{ title: open.title, blocks: (open.spec?.blocks ?? []) as Surface["blocks"] }} send={send} />
       </div>
     );
   }
 
-  const plain = screens.filter((s) => s.kind !== "experiment");
-  const experiments = screens.filter((s) => s.kind === "experiment");
-
   return (
-    <div className="max-w-lg space-y-7">
-      <section>
-        <div className="mb-2 text-[11px] uppercase tracking-wide text-neutral-400">screens</div>
-        {plain.map((s) => <ScreenRow key={s.id} s={s} onOpen={setOpen} />)}
-        {!plain.length && (
-          <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
-            <X size={18} strokeWidth={1.8} className="text-neutral-300" />
-            <span className="text-xs text-neutral-400">Request A/B tests or special views from the agent</span>
-          </div>
-        )}
-      </section>
-      {experiments.length > 0 && (
-        <section>
-          <div className="mb-2 text-[11px] uppercase tracking-wide text-neutral-400">experiments</div>
-          {experiments.map((s) => <ScreenRow key={s.id} s={s} onOpen={setOpen} />)}
-        </section>
+    <div className="max-w-lg">
+      {list.map((s) => <ScreenRow key={s.id} s={s} onOpen={setOpen} />)}
+      {!list.length && (
+        <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
+          <X size={18} strokeWidth={1.8} className="text-neutral-300" />
+          <span className="text-xs text-neutral-400">
+            {kind === "experiment" ? "Ask the agent to run an A/B test" : "Request special views from the agent"}
+          </span>
+        </div>
       )}
     </div>
   );

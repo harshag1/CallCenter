@@ -36,6 +36,7 @@ export const createScreen: OperatorTool = {
       output: { ok: true, screen_id: screen!.id },
       surface: parsed.data,
       notice: `Screen "${parsed.data.title}" created`,
+      navigate: { tab: "screens", screenId: screen!.id },
     };
   },
 };

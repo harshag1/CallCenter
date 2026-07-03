@@ -138,6 +138,10 @@ export type ExperimentMetrics = {
   calls: ExperimentCall[];
 };
 
+/** Only calls with a real conversation count — instant hangups/no-answers stamped with a variant are noise. */
+const ENGAGED =
+  "EXISTS (SELECT 1 FROM call_events ev WHERE ev.call_id = calls.id AND ev.type = 'user_said')";
+
 /** Per-variant aggregates (incl. variant flows) + daily series + scored call points. */
 export async function experimentMetrics(orgId: string, id: string): Promise<ExperimentMetrics | null> {
   const experiment = await qOne<Experiment>(
@@ -159,19 +163,19 @@ export async function experimentMetrics(orgId: string, id: string): Promise<Expe
             count(*) FILTER (WHERE resolution = 'ai_resolved')::int AS ai_resolved,
             count(*) FILTER (WHERE resolution = 'human_resolved')::int AS human_resolved,
             count(*) FILTER (WHERE resolution = 'unresolved')::int AS unresolved
-     FROM calls WHERE experiment_id = $1 GROUP BY variant`,
+     FROM calls WHERE experiment_id = $1 AND ${ENGAGED} GROUP BY variant`,
     [id]
   );
   const daily = await q<{ day: string; variant: string; avg_satisfaction: number; calls: number }>(
     `SELECT to_char(date_trunc('day', started_at), 'YYYY-MM-DD') AS day, variant,
             ROUND(AVG(satisfaction)::numeric, 2)::float AS avg_satisfaction, count(*)::int AS calls
-     FROM calls WHERE experiment_id = $1 AND satisfaction IS NOT NULL
+     FROM calls WHERE experiment_id = $1 AND satisfaction IS NOT NULL AND ${ENGAGED}
      GROUP BY 1, 2 ORDER BY 1`,
     [id]
   );
   const calls = await q<ExperimentCall>(
     `SELECT id, variant, satisfaction, duration_s, started_at, resolution, review
-     FROM calls WHERE experiment_id = $1 AND satisfaction IS NOT NULL
+     FROM calls WHERE experiment_id = $1 AND satisfaction IS NOT NULL AND ${ENGAGED}
      ORDER BY started_at`,
     [id]
   );

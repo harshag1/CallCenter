@@ -106,11 +106,19 @@ export default function Tooltip({
               style={{
                 ...style,
                 ...(variant === "text"
-                  ? { maxWidth: "min(240px, calc(100vw - 16px))", minWidth: 120, whiteSpace: "normal" }
+                  ? { maxWidth: "min(220px, calc(100vw - 16px))", width: "max-content", whiteSpace: "normal" }
                   : { width }),
               }}
             >
-              {content}
+              {variant === "text" && typeof content === "string" ? (
+                <span
+                  className={/^\S+$/.test(content.trim()) ? "font-semibold whitespace-nowrap" : undefined}
+                >
+                  {content.trim().charAt(0).toUpperCase() + content.trim().slice(1)}
+                </span>
+              ) : (
+                content
+              )}
             </span>,
             document.body,
           )
