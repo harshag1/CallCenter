@@ -30,11 +30,28 @@ const KINDS = new Set([
   "stat_row", "table", "chart", "tabs", "transcript", "audio", "code", "form", "markdown", "actions",
 ]);
 
-/** Models naturally emit `type` for the discriminator — accept it as an alias for `kind`. */
+const CHART_TYPES = new Set(["line", "bar", "area", "donut", "pie"]);
+
+/** Models naturally emit `type` for the discriminator, or a chart type as the kind — rescue both. */
 function normalizeBlock(v: unknown): unknown {
-  if (v && typeof v === "object" && !("kind" in v) && KINDS.has((v as { type?: string }).type ?? "")) {
-    const { type, ...rest } = v as Record<string, unknown>;
-    return { kind: type, ...rest };
+  if (!v || typeof v !== "object") return v;
+  const obj = v as Record<string, unknown>;
+  const kind = typeof obj.kind === "string" ? obj.kind : undefined;
+  const type = typeof obj.type === "string" ? obj.type : undefined;
+
+  // {kind:"donut", ...} → {kind:"chart", type:"donut", ...}
+  if (kind && CHART_TYPES.has(kind)) {
+    return { ...obj, kind: "chart", type: kind === "pie" ? "donut" : kind };
+  }
+  // pie is rendered as donut
+  if (kind === "chart" && type === "pie") return { ...obj, type: "donut" };
+  if (!kind && type) {
+    if (KINDS.has(type)) {
+      const { type: t, ...rest } = obj;
+      return { kind: t, ...rest };
+    }
+    // {type:"donut"} with no kind → chart
+    if (CHART_TYPES.has(type)) return { ...obj, kind: "chart", type: type === "pie" ? "donut" : type };
   }
   return v;
 }
