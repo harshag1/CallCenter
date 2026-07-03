@@ -276,7 +276,6 @@ function SatGlance({ n }: { n: number }) {
 
 function CallDetail({ call, events }: { call: CallRow; events: CallEvent[] }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const transcriptRef = useRef<HTMLDivElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [posMs, setPosMs] = useState(0);
@@ -329,7 +328,6 @@ function CallDetail({ call, events }: { call: CallRow; events: CallEvent[] }) {
 
   // Live calls: keep the newest turn in view as events stream in.
   useEffect(() => {
-    if (call.status === "active") transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight });
   }, [events.length, call.status]);
 
   // Playback: keep the active utterance in view.
@@ -371,26 +369,12 @@ function CallDetail({ call, events }: { call: CallRow; events: CallEvent[] }) {
           audioRef={audioUrl ? audioRef : undefined}
           seekable={!!audioUrl}
           onSeek={seek}
+          captions={{
+            colorFor: (k) => speakerTextColor(k, call.satisfaction),
+            activeEvId: activeId,
+            onClickSeg: audioUrl ? (seg) => seek(seg.startMs / 1000) : undefined,
+          }}
         />
-      </div>
-      <div ref={transcriptRef} className="mt-3 max-h-[420px] space-y-0.5 overflow-y-auto">
-        {lines.map((l) => (
-          <button
-            key={l.evId}
-            id={`utt-${l.evId}`}
-            onClick={() => seek(l.startMs / 1000)}
-            disabled={!audioUrl}
-            className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1 text-left transition-colors duration-[160ms] ${
-              l.evId === activeId ? "bg-neutral-100" : audioUrl ? "hover:bg-neutral-50" : "cursor-default"
-            }`}
-          >
-            <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: SPEAKER_COLOR[l.kind] }} />
-            <span className="min-w-0 flex-1 text-[13px] leading-relaxed" style={{ color: speakerTextColor(l.kind, call.satisfaction) }}>
-              {l.text}
-            </span>
-          </button>
-        ))}
-        {!lines.length && <div className="py-6 text-center text-xs text-neutral-400">no transcript</div>}
       </div>
       {(call.review || call.resolution || call.satisfaction != null) && (
         <div className="mt-4 px-2">

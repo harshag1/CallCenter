@@ -22,7 +22,7 @@ const MIN_PX_PER_S = 8;
 const MAX_PX_PER_S = 14;
 const HOLD_BG = "repeating-linear-gradient(45deg, rgba(245,158,11,0.28) 0 3px, rgba(253,230,138,0.32) 3px 6px)";
 const TRACK_H = 56;
-const LANE_TOP: Record<SpeakerKind, number> = { agent: 13, caller: 36, human: 46 };
+const LANE_TOP: Record<SpeakerKind, number> = { agent: 18, caller: 32, human: 41 };
 
 function toMs(v: unknown, fallback: number): number {
   if (typeof v === "number") return v > 1e12 ? v : v * 1000;
@@ -148,14 +148,21 @@ function SegTip({ seg }: { seg: TimelineSeg }) {
   );
 }
 
+export type CaptionConfig = {
+  colorFor: (kind: SpeakerKind) => string;
+  activeEvId?: number | null;
+  onClickSeg?: (seg: TimelineSeg) => void;
+};
+
 export default function CallTimeline({
-  events, durationS, audioRef, seekable = false, onSeek,
+  events, durationS, audioRef, seekable = false, onSeek, captions,
 }: {
   events: CallEvent[];
   durationS?: number | null;
   audioRef?: RefObject<HTMLAudioElement | null>;
   seekable?: boolean;
   onSeek?: (sec: number) => void;
+  captions?: CaptionConfig;
 }) {
   const tl = useMemo(() => buildTimeline(events, durationS), [events, durationS]);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -173,7 +180,17 @@ export default function CallTimeline({
   }, [hasTl]);
 
   const totalS = (tl?.totalMs ?? 1000) / 1000;
-  const pxPerSec = viewW ? Math.min(MAX_PX_PER_S, Math.max(MIN_PX_PER_S, viewW / totalS)) : 10;
+  let pxPerSec = viewW ? Math.min(MAX_PX_PER_S, Math.max(MIN_PX_PER_S, viewW / totalS)) : 10;
+  if (captions && tl) {
+    // Widen until each utterance's text fits in ~4 lines under its own bar.
+    let needed = 0;
+    for (const seg of tl.segs) {
+      if (!seg.text) continue;
+      const durS = Math.max((seg.endMs - seg.startMs) / 1000, 0.5);
+      needed = Math.max(needed, (seg.text.length * 6.4) / 4 / durS);
+    }
+    pxPerSec = Math.min(Math.max(pxPerSec, needed), 44);
+  }
   const trackW = Math.round(totalS * pxPerSec);
 
   // Playhead: rAF-driven transform straight from the audio element, page-flip auto-scroll.
@@ -261,6 +278,29 @@ export default function CallTimeline({
             </span>
           ))}
         </div>
+        {captions && (
+          <div className="relative mt-1.5 min-h-[72px]">
+            {tl.segs.filter((s) => s.text).map((s) => (
+              <button
+                key={`c${s.evId}`}
+                id={`utt-${s.evId}`}
+                onClick={() => captions.onClickSeg?.(s)}
+                disabled={!captions.onClickSeg}
+                className={`absolute top-0 rounded-md px-1 py-0.5 text-left align-top transition-colors duration-[160ms] ${
+                  s.evId === captions.activeEvId ? "bg-neutral-100" : captions.onClickSeg ? "hover:bg-neutral-50" : "cursor-default"
+                }`}
+                style={{ left: X(s.startMs), width: Math.max(X(s.endMs - s.startMs) - 4, 56) }}
+              >
+                <span
+                  className="line-clamp-4 block text-[11px] leading-[1.45]"
+                  style={{ color: captions.colorFor(s.kind) }}
+                >
+                  {s.text}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

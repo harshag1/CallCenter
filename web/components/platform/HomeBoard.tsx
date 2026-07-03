@@ -3,6 +3,7 @@
 
 "use client";
 
+import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
@@ -108,13 +109,16 @@ export default function HomeBoard({
 
   return (
     <div className="space-y-8">
-      <div className="flex gap-3">
+      <div className="grid grid-cols-4 divide-x divide-[var(--border)] rounded-2xl border border-[var(--border)]">
         <Stat label="live now" value={String(active.length)} />
         <Stat label="calls today" value={String(today.length)} />
         <Stat label="avg satisfaction" value={avgSat} />
         <Stat label="experiments" value={String(running)} />
       </div>
 
+      <CallVolumeChart calls={calls} />
+
+      {active.length > 0 && (
       <section>
         <div className="mb-3 text-[11px] uppercase tracking-wide text-neutral-400">live calls</div>
         {active.length ? (
@@ -161,12 +165,9 @@ export default function HomeBoard({
               );
             })}
           </div>
-        ) : (
-          <div className="flex items-center gap-2.5 rounded-2xl border border-[var(--border)] px-4 py-6 text-xs text-neutral-400">
-            <PulseDot color="bg-neutral-300" ping="bg-neutral-200" /> no live calls
-          </div>
-        )}
+        ) : null}
       </section>
+      )}
 
       <section>
         <div className="mb-3 text-[11px] uppercase tracking-wide text-neutral-400">recent</div>
@@ -220,9 +221,48 @@ function LiveCallGlance({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex-1 rounded-2xl border border-[var(--border)] p-4">
+    <div className="p-4">
       <div className="text-[11px] uppercase tracking-wide text-neutral-400">{label}</div>
       <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{value}</div>
+    </div>
+  );
+}
+
+/** 14-day call volume by direction — quiet grayscale lines, no chrome. */
+function CallVolumeChart({ calls }: { calls: CallRow[] }) {
+  const data = useMemo(() => {
+    const days: { day: string; inbound: number; outbound: number; web: number }[] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400_000);
+      const key = d.toISOString().slice(0, 10);
+      days.push({ day: key.slice(5), inbound: 0, outbound: 0, web: 0 });
+    }
+    const idx = new Map(days.map((d, i) => [d.day, i]));
+    for (const c of calls) {
+      const key = new Date(c.started_at).toISOString().slice(5, 10);
+      const i = idx.get(key);
+      if (i == null) continue;
+      if (c.direction === "inbound") days[i].inbound++;
+      else if (c.direction === "outbound") days[i].outbound++;
+      else days[i].web++;
+    }
+    return days;
+  }, [calls]);
+  if (!calls.length) return null;
+  return (
+    <div className="h-44">
+      <ResponsiveContainer>
+        <LineChart data={data} margin={{ top: 6, right: 6, bottom: 0, left: -22 }}>
+          <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#a3a3a3" }} stroke="#eee" tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: "#a3a3a3" }} stroke="#eee" tickLine={false} />
+          <RechartsTooltip
+            contentStyle={{ borderRadius: 12, border: "1px solid #ececec", boxShadow: "0 8px 24px rgba(15,15,15,0.06)", fontSize: 12 }}
+          />
+          <Line dataKey="inbound" stroke="#111" strokeWidth={1.8} dot={false} />
+          <Line dataKey="outbound" stroke="#8b5cf6" strokeWidth={1.6} dot={false} />
+          <Line dataKey="web" stroke="#c4c4c4" strokeWidth={1.4} dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
