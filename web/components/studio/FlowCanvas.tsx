@@ -1,11 +1,13 @@
 // Author: Harsha Gundala
-// FlowCanvas.tsx — the studio flow graph: horizontal agent topology on a dotted canvas.
+// FlowCanvas.tsx — the studio flow graph: horizontal agent topology on a dotted canvas (Three.js renderer).
 
 "use client";
 
-import { useMemo } from "react";
-import { ReactFlow, Background, BackgroundVariant, type Node, type Edge } from "@xyflow/react";
-import { nodeTypes } from "./nodes";
+import { useCallback, useMemo } from "react";
+import ThreeFlow, {
+  FallbackCard, IncomingCallCard, TopicCard,
+  type ThreeFlowEdge, type ThreeFlowNode,
+} from "@/components/flow/ThreeFlow";
 import type { AgentFlow, FlowNode } from "@/lib/flow";
 
 type Props = {
@@ -24,57 +26,45 @@ export default function FlowCanvas({
   const graph = useMemo(() => {
     const branches = flow.nodes.filter((n) => n.kind !== "incoming_call");
     const rowH = 168;
-    const nodes: Node[] = flow.nodes.map((n) => {
+    const nodes: ThreeFlowNode[] = flow.nodes.map((n) => {
       if (n.kind === "incoming_call") {
         return {
-          id: n.id, type: "incoming_call", position: { x: 0, y: ((branches.length - 1) * rowH) / 2 + 14 },
-          data: { number, numberStatus, active: activeNode === n.id },
-          draggable: false,
+          id: n.id,
+          x: 0,
+          y: ((branches.length - 1) * rowH) / 2 + 14,
+          element: <IncomingCallCard data={{ number, numberStatus, active: activeNode === n.id }} />,
         };
       }
       const idx = branches.findIndex((t) => t.id === n.id);
       const stepIdx = n.steps?.findIndex((s) => s.id === activeStep) ?? -1;
+      const data = {
+        label: n.label, icon: n.icon, steps: n.steps,
+        active: activeNode === n.id,
+        activeStep: activeNode === n.id && stepIdx >= 0 ? stepIdx : undefined,
+        supportNumber: n.support_number ?? null,
+        onSaveNumber: onSaveSupportNumber,
+      };
       return {
         id: n.id,
-        type: n.kind === "fallback" ? "fallback" : "topic", // unknown kinds degrade to topic cards
-        position: { x: 340, y: idx * rowH },
-        data: {
-          label: n.label, icon: n.icon, steps: n.steps,
-          active: activeNode === n.id,
-          activeStep: activeNode === n.id && stepIdx >= 0 ? stepIdx : undefined,
-          supportNumber: n.support_number ?? null,
-          onSaveNumber: onSaveSupportNumber,
-        },
-        draggable: false,
+        x: 340,
+        y: idx * rowH,
+        // unknown kinds degrade to topic cards
+        element: n.kind === "fallback" ? <FallbackCard data={data} /> : <TopicCard data={data} />,
       };
     });
-    const edges: Edge[] = flow.edges.map((e, i) => ({
+    const edges: ThreeFlowEdge[] = flow.edges.map((e, i) => ({
       id: `e${i}`, source: e.from, target: e.to, label: e.label,
-      style: { stroke: activeNode === e.to ? "#111" : "#d9d9d9", strokeWidth: activeNode === e.to ? 1.6 : 1.2 },
+      color: activeNode === e.to ? "#111" : "#d9d9d9",
+      width: activeNode === e.to ? 1.6 : 1.2,
       animated: activeNode === e.to,
     }));
     return { nodes, edges };
   }, [flow, number, numberStatus, activeNode, activeStep, onSaveSupportNumber]);
 
-  return (
-    <ReactFlow
-      nodes={graph.nodes}
-      edges={graph.edges}
-      nodeTypes={nodeTypes}
-      fitView
-      fitViewOptions={{ padding: 0.22 }}
-      nodesConnectable={false}
-      elementsSelectable
-      zoomOnScroll={false}
-      panOnDrag
-      proOptions={{ hideAttribution: true }}
-      onNodeClick={(_, rfNode) => {
-        const n = flow.nodes.find((x) => x.id === rfNode.id);
-        if (n && onNodeClick) onNodeClick(n);
-      }}
-      className="!bg-[#f7f7f6]"
-    >
-      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.4} />
-    </ReactFlow>
-  );
+  const handleNodeClick = useCallback((id: string) => {
+    const n = flow.nodes.find((x) => x.id === id);
+    if (n && onNodeClick) onNodeClick(n);
+  }, [flow, onNodeClick]);
+
+  return <ThreeFlow nodes={graph.nodes} edges={graph.edges} fitPadding={0.22} onNodeClick={handleNodeClick} />;
 }

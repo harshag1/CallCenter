@@ -1,12 +1,14 @@
 // Author: Harsha Gundala
 // FlowPanel.tsx — read-only flow graph with the studio's card nodes: horizontal layout, trace ring, live hold chip,
-// running-experiment badge and variant-diff accents for mini renders.
+// running-experiment badge and variant-diff accents for mini renders (Three.js renderer).
 
 "use client";
 
-import { memo, useMemo } from "react";
-import { ReactFlow, Background, BackgroundVariant, type Node, type Edge, type NodeProps } from "@xyflow/react";
-import { nodeTypes as studioNodeTypes } from "@/components/studio/nodes";
+import { useCallback, useMemo } from "react";
+import ThreeFlow, {
+  ExperimentCard, FallbackCard, IncomingCallCard, TopicCard,
+  type ThreeFlowEdge, type ThreeFlowNode,
+} from "@/components/flow/ThreeFlow";
 import { HoldChip } from "@/components/platform/shared";
 
 type FlowLike = {
@@ -40,12 +42,6 @@ type Props = {
   fitPadding?: number;
 };
 
-const HoldNode = memo(function HoldNode({ data }: NodeProps) {
-  return <HoldChip until={data.until as string} />;
-});
-
-const nodeTypes = { ...studioNodeTypes, hold: HoldNode };
-
 const COL_W = 340;
 const ROW_H = 168;
 const EXPERIMENT_DY = 118;
@@ -71,7 +67,7 @@ function layout(
     diffColor?: string;
     interactive: boolean;
   }
-): { nodes: Node[]; edges: Edge[] } {
+): { nodes: ThreeFlowNode[]; edges: ThreeFlowEdge[] } {
   const depth = new Map<string, number>();
   const incoming = new Map(flow.nodes.map((n) => [n.id, 0]));
   flow.edges.forEach((e) => incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1));
@@ -96,7 +92,7 @@ function layout(
 
   let activePos: { x: number; y: number } | null = null;
   let entry: { id: string; pos: { x: number; y: number } } | null = null;
-  const nodes: Node[] = flow.nodes.map((n) => {
+  const nodes: ThreeFlowNode[] = flow.nodes.map((n) => {
     const d = depth.get(n.id) ?? 0;
     const siblings = levels.get(d)!;
     const idx = siblings.indexOf(n.id);
@@ -106,41 +102,40 @@ function layout(
     if (activeNode === n.id) activePos = position;
     if (type === "incoming_call" && !entry) entry = { id: n.id, pos: position };
     const diffColor = opts.diff.has(n.id) ? opts.diffColor : undefined;
-    const data =
-      type === "incoming_call"
-        ? {
+    const element =
+      type === "incoming_call" ? (
+        <IncomingCallCard
+          data={{
             label: n.label, number, active, diffColor, outbound: opts.outbound,
             numberStatus: number || opts.interactive ? undefined : "none", // minis never show the provisioning skeleton
-          }
-        : type === "fallback"
-          ? { label: n.label, supportNumber: n.support_number ?? null, active, diffColor } // no onSaveNumber → read-only card
-          : { label: n.label, icon: n.icon, steps: n.steps, table: n.table, active, diffColor };
-    return { id: n.id, type, position, data, draggable: false, selectable: false };
+          }}
+        />
+      ) : type === "fallback" ? (
+        <FallbackCard data={{ label: n.label, supportNumber: n.support_number ?? null, active, diffColor }} /> // no onSaveNumber → read-only card
+      ) : (
+        <TopicCard data={{ label: n.label, icon: n.icon, steps: n.steps, table: n.table, active, diffColor }} />
+      );
+    return { id: n.id, x: position.x, y: position.y, element };
   });
 
   if (activePos && holdCountdown) {
     const pos = activePos as { x: number; y: number };
     nodes.push({
       id: "__hold",
-      type: "hold",
-      position: { x: pos.x + 6, y: pos.y - 28 },
-      data: { until: holdCountdown.until },
-      draggable: false,
-      selectable: false,
-      zIndex: 20,
+      x: pos.x + 6,
+      y: pos.y - 28,
+      element: <HoldChip until={holdCountdown.until} />,
     });
   }
 
-  const edges: Edge[] = flow.edges.map((e, i) => ({
+  const edges: ThreeFlowEdge[] = flow.edges.map((e, i) => ({
     id: `e${i}`,
     source: e.from,
     target: e.to,
     label: e.label,
-    style: {
-      stroke: e.to === activeNode ? "#111" : visited.has(e.to) ? "#a3a3a3" : "#d9d9d9",
-      strokeWidth: e.to === activeNode ? 1.6 : 1.2,
-    },
-    labelStyle: { fontSize: 9, fill: "#999" },
+    color: e.to === activeNode ? "#111" : visited.has(e.to) ? "#a3a3a3" : "#d9d9d9",
+    width: e.to === activeNode ? 1.6 : 1.2,
+    labelStyle: { fontSize: 9, color: "#999" },
     animated: e.to === activeNode,
   }));
 
@@ -149,21 +144,26 @@ function layout(
     const anchor = entry as { id: string; pos: { x: number; y: number } };
     nodes.push({
       id: "__experiment",
-      type: "experiment",
-      position: { x: anchor.pos.x, y: anchor.pos.y + EXPERIMENT_DY },
-      data: {
-        label: exp.name,
-        onOpen: opts.onOpenExperiment ? () => opts.onOpenExperiment!(exp) : undefined,
-      },
-      draggable: false,
-      selectable: false,
+      x: anchor.pos.x,
+      y: anchor.pos.y + EXPERIMENT_DY,
+      element: (
+        <ExperimentCard
+          data={{
+            label: exp.name,
+            onOpen: opts.onOpenExperiment ? () => opts.onOpenExperiment!(exp) : undefined,
+          }}
+        />
+      ),
     });
     edges.push({
       id: "e__experiment",
       source: anchor.id,
-      sourceHandle: "b",
+      fromAnchor: "bottom",
       target: "__experiment",
-      style: { stroke: "#8b5cf6", strokeWidth: 1.3, strokeDasharray: "4 4" },
+      toAnchor: "top",
+      color: "#8b5cf6",
+      width: 1.3,
+      dashed: true,
     });
   }
   return { nodes, edges };
@@ -187,43 +187,31 @@ export default function FlowPanel({
         : null,
     [flow, visited, activeNode, holdCountdown, number, outbound, experiment, onOpenExperiment, diffNodeIds, diffColor, interactive]
   );
+
+  const handleNodeClick = useCallback(
+    (id: string) => {
+      if (id === "__experiment") {
+        if (experiment && onOpenExperiment) onOpenExperiment(experiment);
+        return;
+      }
+      if (id === "__hold" || !onNodeClick) return;
+      const src = flow?.nodes.find((n) => n.id === id);
+      if (src) onNodeClick(src);
+    },
+    [experiment, onOpenExperiment, onNodeClick, flow]
+  );
+
   if (!graph) {
     return <div className="flex h-full items-center justify-center bg-[#f7f7f6] text-xs text-neutral-300">no flow</div>;
   }
   return (
-    <ReactFlow
-      className="!bg-[#f7f7f6]"
+    <ThreeFlow
       nodes={graph.nodes}
       edges={graph.edges}
-      nodeTypes={nodeTypes}
-      fitView
-      fitViewOptions={{ padding: fitPadding }}
+      onNodeClick={(experiment && onOpenExperiment) || onNodeClick ? handleNodeClick : undefined}
+      interactive={interactive}
+      fitPadding={fitPadding}
       minZoom={0.15}
-      onNodeClick={
-        (experiment && onOpenExperiment) || onNodeClick
-          ? (_, node) => {
-              if (node.id === "__experiment") {
-                if (experiment && onOpenExperiment) onOpenExperiment(experiment);
-                return;
-              }
-              if (node.id === "__hold" || !onNodeClick) return;
-              const src = flow?.nodes.find((n) => n.id === node.id);
-              if (src) onNodeClick(src);
-            }
-          : undefined
-      }
-      nodesDraggable={false}
-      nodesConnectable={false}
-      nodesFocusable={false}
-      elementsSelectable={false}
-      zoomOnScroll={false}
-      zoomOnPinch={interactive}
-      zoomOnDoubleClick={interactive}
-      panOnDrag={interactive}
-      preventScrolling={interactive}
-      proOptions={{ hideAttribution: true }}
-    >
-      <Background variant={BackgroundVariant.Dots} color="#d4d4d4" gap={18} size={1.4} />
-    </ReactFlow>
+    />
   );
 }
