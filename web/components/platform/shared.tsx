@@ -4,7 +4,8 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { AlertCircle, Globe, Pause, PhoneIncoming, PhoneOutgoing, Sparkles, UserCheck } from "lucide-react";
+import { Globe, Pause, PhoneIncoming, PhoneOutgoing, Sparkles, UserCheck, X } from "lucide-react";
+import Tooltip from "@/components/ui/Tooltip";
 
 export type CallRow = {
   id: string;
@@ -94,20 +95,61 @@ export function SatChip({ n }: { n: number | null }) {
   );
 }
 
+export const RES_LABEL: Record<string, string> = {
+  ai_resolved: "AI resolved",
+  human_resolved: "Human resolved",
+  unresolved: "Unresolved",
+};
+
 export function ResIcon({ r }: { r: string | null }) {
-  if (r === "ai_resolved") return <span title="ai resolved"><Sparkles size={13} className="text-neutral-900" /></span>;
-  if (r === "human_resolved") return <span title="human resolved"><UserCheck size={13} className="text-[#6366f1]" /></span>;
-  if (r === "unresolved") return <span title="unresolved"><AlertCircle size={13} className="text-amber-500" /></span>;
-  return <span className="text-neutral-300">—</span>;
+  const icon =
+    r === "ai_resolved" ? <Sparkles size={13} className="text-neutral-900" />
+    : r === "human_resolved" ? <UserCheck size={13} className="text-[#6366f1]" />
+    : r === "unresolved" ? <X size={13} strokeWidth={2.5} className="text-red-500" />
+    : null;
+  if (!icon) return <span className="text-neutral-300">—</span>;
+  return (
+    <Tooltip content={RES_LABEL[r!]}>
+      <span className="inline-flex">{icon}</span>
+    </Tooltip>
+  );
 }
 
-export function DirIcon({ d }: { d: string }) {
+export function DirIcon({ d, size = 13 }: { d: string; size?: number }) {
   const Icon = d === "inbound" ? PhoneIncoming : d === "outbound" ? PhoneOutgoing : Globe;
   return (
     <span title={d} className="inline-flex">
-      <Icon size={13} className="text-neutral-400" />
+      <Icon size={size} className="text-neutral-400" />
     </span>
   );
+}
+
+export type SpeakerKind = "agent" | "caller" | "human";
+
+/** Speaker lane/dot colors: AI agent blue, customer purple, human support orange. */
+export const SPEAKER_COLOR: Record<SpeakerKind, string> = {
+  agent: "#3b82f6",
+  caller: "#8b5cf6",
+  human: "#f59e0b",
+};
+
+export const SPEAKER_LABEL: Record<SpeakerKind, string> = {
+  agent: "agent",
+  caller: "caller",
+  human: "human support",
+};
+
+/** Transcript text color: caller tone follows satisfaction (red deepens as score drops). */
+export function speakerTextColor(kind: SpeakerKind, satisfaction: number | null | undefined): string {
+  if (kind === "agent") return "#525252";
+  if (kind === "human") return "#b45309";
+  if (satisfaction == null) return "#262626";
+  if (satisfaction < 5) {
+    const t = Math.min((5 - satisfaction) / 5, 1);
+    const ch = (a: number, b: number) => Math.round(a + (b - a) * t);
+    return `rgb(${ch(220, 127)},${ch(38, 29)},${ch(38, 29)})`;
+  }
+  return satisfaction >= 7 ? "#047857" : "#262626";
 }
 
 export function PulseDot({ live = true, color = "bg-red-500", ping = "bg-red-400" }: { live?: boolean; color?: string; ping?: string }) {

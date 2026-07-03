@@ -1,17 +1,17 @@
 // Author: Harsha Gundala
-// CallsTable.tsx — call log: expandable rows with recording, aligned timeline, shaded transcript, AI review.
+// CallsTable.tsx — call log: expandable rows with a custom player, speaker-lane timeline, synced transcript, review.
 
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CornerDownLeft, RotateCcw } from "lucide-react";
+import { CornerDownLeft, Pause, Play, RotateCcw } from "lucide-react";
 import { useLiveEvents } from "@/components/hooks/useLiveEvents";
 import type { LiveEvent } from "@/lib/realtime-types";
-import CallTimeline from "./CallTimeline";
-import Tooltip, { TipDivider, TipStat } from "@/components/ui/Tooltip";
+import CallTimeline, { buildTimeline } from "./CallTimeline";
+import Tooltip from "@/components/ui/Tooltip";
 import {
-  DirIcon, PulseDot, ResIcon, SatChip, fmtDur, fmtTime, mmss, useNow,
-  type CallEvent, type CallRow,
+  DirIcon, PulseDot, ResIcon, SPEAKER_COLOR, SatChip, fmtDur, fmtTime, mmss,
+  speakerTextColor, useNow, type CallEvent, type CallRow,
 } from "./shared";
 
 export type CallFocus = {
@@ -22,9 +22,11 @@ export type CallFocus = {
   holdCountdown: { until: string } | null;
 };
 
-const HEADERS = ["time", "agent", "dir", "number", "duration", "sat", "resolution", "review"];
+const HEADERS = ["", "time", "agent", "origin", "duration", "sat", "resolution", "review"];
 
 const isMissed = (c: CallRow) => c.status === "no-answer" || c.status === "failed";
+
+const counterparty = (c: CallRow) => (c.direction === "outbound" ? c.to_number : c.from_number);
 
 async function fetchCalls(): Promise<CallRow[] | null> {
   try {
@@ -161,7 +163,9 @@ export default function CallsTable({
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] uppercase tracking-wide text-neutral-400">
-            {HEADERS.map((h) => <th key={h} className="px-4 py-2.5 font-medium">{h}</th>)}
+            {HEADERS.map((h, i) => (
+              <th key={i} className={h ? "px-4 py-2.5 font-medium" : "w-8 py-2.5 pl-4 pr-0"}>{h}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
@@ -176,6 +180,7 @@ export default function CallsTable({
                     : `hover:bg-neutral-50 ${expanded === c.id ? "bg-neutral-50" : ""}`
                 }`}
               >
+                <td className="w-8 py-2.5 pl-4 pr-0"><DirIcon d={c.direction} size={14} /></td>
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">{fmtTime(c.started_at)}</td>
                 <td className="px-4 py-2.5">
                   <span className="inline-flex max-w-full items-center gap-1.5">
@@ -189,9 +194,13 @@ export default function CallsTable({
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="inline-flex items-center gap-1.5">
-                    <DirIcon d={c.direction} />
+                    {counterparty(c) ? (
+                      <span className="tabular-nums text-neutral-500">{counterparty(c)}</span>
+                    ) : (
+                      <span className="text-neutral-400">browser</span>
+                    )}
                     {c.parent_call_id && (
-                      <Tooltip content="recall — jump to original call">
+                      <Tooltip content="Recall — jump to original call">
                         <button
                           onClick={(e) => { e.stopPropagation(); jumpToCall(c.parent_call_id!); }}
                           className="inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-neutral-500 transition-colors duration-[160ms] hover:border-neutral-900 hover:text-neutral-900"
@@ -201,14 +210,11 @@ export default function CallsTable({
                       </Tooltip>
                     )}
                     {recalledParents.has(c.id) && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-neutral-400">
+                      <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-neutral-400">
                         recalled <CornerDownLeft size={9} />
                       </span>
                     )}
                   </span>
-                </td>
-                <td className="px-4 py-2.5 tabular-nums text-neutral-500">
-                  {(c.direction === "outbound" ? c.to_number : c.from_number) ?? "—"}
                 </td>
                 <td className="px-4 py-2.5 tabular-nums text-neutral-500">
                   {c.status === "active" ? (
@@ -220,10 +226,10 @@ export default function CallsTable({
                 <td className="px-4 py-2.5">
                   {isMissed(c) ? (
                     <span className="inline-flex h-5 items-center rounded-full bg-red-500 px-2 text-[10px] font-medium text-white">
-                      missed
+                      Missed
                     </span>
                   ) : c.satisfaction != null ? (
-                    <Tooltip variant="panel" content={<SatGlance call={c} />}>
+                    <Tooltip variant="panel" content={<SatGlance n={c.satisfaction} />}>
                       <SatChip n={c.satisfaction} />
                     </Tooltip>
                   ) : (
@@ -251,15 +257,8 @@ export default function CallsTable({
   );
 }
 
-const RES_LABEL: Record<string, string> = {
-  ai_resolved: "ai resolved",
-  human_resolved: "human resolved",
-  unresolved: "unresolved",
-};
-
-/** Panel-tooltip body: 10-segment satisfaction bar, resolution, review snippet. */
-function SatGlance({ call }: { call: CallRow }) {
-  const n = call.satisfaction ?? 0;
+/** Panel-tooltip body: 10-segment satisfaction bar. */
+function SatGlance({ n }: { n: number }) {
   const fill = n < 5 ? "#ef4444" : n > 5 ? "#10b981" : "#a3a3a3";
   return (
     <span className="block">
@@ -276,81 +275,138 @@ function SatGlance({ call }: { call: CallRow }) {
           />
         ))}
       </span>
-      <span className="mt-2 block">
-        <TipStat label="Resolution" value={RES_LABEL[call.resolution ?? ""] ?? "—"} />
-      </span>
-      {call.review && (
-        <>
-          <TipDivider />
-          <span className="block truncate text-[10px] leading-[1.45] text-neutral-500">{call.review}</span>
-        </>
-      )}
     </span>
   );
 }
 
 function CallDetail({ call, events }: { call: CallRow; events: CallEvent[] }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [posMs, setPosMs] = useState(0);
 
+  // audio_start marks recorded audio; only then fetch + buffer the recording.
+  const hasAudioStart = useMemo(() => events.some((e) => e.type === "audio_start"), [events]);
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [events.length]);
+    if (!hasAudioStart) return;
+    let live = true;
+    let url: string | null = null;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/calls/${call.id}/recording`);
+        if (!r.ok || !live) return;
+        const blob = await r.blob();
+        if (!live) return;
+        url = URL.createObjectURL(blob);
+        setAudioUrl(url);
+      } catch { /* no recording */ }
+    })();
+    return () => {
+      live = false;
+      setAudioUrl(null);
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [call.id, hasAudioStart]);
 
-  const seek = (sec: number) => {
-    if (audioRef.current) audioRef.current.currentTime = Math.max(0, sec);
-  };
+  const tl = useMemo(() => buildTimeline(events, call.duration_s), [events, call.duration_s]);
+  const lines = useMemo(() => (tl?.segs ?? []).filter((s) => s.text), [tl]);
+  const activeId = useMemo(() => {
+    if (!audioUrl) return null;
+    let id: number | null = null;
+    for (const l of lines) if (posMs >= l.startMs && posMs < l.endMs) id = l.evId;
+    return id;
+  }, [lines, posMs, audioUrl]);
 
-  const turns = events.filter((e) => ["user_said", "agent_said", "human_segment", "tool_call"].includes(e.type));
-  const callerShade =
-    call.satisfaction != null && call.satisfaction < 5
-      ? `rgba(239,68,68,${((5 - call.satisfaction) * 0.12).toFixed(2)})`
-      : "#f5f5f5";
+  const seek = useCallback((sec: number) => {
+    const a = audioRef.current;
+    if (!a) return;
+    a.currentTime = Math.max(0, Number.isFinite(a.duration) ? Math.min(sec, a.duration) : sec);
+    setPosMs(a.currentTime * 1000);
+  }, []);
+
+  const toggle = useCallback(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) void a.play();
+    else a.pause();
+  }, []);
+
+  // Live calls: keep the newest turn in view as events stream in.
+  useEffect(() => {
+    if (call.status === "active") transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight });
+  }, [events.length, call.status]);
+
+  // Playback: keep the active utterance in view.
+  useEffect(() => {
+    if (playing && activeId != null) {
+      document.getElementById(`utt-${activeId}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [activeId, playing]);
 
   return (
-    <div className="grid grid-cols-2 gap-6 border-t border-[var(--border)] p-5">
-      <div className="min-w-0 space-y-4">
-        <audio ref={audioRef} controls preload="none" src={`/api/calls/${call.id}/recording`} className="w-full" />
-        <CallTimeline events={events} durationS={call.duration_s} onSeek={seek} />
-      </div>
-      <div className="min-w-0 space-y-4">
-        <div ref={scrollRef} className="max-h-72 space-y-2 overflow-y-auto rounded-xl border border-[var(--border)] bg-white p-4">
-          {turns.map((e) =>
-            e.type === "tool_call" ? (
-              <div key={e.id} className="pl-16">
-                <span className="rounded border border-[var(--border)] bg-neutral-50 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
-                  {String(e.payload?.name ?? "tool")}(…)
-                </span>
-              </div>
-            ) : (
-              <div key={e.id} className="flex gap-2 text-[13px]">
-                <span
-                  className={`w-14 shrink-0 pt-1 text-[10px] uppercase leading-tight tracking-wide ${
-                    e.type === "user_said" ? "text-neutral-900" : e.type === "human_segment" ? "text-[#6366f1]" : "text-neutral-400"
-                  }`}
-                >
-                  {e.type === "user_said" ? "caller" : e.type === "human_segment" ? "human agent" : "agent"}
-                </span>
-                <span
-                  className="min-w-0 flex-1 rounded-lg px-2 py-1 leading-relaxed text-neutral-700"
-                  style={e.type === "user_said" ? { background: callerShade } : undefined}
-                >
-                  {String(e.payload?.text ?? "")}
-                </span>
-              </div>
-            )
-          )}
-          {!turns.length && <div className="py-6 text-center text-xs text-neutral-400">no transcript</div>}
-        </div>
-        {(call.review || call.resolution) && (
-          <div className="rounded-xl border border-[var(--border)] bg-white p-4">
-            <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-neutral-400">
-              <ResIcon r={call.resolution} /> review
-            </div>
-            <p className="text-[13px] leading-relaxed text-neutral-700">{call.review}</p>
-          </div>
+    <div className="w-0 min-w-full border-t border-[var(--border)] px-5 py-4">
+      {audioUrl && (
+        <audio
+          ref={audioRef}
+          src={audioUrl}
+          preload="auto"
+          className="hidden"
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => setPlaying(false)}
+          onTimeUpdate={(e) => setPosMs(e.currentTarget.currentTime * 1000)}
+        />
+      )}
+      <div className="flex items-start gap-3">
+        {audioUrl && (
+          <button
+            aria-label={playing ? "Pause" : "Play"}
+            onClick={toggle}
+            className="mt-[11px] inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full bg-neutral-950 text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800"
+          >
+            {playing
+              ? <Pause size={14} fill="currentColor" strokeWidth={0} />
+              : <Play size={14} fill="currentColor" strokeWidth={0} className="ml-0.5" />}
+          </button>
         )}
+        <CallTimeline
+          events={events}
+          durationS={call.duration_s}
+          audioRef={audioUrl ? audioRef : undefined}
+          seekable={!!audioUrl}
+          onSeek={seek}
+        />
       </div>
+      <div ref={transcriptRef} className="mt-3 max-h-[420px] space-y-0.5 overflow-y-auto">
+        {lines.map((l) => (
+          <button
+            key={l.evId}
+            id={`utt-${l.evId}`}
+            onClick={() => seek(l.startMs / 1000)}
+            disabled={!audioUrl}
+            className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1 text-left transition-colors duration-[160ms] ${
+              l.evId === activeId ? "bg-neutral-100" : audioUrl ? "hover:bg-neutral-50" : "cursor-default"
+            }`}
+          >
+            <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: SPEAKER_COLOR[l.kind] }} />
+            <span className="min-w-0 flex-1 text-[13px] leading-relaxed" style={{ color: speakerTextColor(l.kind, call.satisfaction) }}>
+              {l.text}
+            </span>
+          </button>
+        ))}
+        {!lines.length && <div className="py-6 text-center text-xs text-neutral-400">no transcript</div>}
+      </div>
+      {(call.review || call.resolution || call.satisfaction != null) && (
+        <div className="mt-4 px-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-neutral-400">review</span>
+            <ResIcon r={call.resolution} />
+            {call.satisfaction != null && <SatChip n={call.satisfaction} />}
+          </div>
+          {call.review && <p className="mt-1.5 max-w-[90ch] text-[13px] leading-relaxed text-neutral-700">{call.review}</p>}
+        </div>
+      )}
     </div>
   );
 }
