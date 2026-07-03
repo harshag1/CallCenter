@@ -7,6 +7,23 @@ import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { ingestDocument } from "@/lib/knowledge";
 import { uploadKindFor, extOf, mimeFor, autoImportCsv } from "@/lib/files";
+import { s3Enabled, putFile, fileKey } from "@/lib/storage";
+import { log } from "@/lib/log";
+
+const L = log("api/knowledge");
+
+/** Puts raw bytes to S3 and records the key; returns false (caller falls back to bytea) on failure. */
+async function storeToS3(orgId: string, documentId: string, filename: string, mime: string, buf: Buffer): Promise<boolean> {
+  try {
+    const key = fileKey(orgId, documentId, filename);
+    await putFile(key, buf, mime);
+    await q("UPDATE documents SET s3_key = $1 WHERE id = $2", [key, documentId]);
+    return true;
+  } catch (e) {
+    L.warn("s3 put failed; using bytea fallback", { orgId, err: (e as Error).message, data: { documentId, filename } });
+    return false;
+  }
+}
 
 export const maxDuration = 300;
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -35,25 +52,32 @@ export async function POST(req: Request) {
         `INSERT INTO documents (org_id, filename, mime, size_bytes) VALUES ($1,$2,$3,$4) RETURNING id`,
         [session.orgId, file.name, mime, file.size]
       );
+      if (s3Enabled()) await storeToS3(session.orgId, row!.id, file.name, mime, buf);
       created.push({ id: row!.id, filename: file.name, kind });
       waitUntil(ingestDocument(row!.id, buf));
       continue;
     }
 
-    // media (mp3/wav/m4a) and data (csv/json): store raw bytes; embed small CSVs as searchable text.
-    const embedCsv = kind === "data" && extOf(file.name) === "csv" && file.size < EMBED_CSV_MAX;
+    // media (mp3/wav/m4a) and data (csv/json): raw bytes to S3 when enabled (bytea otherwise);
+    // CSVs always keep the bytea path (dataset auto-import + small-CSV embedding).
+    const isCsv = kind === "data" && extOf(file.name) === "csv";
+    const embedCsv = isCsv && file.size < EMBED_CSV_MAX;
+    const useS3 = s3Enabled() && !isCsv;
     const row = await qOne<{ id: string }>(
       `INSERT INTO documents (org_id, filename, mime, size_bytes, kind, data, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
       [
         session.orgId, file.name, mime, file.size,
-        kind, buf, embedCsv ? "ingesting" : "ready",
+        kind, useS3 ? null : buf, embedCsv ? "ingesting" : "ready",
       ]
     );
+    if (useS3 && !(await storeToS3(session.orgId, row!.id, file.name, mime, buf))) {
+      await q("UPDATE documents SET data = $1 WHERE id = $2", [buf, row!.id]);
+    }
     created.push({ id: row!.id, filename: file.name, kind });
     if (embedCsv) waitUntil(ingestDocument(row!.id, buf));
     // CSVs also become a first-class table: viewable, editable, agent-readable.
-    if (kind === "data" && extOf(file.name) === "csv") waitUntil(autoImportCsv(row!.id));
+    if (isCsv) waitUntil(autoImportCsv(row!.id));
   }
   return NextResponse.json({ ok: true, documents: created, rejected });
 }

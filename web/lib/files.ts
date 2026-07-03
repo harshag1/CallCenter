@@ -3,6 +3,7 @@
 
 import { q, qOne } from "./db";
 import { floatToUlawBuffer } from "./audio";
+import { documentBytes } from "./storage";
 import { log } from "./log";
 
 const L = log("files");
@@ -59,10 +60,12 @@ function resampleTo8k(samples: Float32Array, sourceRate: number): Float32Array {
 
 /** Decodes an mp3 document and stores a 'ulaw8k' media rendition for telephony hold music. */
 export async function transcodeHoldMusic(documentId: string): Promise<void> {
-  const doc = await qOne<{ org_id: string; filename: string; data: Buffer | null }>(
-    "SELECT org_id, filename, data FROM documents WHERE id = $1", [documentId]
+  const doc = await qOne<{ org_id: string; filename: string; data: Buffer | null; s3_key: string | null }>(
+    "SELECT org_id, filename, data, s3_key FROM documents WHERE id = $1", [documentId]
   );
-  if (!doc?.data?.length) return;
+  if (!doc) return;
+  const bytes = await documentBytes(doc);
+  if (!bytes?.length) return;
   if (extOf(doc.filename) !== "mp3") {
     L.warn("hold-music transcode skipped: only mp3 supported", { orgId: doc.org_id, data: { documentId, filename: doc.filename } });
     return;
@@ -73,7 +76,7 @@ export async function transcodeHoldMusic(documentId: string): Promise<void> {
     await decoder.ready;
     let decoded;
     try {
-      decoded = decoder.decode(new Uint8Array(doc.data));
+      decoded = decoder.decode(new Uint8Array(bytes));
     } finally {
       decoder.free();
     }
