@@ -1,15 +1,14 @@
 // Author: Harsha Gundala
 // datasets.ts — operator tools: list/create datasets, query and write rows.
 
-import { ensureDefaults, listDatasets, createDataset, queryRows, upsertRow } from "../../datasets";
+import { listDatasets, createDataset, queryRows, upsertRow } from "../../datasets";
 import type { OperatorTool } from "../types";
 
 export const listDatasetsTool: OperatorTool = {
   name: "list_datasets",
-  description: "List the org's data tables (datasets) with columns and row counts. Defaults: customers, feedback.",
+  description: "List the org's data tables (datasets) with columns and row counts.",
   parameters: { type: "object", properties: {} },
   async execute(_args, ctx) {
-    await ensureDefaults(ctx.orgId);
     return { output: await listDatasets(ctx.orgId) };
   },
 };

@@ -46,41 +46,6 @@ export function normalizeColumns(input: unknown[]): DatasetColumn[] {
     .slice(0, 32);
 }
 
-const DEFAULTS: { slug: string; name: string; icon: string; columns: DatasetColumn[] }[] = [
-  {
-    slug: "customers",
-    name: "Customers",
-    icon: "users",
-    columns: [
-      { key: "name", label: "Name", type: "text" },
-      { key: "phone", label: "Phone", type: "phone" },
-      { key: "email", label: "Email", type: "text" },
-      { key: "notes", label: "Notes", type: "text" },
-    ],
-  },
-  {
-    slug: "feedback",
-    name: "Feedback",
-    icon: "message-square",
-    columns: [
-      { key: "phone", label: "Phone", type: "phone" },
-      { key: "rating", label: "Rating", type: "number" },
-      { key: "comment", label: "Comment", type: "text" },
-    ],
-  },
-];
-
-/** Seeds the customers + feedback datasets once per org (idempotent). */
-export async function ensureDefaults(orgId: string): Promise<void> {
-  for (const d of DEFAULTS) {
-    await q(
-      `INSERT INTO datasets (org_id, slug, name, icon, columns, created_by)
-       VALUES ($1,$2,$3,$4,$5,'system') ON CONFLICT (org_id, slug) DO NOTHING`,
-      [orgId, d.slug, d.name, d.icon, JSON.stringify(d.columns)]
-    );
-  }
-}
-
 export async function listDatasets(orgId: string): Promise<(Dataset & { row_count: number })[]> {
   return q<Dataset & { row_count: number }>(
     `SELECT d.id, d.slug, d.name, d.icon, d.columns, d.created_by, d.created_at,
@@ -99,7 +64,6 @@ export async function createDataset(
   const slug = slugify(name);
   if (!slug) throw new Error("dataset name required");
   const cols = normalizeColumns(columns);
-  if (!cols.length) throw new Error("at least one column required");
   const row = await qOne<Dataset>(
     `INSERT INTO datasets (org_id, slug, name, icon, columns, created_by)
      VALUES ($1,$2,$3,'table',$4,$5)
@@ -123,6 +87,52 @@ export async function getDatasetBySlug(orgId: string, slug: string): Promise<Dat
     "SELECT id, slug, name, icon, columns, created_by, created_at FROM datasets WHERE org_id = $1 AND slug = $2",
     [orgId, slugify(slug)]
   );
+}
+
+async function writeColumns(orgId: string, datasetId: string, columns: DatasetColumn[]): Promise<Dataset | null> {
+  return qOne<Dataset>(
+    `UPDATE datasets SET columns = $3 WHERE org_id = $1 AND id = $2
+     RETURNING id, slug, name, icon, columns, created_by, created_at`,
+    [orgId, datasetId, JSON.stringify(columns)]
+  );
+}
+
+/** Appends a column; key derived from label when omitted, de-duped with a numeric suffix. */
+export async function addColumn(orgId: string, datasetId: string, label: string, keyHint?: string): Promise<Dataset> {
+  const ds = await getDatasetById(orgId, datasetId);
+  if (!ds) throw new Error("dataset not found");
+  if (ds.columns.length >= 32) throw new Error("column cap of 32 reached");
+  const base = slugify(keyHint || label);
+  if (!base) throw new Error("column name required");
+  let key = base;
+  for (let n = 2; ds.columns.some((c) => c.key === key); n++) key = `${base}_${n}`;
+  const updated = await writeColumns(orgId, datasetId, [...ds.columns, { key, label: label.trim() || key, type: "text" }]);
+  if (!updated) throw new Error("dataset not found");
+  return updated;
+}
+
+/** Relabels a column; the key (and stored row data) stays stable. */
+export async function renameColumn(orgId: string, datasetId: string, key: string, label: string): Promise<Dataset> {
+  const ds = await getDatasetById(orgId, datasetId);
+  if (!ds) throw new Error("dataset not found");
+  if (!ds.columns.some((c) => c.key === key)) throw new Error(`unknown column "${key}"`);
+  const next = ds.columns.map((c) => (c.key === key ? { ...c, label: label.trim() || c.label } : c));
+  const updated = await writeColumns(orgId, datasetId, next);
+  if (!updated) throw new Error("dataset not found");
+  return updated;
+}
+
+/** Removes a column and strips its key from every stored row. */
+export async function dropColumn(orgId: string, datasetId: string, key: string): Promise<Dataset> {
+  const ds = await getDatasetById(orgId, datasetId);
+  if (!ds) throw new Error("dataset not found");
+  if (!ds.columns.some((c) => c.key === key)) throw new Error(`unknown column "${key}"`);
+  const updated = await writeColumns(orgId, datasetId, ds.columns.filter((c) => c.key !== key));
+  if (!updated) throw new Error("dataset not found");
+  await q("UPDATE dataset_rows SET data = data - $3, updated_at = now() WHERE org_id = $1 AND dataset_id = $2 AND data ? $3", [
+    orgId, datasetId, key,
+  ]);
+  return updated;
 }
 
 export async function listRows(orgId: string, datasetId: string, limit = 100, offset = 0): Promise<DatasetRow[]> {

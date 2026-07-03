@@ -7,7 +7,7 @@ import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
 import { AgentFlowSchema, topicNodes, fallbackNode, type AgentFlow } from "./flow";
 import { invokeTool } from "./toolfactory/deploy";
-import { ensureDefaults, queryRows, upsertRow, findCustomerByPhone } from "./datasets";
+import { queryRows, upsertRow, findCustomerByPhone } from "./datasets";
 import { signScope } from "./voice";
 import { sendAgentEmail } from "./email";
 import { sendSms } from "./sms";
@@ -87,7 +87,6 @@ function saveEvent(scope: Scope, type: string, payload: unknown) {
 }
 
 export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
-  await ensureDefaults(scope.orgId).catch(() => {});
   const ctx = await loadCtx(scope);
   const topics = topicNodes(ctx.flow);
   const tools: McpToolDef[] = [];
