@@ -199,6 +199,7 @@ export default function Workspace() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let navigated = false; // once a tool navigates, later surfaces in this reply must not cover the destination
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -227,7 +228,7 @@ export default function Workspace() {
               return [...prev, { kind: "tool", name: ev.name, status: ev.status }];
             });
           } else if (ev.type === "surface") {
-            setSurface(ev.surface);
+            if (!navigated) setSurface(ev.surface);
           } else if (ev.type === "flow") {
             const meta = ev.flowMeta as { id: string; label: string } | undefined;
             if (meta) {
@@ -250,6 +251,7 @@ export default function Workspace() {
             }
           } else if (ev.type === "navigate") {
             // Tool created something screen-shaped — land the user on it.
+            navigated = true;
             const t: "screens" | "experiments" = ev.tab === "experiments" ? "experiments" : "screens";
             if (ev.screenId) openScreen(t, ev.screenId);
             else setTab(t);

@@ -25,7 +25,7 @@ export async function GET(req: Request) {
       ...agents.map((a) => ({
         id: `inbound:${a.id}`, agent_id: a.id, name: `${a.name} — inbound`, kind: "inbound", flow: a.flow,
       })),
-      ...outbound.map((f) => ({ id: f.id, agent_id: f.agent_id, name: f.name, kind: f.kind, flow: f.flow })),
+      ...outbound.map((f) => ({ id: f.id, agent_id: f.agent_id, name: f.name, kind: f.kind, flow: f.flow, instructions: f.instructions })),
     ],
   });
 }

@@ -321,7 +321,16 @@ export default function Studio() {
           {editingNode && agentId && (
             <NodeEditor
               node={editingNode}
+              agentId={agentId}
               onClose={() => setEditingNode(null)}
+              onSaveInstructions={async (instructions) => {
+                const res = await fetch(`/api/agents/${agentId}/flow-node`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ instructions }),
+                });
+                return res.ok;
+              }}
               onSave={async (patch) => {
                 const res = await fetch(`/api/agents/${agentId}/flow-node`, {
                   method: "POST",
