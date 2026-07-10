@@ -31,6 +31,7 @@ import { sendAgentEmail } from "./email";
 import { sendSms } from "./sms";
 import { log } from "./log";
 import { voiceToolExtensions, type VoiceToolScope } from "./voice-tools";
+import { CALL_RUNTIME_SNAPSHOT_QUERY } from "./call-runtime-query";
 
 /** The human's number on this call, direction-aware. */
 async function callerNumber(callId: string): Promise<string | null> {
@@ -62,14 +63,9 @@ type CallCtx = {
 async function loadCtx(scope: Scope): Promise<CallCtx> {
   const [agentRow, org, docsReady, datasets, holdMusic] = await Promise.all([
     // Campaign/recall calls carry a named flow — it overrides the agent's inbound default.
-    qOne<{ flow: unknown; tool_ids: string[] }>(
-      `SELECT COALESCE(f.flow, v.flow) AS flow, v.tool_ids FROM agents a
-       JOIN agent_versions v ON v.agent_id = a.id AND v.version = a.active_version
-       LEFT JOIN calls c ON c.id = $3
-       LEFT JOIN flows f ON f.id = c.flow_id AND f.org_id = a.org_id
-       WHERE a.id = $1 AND a.org_id = $2`,
-      [scope.agentId, scope.orgId, scope.callId]
-    ),
+    qOne<{ flow: unknown; tool_ids: string[] }>(CALL_RUNTIME_SNAPSHOT_QUERY, [
+      scope.agentId, scope.orgId, scope.callId,
+    ]),
     qOne<{ internet_enabled: boolean; allowed_domains: string[] }>(
       "SELECT internet_enabled, allowed_domains FROM orgs WHERE id = $1", [scope.orgId]
     ),

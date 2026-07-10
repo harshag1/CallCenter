@@ -243,6 +243,7 @@ export function flowStateSummary(flow: AgentFlow, state: FlowExecutionState) {
     available_tools: grantedTools(flow, state),
     next_steps: describeNextSteps(flow, state),
     completed_steps: state.completedSteps,
+    outputs: state.outputs,
     checkpoints: state.checkpoints,
     revision: state.revision,
   };

@@ -6,6 +6,7 @@ import {
   createFlowExecutionState,
   describeNextSteps,
   enterFlowStep,
+  flowStateSummary,
   grantedTools,
   selectFlowTopic,
 } from "../flow-runtime";
@@ -145,6 +146,10 @@ describe("flow v2 execution", () => {
     expect(parentDone.nextSteps).toEqual(["returns.verify.eligibility"]);
     expect(parentDone.state.checkpoints).toEqual([{ step: "returns.verify", at: "2026-07-09T00:00:03.000Z" }]);
     expect(grantedTools(deepFlow, parentDone.state)).toEqual(["end_call", "lookup_order"]);
+    expect(flowStateSummary(deepFlow, parentDone.state)).toMatchObject({
+      last_completed_step: "returns.verify",
+      outputs: { "returns.verify": { order_id: "order_123" } },
+    });
 
     const child = enterFlowStep(deepFlow, parentDone.state, "returns.verify.eligibility");
     if ("error" in child) throw new Error(child.error);
