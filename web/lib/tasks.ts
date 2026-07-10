@@ -4,13 +4,11 @@
 
 import { q, qOne } from "./db";
 import { chat, type ChatMessage, type ToolDef } from "./xai";
-import { listToolsFor, callTool } from "./mcp";
+import { listToolsForAudience, callToolForAudience } from "./mcp";
 import { log } from "./log";
 
 const L = log("tasks");
 const MAX_ROUNDS = 6;
-// Call-control tools make no sense off-call.
-const EXCLUDED = new Set(["classify", "begin_step", "hold", "play_hold_music", "contact_support"]);
 
 export async function runCallTask(taskId: string): Promise<void> {
   const task = await qOne<{
@@ -32,7 +30,7 @@ export async function runCallTask(taskId: string): Promise<void> {
         "SELECT type, payload FROM call_events WHERE call_id = $1 ORDER BY id LIMIT 400", [task.call_id]
       ),
       qOne<{ name: string | null }>("SELECT name FROM orgs WHERE id = $1", [task.org_id]),
-      listToolsFor(scope),
+      listToolsForAudience(scope, "background"),
     ]);
 
     const transcript = events
@@ -41,7 +39,6 @@ export async function runCallTask(taskId: string): Promise<void> {
       .join("\n");
 
     const tools: ToolDef[] = mcpTools
-      .filter((t) => !EXCLUDED.has(t.name))
       .map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
 
     const messages: ChatMessage[] = [
@@ -70,7 +67,7 @@ Rules: send_email/send_sms resolve the caller automatically when 'to' is omitted
       for (const tc of msg.tool_calls) {
         let output: unknown;
         try {
-          output = await callTool(scope, tc.function.name, JSON.parse(tc.function.arguments || "{}"));
+          output = await callToolForAudience(scope, "background", tc.function.name, JSON.parse(tc.function.arguments || "{}"));
         } catch (e) {
           output = { error: (e as Error).message };
         }

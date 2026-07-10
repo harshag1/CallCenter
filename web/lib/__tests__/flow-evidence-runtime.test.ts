@@ -1,0 +1,415 @@
+import { describe, expect, it } from "vitest";
+import { AgentFlowSchema, type AgentFlow, type FlowOutputBinding } from "../flow";
+import {
+  FlowExecutionStateSchema,
+  completeFlowStep,
+  createFlowExecutionState,
+  enterFlowStep,
+  hashFlowValue,
+  reserveFlowAction,
+  selectFlowTopic,
+  settleFlowAction,
+  type FlowExecutionState,
+} from "../flow-runtime";
+
+const TOPIC = "operations";
+const STEP = "operations.execute";
+const CASE_TOOL = "create_case";
+
+function evidenceFlow(bindingOverrides: Partial<FlowOutputBinding> = {}): AgentFlow {
+  return AgentFlowSchema.parse({
+    schema_version: 2,
+    always_tools: [],
+    nodes: [
+      { id: "entry", label: "Incoming call", kind: "incoming_call" },
+      {
+        id: TOPIC,
+        label: "Operations",
+        kind: "topic",
+        steps: [{
+          id: "execute",
+          label: "Execute the request",
+          instructions: "Execute and verify the requested operation.",
+          tools: [CASE_TOOL, "tag_case", "notify_case"],
+          required_outputs: ["case_id"],
+          output_bindings: [{
+            output: "case_id",
+            tool: CASE_TOOL,
+            result_path: "$.data.case.id",
+            value_type: "string",
+            ...bindingOverrides,
+          }],
+          action_policies: [
+            { tool: CASE_TOOL, max_calls: 1, idempotency: "per_step" },
+            { tool: "tag_case", max_calls: 3, idempotency: "per_arguments" },
+            { tool: "notify_case", max_calls: 1, idempotency: "none" },
+          ],
+        }],
+      },
+    ],
+    edges: [{ from: "entry", to: TOPIC }],
+  });
+}
+
+function activeStep(flow = evidenceFlow()): FlowExecutionState {
+  const selected = selectFlowTopic(flow, createFlowExecutionState("2026-07-10T00:00:00.000Z"), TOPIC);
+  if ("error" in selected) throw new Error(selected.error);
+  const entered = enterFlowStep(flow, selected, STEP, "2026-07-10T00:00:01.000Z");
+  if ("error" in entered) throw new Error(entered.error);
+  return entered.state;
+}
+
+function reserve(
+  flow: AgentFlow,
+  state: FlowExecutionState,
+  receiptId: string,
+  tool: string,
+  actionArguments: Record<string, unknown>,
+) {
+  const reservation = reserveFlowAction(flow, state, {
+    receiptId,
+    tool,
+    arguments: actionArguments,
+    capabilityEpoch: state.capabilityEpoch,
+  }, "2026-07-10T00:00:02.000Z");
+  if ("error" in reservation) throw new Error(`${reservation.code}: ${reservation.error}`);
+  return reservation;
+}
+
+function settle(
+  state: FlowExecutionState,
+  receiptId: string,
+  status: "succeeded" | "failed" | "indeterminate",
+  result?: unknown,
+) {
+  const settlement = settleFlowAction(state, {
+    receiptId,
+    status,
+    ...(result === undefined ? {} : { result }),
+  }, "2026-07-10T00:00:03.000Z");
+  if ("error" in settlement) throw new Error(`${settlement.code}: ${settlement.error}`);
+  return settlement;
+}
+
+describe("flow action evidence", () => {
+  it("deduplicates always-available effects across capability-epoch transitions", () => {
+    const flow = AgentFlowSchema.parse({
+      ...evidenceFlow(),
+      always_tools: ["request_recall"],
+      always_action_policies: [{
+        tool: "request_recall",
+        max_calls: 2,
+        idempotency: "per_call_arguments",
+      }],
+    });
+    const initial = createFlowExecutionState();
+    const first = reserve(flow, initial, "recall-routing", "request_recall", {
+      to_number: "+15551234567",
+      run_at: "2026-07-10T20:00:00.000Z",
+    });
+    const succeeded = settle(first.state, first.receipt.id, "succeeded", { scheduled_id: "scheduled-1" });
+    const selected = selectFlowTopic(flow, succeeded.state, TOPIC);
+    if ("error" in selected) throw new Error(selected.error);
+    expect(selected.capabilityEpoch).toBe(succeeded.state.capabilityEpoch + 1);
+
+    const replay = reserveFlowAction(flow, selected, {
+      receiptId: "recall-after-transition",
+      tool: "request_recall",
+      arguments: {
+        run_at: "2026-07-10T20:00:00.000Z",
+        to_number: "+15551234567",
+      },
+      capabilityEpoch: selected.capabilityEpoch,
+    });
+    if ("error" in replay) throw new Error(replay.error);
+    expect(replay).toMatchObject({
+      execute: false,
+      replayed: true,
+      receipt: { id: "recall-routing", result: { scheduled_id: "scheduled-1" } },
+    });
+  });
+
+  it("hashes semantically identical arguments identically regardless of object key order", () => {
+    const first = {
+      z: 7,
+      nested: { beta: true, alpha: ["one", { y: 2, x: 1 }] },
+      a: null,
+    };
+    const reordered = {
+      a: null,
+      nested: { alpha: ["one", { x: 1, y: 2 }], beta: true },
+      z: 7,
+    };
+
+    expect(hashFlowValue(first)).toMatch(/^[a-f0-9]{64}$/);
+    expect(hashFlowValue(first)).toBe(hashFlowValue(reordered));
+    expect(hashFlowValue({ values: [1, 2] })).not.toBe(hashFlowValue({ values: [2, 1] }));
+  });
+
+  it("changes capability epochs only for topic, enter, retry, and completion transitions", () => {
+    const flow = evidenceFlow();
+    const initial = createFlowExecutionState("2026-07-10T00:00:00.000Z");
+    expect(initial.capabilityEpoch).toBe(0);
+
+    const selected = selectFlowTopic(flow, initial, TOPIC, "2026-07-10T00:00:01.000Z");
+    if ("error" in selected) throw new Error(selected.error);
+    expect(selected.capabilityEpoch).toBe(1);
+    expect(selectFlowTopic(flow, selected, TOPIC)).toBe(selected);
+
+    const entered = enterFlowStep(flow, selected, STEP, "2026-07-10T00:00:02.000Z");
+    if ("error" in entered) throw new Error(entered.error);
+    expect(entered.state.capabilityEpoch).toBe(2);
+
+    const reservation = reserve(flow, entered.state, "receipt-before-retry", CASE_TOOL, { member: "m-1" });
+    expect(reservation.state.capabilityEpoch).toBe(2);
+    expect(reservation.state.revision).toBe(entered.state.revision + 1);
+
+    const settlement = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-before-retry" } } },
+    );
+    expect(settlement.state.capabilityEpoch).toBe(2);
+    expect(settlement.state.revision).toBe(reservation.state.revision + 1);
+
+    const retried = enterFlowStep(flow, settlement.state, STEP, "2026-07-10T00:00:04.000Z");
+    if ("error" in retried) throw new Error(retried.error);
+    expect(retried.state.capabilityEpoch).toBe(3);
+
+    const currentReservation = reserve(flow, retried.state, "receipt-after-retry", CASE_TOOL, { member: "m-1" });
+    const currentSettlement = settle(
+      currentReservation.state,
+      currentReservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-after-retry" } } },
+    );
+    expect(currentSettlement.state.capabilityEpoch).toBe(3);
+
+    const completed = completeFlowStep(flow, currentSettlement.state, {}, "2026-07-10T00:00:05.000Z");
+    if ("error" in completed) throw new Error(completed.error);
+    expect(completed.state.capabilityEpoch).toBe(4);
+  });
+
+  it("rejects action reservations carrying a stale capability epoch without mutating state", () => {
+    const flow = evidenceFlow();
+    const state = activeStep(flow);
+
+    expect(reserveFlowAction(flow, state, {
+      receiptId: "stale-receipt",
+      tool: CASE_TOOL,
+      arguments: { member: "m-1" },
+      capabilityEpoch: state.capabilityEpoch - 1,
+    })).toMatchObject({ code: "stale_capability" });
+    expect(state.actionReceipts).toEqual([]);
+  });
+
+  it("deduplicates per-step actions across different receipt IDs and arguments", () => {
+    const flow = evidenceFlow();
+    const first = reserve(flow, activeStep(flow), "case-receipt-1", CASE_TOOL, { member: "m-1" });
+    expect(first).toMatchObject({ execute: true, replayed: false });
+
+    const whileReserved = reserveFlowAction(flow, first.state, {
+      receiptId: "case-receipt-2",
+      tool: CASE_TOOL,
+      arguments: { member: "different-member" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    });
+    if ("error" in whileReserved) throw new Error(whileReserved.error);
+    expect(whileReserved).toMatchObject({
+      execute: false,
+      replayed: false,
+      receipt: { id: "case-receipt-1" },
+    });
+    expect(whileReserved.state).toBe(first.state);
+
+    const succeeded = settle(
+      first.state,
+      first.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-1" } } },
+    );
+    const afterSuccess = reserveFlowAction(flow, succeeded.state, {
+      receiptId: "case-receipt-3",
+      tool: CASE_TOOL,
+      arguments: { member: "another-member" },
+      capabilityEpoch: succeeded.state.capabilityEpoch,
+    });
+    if ("error" in afterSuccess) throw new Error(afterSuccess.error);
+    expect(afterSuccess).toMatchObject({
+      execute: false,
+      replayed: true,
+      receipt: { id: "case-receipt-1", status: "succeeded" },
+    });
+  });
+
+  it("deduplicates per-arguments actions by canonical arguments while admitting distinct arguments", () => {
+    const flow = evidenceFlow();
+    const first = reserve(flow, activeStep(flow), "tag-receipt-1", "tag_case", {
+      metadata: { priority: 1, source: "voice" },
+      tags: ["urgent", "member"],
+    });
+
+    const reordered = reserveFlowAction(flow, first.state, {
+      receiptId: "tag-receipt-2",
+      tool: "tag_case",
+      arguments: {
+        tags: ["urgent", "member"],
+        metadata: { source: "voice", priority: 1 },
+      },
+      capabilityEpoch: first.state.capabilityEpoch,
+    });
+    if ("error" in reordered) throw new Error(reordered.error);
+    expect(reordered).toMatchObject({ execute: false, receipt: { id: "tag-receipt-1" } });
+
+    const distinct = reserveFlowAction(flow, first.state, {
+      receiptId: "tag-receipt-3",
+      tool: "tag_case",
+      arguments: {
+        tags: ["member", "urgent"],
+        metadata: { source: "voice", priority: 1 },
+      },
+      capabilityEpoch: first.state.capabilityEpoch,
+    });
+    if ("error" in distinct) throw new Error(distinct.error);
+    expect(distinct).toMatchObject({ execute: true, replayed: false, receipt: { id: "tag-receipt-3" } });
+    expect(distinct.receipt.idempotencyKey).not.toBe(first.receipt.idempotencyKey);
+  });
+
+  it("enforces per-step action call limits but permits a retry after definitive failure", () => {
+    const flow = evidenceFlow();
+    const first = reserve(flow, activeStep(flow), "notice-receipt-1", "notify_case", { channel: "sms" });
+
+    expect(reserveFlowAction(flow, first.state, {
+      receiptId: "notice-receipt-2",
+      tool: "notify_case",
+      arguments: { channel: "email" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    })).toMatchObject({ code: "action_call_limit" });
+
+    const failed = settle(first.state, first.receipt.id, "failed", { provider: "unavailable" });
+    const retry = reserveFlowAction(flow, failed.state, {
+      receiptId: "notice-receipt-3",
+      tool: "notify_case",
+      arguments: { channel: "email" },
+      capabilityEpoch: failed.state.capabilityEpoch,
+    });
+    if ("error" in retry) throw new Error(retry.error);
+    expect(retry).toMatchObject({ execute: true, receipt: { id: "notice-receipt-3" } });
+  });
+
+  it("auto-populates bound durable outputs only from a successful authoritative receipt", () => {
+    const flow = evidenceFlow();
+    const initial = activeStep(flow);
+    const reservation = reserve(flow, initial, "case-success", CASE_TOOL, { member: "m-1" });
+    const settlement = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-authoritative" } } },
+    );
+
+    const completed = completeFlowStep(flow, settlement.state, { outputs: { model_note: "caller confirmed" } });
+    if ("error" in completed) throw new Error(completed.error);
+    expect(completed.state.outputs[STEP]).toEqual({
+      model_note: "caller confirmed",
+      case_id: "case-authoritative",
+    });
+    expect(completed.state.status).toBe("completed");
+    expect(settlement.receipt.resultHash).toBe(hashFlowValue({ data: { case: { id: "case-authoritative" } } }));
+  });
+
+  it.each([
+    ["reserved", undefined],
+    ["failed", { provider: "declined" }],
+    ["indeterminate", { provider: "timed_out_after_dispatch" }],
+  ] as const)("rejects %s receipts as bound-output evidence", (status, result) => {
+    const flow = evidenceFlow();
+    const reservation = reserve(flow, activeStep(flow), `case-${status}`, CASE_TOOL, { member: "m-1" });
+    const state = status === "reserved"
+      ? reservation.state
+      : settle(reservation.state, reservation.receipt.id, status, result).state;
+
+    expect(completeFlowStep(flow, state, { outputs: { case_id: "fabricated" } })).toMatchObject({
+      code: "missing_action_evidence",
+    });
+  });
+
+  it("rejects succeeded evidence from an obsolete step-attempt epoch", () => {
+    const flow = evidenceFlow();
+    const reservation = reserve(flow, activeStep(flow), "case-old-epoch", CASE_TOOL, { member: "m-1" });
+    const succeeded = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-old" } } },
+    );
+    const retried = enterFlowStep(flow, succeeded.state, STEP);
+    if ("error" in retried) throw new Error(retried.error);
+    expect(retried.state.capabilityEpoch).toBe(succeeded.state.capabilityEpoch + 1);
+
+    expect(completeFlowStep(flow, retried.state, { outputs: { case_id: "case-old" } })).toMatchObject({
+      code: "missing_action_evidence",
+    });
+  });
+
+  it("rejects a model-authored bound output that contradicts the receipt", () => {
+    const flow = evidenceFlow();
+    const reservation = reserve(flow, activeStep(flow), "case-mismatch", CASE_TOOL, { member: "m-1" });
+    const succeeded = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-authoritative" } } },
+    );
+
+    expect(completeFlowStep(flow, succeeded.state, { outputs: { case_id: "case-fabricated" } })).toMatchObject({
+      code: "bound_output_mismatch",
+    });
+    expect(succeeded.state.completedSteps).toEqual([]);
+  });
+
+  it("rejects receipt values that violate the binding's declared type", () => {
+    const flow = evidenceFlow();
+    const reservation = reserve(flow, activeStep(flow), "case-wrong-type", CASE_TOOL, { member: "m-1" });
+    const succeeded = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: 42 } } },
+    );
+
+    expect(completeFlowStep(flow, succeeded.state, {})).toMatchObject({ code: "receipt_output_type" });
+  });
+
+  it.each(["__proto__", "prototype", "constructor"])(
+    "rejects unsafe %s segments in receipt result paths",
+    (segment) => {
+      const flow = evidenceFlow({ result_path: `$.data.${segment}.polluted` });
+      const reservation = reserve(flow, activeStep(flow), `case-path-${segment}`, CASE_TOOL, { member: "m-1" });
+      const succeeded = settle(
+        reservation.state,
+        reservation.receipt.id,
+        "succeeded",
+        { data: { safe: "value" } },
+      );
+
+      expect(completeFlowStep(flow, succeeded.state, {})).toMatchObject({ code: "missing_receipt_output" });
+    },
+  );
+
+  it("hydrates old persisted flow state with safe evidence-ledger defaults", () => {
+    const current = createFlowExecutionState("2026-07-09T23:59:59.000Z");
+    const oldPersistedState: Record<string, unknown> = { ...current };
+    delete oldPersistedState.capabilityEpoch;
+    delete oldPersistedState.actionReceipts;
+
+    const hydrated = FlowExecutionStateSchema.parse(oldPersistedState);
+    expect(hydrated.capabilityEpoch).toBe(0);
+    expect(hydrated.actionReceipts).toEqual([]);
+
+    const selected = selectFlowTopic(evidenceFlow(), hydrated, TOPIC);
+    if ("error" in selected) throw new Error(selected.error);
+    expect(selected.capabilityEpoch).toBe(1);
+  });
+});

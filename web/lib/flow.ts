@@ -24,6 +24,24 @@ export type FlowTransition = {
   };
 };
 
+export type FlowOutputBinding = {
+  /** Durable output key populated by the runtime, never trusted from model-authored completion args. */
+  output: string;
+  /** Action whose successful receipt is authoritative for this value. */
+  tool: string;
+  /** Dot path inside the action result, including numeric array indices. */
+  result_path: string;
+  value_type?: "string" | "number" | "boolean" | "object" | "array";
+};
+
+export type FlowActionPolicy = {
+  tool: string;
+  /** Successful executions allowed for this step. */
+  max_calls?: number;
+  /** Runtime-generated deduplication scope for late/replayed realtime tool events. */
+  idempotency?: "none" | "per_step" | "per_arguments" | "per_call" | "per_call_arguments";
+};
+
 export type FlowStep = {
   id: string;
   label: string;
@@ -35,6 +53,10 @@ export type FlowStep = {
   tools?: string[];
   /** Output keys that complete_step must persist before this step can finish. */
   required_outputs?: string[];
+  /** Bind durable outputs to verified action receipts. */
+  output_bindings?: FlowOutputBinding[];
+  /** Exactly-once/call-count policy for consequential actions. */
+  action_policies?: FlowActionPolicy[];
   success_criteria?: string[];
   transitions?: FlowTransition[];
   on_failure?: string;
@@ -71,6 +93,17 @@ export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
     entry: z.boolean().optional(),
     tools: z.array(z.string().regex(TOOL_NAME)).optional(),
     required_outputs: z.array(z.string().min(1)).optional(),
+    output_bindings: z.array(z.object({
+      output: z.string().min(1),
+      tool: z.string().regex(TOOL_NAME),
+      result_path: z.string().min(1),
+      value_type: z.enum(["string", "number", "boolean", "object", "array"]).optional(),
+    })).optional(),
+    action_policies: z.array(z.object({
+      tool: z.string().regex(TOOL_NAME),
+      max_calls: z.number().int().min(1).max(100).optional(),
+      idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
+    })).optional(),
     success_criteria: z.array(z.string().min(1)).optional(),
     transitions: z.array(FlowTransitionSchema).optional(),
     on_failure: z.string().min(1).optional(),
@@ -110,6 +143,12 @@ export const AgentFlowSchema = z.object({
   schema_version: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Tools visible for the whole call. Keep this deliberately small. */
   always_tools: z.array(z.string().regex(TOOL_NAME)).optional(),
+  /** Admission/idempotency rules for always-available actions routed through the gateway. */
+  always_action_policies: z.array(z.object({
+    tool: z.string().regex(TOOL_NAME),
+    max_calls: z.number().int().min(1).max(100).optional(),
+    idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
+  })).optional(),
   /** gateway exposes one guarded run_action tool; direct exposes every attached tool up front. */
   tool_exposure: z.enum(["gateway", "direct"]).optional(),
   /** Optional circuit breaker for total step entries/retries during one call. */
@@ -135,6 +174,11 @@ export type FlowDiagnostic = {
 export type StepRef = { path: string; nodeId: string; step: FlowStep; ancestors: FlowStep[] };
 
 const DEFAULT_ALWAYS_TOOLS = ["contact_support", "request_recall", "log_note", "end_call"];
+const DEFAULT_ALWAYS_ACTION_POLICIES: FlowActionPolicy[] = [
+  { tool: "contact_support", max_calls: 1, idempotency: "per_call" },
+  { tool: "request_recall", max_calls: 3, idempotency: "per_call_arguments" },
+  { tool: "end_call", max_calls: 1, idempotency: "per_call" },
+];
 
 /** v1 remains direct for compatibility; v2 defaults to the progressive action gateway. */
 export function flowToolExposure(flow: AgentFlow): "gateway" | "direct" {
@@ -143,6 +187,15 @@ export function flowToolExposure(flow: AgentFlow): "gateway" | "direct" {
 
 export function alwaysTools(flow: AgentFlow): string[] {
   return [...new Set(flow.always_tools ?? DEFAULT_ALWAYS_TOOLS)];
+}
+
+export function alwaysActionPolicies(flow: AgentFlow): FlowActionPolicy[] {
+  const granted = new Set(alwaysTools(flow));
+  const explicit = new Map((flow.always_action_policies ?? []).map((policy) => [policy.tool, policy]));
+  return [
+    ...DEFAULT_ALWAYS_ACTION_POLICIES.filter((policy) => granted.has(policy.tool) && !explicit.has(policy.tool)),
+    ...explicit.values(),
+  ];
 }
 
 export function listStepRefs(flow: AgentFlow): StepRef[] {
@@ -212,6 +265,17 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
   if (!flow.nodes.some((node) => node.kind === "topic")) diagnostics.push({ level: "error", path: "nodes", message: "flow needs at least one topic node" });
 
   const refs = listStepRefs(flow);
+  const globalPolicyTools = new Set<string>();
+  const globalTools = new Set(alwaysTools(flow));
+  for (const [index, policy] of (flow.always_action_policies ?? []).entries()) {
+    if (globalPolicyTools.has(policy.tool)) {
+      diagnostics.push({ level: "error", path: `always_action_policies.${index}.tool`, message: `duplicate global action policy for "${policy.tool}"` });
+    }
+    globalPolicyTools.add(policy.tool);
+    if (!globalTools.has(policy.tool)) {
+      diagnostics.push({ level: "error", path: `always_action_policies.${index}.tool`, message: `global action policy tool "${policy.tool}" is not in always_tools` });
+    }
+  }
   const stepPaths = new Set(refs.map((ref) => ref.path));
   const seenPaths = new Set<string>();
   for (const ref of refs) {
@@ -220,6 +284,33 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
     if (ref.path.split(".").length - 1 > 8) diagnostics.push({ level: "error", path: ref.path, message: "step nesting exceeds the supported depth of 8" });
     if (ref.ancestors.length > 0 && ref.step.entry !== undefined) {
       diagnostics.push({ level: "error", path: `${ref.path}.entry`, message: "entry may only be set on top-level steps" });
+    }
+    const node = flow.nodes.find((candidate) => candidate.id === ref.nodeId);
+    const granted = new Set([
+      ...alwaysTools(flow),
+      ...(node?.tools ?? []),
+      ...ref.ancestors.flatMap((ancestor) => ancestor.tools ?? []),
+      ...(ref.step.tools ?? []),
+    ]);
+    const bindingOutputs = new Set<string>();
+    for (const [bindingIndex, binding] of (ref.step.output_bindings ?? []).entries()) {
+      if (bindingOutputs.has(binding.output)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.output_bindings.${bindingIndex}.output`, message: `duplicate output binding "${binding.output}"` });
+      }
+      bindingOutputs.add(binding.output);
+      if (!granted.has(binding.tool)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.output_bindings.${bindingIndex}.tool`, message: `binding tool "${binding.tool}" is not granted in this step` });
+      }
+    }
+    const policyTools = new Set<string>();
+    for (const [policyIndex, policy] of (ref.step.action_policies ?? []).entries()) {
+      if (policyTools.has(policy.tool)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.action_policies.${policyIndex}.tool`, message: `duplicate action policy for "${policy.tool}"` });
+      }
+      policyTools.add(policy.tool);
+      if (!granted.has(policy.tool)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.action_policies.${policyIndex}.tool`, message: `policy tool "${policy.tool}" is not granted in this step` });
+      }
     }
     for (const transition of ref.step.transitions ?? []) {
       if (!stepPaths.has(transition.to)) diagnostics.push({ level: "error", path: `${ref.path}.transitions`, message: `transition targets unknown step "${transition.to}"` });
@@ -288,7 +379,7 @@ export function slimInstructions(persona: string, flow: AgentFlow): string {
     .join("\n");
   const progressiveRules = flow.schema_version === 2
     ? `2. classify returns only the selected topic and its first valid step paths. Call enter_step(path) to unlock that step's context and action schemas.
-3. Use run_action only for actions returned by enter_step. Persist every required output with complete_step before moving on. If context is lost, call get_flow_state and resume from its checkpoint.`
+3. Every business action goes through run_action. Copy its capability_grant exactly from classify, enter_step, or get_flow_state; never reuse a grant after the state changes. Receipt-bound outputs are committed by complete_step from verified tool evidence, not from memory. If context is lost, call get_flow_state and resume from its checkpoint.`
     : `2. classify returns the topic context and the available next steps. Follow ONLY those steps. When the caller picks a direction, call begin_step to get that step's exact instructions.`;
   return `${persona}
 
@@ -302,7 +393,7 @@ ${progressiveRules}
 4. Never invent policy, prices, or procedures. If the answer isn't in tool output, use an available search action or offer human help.
 5. hold(seconds) when you need to pause (e.g. "let me check that").
 6. Keep every reply to one or two short sentences — this is a phone call.
-7. RECORDING IS SACRED: the moment you have data a step told you to record (write_table etc.), call that tool immediately — you can do it while still talking. NEVER end a call with unrecorded answers, even if the caller is saying goodbye. Record first, then say goodbye, then end_call.`;
+7. RECORDING IS SACRED: the moment you have data a step told you to record (write_table etc.), call that action immediately — you can do it while still talking. NEVER end a call with unrecorded answers, even if the caller is saying goodbye. Record first, finish the flow or take its explicit fallback, then get a fresh end_call grant and end.`;
 }
 
 

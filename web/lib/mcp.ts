@@ -2,11 +2,13 @@
 // mcp.ts — MCP gateway core: progressive-disclosure tools for live voice sessions.
 // The base prompt stays slim; classify() reveals topic context + steps, begin_step() reveals execution detail.
 
+import { randomUUID } from "node:crypto";
 import { q, qOne } from "./db";
 import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
 import {
   AgentFlowSchema,
+  alwaysActionPolicies,
   alwaysTools,
   fallbackNode,
   findStep,
@@ -19,11 +21,21 @@ import {
   completeFlowStep,
   describeNextSteps,
   enterFlowStep,
+  flowCapabilityScope,
   flowStateSummary,
   grantedTools,
+  hashFlowValue,
   selectFlowTopic,
+  type FlowExecutionState,
+  type RuntimeError,
 } from "./flow-runtime";
-import { loadFlowState, saveFlowState } from "./flow-state-store";
+import {
+  loadFlowState,
+  reserveFlowActionAtomic,
+  settleFlowActionAtomic,
+  withLockedFlowState,
+} from "./flow-state-store";
+import { signFlowCapability, verifyFlowCapability } from "./flow-capability";
 import { invokeTool } from "./toolfactory/deploy";
 import { queryRows, upsertRow, findCustomerByPhone } from "./datasets";
 import { signScope } from "./voice";
@@ -32,6 +44,7 @@ import { sendSms } from "./sms";
 import { log } from "./log";
 import { voiceToolExtensions, type VoiceToolScope } from "./voice-tools";
 import { CALL_RUNTIME_SNAPSHOT_QUERY } from "./call-runtime-query";
+import { parseCallRuntimeSnapshot } from "./call-runtime-snapshot";
 
 /** The human's number on this call, direction-aware. */
 async function callerNumber(callId: string): Promise<string | null> {
@@ -57,13 +70,27 @@ type CallCtx = {
   docsReady: boolean;
   datasetSlugs: string[];
   holdMusic: boolean;
-  mintedTools: { slug: string; description: string; input_schema: Record<string, unknown> }[];
+  runtimeDigest: string | null;
+  mintedTools: { slug: string; description: string; input_schema: Record<string, unknown>; endpoint_url: string | null }[];
+  extensionTools: McpToolDef[];
 };
+
+type LeasedToolDef = McpToolDef & {
+  capability_grant: string;
+  capability_expires_at: string;
+  policy: {
+    idempotency: "none" | "per_step" | "per_arguments" | "per_call" | "per_call_arguments";
+    max_calls?: number;
+  };
+};
+
+type EnterStepSuccess = Exclude<ReturnType<typeof enterFlowStep>, RuntimeError>;
+type CompleteStepSuccess = Exclude<ReturnType<typeof completeFlowStep>, RuntimeError>;
 
 async function loadCtx(scope: Scope): Promise<CallCtx> {
   const [agentRow, org, docsReady, datasets, holdMusic] = await Promise.all([
     // Campaign/recall calls carry a named flow — it overrides the agent's inbound default.
-    qOne<{ flow: unknown; tool_ids: string[] }>(CALL_RUNTIME_SNAPSHOT_QUERY, [
+    qOne<{ flow: unknown; tool_ids: string[]; runtime_snapshot: unknown | null; runtime_digest: string | null }>(CALL_RUNTIME_SNAPSHOT_QUERY, [
       scope.agentId, scope.orgId, scope.callId,
     ]),
     qOne<{ internet_enabled: boolean; allowed_domains: string[] }>(
@@ -77,21 +104,34 @@ async function loadCtx(scope: Scope): Promise<CallCtx> {
       [scope.orgId]
     ),
   ]);
-  const parsed = AgentFlowSchema.safeParse(agentRow?.flow ?? { nodes: [], edges: [] });
-  const mintedTools = agentRow?.tool_ids?.length
+  const pinned = agentRow?.runtime_snapshot
+    ? parseCallRuntimeSnapshot(agentRow.runtime_snapshot, agentRow.runtime_digest)
+    : null;
+  const parsed = AgentFlowSchema.safeParse(pinned?.snapshot.flow ?? agentRow?.flow ?? { nodes: [], edges: [] });
+  const mintedTools = pinned
+    ? pinned.snapshot.toolManifest.map((tool) => ({
+        slug: tool.slug,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+        endpoint_url: tool.endpointUrl,
+      }))
+    : agentRow?.tool_ids?.length
     ? await q<CallCtx["mintedTools"][number]>(
-        "SELECT slug, description, input_schema FROM tools WHERE id = ANY($1) AND org_id = $2 AND deploy_status = 'live'",
+        "SELECT slug, description, input_schema, endpoint_url FROM tools WHERE id = ANY($1) AND org_id = $2 AND deploy_status = 'live'",
         [agentRow.tool_ids, scope.orgId]
       )
     : [];
+  const environment = pinned?.snapshot.environment;
   return {
     flow: parsed.success ? parsed.data : { nodes: [], edges: [] },
-    internetEnabled: org?.internet_enabled ?? false,
-    allowedDomains: org?.allowed_domains ?? [],
-    docsReady,
-    datasetSlugs: datasets.map((d) => d.slug),
-    holdMusic: !!holdMusic,
+    internetEnabled: environment?.internetEnabled ?? org?.internet_enabled ?? false,
+    allowedDomains: environment?.allowedDomains ?? org?.allowed_domains ?? [],
+    docsReady: environment?.docsReady ?? docsReady,
+    datasetSlugs: environment?.datasetSlugs ?? datasets.map((d) => d.slug),
+    holdMusic: environment?.holdMusic ?? !!holdMusic,
+    runtimeDigest: pinned?.digest ?? null,
     mintedTools,
+    extensionTools: pinned?.snapshot.extensionManifest ?? await voiceToolExtensions.definitions(scope),
   };
 }
 
@@ -265,11 +305,75 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
   for (const t of ctx.mintedTools) {
     tools.push({ name: t.slug, description: t.description, inputSchema: t.input_schema });
   }
-  tools.push(...await voiceToolExtensions.definitions(scope));
+  tools.push(...ctx.extensionTools);
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (names.has(tool.name)) throw new Error(`voice tool name collision: "${tool.name}"`);
+    names.add(tool.name);
+  }
   return tools;
 }
 
 const FLOW_CONTROL_TOOLS = new Set(["classify", "enter_step", "complete_step", "get_flow_state", "run_action"]);
+
+function runtimeDigest(ctx: CallCtx, catalog: McpToolDef[]): string {
+  return ctx.runtimeDigest ?? hashFlowValue({
+    flow: ctx.flow,
+    tools: [...catalog]
+      .map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  });
+}
+
+function leasedActionsFor(
+  scope: Scope,
+  ctx: CallCtx,
+  state: FlowExecutionState,
+  catalog: McpToolDef[],
+  digest = runtimeDigest(ctx, catalog)
+): LeasedToolDef[] {
+  const allowed = new Set(grantedTools(ctx.flow, state));
+  const scopeState = flowCapabilityScope(state);
+  const ref = state.currentStep && !state.completedSteps.includes(state.currentStep)
+    ? findStep(ctx.flow, state.currentStep)
+    : undefined;
+  return catalog.filter((tool) => allowed.has(tool.name) && !FLOW_CONTROL_TOOLS.has(tool.name)).map((tool) => {
+    const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === tool.name)
+      ?? alwaysActionPolicies(ctx.flow).find((candidate) => candidate.tool === tool.name);
+    const signed = signFlowCapability({
+      callId: scope.callId,
+      agentId: scope.agentId,
+      orgId: scope.orgId,
+      runtimeDigest: digest,
+      capabilityEpoch: state.capabilityEpoch,
+      step: scopeState.step,
+      attempt: scopeState.attempt,
+      tool: tool.name,
+    });
+    return {
+      ...tool,
+      capability_grant: signed.token,
+      capability_expires_at: signed.expiresAt,
+      policy: {
+        idempotency: policy?.idempotency ?? "none",
+        ...(policy?.max_calls !== undefined ? { max_calls: policy.max_calls } : {}),
+      },
+    };
+  });
+}
+
+async function flowStateWithLeases(
+  scope: Scope,
+  ctx: CallCtx,
+  state: FlowExecutionState,
+  catalog?: McpToolDef[]
+) {
+  const resolvedCatalog = catalog ?? await listToolCatalogFor(scope, ctx);
+  return {
+    ...flowStateSummary(ctx.flow, state),
+    available_actions: leasedActionsFor(scope, ctx, state, resolvedCatalog),
+  };
+}
 
 /**
  * Flow v2 keeps the initial model context intentionally small. Step-specific actions are
@@ -294,7 +398,7 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
     },
     {
       name: "complete_step",
-      description: "Persist the active step's outcome and unlock its next steps. Include every required output returned by enter_step.",
+      description: "Commit the active checkpoint and unlock valid next steps. Receipt-bound outputs are populated by the runtime; include only conversational outputs and any matching values you want checked.",
       inputSchema: {
         type: "object",
         properties: { path: { type: "string" }, outputs: { type: "object" } },
@@ -308,28 +412,64 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
     },
     {
       name: "run_action",
-      description: "Execute an action granted by the active flow step. Use the exact name and argument schema returned by enter_step; ungranted actions are rejected.",
+      description: "Execute an action granted by the active flow step. Copy its capability_grant exactly from enter_step/get_flow_state; stale, edited, or replayed grants fail closed.",
       inputSchema: {
         type: "object",
-        properties: { name: { type: "string" }, arguments: { type: "object" } },
-        required: ["name", "arguments"],
+        properties: {
+          name: { type: "string" },
+          arguments: { type: "object" },
+          capability_grant: { type: "string", description: "Opaque short-lived grant returned beside this action." },
+        },
+        required: ["name", "arguments", "capability_grant"],
       },
     },
   ];
-  const global = new Set(alwaysTools(ctx.flow));
-  return [...controls, ...catalog.filter((tool) => global.has(tool.name) && !FLOW_CONTROL_TOOLS.has(tool.name))];
+  // Every business action, including always-available ones, goes through run_action so delayed
+  // realtime calls cannot bypass epoch checks or the exactly-once admission ledger.
+  return controls;
+}
+
+const BACKGROUND_TOOL_NAMES = new Set([
+  "send_email",
+  "send_sms",
+  "read_table",
+  "write_table",
+  "search",
+  "search_knowledge",
+  "log_note",
+]);
+
+export async function listToolsForAudience(
+  scope: Scope,
+  audience: "realtime" | "background"
+): Promise<McpToolDef[]> {
+  if (audience === "realtime") return listToolsFor(scope);
+  const ctx = await loadCtx(scope);
+  return (await listToolCatalogFor(scope, ctx)).filter((tool) => BACKGROUND_TOOL_NAMES.has(tool.name));
 }
 
 export async function callTool(scope: Scope, name: string, args: Record<string, unknown>): Promise<unknown> {
-  await saveEvent(scope, "tool_call", { name, args });
+  return callToolForAudience(scope, "realtime", name, args);
+}
+
+export async function callToolForAudience(
+  scope: Scope,
+  audience: "realtime" | "background",
+  name: string,
+  args: Record<string, unknown>
+): Promise<unknown> {
+  if (audience === "background" && !BACKGROUND_TOOL_NAMES.has(name)) {
+    return { error: `tool "${name}" is not available to background tasks`, code: "wrong_tool_audience" };
+  }
+  await saveEvent(scope, "tool_call", { name, args, audience });
   let result: unknown;
   try {
-    result = await dispatch(scope, name, args);
+    result = await dispatch(scope, name, args, audience === "background");
   } catch (e) {
     result = { error: (e as Error).message };
   }
-  await saveEvent(scope, "tool_result", { name, result: JSON.stringify(result).slice(0, 2000) });
-  L.info("mcp tool", { callId: scope.callId, orgId: scope.orgId, data: { name } });
+  await saveEvent(scope, "tool_result", { name, result: JSON.stringify(result).slice(0, 2000), audience });
+  L.info("mcp tool", { callId: scope.callId, orgId: scope.orgId, data: { name, audience } });
   return result;
 }
 
@@ -350,8 +490,6 @@ async function dispatch(
     return { error: `action "${name}" is not globally available; enter the correct flow step and use run_action` };
   }
 
-  if (voiceToolExtensions.has(name)) return voiceToolExtensions.execute(name, args, scope);
-
   switch (name) {
     case "classify": {
       const id = String(args.topic);
@@ -368,23 +506,34 @@ async function dispatch(
       if (!node) return { error: `unknown topic ${id}. Valid: ${topicNodes(ctx.flow).map((t) => t.id).join(", ")}, other` };
       await saveEvent(scope, "state", { node: node.id });
       if (ctx.flow.schema_version === 2) {
-        const current = await loadFlowState(scope.callId);
-        const selected = selectFlowTopic(ctx.flow, current, node.id);
-        if ("error" in selected) return selected;
-        if (selected === current && current.currentStep) {
+        const selected = await withLockedFlowState<{
+          result: FlowExecutionState | RuntimeError;
+          alreadySelected: boolean;
+        }>(scope.callId, (current) => {
+          const next = selectFlowTopic(ctx.flow, current, node.id);
+          if ("error" in next) return { value: { result: next, alreadySelected: false } };
+          return {
+            ...(next !== current ? { state: next } : {}),
+            value: { result: next, alreadySelected: next === current && !!current.currentStep },
+          };
+        });
+        if ("error" in selected.value.result) return selected.value.result;
+        if (selected.value.alreadySelected) {
           return {
             already_selected: true,
             guidance: "This topic is already active. Continue from the durable state instead of restarting its entry steps.",
-            state: flowStateSummary(ctx.flow, current),
+            state: await flowStateWithLeases(scope, ctx, selected.state),
           };
         }
-        await saveFlowState(scope.callId, selected);
       }
       if (node.kind === "fallback") {
         return {
           context: node.context ?? "Out-of-scope request.",
           next_steps: [{ id: "transfer", label: "Contact support", when: "caller agrees to be transferred" }],
           guidance: "Offer to connect them with the support line via contact_support. If they'd rather get a callback, use request_recall.",
+          ...(ctx.flow.schema_version === 2
+            ? { state: await flowStateWithLeases(scope, ctx, await loadFlowState(scope.callId)) }
+            : {}),
         };
       }
       return {
@@ -404,6 +553,9 @@ async function dispatch(
           ctx.flow.schema_version === 2
             ? "Work within this topic only. When the caller commits to one of next_steps, call enter_step with its path. If none fit, classify('other')."
             : "Work within this topic only. When the caller commits to one of next_steps, call begin_step for its exact instructions. If none fit, classify('other').",
+        ...(ctx.flow.schema_version === 2
+          ? { state: await flowStateWithLeases(scope, ctx, await loadFlowState(scope.callId)) }
+          : {}),
       };
     }
 
@@ -419,76 +571,174 @@ async function dispatch(
     }
 
     case "enter_step": {
-      const state = await loadFlowState(scope.callId);
-      const entered = enterFlowStep(ctx.flow, state, String(args.path ?? ""));
+      const transition = await withLockedFlowState<EnterStepSuccess | RuntimeError>(scope.callId, (state) => {
+        const entered = enterFlowStep(ctx.flow, state, String(args.path ?? ""));
+        return "error" in entered
+          ? { value: entered }
+          : { state: entered.state, value: entered };
+      });
+      const entered = transition.value;
       if ("error" in entered) return entered;
-      const saved = await saveFlowState(scope.callId, entered.state);
-      if (saved.currentStep !== entered.path) {
-        return {
-          error: "flow state changed before this step could be entered; recover with get_flow_state",
-          code: "revision_conflict",
-          state: flowStateSummary(ctx.flow, saved),
-        };
-      }
+      const saved = transition.state;
       const catalog = await listToolCatalogFor(scope, ctx);
-      const allowed = new Set(entered.availableTools);
+      const digest = runtimeDigest(ctx, catalog);
       return {
         path: entered.path,
         context: entered.step.context,
         instructions: entered.step.instructions,
         success_criteria: entered.step.success_criteria ?? [],
         required_outputs: entered.step.required_outputs ?? [],
+        output_bindings: entered.step.output_bindings ?? [],
         checkpoint: entered.step.checkpoint ?? false,
-        available_actions: catalog.filter((tool) => allowed.has(tool.name)),
+        available_actions: leasedActionsFor(scope, ctx, saved, catalog, digest),
         next_steps: describeNextSteps(ctx.flow, saved),
+        capability_epoch: saved.capabilityEpoch,
+        runtime_digest: digest,
         revision: saved.revision,
       };
     }
 
     case "complete_step": {
-      const state = await loadFlowState(scope.callId);
-      const completed = completeFlowStep(ctx.flow, state, {
-        path: args.path ? String(args.path) : undefined,
-        outputs: (args.outputs as Record<string, unknown>) ?? {},
+      let completedPath = "";
+      const transition = await withLockedFlowState<CompleteStepSuccess | RuntimeError>(scope.callId, (state) => {
+        completedPath = String(args.path ?? state.currentStep ?? "");
+        const completed = completeFlowStep(ctx.flow, state, {
+          path: args.path ? String(args.path) : undefined,
+          outputs: (args.outputs as Record<string, unknown>) ?? {},
+        });
+        return "error" in completed
+          ? { value: completed }
+          : { state: completed.state, value: completed };
       });
+      const completed = transition.value;
       if ("error" in completed) return completed;
-      const saved = await saveFlowState(scope.callId, completed.state);
-      const completedPath = String(args.path ?? state.currentStep ?? "");
-      if (completedPath && !saved.completedSteps.includes(completedPath)) {
-        return {
-          error: "flow state changed before this completion could be recorded; recover with get_flow_state",
-          code: "revision_conflict",
-          state: flowStateSummary(ctx.flow, saved),
-        };
-      }
+      const saved = transition.state;
       await saveEvent(scope, "state", {
         node: saved.nodeId,
         step: saved.currentStep,
-        completed: args.path ?? state.currentStep,
+        completed: completedPath,
+        capability_epoch: saved.capabilityEpoch,
         revision: saved.revision,
       });
-      return flowStateSummary(ctx.flow, saved);
+      return flowStateWithLeases(scope, ctx, saved);
     }
 
     case "get_flow_state": {
-      return flowStateSummary(ctx.flow, await loadFlowState(scope.callId));
+      return flowStateWithLeases(scope, ctx, await loadFlowState(scope.callId));
     }
 
     case "run_action": {
       const action = String(args.name ?? "");
       if (FLOW_CONTROL_TOOLS.has(action)) return { error: "flow control tools cannot be nested inside run_action" };
       const state = await loadFlowState(scope.callId);
-      const allowed = new Set(grantedTools(ctx.flow, state));
-      if (!allowed.has(action)) {
-        return { error: `action "${action}" is not granted at ${state.currentStep ?? "the routing stage"}`, available_actions: [...allowed] };
-      }
       const actionArgs = args.arguments && typeof args.arguments === "object"
         ? args.arguments as Record<string, unknown>
         : {};
-      await saveEvent(scope, "tool_call", { name: action, args: actionArgs, via: "run_action" });
-      const result = await dispatch(scope, action, actionArgs, true);
-      await saveEvent(scope, "tool_result", { name: action, result: JSON.stringify(result).slice(0, 2000), via: "run_action" });
-      return result;
+      const catalog = await listToolCatalogFor(scope, ctx);
+      const digest = runtimeDigest(ctx, catalog);
+      const capabilityScope = flowCapabilityScope(state);
+      const verified = verifyFlowCapability(String(args.capability_grant ?? ""), {
+        callId: scope.callId,
+        agentId: scope.agentId,
+        orgId: scope.orgId,
+        runtimeDigest: digest,
+        capabilityEpoch: state.capabilityEpoch,
+        step: capabilityScope.step,
+        attempt: capabilityScope.attempt,
+        tool: action,
+      });
+      if ("error" in verified) return verified;
+
+      const receiptId = randomUUID();
+      const ownerToken = randomUUID();
+      const reservation = await reserveFlowActionAtomic(scope.callId, ctx.flow, {
+        receiptId,
+        ownerToken,
+        runtimeDigest: digest,
+        tool: action,
+        arguments: actionArgs,
+        capabilityEpoch: verified.claims.capabilityEpoch,
+      });
+      if ("error" in reservation) return reservation;
+      if (!reservation.execute) {
+        if (reservation.receipt.status === "succeeded") {
+          return {
+            ...(reservation.receipt.result && typeof reservation.receipt.result === "object"
+              ? reservation.receipt.result as Record<string, unknown>
+              : { result: reservation.receipt.result }),
+            receipt_id: reservation.receipt.id,
+            replayed: true,
+          };
+        }
+        if (reservation.receipt.status === "indeterminate") {
+          return {
+            error: "the prior action may have committed and requires reconciliation before retrying",
+            code: "action_indeterminate",
+            receipt_id: reservation.receipt.id,
+          };
+        }
+        return { pending: true, receipt_id: reservation.receipt.id };
+      }
+
+      await saveEvent(scope, "tool_call", {
+        name: action,
+        arguments_hash: reservation.receipt.argumentsHash,
+        receipt_id: reservation.receipt.id,
+        capability_epoch: reservation.receipt.capabilityEpoch,
+        via: "run_action",
+      });
+      let result: unknown;
+      try {
+        result = await dispatch(scope, action, actionArgs, true);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "action execution failed without a result";
+        await settleFlowActionAtomic(scope.callId, {
+          receiptId: reservation.receipt.id,
+          ownerToken,
+          status: "indeterminate",
+          error: message,
+          deliveryState: "unknown",
+        });
+        await saveEvent(scope, "tool_result", {
+          name: action,
+          receipt_id: reservation.receipt.id,
+          status: "indeterminate",
+          via: "run_action",
+        });
+        return {
+          error: "action outcome is indeterminate; recover or reconcile before retrying",
+          code: "action_indeterminate",
+          receipt_id: reservation.receipt.id,
+        };
+      }
+      const failed = !!result && typeof result === "object" && "error" in result;
+      const settled = await settleFlowActionAtomic(scope.callId, {
+        receiptId: reservation.receipt.id,
+        ownerToken,
+        status: failed ? "failed" : "succeeded",
+        result,
+        ...(failed ? { error: String((result as { error: unknown }).error), deliveryState: "not_sent" as const } : { deliveryState: "committed" as const }),
+      });
+      if ("error" in settled) return settled;
+      await saveEvent(scope, "tool_result", {
+        name: action,
+        receipt_id: settled.receipt.id,
+        result_hash: settled.receipt.resultHash,
+        status: settled.receipt.status,
+        via: "run_action",
+      });
+      if (failed) {
+        return {
+          ...(result as Record<string, unknown>),
+          receipt_id: settled.receipt.id,
+          receipt_status: settled.receipt.status,
+        };
+      }
+      return {
+        ...(result && typeof result === "object" ? result as Record<string, unknown> : { result }),
+        receipt_id: settled.receipt.id,
+        receipt_status: settled.receipt.status,
+      };
     }
 
     case "hold": {
@@ -579,6 +829,24 @@ async function dispatch(
       return { ok: true };
 
     case "end_call": {
+      if (ctx.flow.schema_version === 2 && flowToolExposure(ctx.flow) === "gateway") {
+        const state = await loadFlowState(scope.callId);
+        const node = ctx.flow.nodes.find((candidate) => candidate.id === state.nodeId);
+        const unresolved = state.actionReceipts.filter((receipt) =>
+          receipt.status === "reserved" || receipt.status === "indeterminate"
+        );
+        const terminal = state.status === "completed" || state.status === "failed" || node?.kind === "fallback";
+        if (!terminal || unresolved.length) {
+          return {
+            error: unresolved.length
+              ? "the call has unresolved actions that must settle or be reconciled before ending"
+              : "the active flow is incomplete; finish it or use the explicit fallback/handoff path before ending",
+            code: unresolved.length ? "unresolved_actions" : "flow_incomplete",
+            unresolved_receipts: unresolved.map((receipt) => receipt.id),
+            state: await flowStateWithLeases(scope, ctx, state),
+          };
+        }
+      }
       await saveEvent(scope, "state", { state: "ending", reason: args.reason ?? null });
       const call = await qOne<{ twilio_call_sid: string | null }>(
         "SELECT twilio_call_sid FROM calls WHERE id = $1", [scope.callId]
@@ -658,13 +926,10 @@ async function dispatch(
     }
 
     default: {
+      if (voiceToolExtensions.has(name)) return voiceToolExtensions.execute(name, args, scope);
       const tool = ctx.mintedTools.find((t) => t.slug === name);
       if (!tool) return { error: `unknown tool ${name}` };
-      const row = await qOne<{ endpoint_url: string | null }>(
-        "SELECT endpoint_url FROM tools WHERE org_id = $1 AND slug = $2 AND deploy_status = 'live'",
-        [scope.orgId, name]
-      );
-      return row?.endpoint_url ? await invokeTool(row.endpoint_url, args) : { error: `tool ${name} not deployed` };
+      return tool.endpoint_url ? await invokeTool(tool.endpoint_url, args) : { error: `tool ${name} not deployed in this call's runtime snapshot` };
     }
   }
 }

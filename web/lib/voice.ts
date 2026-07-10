@@ -10,6 +10,15 @@ import { resolveVoiceProviderConfig } from "./realtime/config";
 import { buildProviderSessionUpdate } from "./realtime/registry";
 import type { RealtimeAudioFormat, RemoteMcpServer, VoiceSessionSpec } from "./realtime/types";
 import { decryptSecret } from "./vault";
+import { AgentFlowSchema, flowToolExposure } from "./flow";
+import { hasReadyDocuments } from "./knowledge";
+import { voiceToolExtensions } from "./voice-tools";
+import {
+  CallRuntimeSnapshotSchema,
+  callRuntimeDigest,
+  parseCallRuntimeSnapshot,
+  type CallRuntimeSnapshot,
+} from "./call-runtime-snapshot";
 
 export type AgentVersionRow = {
   agent_id: string;
@@ -92,6 +101,8 @@ type CallRow = {
   variant: string | null;
   agent_version: number;
   flow_id: string | null;
+  runtime_snapshot: unknown | null;
+  runtime_digest: string | null;
 };
 
 /** Honors a stamped experiment variant, or lazily picks one (covers PSTN calls created outside buildVoiceSession). */
@@ -155,6 +166,109 @@ async function callerContextBlock(orgId: string, callId: string, call: CallRow |
   return `${lines.join("\n")}\n\n`;
 }
 
+async function buildRuntimeSnapshot(
+  agent: AgentVersionRow,
+  callId: string,
+  flowId: string | null
+): Promise<{ snapshot: CallRuntimeSnapshot; digest: string }> {
+  const [named, toolRows, mcpRows, org, docsReady, datasets, holdMusic, extensionManifest] = await Promise.all([
+    flowId
+      ? qOne<{ flow: unknown; instructions: string }>(
+          "SELECT flow, instructions FROM flows WHERE id = $1 AND org_id = $2 AND agent_id = $3",
+          [flowId, agent.org_id, agent.agent_id]
+        )
+      : Promise.resolve(null),
+    agent.tool_ids.length
+      ? q<{ id: string; slug: string; description: string; input_schema: Record<string, unknown>; endpoint_url: string | null }>(
+          "SELECT id, slug, description, input_schema, endpoint_url FROM tools WHERE id = ANY($1) AND org_id = $2",
+          [agent.tool_ids, agent.org_id]
+        )
+      : Promise.resolve([]),
+    agent.mcp_server_ids.length
+      ? q<{ id: string; label: string; server_url: string; allowed_tools: string[] | null; auth_header_encrypted: string | null }>(
+          "SELECT id, label, server_url, allowed_tools, auth_header_encrypted FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
+          [agent.mcp_server_ids, agent.org_id]
+        )
+      : Promise.resolve([]),
+    qOne<{ internet_enabled: boolean; allowed_domains: string[] }>(
+      "SELECT internet_enabled, allowed_domains FROM orgs WHERE id = $1",
+      [agent.org_id]
+    ),
+    hasReadyDocuments(agent.org_id),
+    q<{ slug: string }>("SELECT slug FROM datasets WHERE org_id = $1 ORDER BY created_at", [agent.org_id]),
+    qOne<{ ok: number }>(
+      `SELECT 1 AS ok FROM media_renditions mr JOIN documents d ON d.id = mr.document_id
+       WHERE d.org_id = $1 AND d.meta->>'hold_music' = 'true' AND mr.kind = 'ulaw8k' LIMIT 1`,
+      [agent.org_id]
+    ),
+    voiceToolExtensions.definitions({ callId, agentId: agent.agent_id, orgId: agent.org_id }),
+  ]);
+  if (flowId && !named) throw new Error("named flow is missing or does not belong to this agent");
+  const flow = AgentFlowSchema.parse(named?.flow ?? agent.flow);
+  const toolsById = new Map(toolRows.map((tool) => [tool.id, tool]));
+  const mcpById = new Map(mcpRows.map((server) => [server.id, server]));
+  const snapshot = CallRuntimeSnapshotSchema.parse({
+    v: 1,
+    agentVersion: agent.version,
+    namedFlowId: flowId,
+    flow,
+    instructions: named?.instructions ?? agent.instructions,
+    codeRevision: process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? "local-development",
+    toolManifest: agent.tool_ids.flatMap((id) => {
+      const tool = toolsById.get(id);
+      return tool ? [{
+        id: tool.id,
+        slug: tool.slug,
+        description: tool.description,
+        inputSchema: tool.input_schema,
+        endpointUrl: tool.endpoint_url,
+      }] : [];
+    }),
+    extensionManifest,
+    externalMcpManifest: agent.mcp_server_ids.flatMap((id) => {
+      const server = mcpById.get(id);
+      return server ? [{
+        id: server.id,
+        label: server.label,
+        serverUrl: server.server_url,
+        allowedTools: server.allowed_tools,
+        authHeaderEncrypted: server.auth_header_encrypted,
+      }] : [];
+    }),
+    environment: {
+      internetEnabled: org?.internet_enabled ?? false,
+      allowedDomains: org?.allowed_domains ?? [],
+      docsReady,
+      datasetSlugs: datasets.map((dataset) => dataset.slug),
+      holdMusic: !!holdMusic,
+    },
+    createdAt: new Date().toISOString(),
+  });
+  return { snapshot, digest: callRuntimeDigest(snapshot) };
+}
+
+async function ensureRuntimeSnapshot(
+  agent: AgentVersionRow,
+  callId: string,
+  call: CallRow
+): Promise<{ snapshot: CallRuntimeSnapshot; digest: string }> {
+  if (call.runtime_snapshot) return parseCallRuntimeSnapshot(call.runtime_snapshot, call.runtime_digest);
+  const candidate = await buildRuntimeSnapshot(agent, callId, call.flow_id);
+  const updated = await qOne<{ runtime_snapshot: unknown; runtime_digest: string }>(
+    `UPDATE calls SET runtime_snapshot = $2, runtime_digest = $3
+     WHERE id = $1 AND runtime_snapshot IS NULL
+     RETURNING runtime_snapshot, runtime_digest`,
+    [callId, JSON.stringify(candidate.snapshot), candidate.digest]
+  );
+  if (updated) return parseCallRuntimeSnapshot(updated.runtime_snapshot, updated.runtime_digest);
+  const winner = await qOne<{ runtime_snapshot: unknown; runtime_digest: string }>(
+    "SELECT runtime_snapshot, runtime_digest FROM calls WHERE id = $1",
+    [callId]
+  );
+  if (!winner?.runtime_snapshot) throw new Error("call runtime snapshot could not be pinned");
+  return parseCallRuntimeSnapshot(winner.runtime_snapshot, winner.runtime_digest);
+}
+
 /** Resolves one provider-neutral session spec for an existing call. */
 export async function voiceSessionSpecForCall(
   agent: AgentVersionRow,
@@ -165,21 +279,24 @@ export async function voiceSessionSpecForCall(
   const scope = signScope({ callId, agentId: agent.agent_id, orgId: agent.org_id });
 
   const call = await qOne<CallRow>(
-    "SELECT direction, from_number, to_number, experiment_id, variant, agent_version, flow_id FROM calls WHERE id = $1",
+    `SELECT direction, from_number, to_number, experiment_id, variant, agent_version, flow_id,
+            runtime_snapshot, runtime_digest
+     FROM calls WHERE id = $1`,
     [callId]
   );
+  if (!call) throw new Error("call not found");
   const [resolvedAgent, callerContext] = await Promise.all([
     resolveVariant(agent, callId, call),
     callerContextBlock(agent.org_id, callId, call),
   ]);
-  let effective = resolvedAgent;
-  // Campaign/recall calls run a named outbound flow: its instructions replace the inbound default.
-  if (call?.flow_id) {
-    const named = await qOne<{ instructions: string }>(
-      "SELECT instructions FROM flows WHERE id = $1 AND org_id = $2", [call.flow_id, agent.org_id]
-    );
-    if (named) effective = { ...effective, instructions: named.instructions };
-  }
+  const pinned = await ensureRuntimeSnapshot(resolvedAgent, callId, call);
+  const effective = {
+    ...resolvedAgent,
+    flow: pinned.snapshot.flow,
+    instructions: pinned.snapshot.instructions,
+    tool_ids: pinned.snapshot.toolManifest.map((tool) => tool.id),
+    mcp_server_ids: pinned.snapshot.externalMcpManifest.map((server) => server.id),
+  };
 
   const toolProxyUrl = `${origin}/api/mcp`;
   const mcpServers: RemoteMcpServer[] = [{
@@ -187,22 +304,21 @@ export async function voiceSessionSpecForCall(
     serverUrl: toolProxyUrl,
     authorization: `Bearer ${scope}`,
   }];
-  const mcpRows = effective.mcp_server_ids.length
-    ? await q<{ label: string; server_url: string; allowed_tools: string[] | null; auth_header_encrypted: string | null }>(
-        "SELECT label, server_url, allowed_tools, auth_header_encrypted FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
-        [effective.mcp_server_ids, effective.org_id]
-      )
+  // Secured Flow v2 sessions expose only our gateway. Direct remote MCP would bypass leases,
+  // receipts, and end-state guards; legacy/direct flows retain the prior attachment behavior.
+  const externalMcp = flowToolExposure(pinned.snapshot.flow) === "direct"
+    ? pinned.snapshot.externalMcpManifest
     : [];
-  for (const m of mcpRows) {
+  for (const m of externalMcp) {
     mcpServers.push({
       label: m.label.toLowerCase().replace(/[^a-z0-9]/g, "-"),
-      serverUrl: m.server_url,
-      ...(m.allowed_tools?.length ? { allowedTools: m.allowed_tools } : {}),
-      ...(m.auth_header_encrypted ? { authorization: decryptSecret(m.auth_header_encrypted) } : {}),
+      serverUrl: m.serverUrl,
+      ...(m.allowedTools?.length ? { allowedTools: m.allowedTools } : {}),
+      ...(m.authHeaderEncrypted ? { authorization: decryptSecret(m.authHeaderEncrypted) } : {}),
     });
   }
 
-  const humanNumber = call ? (call.direction === "outbound" ? call.to_number : call.from_number) : null;
+  const humanNumber = call.direction === "outbound" ? call.to_number : call.from_number;
   const callFacts = humanNumber
     ? `CALL FACTS: the number on this call is ${humanNumber} — use it whenever a step needs the caller's phone number; never ask them for it.\n\n`
     : "";

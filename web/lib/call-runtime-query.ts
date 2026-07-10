@@ -4,7 +4,9 @@
  * lets an unrelated activation change a conversation that is already in progress.
  */
 export const CALL_RUNTIME_SNAPSHOT_QUERY = `
-  SELECT COALESCE(f.flow, v.flow) AS flow, v.tool_ids
+  SELECT c.runtime_snapshot, c.runtime_digest,
+         COALESCE(c.runtime_snapshot->'flow', f.flow, v.flow) AS flow,
+         v.tool_ids
   FROM calls c
   JOIN agents a ON a.id = c.agent_id
   JOIN agent_versions v ON v.agent_id = c.agent_id AND v.version = c.agent_version

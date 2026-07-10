@@ -2,6 +2,11 @@
   "schema_version": 2,
   "tool_exposure": "gateway",
   "always_tools": ["contact_support", "request_recall", "end_call"],
+  "always_action_policies": [
+    { "tool": "contact_support", "max_calls": 1, "idempotency": "per_call" },
+    { "tool": "request_recall", "max_calls": 3, "idempotency": "per_call_arguments" },
+    { "tool": "end_call", "max_calls": 1, "idempotency": "per_call" }
+  ],
   "nodes": [
     {
       "id": "entry",
@@ -20,6 +25,12 @@
           "instructions": "Collect the member number and one approved verification factor. Never expose account details before the lookup succeeds.",
           "tools": ["read_table"],
           "required_outputs": ["member_id"],
+          "output_bindings": [
+            { "output": "member_id", "tool": "read_table", "result_path": "rows.0.id", "value_type": "string" }
+          ],
+          "action_policies": [
+            { "tool": "read_table", "max_calls": 3, "idempotency": "per_arguments" }
+          ],
           "success_criteria": ["The member record matches the caller", "No sensitive value was spoken back unnecessarily"],
           "checkpoint": true,
           "max_attempts": 3,
@@ -37,6 +48,13 @@
               "instructions": "Confirm term, price, and consent, then renew exactly once using the verified member_id.",
               "tools": ["renew_membership"],
               "required_outputs": ["renewal_id", "expires_at"],
+              "output_bindings": [
+                { "output": "renewal_id", "tool": "renew_membership", "result_path": "renewal_id", "value_type": "string" },
+                { "output": "expires_at", "tool": "renew_membership", "result_path": "expires_at", "value_type": "string" }
+              ],
+              "action_policies": [
+                { "tool": "renew_membership", "max_calls": 1, "idempotency": "per_step" }
+              ],
               "transitions": [
                 {
                   "to": "membership.confirm",
@@ -56,7 +74,13 @@
           "label": "Confirm result",
           "instructions": "Read back the new expiration date and offer a receipt.",
           "tools": ["send_email"],
-          "required_outputs": ["confirmation_delivered"]
+          "required_outputs": ["confirmation_delivered"],
+          "output_bindings": [
+            { "output": "confirmation_delivered", "tool": "send_email", "result_path": "ok", "value_type": "boolean" }
+          ],
+          "action_policies": [
+            { "tool": "send_email", "max_calls": 1, "idempotency": "per_arguments" }
+          ]
         },
         {
           "id": "escalate",
@@ -77,6 +101,12 @@
           "instructions": "Collect the order number and match it to the caller.",
           "tools": ["read_table"],
           "required_outputs": ["order_id"],
+          "output_bindings": [
+            { "output": "order_id", "tool": "read_table", "result_path": "rows.0.id", "value_type": "string" }
+          ],
+          "action_policies": [
+            { "tool": "read_table", "max_calls": 3, "idempotency": "per_arguments" }
+          ],
           "checkpoint": true,
           "steps": [
             {
@@ -85,13 +115,28 @@
               "instructions": "Evaluate the return window, item condition, and policy exceptions. Do not promise a refund before this finishes.",
               "tools": ["search_knowledge", "check_return_eligibility"],
               "required_outputs": ["eligible", "reason"],
+              "output_bindings": [
+                { "output": "eligible", "tool": "check_return_eligibility", "result_path": "eligible", "value_type": "boolean" },
+                { "output": "reason", "tool": "check_return_eligibility", "result_path": "reason", "value_type": "string" }
+              ],
+              "action_policies": [
+                { "tool": "check_return_eligibility", "max_calls": 2, "idempotency": "per_arguments" }
+              ],
               "steps": [
                 {
                   "id": "create",
                   "label": "Create return",
                   "instructions": "Confirm the return method and create the return exactly once.",
                   "tools": ["create_return", "send_email"],
-                  "required_outputs": ["return_id", "label_delivered"]
+                  "required_outputs": ["return_id", "label_delivered"],
+                  "output_bindings": [
+                    { "output": "return_id", "tool": "create_return", "result_path": "return_id", "value_type": "string" },
+                    { "output": "label_delivered", "tool": "send_email", "result_path": "ok", "value_type": "boolean" }
+                  ],
+                  "action_policies": [
+                    { "tool": "create_return", "max_calls": 1, "idempotency": "per_step" },
+                    { "tool": "send_email", "max_calls": 1, "idempotency": "per_arguments" }
+                  ]
                 }
               ]
             }
