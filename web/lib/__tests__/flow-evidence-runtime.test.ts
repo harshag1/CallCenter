@@ -219,6 +219,29 @@ describe("flow action evidence", () => {
     expect(completed.state.outputs[STEP]).toEqual({ case_id: "case-call-scoped" });
   });
 
+  it.each(["reserved", "indeterminate"] as const)(
+    "cannot rotate away from %s action evidence before settlement or reconciliation",
+    (status) => {
+      const flow = evidenceFlow();
+      const first = reserve(flow, activeStep(flow), `case-${status}`, CASE_TOOL, { member: "m-1" });
+      const state = status === "reserved"
+        ? first.state
+        : settle(first.state, first.receipt.id, "indeterminate").state;
+
+      expect(enterFlowStep(flow, state, STEP)).toMatchObject({
+        code: "pending_action_evidence",
+        allowed: [],
+      });
+      expect(completeFlowStep(flow, state, { outputs: {} })).toMatchObject({
+        code: "pending_action_evidence",
+      });
+      expect(state.actionReceipts).toContainEqual(expect.objectContaining({
+        id: `case-${status}`,
+        status,
+      }));
+    }
+  );
+
   it("rejects action reservations carrying a stale capability epoch without mutating state", () => {
     const flow = evidenceFlow();
     const state = activeStep(flow);
@@ -359,7 +382,7 @@ describe("flow action evidence", () => {
       : settle(reservation.state, reservation.receipt.id, status, result).state;
 
     expect(completeFlowStep(flow, state, { outputs: { case_id: "fabricated" } })).toMatchObject({
-      code: "missing_action_evidence",
+      code: status === "failed" ? "missing_action_evidence" : "pending_action_evidence",
     });
   });
 

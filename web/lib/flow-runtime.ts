@@ -234,6 +234,20 @@ export function enterFlowStep(
   const ref = findStep(flow, path);
   if (!ref) return { error: `unknown step "${path}"`, code: "unknown_step", allowed: allowedStepPaths(flow, state) };
 
+  const unresolved = state.currentStep && !state.completedSteps.includes(state.currentStep)
+    ? state.actionReceipts.filter((receipt) =>
+      receipt.step === state.currentStep
+      && (receipt.status === "reserved" || receipt.status === "indeterminate")
+    )
+    : [];
+  if (unresolved.length > 0) {
+    return {
+      error: `cannot leave or retry ${state.currentStep} while action receipts need settlement or reconciliation: ${unresolved.map((receipt) => receipt.id).join(", ")}`,
+      code: "pending_action_evidence",
+      allowed: [],
+    };
+  }
+
   const allowed = allowedStepPaths(flow, state);
   const isRetry = state.currentStep === path && !state.completedSteps.includes(path);
   if (ref.nodeId !== state.nodeId && !allowed.includes(path)) {
@@ -516,12 +530,7 @@ export function completeFlowStep(
   if (!path || path !== state.currentStep) return { error: "complete_step must target the active step", code: "not_active_step" };
   const ref = findStep(flow, path);
   if (!ref) return { error: `unknown step "${path}"`, code: "unknown_step" };
-  const supplied = args.outputs ?? {};
-  const verified = verifiedOutputs(state, ref, supplied);
-  if ("error" in verified) return verified;
-  const outputs = verified.outputs;
   const pending = state.actionReceipts.filter((receipt) =>
-    receipt.capabilityEpoch === state.capabilityEpoch &&
     receipt.step === ref.path &&
     (receipt.status === "reserved" || receipt.status === "indeterminate")
   );
@@ -531,6 +540,10 @@ export function completeFlowStep(
       code: "pending_action_evidence",
     };
   }
+  const supplied = args.outputs ?? {};
+  const verified = verifiedOutputs(state, ref, supplied);
+  if ("error" in verified) return verified;
+  const outputs = verified.outputs;
   const missing = (ref.step.required_outputs ?? []).filter((key) => outputs[key] === undefined || outputs[key] === null);
   if (missing.length) return { error: `missing required outputs: ${missing.join(", ")}`, code: "missing_outputs" };
 
