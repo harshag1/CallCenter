@@ -37,23 +37,31 @@ export class OpenAIWebRtcTransport implements BrowserRealtimeTransport {
 
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
-    const form = new FormData();
-    form.set("sdp", new Blob([offer.sdp ?? ""], { type: "application/sdp" }), "offer.sdp");
     const response = await fetch(connection.endpoint, {
       method: "POST",
-      headers: { Authorization: `Bearer ${connection.token}` },
-      body: form,
+      headers: {
+        Authorization: `Bearer ${connection.token}`,
+        "Content-Type": "application/sdp",
+      },
+      body: offer.sdp ?? "",
     });
     if (!response.ok) throw new Error(`OpenAI WebRTC ${response.status}: ${(await response.text()).slice(0, 300)}`);
     await peer.setRemoteDescription({ type: "answer", sdp: await response.text() });
 
     await new Promise<void>((resolve, reject) => {
+      if (channel.readyState === "open") {
+        resolve();
+        return;
+      }
       const timeout = window.setTimeout(() => reject(new Error("OpenAI realtime data channel timed out")), 15_000);
       channel.onopen = () => {
         window.clearTimeout(timeout);
         resolve();
       };
-      channel.onerror = () => reject(new Error("OpenAI realtime data channel failed"));
+      channel.onerror = () => {
+        window.clearTimeout(timeout);
+        reject(new Error("OpenAI realtime data channel failed"));
+      };
     });
   }
 

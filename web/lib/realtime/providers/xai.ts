@@ -2,43 +2,16 @@ import "server-only";
 
 import type {
   BrowserRealtimeConnection,
-  RealtimeAudioFormat,
   RealtimeProviderAdapter,
   ServerRealtimeConnection,
-  VoiceSessionSpec,
 } from "../types";
+import { buildXaiSessionUpdate } from "./xai-protocol";
 
 const API = "https://api.x.ai/v1";
 
 function apiKey() {
   if (!process.env.XAI_API_KEY) throw new Error("XAI_API_KEY is required for the xAI voice provider");
   return process.env.XAI_API_KEY;
-}
-
-export function buildXaiSessionUpdate(spec: VoiceSessionSpec, audio: RealtimeAudioFormat): Record<string, unknown> {
-  return {
-    type: "session.update",
-    session: {
-      voice: spec.voice,
-      instructions: spec.instructions,
-      turn_detection: { type: "server_vad" },
-      tools: spec.mcpServers.map((server) => ({
-        type: "mcp",
-        server_label: server.label,
-        server_url: server.serverUrl,
-        ...(server.allowedTools?.length ? { allowed_tools: server.allowedTools } : {}),
-        ...(server.authorization ? { authorization: server.authorization } : {}),
-      })),
-      ...(audio === "pcmu" ? {
-        audio: {
-          input: { format: { type: "audio/pcmu", rate: 8000 } },
-          output: { format: { type: "audio/pcmu", rate: 8000 } },
-        },
-      } : {}),
-      resumption: { enabled: true },
-      ...spec.settings,
-    },
-  };
 }
 
 async function mintToken(): Promise<string> {

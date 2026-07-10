@@ -3,6 +3,7 @@ import {
   interruptPlayback,
   pcm16Base64,
   playPcm16,
+  resampleMono,
   type BrowserRealtimeTransport,
   type RealtimeTransportStart,
 } from "./types";
@@ -68,9 +69,10 @@ export class GeminiWebSocketTransport implements BrowserRealtimeTransport {
           window.clearTimeout(timeout);
           processor.onaudioprocess = (audio) => {
             if (socket.readyState !== WebSocket.OPEN) return;
+            const pcm = resampleMono(audio.inputBuffer.getChannelData(0), args.audioContext.sampleRate, 16_000);
             socket.send(JSON.stringify({
               realtimeInput: {
-                audio: { data: pcm16Base64(audio.inputBuffer.getChannelData(0)), mimeType: `audio/pcm;rate=${args.audioContext.sampleRate}` },
+                audio: { data: pcm16Base64(pcm), mimeType: "audio/pcm;rate=16000" },
               },
             }));
           };

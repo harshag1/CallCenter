@@ -21,7 +21,7 @@ The result is a repeatable state machine that still leaves the realtime model fr
 
 ## What you get
 
-- Deep, recursive voice flows with explicit transitions, failure paths, retries, required outputs, and checkpoints.
+- Deep, recursive voice flows with machine-enforced output conditions, cross-topic transitions, failure paths, retries, required outputs, checkpoints, and circuit breakers.
 - Provider adapters for xAI Voice, OpenAI Realtime, and Gemini Live.
 - Browser calling over WebSocket or WebRTC, plus a Twilio Media Streams bridge for xAI/OpenAI telephony.
 - A scoped MCP gateway with expiring capabilities and minimum-tool enforcement.
@@ -139,7 +139,7 @@ npm run build
 
 ## Project status
 
-This is an ambitious starting point, not a hosted compliance product. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN requires a transcoding bridge. Production deployments should add rate limiting, provider webhook verification, retention policies, consent/recording notices, audit export, and the controls required by their jurisdiction and use case.
+This is an ambitious starting point, not a hosted compliance product. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN requires a transcoding bridge. Provider session-resumption signals are enabled, but hosts should add reconnection/token-refresh orchestration for calls that must survive transport resets. Production deployments should add rate limiting, provider webhook verification, retention policies, consent/recording notices, audit export, and the controls required by their jurisdiction and use case.
 
 ## Contributing
 

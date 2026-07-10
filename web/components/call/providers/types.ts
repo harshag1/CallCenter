@@ -32,6 +32,23 @@ export function pcm16Base64(samples: Float32Array): string {
   return btoa(binary);
 }
 
+/** Resample mono float audio before encoding it for providers with a fixed input rate. */
+export function resampleMono(samples: Float32Array, sourceRate: number, targetRate: number): Float32Array {
+  if (sourceRate === targetRate || samples.length === 0) return samples;
+  if (sourceRate <= 0 || targetRate <= 0) throw new Error("audio sample rates must be positive");
+  const outputLength = Math.max(1, Math.round(samples.length * targetRate / sourceRate));
+  const output = new Float32Array(outputLength);
+  const ratio = sourceRate / targetRate;
+  for (let index = 0; index < outputLength; index++) {
+    const position = index * ratio;
+    const left = Math.min(samples.length - 1, Math.floor(position));
+    const right = Math.min(samples.length - 1, left + 1);
+    const fraction = position - left;
+    output[index] = samples[left] + (samples[right] - samples[left]) * fraction;
+  }
+  return output;
+}
+
 export function playPcm16(
   base64: string,
   context: AudioContext,

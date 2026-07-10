@@ -3,31 +3,12 @@ import "server-only";
 import type {
   BrowserRealtimeConnection,
   RealtimeProviderAdapter,
-  VoiceSessionSpec,
 } from "../types";
+import { buildGeminiSetup } from "./gemini-protocol";
 
 function apiKey() {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required for the Gemini Live provider");
   return process.env.GEMINI_API_KEY;
-}
-
-function setup(spec: VoiceSessionSpec): Record<string, unknown> {
-  return {
-    setup: {
-      model: `models/${spec.model}`,
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: spec.voice } } },
-        ...spec.settings,
-      },
-      systemInstruction: { parts: [{ text: spec.instructions }] },
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
-      sessionResumption: {},
-      // Function declarations are fetched from toolProxyUrl by the browser and inserted before setup is sent.
-      tools: [],
-    },
-  };
 }
 
 async function mintToken(): Promise<string> {
@@ -59,7 +40,7 @@ export const geminiAdapter: RealtimeProviderAdapter = {
     sessionResumption: true,
     notes: ["Live API and ephemeral tokens are preview", "Audio input PCM16; audio output 24kHz PCM16"],
   },
-  buildSessionUpdate: setup,
+  buildSessionUpdate: buildGeminiSetup,
   async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
     const token = await mintToken();
     return {
@@ -69,7 +50,7 @@ export const geminiAdapter: RealtimeProviderAdapter = {
       voice: spec.voice,
       token,
       wsUrl: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`,
-      setup: setup(spec),
+      setup: buildGeminiSetup(spec),
       toolProxyUrl: spec.toolProxyUrl,
       toolProxyToken: spec.toolProxyToken,
     };

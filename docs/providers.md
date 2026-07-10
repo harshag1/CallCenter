@@ -8,7 +8,7 @@ Provider facts and defaults below were checked against official documentation on
 - Browser transport: WebSocket with an ephemeral client secret.
 - Telephony: PCMU passthrough through Twilio or native xAI SIP.
 - Tools: remote MCP.
-- Session resumption: enabled; xAI documents a 30-minute inactive-history expiry.
+- Session resumption: the adapter opts in and xAI emits a conversation ID; hosts that automatically reconnect should retain it and append it as `conversation_id`. xAI documents a 30-minute inactive-history expiry.
 
 Official documentation: [Voice Agent API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent), [ephemeral tokens](https://docs.x.ai/developers/model-capabilities/audio/ephemeral-tokens).
 
@@ -30,9 +30,9 @@ GPT-Live was announced for ChatGPT on July 8, 2026. OpenAI says API availability
 
 - Default: `gemini-3.1-flash-live-preview`.
 - Browser transport: Live API WebSocket with a single-use ephemeral token.
-- Audio: raw PCM16 input; 24 kHz PCM16 output.
+- Audio: browser input is resampled to 16 kHz PCM16; output is 24 kHz PCM16.
 - Tools: function declarations executed through the scoped MCP proxy.
-- Audio-only sessions are documented as 15 minutes without session-management techniques; session resumption is enabled in the adapter.
+- Context-window compression is enabled by default so audio context is not capped at 15 minutes. The adapter requests resumption handles; hosts that automatically reconnect must retain the newest handle and supply it on the next connection.
 
 Official documentation: [Live API](https://ai.google.dev/gemini-api/docs/live-api), [capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities), [ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens), [tool use](https://ai.google.dev/gemini-api/docs/live-api/tools).
 
@@ -51,5 +51,7 @@ Provider settings live on an immutable agent version:
   }
 }
 ```
+
+Gemini settings that belong to `generationConfig` should be nested under that key; Live session-level settings such as `contextWindowCompression` can sit directly in `provider_settings`. Across adapters, provider tuning cannot override the selected model, system instructions, negotiated codec, or tool grants.
 
 Use the builder's `update_agent` tool or add an authenticated settings UI. `GET /api/voice/providers` returns capability and configuration status without exposing secret values.

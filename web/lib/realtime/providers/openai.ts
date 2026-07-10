@@ -7,6 +7,7 @@ import type {
   ServerRealtimeConnection,
   VoiceSessionSpec,
 } from "../types";
+import { buildOpenAIClientSecretPayload, buildOpenAISession } from "./openai-protocol";
 
 const API = "https://api.openai.com/v1";
 
@@ -15,43 +16,15 @@ function apiKey() {
   return process.env.OPENAI_API_KEY;
 }
 
-function session(spec: VoiceSessionSpec, audio: RealtimeAudioFormat) {
-  return {
-    type: "realtime",
-    model: spec.model,
-    instructions: spec.instructions,
-    audio: {
-      input: {
-        format: audio === "pcmu" ? { type: "audio/pcmu" } : { type: "audio/pcm", rate: 24000 },
-        transcription: { model: "gpt-realtime-whisper" },
-        turn_detection: { type: "server_vad" },
-      },
-      output: {
-        format: audio === "pcmu" ? { type: "audio/pcmu" } : { type: "audio/pcm", rate: 24000 },
-        voice: spec.voice,
-      },
-    },
-    tools: spec.mcpServers.map((server) => ({
-      type: "mcp",
-      server_label: server.label,
-      server_url: server.serverUrl,
-      ...(server.allowedTools?.length ? { allowed_tools: server.allowedTools } : {}),
-      ...(server.authorization ? { authorization: server.authorization } : {}),
-    })),
-    tool_choice: "auto",
-    ...spec.settings,
-  };
-}
-
 export function buildOpenAISessionUpdate(spec: VoiceSessionSpec, audio: RealtimeAudioFormat): Record<string, unknown> {
-  return { type: "session.update", session: session(spec, audio) };
+  return { type: "session.update", session: buildOpenAISession(spec, audio) };
 }
 
 async function mintToken(spec: VoiceSessionSpec): Promise<string> {
   const response = await fetch(`${API}/realtime/client_secrets`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
-    body: JSON.stringify(session(spec, "pcm")),
+    body: JSON.stringify(buildOpenAIClientSecretPayload(buildOpenAISession(spec, "pcm"))),
   });
   if (!response.ok) throw new Error(`OpenAI realtime token ${response.status}: ${(await response.text()).slice(0, 300)}`);
   const json = await response.json() as { client_secret?: { value?: string }; value?: string };
