@@ -191,6 +191,34 @@ describe("flow action evidence", () => {
     expect(completed.state.capabilityEpoch).toBe(4);
   });
 
+  it("reuses call-scoped authoritative evidence when the same step is retried", () => {
+    const flow = evidenceFlow();
+    const topic = flow.nodes.find((node) => node.id === TOPIC)!;
+    const step = topic.steps!.find((candidate) => candidate.id === "execute")!;
+    step.action_policies = step.action_policies!.map((policy) =>
+      policy.tool === CASE_TOOL
+        ? { ...policy, idempotency: "per_call_arguments" as const }
+        : policy
+    );
+
+    const first = reserve(flow, activeStep(flow), "case-first-attempt", CASE_TOOL, { member: "m-1" });
+    const succeeded = settle(first.state, first.receipt.id, "succeeded", {
+      data: { case: { id: "case-call-scoped" } },
+    });
+    const retried = enterFlowStep(flow, succeeded.state, STEP, "2026-07-10T00:00:04.000Z");
+    if ("error" in retried) throw new Error(retried.error);
+
+    const replay = reserve(flow, retried.state, "case-retry-attempt", CASE_TOOL, { member: "m-1" });
+    expect(replay).toMatchObject({
+      execute: false,
+      replayed: true,
+      receipt: { id: "case-first-attempt" },
+    });
+    const completed = completeFlowStep(flow, replay.state, { outputs: {} });
+    if ("error" in completed) throw new Error(completed.error);
+    expect(completed.state.outputs[STEP]).toEqual({ case_id: "case-call-scoped" });
+  });
+
   it("rejects action reservations carrying a stale capability epoch without mutating state", () => {
     const flow = evidenceFlow();
     const state = activeStep(flow);

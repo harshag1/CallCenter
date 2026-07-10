@@ -465,11 +465,13 @@ function verifiedOutputs(
 ): { outputs: Record<string, unknown> } | RuntimeError {
   const outputs = { ...supplied };
   for (const binding of ref.step.output_bindings ?? []) {
+    const policy = ref.step.action_policies?.find((candidate) => candidate.tool === binding.tool);
+    const callScoped = policy?.idempotency === "per_call" || policy?.idempotency === "per_call_arguments";
     const receipt = [...state.actionReceipts].reverse().find((candidate) =>
       candidate.status === "succeeded" &&
-      candidate.capabilityEpoch === state.capabilityEpoch &&
       candidate.step === ref.path &&
-      candidate.tool === binding.tool
+      candidate.tool === binding.tool &&
+      (candidate.capabilityEpoch === state.capabilityEpoch || callScoped)
     );
     if (!receipt) {
       return {
