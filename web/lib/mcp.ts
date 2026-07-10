@@ -5,7 +5,22 @@
 import { q, qOne } from "./db";
 import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
-import { AgentFlowSchema, topicNodes, fallbackNode, type AgentFlow } from "./flow";
+import {
+  AgentFlowSchema,
+  alwaysTools,
+  fallbackNode,
+  flowToolExposure,
+  topicNodes,
+  type AgentFlow,
+} from "./flow";
+import {
+  completeFlowStep,
+  enterFlowStep,
+  flowStateSummary,
+  grantedTools,
+  selectFlowTopic,
+} from "./flow-runtime";
+import { loadFlowState, saveFlowState } from "./flow-state-store";
 import { invokeTool } from "./toolfactory/deploy";
 import { queryRows, upsertRow, findCustomerByPhone } from "./datasets";
 import { signScope } from "./voice";
@@ -86,8 +101,8 @@ function saveEvent(scope: Scope, type: string, payload: unknown) {
   ]).catch(() => {});
 }
 
-export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
-  const ctx = await loadCtx(scope);
+async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpToolDef[]> {
+  const ctx = loaded ?? await loadCtx(scope);
   const topics = topicNodes(ctx.flow);
   const tools: McpToolDef[] = [];
 
@@ -253,6 +268,57 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
   return tools;
 }
 
+const FLOW_CONTROL_TOOLS = new Set(["classify", "enter_step", "complete_step", "get_flow_state", "run_action"]);
+
+/**
+ * Flow v2 keeps the initial model context intentionally small. Step-specific actions are
+ * returned by enter_step and invoked through run_action, where the runtime enforces grants.
+ */
+export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
+  const ctx = await loadCtx(scope);
+  const catalog = await listToolCatalogFor(scope, ctx);
+  if (flowToolExposure(ctx.flow) === "direct") return catalog;
+
+  const classify = catalog.find((tool) => tool.name === "classify");
+  const controls: McpToolDef[] = [
+    ...(classify ? [classify] : []),
+    {
+      name: "enter_step",
+      description: "Enter one of the step paths returned by classify, complete_step, or get_flow_state. Returns only the context and action schemas needed for that step.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string", description: "Absolute path such as membership.renew.verify_identity" } },
+        required: ["path"],
+      },
+    },
+    {
+      name: "complete_step",
+      description: "Persist the active step's outcome and unlock its next steps. Include every required output returned by enter_step.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" }, outputs: { type: "object" } },
+        required: ["outputs"],
+      },
+    },
+    {
+      name: "get_flow_state",
+      description: "Recover the durable flow checkpoint, currently granted actions, and valid next steps after uncertainty or reconnection.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "run_action",
+      description: "Execute an action granted by the active flow step. Use the exact name and argument schema returned by enter_step; ungranted actions are rejected.",
+      inputSchema: {
+        type: "object",
+        properties: { name: { type: "string" }, arguments: { type: "object" } },
+        required: ["name", "arguments"],
+      },
+    },
+  ];
+  const global = new Set(alwaysTools(ctx.flow));
+  return [...controls, ...catalog.filter((tool) => global.has(tool.name) && !FLOW_CONTROL_TOOLS.has(tool.name))];
+}
+
 export async function callTool(scope: Scope, name: string, args: Record<string, unknown>): Promise<unknown> {
   await saveEvent(scope, "tool_call", { name, args });
   let result: unknown;
@@ -266,8 +332,22 @@ export async function callTool(scope: Scope, name: string, args: Record<string, 
   return result;
 }
 
-async function dispatch(scope: Scope, name: string, args: Record<string, unknown>): Promise<unknown> {
+async function dispatch(
+  scope: Scope,
+  name: string,
+  args: Record<string, unknown>,
+  bypassGateway = false
+): Promise<unknown> {
   const ctx = await loadCtx(scope);
+
+  if (
+    !bypassGateway &&
+    flowToolExposure(ctx.flow) === "gateway" &&
+    !FLOW_CONTROL_TOOLS.has(name) &&
+    !alwaysTools(ctx.flow).includes(name)
+  ) {
+    return { error: `action "${name}" is not globally available; enter the correct flow step and use run_action` };
+  }
 
   switch (name) {
     case "classify": {
@@ -284,6 +364,12 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
       }
       if (!node) return { error: `unknown topic ${id}. Valid: ${topicNodes(ctx.flow).map((t) => t.id).join(", ")}, other` };
       await saveEvent(scope, "state", { node: node.id });
+      if (ctx.flow.schema_version === 2) {
+        const current = await loadFlowState(scope.callId);
+        const selected = selectFlowTopic(ctx.flow, current, node.id);
+        if ("error" in selected) return selected;
+        await saveFlowState(scope.callId, selected);
+      }
       if (node.kind === "fallback") {
         return {
           context: node.context ?? "Out-of-scope request.",
@@ -293,18 +379,86 @@ async function dispatch(scope: Scope, name: string, args: Record<string, unknown
       }
       return {
         context: node.context,
-        next_steps: (node.steps ?? []).map((s) => ({ id: s.id, label: s.label })),
+        next_steps: (node.steps ?? []).map((s) => ({
+          id: s.id,
+          path: `${node.id}.${s.id}`,
+          label: s.label,
+          context: s.context,
+        })),
         guidance:
-          "Work within this topic only. When the caller commits to one of next_steps, call begin_step for its exact instructions. If none fit, classify('other').",
+          ctx.flow.schema_version === 2
+            ? "Work within this topic only. When the caller commits to one of next_steps, call enter_step with its path. If none fit, classify('other')."
+            : "Work within this topic only. When the caller commits to one of next_steps, call begin_step for its exact instructions. If none fit, classify('other').",
       };
     }
 
     case "begin_step": {
+      if (ctx.flow.schema_version === 2) {
+        return { error: "flow v2 uses enter_step with an absolute path" };
+      }
       const node = ctx.flow.nodes.find((n) => n.id === String(args.topic));
       const step = node?.steps?.find((s) => s.id === String(args.step));
       if (!step) return { error: "unknown step — use ids returned by classify" };
       await saveEvent(scope, "state", { node: node!.id, step: step.id });
       return { instructions: step.instructions, always_available: ["search", "search_knowledge", "read_table", "write_table", "contact_support", "hold", "request_recall"] };
+    }
+
+    case "enter_step": {
+      const state = await loadFlowState(scope.callId);
+      const entered = enterFlowStep(ctx.flow, state, String(args.path ?? ""));
+      if ("error" in entered) return entered;
+      const saved = await saveFlowState(scope.callId, entered.state);
+      const catalog = await listToolCatalogFor(scope, ctx);
+      const allowed = new Set(entered.availableTools);
+      return {
+        path: entered.path,
+        context: entered.step.context,
+        instructions: entered.step.instructions,
+        success_criteria: entered.step.success_criteria ?? [],
+        required_outputs: entered.step.required_outputs ?? [],
+        checkpoint: entered.step.checkpoint ?? false,
+        available_actions: catalog.filter((tool) => allowed.has(tool.name)),
+        next_steps: entered.nextSteps,
+        revision: saved.revision,
+      };
+    }
+
+    case "complete_step": {
+      const state = await loadFlowState(scope.callId);
+      const completed = completeFlowStep(ctx.flow, state, {
+        path: args.path ? String(args.path) : undefined,
+        outputs: (args.outputs as Record<string, unknown>) ?? {},
+      });
+      if ("error" in completed) return completed;
+      const saved = await saveFlowState(scope.callId, completed.state);
+      await saveEvent(scope, "state", {
+        node: saved.nodeId,
+        step: saved.currentStep,
+        completed: args.path ?? state.currentStep,
+        revision: saved.revision,
+      });
+      return flowStateSummary(ctx.flow, saved);
+    }
+
+    case "get_flow_state": {
+      return flowStateSummary(ctx.flow, await loadFlowState(scope.callId));
+    }
+
+    case "run_action": {
+      const action = String(args.name ?? "");
+      if (FLOW_CONTROL_TOOLS.has(action)) return { error: "flow control tools cannot be nested inside run_action" };
+      const state = await loadFlowState(scope.callId);
+      const allowed = new Set(grantedTools(ctx.flow, state));
+      if (!allowed.has(action)) {
+        return { error: `action "${action}" is not granted at ${state.currentStep ?? "the routing stage"}`, available_actions: [...allowed] };
+      }
+      const actionArgs = args.arguments && typeof args.arguments === "object"
+        ? args.arguments as Record<string, unknown>
+        : {};
+      await saveEvent(scope, "tool_call", { name: action, args: actionArgs, via: "run_action" });
+      const result = await dispatch(scope, action, actionArgs, true);
+      await saveEvent(scope, "tool_result", { name: action, result: JSON.stringify(result).slice(0, 2000), via: "run_action" });
+      return result;
     }
 
     case "hold": {

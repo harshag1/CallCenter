@@ -2,7 +2,7 @@
 // agents.ts — operator tools: bot roster and append-only bot configuration (prompt, voice, flow, tools).
 
 import { q, qOne } from "../../db";
-import { AgentFlowSchema, type AgentFlow } from "../../flow";
+import { AgentFlowSchema, validateAgentFlow, type AgentFlow } from "../../flow";
 import type { OperatorTool } from "../types";
 
 export const listAgents: OperatorTool = {
@@ -48,7 +48,7 @@ export const updateAgent: OperatorTool = {
 
     let flow = cur.flow;
     if (args.flow) {
-      const parsed = AgentFlowSchema.safeParse(args.flow);
+      const parsed = AgentFlowSchema.safeParse({ schema_version: 2, tool_exposure: "gateway", ...args.flow as object });
       if (!parsed.success) return { output: { error: `invalid flow: ${parsed.error.message.slice(0, 300)}` } };
       const healed = healFlow(parsed.data, AgentFlowSchema.parse(cur.flow));
       if ("error" in healed) return { output: healed };
@@ -130,5 +130,9 @@ function healFlow(next: AgentFlow, current: AgentFlow): { flow: AgentFlow } | { 
       }
     }
   }
-  return { flow: { nodes, edges } };
+  const flow = { ...next, nodes, edges };
+  const validation = validateAgentFlow(flow);
+  const errors = validation.diagnostics.filter((diagnostic) => diagnostic.level === "error");
+  if (errors.length) return { error: errors.slice(0, 5).map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("; ") };
+  return { flow };
 }

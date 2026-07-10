@@ -9,11 +9,55 @@ export const TOPIC_ICONS = [
   "shopping-cart", "truck", "rotate-ccw", "shield", "zap", "book-open", "wrench", "gift",
 ] as const;
 
-export const FlowStepSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  instructions: z.string(),
+const TOOL_NAME = /^[a-z][a-z0-9_.-]{1,63}$/;
+
+export type FlowTransition = {
+  to: string;
+  label?: string;
+  /** Human-readable condition supplied to the model. Deterministic requirements belong in required_outputs. */
+  when?: string;
+};
+
+export type FlowStep = {
+  id: string;
+  label: string;
+  instructions: string;
+  context?: string;
+  /** Tools granted while this step (or one of its descendants) is active. */
+  tools?: string[];
+  /** Output keys that complete_step must persist before this step can finish. */
+  required_outputs?: string[];
+  success_criteria?: string[];
+  transitions?: FlowTransition[];
+  on_failure?: string;
+  max_attempts?: number;
+  checkpoint?: boolean;
+  /** Arbitrarily nested substeps. The runtime caps depth to keep model context bounded. */
+  steps?: FlowStep[];
+};
+
+export const FlowTransitionSchema: z.ZodType<FlowTransition> = z.object({
+  to: z.string().min(1),
+  label: z.string().min(1).optional(),
+  when: z.string().min(1).optional(),
 });
+
+export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
+  z.object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    instructions: z.string().min(1),
+    context: z.string().min(1).optional(),
+    tools: z.array(z.string().regex(TOOL_NAME)).optional(),
+    required_outputs: z.array(z.string().min(1)).optional(),
+    success_criteria: z.array(z.string().min(1)).optional(),
+    transitions: z.array(FlowTransitionSchema).optional(),
+    on_failure: z.string().min(1).optional(),
+    max_attempts: z.number().int().min(1).max(10).optional(),
+    checkpoint: z.boolean().optional(),
+    steps: z.array(FlowStepSchema).optional(),
+  })
+);
 
 export const FlowNodeSchema = z.preprocess(
   (v) => {
@@ -36,17 +80,128 @@ export const FlowNodeSchema = z.preprocess(
     support_number: z.string().optional(),
     // dataset this node records into (rendered as a table chip)
     table: z.string().optional(),
+    // flow-v2 progressive disclosure: tools inherited by every step in this topic
+    tools: z.array(z.string().regex(TOOL_NAME)).optional(),
   })
 );
 
 export const AgentFlowSchema = z.object({
+  schema_version: z.union([z.literal(1), z.literal(2)]).optional(),
+  /** Tools visible for the whole call. Keep this deliberately small. */
+  always_tools: z.array(z.string().regex(TOOL_NAME)).optional(),
+  /** gateway exposes one guarded run_action tool; direct exposes every attached tool up front. */
+  tool_exposure: z.enum(["gateway", "direct"]).optional(),
+  max_turns: z.number().int().min(1).max(1000).optional(),
   nodes: z.array(FlowNodeSchema),
-  edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string().optional() })),
+  edges: z.array(z.object({
+    from: z.string(),
+    to: z.string(),
+    label: z.string().optional(),
+    when: z.string().optional(),
+  })),
 });
 
-export type FlowStep = z.infer<typeof FlowStepSchema>;
 export type FlowNode = z.infer<typeof FlowNodeSchema>;
 export type AgentFlow = z.infer<typeof AgentFlowSchema>;
+
+export type FlowDiagnostic = {
+  level: "error" | "warning";
+  path: string;
+  message: string;
+};
+
+export type StepRef = { path: string; nodeId: string; step: FlowStep; ancestors: FlowStep[] };
+
+const DEFAULT_ALWAYS_TOOLS = ["contact_support", "request_recall", "log_note", "end_call"];
+
+/** v1 remains direct for compatibility; v2 defaults to the progressive action gateway. */
+export function flowToolExposure(flow: AgentFlow): "gateway" | "direct" {
+  return flow.tool_exposure ?? (flow.schema_version === 2 ? "gateway" : "direct");
+}
+
+export function alwaysTools(flow: AgentFlow): string[] {
+  return [...new Set(flow.always_tools ?? DEFAULT_ALWAYS_TOOLS)];
+}
+
+export function listStepRefs(flow: AgentFlow): StepRef[] {
+  const refs: StepRef[] = [];
+  const visit = (nodeId: string, steps: FlowStep[], parentPath: string, ancestors: FlowStep[]) => {
+    for (const step of steps) {
+      const path = `${parentPath}.${step.id}`;
+      refs.push({ path, nodeId, step, ancestors });
+      if (step.steps?.length) visit(nodeId, step.steps, path, [...ancestors, step]);
+    }
+  };
+  for (const node of flow.nodes) visit(node.id, node.steps ?? [], node.id, []);
+  return refs;
+}
+
+export function findStep(flow: AgentFlow, path: string): StepRef | undefined {
+  return listStepRefs(flow).find((ref) => ref.path === path);
+}
+
+/** Semantic validation beyond JSON shape: identity, reachability, nesting and transition safety. */
+export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnostics: FlowDiagnostic[] } {
+  const parsed = AgentFlowSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      diagnostics: parsed.error.issues.map((issue) => ({
+        level: "error" as const,
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    };
+  }
+
+  const flow = parsed.data;
+  const diagnostics: FlowDiagnostic[] = [];
+  const nodeIds = new Set<string>();
+  for (const [index, node] of flow.nodes.entries()) {
+    if (nodeIds.has(node.id)) diagnostics.push({ level: "error", path: `nodes.${index}.id`, message: `duplicate node id "${node.id}"` });
+    nodeIds.add(node.id);
+  }
+  for (const [index, edge] of flow.edges.entries()) {
+    if (!nodeIds.has(edge.from)) diagnostics.push({ level: "error", path: `edges.${index}.from`, message: `unknown node "${edge.from}"` });
+    if (!nodeIds.has(edge.to)) diagnostics.push({ level: "error", path: `edges.${index}.to`, message: `unknown node "${edge.to}"` });
+  }
+
+  const entries = flow.nodes.filter((node) => node.kind === "incoming_call" || node.kind === "start");
+  if (entries.length !== 1) diagnostics.push({ level: "error", path: "nodes", message: `flow needs exactly one entry node; found ${entries.length}` });
+  if (!flow.nodes.some((node) => node.kind === "topic")) diagnostics.push({ level: "error", path: "nodes", message: "flow needs at least one topic node" });
+
+  const refs = listStepRefs(flow);
+  const stepPaths = new Set(refs.map((ref) => ref.path));
+  const seenPaths = new Set<string>();
+  for (const ref of refs) {
+    if (seenPaths.has(ref.path)) diagnostics.push({ level: "error", path: ref.path, message: `duplicate step path "${ref.path}"` });
+    seenPaths.add(ref.path);
+    if (ref.path.split(".").length - 1 > 8) diagnostics.push({ level: "error", path: ref.path, message: "step nesting exceeds the supported depth of 8" });
+    for (const transition of ref.step.transitions ?? []) {
+      if (!stepPaths.has(transition.to)) diagnostics.push({ level: "error", path: `${ref.path}.transitions`, message: `transition targets unknown step "${transition.to}"` });
+    }
+    if (ref.step.on_failure && !stepPaths.has(ref.step.on_failure)) {
+      diagnostics.push({ level: "error", path: `${ref.path}.on_failure`, message: `failure target "${ref.step.on_failure}" does not exist` });
+    }
+  }
+
+  if (entries.length === 1) {
+    const reachable = new Set([entries[0].id]);
+    const queue = [entries[0].id];
+    while (queue.length) {
+      const from = queue.shift()!;
+      for (const edge of flow.edges.filter((candidate) => candidate.from === from)) {
+        if (!reachable.has(edge.to)) {
+          reachable.add(edge.to);
+          queue.push(edge.to);
+        }
+      }
+    }
+    for (const node of flow.nodes) {
+      if (!reachable.has(node.id)) diagnostics.push({ level: "warning", path: `nodes.${node.id}`, message: "node is unreachable from the entry" });
+    }
+  }
+  return { flow, diagnostics };
+}
 
 export function topicNodes(flow: AgentFlow): FlowNode[] {
   return flow.nodes.filter((n) => n.kind === "topic");
@@ -61,6 +216,10 @@ export function slimInstructions(persona: string, flow: AgentFlow): string {
   const topics = topicNodes(flow)
     .map((n) => `- ${n.id}: ${n.label}`)
     .join("\n");
+  const progressiveRules = flow.schema_version === 2
+    ? `2. classify returns only the selected topic and its first valid step paths. Call enter_step(path) to unlock that step's context and action schemas.
+3. Use run_action only for actions returned by enter_step. Persist every required output with complete_step before moving on. If context is lost, call get_flow_state and resume from its checkpoint.`
+    : `2. classify returns the topic context and the available next steps. Follow ONLY those steps. When the caller picks a direction, call begin_step to get that step's exact instructions.`;
   return `${persona}
 
 You handle calls with a strict tool-driven workflow. Your base knowledge is intentionally minimal — tools give you everything.
@@ -69,11 +228,11 @@ RULES:
 1. Greet briefly, then listen. As soon as the caller's need is clear, call classify with the matching topic:
 ${topics}
 - If nothing matches, call classify with "other".
-2. classify returns the topic context and the available next steps. Follow ONLY those steps. When the caller picks a direction, call begin_step to get that step's exact instructions.
-3. Never invent policy, prices, or procedures. If the answer isn't in tool output, use search or search_knowledge (when available), or offer to transfer via contact_support.
-4. hold(seconds) when you need to pause (e.g. "let me check that").
-5. Keep every reply to one or two short sentences — this is a phone call.
-6. RECORDING IS SACRED: the moment you have data a step told you to record (write_table etc.), call that tool immediately — you can do it while still talking. NEVER end a call with unrecorded answers, even if the caller is saying goodbye. Record first, then say goodbye, then end_call.`;
+${progressiveRules}
+4. Never invent policy, prices, or procedures. If the answer isn't in tool output, use an available search action or offer human help.
+5. hold(seconds) when you need to pause (e.g. "let me check that").
+6. Keep every reply to one or two short sentences — this is a phone call.
+7. RECORDING IS SACRED: the moment you have data a step told you to record (write_table etc.), call that tool immediately — you can do it while still talking. NEVER end a call with unrecorded answers, even if the caller is saying goodbye. Record first, then say goodbye, then end_call.`;
 }
 
 
@@ -126,5 +285,9 @@ export function normalizeFlow(
       edges.push({ from: entry.id, to: n.id });
     }
   }
-  return { flow: { nodes, edges } };
+  const flow: AgentFlow = { ...input, nodes, edges };
+  const validation = validateAgentFlow(flow);
+  const errors = validation.diagnostics.filter((diagnostic) => diagnostic.level === "error");
+  if (errors.length) return { error: errors.slice(0, 5).map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("; ") };
+  return { flow };
 }

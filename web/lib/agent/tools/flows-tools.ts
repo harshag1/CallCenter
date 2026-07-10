@@ -6,7 +6,7 @@ import { createFlow, updateFlow, listFlows, launchCampaign, kickCampaign, cancel
 import { slimInstructions, AgentFlowSchema, normalizeFlow } from "../../flow";
 import type { OperatorTool } from "../types";
 
-const FLOW_DOC = `Flow shape: {nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,steps?:[{id,label,instructions}],support_number?,table?}],edges:[{from,to}]}. RULES: exactly one entry node kind "incoming_call" (label "Outgoing call" for outbound flows) with NO steps on it; the conversation lives on topic nodes (context = what this part covers, steps = exact things to do); when a topic records data, set its \`table\` to the dataset slug AND spell out write_table usage in the step instructions; edges connect NODE ids only.`;
+const FLOW_DOC = `Prefer Flow v2: {schema_version:2,always_tools?:[tool],tool_exposure:"gateway",nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,tools?:[tool],steps?:[Step],support_number?,table?}],edges:[{from,to,when?}]}. Step is recursive: {id,label,instructions,context?,tools?:[tool],required_outputs?:[key],success_criteria?:[text],checkpoint?:boolean,max_attempts?:number,steps?:[Step],transitions?:[{to:"absolute.step.path",when?,label?}],on_failure?:"absolute.step.path"}. RULES: exactly one entry with no steps; topic steps may nest up to 8 levels; grant only the tools needed at each step; use required_outputs for deterministic completion; all transition targets are absolute paths; when recording data, grant write_table and require the durable row id/output.`;
 
 export const createFlowTool: OperatorTool = {
   name: "create_flow",
@@ -25,7 +25,7 @@ export const createFlowTool: OperatorTool = {
     const owned = await qOne("SELECT id FROM agents WHERE id = $1 AND org_id = $2", [args.agent_id, ctx.orgId]);
     if (!owned) return { output: { error: "agent not found" } };
     try {
-      const parsed = AgentFlowSchema.parse(args.flow);
+      const parsed = AgentFlowSchema.parse({ schema_version: 2, tool_exposure: "gateway", ...args.flow as object });
       const normalized = normalizeFlow(parsed, "outbound");
       if ("error" in normalized) return { output: normalized };
       const row = await createFlow(ctx.orgId, String(args.agent_id), {
@@ -61,7 +61,7 @@ export const updateFlowTool: OperatorTool = {
   },
   async execute(args, ctx) {
     try {
-      let parsed = args.flow ? AgentFlowSchema.parse(args.flow) : null;
+      let parsed = args.flow ? AgentFlowSchema.parse({ schema_version: 2, tool_exposure: "gateway", ...args.flow as object }) : null;
       if (parsed) {
         const normalized = normalizeFlow(parsed, "outbound");
         if ("error" in normalized) return { output: normalized };
