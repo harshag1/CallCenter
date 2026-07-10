@@ -112,5 +112,31 @@ integration("atomic Flow v2 action persistence", () => {
       [ids.call]
     );
     expect(rows[0].count).toBe("1");
+
+    const owner = successful.find((result) => result.execute);
+    if (!owner?.ownerToken) throw new Error("reservation owner token was not returned");
+    const settled = await modules.store.settleFlowActionAtomic(ids.call, {
+      receiptId: owner.receipt.id,
+      ownerToken: owner.ownerToken,
+      status: "succeeded",
+      result: { operation_id: "operation-1", committed: true },
+      deliveryState: "committed",
+    });
+    if ("error" in settled) throw new Error(settled.error);
+    expect(settled.receipt.status).toBe("succeeded");
+
+    const replayState = await modules.store.loadFlowState(ids.call);
+    const replays = await Promise.all(Array.from({ length: 25 }, () =>
+      modules.store.reserveFlowActionAtomic(ids.call, flow, {
+        receiptId: randomUUID(),
+        ownerToken: randomUUID(),
+        runtimeDigest: "a".repeat(64),
+        tool: "commit_operation",
+        arguments: { amount: 42, operation_id: "operation-1" },
+        capabilityEpoch: replayState.capabilityEpoch,
+      })
+    ));
+    expect(replays.every((result) => !("error" in result) && !result.execute && result.replayed)).toBe(true);
+    expect(new Set(replays.flatMap((result) => "error" in result ? [] : [result.receipt.id])).size).toBe(1);
   }, 20_000);
 });
