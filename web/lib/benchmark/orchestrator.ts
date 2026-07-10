@@ -131,6 +131,9 @@ export type TrialSessionConfiguration = Readonly<{
   renderedCapabilitySnapshot: string;
   providerTools: readonly ProviderFunctionTool[];
   conditionHash: string;
+  inputAudioFormat: Readonly<Pick<Pcm16Audio, "encoding" | "sampleRateHz" | "channels">>;
+  audioDeliveryProfile: TrialAudioDeliveryProfile;
+  audioDeliveryProfileHash: string;
 }>;
 
 export type TrialClientFactory = (
@@ -167,10 +170,65 @@ export type TrialAudibilityReport = Readonly<{
   score: AudibilityScore;
 }>;
 
+export type TrialJournalCategory =
+  | "lifecycle"
+  | "event_chain"
+  | "normalized_event"
+  | "raw_wire"
+  | "audio"
+  | "usage"
+  | "tool"
+  | "world"
+  | "error"
+  | "finalization";
+
+export type TrialJournalRecord = Readonly<{
+  schema_version: 1;
+  sequence: number;
+  observed_at: string;
+  category: TrialJournalCategory;
+  event_type: string;
+  payload: ArtifactJsonValue;
+}>;
+
+export type TrialJournalFinalization = Readonly<{
+  record: TrialJournalRecord;
+  run_id: string;
+  status: TrialStatus;
+  manifest: RunManifest;
+  event_count: number;
+  budget_reservation_status: "active" | "settled" | "released" | "missing";
+}>;
+
+/**
+ * Crash-durable WAL boundary implemented by the CLI. `append` calls are
+ * serialized and awaited before the runner performs its next external action.
+ */
+export interface TrialJournalSink {
+  beforeClientCreate(record: TrialJournalRecord): void | Promise<void>;
+  onSessionOpened(record: TrialJournalRecord): void | Promise<void>;
+  append(record: TrialJournalRecord): void | Promise<void>;
+  finalize(result: TrialJournalFinalization): void | Promise<void>;
+}
+
 export type CallerAudioTurn = Readonly<{
   turnId: string;
   audio: Pcm16Audio | readonly Pcm16Audio[];
 }>;
+
+export type TrialAudioDeliveryProfile = Readonly<{
+  schemaVersion: 1;
+  chunkMs: number;
+  pace: "realtime";
+}>;
+
+export const DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE: TrialAudioDeliveryProfile = Object.freeze({
+  schemaVersion: 1,
+  chunkMs: 20,
+  pace: "realtime",
+});
+
+export type TrialSleep = (durationMs: number) => void | Promise<void>;
 
 export type PairedAudioTurn = Readonly<{
   ordinal: number;
@@ -180,6 +238,9 @@ export type PairedAudioTurn = Readonly<{
   encoding: "pcm16";
   sample_rate_hz: number;
   channels: 1;
+  delivery_hash: string;
+  chunk_hashes: readonly string[];
+  chunk_byte_lengths: readonly number[];
 }>;
 
 /** This object is condition-independent and can be shared by a raw/harness pair. */
@@ -188,7 +249,27 @@ export type PairedAudioManifest = Readonly<{
   pair_id: string;
   scenario_id: string;
   scenario_version: string;
+  delivery_profile_hash: string;
   turns: readonly PairedAudioTurn[];
+}>;
+
+export type TrialAudioChunkDelivery = Readonly<{
+  turn: number;
+  turn_id: string;
+  chunk_index: number;
+  chunk_count: number;
+  byte_length: number;
+  sha256: string;
+  scheduled_offset_ms: number;
+  appended_at_monotonic_ms: number;
+  session_offset_ms: number;
+}>;
+
+export type TrialAudioDeliveryReport = Readonly<{
+  schema_version: 1;
+  profile: TrialAudioDeliveryProfile;
+  profile_hash: string;
+  deliveries: readonly TrialAudioChunkDelivery[];
 }>;
 
 export type TrialLimits = Readonly<{
@@ -243,6 +324,7 @@ export type TrialStatus =
   | "session_timeout"
   | "cap_exceeded"
   | "tool_error"
+  | "journal_error"
   | "budget_error";
 
 export type TrialError = Readonly<{
@@ -293,6 +375,7 @@ export type TrialResult = Readonly<{
   outputAudioHashes: readonly string[];
   usage: readonly NormalizedRealtimeUsage[];
   audibility: TrialAudibilityReport;
+  audioDelivery: TrialAudioDeliveryReport;
   world: ToolWorldState;
   budgetLedger: BudgetLedger;
   artifacts: TrialArtifacts;
@@ -307,6 +390,11 @@ export type RunTrialInput = Readonly<{
   condition: CompiledBenchmarkCondition;
   gatewayKernel: BenchmarkGatewayKernel;
   audibilitySink?: TrialAudibilitySink;
+  journal?: TrialJournalSink;
+  /** Exact loaded secrets; used only for pre-sink scanning and never serialized. */
+  journalSecretValues?: readonly string[];
+  audioDeliveryProfile?: TrialAudioDeliveryProfile;
+  sleep?: TrialSleep;
   callerTurns: readonly CallerAudioTurn[];
   pairedAudio: PairedAudioManifest;
   limits: TrialLimits;
@@ -373,6 +461,7 @@ type MutableRuntime = {
   activeResponseId: string | null;
   audibilityState: AudibilityState;
   audibilityEvents: AudibilityEvent[];
+  audioDeliveries: TrialAudioChunkDelivery[];
   currentTurnIndex: number;
   sessionReady: boolean;
   connected: boolean;
@@ -448,6 +537,14 @@ function requireNonEmpty(value: string, label: string): void {
   }
 }
 
+function requirePrompt(value: string, label: string): void {
+  if (!value.trim()) throw new Error(`${label} must not be blank`);
+  if (value.includes("\0")) throw new Error(`${label} cannot contain a NUL byte`);
+  if (Buffer.byteLength(value, "utf8") > 1024 * 1024) {
+    throw new Error(`${label} cannot exceed 1 MiB of UTF-8 text`);
+  }
+}
+
 function requirePositiveInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive safe integer`);
@@ -509,13 +606,72 @@ function prepareAudio(audio: Pcm16Audio | readonly Pcm16Audio[]): AudioMaterial 
   });
 }
 
+function normalizeAudioDeliveryProfile(
+  input: TrialAudioDeliveryProfile | undefined
+): TrialAudioDeliveryProfile {
+  const profile = input ?? DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE;
+  if (profile.schemaVersion !== 1) throw new Error("unsupported audio delivery profile schema");
+  if (!Number.isSafeInteger(profile.chunkMs) || profile.chunkMs < 20 || profile.chunkMs > 100) {
+    throw new Error("audio delivery chunkMs must be an integer from 20 through 100");
+  }
+  if (profile.pace !== "realtime") throw new Error("primary audio delivery must use realtime pacing");
+  return Object.freeze({ schemaVersion: 1 as const, chunkMs: profile.chunkMs, pace: "realtime" as const });
+}
+
+export function trialAudioDeliveryProfileHash(profileInput: TrialAudioDeliveryProfile): string {
+  const profile = normalizeAudioDeliveryProfile(profileInput);
+  return sha256Hex(`harshas-amazing-call-center/audio-delivery-profile/v1\n${canonicalArtifactJson(profile)}`);
+}
+
+function packetizeAudio(
+  material: AudioMaterial,
+  profile: TrialAudioDeliveryProfile
+): readonly Pcm16Audio[] {
+  const samplesPerChunk = material.format.sampleRateHz * profile.chunkMs / 1_000;
+  if (!Number.isSafeInteger(samplesPerChunk) || samplesPerChunk <= 0) {
+    throw new Error(
+      `audio sample rate ${material.format.sampleRateHz} cannot represent ${profile.chunkMs}ms PCM chunks exactly`
+    );
+  }
+  const bytesPerChunk = samplesPerChunk * 2;
+  const chunks: Pcm16Audio[] = [];
+  for (let offset = 0; offset < material.bytes.byteLength; offset += bytesPerChunk) {
+    chunks.push(Object.freeze({
+      ...material.format,
+      data: material.bytes.slice(offset, Math.min(material.bytes.byteLength, offset + bytesPerChunk)),
+    }));
+  }
+  return Object.freeze(chunks);
+}
+
+function deliveryPlan(material: AudioMaterial, profile: TrialAudioDeliveryProfile) {
+  const chunks = packetizeAudio(material, profile);
+  const plan = chunks.map((chunk, index) => ({
+    chunk_index: index + 1,
+    byte_length: chunk.data.byteLength,
+    sha256: sha256Hex(chunk.data),
+    scheduled_offset_ms: index * profile.chunkMs,
+  }));
+  return Object.freeze({
+    chunks,
+    plan: Object.freeze(plan),
+    hash: sha256Hex(`harshas-amazing-call-center/audio-delivery-plan/v1\n${canonicalArtifactJson({
+      profile_hash: trialAudioDeliveryProfileHash(profile),
+      format: material.format,
+      chunks: plan,
+    })}`),
+  });
+}
+
 export function createPairedAudioManifest(input: Readonly<{
   pairId: string;
   scenario: unknown;
   callerTurns: readonly CallerAudioTurn[];
+  audioDeliveryProfile?: TrialAudioDeliveryProfile;
 }>): PairedAudioManifest {
   requireNonEmpty(input.pairId, "pairId");
   const scenario = BenchmarkScenarioSchema.parse(input.scenario);
+  const profile = normalizeAudioDeliveryProfile(input.audioDeliveryProfile);
   if (input.callerTurns.length !== scenario.caller.turns.length) {
     throw new Error("paired audio must contain exactly one turn for every scenario caller turn");
   }
@@ -525,6 +681,7 @@ export function createPairedAudioManifest(input: Readonly<{
       throw new Error(`paired audio turn ${index + 1} must be ${expected.id}, received ${turn.turnId}`);
     }
     const material = prepareAudio(turn.audio);
+    const delivery = deliveryPlan(material, profile);
     return Object.freeze({
       ordinal: index + 1,
       turn_id: turn.turnId,
@@ -533,6 +690,9 @@ export function createPairedAudioManifest(input: Readonly<{
       encoding: "pcm16" as const,
       sample_rate_hz: material.format.sampleRateHz,
       channels: 1 as const,
+      delivery_hash: delivery.hash,
+      chunk_hashes: Object.freeze(delivery.plan.map((chunk) => chunk.sha256)),
+      chunk_byte_lengths: Object.freeze(delivery.plan.map((chunk) => chunk.byte_length)),
     });
   });
   return Object.freeze({
@@ -540,6 +700,7 @@ export function createPairedAudioManifest(input: Readonly<{
     pair_id: input.pairId,
     scenario_id: scenario.id,
     scenario_version: scenario.version,
+    delivery_profile_hash: trialAudioDeliveryProfileHash(profile),
     turns: Object.freeze(turns),
   });
 }
@@ -548,10 +709,14 @@ function validateAndPrepareTurns(
   scenario: BenchmarkScenario,
   callerTurns: readonly CallerAudioTurn[],
   paired: PairedAudioManifest,
-  limits: TrialLimits
+  limits: TrialLimits,
+  profile: TrialAudioDeliveryProfile
 ): readonly PreparedTurn[] {
   requireNonEmpty(paired.pair_id, "pairedAudio.pair_id");
   if (paired.schema_version !== 1) throw new Error("unsupported paired audio manifest schema");
+  if (paired.delivery_profile_hash !== trialAudioDeliveryProfileHash(profile)) {
+    throw new Error("paired audio manifest uses a different audio delivery profile");
+  }
   if (paired.scenario_id !== scenario.id || paired.scenario_version !== scenario.version) {
     throw new Error("paired audio manifest belongs to a different scenario revision");
   }
@@ -570,6 +735,7 @@ function validateAndPrepareTurns(
       throw new Error(`caller turn order diverges at ordinal ${index + 1}`);
     }
     const material = prepareAudio(turn.audio);
+    const delivery = deliveryPlan(material, profile);
     totalBytes += material.bytes.byteLength;
     if (
       pairedTurn.sha256 !== material.hash
@@ -577,6 +743,9 @@ function validateAndPrepareTurns(
       || pairedTurn.encoding !== material.format.encoding
       || pairedTurn.sample_rate_hz !== material.format.sampleRateHz
       || pairedTurn.channels !== material.format.channels
+      || pairedTurn.delivery_hash !== delivery.hash
+      || canonicalArtifactJson(pairedTurn.chunk_hashes) !== canonicalArtifactJson(delivery.plan.map((chunk) => chunk.sha256))
+      || canonicalArtifactJson(pairedTurn.chunk_byte_lengths) !== canonicalArtifactJson(delivery.plan.map((chunk) => chunk.byte_length))
     ) {
       throw new Error(`caller audio hash or format mismatch for ${turn.turnId}`);
     }
@@ -584,6 +753,14 @@ function validateAndPrepareTurns(
   });
   if (totalBytes > limits.maxInputAudioBytes) {
     throw new Error(`caller audio exceeds the ${limits.maxInputAudioBytes}-byte input cap`);
+  }
+  const firstFormat = prepared[0]?.material.format;
+  if (!firstFormat || prepared.some((turn) =>
+    turn.material.format.encoding !== firstFormat.encoding
+    || turn.material.format.sampleRateHz !== firstFormat.sampleRateHz
+    || turn.material.format.channels !== firstFormat.channels
+  )) {
+    throw new Error("all caller turns in one realtime session must use one native PCM format");
   }
   return Object.freeze(prepared);
 }
@@ -619,6 +796,203 @@ function artifactJson(value: unknown, seen = new WeakSet<object>(), depth = 0): 
   } finally {
     seen.delete(value);
   }
+}
+
+const JOURNAL_REDACTION_MARKER = "[REDACTED]";
+const SENSITIVE_JOURNAL_KEY = /^(?:authorization|proxy_authorization|api_key|apikey|access_token|refresh_token|id_token|password|secret|client_secret|capability_grant|resume_handle|resumption_handle)$/i;
+
+function normalizedJournalKey(key: string): string {
+  return key.replace(/[-\s]/g, "_");
+}
+
+function journalSecretVariants(values: readonly string[]): readonly string[] {
+  const variants = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string" || value.length < 4) continue;
+    variants.add(value);
+    variants.add(encodeURIComponent(value));
+    variants.add(Buffer.from(value, "utf8").toString("base64"));
+  }
+  return Object.freeze([...variants].filter(Boolean).sort((left, right) => right.length - left.length));
+}
+
+function redactJournalString(input: string, secretVariants: readonly string[]): string {
+  let value = input;
+  for (const secret of secretVariants) value = value.split(secret).join(JOURNAL_REDACTION_MARKER);
+  value = value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, `Bearer ${JOURNAL_REDACTION_MARKER}`)
+    .replace(/([?&](?:key|api_key|apikey|access_token|token|auth|authorization)=)[^&#\s"']+/gi, `$1${JOURNAL_REDACTION_MARKER}`)
+    .replace(/("capability_grant"\s*:\s*")[^"]*(")/gi, `$1${JOURNAL_REDACTION_MARKER}$2`)
+    .replace(/("(?:resume_handle|resumption_handle)"\s*:\s*")[^"]*(")/gi, `$1${JOURNAL_REDACTION_MARKER}$2`);
+  return value;
+}
+
+/** Structured, recursive redaction that runs before any value crosses the sink boundary. */
+export function redactTrialJournalValue(
+  value: unknown,
+  secretValues: readonly string[] = []
+): ArtifactJsonValue {
+  const variants = journalSecretVariants(secretValues);
+  const seen = new WeakSet<object>();
+  const visit = (current: unknown, path: readonly string[], depth: number): ArtifactJsonValue => {
+    if (depth > 50) return "[Maximum depth exceeded]";
+    if (current === null || typeof current === "boolean") return current;
+    if (typeof current === "string") return redactJournalString(current, variants);
+    if (typeof current === "number") return Number.isFinite(current) ? current : String(current);
+    if (typeof current === "bigint") return current.toString();
+    if (current === undefined || typeof current === "function" || typeof current === "symbol") return null;
+    if (current instanceof Uint8Array) {
+      return { byte_length: current.byteLength, sha256: sha256Hex(current) };
+    }
+    if (current instanceof Error) {
+      return {
+        name: redactJournalString(current.name, variants),
+        message: redactJournalString(current.message, variants),
+      };
+    }
+    if (typeof current !== "object") return redactJournalString(String(current), variants);
+    if (seen.has(current)) return "[Circular]";
+    seen.add(current);
+    try {
+      if (Array.isArray(current)) return current.map((entry) => visit(entry, path, depth + 1));
+      const output: Record<string, ArtifactJsonValue> = {};
+      const record = current as Record<string, unknown>;
+      const recordIsResumption = typeof record.type === "string" && /resum/i.test(record.type);
+      for (const [key, entry] of Object.entries(current).sort(([left], [right]) => left.localeCompare(right))) {
+        if (key === "__proto__" || key === "prototype" || key === "constructor") continue;
+        const normalized = normalizedJournalKey(key);
+        const pathContainsResumption = path.some((segment) => /resum/i.test(segment));
+        output[key] = SENSITIVE_JOURNAL_KEY.test(normalized)
+          || /^(?:(?:resume|resumption).*handle|new_handle|conversation_id)$/i.test(normalized)
+          || (normalized.toLowerCase() === "handle" && (pathContainsResumption || recordIsResumption))
+          ? JOURNAL_REDACTION_MARKER
+          : visit(entry, [...path, key], depth + 1);
+      }
+      return output;
+    } finally {
+      seen.delete(current);
+    }
+  };
+  return visit(value, [], 0);
+}
+
+class TrialJournalCoordinator {
+  private sequence = 0;
+  private pending: Promise<void> = Promise.resolve();
+  private journalFailure: Error | null = null;
+
+  constructor(
+    private readonly sink: TrialJournalSink | undefined,
+    private readonly clock: TrialClock,
+    private readonly secretValues: readonly string[]
+  ) {}
+
+  get failed(): boolean {
+    return this.journalFailure !== null;
+  }
+
+  createRecord(
+    category: TrialJournalCategory,
+    eventType: string,
+    payload: unknown
+  ): TrialJournalRecord {
+    this.sequence += 1;
+    return Object.freeze({
+      schema_version: 1 as const,
+      sequence: this.sequence,
+      observed_at: this.clock.wallTimeIso(),
+      category,
+      event_type: eventType,
+      payload: redactTrialJournalValue(payload, this.secretValues),
+    });
+  }
+
+  append(category: TrialJournalCategory, eventType: string, payload: unknown): void {
+    if (!this.sink || this.journalFailure) return;
+    const record = this.createRecord(category, eventType, payload);
+    this.pending = this.pending
+      .then(async () => {
+        if (this.journalFailure) return;
+        await this.sink!.append(record);
+      })
+      .catch((error) => {
+        this.journalFailure ??= new Error(`Trial journal append failed: ${errorMessage(error)}`);
+      });
+  }
+
+  async flush(): Promise<void> {
+    await this.pending;
+    if (this.journalFailure) {
+      throw trialError("journal_error", "journal_append_failed", this.journalFailure.message, "artifact", { fatal: true });
+    }
+  }
+
+  async beforeClientCreate(payload: unknown): Promise<void> {
+    if (!this.sink) return;
+    await this.flush();
+    const record = this.createRecord("lifecycle", "connection_intent", payload);
+    this.pending = this.pending
+      .then(() => this.sink!.beforeClientCreate(record))
+      .then(() => undefined)
+      .catch((error) => {
+        this.journalFailure ??= new Error(`Trial journal connection intent failed: ${errorMessage(error)}`);
+      });
+    await this.pending;
+    if (this.journalFailure) {
+      throw trialError("journal_error", "journal_connection_intent_failed", this.journalFailure.message, "artifact", { fatal: true });
+    }
+  }
+
+  async onSessionOpened(payload: unknown): Promise<void> {
+    if (!this.sink) return;
+    await this.flush();
+    const record = this.createRecord("lifecycle", "session_opened", payload);
+    this.pending = this.pending
+      .then(() => this.sink!.onSessionOpened(record))
+      .then(() => undefined)
+      .catch((error) => {
+        this.journalFailure ??= new Error(`Trial journal session-opened write failed: ${errorMessage(error)}`);
+      });
+    await this.pending;
+    if (this.journalFailure) {
+      throw trialError("journal_error", "journal_session_opened_failed", this.journalFailure.message, "artifact", { fatal: true });
+    }
+  }
+
+  async finalize(input: Omit<TrialJournalFinalization, "record">): Promise<void> {
+    if (!this.sink) return;
+    await this.flush();
+    const record = this.createRecord("finalization", "trial_finalized", {
+      run_id: input.run_id,
+      status: input.status,
+      manifest_hash: input.manifest.manifest_hash,
+      event_count: input.event_count,
+      budget_reservation_status: input.budget_reservation_status,
+    });
+    this.pending = this.pending
+      .then(() => this.sink!.finalize(Object.freeze({ ...input, record })))
+      .then(() => undefined)
+      .catch((error) => {
+        this.journalFailure ??= new Error(`Trial journal finalization failed: ${errorMessage(error)}`);
+      });
+    await this.pending;
+    if (this.journalFailure) {
+      throw trialError("journal_error", "journal_finalization_failed", this.journalFailure.message, "artifact", { fatal: true });
+    }
+  }
+}
+
+function journalCategoryForEventType(eventType: string): TrialJournalCategory {
+  if (eventType === "provider.normalized") return "normalized_event";
+  if (eventType.startsWith("tool.")) return "tool";
+  if (eventType.startsWith("world.")) return "world";
+  if (eventType.startsWith("audibility.") || eventType.startsWith("caller.")) return "audio";
+  if (eventType.includes("failed") || eventType.includes("error")) return "error";
+  if (eventType === "trial.finished") return "finalization";
+  if (eventType.startsWith("trial.") || eventType.startsWith("budget.") || eventType.startsWith("session.")) {
+    return "lifecycle";
+  }
+  return "event_chain";
 }
 
 function jsonRecord(value: unknown): Record<string, JsonValue> | null {
@@ -664,7 +1038,7 @@ function validateCompiledCondition(condition: CompiledBenchmarkCondition): void 
   ) {
     throw new Error(`condition ${condition.id} must expose exactly [${CAPABILITY_GATEWAY_NAME}]`);
   }
-  requireNonEmpty(condition.initialPrompt, "condition.initialPrompt");
+  requirePrompt(condition.initialPrompt, "condition.initialPrompt");
   requireNonEmpty(condition.conditionHash, "condition.conditionHash");
 }
 
@@ -683,6 +1057,7 @@ function assertSnapshotMatches(
     expected.length !== actual.length
     || expected.some((capability, index) =>
       capability.name !== actual[index]?.name
+      || capability.description !== actual[index]?.description
       || capability.semanticHash !== actual[index]?.semantic_hash
       || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(actual[index]?.input_schema)
     )
@@ -694,18 +1069,27 @@ function assertSnapshotMatches(
 
 function assertSnapshotSubset(
   snapshotInput: unknown,
-  capabilities: CompiledBenchmarkCondition["visibleCapabilities"],
+  condition: CompiledBenchmarkCondition,
   label: string
 ): ProviderCapabilitySnapshot {
   const snapshot = ProviderCapabilitySnapshotSchema.parse(snapshotInput);
   if (new Set(snapshot.actions.map((action) => action.capability_grant)).size !== snapshot.actions.length) {
     throw new Error(`${label} capability snapshot must use action-bound unique grants`);
   }
-  const catalog = new Map(capabilities.map((capability) => [capability.name, capability]));
+  if (!condition.behavior.progressiveDisclosure) {
+    return assertSnapshotMatches(snapshot, condition.visibleCapabilities, label);
+  }
+  const catalog = new Map(
+    [
+      ...condition.visibleCapabilities,
+      ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
+    ].map((capability) => [capability.name, capability])
+  );
   for (const action of snapshot.actions) {
     const capability = catalog.get(action.name);
     if (
       !capability
+      || capability.description !== action.description
       || capability.semanticHash !== action.semantic_hash
       || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(action.input_schema)
     ) {
@@ -919,7 +1303,7 @@ async function dispatchToolCall(input: Readonly<{
   } else if (outcome.capabilitySnapshot) {
     const snapshot = assertSnapshotSubset(
       outcome.capabilitySnapshot,
-      condition.visibleCapabilities,
+      condition,
       "rotated"
     );
     const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
@@ -943,6 +1327,108 @@ function safeClose(client: NormalizedRealtimeClient, reason: string): void {
     client.close(1000, reason.slice(0, 120));
   } catch {
     // Closing is best-effort only; the original provider/runtime error is retained.
+  }
+}
+
+function defaultTrialSleep(durationMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+async function deliverCallerAudio(input: Readonly<{
+  client: NormalizedRealtimeClient;
+  turn: PreparedTurn;
+  ordinal: number;
+  profile: TrialAudioDeliveryProfile;
+  sleep: TrialSleep;
+  clock: TrialClock;
+  sessionStartedMs: number;
+  limits: TrialLimits;
+  runtime: MutableRuntime;
+  journal: TrialJournalCoordinator;
+  record(type: string, payload: unknown): void;
+}>): Promise<void> {
+  const delivery = deliveryPlan(input.turn.material, input.profile);
+  if (input.runtime.inputAudioBytes + input.turn.material.bytes.byteLength > input.limits.maxInputAudioBytes) {
+    throw trialError(
+      "cap_exceeded",
+      "input_audio_cap_exceeded",
+      `Caller audio would exceed the ${input.limits.maxInputAudioBytes}-byte hard cap`,
+      "turn",
+      { fatal: true }
+    );
+  }
+  const deliveryStartedMs = input.clock.monotonicNowMs();
+  let priorAppendMs = deliveryStartedMs;
+  for (const [index, chunk] of delivery.chunks.entries()) {
+    const planned = delivery.plan[index];
+    input.record("caller.audio_chunk_intent", {
+      turn: input.ordinal,
+      turn_id: input.turn.turnId,
+      chunk_index: index + 1,
+      chunk_count: delivery.chunks.length,
+      byte_length: planned.byte_length,
+      sha256: planned.sha256,
+      scheduled_offset_ms: planned.scheduled_offset_ms,
+      delivery_hash: delivery.hash,
+    });
+    await input.journal.flush();
+    if (sessionRemainingMs(input.clock, input.sessionStartedMs, input.limits.maxSessionMs) <= 0) {
+      throw trialError("session_timeout", "session_timeout", "Trial exceeded the monotonic session cap", "session", { fatal: true });
+    }
+    try {
+      input.client.appendInputAudio(chunk);
+    } catch (error) {
+      throw trialError("protocol_error", "audio_chunk_append_failed", errorMessage(error), "turn", { fatal: true });
+    }
+    const appendedAtMs = input.clock.monotonicNowMs();
+    if (!Number.isFinite(appendedAtMs) || appendedAtMs < priorAppendMs) {
+      throw trialError(
+        "protocol_error",
+        "non_monotonic_audio_clock",
+        "Monotonic clock moved backwards during caller audio delivery",
+        "turn",
+        { fatal: true }
+      );
+    }
+    priorAppendMs = appendedAtMs;
+    input.runtime.inputAudioBytes += chunk.data.byteLength;
+    input.runtime.inputAudioMs += chunk.data.byteLength / 2 / chunk.sampleRateHz * 1_000;
+    const delivered: TrialAudioChunkDelivery = Object.freeze({
+      turn: input.ordinal,
+      turn_id: input.turn.turnId,
+      chunk_index: index + 1,
+      chunk_count: delivery.chunks.length,
+      byte_length: chunk.data.byteLength,
+      sha256: sha256Hex(chunk.data),
+      scheduled_offset_ms: planned.scheduled_offset_ms,
+      appended_at_monotonic_ms: appendedAtMs,
+      session_offset_ms: Math.max(0, appendedAtMs - input.sessionStartedMs),
+    });
+    input.runtime.audioDeliveries.push(delivered);
+    input.record("caller.audio_chunk_delivered", delivered);
+    await input.journal.flush();
+    if (index < delivery.chunks.length - 1) {
+      const nextScheduledAtMs = deliveryStartedMs + (index + 1) * input.profile.chunkMs;
+      const delayMs = Math.max(0, nextScheduledAtMs - input.clock.monotonicNowMs());
+      try {
+        await input.sleep(delayMs);
+      } catch (error) {
+        throw trialError("protocol_error", "audio_pacing_failed", errorMessage(error), "turn", { fatal: true });
+      }
+    }
+  }
+  input.record("caller.turn_commit_intent", {
+    turn: input.ordinal,
+    turn_id: input.turn.turnId,
+    delivery_hash: delivery.hash,
+    chunk_count: delivery.chunks.length,
+  });
+  await input.journal.flush();
+  try {
+    input.client.commitInputAudio();
+    input.client.createResponse();
+  } catch (error) {
+    throw trialError("protocol_error", "audio_turn_commit_failed", errorMessage(error), "turn", { fatal: true });
   }
 }
 
@@ -1102,6 +1588,7 @@ async function awaitLogicalResponse(input: Readonly<{
   sessionStartedMs: number;
   record(type: string, payload: unknown): void;
   callInvocationIds: Map<string, string>;
+  journal: TrialJournalCoordinator;
 }>): Promise<void> {
   const responseStartedMs = input.clock.monotonicNowMs();
   let lastSubmissionBarrier = -1;
@@ -1135,6 +1622,7 @@ async function awaitLogicalResponse(input: Readonly<{
       throw trialError("response_timeout", "response_timeout", "Provider did not complete the response before the hard timeout", "turn", { fatal: true });
     }
     const event = queued.event;
+    await input.journal.flush();
     if (event.type === "error") {
       const providerError: TrialError = {
         code: "provider_error",
@@ -1191,6 +1679,7 @@ async function awaitLogicalResponse(input: Readonly<{
       });
       const results: RealtimeToolResult[] = [];
       for (const call of event.calls) {
+        await input.journal.flush();
         let invocationId = input.callInvocationIds.get(call.callId);
         if (!invocationId) {
           invocationId = invocationIdFor(input.callInvocationIds.size + 1);
@@ -1221,11 +1710,18 @@ async function awaitLogicalResponse(input: Readonly<{
           disclosure_prompt_hash: dispatched.disclosure ? sha256Hex(dispatched.disclosure.prompt) : null,
           capability_snapshot_hash: dispatched.disclosure ? sha256Hex(dispatched.disclosure.renderedSnapshot) : null,
         });
+        input.journal.append("world", "world.after_tool_call", {
+          turn: input.runtime.currentTurnIndex + 1,
+          provider_call_id: call.callId,
+          invocation_id: invocationId,
+          world: input.runtime.world,
+        });
       }
       // Anything already normalized belongs to the response that requested
       // tools. Events emitted synchronously by submitToolResults are a genuine
       // continuation and therefore fall beyond this barrier.
       const submissionBarrier = input.runtime.eventSequence;
+      await input.journal.flush();
       try {
         input.client.submitToolResults(results, true);
       } catch (error) {
@@ -1253,6 +1749,7 @@ async function awaitLogicalResponse(input: Readonly<{
         );
       }
       if (queued.sequence <= lastSubmissionBarrier) continue;
+      await input.journal.flush();
       return;
     }
   }
@@ -1279,6 +1776,8 @@ function assertCompleteTrialArtifacts(
     runId: string;
     planned: readonly PreparedTurn[];
     turnsSent: number;
+    pair: PairedAudioManifest;
+    audioDelivery: TrialAudioDeliveryReport;
   }>
 ): void {
   const eventVerification = verifyEventChain(artifacts.events);
@@ -1310,6 +1809,7 @@ function assertCompleteTrialArtifacts(
     "trial-result.json",
     "budget-ledger.json",
     "audibility.json",
+    "audio/delivery.json",
     "audio/pair-manifest.json",
   ];
   for (const path of required) {
@@ -1322,6 +1822,27 @@ function assertCompleteTrialArtifacts(
     if (index < expected.turnsSent && !fileByPath.has(pcmPath("output", index + 1, turn.turnId))) {
       throw new Error(`output audio artifact for sent turn ${turn.turnId} is missing`);
     }
+    const delivered = expected.audioDelivery.deliveries.filter((entry) => entry.turn === index + 1);
+    const pairedTurn = expected.pair.turns[index];
+    if (index < expected.turnsSent && delivered.length !== pairedTurn.chunk_hashes.length) {
+      throw new Error(`successful turn ${turn.turnId} does not have a complete paced delivery trace`);
+    }
+    if (delivered.length > pairedTurn.chunk_hashes.length) {
+      throw new Error(`turn ${turn.turnId} has more delivered chunks than its frozen plan`);
+    }
+    for (const [chunkIndex, delivery] of delivered.entries()) {
+      if (
+        delivery.chunk_index !== chunkIndex + 1
+        || delivery.chunk_count !== pairedTurn.chunk_hashes.length
+        || delivery.sha256 !== pairedTurn.chunk_hashes[chunkIndex]
+        || delivery.byte_length !== pairedTurn.chunk_byte_lengths[chunkIndex]
+      ) {
+        throw new Error(`turn ${turn.turnId} delivery chunk ${chunkIndex + 1} diverges from the paired plan`);
+      }
+    }
+  }
+  if (expected.audioDelivery.profile_hash !== expected.pair.delivery_profile_hash) {
+    throw new Error("audio delivery artifact profile does not match paired audio manifest");
   }
   if (
     artifacts.manifest.event_log?.event_count !== eventVerification.event_count
@@ -1349,6 +1870,7 @@ function buildArtifacts(input: Readonly<{
   world: ToolWorldState;
   ledger: BudgetLedger;
   audibility: TrialAudibilityReport;
+  audioDelivery: TrialAudioDeliveryReport;
   events: readonly BenchmarkEventEnvelope[];
   createdAt: string;
 }>): TrialArtifacts {
@@ -1385,6 +1907,11 @@ function buildArtifacts(input: Readonly<{
     "application/json"
   ));
   files.push(makeArtifactFile(
+    "audio/delivery.json",
+    `${canonicalArtifactJson(input.audioDelivery)}\n`,
+    "application/json"
+  ));
+  files.push(makeArtifactFile(
     "trial-result.json",
     `${canonicalArtifactJson({
       schema_version: 1,
@@ -1397,6 +1924,7 @@ function buildArtifacts(input: Readonly<{
       condition: input.condition,
       status: input.status,
       audibility_applicability: input.audibility.applicability,
+      audio_delivery_profile_hash: input.audioDelivery.profile_hash,
       errors: input.errors,
       counters: input.counters,
       budget: budgetSnapshot(input.ledger),
@@ -1449,6 +1977,8 @@ function buildArtifacts(input: Readonly<{
     runId: input.runId,
     planned: input.planned,
     turnsSent: input.counters.turnsSent,
+    pair: input.pair,
+    audioDelivery: input.audioDelivery,
   });
   return artifacts;
 }
@@ -1465,8 +1995,22 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   validateLimits(input.limits);
   validateCompiledCondition(input.condition);
   const scenario = BenchmarkScenarioSchema.parse(input.scenario);
-  const planned = validateAndPrepareTurns(scenario, input.callerTurns, input.pairedAudio, input.limits);
+  const audioDeliveryProfile = normalizeAudioDeliveryProfile(input.audioDeliveryProfile);
+  const audioDeliveryProfileHash = trialAudioDeliveryProfileHash(audioDeliveryProfile);
+  const planned = validateAndPrepareTurns(
+    scenario,
+    input.callerTurns,
+    input.pairedAudio,
+    input.limits,
+    audioDeliveryProfile
+  );
+  const sleep = input.sleep ?? defaultTrialSleep;
   const clock = input.clock ?? defaultClock();
+  const journal = new TrialJournalCoordinator(
+    input.journal,
+    clock,
+    input.journalSecretValues ?? []
+  );
   const sessionStartedMs = clock.monotonicNowMs();
   if (!Number.isFinite(sessionStartedMs)) throw new Error("clock.monotonicNowMs() must be finite");
   const createdAt = clock.wallTimeIso();
@@ -1491,6 +2035,9 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     renderedCapabilitySnapshot: renderedInitialSnapshot,
     providerTools: input.condition.providerTools,
     conditionHash: input.condition.conditionHash,
+    inputAudioFormat: planned[0].material.format,
+    audioDeliveryProfile,
+    audioDeliveryProfileHash,
   });
   const initialEvent = Object.freeze({
     run_id: input.runId,
@@ -1508,20 +2055,33 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       initial_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
       turns_planned: planned.length,
       input_audio_hashes: planned.map((turn) => turn.material.hash),
+      audio_delivery_profile: audioDeliveryProfile,
+      audio_delivery_profile_hash: audioDeliveryProfileHash,
       retry_policy: "none",
     }),
   });
   const chain: BenchmarkEventEnvelope[] = [];
   const record = (eventType: string, payload: unknown) => {
-    const safePayload = artifactJson(payload);
+    const safePayload = redactTrialJournalValue(payload, input.journalSecretValues ?? []);
     const envelope = appendEventEnvelope(chain[chain.length - 1], {
       observed_at: clock.wallTimeIso(),
       event_type: eventType,
       payload: safePayload,
     });
     chain.push(envelope);
+    journal.append(journalCategoryForEventType(eventType), eventType, {
+      event_sequence: envelope.sequence,
+      event_hash: envelope.event_hash,
+      payload: safePayload,
+    });
   };
-  chain.push(startEventChain(initialEvent));
+  const started = startEventChain(initialEvent);
+  chain.push(started);
+  journal.append("lifecycle", "trial.started", {
+    event_sequence: started.sequence,
+    event_hash: started.event_hash,
+    payload: started.payload,
+  });
 
   let budgetLedger: BudgetLedger;
   const reserved = reserveBudget(input.budget.ledger, {
@@ -1538,6 +2098,13 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     reservation_id: reserved.reservation.reservation_id,
     maximum_micro_usd: reserved.reservation.maximum_micro_usd,
     scheduling_exposure_micro_usd: budgetSnapshot(budgetLedger).scheduling_exposure_micro_usd,
+  });
+  await journal.beforeClientCreate({
+    run_id: input.runId,
+    reservation_id: input.budget.reservationId,
+    reservation_status: "active",
+    session_configuration: sessionConfiguration,
+    initial_capability_snapshot: initialSnapshot,
   });
   // The spend reservation is durable before provider client construction. A
   // factory must only construct/configure; runBenchmarkTrial owns connect().
@@ -1567,6 +2134,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     activeResponseId: null,
     audibilityState: createAudibilityState(),
     audibilityEvents: [],
+    audioDeliveries: [],
     currentTurnIndex: -1,
     sessionReady: false,
     connected: false,
@@ -1592,6 +2160,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         ...(event.code ? { provider_code: event.code } : {}),
         fatal: event.fatal,
       });
+      journal.append("error", "provider.error", event);
     }
     if (event.type === "usage") {
       runtime.usage.push(event.usage);
@@ -1603,8 +2172,16 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         ...(event.scope ? { scope: event.scope } : {}),
         usage: artifactJson(event.usage),
       }));
+      journal.append("usage", "provider.usage", event);
     }
     if (event.type === "output.audio") {
+      journal.append("audio", "provider.output_audio", {
+        turn: runtime.currentTurnIndex + 1,
+        response_id: event.responseId ?? runtime.activeResponseId,
+        byte_length: event.audio.byteLength,
+        sha256: sha256Hex(event.audio),
+        format: event.format,
+      });
       const projected = runtime.outputAudioBytes + event.audio.byteLength;
       if (runtime.currentTurnIndex < 0) {
         runtime.terminalError = {
@@ -1672,13 +2249,18 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   });
   const unsubscribeWire = client.onWireEvent((event) => {
     runtime.rawWireEvents += 1;
-    const safe = artifactJson(event);
+    const safe = redactTrialJournalValue(event, input.journalSecretValues ?? []);
     const recordValue = Object.freeze({
       sequence: runtime.rawWireEvents,
       observed_at: clock.wallTimeIso(),
       event: safe,
     });
     runtime.wireRecords.push(recordValue);
+    journal.append("raw_wire", "provider.raw_wire", {
+      sequence: recordValue.sequence,
+      observed_at: recordValue.observed_at,
+      event,
+    });
     record("provider.wire_observed", {
       sequence: recordValue.sequence,
       sha256: sha256Hex(canonicalArtifactJson(safe)),
@@ -1700,6 +2282,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       throw trialError("provider_error", "connect_failed", errorMessage(error), "connect", { fatal: true });
     }
     runtime.connected = true;
+    await journal.flush();
     if (!runtime.sessionReady || client.state !== "ready") {
       throw trialError("protocol_error", "missing_session_ack", "connect() resolved without a normalized session.ready acknowledgement", "connect", { fatal: true });
     }
@@ -1710,20 +2293,41 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       initial_prompt_hash: input.condition.initialPromptHash,
       rendered_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
     });
+    await journal.onSessionOpened({
+      run_id: input.runId,
+      provider: client.provider,
+      model: input.model,
+      condition: input.condition.id,
+      session_state: client.state,
+    });
 
     for (const [index, turn] of planned.entries()) {
       if (sessionRemainingMs(clock, sessionStartedMs, input.limits.maxSessionMs) <= 0) {
         throw trialError("session_timeout", "session_timeout", "Trial exceeded the monotonic session cap", "session", { fatal: true });
       }
       runtime.currentTurnIndex = index;
-      try {
-        client.sendTurn(turn.material.chunks.length === 1 ? turn.material.chunks[0] : turn.material.chunks);
-      } catch (error) {
-        throw trialError("protocol_error", "audio_turn_send_failed", errorMessage(error), "turn", { fatal: true });
-      }
+      record("caller.turn_delivery_intent", {
+        ordinal: index + 1,
+        turn_id: turn.turnId,
+        byte_length: turn.material.bytes.byteLength,
+        sha256: turn.material.hash,
+        format: turn.material.format,
+      });
+      await journal.flush();
+      await deliverCallerAudio({
+        client,
+        turn,
+        ordinal: index + 1,
+        profile: audioDeliveryProfile,
+        sleep,
+        clock,
+        sessionStartedMs,
+        limits: input.limits,
+        runtime,
+        journal,
+        record,
+      });
       runtime.turnsSent += 1;
-      runtime.inputAudioBytes += turn.material.bytes.byteLength;
-      runtime.inputAudioMs += turn.material.durationMs;
       record("caller.turn_sent", {
         ordinal: index + 1,
         turn_id: turn.turnId,
@@ -1745,6 +2349,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         sessionStartedMs,
         record,
         callInvocationIds,
+        journal,
       });
       record("caller.turn_completed", {
         ordinal: index + 1,
@@ -1767,7 +2372,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   try {
     audibility = await finalizeAudibility({
       runId: input.runId,
-      sink: input.audibilitySink,
+      sink: journal.failed ? undefined : input.audibilitySink,
       runtime,
       record,
     });
@@ -1786,6 +2391,17 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     });
   }
 
+  if (!journal.failed) {
+    try {
+      await journal.flush();
+    } catch (error) {
+      const failure = asTrialRuntimeError(error, "artifact");
+      runtime.status = failure.status;
+      addErrorOnce(runtime, failure.trialError);
+      record("journal.failed", { error: failure.trialError });
+    }
+  }
+
   if (runtime.status === "completed" && runtime.errors.length > 0) {
     runtime.status = "provider_error";
     record("trial.provider_errors_preserved", {
@@ -1795,8 +2411,9 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   }
 
   const inputAudioBytes = runtime.inputAudioBytes;
-  try {
-    const estimate = await input.budget.estimateCost(Object.freeze({
+  if (!journal.failed) {
+    try {
+      const estimate = await input.budget.estimateCost(Object.freeze({
       runId: input.runId,
       provider: input.provider,
       model: input.model,
@@ -1809,27 +2426,35 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       turnsSent: runtime.turnsSent,
       toolCalls: runtime.toolCalls,
     }));
-    const settled = settleBudgetReservation(budgetLedger, input.budget.reservationId, {
+      const settled = settleBudgetReservation(budgetLedger, input.budget.reservationId, {
       estimated_usd: estimate.estimatedUsd,
       ...(estimate.providerReportedUsd === undefined ? {} : { provider_reported_usd: estimate.providerReportedUsd }),
       ...(estimate.reconciledUsd === undefined ? {} : { reconciled_usd: estimate.reconciledUsd }),
     });
-    await input.budget.persistLedger(settled);
-    budgetLedger = settled;
-    record("budget.settled", {
+      await input.budget.persistLedger(settled);
+      budgetLedger = settled;
+      record("budget.settled", {
+        reservation_id: input.budget.reservationId,
+        costs: settled.reservations.find((reservation) => reservation.reservation_id === input.budget.reservationId)?.costs ?? null,
+      });
+    } catch (error) {
+      runtime.status = "budget_error";
+      const failure: TrialError = {
+        code: "budget_settlement_failed",
+        message: errorMessage(error),
+        phase: "budget",
+        fatal: true,
+      };
+      addErrorOnce(runtime, failure);
+      record("budget.settlement_failed", { error: failure, reservation_status: "active" });
+    }
+  } else {
+    runtime.status = "journal_error";
+    record("budget.reservation_retained", {
       reservation_id: input.budget.reservationId,
-      costs: settled.reservations.find((reservation) => reservation.reservation_id === input.budget.reservationId)?.costs ?? null,
+      reservation_status: "active",
+      reason: "journal_failure",
     });
-  } catch (error) {
-    runtime.status = "budget_error";
-    const failure: TrialError = {
-      code: "budget_settlement_failed",
-      message: errorMessage(error),
-      phase: "budget",
-      fatal: true,
-    };
-    addErrorOnce(runtime, failure);
-    record("budget.settlement_failed", { error: failure, reservation_status: "active" });
   }
 
   const elapsedMs = Math.max(0, clock.monotonicNowMs() - sessionStartedMs);
@@ -1844,6 +2469,19 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     retries: 0,
     elapsedMs,
   });
+  const publicErrors: readonly TrialError[] = Object.freeze(runtime.errors.map((error) => Object.freeze({
+    ...error,
+    message: String(redactTrialJournalValue(error.message, input.journalSecretValues ?? [])),
+    ...(error.provider_code
+      ? { provider_code: String(redactTrialJournalValue(error.provider_code, input.journalSecretValues ?? [])) }
+      : {}),
+  })));
+  const audioDelivery: TrialAudioDeliveryReport = Object.freeze({
+    schema_version: 1 as const,
+    profile: audioDeliveryProfile,
+    profile_hash: audioDeliveryProfileHash,
+    deliveries: Object.freeze([...runtime.audioDeliveries]),
+  });
   record("trial.finished", {
     status: runtime.status,
     counters,
@@ -1852,6 +2490,16 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       (reservation) => reservation.reservation_id === input.budget.reservationId
     )?.status ?? "missing",
   });
+  if (!journal.failed) {
+    try {
+      await journal.flush();
+    } catch (error) {
+      const failure = asTrialRuntimeError(error, "artifact");
+      runtime.status = failure.status;
+      addErrorOnce(runtime, failure.trialError);
+      record("journal.failed", { error: failure.trialError });
+    }
+  }
 
   const artifacts = buildArtifacts({
     runId: input.runId,
@@ -1861,7 +2509,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     model: input.model,
     condition: input.condition.id,
     status: runtime.status,
-    errors: runtime.errors,
+    errors: publicErrors,
     counters,
     planned,
     outputByTurn: runtime.outputByTurn,
@@ -1871,10 +2519,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     world: runtime.world,
     ledger: budgetLedger,
     audibility,
+    audioDelivery,
     events: chain,
     createdAt,
   });
-  return Object.freeze({
+  const result: TrialResult = Object.freeze({
     schemaVersion: 1 as const,
     runId: input.runId,
     pairId: input.pairedAudio.pair_id,
@@ -1882,14 +2531,27 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     model: input.model,
     condition: input.condition.id,
     status: runtime.status,
-    errors: Object.freeze([...runtime.errors]),
+    errors: publicErrors,
     counters,
     inputAudioHashes: Object.freeze(planned.map((turn) => turn.material.hash)),
     outputAudioHashes: Object.freeze(runtime.outputByTurn.slice(0, runtime.turnsSent).map((chunks) => sha256Hex(concatBytes(chunks)))),
     usage: Object.freeze([...runtime.usage]),
     audibility,
+    audioDelivery,
     world: ToolWorldStateSchema.parse(runtime.world),
     budgetLedger,
     artifacts,
   });
+  if (journal.failed) await journal.flush();
+  const reservationStatus = budgetLedger.reservations.find(
+    (reservation) => reservation.reservation_id === input.budget.reservationId
+  )?.status ?? "missing";
+  await journal.finalize({
+    run_id: input.runId,
+    status: runtime.status,
+    manifest: artifacts.manifest,
+    event_count: artifacts.events.length,
+    budget_reservation_status: reservationStatus,
+  });
+  return result;
 }

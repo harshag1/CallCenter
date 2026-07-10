@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
 import { verifyEventChain, verifyRunManifest } from "../artifacts";
 import { createBudgetLedger } from "../budget";
 import {
@@ -7,6 +8,10 @@ import {
   type BenchmarkGatewayInvocation,
   type BenchmarkGatewayKernel,
   type CallerAudioTurn,
+  type TrialAudioDeliveryProfile,
+  type TrialJournalFinalization,
+  type TrialJournalRecord,
+  type TrialJournalSink,
   type TrialSessionConfiguration,
   type TrialLimits,
 } from "../orchestrator";
@@ -18,6 +23,8 @@ import {
   type ProviderCapabilitySnapshot,
 } from "../capability-gateway";
 import type { BenchmarkConditionId, CompiledBenchmarkCondition } from "../condition-compiler";
+import { compileConditionSuite } from "../condition-compiler";
+import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
 import type {
   NormalizedRealtimeClient,
@@ -142,6 +149,24 @@ const pairedAudio = createPairedAudioManifest({
   scenario,
   callerTurns,
 });
+const PACED_PROFILE: TrialAudioDeliveryProfile = Object.freeze({
+  schemaVersion: 1,
+  chunkMs: 20,
+  pace: "realtime",
+});
+
+function pacedCallerTurns(sampleRateHz: 16_000 | 24_000, durationMs = 60): readonly CallerAudioTurn[] {
+  const byteLength = sampleRateHz * durationMs / 1_000 * 2;
+  return Object.freeze([{
+    turnId: "caller-one",
+    audio: Object.freeze({
+      encoding: "pcm16" as const,
+      sampleRateHz,
+      channels: 1 as const,
+      data: new Uint8Array(byteLength).map((_, index) => index % 251),
+    }),
+  }]);
+}
 
 const limits: TrialLimits = Object.freeze({
   maxTurns: 4,
@@ -294,9 +319,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   private readonly eventListeners = new Set<RealtimeEventListener>();
   private readonly wireListeners = new Set<RealtimeWireEventListener>();
   readonly turns: Array<Pcm16Audio | readonly Pcm16Audio[]> = [];
+  readonly appendedChunks: Pcm16Audio[] = [];
   readonly resultBatches: Array<readonly RealtimeToolResult[]> = [];
   connectCalls = 0;
   closeCalls = 0;
+  commitCalls = 0;
+  createResponseCalls = 0;
+  private pendingChunks: Pcm16Audio[] = [];
+  private lastCommitted: Pcm16Audio | readonly Pcm16Audio[] | null = null;
 
   constructor(private readonly hooks: FakeHooks = {}) {}
 
@@ -330,23 +360,32 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     return () => this.wireListeners.delete(listener);
   }
 
-  appendInputAudio(): void {
-    throw new Error("orchestrator must use sendTurn for true-audio turns");
+  appendInputAudio(audio: Pcm16Audio): void {
+    const copy = Object.freeze({ ...audio, data: new Uint8Array(audio.data) });
+    this.appendedChunks.push(copy);
+    this.pendingChunks.push(copy);
   }
 
   commitInputAudio(): void {
-    throw new Error("orchestrator must use sendTurn for true-audio turns");
+    this.commitCalls += 1;
+    if (this.pendingChunks.length === 0) throw new Error("no audio to commit");
+    this.lastCommitted = this.pendingChunks.length === 1
+      ? this.pendingChunks[0]
+      : Object.freeze([...this.pendingChunks]);
+    this.turns.push(this.lastCommitted);
+    this.pendingChunks = [];
+    this.wire({ type: "input_audio_buffer.commit", turn: this.turns.length });
   }
 
   createResponse(): void {
-    throw new Error("orchestrator delegates response creation to sendTurn and submitToolResults");
+    this.createResponseCalls += 1;
+    if (!this.lastCommitted) throw new Error("no committed turn");
+    this.hooks.onTurn?.(this, this.lastCommitted);
   }
 
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void {
-    if (this.clientState !== "ready") throw new Error("fake client is not ready");
-    this.turns.push(audio);
-    this.wire({ type: "input_audio_buffer.commit", turn: this.turns.length });
-    this.hooks.onTurn?.(this, audio);
+    void audio;
+    throw new Error("orchestrator must packetize with appendInputAudio/commitInputAudio/createResponse");
   }
 
   submitToolResults(results: readonly RealtimeToolResult[], createResponse = true): void {
@@ -372,6 +411,40 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
 
   resolveReadyWithoutAcknowledgement(): void {
     this.clientState = "ready";
+  }
+}
+
+class CollectingJournal implements TrialJournalSink {
+  readonly order: string[] = [];
+  readonly appended: TrialJournalRecord[] = [];
+  readonly clientIntents: TrialJournalRecord[] = [];
+  readonly opened: TrialJournalRecord[] = [];
+  readonly finalizations: TrialJournalFinalization[] = [];
+
+  constructor(private readonly fail?: (phase: string, record: TrialJournalRecord) => boolean) {}
+
+  append(record: TrialJournalRecord): void {
+    if (this.fail?.("append", record)) throw new Error(`journal rejected ${record.event_type}`);
+    this.appended.push(record);
+    this.order.push(`append:${record.event_type}`);
+  }
+
+  beforeClientCreate(record: TrialJournalRecord): void {
+    if (this.fail?.("beforeClientCreate", record)) throw new Error("journal rejected connection intent");
+    this.clientIntents.push(record);
+    this.order.push("beforeClientCreate");
+  }
+
+  onSessionOpened(record: TrialJournalRecord): void {
+    if (this.fail?.("onSessionOpened", record)) throw new Error("journal rejected session open");
+    this.opened.push(record);
+    this.order.push("onSessionOpened");
+  }
+
+  finalize(result: TrialJournalFinalization): void {
+    if (this.fail?.("finalize", result.record)) throw new Error("journal rejected finalization");
+    this.finalizations.push(result);
+    this.order.push("finalize");
   }
 }
 
@@ -504,6 +577,61 @@ function rawE2eClient(): FakeRealtimeClient {
 }
 
 describe("provider-neutral benchmark trial orchestrator", () => {
+  it("accepts the real compiled industrial prompt and binds it into the provider session", async () => {
+    const industrialScenario = BenchmarkScenarioSchema.parse(fieldServiceScenarioJson);
+    const suite = compileConditionSuite(industrialFieldServiceCompilerInput(industrialScenario));
+    const condition = suite.conditions["raw-full"];
+    expect(Buffer.byteLength(condition.initialPrompt, "utf8")).toBeGreaterThan(256);
+    const industrialTurns: readonly CallerAudioTurn[] = Object.freeze(
+      industrialScenario.caller.turns.map((turn) => Object.freeze({
+        turnId: turn.id,
+        audio: Object.freeze({
+          encoding: "pcm16" as const,
+          sampleRateHz: 24_000,
+          channels: 1 as const,
+          data: Uint8Array.from([1, 0]),
+        }),
+      }))
+    );
+    const industrialPair = createPairedAudioManifest({
+      pairId: "industrial-real-condition",
+      scenario: industrialScenario,
+      callerTurns: industrialTurns,
+    });
+    let response = 0;
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        response += 1;
+        fake.emit(event("response.completed", {
+          responseId: `industrial-${response}`,
+          status: "completed",
+        }));
+      },
+    });
+    const sessions: TrialSessionConfiguration[] = [];
+    const trialBudget = budget("industrial-real-condition");
+    const result = await runBenchmarkTrial({
+      runId: "industrial-real-condition",
+      model: "fake-realtime-model",
+      scenario: industrialScenario,
+      ...runtimeBindings(client, { condition, kernel: new DirectGatewayKernel(), sessions }),
+      callerTurns: industrialTurns,
+      pairedAudio: industrialPair,
+      limits: {
+        ...limits,
+        maxTurns: industrialTurns.length,
+        maxInputAudioBytes: industrialTurns.length * 2,
+        maxToolCalls: 128,
+      },
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters.turnsSent).toBe(industrialTurns.length);
+    expect(sessions[0].initialPrompt).toBe(condition.initialPrompt);
+    expect(sessions[0].instructions).toContain(condition.initialPrompt);
+  });
+
   it("runs a hash-locked true-audio raw trial with batched tools, after-commit timeout, duplicate, and malformed args", async () => {
     const client = rawE2eClient();
     const trialBudget = budget("raw-e2e");
@@ -649,7 +777,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       .toBe(pairedAudio.turns[0].sha256);
   });
 
-  it("appends compiled progressive disclosure and independent state-only grant rotations to gateway results", async () => {
+  it("appends compiled disclosure and validates independent post-checkpoint rotations against the catalog union", async () => {
     const baseProgressive = conditionFor("full-harness");
     const lookupCapability = baseProgressive.visibleCapabilities.find((capability) => capability.name === "lookup_value")!;
     const commitCapability = baseProgressive.visibleCapabilities.find((capability) => capability.name === "commit_action")!;
@@ -717,7 +845,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       payload: expect.objectContaining({ disclosure_target: "step:commit" }),
     }));
 
-    const stateCondition = conditionFor("state-only");
+    const stateCondition = progressiveCondition;
     const stateDirect = new DirectGatewayKernel();
     const stateKernel: BenchmarkGatewayKernel = {
       initialize: (input) => snapshot(input.condition),
@@ -725,7 +853,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
         const outcome = await stateDirect.invoke(invocation);
         return {
           ...outcome,
-          capabilitySnapshot: snapshotFor([lookupCapability], "state:epoch-1", 1, "rotated"),
+          capabilitySnapshot: snapshotFor([commitCapability], "post-checkpoint", 2, "rotated"),
         };
       },
     };
@@ -740,7 +868,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       onToolResults(fake, results) {
         expect(results[0].output).not.toHaveProperty("progressive_disclosure");
         expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
-          .toContain('"capability_grant":"rotated.lookup_value"');
+          .toContain('"capability_grant":"rotated.commit_action"');
         fake.emit(event("response.completed", { responseId: "state-2", status: "completed" }));
       },
     });
@@ -760,6 +888,98 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       event_type: "tool.call_result",
       payload: expect.objectContaining({ disclosure_target: "$grant-rotation" }),
     }));
+  });
+
+  it("rejects treatment-changing state-only subsets and model-visible snapshot description tampering", async () => {
+    const stateCondition = conditionFor("state-only");
+    const lookup = stateCondition.visibleCapabilities.find((capability) => capability.name === "lookup_value")!;
+    const direct = new DirectGatewayKernel();
+    const stateKernel: BenchmarkGatewayKernel = {
+      initialize: (input) => snapshot(input.condition),
+      async invoke(invocation) {
+        const outcome = await direct.invoke(invocation);
+        return {
+          ...outcome,
+          capabilitySnapshot: snapshotFor([lookup], "invalid-state-subset", 1, "subset"),
+        };
+      },
+    };
+    const stateClient = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("tool.calls", {
+          responseId: "invalid-state-subset",
+          calls: [gatewayCall("invalid-state-call", "lookup_value", { key: "primary" })],
+        }));
+        fake.emit(event("response.completed", { responseId: "invalid-state-subset", status: "completed" }));
+      },
+      onToolResults() {
+        throw new Error("invalid state-only snapshot must not reach the provider");
+      },
+    });
+    const stateBudget = budget("invalid-state-subset");
+    const stateResult = await runBenchmarkTrial({
+      runId: "invalid-state-subset",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(stateClient, { condition: stateCondition, kernel: stateKernel }),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: stateBudget.value,
+    });
+    expect(stateResult.status).toBe("protocol_error");
+    expect(stateClient.resultBatches).toHaveLength(0);
+
+    const progressiveBase = conditionFor("full-harness");
+    const commit = progressiveBase.visibleCapabilities.find((capability) => capability.name === "commit_action")!;
+    const progressiveCondition: CompiledBenchmarkCondition = Object.freeze({
+      ...progressiveBase,
+      visibleCapabilities: Object.freeze([lookup]),
+      disclosures: Object.freeze([{
+        target: "step:commit" as const,
+        information: Object.freeze([]),
+        visibleCapabilities: Object.freeze([commit]),
+        prompt: "COMMIT STAGE",
+        promptHash: HASH,
+        disclosureHash: HASH,
+      }]),
+    });
+    const descriptionKernel: BenchmarkGatewayKernel = {
+      initialize: (input) => snapshot(input.condition),
+      async invoke(invocation) {
+        const outcome = await direct.invoke(invocation);
+        const rotated = snapshotFor([commit], "tampered-description", 1, "tampered");
+        return {
+          ...outcome,
+          capabilitySnapshot: {
+            ...rotated,
+            actions: rotated.actions.map((action) => ({ ...action, description: "TAMPERED MODEL CONTRACT" })),
+          },
+        };
+      },
+    };
+    const descriptionClient = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("tool.calls", {
+          responseId: "tampered-description",
+          calls: [gatewayCall("tampered-description-call", "lookup_value", { key: "primary" })],
+        }));
+        fake.emit(event("response.completed", { responseId: "tampered-description", status: "completed" }));
+      },
+    });
+    const descriptionBudget = budget("tampered-description");
+    const descriptionResult = await runBenchmarkTrial({
+      runId: "tampered-description",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(descriptionClient, { condition: progressiveCondition, kernel: descriptionKernel }),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: descriptionBudget.value,
+    });
+    expect(descriptionResult.status).toBe("protocol_error");
+    expect(descriptionClient.resultBatches).toHaveLength(0);
   });
 
   it("fails closed when connect resolves without a normalized session acknowledgement", async () => {
@@ -929,5 +1149,211 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(sessionResult.status).toBe("session_timeout");
     expect(sessionResult.errors).toContainEqual(expect.objectContaining({ code: "session_timeout" }));
     expect(sessionClient.turns).toHaveLength(1);
+  });
+
+  it.each([16_000, 24_000] as const)(
+    "packetizes and paces native %i Hz PCM with no final sleep",
+    async (sampleRateHz) => {
+      let monotonicMs = 0;
+      const sleeps: number[] = [];
+      const turns = pacedCallerTurns(sampleRateHz);
+      const pair = createPairedAudioManifest({
+        pairId: `paced-${sampleRateHz}`,
+        scenario,
+        callerTurns: turns,
+        audioDeliveryProfile: PACED_PROFILE,
+      });
+      const client = new FakeRealtimeClient({
+        onTurn(fake) {
+          fake.emit(event("response.completed", { responseId: `paced-${sampleRateHz}`, status: "completed" }));
+        },
+      });
+      const trialBudget = budget(`paced-${sampleRateHz}`);
+      const result = await runBenchmarkTrial({
+        runId: `paced-${sampleRateHz}`,
+        model: "fake-realtime-model",
+        scenario,
+        ...runtimeBindings(client),
+        callerTurns: turns,
+        pairedAudio: pair,
+        limits,
+        budget: trialBudget.value,
+        audioDeliveryProfile: PACED_PROFILE,
+        sleep(durationMs) {
+          sleeps.push(durationMs);
+          monotonicMs += durationMs;
+        },
+        clock: {
+          monotonicNowMs: () => monotonicMs,
+          wallTimeIso: () => "2026-07-10T12:00:00.000Z",
+        },
+      });
+
+      expect(result.status).toBe("completed");
+      expect(client.appendedChunks).toHaveLength(3);
+      expect(client.appendedChunks.map((chunk) => chunk.data.byteLength)).toEqual([
+        sampleRateHz * 20 / 1_000 * 2,
+        sampleRateHz * 20 / 1_000 * 2,
+        sampleRateHz * 20 / 1_000 * 2,
+      ]);
+      expect(sleeps).toEqual([20, 20]);
+      expect(client.commitCalls).toBe(1);
+      expect(client.createResponseCalls).toBe(1);
+      expect(result.audioDelivery.deliveries.map((delivery) => delivery.session_offset_ms)).toEqual([0, 20, 40]);
+      expect(result.audioDelivery.deliveries.map((delivery) => delivery.sha256)).toEqual(pair.turns[0].chunk_hashes);
+      expect(result.artifacts.files.map((file) => file.path)).toContain("audio/delivery.json");
+    }
+  );
+
+  it("aborts pacing before the next chunk and checks the input cap before the first byte", async () => {
+    const turns = pacedCallerTurns(24_000);
+    const pair = createPairedAudioManifest({
+      pairId: "pacing-failure",
+      scenario,
+      callerTurns: turns,
+      audioDeliveryProfile: PACED_PROFILE,
+    });
+    const pacingClient = new FakeRealtimeClient();
+    const pacingBudget = budget("pacing-failure");
+    const pacingResult = await runBenchmarkTrial({
+      runId: "pacing-failure",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(pacingClient),
+      callerTurns: turns,
+      pairedAudio: pair,
+      limits,
+      budget: pacingBudget.value,
+      audioDeliveryProfile: PACED_PROFILE,
+      sleep: () => { throw new Error("pacer unavailable"); },
+    });
+    expect(pacingResult.status).toBe("protocol_error");
+    expect(pacingResult.errors).toContainEqual(expect.objectContaining({ code: "audio_pacing_failed" }));
+    expect(pacingClient.appendedChunks).toHaveLength(1);
+    expect(pacingClient.commitCalls).toBe(0);
+
+    const cappedClient = new FakeRealtimeClient();
+    const cappedBudget = budget("paced-cap");
+    await expect(runBenchmarkTrial({
+      runId: "paced-cap",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(cappedClient),
+      callerTurns: turns,
+      pairedAudio: pair,
+      limits: { ...limits, maxInputAudioBytes: 100 },
+      budget: cappedBudget.value,
+      audioDeliveryProfile: PACED_PROFILE,
+    })).rejects.toThrow(/input cap/);
+    expect(cappedClient.appendedChunks).toHaveLength(0);
+    expect(cappedClient.connectCalls).toBe(0);
+  });
+
+  it("opens and backpressures a redacted journal before client/session actions", async () => {
+    const secret = "sk-super-secret-value";
+    const resumeHandle = "resume-handle-sensitive";
+    const journal = new CollectingJournal();
+    const client = new FakeRealtimeClient({
+      onConnect(fake) {
+        fake.wire({
+          type: "session.resumption",
+          authorization: `Bearer ${secret}`,
+          handle: resumeHandle,
+          sessionResumption: { handle: resumeHandle },
+          url: `wss://provider.example/live?key=${encodeURIComponent(secret)}`,
+          encoded: Buffer.from(secret).toString("base64"),
+        });
+      },
+      onTurn(fake) {
+        fake.emit(event("response.completed", { responseId: "journal-response", status: "completed" }));
+      },
+    });
+    const trialBudget = budget("journal-redaction");
+    const result = await runBenchmarkTrial({
+      runId: "journal-redaction",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+      journal,
+      journalSecretValues: [secret],
+    });
+
+    expect(result.status).toBe("completed");
+    expect(journal.clientIntents).toHaveLength(1);
+    expect(journal.opened).toHaveLength(1);
+    expect(journal.finalizations).toHaveLength(1);
+    expect(journal.order.indexOf("beforeClientCreate")).toBeLessThan(journal.order.indexOf("onSessionOpened"));
+    expect(journal.order.at(-1)).toBe("finalize");
+    const serialized = JSON.stringify({
+      appended: journal.appended,
+      intents: journal.clientIntents,
+      opened: journal.opened,
+    });
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(encodeURIComponent(secret));
+    expect(serialized).not.toContain(Buffer.from(secret).toString("base64"));
+    expect(serialized).not.toContain(resumeHandle);
+    expect(serialized).not.toContain("grant.lookup_value");
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("fails closed before connect or the next audio chunk when journal durability fails", async () => {
+    const beforeJournal = new CollectingJournal((phase) => phase === "beforeClientCreate");
+    const beforeClient = new FakeRealtimeClient();
+    let factoryCalls = 0;
+    const beforeBudget = budget("journal-before-failure");
+    await expect(runBenchmarkTrial({
+      runId: "journal-before-failure",
+      provider: "openai",
+      model: "fake-realtime-model",
+      scenario,
+      condition: conditionFor(),
+      gatewayKernel: new DirectGatewayKernel(),
+      createClient() {
+        factoryCalls += 1;
+        return beforeClient;
+      },
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: beforeBudget.value,
+      journal: beforeJournal,
+    })).rejects.toThrow(/connection intent failed/);
+    expect(factoryCalls).toBe(0);
+    expect(beforeClient.connectCalls).toBe(0);
+
+    const pacedTurns = pacedCallerTurns(24_000);
+    const pacedPair = createPairedAudioManifest({
+      pairId: "journal-mid-failure",
+      scenario,
+      callerTurns: pacedTurns,
+      audioDeliveryProfile: PACED_PROFILE,
+    });
+    const midJournal = new CollectingJournal(
+      (phase, record) => phase === "append" && record.event_type === "caller.audio_chunk_delivered"
+    );
+    const midClient = new FakeRealtimeClient();
+    const midBudget = budget("journal-mid-failure");
+    await expect(runBenchmarkTrial({
+      runId: "journal-mid-failure",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(midClient),
+      callerTurns: pacedTurns,
+      pairedAudio: pacedPair,
+      limits,
+      budget: midBudget.value,
+      audioDeliveryProfile: PACED_PROFILE,
+      sleep: () => { throw new Error("sleep must not run after journal failure"); },
+      journal: midJournal,
+    })).rejects.toThrow(/journal append failed/i);
+    expect(midClient.connectCalls).toBe(1);
+    expect(midClient.appendedChunks).toHaveLength(1);
+    expect(midClient.commitCalls).toBe(0);
+    expect(midBudget.persisted.at(-1)?.reservations[0]?.status).toBe("active");
   });
 });
