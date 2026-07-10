@@ -178,6 +178,7 @@ describe("flow action evidence", () => {
     expect(retried.state.capabilityEpoch).toBe(3);
 
     const currentReservation = reserve(flow, retried.state, "receipt-after-retry", CASE_TOOL, { member: "m-1" });
+    expect(currentReservation.receipt.idempotencyKey).not.toBe(reservation.receipt.idempotencyKey);
     const currentSettlement = settle(
       currentReservation.state,
       currentReservation.receipt.id,

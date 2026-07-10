@@ -298,6 +298,7 @@ export type FlowActionReservation = {
 
 function actionIdempotencyKey(
   step: string,
+  attempt: number,
   tool: string,
   mode: "none" | "per_step" | "per_arguments" | "per_call" | "per_call_arguments",
   argumentsHash: string,
@@ -308,9 +309,9 @@ function actionIdempotencyKey(
     : mode === "per_call_arguments"
       ? { tool, argumentsHash }
       : mode === "per_step"
-    ? { step, tool }
+    ? { step, attempt, tool }
     : mode === "per_arguments"
-      ? { step, tool, argumentsHash }
+      ? { step, attempt, tool, argumentsHash }
       : { step, tool, receiptId };
   return hashFlowValue(material);
 }
@@ -362,7 +363,14 @@ export function reserveFlowAction(
     ?? alwaysActionPolicies(flow).find((candidate) => candidate.tool === args.tool);
   const mode = policy?.idempotency ?? "none";
   const callScoped = mode === "per_call" || mode === "per_call_arguments";
-  const idempotencyKey = actionIdempotencyKey(scope.step, args.tool, mode, argumentsHash, args.receiptId);
+  const idempotencyKey = actionIdempotencyKey(
+    scope.step,
+    scope.attempt,
+    args.tool,
+    mode,
+    argumentsHash,
+    args.receiptId
+  );
   const existing = state.actionReceipts.find((receipt) =>
     (callScoped || receipt.capabilityEpoch === state.capabilityEpoch) &&
     receipt.idempotencyKey === idempotencyKey &&
