@@ -837,7 +837,7 @@ describe("GeminiLiveClient", () => {
     const completions = interrupted.events.filter((event) => event.type === "response.completed");
     expect(completions).toHaveLength(1);
     expect(completions[0]?.type === "response.completed" ? completions[0].status : undefined)
-      .toBe("interrupted:turn_complete");
+      .toBe("interrupted");
   });
 
   it("never exposes an authenticated key-bearing URL through transport diagnostics", async () => {

@@ -859,6 +859,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
             ? "failed"
             : "completed",
         reason ?? "turn_complete",
+        "serverContent.turnComplete",
       );
     }
 
@@ -969,6 +970,16 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     if (!this.isCurrentConnection(binding) || this.clientState !== "ready") return;
     if (!Array.isArray(toolCall.functionCalls) || toolCall.functionCalls.length === 0) return;
     const responseId = this.ensureResponseStarted();
+    if (toolCall.functionCalls.some((raw) => !isRecord(raw)
+      || typeof raw.id !== "string" || !raw.id
+      || typeof raw.name !== "string" || !raw.name)) {
+      this.failActiveConnection(
+        binding,
+        new Error("Gemini returned a function call without a matchable id and name"),
+        "invalid_tool_call_identity",
+      );
+      return;
+    }
     const calls = toolCall.functionCalls.filter(isRecord).map((raw): FunctionCall => {
       const call: FunctionCall = { id: raw.id, name: raw.name, args: raw.args };
       const id = typeof call.id === "string" ? call.id : "";
@@ -1201,14 +1212,18 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     return this.currentResponseId;
   }
 
-  private completeResponse(status: "completed" | "interrupted" | "failed", reason?: string) {
+  private completeResponse(
+    status: "completed" | "interrupted" | "failed",
+    reason?: string,
+    wireType = "serverContent.turnComplete",
+  ) {
     if (!this.currentResponseId || this.responseFinished) return;
     this.responseFinished = true;
     this.emit({
       type: "response.completed",
       responseId: this.currentResponseId,
-      status: reason ? `${status}:${reason}` : status,
-    }, "serverContent.generationComplete");
+      status: reason && reason !== "turn_complete" ? `${status}:${reason}` : status,
+    }, wireType);
   }
 
   private sendReady(message: Record<string, unknown>) {
@@ -1243,7 +1258,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.outstandingToolCalls.clear();
     if (wasConnecting) this.rejectPendingConnect(new Error("Gemini Live closed before setup completed"));
     if (this.currentResponseId && !this.responseFinished) {
-      this.completeResponse("failed", "connection_closed");
+      this.completeResponse("failed", "connection_closed", "socket.close");
     }
     this.emit({
       type: "connection.closed",
@@ -1268,7 +1283,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.abortPendingToolCalls("Gemini Live connection failed");
     this.outstandingToolCalls.clear();
     this.rejectPendingConnect(error);
-    if (this.currentResponseId && !this.responseFinished) this.completeResponse("failed", code);
+    if (this.currentResponseId && !this.responseFinished) this.completeResponse("failed", code, "client.transport");
     this.emitError(error, true, undefined, code);
     try {
       if (binding.socket.terminate) binding.socket.terminate();
