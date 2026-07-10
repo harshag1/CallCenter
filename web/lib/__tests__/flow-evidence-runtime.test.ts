@@ -220,6 +220,30 @@ describe("flow action evidence", () => {
     expect(completed.state.outputs[STEP]).toEqual({ case_id: "case-call-scoped" });
   });
 
+  it("fails closed when multiple successful intents could satisfy one output binding", () => {
+    const flow = evidenceFlow();
+    const topic = flow.nodes.find((node) => node.id === TOPIC)!;
+    const step = topic.steps!.find((candidate) => candidate.id === "execute")!;
+    step.action_policies = step.action_policies!.map((policy) =>
+      policy.tool === CASE_TOOL
+        ? { ...policy, max_calls: 2, idempotency: "per_arguments" as const }
+        : policy
+    );
+
+    const first = reserve(flow, activeStep(flow), "case-account-a", CASE_TOOL, { account: "A" });
+    const firstSettled = settle(first.state, first.receipt.id, "succeeded", {
+      data: { case: { id: "case-for-A" } },
+    });
+    const second = reserve(flow, firstSettled.state, "case-account-b", CASE_TOOL, { account: "B" });
+    const secondSettled = settle(second.state, second.receipt.id, "succeeded", {
+      data: { case: { id: "case-for-B" } },
+    });
+
+    expect(completeFlowStep(flow, secondSettled.state, { outputs: {} })).toMatchObject({
+      code: "ambiguous_action_evidence",
+    });
+  });
+
   it.each(["reserved", "indeterminate"] as const)(
     "cannot rotate away from %s action evidence before settlement or reconciliation",
     (status) => {

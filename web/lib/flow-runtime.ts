@@ -489,12 +489,19 @@ function verifiedOutputs(
   for (const binding of ref.step.output_bindings ?? []) {
     const policy = ref.step.action_policies?.find((candidate) => candidate.tool === binding.tool);
     const callScoped = policy?.idempotency === "per_call" || policy?.idempotency === "per_call_arguments";
-    const receipt = [...state.actionReceipts].reverse().find((candidate) =>
+    const candidates = state.actionReceipts.filter((candidate) =>
       candidate.status === "succeeded" &&
       candidate.step === ref.path &&
       candidate.tool === binding.tool &&
       (candidate.capabilityEpoch === state.capabilityEpoch || callScoped)
     );
+    if (candidates.length > 1) {
+      return {
+        error: `output "${binding.output}" has ambiguous successful ${binding.tool} receipts: ${candidates.map((receipt) => receipt.id).join(", ")}`,
+        code: "ambiguous_action_evidence",
+      };
+    }
+    const receipt = candidates[0];
     if (!receipt) {
       return {
         error: `output "${binding.output}" requires a successful ${binding.tool} receipt from the active step attempt`,
