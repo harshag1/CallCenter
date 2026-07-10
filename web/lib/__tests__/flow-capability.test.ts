@@ -32,6 +32,6 @@ describe("flow action capabilities", () => {
     expect(verifyFlowCapability(signed.token, subject, { secret, nowMs: 1_002_000 })).toMatchObject({
       code: "expired_capability",
     });
-    expect(() => signFlowCapability(subject, { secret, ttlSeconds: 301 })).toThrow(/between 1 and 300/);
+    expect(() => signFlowCapability(subject, { secret, ttlSeconds: 3_601 })).toThrow(/between 1 and 3600/);
   });
 });

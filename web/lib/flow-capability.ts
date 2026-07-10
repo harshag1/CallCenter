@@ -3,7 +3,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 const DOMAIN = "harshas-amazing-call-center:flow-action-lease:v1";
-const MAX_TTL_SECONDS = 5 * 60;
+const DEFAULT_TTL_SECONDS = 5 * 60;
+export const MAX_FLOW_CAPABILITY_TTL_SECONDS = 60 * 60;
 
 export type FlowCapabilityClaims = {
   typ: "flow-action-lease";
@@ -52,9 +53,9 @@ export function signFlowCapability(
   options: { secret?: string; nowMs?: number; ttlSeconds?: number; nonce?: string } = {}
 ): { token: string; expiresAt: string; claims: FlowCapabilityClaims } {
   const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1000);
-  const ttlSeconds = options.ttlSeconds ?? MAX_TTL_SECONDS;
-  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) {
-    throw new Error(`flow action lease TTL must be between 1 and ${MAX_TTL_SECONDS} seconds`);
+  const ttlSeconds = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_FLOW_CAPABILITY_TTL_SECONDS) {
+    throw new Error(`flow action lease TTL must be between 1 and ${MAX_FLOW_CAPABILITY_TTL_SECONDS} seconds`);
   }
   const claims: FlowCapabilityClaims = {
     typ: "flow-action-lease",
@@ -118,7 +119,7 @@ export function verifyFlowCapability(
     if (!claims) return { error: "invalid action capability claims", code: "invalid_capability" };
     const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1000);
     if (claims.exp <= nowSeconds) return { error: "action capability expired", code: "expired_capability" };
-    if (claims.exp - claims.iat > MAX_TTL_SECONDS || claims.iat > nowSeconds + 30) {
+    if (claims.exp - claims.iat > MAX_FLOW_CAPABILITY_TTL_SECONDS || claims.iat > nowSeconds + 30) {
       return { error: "action capability lifetime is invalid", code: "capability_ttl_exceeded" };
     }
     for (const key of Object.keys(expected) as (keyof CapabilitySubject)[]) {
