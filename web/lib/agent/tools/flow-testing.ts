@@ -2,6 +2,7 @@ import { listStepRefs, validateAgentFlow } from "../../flow";
 import {
   completeFlowStep,
   createFlowExecutionState,
+  describeNextSteps,
   enterFlowStep,
   flowStateSummary,
   selectFlowTopic,
@@ -70,9 +71,15 @@ export const testFlowScenario: OperatorTool = {
     for (const item of args.steps as { path: string; outputs: Record<string, unknown> }[]) {
       const entered = enterFlowStep(validated.flow, selected, item.path);
       if ("error" in entered) return { output: { ok: false, stage: "enter_step", path: item.path, trace, ...entered } };
-      trace.push({ path: item.path, available_tools: entered.availableTools, next_steps: entered.nextSteps });
       const completed = completeFlowStep(validated.flow, entered.state, { path: item.path, outputs: item.outputs });
       if ("error" in completed) return { output: { ok: false, stage: "complete_step", path: item.path, trace, ...completed } };
+      trace.push({
+        path: item.path,
+        available_tools: entered.availableTools,
+        outputs: item.outputs,
+        next_steps: describeNextSteps(validated.flow, completed.state),
+        revision: completed.state.revision,
+      });
       selected = completed.state;
     }
     return { output: { ok: true, trace, final: flowStateSummary(validated.flow, selected) } };

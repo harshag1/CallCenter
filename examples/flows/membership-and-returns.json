@@ -41,7 +41,11 @@
                 {
                   "to": "membership.confirm",
                   "when": "renewal_id was returned",
-                  "label": "Renewed"
+                  "label": "Renewed",
+                  "condition": {
+                    "output": "renewal_id",
+                    "operator": "exists"
+                  }
                 }
               ]
             }

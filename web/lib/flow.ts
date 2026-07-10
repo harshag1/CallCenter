@@ -14,8 +14,14 @@ const TOOL_NAME = /^[a-z][a-z0-9_.-]{1,63}$/;
 export type FlowTransition = {
   to: string;
   label?: string;
-  /** Human-readable condition supplied to the model. Deterministic requirements belong in required_outputs. */
+  /** Human-readable branch guidance supplied to the model. */
   when?: string;
+  /** Optional machine-enforced condition evaluated against the completed step's outputs. */
+  condition?: {
+    output: string;
+    operator: "equals" | "not_equals" | "exists" | "in";
+    value?: unknown;
+  };
 };
 
 export type FlowStep = {
@@ -23,6 +29,8 @@ export type FlowStep = {
   label: string;
   instructions: string;
   context?: string;
+  /** Marks this top-level step as directly selectable after classification. */
+  entry?: boolean;
   /** Tools granted while this step (or one of its descendants) is active. */
   tools?: string[];
   /** Output keys that complete_step must persist before this step can finish. */
@@ -40,6 +48,18 @@ export const FlowTransitionSchema: z.ZodType<FlowTransition> = z.object({
   to: z.string().min(1),
   label: z.string().min(1).optional(),
   when: z.string().min(1).optional(),
+  condition: z.object({
+    output: z.string().min(1),
+    operator: z.enum(["equals", "not_equals", "exists", "in"]),
+    value: z.unknown().optional(),
+  }).superRefine((condition, ctx) => {
+    if (condition.operator !== "exists" && condition.value === undefined) {
+      ctx.addIssue({ code: "custom", path: ["value"], message: `${condition.operator} requires a value` });
+    }
+    if (condition.operator === "in" && !Array.isArray(condition.value)) {
+      ctx.addIssue({ code: "custom", path: ["value"], message: "in requires an array value" });
+    }
+  }).optional(),
 });
 
 export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
@@ -48,6 +68,7 @@ export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
     label: z.string().min(1),
     instructions: z.string().min(1),
     context: z.string().min(1).optional(),
+    entry: z.boolean().optional(),
     tools: z.array(z.string().regex(TOOL_NAME)).optional(),
     required_outputs: z.array(z.string().min(1)).optional(),
     success_criteria: z.array(z.string().min(1)).optional(),
@@ -91,7 +112,8 @@ export const AgentFlowSchema = z.object({
   always_tools: z.array(z.string().regex(TOOL_NAME)).optional(),
   /** gateway exposes one guarded run_action tool; direct exposes every attached tool up front. */
   tool_exposure: z.enum(["gateway", "direct"]).optional(),
-  max_turns: z.number().int().min(1).max(1000).optional(),
+  /** Optional circuit breaker for total step entries/retries during one call. */
+  max_step_entries: z.number().int().min(1).max(10_000).optional(),
   nodes: z.array(FlowNodeSchema),
   edges: z.array(z.object({
     from: z.string(),
@@ -140,6 +162,26 @@ export function findStep(flow: AgentFlow, path: string): StepRef | undefined {
   return listStepRefs(flow).find((ref) => ref.path === path);
 }
 
+/**
+ * Entry steps are explicit when any top-level step sets `entry`; otherwise they are inferred
+ * as top-level steps that are not transition/failure targets. This keeps follow-up steps from
+ * becoming accidental shortcuts while preserving menus with several root choices.
+ */
+export function topicEntryStepPaths(flow: AgentFlow, nodeId: string): string[] {
+  const refs = listStepRefs(flow);
+  const roots = refs.filter((ref) => ref.nodeId === nodeId && ref.ancestors.length === 0);
+  if (roots.some((ref) => ref.step.entry !== undefined)) {
+    return roots.filter((ref) => ref.step.entry === true).map((ref) => ref.path);
+  }
+  const targets = new Set(
+    refs.flatMap((ref) => [
+      ...(ref.step.transitions ?? []).map((transition) => transition.to),
+      ...(ref.step.on_failure ? [ref.step.on_failure] : []),
+    ])
+  );
+  return roots.filter((ref) => !targets.has(ref.path)).map((ref) => ref.path);
+}
+
 /** Semantic validation beyond JSON shape: identity, reachability, nesting and transition safety. */
 export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnostics: FlowDiagnostic[] } {
   const parsed = AgentFlowSchema.safeParse(input);
@@ -176,11 +218,36 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
     if (seenPaths.has(ref.path)) diagnostics.push({ level: "error", path: ref.path, message: `duplicate step path "${ref.path}"` });
     seenPaths.add(ref.path);
     if (ref.path.split(".").length - 1 > 8) diagnostics.push({ level: "error", path: ref.path, message: "step nesting exceeds the supported depth of 8" });
+    if (ref.ancestors.length > 0 && ref.step.entry !== undefined) {
+      diagnostics.push({ level: "error", path: `${ref.path}.entry`, message: "entry may only be set on top-level steps" });
+    }
     for (const transition of ref.step.transitions ?? []) {
       if (!stepPaths.has(transition.to)) diagnostics.push({ level: "error", path: `${ref.path}.transitions`, message: `transition targets unknown step "${transition.to}"` });
     }
     if (ref.step.on_failure && !stepPaths.has(ref.step.on_failure)) {
       diagnostics.push({ level: "error", path: `${ref.path}.on_failure`, message: `failure target "${ref.step.on_failure}" does not exist` });
+    }
+  }
+
+  if (flow.schema_version === 2) {
+    for (const node of flow.nodes.filter((candidate) => candidate.kind === "topic")) {
+      const roots = refs.filter((ref) => ref.nodeId === node.id && ref.ancestors.length === 0);
+      if (!roots.length) {
+        diagnostics.push({ level: "error", path: `nodes.${node.id}.steps`, message: "topic needs at least one top-level step" });
+        continue;
+      }
+      if (!topicEntryStepPaths(flow, node.id).length) {
+        const rootPaths = new Set(roots.map((ref) => ref.path));
+        const hasCrossTopicInbound = refs.some((ref) =>
+          ref.nodeId !== node.id && [
+            ...(ref.step.transitions ?? []).map((transition) => transition.to),
+            ...(ref.step.on_failure ? [ref.step.on_failure] : []),
+          ].some((target) => rootPaths.has(target))
+        );
+        if (!hasCrossTopicInbound) {
+          diagnostics.push({ level: "error", path: `nodes.${node.id}.steps`, message: "topic needs an entry step or an inbound cross-topic transition" });
+        }
+      }
     }
   }
 
@@ -204,7 +271,10 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
 }
 
 export function topicNodes(flow: AgentFlow): FlowNode[] {
-  return flow.nodes.filter((n) => n.kind === "topic");
+  const topics = flow.nodes.filter((n) => n.kind === "topic");
+  return flow.schema_version === 2
+    ? topics.filter((node) => topicEntryStepPaths(flow, node.id).length > 0)
+    : topics;
 }
 
 export function fallbackNode(flow: AgentFlow): FlowNode | undefined {

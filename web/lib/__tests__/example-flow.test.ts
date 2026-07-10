@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { validateAgentFlow } from "../flow";
-import { completeFlowStep, createFlowExecutionState, enterFlowStep, selectFlowTopic } from "../flow-runtime";
+import { completeFlowStep, createFlowExecutionState, describeNextSteps, enterFlowStep, selectFlowTopic } from "../flow-runtime";
 
 const input = JSON.parse(readFileSync(new URL("../../../examples/flows/membership-and-returns.json", import.meta.url), "utf8"));
 const validated = validateAgentFlow(input);
@@ -29,5 +29,12 @@ describe("public Flow v2 example", () => {
     });
     if ("error" in renewed) throw new Error(renewed.error);
     expect(renewed.nextSteps).toEqual(["membership.confirm"]);
+    expect(describeNextSteps(flow, renewed.state)).toEqual([
+      expect.objectContaining({
+        path: "membership.confirm",
+        kind: "transition",
+        when: "renewal_id was returned",
+      }),
+    ]);
   });
 });

@@ -9,12 +9,15 @@ import {
   AgentFlowSchema,
   alwaysTools,
   fallbackNode,
+  findStep,
   flowToolExposure,
+  topicEntryStepPaths,
   topicNodes,
   type AgentFlow,
 } from "./flow";
 import {
   completeFlowStep,
+  describeNextSteps,
   enterFlowStep,
   flowStateSummary,
   grantedTools,
@@ -372,6 +375,13 @@ async function dispatch(
         const current = await loadFlowState(scope.callId);
         const selected = selectFlowTopic(ctx.flow, current, node.id);
         if ("error" in selected) return selected;
+        if (selected === current && current.currentStep) {
+          return {
+            already_selected: true,
+            guidance: "This topic is already active. Continue from the durable state instead of restarting its entry steps.",
+            state: flowStateSummary(ctx.flow, current),
+          };
+        }
         await saveFlowState(scope.callId, selected);
       }
       if (node.kind === "fallback") {
@@ -383,12 +393,17 @@ async function dispatch(
       }
       return {
         context: node.context,
-        next_steps: (node.steps ?? []).map((s) => ({
-          id: s.id,
-          path: `${node.id}.${s.id}`,
-          label: s.label,
-          context: s.context,
-        })),
+        next_steps: ctx.flow.schema_version === 2
+          ? topicEntryStepPaths(ctx.flow, node.id).map((path) => {
+              const step = findStep(ctx.flow, path)?.step;
+              return { id: step?.id ?? path, path, label: step?.label ?? path, context: step?.context };
+            })
+          : (node.steps ?? []).map((s) => ({
+              id: s.id,
+              path: `${node.id}.${s.id}`,
+              label: s.label,
+              context: s.context,
+            })),
         guidance:
           ctx.flow.schema_version === 2
             ? "Work within this topic only. When the caller commits to one of next_steps, call enter_step with its path. If none fit, classify('other')."
@@ -412,6 +427,13 @@ async function dispatch(
       const entered = enterFlowStep(ctx.flow, state, String(args.path ?? ""));
       if ("error" in entered) return entered;
       const saved = await saveFlowState(scope.callId, entered.state);
+      if (saved.currentStep !== entered.path) {
+        return {
+          error: "flow state changed before this step could be entered; recover with get_flow_state",
+          code: "revision_conflict",
+          state: flowStateSummary(ctx.flow, saved),
+        };
+      }
       const catalog = await listToolCatalogFor(scope, ctx);
       const allowed = new Set(entered.availableTools);
       return {
@@ -422,7 +444,7 @@ async function dispatch(
         required_outputs: entered.step.required_outputs ?? [],
         checkpoint: entered.step.checkpoint ?? false,
         available_actions: catalog.filter((tool) => allowed.has(tool.name)),
-        next_steps: entered.nextSteps,
+        next_steps: describeNextSteps(ctx.flow, saved),
         revision: saved.revision,
       };
     }
@@ -435,6 +457,14 @@ async function dispatch(
       });
       if ("error" in completed) return completed;
       const saved = await saveFlowState(scope.callId, completed.state);
+      const completedPath = String(args.path ?? state.currentStep ?? "");
+      if (completedPath && !saved.completedSteps.includes(completedPath)) {
+        return {
+          error: "flow state changed before this completion could be recorded; recover with get_flow_state",
+          code: "revision_conflict",
+          state: flowStateSummary(ctx.flow, saved),
+        };
+      }
       await saveEvent(scope, "state", {
         node: saved.nodeId,
         step: saved.currentStep,
