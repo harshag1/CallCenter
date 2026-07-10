@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "id": "field_service_multigoal",
+  "version": "1.0.0",
+  "label": "Field repair with safe scheduling detours",
+  "global_capabilities": [
+    "lookup_work_order"
+  ],
+  "goals": [
+    {
+      "id": "repair",
+      "label": "Repair and close the work order",
+      "entry": true,
+      "required": true,
+      "depends_on": [],
+      "capabilities": [
+        "lookup_work_order",
+        "reserve_part",
+        "record_repair",
+        "close_work_order",
+        "notify_dispatch"
+      ],
+      "completion": [
+        {
+          "kind": "receipt",
+          "action": "close_work_order",
+          "status": "succeeded",
+          "scope": "goal"
+        },
+        {
+          "kind": "receipt",
+          "action": "notify_dispatch",
+          "status": "succeeded",
+          "scope": "goal"
+        }
+      ],
+      "allowed_detours": [
+        "schedule_followup"
+      ]
+    },
+    {
+      "id": "schedule_followup",
+      "label": "Schedule and confirm a follow-up visit",
+      "entry": false,
+      "required": false,
+      "depends_on": [],
+      "capabilities": [
+        "schedule_visit",
+        "send_visit_confirmation"
+      ],
+      "completion": [
+        {
+          "kind": "receipt",
+          "action": "schedule_visit",
+          "status": "succeeded",
+          "scope": "goal"
+        },
+        {
+          "kind": "receipt",
+          "action": "send_visit_confirmation",
+          "status": "succeeded",
+          "scope": "goal"
+        }
+      ],
+      "allowed_detours": []
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "lookup_work_order",
+      "description": "Read the current authoritative work-order state.",
+      "risk": "read",
+      "goals": [
+        "repair",
+        "schedule_followup"
+      ],
+      "prerequisites": [],
+      "idempotency": "per_arguments",
+      "opens_obligations": [],
+      "satisfies_obligation_types": []
+    },
+    {
+      "name": "reserve_part",
+      "description": "Reserve one replacement part after identity and safety verification.",
+      "risk": "reversible",
+      "goals": [
+        "repair"
+      ],
+      "prerequisites": [
+        {
+          "kind": "fact",
+          "fact_id": "identity_verified",
+          "operator": "equals",
+          "value": true,
+          "authorities": [
+            "tool"
+          ]
+        },
+        {
+          "kind": "fact",
+          "fact_id": "safe_to_work",
+          "operator": "equals",
+          "value": true,
+          "authorities": [
+            "tool",
+            "policy"
+          ]
+        }
+      ],
+      "idempotency": "per_arguments",
+      "opens_obligations": [],
+      "satisfies_obligation_types": [],
+      "saga": {
+        "group": "repair_transaction",
+        "compensation_action": "release_part"
+      }
+    },
+    {
+      "name": "release_part",
+      "description": "Release a prior reservation when a later repair step fails.",
+      "risk": "reversible",
+      "goals": [
+        "repair"
+      ],
+      "prerequisites": [],
+      "idempotency": "per_arguments",
+      "opens_obligations": [],
+      "satisfies_obligation_types": [
+        "compensate:reserve_part"
+      ]
+    },
+    {
+      "name": "record_repair",
+      "description": "Record the completed repair using its physical serial evidence.",
+      "risk": "consequential",
+      "goals": [
+        "repair"
+      ],
+      "prerequisites": [
+        {
+          "kind": "receipt",
+          "action": "reserve_part",
+          "status": "succeeded",
+          "scope": "goal"
+        }
+      ],
+      "idempotency": "per_arguments",
+      "opens_obligations": [],
+      "satisfies_obligation_types": [],
+      "saga": {
+        "group": "repair_transaction"
+      }
+    },
+    {
+      "name": "close_work_order",
+      "description": "Irreversibly close the repaired work order.",
+      "risk": "irreversible",
+      "goals": [
+        "repair"
+      ],
+      "prerequisites": [
+        {
+          "kind": "receipt",
+          "action": "record_repair",
+          "status": "succeeded",
+          "scope": "goal"
+        },
+        {
+          "kind": "fact",
+          "fact_id": "safe_to_work",
+          "operator": "equals",
+          "value": true,
+          "authorities": [
+            "tool",
+            "policy"
+          ]
+        }
+      ],
+      "confirmation": {
+        "prompt": "Confirm that I should close this work order now.",
+        "accepted_values": [
+          "yes"
+        ],
+        "authorities": [
+          "caller"
+        ]
+      },
+      "idempotency": "per_goal",
+      "opens_obligations": [
+        {
+          "type": "notify_dispatch",
+          "description": "Notify dispatch that the work order was closed.",
+          "owner": "agent",
+          "blocks": "goal_completion"
+        }
+      ],
+      "satisfies_obligation_types": []
+    },
+    {
+      "name": "notify_dispatch",
+      "description": "Notify dispatch using the authoritative closure receipt.",
+      "risk": "consequential",
+      "goals": [
+        "repair"
+      ],
+      "prerequisites": [
+        {
+          "kind": "receipt",
+          "action": "close_work_order",
+          "status": "succeeded",
+          "scope": "goal"
+        }
+      ],
+      "idempotency": "per_goal",
+      "opens_obligations": [],
+      "satisfies_obligation_types": [
+        "notify_dispatch"
+      ]
+    },
+    {
+      "name": "schedule_visit",
+      "description": "Schedule one follow-up visit for the caller's current requested slot.",
+      "risk": "reversible",
+      "goals": [
+        "schedule_followup"
+      ],
+      "prerequisites": [],
+      "idempotency": "per_arguments",
+      "opens_obligations": [
+        {
+          "type": "send_visit_confirmation",
+          "description": "Send the confirmed follow-up details.",
+          "owner": "agent",
+          "blocks": "goal_completion"
+        }
+      ],
+      "satisfies_obligation_types": []
+    },
+    {
+      "name": "send_visit_confirmation",
+      "description": "Send the authoritative visit details on the caller's selected channel.",
+      "risk": "consequential",
+      "goals": [
+        "schedule_followup"
+      ],
+      "prerequisites": [
+        {
+          "kind": "receipt",
+          "action": "schedule_visit",
+          "status": "succeeded",
+          "scope": "goal"
+        }
+      ],
+      "idempotency": "per_goal",
+      "opens_obligations": [],
+      "satisfies_obligation_types": [
+        "send_visit_confirmation"
+      ]
+    }
+  ]
+}
