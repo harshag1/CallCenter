@@ -27,6 +27,7 @@ import { signScope } from "./voice";
 import { sendAgentEmail } from "./email";
 import { sendSms } from "./sms";
 import { log } from "./log";
+import { voiceToolExtensions, type VoiceToolScope } from "./voice-tools";
 
 /** The human's number on this call, direction-aware. */
 async function callerNumber(callId: string): Promise<string | null> {
@@ -42,7 +43,7 @@ const MAX_HOLD_S = 20;
 const MAX_HOLD_MUSIC_S = 30;
 const PROTECTED_TABLES = new Set(["calls", "call_events", "logs"]);
 
-type Scope = { callId: string; agentId: string; orgId: string };
+type Scope = VoiceToolScope;
 type McpToolDef = { name: string; description: string; inputSchema: Record<string, unknown> };
 
 type CallCtx = {
@@ -265,6 +266,7 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
   for (const t of ctx.mintedTools) {
     tools.push({ name: t.slug, description: t.description, inputSchema: t.input_schema });
   }
+  tools.push(...await voiceToolExtensions.definitions(scope));
   return tools;
 }
 
@@ -348,6 +350,8 @@ async function dispatch(
   ) {
     return { error: `action "${name}" is not globally available; enter the correct flow step and use run_action` };
   }
+
+  if (voiceToolExtensions.has(name)) return voiceToolExtensions.execute(name, args, scope);
 
   switch (name) {
     case "classify": {

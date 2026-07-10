@@ -17,6 +17,9 @@ import { createScreen } from "./screens-tools";
 import { listFiles, parseCsv, importCsv, runJs, setHoldMusic } from "./files-tools";
 import { sendEmailTool, sendSmsTool } from "./comms";
 import { createFlowTool, updateFlowTool, openFlowTool, listFlowsTool, runCampaignTool, listCampaignsTool, cancelCampaignTool, getRecallPolicy, setRecallPolicy } from "./flows-tools";
+import { OPERATOR_TOOL_EXTENSIONS } from "./extensions";
+import { listIntegrations } from "./integrations";
+import { testFlowScenario, validateFlowTool } from "./flow-testing";
 
 export const OPERATOR_TOOLS: OperatorTool[] = [
   renderSurface, showFlow,
@@ -33,7 +36,15 @@ export const OPERATOR_TOOLS: OperatorTool[] = [
   listFiles, parseCsv, importCsv, runJs, setHoldMusic,
   sendEmailTool, sendSmsTool,
   createFlowTool, updateFlowTool, openFlowTool, listFlowsTool, runCampaignTool, listCampaignsTool, cancelCampaignTool, getRecallPolicy, setRecallPolicy,
+  listIntegrations,
+  validateFlowTool, testFlowScenario,
+  ...OPERATOR_TOOL_EXTENSIONS,
 ];
+
+const duplicateNames = OPERATOR_TOOLS
+  .map((tool) => tool.name)
+  .filter((name, index, names) => names.indexOf(name) !== index);
+if (duplicateNames.length) throw new Error(`duplicate operator tools: ${[...new Set(duplicateNames)].join(", ")}`);
 
 export const byName = new Map(OPERATOR_TOOLS.map((t) => [t.name, t]));
 

@@ -4,8 +4,11 @@
 import { log } from "../log";
 
 const API = "https://api.vercel.com";
-const PROJECT = "callcenter-tools";
 const L = log("toolfactory/deploy");
+
+function project(): string {
+  return process.env.VERCEL_TOOLS_PROJECT ?? "callcenter-tools";
+}
 
 function headers() {
   return { Authorization: `Bearer ${process.env.VERCEL_TOKEN}`, "Content-Type": "application/json" };
@@ -16,19 +19,20 @@ function team(): string {
 }
 
 async function ensureProject(): Promise<void> {
-  const get = await fetch(`${API}/v9/projects/${PROJECT}?${team()}`, { headers: headers() });
+  const target = project();
+  const get = await fetch(`${API}/v9/projects/${target}?${team()}`, { headers: headers() });
   if (!get.ok) {
     const res = await fetch(`${API}/v11/projects?${team()}`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ name: PROJECT }),
+      body: JSON.stringify({ name: target }),
     });
     if (!res.ok) throw new Error(`vercel project create ${res.status}: ${(await res.text()).slice(0, 300)}`);
     L.info("created tools project");
   }
   // Tools are called by xAI/our gateway, not browsers — auth is our bearer secret,
   // so Vercel's SSO deployment protection must be off or every call 401s.
-  await fetch(`${API}/v9/projects/${PROJECT}?${team()}`, {
+  await fetch(`${API}/v9/projects/${target}?${team()}`, {
     method: "PATCH",
     headers: headers(),
     body: JSON.stringify({ ssoProtection: null }),
@@ -38,10 +42,11 @@ async function ensureProject(): Promise<void> {
 /** Upserts env vars on the tools project (encrypted at Vercel, production target). */
 export async function pushToolEnv(vars: Record<string, string>): Promise<void> {
   await ensureProject();
+  const target = project();
   const body = Object.entries(vars).map(([key, value]) => ({
     key, value, type: "encrypted", target: ["production"],
   }));
-  const res = await fetch(`${API}/v10/projects/${PROJECT}/env?upsert=true&${team()}`, {
+  const res = await fetch(`${API}/v10/projects/${target}/env?upsert=true&${team()}`, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(body),
@@ -54,16 +59,17 @@ export type DeployOutcome = { deploymentId: string; url: string };
 /** Deploys one edge function as its own production deployment; returns its stable alias URL. */
 export async function deployTool(slug: string, wrappedSource: string): Promise<DeployOutcome> {
   await ensureProject();
+  const target = project();
   const res = await fetch(`${API}/v13/deployments?${team()}`, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({
-      name: PROJECT,
-      project: PROJECT,
+      name: target,
+      project: target,
       target: "production",
       files: [
         { file: `api/${slug}.js`, data: wrappedSource },
-        { file: "package.json", data: JSON.stringify({ name: PROJECT, private: true }) },
+        { file: "package.json", data: JSON.stringify({ name: target, private: true }) },
       ],
       projectSettings: { framework: null },
     }),
