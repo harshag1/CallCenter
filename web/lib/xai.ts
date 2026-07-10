@@ -1,5 +1,5 @@
 // Author: Harsha Gundala
-// xai.ts — Grok API client: chat completions (streaming + tools + live search) and realtime ephemeral tokens.
+// xai.ts — Grok operator client: chat completions, streaming tool calls, and live search.
 
 const BASE = "https://api.x.ai/v1";
 
@@ -158,18 +158,4 @@ export async function researchJSON<T>(system: string, user: string, maxTokens = 
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = fenced ? fenced[1] : text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
   return JSON.parse(raw) as T;
-}
-
-/** Mints a short-lived client secret for browser realtime (voice) sessions. */
-export async function mintEphemeralToken(expiresSeconds = 300): Promise<string> {
-  const res = await fetch(`${BASE}/realtime/client_secrets`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({ expires_after: { seconds: expiresSeconds } }),
-  });
-  if (!res.ok) throw new Error(`xai token ${res.status}: ${(await res.text()).slice(0, 400)}`);
-  const json = await res.json();
-  const token = json.value ?? json.client_secret?.value ?? json.token;
-  if (!token) throw new Error(`xai token: unexpected response shape ${JSON.stringify(json).slice(0, 200)}`);
-  return token as string;
 }

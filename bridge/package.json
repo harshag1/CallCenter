@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "1.0.0",
-  "description": "Twilio Media Streams <-> xAI realtime audio bridge",
+  "description": "Twilio Media Streams <-> provider-neutral realtime audio bridge",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

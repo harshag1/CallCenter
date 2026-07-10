@@ -3,7 +3,8 @@
 
 import { NextResponse } from "next/server";
 import { qOne } from "@/lib/db";
-import { verifyScope, loadActiveAgent, sessionUpdateForCall } from "@/lib/voice";
+import { verifyScope, loadActiveAgent, voiceSessionSpecForCall } from "@/lib/voice";
+import { buildProviderSessionUpdate, serverRealtimeEndpoint } from "@/lib/realtime/registry";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -18,10 +19,18 @@ export async function GET(req: Request) {
   if (!call || !agent) return NextResponse.json({ error: "call not found" }, { status: 404 });
 
   const origin = process.env.PUBLIC_ORIGIN ?? url.origin;
-  const sessionUpdate = await sessionUpdateForCall(agent, scope.callId, call.direction, origin, "pcmu");
+  const spec = await voiceSessionSpecForCall(agent, scope.callId, call.direction, origin);
   if (call.direction === "outbound" && call.metadata?.reason) {
-    const s = sessionUpdate as { session: { instructions: string } };
-    s.session.instructions += `\n\nYou are placing this outbound call. Purpose: ${call.metadata.reason}. Open by introducing yourself and the reason for the call.`;
+    spec.instructions += `\n\nYou are placing this outbound call. Purpose: ${call.metadata.reason}. Open by introducing yourself and the reason for the call.`;
   }
-  return NextResponse.json({ sessionUpdate, callId: scope.callId });
+  try {
+    return NextResponse.json({
+      ...serverRealtimeEndpoint(spec),
+      sessionUpdate: buildProviderSessionUpdate(spec, "pcmu"),
+      callId: scope.callId,
+      model: spec.model,
+    });
+  } catch (error) {
+    return NextResponse.json({ error: (error as Error).message }, { status: 409 });
+  }
 }

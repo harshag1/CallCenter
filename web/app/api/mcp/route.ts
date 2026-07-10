@@ -14,7 +14,8 @@ function rpcResult(id: RpcRequest["id"], result: unknown) {
 }
 
 export async function POST(req: Request) {
-  const scopeToken = new URL(req.url).searchParams.get("scope");
+  const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const scopeToken = bearer ?? new URL(req.url).searchParams.get("scope");
   const scope = scopeToken ? verifyScope(scopeToken) : null;
   if (!scope) return NextResponse.json({ error: "invalid scope" }, { status: 401 });
 

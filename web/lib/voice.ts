@@ -2,10 +2,13 @@
 // voice.ts — builds xAI realtime session configs for bots; scoped MCP tokens; call rows.
 // Session build also resolves A/B experiment variants and injects caller CRM context.
 
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { q, qOne } from "./db";
 import { pickVariant } from "./experiments";
 import { findCustomerByPhone, phoneDigits } from "./datasets";
+import { resolveVoiceProviderConfig } from "./realtime/config";
+import { buildProviderSessionUpdate } from "./realtime/registry";
+import type { RealtimeAudioFormat, RemoteMcpServer, VoiceSessionSpec } from "./realtime/types";
 
 export type AgentVersionRow = {
   agent_id: string;
@@ -39,20 +42,42 @@ async function loadAgentVersion(agent: AgentVersionRow, version: number): Promis
   return v ? { ...agent, ...v } : null;
 }
 
-/** Signed scope embedded in the MCP gateway URL so xAI's server-side calls are org+call bound. */
-export function signScope(payload: { callId: string; agentId: string; orgId: string }): string {
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = createHmac("sha256", process.env.MCP_GATEWAY_SECRET!).update(body).digest("base64url");
+type ScopePayload = { callId: string; agentId: string; orgId: string; exp: number; v: 1 };
+
+function scopeSecret(): string {
+  const secret = process.env.MCP_GATEWAY_SECRET;
+  if (!secret || secret.length < 32) throw new Error("MCP_GATEWAY_SECRET must be at least 32 characters");
+  return secret;
+}
+
+/** Short-lived org+agent+call capability used by provider-side MCP and browser function proxies. */
+export function signScope(
+  payload: { callId: string; agentId: string; orgId: string },
+  ttlSeconds = 2 * 60 * 60
+): string {
+  const claims: ScopePayload = { ...payload, exp: Math.floor(Date.now() / 1000) + ttlSeconds, v: 1 };
+  const body = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  const sig = createHmac("sha256", scopeSecret()).update(body).digest("base64url");
   return `${body}.${sig}`;
 }
 
 export function verifyScope(token: string): { callId: string; agentId: string; orgId: string } | null {
   const [body, sig] = token.split(".");
   if (!body || !sig) return null;
-  const expect = createHmac("sha256", process.env.MCP_GATEWAY_SECRET!).update(body).digest("base64url");
-  if (sig !== expect) return null;
   try {
-    return JSON.parse(Buffer.from(body, "base64url").toString());
+    const expect = createHmac("sha256", scopeSecret()).update(body).digest();
+    const actual = Buffer.from(sig, "base64url");
+    if (actual.length !== expect.length || !timingSafeEqual(actual, expect)) return null;
+    const claims = JSON.parse(Buffer.from(body, "base64url").toString()) as Partial<ScopePayload>;
+    if (
+      claims.v !== 1 ||
+      typeof claims.exp !== "number" ||
+      claims.exp <= Math.floor(Date.now() / 1000) ||
+      typeof claims.callId !== "string" ||
+      typeof claims.agentId !== "string" ||
+      typeof claims.orgId !== "string"
+    ) return null;
+    return { callId: claims.callId, agentId: claims.agentId, orgId: claims.orgId };
   } catch {
     return null;
   }
@@ -129,24 +154,24 @@ async function callerContextBlock(orgId: string, callId: string, call: CallRow |
   return `${lines.join("\n")}\n\n`;
 }
 
-/** Builds the session.update payload for an existing call. Audio "pcmu" targets telephony (8kHz μ-law). */
-export async function sessionUpdateForCall(
+/** Resolves one provider-neutral session spec for an existing call. */
+export async function voiceSessionSpecForCall(
   agent: AgentVersionRow,
   callId: string,
   direction: "web" | "inbound" | "outbound",
-  origin: string,
-  audio: "pcm" | "pcmu" = "pcm"
-): Promise<Record<string, unknown>> {
+  origin: string
+): Promise<VoiceSessionSpec> {
   const scope = signScope({ callId, agentId: agent.agent_id, orgId: agent.org_id });
 
   const call = await qOne<CallRow>(
     "SELECT direction, from_number, to_number, experiment_id, variant, agent_version, flow_id FROM calls WHERE id = $1",
     [callId]
   );
-  let [effective, callerContext] = await Promise.all([
+  const [resolvedAgent, callerContext] = await Promise.all([
     resolveVariant(agent, callId, call),
     callerContextBlock(agent.org_id, callId, call),
   ]);
+  let effective = resolvedAgent;
   // Campaign/recall calls run a named outbound flow: its instructions replace the inbound default.
   if (call?.flow_id) {
     const named = await qOne<{ instructions: string }>(
@@ -155,13 +180,12 @@ export async function sessionUpdateForCall(
     if (named) effective = { ...effective, instructions: named.instructions };
   }
 
-  const tools: Record<string, unknown>[] = [
-    {
-      type: "mcp",
-      server_label: "callcenter",
-      server_url: `${origin}/api/mcp?scope=${scope}`,
-    },
-  ];
+  const toolProxyUrl = `${origin}/api/mcp`;
+  const mcpServers: RemoteMcpServer[] = [{
+    label: "callcenter",
+    serverUrl: toolProxyUrl,
+    authorization: `Bearer ${scope}`,
+  }];
   const mcpRows = effective.mcp_server_ids.length
     ? await q<{ label: string; server_url: string; allowed_tools: string[] | null }>(
         "SELECT label, server_url, allowed_tools FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
@@ -169,11 +193,10 @@ export async function sessionUpdateForCall(
       )
     : [];
   for (const m of mcpRows) {
-    tools.push({
-      type: "mcp",
-      server_label: m.label.toLowerCase().replace(/[^a-z0-9]/g, "-"),
-      server_url: m.server_url,
-      ...(m.allowed_tools?.length ? { allowed_tools: m.allowed_tools } : {}),
+    mcpServers.push({
+      label: m.label.toLowerCase().replace(/[^a-z0-9]/g, "-"),
+      serverUrl: m.server_url,
+      ...(m.allowed_tools?.length ? { allowedTools: m.allowed_tools } : {}),
     });
   }
 
@@ -181,26 +204,30 @@ export async function sessionUpdateForCall(
   const callFacts = humanNumber
     ? `CALL FACTS: the number on this call is ${humanNumber} — use it whenever a step needs the caller's phone number; never ask them for it.\n\n`
     : "";
+  const provider = resolveVoiceProviderConfig(effective.settings, effective.voice);
   return {
-    type: "session.update",
-    session: {
-      voice: effective.voice,
-      instructions:
-        `${callFacts}${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
-        `If the caller asks for a callback at a specific time, use the request_recall tool.`,
-      turn_detection: { type: "server_vad" },
-      tools,
-      ...(audio === "pcmu"
-        ? {
-            audio: {
-              input: { format: { type: "audio/pcmu", rate: 8000 } },
-              output: { format: { type: "audio/pcmu", rate: 8000 } },
-            },
-          }
-        : {}),
-      ...effective.settings,
-    },
+    ...provider,
+    instructions:
+      `${callFacts}${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
+      `If the caller asks for a callback at a specific time, use the request_recall tool.`,
+    mcpServers,
+    toolProxyUrl,
+    toolProxyToken: scope,
   };
+}
+
+/** Provider-specific event used by server bridges. Audio "pcmu" is Twilio's native 8kHz μ-law. */
+export async function sessionUpdateForCall(
+  agent: AgentVersionRow,
+  callId: string,
+  direction: "web" | "inbound" | "outbound",
+  origin: string,
+  audio: RealtimeAudioFormat = "pcm"
+): Promise<Record<string, unknown>> {
+  return buildProviderSessionUpdate(
+    await voiceSessionSpecForCall(agent, callId, direction, origin),
+    audio
+  );
 }
 
 /** Creates the call row (experiment variant + optional named flow stamped at insert) and the session.update payload. */
@@ -210,7 +237,7 @@ export async function buildVoiceSession(
   origin: string,
   numbers: { from?: string; to?: string } = {},
   opts: { flowId?: string | null } = {}
-): Promise<{ callId: string; sessionUpdate: Record<string, unknown> }> {
+): Promise<{ callId: string; sessionSpec: VoiceSessionSpec; sessionUpdate: Record<string, unknown> }> {
   const pick = await pickVariant(agent.agent_id).catch(() => null);
   const call = await qOne<{ id: string }>(
     `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, experiment_id, variant, flow_id)
@@ -222,6 +249,7 @@ export async function buildVoiceSession(
     ]
   );
   const callId = call!.id;
-  const sessionUpdate = await sessionUpdateForCall(agent, callId, direction, origin);
-  return { callId, sessionUpdate };
+  const sessionSpec = await voiceSessionSpecForCall(agent, callId, direction, origin);
+  const sessionUpdate = buildProviderSessionUpdate(sessionSpec, "pcm");
+  return { callId, sessionSpec, sessionUpdate };
 }

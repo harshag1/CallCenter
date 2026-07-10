@@ -24,14 +24,17 @@ export const listAgents: OperatorTool = {
 export const updateAgent: OperatorTool = {
   name: "update_agent",
   description:
-    "Update a bot by creating a new immutable version (append-only; old versions remain revertible). Provide only the fields to change. `flow` shape: {nodes:[{id,label,kind:\"incoming_call\"|\"topic\"|\"fallback\",icon?,context?,steps?:[{id,label,instructions}],support_number?}],edges:[{from,to}]}. Topic nodes MUST keep their context and steps (copy them from the current flow when unchanged). The incoming_call and fallback nodes are preserved automatically if you omit them.",
+    "Update a bot by creating a new immutable version (append-only; old versions remain revertible). Providers: xai, openai, or gemini; model ids stay configurable for new releases. Prefer Flow v2 nested steps and scoped tools. Topic nodes MUST keep their context and steps (copy them from the current flow when unchanged). The incoming_call and fallback nodes are preserved automatically if omitted.",
   parameters: {
     type: "object",
     properties: {
       agent_id: { type: "string" },
       name: { type: "string" },
       instructions: { type: "string" },
-      voice: { type: "string", enum: ["eve", "ara", "rex", "sal", "leo"] },
+      provider: { type: "string", enum: ["xai", "openai", "gemini"] },
+      model: { type: "string", description: "Optional provider model id; omit to use the provider default." },
+      voice: { type: "string", description: "Provider voice id/name. Defaults: xAI ara, OpenAI marin, Gemini Kore." },
+      provider_settings: { type: "object", description: "Advanced provider-specific realtime session settings." },
       flow: { type: "object" },
       tool_ids: { type: "array", items: { type: "string" } },
       mcp_server_ids: { type: "array", items: { type: "string" } },
@@ -39,7 +42,7 @@ export const updateAgent: OperatorTool = {
     required: ["agent_id"],
   },
   async execute(args, ctx) {
-    const cur = await qOne<{ version: number; instructions: string; voice: string; flow: unknown; tool_ids: string[]; mcp_server_ids: string[] }>(
+    const cur = await qOne<{ version: number; instructions: string; voice: string; flow: unknown; tool_ids: string[]; mcp_server_ids: string[]; settings: Record<string, unknown> }>(
       `SELECT v.* FROM agent_versions v JOIN agents a ON a.id = v.agent_id AND a.org_id = $2
        WHERE v.agent_id = $1 AND v.version = a.active_version`,
       [args.agent_id, ctx.orgId]
@@ -54,20 +57,34 @@ export const updateAgent: OperatorTool = {
       if ("error" in healed) return { output: healed };
       flow = healed.flow;
     }
-    const next = cur.version + 1;
-    await q(
-      `INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, tool_ids, mcp_server_ids, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    const settings = {
+      ...cur.settings,
+      ...(args.provider ? { voice_provider: args.provider } : {}),
+      ...(args.model ? { voice_model: args.model } : {}),
+      ...(args.provider_settings ? { provider_settings: args.provider_settings } : {}),
+    };
+    const inserted = await qOne<{ version: number }>(
+      `WITH locked AS (
+         SELECT pg_advisory_xact_lock(hashtext($1::text))
+       ), next_version AS (
+         SELECT COALESCE(MAX(version), 0) + 1 AS version
+         FROM agent_versions, locked WHERE agent_id = $1
+       )
+       INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, tool_ids, mcp_server_ids, settings, created_by)
+       SELECT $1, next_version.version, $2, $3, $4, $5, $6, $7, $8 FROM next_version
+       RETURNING version`,
       [
-        args.agent_id, next,
+        args.agent_id,
         args.instructions ?? cur.instructions,
         args.voice ?? cur.voice,
         JSON.stringify(flow),
         (args.tool_ids as string[]) ?? cur.tool_ids,
         (args.mcp_server_ids as string[]) ?? cur.mcp_server_ids,
+        JSON.stringify(settings),
         `operator (${ctx.email})`,
       ]
     );
+    const next = inserted!.version;
     await q(
       "UPDATE agents SET active_version = $2, name = COALESCE($3, name) WHERE id = $1",
       [args.agent_id, next, args.name ?? null]

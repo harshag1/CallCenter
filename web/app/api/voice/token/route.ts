@@ -3,10 +3,10 @@
 
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { mintEphemeralToken } from "@/lib/xai";
 import { loadActiveAgent, buildVoiceSession } from "@/lib/voice";
+import { createBrowserRealtimeConnection } from "@/lib/realtime/registry";
 import { readJson, isUuid } from "@/lib/http";
-import { qOne } from "@/lib/db";
+import { q, qOne } from "@/lib/db";
 
 export async function POST(req: Request) {
   const session = await getSession();
@@ -28,14 +28,15 @@ export async function POST(req: Request) {
   }
 
   const origin = process.env.PUBLIC_ORIGIN ?? new URL(req.url).origin;
-  const [token, voiceSession] = await Promise.all([
-    mintEphemeralToken(600),
-    buildVoiceSession(agent, "web", origin, {}, { flowId: namedFlowId }),
-  ]);
-  return NextResponse.json({
-    token,
-    callId: voiceSession.callId,
-    sessionUpdate: voiceSession.sessionUpdate,
-    wsUrl: "wss://api.x.ai/v1/realtime?model=grok-voice-latest",
-  });
+  const voiceSession = await buildVoiceSession(agent, "web", origin, {}, { flowId: namedFlowId });
+  try {
+    const connection = await createBrowserRealtimeConnection(voiceSession.sessionSpec);
+    return NextResponse.json({ callId: voiceSession.callId, connection });
+  } catch (error) {
+    await q("UPDATE calls SET status = 'failed', ended_at = now() WHERE id = $1", [voiceSession.callId]).catch(() => {});
+    return NextResponse.json(
+      { error: `voice provider unavailable: ${(error as Error).message}` },
+      { status: 503 }
+    );
+  }
 }

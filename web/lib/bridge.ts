@@ -1,16 +1,16 @@
 // Author: Harsha Gundala
-// bridge.ts — Twilio Media Streams ↔ xAI realtime bridge: μ-law passthrough, mixed recording,
+// bridge.ts — Twilio Media Streams ↔ OpenAI-compatible realtime providers: μ-law passthrough, mixed recording,
 // turn-boundary events, hold-music playback, and observe mode (human-transfer transcription).
 
 import WebSocket from "ws";
 import { q, qOne } from "./db";
-import { verifyScope, loadActiveAgent, sessionUpdateForCall } from "./voice";
+import { verifyScope, loadActiveAgent, voiceSessionSpecForCall } from "./voice";
+import { createServerRealtimeConnection } from "./realtime/registry";
 import { mixUlaw } from "./audio";
 import { transcribeUlaw } from "./stt";
 import { log } from "./log";
 
 const L = log("bridge");
-const XAI_WS = "wss://api.x.ai/v1/realtime?model=grok-voice-latest";
 const FRAME = 160; // 20ms of 8kHz μ-law
 const REC_FLUSH_MS = 5000;
 const HOLD_POLL_MS = 2000;
@@ -34,7 +34,7 @@ type TwilioMessage = {
 type Scope = { callId: string; agentId: string; orgId: string };
 
 export class BridgeSession {
-  private xai: WebSocket | null = null;
+  private providerSocket: WebSocket | null = null;
   private streamSid: string | null = null;
   private callId: string | null = null;
   private mode: "agent" | "observe" = "agent";
@@ -93,8 +93,8 @@ export class BridgeSession {
           this.onObserveFrame(msg.media!.track === "outbound" ? "outbound" : "inbound", ulaw);
         } else {
           this.recordCallerFrame(ulaw);
-          if (this.xai?.readyState === WebSocket.OPEN) {
-            this.xai.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media!.payload }));
+          if (this.providerSocket?.readyState === WebSocket.OPEN) {
+            this.providerSocket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media!.payload }));
           }
         }
         break;
@@ -133,10 +133,10 @@ export class BridgeSession {
     void this.loadHoldClip(scope.orgId);
     this.holdPoll = setInterval(() => void this.pollHold(), HOLD_POLL_MS);
     void this.armOutboundGuard(scope.callId);
-    await this.connectXai(scope);
+    await this.connectProvider(scope);
   }
 
-  private async connectXai(scope: Scope) {
+  private async connectProvider(scope: Scope) {
     const [agent, call] = await Promise.all([
       loadActiveAgent(scope.agentId, scope.orgId),
       q<{ direction: "inbound" | "outbound"; metadata: { reason?: string } }>(
@@ -146,29 +146,28 @@ export class BridgeSession {
     if (!agent || !call) throw new Error("call or agent missing");
 
     const origin = process.env.PUBLIC_ORIGIN!;
-    const sessionUpdate = (await sessionUpdateForCall(agent, scope.callId, call.direction, origin, "pcmu")) as {
-      session: { instructions: string };
-    };
+    const sessionSpec = await voiceSessionSpecForCall(agent, scope.callId, call.direction, origin);
     if (call.direction === "outbound" && call.metadata?.reason) {
-      sessionUpdate.session.instructions +=
+      sessionSpec.instructions +=
         `\n\nYou are placing this outbound call. Purpose: ${call.metadata.reason}. Open by introducing yourself and the reason for the call.`;
     }
+    const connection = await createServerRealtimeConnection(sessionSpec, "pcmu");
 
-    this.xai = new WebSocket(XAI_WS, { headers: { Authorization: `Bearer ${process.env.XAI_API_KEY}` } });
-    this.xai.on("open", () => {
-      this.xai!.send(JSON.stringify(sessionUpdate));
-      this.xai!.send(JSON.stringify({ type: "response.create" }));
-      void this.save("state", { state: "bridged" });
+    this.providerSocket = new WebSocket(connection.wsUrl, { headers: connection.headers });
+    this.providerSocket.on("open", () => {
+      this.providerSocket!.send(JSON.stringify(connection.sessionUpdate));
+      this.providerSocket!.send(JSON.stringify({ type: "response.create" }));
+      void this.save("state", { state: "bridged", provider: connection.provider, model: connection.model });
     });
-    this.xai.on("message", (raw) => this.onXai(JSON.parse(String(raw))));
-    this.xai.on("close", () => void this.teardown());
-    this.xai.on("error", (e) => {
-      L.error("xai ws error", { callId: this.callId ?? undefined, err: (e as Error).message });
+    this.providerSocket.on("message", (raw) => this.onProviderEvent(JSON.parse(String(raw))));
+    this.providerSocket.on("close", () => void this.teardown());
+    this.providerSocket.on("error", (e) => {
+      L.error("realtime provider ws error", { callId: this.callId ?? undefined, err: (e as Error).message });
       void this.teardown();
     });
   }
 
-  private onXai(ev: { type: string; delta?: string; transcript?: string }) {
+  private onProviderEvent(ev: { type: string; delta?: string; transcript?: string }) {
     switch (ev.type) {
       case "response.output_audio.delta":
       case "response.audio.delta": {
@@ -192,7 +191,7 @@ export class BridgeSession {
         this.sendTwilio({ event: "clear", streamSid: this.streamSid }); // barge-in
         break;
       case "conversation.item.input_audio_transcription.completed": {
-        // xAI re-emits completed transcriptions as an item grows — keep one event per utterance.
+        // Some providers re-emit completed transcriptions as an item grows — keep one event per utterance.
         const text = String(ev.transcript ?? "");
         if (this.lastUserSaid && (text.startsWith(this.lastUserSaid) || this.lastUserSaid.startsWith(text))) {
           void this.updateLastUserSaid(text);
@@ -385,7 +384,7 @@ export class BridgeSession {
     this.done = true;
     for (const t of [this.recFlush, this.holdPacer, this.holdPoll, this.sttTimer]) if (t) clearInterval(t);
     if (this.holdDeadline) clearTimeout(this.holdDeadline);
-    try { this.xai?.close(); } catch {}
+    try { this.providerSocket?.close(); } catch {}
     try { this.twilio.close(); } catch {}
 
     if (this.mode === "observe") await this.flushStt(true).catch(() => {});

@@ -1,16 +1,15 @@
 // Author: Harsha Gundala
-// server.js — Twilio Media Streams ↔ xAI realtime bridge. μ-law passthrough, no transcoding.
-// Env: XAI_API_KEY, APP_ORIGIN (the web app), PORT (default 8080).
+// server.js — Twilio Media Streams ↔ xAI/OpenAI realtime bridge. μ-law passthrough, no transcoding.
+// Env: APP_ORIGIN, plus XAI_API_KEY and/or OPENAI_API_KEY, PORT (default 8080).
 
 import http from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const APP = process.env.APP_ORIGIN;
-const XAI_WS = "wss://api.x.ai/v1/realtime?model=grok-voice-latest";
 
-if (!process.env.XAI_API_KEY || !APP) {
-  console.error("XAI_API_KEY and APP_ORIGIN are required");
+if (!APP) {
+  console.error("APP_ORIGIN is required");
   process.exit(1);
 }
 
@@ -25,7 +24,7 @@ server.listen(PORT, () => console.log(`bridge listening :${PORT}`));
 class BridgeSession {
   constructor(twilio) {
     this.twilio = twilio;
-    this.xai = null;
+    this.providerSocket = null;
     this.streamSid = null;
     this.scope = null;
     this.pending = [];
@@ -43,17 +42,17 @@ class BridgeSession {
         const params = msg.start.customParameters ?? {};
         this.scope = params.scope;
         try {
-          await this.connectXai(params.scope);
+          await this.connectProvider(params.scope);
         } catch (e) {
-          console.error("xai connect failed:", e.message);
+          console.error("realtime provider connect failed:", e.message);
           this.twilio.close();
         }
         break;
       }
       case "media":
-        // Twilio sends 8kHz μ-law base64 — xAI accepts it verbatim.
-        if (this.xai?.readyState === WebSocket.OPEN) {
-          this.xai.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media.payload }));
+        // Twilio sends 8kHz μ-law base64 — xAI and OpenAI accept it verbatim.
+        if (this.providerSocket?.readyState === WebSocket.OPEN) {
+          this.providerSocket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media.payload }));
         }
         break;
       case "stop":
@@ -62,28 +61,30 @@ class BridgeSession {
     }
   }
 
-  async connectXai(scope) {
+  async connectProvider(scope) {
     const res = await fetch(`${APP}/api/telephony/session?scope=${encodeURIComponent(scope)}`);
     if (!res.ok) throw new Error(`session fetch ${res.status}`);
-    const { sessionUpdate } = await res.json();
+    const { sessionUpdate, provider, wsUrl, model } = await res.json();
+    const key = provider === "openai" ? process.env.OPENAI_API_KEY : process.env.XAI_API_KEY;
+    if (!key) throw new Error(`${provider === "openai" ? "OPENAI_API_KEY" : "XAI_API_KEY"} is required by this call`);
 
-    this.xai = new WebSocket(XAI_WS, {
-      headers: { Authorization: `Bearer ${process.env.XAI_API_KEY}` },
+    this.providerSocket = new WebSocket(wsUrl, {
+      headers: { Authorization: `Bearer ${key}` },
     });
-    this.xai.on("open", () => {
-      this.xai.send(JSON.stringify(sessionUpdate));
-      this.xai.send(JSON.stringify({ type: "response.create" }));
-      this.queue("state", { state: "bridged" });
+    this.providerSocket.on("open", () => {
+      this.providerSocket.send(JSON.stringify(sessionUpdate));
+      this.providerSocket.send(JSON.stringify({ type: "response.create" }));
+      this.queue("state", { state: "bridged", provider, model });
     });
-    this.xai.on("message", (raw) => this.onXai(JSON.parse(raw)));
-    this.xai.on("close", () => this.teardown());
-    this.xai.on("error", (e) => {
-      console.error("xai ws error:", e.message);
+    this.providerSocket.on("message", (raw) => this.onProviderEvent(JSON.parse(raw)));
+    this.providerSocket.on("close", () => this.teardown());
+    this.providerSocket.on("error", (e) => {
+      console.error("realtime provider ws error:", e.message);
       this.teardown();
     });
   }
 
-  onXai(ev) {
+  onProviderEvent(ev) {
     switch (ev.type) {
       case "response.output_audio.delta":
       case "response.audio.delta":
@@ -101,7 +102,7 @@ class BridgeSession {
         this.queue("agent_said", { text: ev.transcript });
         break;
       case "error":
-        console.error("xai event error:", JSON.stringify(ev).slice(0, 300));
+        console.error("realtime provider event error:", JSON.stringify(ev).slice(0, 300));
         this.queue("error", ev);
         break;
     }
@@ -130,7 +131,7 @@ class BridgeSession {
     this.done = true;
     clearInterval(this.flusher);
     void this.flush(true);
-    try { this.xai?.close(); } catch {}
+    try { this.providerSocket?.close(); } catch {}
     try { this.twilio.close(); } catch {}
   }
 }
