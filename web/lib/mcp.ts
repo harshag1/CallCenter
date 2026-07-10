@@ -141,6 +141,11 @@ function saveEvent(scope: Scope, type: string, payload: unknown) {
   ]).catch(() => {});
 }
 
+function auditableToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (name !== "run_action" || !("capability_grant" in args)) return args;
+  return { ...args, capability_grant: "[REDACTED]" };
+}
+
 async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpToolDef[]> {
   const ctx = loaded ?? await loadCtx(scope);
   const topics = topicNodes(ctx.flow);
@@ -461,7 +466,7 @@ export async function callToolForAudience(
   if (audience === "background" && !BACKGROUND_TOOL_NAMES.has(name)) {
     return { error: `tool "${name}" is not available to background tasks`, code: "wrong_tool_audience" };
   }
-  await saveEvent(scope, "tool_call", { name, args, audience });
+  await saveEvent(scope, "tool_call", { name, args: auditableToolArgs(name, args), audience });
   let result: unknown;
   try {
     result = await dispatch(scope, name, args, audience === "background");
