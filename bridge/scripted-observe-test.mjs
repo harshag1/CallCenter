@@ -5,19 +5,18 @@
 //
 // Usage: node scripted-observe-test.mjs   (env: BRIDGE_URL, AGENT_ID, WEB_DIR)
 
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import WebSocket from "ws";
+import { databaseConfig, loadProjectEnv, signScope } from "./test-helpers.mjs";
 
 const WEB = process.env.WEB_DIR ?? new URL("../web", import.meta.url).pathname;
-const env = Object.fromEntries(
-  readFileSync(`${WEB}/.env.local`, "utf8").split("\n").filter((l) => l.includes("=") && !l.startsWith("#"))
-    .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)])
-);
-const BRIDGE_URL = process.env.BRIDGE_URL ?? "wss://callcenter-dun.vercel.app/api/bridge";
-const API_BASE = `https://${new URL(BRIDGE_URL).host}`;
-const AGENT_ID = process.env.AGENT_ID ?? "fac1e0d8-cba6-45fa-9109-a285732b37ee";
+const env = loadProjectEnv(WEB);
+const BRIDGE_URL = process.env.BRIDGE_URL ?? "ws://localhost:8080/stream";
+const API_BASE = process.env.APP_ORIGIN ?? "http://localhost:3000";
+const AGENT_ID = process.env.AGENT_ID;
+if (!AGENT_ID) throw new Error("AGENT_ID is required");
 const FRAME = 160; // 20ms of 8kHz μ-law
 const SILENCE = Buffer.alloc(FRAME, 0xff);
 
@@ -68,10 +67,7 @@ function buildSchedule(inboundUtt, outboundUtt) {
   };
 }
 
-const db = new pg.Client({
-  connectionString: env.SUPABASE_DB_URL,
-  ssl: { ca: readFileSync(`${WEB}/certs/supabase-ca.crt`, "utf8") },
-});
+const db = new pg.Client(databaseConfig(env, WEB));
 await db.connect();
 
 const agent = (await db.query(
@@ -104,8 +100,7 @@ await db.query(
 );
 console.log("callId:", call.id);
 
-const body = Buffer.from(JSON.stringify({ callId: call.id, agentId: agent.id, orgId: agent.org_id })).toString("base64url");
-const scope = `${body}.${createHmac("sha256", env.MCP_GATEWAY_SECRET).update(body).digest("base64url")}`;
+const scope = signScope(env.MCP_GATEWAY_SECRET, { callId: call.id, agentId: agent.id, orgId: agent.org_id });
 
 // Temp session for the authenticated /recording HTTP check.
 const user = (await db.query("SELECT email FROM users WHERE org_id = $1 LIMIT 1", [agent.org_id])).rows[0];

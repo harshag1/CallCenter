@@ -2,28 +2,41 @@
 // db.ts — Postgres pool (pinned Supabase CA, strict TLS) + query helper.
 
 import { Pool, type QueryResultRow } from "pg";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const globalForDb = globalThis as unknown as { __pool?: Pool };
 
 function makePool(): Pool {
-  const ca = readFileSync(join(process.cwd(), "certs", "supabase-ca.crt"), "utf8");
+  const connectionString = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
+  if (!connectionString) throw new Error("DATABASE_URL or SUPABASE_DB_URL is required");
+  const sslMode = process.env.DATABASE_SSL ?? (process.env.SUPABASE_DB_URL ? "verify-full" : "disable");
+  const defaultCaPath = join(process.cwd(), "certs", "supabase-ca.crt");
+  const ssl = sslMode === "disable"
+    ? false
+    : {
+        rejectUnauthorized: true,
+        ...(process.env.DATABASE_CA_CERT
+          ? { ca: process.env.DATABASE_CA_CERT.replace(/\\n/g, "\n") }
+          : existsSync(defaultCaPath) ? { ca: readFileSync(defaultCaPath, "utf8") } : {}),
+      };
   return new Pool({
-    connectionString: process.env.SUPABASE_DB_URL,
-    ssl: { ca },
+    connectionString,
+    ssl,
     max: 5,
     idleTimeoutMillis: 30_000,
   });
 }
 
-export const pool: Pool = globalForDb.__pool ?? (globalForDb.__pool = makePool());
+export function getPool(): Pool {
+  return globalForDb.__pool ?? (globalForDb.__pool = makePool());
+}
 
 export async function q<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params: unknown[] = []
 ): Promise<T[]> {
-  const res = await pool.query<T>(text, params as never[]);
+  const res = await getPool().query<T>(text, params as never[]);
   return res.rows;
 }
 

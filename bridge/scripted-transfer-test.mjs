@@ -3,21 +3,19 @@
 // agent must trigger contact_support, acknowledge the transfer verbally, and never speak a
 // phone number. Also spot-checks the transfer TwiML endpoint. TTS caller via OpenAI tts-1.
 
-import { createHmac } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import pg from "pg";
 import WebSocket from "ws";
+import { databaseConfig, loadProjectEnv, signScope } from "./test-helpers.mjs";
 
-const AGENT_ID = "fac1e0d8-cba6-45fa-9109-a285732b37ee"; // Costco agent
-const BRIDGE_URL = process.env.BRIDGE_URL ?? "wss://callcenter-dun.vercel.app/api/bridge";
-const ORIGIN = "https://callcenter-dun.vercel.app";
+const AGENT_ID = process.env.AGENT_ID;
+if (!AGENT_ID) throw new Error("AGENT_ID is required");
+const BRIDGE_URL = process.env.BRIDGE_URL ?? "ws://localhost:8080/stream";
+const ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3000";
 
 const WEB = process.env.WEB_DIR ?? new URL("../web", import.meta.url).pathname;
-const env = Object.fromEntries(
-  readFileSync(`${WEB}/.env.local`, "utf8").split("\n").filter((l) => l.includes("=") && !l.startsWith("#"))
-    .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)])
-);
+const env = loadProjectEnv(WEB);
 
 // μ-law encode (G.711)
 function linearToUlaw(s) {
@@ -60,15 +58,14 @@ const utt1 = await ttsUlaw(
 const utt2 = await ttsUlaw("Yes, please connect me.", "transfer-test-utt2.pcm");
 const silence = Buffer.alloc(160, 0xff).toString("base64");
 
-const db = new pg.Client({ connectionString: env.SUPABASE_DB_URL, ssl: { ca: readFileSync(`${WEB}/certs/supabase-ca.crt`, "utf8") } });
+const db = new pg.Client(databaseConfig(env, WEB));
 await db.connect();
 const agent = (await db.query("SELECT org_id, active_version FROM agents WHERE id = $1", [AGENT_ID])).rows[0];
 const call = (await db.query(
   `INSERT INTO calls (agent_id, agent_version, direction) VALUES ($1,$2,'web') RETURNING id`,
   [AGENT_ID, agent.active_version]
 )).rows[0];
-const body = Buffer.from(JSON.stringify({ callId: call.id, agentId: AGENT_ID, orgId: agent.org_id })).toString("base64url");
-const scope = `${body}.${createHmac("sha256", env.MCP_GATEWAY_SECRET).update(body).digest("base64url")}`;
+const scope = signScope(env.MCP_GATEWAY_SECRET, { callId: call.id, agentId: AGENT_ID, orgId: agent.org_id });
 console.log("callId:", call.id);
 
 // Cheap API-level check: transfer TwiML must contain <Dial> with the number and <Start><Stream.

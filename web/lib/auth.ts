@@ -16,7 +16,9 @@ export function generateCode(): string {
 }
 
 export function hmacCode(code: string): string {
-  return createHmac("sha256", process.env.AUTH_CODE_HMAC_SECRET!).update(code).digest("hex");
+  const secret = process.env.AUTH_CODE_HMAC_SECRET;
+  if (!secret || secret.length < 32) throw new Error("AUTH_CODE_HMAC_SECRET must be at least 32 characters");
+  return createHmac("sha256", secret).update(code).digest("hex");
 }
 
 export function generateToken(): string {

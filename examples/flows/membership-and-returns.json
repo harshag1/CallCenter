@@ -1,0 +1,111 @@
+{
+  "schema_version": 2,
+  "tool_exposure": "gateway",
+  "always_tools": ["contact_support", "request_recall", "end_call"],
+  "nodes": [
+    {
+      "id": "entry",
+      "label": "Incoming call",
+      "kind": "incoming_call"
+    },
+    {
+      "id": "membership",
+      "label": "Membership",
+      "kind": "topic",
+      "context": "Answer membership questions and perform account changes only after verification.",
+      "steps": [
+        {
+          "id": "verify",
+          "label": "Verify member",
+          "instructions": "Collect the member number and one approved verification factor. Never expose account details before the lookup succeeds.",
+          "tools": ["read_table"],
+          "required_outputs": ["member_id"],
+          "success_criteria": ["The member record matches the caller", "No sensitive value was spoken back unnecessarily"],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "membership.escalate",
+          "steps": [
+            {
+              "id": "details",
+              "label": "Explain membership",
+              "instructions": "Answer only from the verified member row and company knowledge. Offer the relevant next action.",
+              "tools": ["search_knowledge"]
+            },
+            {
+              "id": "renew",
+              "label": "Renew membership",
+              "instructions": "Confirm term, price, and consent, then renew exactly once using the verified member_id.",
+              "tools": ["renew_membership"],
+              "required_outputs": ["renewal_id", "expires_at"],
+              "transitions": [
+                {
+                  "to": "membership.confirm",
+                  "when": "renewal_id was returned",
+                  "label": "Renewed"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "confirm",
+          "label": "Confirm result",
+          "instructions": "Read back the new expiration date and offer a receipt.",
+          "tools": ["send_email"],
+          "required_outputs": ["confirmation_delivered"]
+        },
+        {
+          "id": "escalate",
+          "label": "Verification failed",
+          "instructions": "Do not reveal account data. Offer human support or a callback."
+        }
+      ]
+    },
+    {
+      "id": "returns",
+      "label": "Return an order",
+      "kind": "topic",
+      "context": "Locate an order, evaluate policy, and create a return without skipping consent or durable recording.",
+      "steps": [
+        {
+          "id": "locate",
+          "label": "Locate order",
+          "instructions": "Collect the order number and match it to the caller.",
+          "tools": ["read_table"],
+          "required_outputs": ["order_id"],
+          "checkpoint": true,
+          "steps": [
+            {
+              "id": "eligibility",
+              "label": "Check eligibility",
+              "instructions": "Evaluate the return window, item condition, and policy exceptions. Do not promise a refund before this finishes.",
+              "tools": ["search_knowledge", "check_return_eligibility"],
+              "required_outputs": ["eligible", "reason"],
+              "steps": [
+                {
+                  "id": "create",
+                  "label": "Create return",
+                  "instructions": "Confirm the return method and create the return exactly once.",
+                  "tools": ["create_return", "send_email"],
+                  "required_outputs": ["return_id", "label_delivered"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Something else",
+      "kind": "fallback",
+      "context": "The request is outside configured workflows. Do not improvise policy.",
+      "support_number": "+15550000000"
+    }
+  ],
+  "edges": [
+    { "from": "entry", "to": "membership", "label": "Membership" },
+    { "from": "entry", "to": "returns", "label": "Returns" },
+    { "from": "entry", "to": "other", "label": "Other" }
+  ]
+}

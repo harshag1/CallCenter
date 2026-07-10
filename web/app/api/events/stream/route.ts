@@ -46,7 +46,8 @@ export async function GET(req: Request) {
         try {
           const row = JSON.parse(n.payload) as { orgId?: string } & Record<string, unknown>;
           if (row.orgId !== session.orgId) return;
-          const { orgId: _org, ...ev } = row;
+          const ev = { ...row };
+          delete ev.orgId;
           send(`data: ${JSON.stringify(ev)}\n\n`);
         } catch { /* malformed payload */ }
       });

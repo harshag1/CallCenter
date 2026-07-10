@@ -2,16 +2,13 @@
 // scripted-caller.mjs — deterministic voice-loop test: a TTS "human" answers the Day Survey
 // through the production bridge, so write_table/end_call behavior is verifiable without a person.
 
-import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import WebSocket from "ws";
+import { databaseConfig, loadProjectEnv, signScope } from "./test-helpers.mjs";
 
 const WEB = process.env.WEB_DIR ?? new URL("../web", import.meta.url).pathname;
-const env = Object.fromEntries(
-  readFileSync(`${WEB}/.env.local`, "utf8").split("\n").filter((l) => l.includes("=") && !l.startsWith("#"))
-    .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)])
-);
+const env = loadProjectEnv(WEB);
 
 // μ-law encode (G.711)
 function linearToUlaw(s) {
@@ -35,20 +32,20 @@ const utt1 = pcm24kToUlaw8k(readFileSync("/tmp/utt1.pcm"));
 const utt2 = pcm24kToUlaw8k(readFileSync("/tmp/utt2.pcm"));
 const silence = Buffer.alloc(160, 0xff).toString("base64");
 
-const db = new pg.Client({ connectionString: env.SUPABASE_DB_URL, ssl: { ca: readFileSync(`${WEB}/certs/supabase-ca.crt`, "utf8") } });
+const db = new pg.Client(databaseConfig(env, WEB));
 await db.connect();
-const flow = (await db.query("SELECT id, agent_id, org_id FROM flows WHERE name = 'Day Survey'")).rows[0];
+const flow = (await db.query("SELECT id, agent_id, org_id FROM flows WHERE name = $1", [process.env.FLOW_NAME ?? "Day Survey"])).rows[0];
+if (!flow) throw new Error(`flow not found: ${process.env.FLOW_NAME ?? "Day Survey"}`);
 const agent = (await db.query("SELECT active_version FROM agents WHERE id = $1", [flow.agent_id])).rows[0];
 const call = (await db.query(
   `INSERT INTO calls (agent_id, agent_version, direction, from_number, to_number, flow_id, metadata)
-   VALUES ($1,$2,'outbound','+16624987450','+15550009999',$3,'{"reason":"campaign: Scripted Verification"}') RETURNING id`,
-  [flow.agent_id, agent.active_version, flow.id]
+   VALUES ($1,$2,'outbound',$3,$4,$5,'{"reason":"campaign: Scripted Verification"}') RETURNING id`,
+  [flow.agent_id, agent.active_version, process.env.FROM_NUMBER ?? "+15550000001", process.env.TO_NUMBER ?? "+15550000002", flow.id]
 )).rows[0];
-const body = Buffer.from(JSON.stringify({ callId: call.id, agentId: flow.agent_id, orgId: flow.org_id })).toString("base64url");
-const scope = `${body}.${createHmac("sha256", env.MCP_GATEWAY_SECRET).update(body).digest("base64url")}`;
+const scope = signScope(env.MCP_GATEWAY_SECRET, { callId: call.id, agentId: flow.agent_id, orgId: flow.org_id });
 console.log("callId:", call.id);
 
-const ws = new WebSocket(process.env.BRIDGE_URL ?? "wss://callcenter-dun.vercel.app/api/bridge");
+const ws = new WebSocket(process.env.BRIDGE_URL ?? "ws://localhost:8080/stream");
 let queue = null;      // utterance being streamed
 let queuePos = 0;
 let agentTalking = false;

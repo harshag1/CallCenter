@@ -1,7 +1,7 @@
 // Author: Harsha Gundala
 // data.ts — operator tools: read-only SQL, sandboxed DDL/DML in agent_data, log search.
 
-import { pool, q } from "../../db";
+import { getPool, q } from "../../db";
 import type { OperatorTool } from "../types";
 
 const ROW_CAP = 200;
@@ -18,7 +18,7 @@ export const queryData: OperatorTool = {
   async execute(args) {
     const sql = String(args.sql).trim().replace(/;+\s*$/, "");
     if (!/^(select|with)\b/i.test(sql)) return { output: { error: "read-only: statement must start with SELECT/WITH" } };
-    const client = await pool.connect();
+    const client = await getPool().connect();
     try {
       await client.query("BEGIN READ ONLY");
       await client.query("SET LOCAL statement_timeout = '5s'");
@@ -59,7 +59,7 @@ export const manageTable: OperatorTool = {
     if (/\b(drop\s+schema|alter\s+system|create\s+(role|extension|function)|grant|revoke|copy)\b/i.test(sql)) {
       return { output: { error: "statement class not allowed in sandbox" } };
     }
-    const client = await pool.connect();
+    const client = await getPool().connect();
     try {
       await client.query("BEGIN");
       await client.query("SET LOCAL statement_timeout = '10s'");

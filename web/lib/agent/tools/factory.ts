@@ -23,6 +23,9 @@ export const createTool: OperatorTool = {
     required: ["slug", "description", "input_schema", "source"],
   },
   async execute(args, ctx) {
+    if (process.env.ENABLE_TOOL_FACTORY !== "true") {
+      return { output: { error: "tool deployment is disabled; set ENABLE_TOOL_FACTORY=true after reviewing SECURITY.md" } };
+    }
     const slug = String(args.slug).toLowerCase().replace(/[^a-z0-9-]/g, "-");
     if (!/async\s+function\s+run\s*\(/.test(String(args.source))) {
       return { output: { error: "source must define `async function run(input, env)`" } };

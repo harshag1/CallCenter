@@ -2,7 +2,7 @@
 // Author: Harsha Gundala
 // useLiveEvents.ts — org-wide live event feed: SSE with exponential reconnect, silent polling fallback.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent } from "react";
 import type { LiveEvent } from "@/lib/realtime-types";
 
 const POLL_MS = 3000;
@@ -10,8 +10,7 @@ const SSE_RETRY_MS = 60_000;
 const FALLBACK_AFTER = 2;
 
 export function useLiveEvents(onEvent: (ev: LiveEvent) => void): void {
-  const cb = useRef(onEvent);
-  cb.current = onEvent;
+  const deliverEvent = useEffectEvent(onEvent);
 
   useEffect(() => {
     let es: EventSource | null = null;
@@ -23,7 +22,7 @@ export function useLiveEvents(onEvent: (ev: LiveEvent) => void): void {
 
     const deliver = (ev: LiveEvent) => {
       if (ev.kind === "call_event" && ev.eventId > cursor) cursor = ev.eventId;
-      cb.current(ev);
+      deliverEvent(ev);
     };
 
     const stopPolling = () => {

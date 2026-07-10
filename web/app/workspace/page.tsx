@@ -22,6 +22,7 @@ import FilesModal from "@/components/studio/FilesModal";
 import NodeEditor from "@/components/studio/NodeEditor";
 import type { FlowNode } from "@/lib/flow";
 import { useScheduled } from "@/components/hooks/useScheduled";
+import { PRODUCT_NAME } from "@/lib/product";
 import { useOrgSettings } from "@/components/hooks/useOrgSettings";
 import type { Surface } from "@/lib/surface-dsl";
 
@@ -387,7 +388,7 @@ export default function Workspace() {
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-5">
         <div className="flex items-center gap-2">
           <Phone size={15} strokeWidth={2.4} />
-          <span className="text-sm font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</span>
+          <span className="text-sm font-semibold tracking-tight">{PRODUCT_NAME}</span>
         </div>
         <Tooltip content="log out" placement="bottom">
           <button onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">

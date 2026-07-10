@@ -27,9 +27,12 @@ export default function FilesModal({ open, onClose, onCountChange }: {
 
   useEffect(() => {
     if (!open) return;
-    refresh();
+    const initial = setTimeout(() => void refresh(), 0);
     const iv = setInterval(refresh, 2500);
-    return () => clearInterval(iv);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(iv);
+    };
   }, [open, refresh]);
 
   async function upload(files: FileList | File[]) {

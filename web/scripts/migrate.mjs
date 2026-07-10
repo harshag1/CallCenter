@@ -3,16 +3,26 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "migrations");
-const url = process.env.SUPABASE_DB_URL;
-if (!url) throw new Error("SUPABASE_DB_URL not set");
+const url = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
+if (!url) throw new Error("DATABASE_URL or SUPABASE_DB_URL not set");
 
-const ca = readFileSync(join(root, "certs", "supabase-ca.crt"), "utf8");
-const client = new pg.Client({ connectionString: url, ssl: { ca } });
+const sslMode = process.env.DATABASE_SSL ?? (process.env.SUPABASE_DB_URL ? "verify-full" : "disable");
+const caPath = join(root, "certs", "supabase-ca.crt");
+const ssl = sslMode === "disable"
+  ? false
+  : {
+      rejectUnauthorized: true,
+      ...(process.env.DATABASE_CA_CERT
+        ? { ca: process.env.DATABASE_CA_CERT.replace(/\\n/g, "\n") }
+        : existsSync(caPath) ? { ca: readFileSync(caPath, "utf8") } : {}),
+    };
+const client = new pg.Client({ connectionString: url, ssl });
 await client.connect();
 await client.query("CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz DEFAULT now())");
 const applied = new Set((await client.query("SELECT name FROM _migrations")).rows.map((r) => r.name));

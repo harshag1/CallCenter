@@ -230,10 +230,11 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 /** 14-day call volume by direction — quiet grayscale lines, no chrome. */
 function CallVolumeChart({ calls }: { calls: CallRow[] }) {
+  const [anchor] = useState(() => Date.now());
   const data = useMemo(() => {
     const days: { day: string; inbound: number; outbound: number; web: number }[] = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86400_000);
+      const d = new Date(anchor - i * 86400_000);
       const key = d.toISOString().slice(0, 10);
       days.push({ day: key.slice(5), inbound: 0, outbound: 0, web: 0 });
     }
@@ -247,7 +248,7 @@ function CallVolumeChart({ calls }: { calls: CallRow[] }) {
       else days[i].web++;
     }
     return days;
-  }, [calls]);
+  }, [anchor, calls]);
   if (!calls.length) return null;
   return (
     <div className="h-44">

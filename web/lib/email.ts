@@ -2,9 +2,19 @@
 // email.ts — transactional email via Resend: OTP login codes + agent-composed messages (Meshia layout).
 
 import { Resend } from "resend";
+import { PRODUCT_NAME } from "./product";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-const FROM = process.env.EMAIL_FROM ?? "Harsha's Amazing Call Center <callcenter@auth.meshia.io>";
+let resend: Resend | null = null;
+
+function getResend(): Resend {
+  if (!process.env.RESEND_API_KEY) throw new Error("RESEND_API_KEY is not configured");
+  return resend ?? (resend = new Resend(process.env.RESEND_API_KEY));
+}
+
+function fromAddress(): string {
+  if (!process.env.EMAIL_FROM) throw new Error("EMAIL_FROM is not configured");
+  return process.env.EMAIL_FROM;
+}
 
 /** Escape at the boundary — subjects/bodies originate from agent tool output. */
 function escapeHtml(s: string): string {
@@ -20,11 +30,11 @@ export async function sendAgentEmail(opts: {
   message: string;
   brand?: string | null;
 }): Promise<void> {
-  const brand = escapeHtml(opts.brand ?? "Harsha's Amazing Call Center");
+  const brand = escapeHtml(opts.brand ?? PRODUCT_NAME);
   const subject = escapeHtml(opts.subject);
   const body = escapeHtml(opts.message);
-  const { error } = await resend.emails.send({
-    from: FROM,
+  const { error } = await getResend().emails.send({
+    from: fromAddress(),
     to: opts.to,
     subject: opts.subject,
     html: `
@@ -43,12 +53,16 @@ export async function sendAgentEmail(opts: {
 }
 
 export async function sendLoginCode(to: string, code: string): Promise<void> {
-  const { error } = await resend.emails.send({
-    from: FROM,
+  if (!process.env.RESEND_API_KEY && process.env.NODE_ENV !== "production") {
+    console.log(`[dev auth] ${to}: ${code}`);
+    return;
+  }
+  const { error } = await getResend().emails.send({
+    from: fromAddress(),
     to,
     subject: `${code} is your login code`,
     html: `<div style="font-family:ui-sans-serif,system-ui;padding:32px;color:#111">
-      <p style="font-size:14px;color:#666;margin:0 0 16px">Harsha's Amazing Call Center</p>
+      <p style="font-size:14px;color:#666;margin:0 0 16px">${escapeHtml(PRODUCT_NAME)}</p>
       <p style="font-size:32px;font-weight:700;letter-spacing:6px;margin:0">${code}</p>
       <p style="font-size:13px;color:#999;margin:16px 0 0">Expires in 10 minutes.</p>
     </div>`,

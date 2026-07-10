@@ -12,7 +12,7 @@ export const maxDuration = 300;
 
 function verifySignature(raw: string, signature: string | null): boolean {
   const secret = process.env.XAI_SIP_SIGNING_SECRET;
-  if (!secret) return true; // not yet provisioned — accept during setup, tighten after registration
+  if (!secret) return process.env.NODE_ENV !== "production";
   if (!signature) return false;
   const expect = createHmac("sha256", secret).update(raw).digest("hex");
   try {

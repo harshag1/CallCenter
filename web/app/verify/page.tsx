@@ -6,6 +6,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Check, Loader2, Mail, Phone, RotateCw } from "lucide-react";
+import { PRODUCT_NAME } from "@/lib/product";
 
 type Stage = "email" | "phone" | "done";
 
@@ -168,7 +169,7 @@ export default function VerifyPage() {
     <main className="flex min-h-screen flex-col bg-[#f8f8f8] px-5 text-neutral-950">
       <header className="flex items-center justify-center gap-2.5 pt-10">
         <Phone size={17} strokeWidth={2.35} />
-        <h1 className="text-[15px] font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</h1>
+        <h1 className="text-[15px] font-semibold tracking-tight">{PRODUCT_NAME}</h1>
       </header>
 
       <div className="flex flex-1 items-center justify-center">

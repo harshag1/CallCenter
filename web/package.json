@@ -2,13 +2,20 @@
   "name": "web",
   "version": "0.1.0",
   "private": true,
+  "engines": { "node": ">=20.9.0" },
+  "overrides": {
+    "postcss": "8.5.16"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run test && npm run lint && npm run typecheck",
+    "db:migrate": "node --env-file=.env.local scripts/migrate.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

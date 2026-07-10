@@ -4,7 +4,7 @@
 import { NextResponse } from "next/server";
 import { getSession, normalizePhoneNumber } from "@/lib/auth";
 import { checkPhoneVerification } from "@/lib/sms";
-import { q, qOne } from "@/lib/db";
+import { q } from "@/lib/db";
 
 export async function POST(req: Request) {
   const session = await getSession();

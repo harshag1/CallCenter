@@ -56,7 +56,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     category: "data",
     description: "Durable agent versions, flows, datasets, call events, recordings, and checkpoints.",
     docsUrl: "https://supabase.com/docs/guides/database/connecting-to-postgres",
-    requiredEnv: ["SUPABASE_DB_URL"],
+    requiredEnv: [],
+    alternativeEnv: [["DATABASE_URL"], ["SUPABASE_DB_URL"]],
     capabilities: ["postgres", "pgvector", "recordings", "realtime-events"],
   },
   {
@@ -66,7 +67,7 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     description: "Optional isolated deployment target for tools created by the builder agent.",
     docsUrl: "https://vercel.com/docs/rest-api",
     requiredEnv: ["VERCEL_TOKEN"],
-    optionalEnv: ["VERCEL_TEAM_ID", "VERCEL_TOOLS_PROJECT"],
+    optionalEnv: ["VERCEL_TEAM_ID", "VERCEL_TOOLS_PROJECT", "ENABLE_TOOL_FACTORY"],
     capabilities: ["tool-deployment", "encrypted-env", "preview-isolation"],
   },
 ];

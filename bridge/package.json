@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "version": "1.0.0",
+  "engines": { "node": ">=20.9.0" },
   "description": "Twilio Media Streams <-> provider-neutral realtime audio bridge",
   "main": "server.js",
   "scripts": {

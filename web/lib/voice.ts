@@ -9,6 +9,7 @@ import { findCustomerByPhone, phoneDigits } from "./datasets";
 import { resolveVoiceProviderConfig } from "./realtime/config";
 import { buildProviderSessionUpdate } from "./realtime/registry";
 import type { RealtimeAudioFormat, RemoteMcpServer, VoiceSessionSpec } from "./realtime/types";
+import { decryptSecret } from "./vault";
 
 export type AgentVersionRow = {
   agent_id: string;
@@ -187,8 +188,8 @@ export async function voiceSessionSpecForCall(
     authorization: `Bearer ${scope}`,
   }];
   const mcpRows = effective.mcp_server_ids.length
-    ? await q<{ label: string; server_url: string; allowed_tools: string[] | null }>(
-        "SELECT label, server_url, allowed_tools FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
+    ? await q<{ label: string; server_url: string; allowed_tools: string[] | null; auth_header_encrypted: string | null }>(
+        "SELECT label, server_url, allowed_tools, auth_header_encrypted FROM mcp_servers WHERE id = ANY($1) AND org_id = $2",
         [effective.mcp_server_ids, effective.org_id]
       )
     : [];
@@ -197,6 +198,7 @@ export async function voiceSessionSpecForCall(
       label: m.label.toLowerCase().replace(/[^a-z0-9]/g, "-"),
       serverUrl: m.server_url,
       ...(m.allowed_tools?.length ? { allowedTools: m.allowed_tools } : {}),
+      ...(m.auth_header_encrypted ? { authorization: decryptSecret(m.auth_header_encrypted) } : {}),
     });
   }
 

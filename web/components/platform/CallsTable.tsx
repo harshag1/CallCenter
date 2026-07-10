@@ -10,7 +10,7 @@ import type { LiveEvent } from "@/lib/realtime-types";
 import CallTimeline, { buildTimeline } from "./CallTimeline";
 import Tooltip from "@/components/ui/Tooltip";
 import {
-  DirIcon, PulseDot, ResIcon, SPEAKER_COLOR, SatChip, fmtDur, fmtTime, mmss,
+  DirIcon, PulseDot, ResIcon, SatChip, fmtDur, fmtTime, mmss,
   speakerTextColor, useNow, type CallEvent, type CallRow,
 } from "./shared";
 

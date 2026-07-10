@@ -18,6 +18,7 @@ import { AgentFlowSchema, type AgentFlow, type FlowNode } from "@/lib/flow";
 import { shortBrand } from "@/lib/brand";
 import NodeEditor from "@/components/studio/NodeEditor";
 import TracePanel, { type TraceEvent } from "@/components/studio/TracePanel";
+import { PRODUCT_NAME } from "@/lib/product";
 
 type ChatItem =
   | { kind: "text"; role: "user" | "assistant"; text: string }
@@ -268,7 +269,7 @@ export default function Studio() {
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-5">
         <div className="flex items-center gap-2">
           <Phone size={15} strokeWidth={2.4} />
-          <span className="text-sm font-semibold tracking-tight">Harsha&apos;s Amazing Call Center</span>
+          <span className="text-sm font-semibold tracking-tight">{PRODUCT_NAME}</span>
         </div>
         <div className="flex items-center gap-4">
           <Tooltip content="workspace" placement="bottom">

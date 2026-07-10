@@ -5,8 +5,10 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { isUuid } from "@/lib/http";
+import { resolveVoiceProviderConfig } from "@/lib/realtime/config";
+import { AgentFlowSchema, alwaysTools, flowToolExposure } from "@/lib/flow";
 
-const BASE_TOOLS = ["classify", "begin_step", "hold", "contact_support", "request_recall", "send_email", "send_sms", "launch_task", "read_table", "write_table", "end_call", "log_note"];
+const LEGACY_TOOLS = ["classify", "begin_step", "hold", "contact_support", "request_recall", "send_email", "send_sms", "launch_task", "read_table", "write_table", "end_call", "log_note"];
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
@@ -16,9 +18,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const agent = await qOne<{
     name: string; version: number; instructions: string; voice: string;
-    tool_ids: string[]; created_at: string; created_by: string;
+    tool_ids: string[]; created_at: string; created_by: string; settings: Record<string, unknown>; flow: unknown;
   }>(
-    `SELECT a.name, v.version, v.instructions, v.voice, v.tool_ids, v.created_at, v.created_by
+    `SELECT a.name, v.version, v.instructions, v.voice, v.tool_ids, v.created_at, v.created_by, v.settings, v.flow
      FROM agents a JOIN agent_versions v ON v.agent_id = a.id AND v.version = a.active_version
      WHERE a.id = $1 AND a.org_id = $2`,
     [id, session.orgId]
@@ -31,13 +33,20 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         [agent.tool_ids, session.orgId]
       )
     : [];
+  const provider = resolveVoiceProviderConfig(agent.settings, agent.voice);
+  const parsedFlow = AgentFlowSchema.safeParse(agent.flow);
+  const baseTools = parsedFlow.success && flowToolExposure(parsedFlow.data) === "gateway"
+    ? ["classify", "enter_step", "complete_step", "get_flow_state", "run_action", ...alwaysTools(parsedFlow.data)]
+    : LEGACY_TOOLS;
   return NextResponse.json({
     name: agent.name,
     version: agent.version,
     instructions: agent.instructions,
     voice: agent.voice,
+    provider: provider.provider,
+    model: provider.model,
     updated_at: agent.created_at,
     updated_by: agent.created_by,
-    tools: [...BASE_TOOLS, ...minted.map((m) => m.slug)],
+    tools: [...new Set([...baseTools, ...minted.map((m) => m.slug)])],
   });
 }

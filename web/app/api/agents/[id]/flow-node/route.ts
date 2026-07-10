@@ -17,7 +17,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const parsedNode = instructionsOnly ? null : FlowNodeSchema.safeParse(body?.node);
   if (!instructionsOnly && !parsedNode!.success) return NextResponse.json({ error: "invalid node" }, { status: 400 });
 
-  const cur = await qOne<{ version: number; instructions: string; voice: string; flow: unknown; tool_ids: string[]; mcp_server_ids: string[] }>(
+  const cur = await qOne<{ version: number; instructions: string; voice: string; flow: unknown; tool_ids: string[]; mcp_server_ids: string[]; settings: Record<string, unknown> }>(
     `SELECT v.* FROM agent_versions v JOIN agents a ON a.id = v.agent_id AND a.org_id = $2
      WHERE v.agent_id = $1 AND v.version = a.active_version`,
     [id, session.orgId]
@@ -31,16 +31,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     flow.nodes[idx] = { ...flow.nodes[idx], ...parsedNode!.data! };
   }
 
-  const next = cur.version + 1;
-  await q(
-    `INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, tool_ids, mcp_server_ids, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+  const inserted = await qOne<{ version: number }>(
+    `WITH locked AS (
+       SELECT pg_advisory_xact_lock(hashtext($1::text))
+     ), next_version AS (
+       SELECT COALESCE(MAX(version), 0) + 1 AS version
+       FROM agent_versions, locked WHERE agent_id = $1
+     )
+     INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, tool_ids, mcp_server_ids, settings, created_by)
+     SELECT $1, next_version.version, $2, $3, $4, $5, $6, $7, $8 FROM next_version
+     RETURNING version`,
     [
-      id, next,
+      id,
       instructionsOnly ? String(body!.instructions).slice(0, 20000) : cur.instructions,
-      cur.voice, JSON.stringify(flow), cur.tool_ids, cur.mcp_server_ids, `studio (${session.email})`,
+      cur.voice, JSON.stringify(flow), cur.tool_ids, cur.mcp_server_ids, JSON.stringify(cur.settings), `studio (${session.email})`,
     ]
   );
+  const next = inserted!.version;
   await q("UPDATE agents SET active_version = $2 WHERE id = $1", [id, next]);
   return NextResponse.json({ ok: true, flow, version: next });
 }

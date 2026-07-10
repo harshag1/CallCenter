@@ -20,6 +20,7 @@ function toolsInSteps(node: FlowNode): string[] {
 
 type AgentInfo = {
   version: number; instructions: string; tools: string[]; updated_by: string; updated_at: string;
+  provider: "xai" | "openai" | "gemini"; model: string; voice: string;
 };
 
 export default function NodeEditor({
@@ -45,10 +46,7 @@ export default function NodeEditor({
   // Entry node: load the live agent config (prompt + belt) so chat edits are inspectable.
   useEffect(() => {
     if (!isEntry) return;
-    if (flowInstructions != null) {
-      setPrompt(flowInstructions);
-      return;
-    }
+    if (flowInstructions != null) return;
     if (!agentId) return;
     fetch(`/api/agents/${agentId}`)
       .then((r) => (r.ok ? r.json() : null))
@@ -86,15 +84,18 @@ export default function NodeEditor({
         {isEntry && (
           <>
             {agent && (
-              <div className="text-[11px] text-neutral-400">
-                v{agent.version} · {agent.updated_by.replace(/\s*\(.*\)/, "")}
+              <div className="flex flex-wrap items-center gap-1 text-[11px] text-neutral-400">
+                <span>v{agent.version} · {agent.updated_by.replace(/\s*\(.*\)/, "")}</span>
+                <span className="rounded-full border border-neutral-200 px-1.5 py-0.5 font-mono text-[9px]">{agent.provider}</span>
+                <span className="rounded-full border border-neutral-200 px-1.5 py-0.5 font-mono text-[9px]">{agent.model}</span>
+                <span className="rounded-full border border-neutral-200 px-1.5 py-0.5 font-mono text-[9px]">{agent.voice}</span>
               </div>
             )}
             <div>
               <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-400">Prompt</div>
               <textarea
                 rows={12}
-                value={prompt}
+                value={flowInstructions ?? prompt}
                 readOnly={!canEditPrompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 className={`${input} resize-none font-mono text-[11px] leading-[1.55] ${!canEditPrompt ? "bg-neutral-50 text-neutral-500" : ""}`}

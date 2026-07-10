@@ -1,6 +1,8 @@
 // Author: Harsha Gundala
 // sms.ts — Twilio SMS delivery: Verify-service OTP (carrier-approved) + generic agent SMS.
 
+import { PRODUCT_NAME } from "./product";
+
 function verifyAuth(): string {
   return Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
 }
@@ -55,7 +57,7 @@ export async function sendPhoneCode(toNumber: string, code: string): Promise<voi
     body: new URLSearchParams({
       To: toNumber,
       From: fromNumber,
-      Body: `Your Harsha's Amazing Call Center code is ${code}. It expires in 10 minutes.`,
+      Body: `Your ${PRODUCT_NAME} code is ${code}. It expires in 10 minutes.`,
     }),
   });
 
