@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving Voice Agent Studio.
+Thank you for improving Harsha's Amazing Call Center.
 
 ## Before opening a pull request
 

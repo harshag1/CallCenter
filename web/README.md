@@ -1,6 +1,6 @@
 # Web application
 
-The Next.js application for Voice Agent Studio. Start with the repository [README](../README.md) for setup, architecture, providers, and Flow v2.
+The Next.js application for Harsha's Amazing Call Center. Start with the repository [README](../README.md) for setup, architecture, providers, and Flow v2.
 
 ```bash
 cp .env.example .env.local

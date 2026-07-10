@@ -1,6 +1,6 @@
 # Architecture
 
-Voice Agent Studio separates four concerns that are often entangled in voice-agent repositories.
+Harsha's Amazing Call Center separates four concerns that are often entangled in voice-agent repositories.
 
 ## Agent definition
 

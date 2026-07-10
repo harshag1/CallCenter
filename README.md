@@ -1,8 +1,8 @@
-# Voice Agent Studio
+# Harsha's Amazing Call Center
 
 An open, provider-neutral starting point for building speech-to-speech agents that can reliably finish long, tool-driven workflows.
 
-Voice Agent Studio combines a visual builder, a high-authority builder agent, realtime browser and phone calls, durable call records, extensible tools, datasets, knowledge retrieval, and a deterministic Flow v2 runtime. It is designed for support, sales, intake, scheduling, education, field operations, personal assistants, and any other realtime voice experience—not only call centers.
+Harsha's Amazing Call Center combines a visual builder, a high-authority builder agent, realtime browser and phone calls, durable call records, extensible tools, datasets, knowledge retrieval, and a deterministic Flow v2 runtime. It is designed for support, sales, intake, scheduling, education, field operations, personal assistants, and any other realtime voice experience—not only call centers.
 
 ## Why this exists
 
@@ -65,7 +65,7 @@ Prerequisites: Node.js 20.9+, npm, Docker, and an API key for at least one realt
 
 ```bash
 git clone <your-fork-url>
-cd CallCenter
+cd Harshas-Amazing-Call-Center
 docker compose up -d db
 cp web/.env.example web/.env.local
 ```
