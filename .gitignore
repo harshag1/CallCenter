@@ -14,5 +14,13 @@ node_modules/
 .vercel/
 *.tsbuildinfo
 
+# Python environments / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
 # OS / editor
 .DS_Store
