@@ -146,6 +146,19 @@ function auditableToolArgs(name: string, args: Record<string, unknown>): Record<
   return { ...args, capability_grant: "[REDACTED]" };
 }
 
+function auditableToolResult(result: unknown): string {
+  try {
+    const serialized = JSON.stringify(result, (key, value) =>
+      /(capability_grant|authorization|api[_-]?key|secret|password|token)/i.test(key)
+        ? "[REDACTED]"
+        : value
+    );
+    return (serialized ?? "null").slice(0, 2000);
+  } catch {
+    return JSON.stringify({ error: "tool result was not JSON-serializable for the audit preview" });
+  }
+}
+
 async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpToolDef[]> {
   const ctx = loaded ?? await loadCtx(scope);
   const topics = topicNodes(ctx.flow);
@@ -473,7 +486,7 @@ export async function callToolForAudience(
   } catch (e) {
     result = { error: (e as Error).message };
   }
-  await saveEvent(scope, "tool_result", { name, result: JSON.stringify(result).slice(0, 2000), audience });
+  await saveEvent(scope, "tool_result", { name, result: auditableToolResult(result), audience });
   L.info("mcp tool", { callId: scope.callId, orgId: scope.orgId, data: { name, audience } });
   return result;
 }
