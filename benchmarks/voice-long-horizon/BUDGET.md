@@ -17,7 +17,7 @@ The authorization is a ceiling, not a target. No new provider session may be sch
 | Gate | Purpose | Maximum automatically schedulable cumulative spend | Release condition |
 |---|---|---:|---|
 | 0 | Offline runner, fixtures, graders, fault injection, and dry runs | $0 provider spend | Repository-wide check plus deterministic grader, attestation/replay, provider-fixture, budget-kill, secret-boundary, and artifact mutation tests pass |
-| 1 | Three transport smokes, then at most one `raw-memory`/`full-harness` transport pair per provider if the smokes pass and budget remains | $15 provider spend | Per-provider acceptance packet below; compatibility only, never effectiveness |
+| 1 | Exactly three sequential full-harness transport smokes: one per provider, with no efficacy pair or retry | $15 provider spend | Per-provider acceptance packet below; compatibility only, never effectiveness |
 | 2 | Small paired pilot across development scenarios | $100 | No systematic adapter failure; artifact completeness passes; metrics detect seeded faults |
 | 3 | Preregistered confirmatory allocation | $750 | Clean freeze commit; successful canaries; frozen comparator, held-out split, sample plan, randomization, evaluator, and safety margin; no stop-ship issue |
 | 4 | Evidence-driven extension within scheduled ceiling | $900 | Written rationale before outcomes; only registered additional cells or predeclared operational reruns |
@@ -38,7 +38,7 @@ Before any provider socket opens, Gate 0 must demonstrate:
 
 Each provider transport smoke is accepted only when it records real PCM input and audio output, one harmless gateway round trip, an order-preserving redacted provider-event projection linked to normalized events, exact requested-versus-returned identity status, usage/audio metering, a complete hash manifest, a valid plan-pinned signature, successful independent replay of replayable state, and settled filesystem budget state. A mismatch fails the canary; an unacknowledged field remains explicitly unverifiable. Missing evidence is preserved as failure.
 
-The $15 ceiling is aggregate. Smokes run sequentially with pessimistic reservations; paired transport cells are scheduled only from the remaining balance after all three accepted smokes. No Gate 1 pass rate enters `RESULTS.md` as model-performance evidence.
+The $15 ceiling is aggregate. Smokes run sequentially with a $5 pessimistic reservation each. Any amount left after settlement remains unspent; it does not authorize retries or an `n=1` raw-versus-harness comparison. Paired effectiveness cells begin only under Gate 2. No Gate 1 pass rate enters `RESULTS.md` as model-performance evidence.
 
 ## Fail-closed reservation rule
 
