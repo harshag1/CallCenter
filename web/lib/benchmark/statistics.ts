@@ -27,6 +27,17 @@ export type BootstrapDifference = Readonly<{
   units: number;
 }>;
 
+export type ExactConditionalMcNemarPower = Readonly<{
+  method: "exact_conditional_mcnemar_two_sided";
+  sample_size: number;
+  alpha: number;
+  risk_difference: number;
+  discordance: number;
+  treatment_only_probability: number;
+  baseline_only_probability: number;
+  power: number;
+}>;
+
 function assertProbability(value: number, label: string): void {
   if (!Number.isFinite(value) || value <= 0 || value >= 1) {
     throw new Error(`${label} must be strictly between zero and one`);
@@ -243,6 +254,102 @@ export function wilsonScoreInterval(
     confidence_level: confidenceLevel,
     lower: Math.max(0, center - margin),
     upper: Math.min(1, center + margin),
+  });
+}
+
+function binomialProbabilities(trials: number, probability: number): readonly number[] {
+  if (!Number.isSafeInteger(trials) || trials < 0 || trials > 1_000) {
+    throw new Error("binomial trials must be a safe integer between zero and 1,000");
+  }
+  if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+    throw new Error("binomial probability must be between zero and one");
+  }
+  if (probability === 0) {
+    return Object.freeze([1, ...Array.from({ length: trials }, () => 0)]);
+  }
+  if (probability === 1) {
+    return Object.freeze([...Array.from({ length: trials }, () => 0), 1]);
+  }
+  if (probability > 0.5) {
+    return Object.freeze([...binomialProbabilities(trials, 1 - probability)].reverse());
+  }
+  const probabilities = new Array<number>(trials + 1).fill(0);
+  probabilities[0] = (1 - probability) ** trials;
+  const odds = probability / (1 - probability);
+  for (let successes = 0; successes < trials; successes += 1) {
+    probabilities[successes + 1] = probabilities[successes]
+      * ((trials - successes) / (successes + 1))
+      * odds;
+  }
+  const total = probabilities.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    throw new Error("binomial probability calculation lost numeric support");
+  }
+  return Object.freeze(probabilities.map((value) => value / total));
+}
+
+/**
+ * Planning-only exact power for a two-sided conditional McNemar test.
+ *
+ * This freezes the candidate-design calculation in the protocol; it does not
+ * establish power for a report that uses a different interval, clustering,
+ * provider-weighting, missingness, multiplicity, or conjunctive decision rule.
+ */
+export function exactConditionalMcNemarPower(input: Readonly<{
+  sample_size: number;
+  risk_difference: number;
+  discordance: number;
+  alpha?: number;
+}>): ExactConditionalMcNemarPower {
+  if (!Number.isSafeInteger(input.sample_size) || input.sample_size <= 0 || input.sample_size > 1_000) {
+    throw new Error("sample_size must be a safe integer between one and 1,000");
+  }
+  const alpha = input.alpha ?? 0.05;
+  assertProbability(alpha, "alpha");
+  if (!Number.isFinite(input.discordance) || input.discordance <= 0 || input.discordance >= 1) {
+    throw new Error("discordance must be strictly between zero and one");
+  }
+  if (
+    !Number.isFinite(input.risk_difference)
+    || input.risk_difference <= 0
+    || input.risk_difference > input.discordance
+  ) {
+    throw new Error("risk_difference must be positive and no larger than discordance");
+  }
+  const treatmentOnly = (input.discordance + input.risk_difference) / 2;
+  const baselineOnly = (input.discordance - input.risk_difference) / 2;
+  const treatmentShareAmongDiscordant = treatmentOnly / input.discordance;
+  const discordantCounts = binomialProbabilities(input.sample_size, input.discordance);
+  let power = 0;
+  for (let discordant = 1; discordant <= input.sample_size; discordant += 1) {
+    const nullDistribution = binomialProbabilities(discordant, 0.5);
+    const alternativeDistribution = binomialProbabilities(
+      discordant,
+      treatmentShareAmongDiscordant
+    );
+    const lowerTail = new Array<number>(discordant + 1).fill(0);
+    for (let index = 0; index <= discordant; index += 1) {
+      lowerTail[index] = nullDistribution[index] + (index === 0 ? 0 : lowerTail[index - 1]);
+    }
+    let conditionalRejectionProbability = 0;
+    for (let treatmentOnlyCount = 0; treatmentOnlyCount <= discordant; treatmentOnlyCount += 1) {
+      const symmetricTail = Math.min(treatmentOnlyCount, discordant - treatmentOnlyCount);
+      const twoSidedPValue = Math.min(1, 2 * lowerTail[symmetricTail]);
+      if (twoSidedPValue <= alpha + 1e-12) {
+        conditionalRejectionProbability += alternativeDistribution[treatmentOnlyCount];
+      }
+    }
+    power += discordantCounts[discordant] * conditionalRejectionProbability;
+  }
+  return Object.freeze({
+    method: "exact_conditional_mcnemar_two_sided" as const,
+    sample_size: input.sample_size,
+    alpha,
+    risk_difference: input.risk_difference,
+    discordance: input.discordance,
+    treatment_only_probability: treatmentOnly,
+    baseline_only_probability: baselineOnly,
+    power,
   });
 }
 

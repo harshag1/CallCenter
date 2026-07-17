@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clusteredPairedBootstrapMeanDifference,
   createSeededRng,
+  exactConditionalMcNemarPower,
   pairedBootstrapMeanDifference,
   pairedRandomizationTest,
   randomizePairedArmOrder,
@@ -43,6 +44,31 @@ describe("deterministic paired experiment statistics", () => {
     const half = wilsonScoreInterval(50, 100, 0.95);
     expect(half.lower).toBeCloseTo(0.4038, 3);
     expect(half.upper).toBeCloseTo(0.5962, 3);
+  });
+
+  it("freezes the planning-only 107-template exact McNemar power calculation", () => {
+    const discordanceForty = exactConditionalMcNemarPower({
+      sample_size: 107,
+      risk_difference: 0.2,
+      discordance: 0.4,
+    });
+    const discordanceFifty = exactConditionalMcNemarPower({
+      sample_size: 107,
+      risk_difference: 0.2,
+      discordance: 0.5,
+    });
+    expect(discordanceForty).toMatchObject({
+      method: "exact_conditional_mcnemar_two_sided",
+    });
+    expect(discordanceForty.treatment_only_probability).toBeCloseTo(0.3, 15);
+    expect(discordanceForty.baseline_only_probability).toBeCloseTo(0.1, 15);
+    expect(discordanceForty.power).toBeCloseTo(0.9016948182, 10);
+    expect(discordanceFifty.power).toBeCloseTo(0.8177184462, 10);
+    expect(exactConditionalMcNemarPower({
+      sample_size: 106,
+      risk_difference: 0.2,
+      discordance: 0.4,
+    }).power).toBeLessThan(0.9);
   });
 
   it("produces reproducible paired bootstrap intervals", () => {
