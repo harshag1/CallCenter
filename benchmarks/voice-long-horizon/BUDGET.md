@@ -7,8 +7,8 @@
 - Protected contingency reserve: **$100.00 USD**
 - Current operational ceiling: **$15.00 USD**
 - Recorded paid voice-provider spend: **$0.00 USD**
-- Recorded auxiliary review spend: **$2.624932 USD**
-- Recorded total program cash spend: **$2.624932 USD**
+- Recorded auxiliary review spend: **$3.312551 USD**
+- Recorded total program cash spend: **$3.312551 USD**
 
 The authorization is a ceiling, not a target. No new provider session may be scheduled once cumulative provider spend plus active reservations reaches $900. The final $100 is protected against metering lag, in-flight overrun, reconciliation, or an explicitly approved and documented contingency; the runner must never consume it automatically. Auxiliary spend is excluded from provider/model evidence accounting but still counts toward the user's $1,000 total cash authorization when reserve use is considered.
 
@@ -100,8 +100,9 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 | 2026-07-16 | Fable / Claude Code | Database tenancy and RLS design review | $0.762557 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-database-tenancy-fable.md) |
 | 2026-07-16 | Fable / Claude Code | Campaign scheduler and funded-action authority review | $0.752466 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md) |
 | 2026-07-16 | Fable / Claude Code | Authentication and credential-boundary review | $0.458499 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md) |
+| 2026-07-16 | Fable / Claude Code | Pre-canary release-gate and paid-runner falsification review | $0.687619 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md) |
 
-- **Cumulative auxiliary review spend: $2.624932**
-- **Cumulative total recorded program cash spend: $2.624932**
+- **Cumulative auxiliary review spend: $3.312551**
+- **Cumulative total recorded program cash spend: $3.312551**
 
 Changing the operational ceiling requires a dated ledger entry linking the exact release evidence, source commit, test/artifact IDs, and any unresolved accounting uncertainty. Spending the protected reserve additionally requires a prior entry in [DEVIATIONS.md](DEVIATIONS.md).
