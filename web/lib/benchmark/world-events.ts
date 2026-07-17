@@ -1,22 +1,25 @@
 import { z } from "zod";
 import {
+  ContentHashSchema,
   IdentifierSchema,
   JsonValueSchema,
   PrerequisiteEvidenceSchema,
   SafePathSchema,
   VisibleToolResultSchema,
   WorldEffectSchema,
+  WorldAdmissionSchema,
   WorldReceiptSchema,
 } from "./scenario-schema";
 
 const EventBaseSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   event_id: z.string().min(1),
   sequence: z.number().int().positive(),
   scenario_id: IdentifierSchema,
   scenario_version: z.string().min(1),
+  scenario_hash: ContentHashSchema,
   turn: z.number().int().nonnegative(),
-});
+}).strict();
 
 export const WorldInitializedEventSchema = EventBaseSchema.extend({
   type: z.literal("world.initialized"),
@@ -28,6 +31,8 @@ export const ToolInvocationReceivedEventSchema = EventBaseSchema.extend({
   invocation_id: IdentifierSchema,
   tool: IdentifierSchema,
   arguments: z.record(z.string(), JsonValueSchema),
+  idempotency_key: z.string().min(1).optional(),
+  semantic_opportunity_id: IdentifierSchema.optional(),
 });
 
 export const ToolArgumentsValidatedEventSchema = EventBaseSchema.extend({
@@ -59,15 +64,31 @@ export const ToolInvocationReplayedEventSchema = EventBaseSchema.extend({
   invocation_id: IdentifierSchema,
   tool: IdentifierSchema,
   original_receipt_id: z.string().min(1),
+  original_turn: z.number().int().nonnegative(),
+  replay_turn: z.number().int().nonnegative(),
+});
+
+export const ToolExecutionAdmittedEventSchema = EventBaseSchema.extend({
+  type: z.literal("tool.execution_admitted"),
+  admission: WorldAdmissionSchema,
 });
 
 export const ToolFaultInjectedEventSchema = EventBaseSchema.extend({
   type: z.literal("tool.fault_injected"),
   invocation_id: IdentifierSchema,
   tool: IdentifierSchema,
+  semantic_key: z.string().min(1),
   fault_id: IdentifierSchema,
   phase: z.enum(["before_commit", "after_commit"]),
   error_code: IdentifierSchema,
+  admission_id: z.string().min(1),
+  semantic_ordinal: z.number().int().positive(),
+  matching_ordinal: z.number().int().positive().optional(),
+  semantic_opportunity_id: IdentifierSchema.optional(),
+  schedule: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("fault_match_ordinal"), value: z.number().int().positive() }).strict(),
+    z.object({ kind: z.literal("semantic_opportunity"), value: IdentifierSchema }).strict(),
+  ]),
 });
 
 export const WorldEffectCommittedEventSchema = EventBaseSchema.extend({
@@ -95,6 +116,7 @@ export const WorldEventSchema = z.discriminatedUnion("type", [
   ToolPrerequisiteEvaluatedEventSchema,
   ToolDuplicateDetectedEventSchema,
   ToolInvocationReplayedEventSchema,
+  ToolExecutionAdmittedEventSchema,
   ToolFaultInjectedEventSchema,
   WorldEffectCommittedEventSchema,
   ToolReceiptRecordedEventSchema,

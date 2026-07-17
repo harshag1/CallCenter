@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "tool-world-causal-containment.v1",
+  "scenario_hash": "sha256:3e57ef7d3ba6948a4bed2f1a555cd798a1c020acd5c69b4651f891ce801c90ac",
+  "seed_start": 7301,
+  "seeds_per_case": 32,
+  "trial_count": 160,
+  "design_status": "fixed-development-design",
+  "provider_calls": 0,
+  "endpoints": {
+    "naive_schema_only": "schema-only persisted-state acceptance plus at-least-once mutation execution",
+    "full_harness": "ToolWorld v2 scenario-bound replay verification and idempotent execution"
+  },
+  "protocol": {
+    "status": "fixed deterministic development design; outcomes observed; not a prospective preregistration",
+    "seed_start": 7301,
+    "seeds_per_case": 32,
+    "cases": [
+      "replayed_delivery",
+      "after_commit_retry",
+      "reconnect_redelivery",
+      "stale_snapshot_resume",
+      "reordered_commit_ledger"
+    ],
+    "exclusions": "none; any thrown trial aborts artifact generation",
+    "invariants": [
+      "one semantic mutation produces exactly one authoritative effect",
+      "an exact invocation replay does not produce a second authoritative effect",
+      "a distinct-invocation retry after a post-commit timeout reconciles to the prior committed receipt",
+      "a reconnect round-trip preserves exact replay identity",
+      "a stale fact snapshot grafted onto a newer ledger is rejected before execution",
+      "a reordered event ledger is rejected before execution",
+      "after rejecting corrupt persisted state, execution from the last canonical state reaches the oracle total"
+    ],
+    "success_rule": "all fixed invariants hold in every full-harness trial; the naive schema-only comparator accepts or executes the unsafe schedule",
+    "interval": "two-sided Wilson score interval at 95%; descriptive over these deterministic schedules only"
+  },
+  "aggregate": {
+    "attempted": 160,
+    "naive_comparator_unsafe_accept_count": 160,
+    "naive_comparator_unsafe_accept_rate": 1,
+    "naive_comparator_unsafe_accept_wilson_95": {
+      "lower": 0.976554,
+      "upper": 1
+    },
+    "harness_contained_count": 160,
+    "harness_containment_rate": 1,
+    "harness_containment_wilson_95": {
+      "lower": 0.976554,
+      "upper": 1
+    },
+    "harness_corrupt_state_rejection_count": 64,
+    "harness_idempotent_suppression_count": 96,
+    "schedule_set_hash": "2fd7948bcb01ee2d5a98e9c4fa0519b668f000d7ebe28c42da13560149379fc2"
+  },
+  "cases": {
+    "replayed_delivery": {
+      "attempted": 32,
+      "naive_comparator_unsafe_accept_count": 32,
+      "naive_comparator_unsafe_accept_rate": 1,
+      "naive_comparator_unsafe_accept_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_contained_count": 32,
+      "harness_containment_rate": 1,
+      "harness_containment_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_corrupt_state_rejection_count": 0,
+      "harness_idempotent_suppression_count": 32,
+      "schedule_set_hash": "b19648a9b84b806ffa3fc5d028cab89c512eb81315037307c8246f9d6ecbb8cf"
+    },
+    "after_commit_retry": {
+      "attempted": 32,
+      "naive_comparator_unsafe_accept_count": 32,
+      "naive_comparator_unsafe_accept_rate": 1,
+      "naive_comparator_unsafe_accept_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_contained_count": 32,
+      "harness_containment_rate": 1,
+      "harness_containment_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_corrupt_state_rejection_count": 0,
+      "harness_idempotent_suppression_count": 32,
+      "schedule_set_hash": "1eff34b91d051b03f3ffaf82c30d3252faf58dd24e314c76d944ef71fe40cf23"
+    },
+    "reconnect_redelivery": {
+      "attempted": 32,
+      "naive_comparator_unsafe_accept_count": 32,
+      "naive_comparator_unsafe_accept_rate": 1,
+      "naive_comparator_unsafe_accept_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_contained_count": 32,
+      "harness_containment_rate": 1,
+      "harness_containment_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_corrupt_state_rejection_count": 0,
+      "harness_idempotent_suppression_count": 32,
+      "schedule_set_hash": "931eee3aadf64fd46075fe9bf7a31dd7c839742f8d40eafc953f4d583c795bf7"
+    },
+    "stale_snapshot_resume": {
+      "attempted": 32,
+      "naive_comparator_unsafe_accept_count": 32,
+      "naive_comparator_unsafe_accept_rate": 1,
+      "naive_comparator_unsafe_accept_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_contained_count": 32,
+      "harness_containment_rate": 1,
+      "harness_containment_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_corrupt_state_rejection_count": 32,
+      "harness_idempotent_suppression_count": 0,
+      "schedule_set_hash": "4e780dac5e6d9bdae574c9dfb5e559630de3fae0f1895803dd6cb38dbc82f6e0"
+    },
+    "reordered_commit_ledger": {
+      "attempted": 32,
+      "naive_comparator_unsafe_accept_count": 32,
+      "naive_comparator_unsafe_accept_rate": 1,
+      "naive_comparator_unsafe_accept_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_contained_count": 32,
+      "harness_containment_rate": 1,
+      "harness_containment_wilson_95": {
+        "lower": 0.892821,
+        "upper": 1
+      },
+      "harness_corrupt_state_rejection_count": 32,
+      "harness_idempotent_suppression_count": 0,
+      "schedule_set_hash": "7bd5ebe884a1d76b8adf2ffb6be896485e1020f44a786490dcec4a01603fb807"
+    }
+  },
+  "trial_set_hash": "d1ac1e90e5701109e0eece6a98256baa7068c642d5b718293f3ac9ff5be0e09d",
+  "claim_scope": "Deterministic offline causal-failure containment in a synthetic ToolWorld fixture; not realtime-model quality, provider behavior, speech quality, or population inference.",
+  "result_hash": "f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab"
+}

@@ -160,7 +160,7 @@ describe("provider-neutral benchmark scenario", () => {
     expect(() => invoke(exactReplay.state, "close-01", "close_work_order", {
       work_order_id: "WO-2048",
       confirmed: false,
-    }, 14)).toThrow(/reused with a different tool or argument payload/);
+    }, 14)).toThrow(/reused with different tool, arguments, idempotency, or semantic opportunity identity/);
 
     const semanticDuplicate = invoke(exactReplay.state, "close-02", "close_work_order", {
       work_order_id: "WO-2048",
