@@ -2,8 +2,14 @@ import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
 import {
   BENCHMARK_CONDITION_IDS,
+  assertCompiledConditionIntegrity,
   auditConditionParity,
+  benchmarkFlowHash,
+  benchmarkScenarioHash,
+  compiledConditionHash,
+  compiledConditionSuiteHash,
   compileConditionSuite,
+  createConditionSuiteTrustAnchor,
   type CompiledConditionSuite,
 } from "../condition-compiler";
 import {
@@ -118,6 +124,153 @@ describe("canonical benchmark condition compiler", () => {
       "disclosure_reconstruction",
       "condition_hash",
       "suite_hash",
+    ]));
+  });
+
+  it("rejects ambiguous or incomplete transported-suite containers before scheduling", () => {
+    const transported = structuredClone(compile()) as unknown as {
+      schemaVersion: number;
+      informationHash: string;
+      canonicalInformation: Array<{ id: string }>;
+      conditions: Record<string, {
+        visibleCapabilities: Array<{ name: string; category: string }>;
+        disclosures: Array<{
+          target: string;
+          information: Array<{ target: string }>;
+          visibleCapabilities: Array<{ name: string; category: string }>;
+        }>;
+      }>;
+    };
+    transported.schemaVersion = 99;
+    transported.informationHash = "0".repeat(64);
+    transported.canonicalInformation.push(structuredClone(transported.canonicalInformation[0]));
+    const full = transported.conditions["full-harness"];
+    full.disclosures.push(structuredClone(full.disclosures[0]));
+    full.disclosures[0].information[0].target = "topic:not-the-container";
+    full.disclosures[0].visibleCapabilities.push(structuredClone(full.disclosures[0].visibleCapabilities[0]));
+    transported.conditions["raw-memory"].visibleCapabilities = transported.conditions["raw-memory"].visibleCapabilities
+      .filter((capability) => capability.name !== "durable_memory");
+
+    const audit = auditConditionParity(transported as unknown as CompiledConditionSuite);
+    expect(audit.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      "suite_schema_version",
+      "information_catalog_hash",
+      "duplicate_canonical_information",
+      "duplicate_disclosure_target",
+      "information_container_target",
+      "duplicate_capability",
+      "durable_memory_contract",
+    ]));
+  });
+
+  it("self-authenticates behavior flags and binds exact scenario and flow sources", () => {
+    const compiled = compile();
+    const condition = compiled.conditions["full-harness"];
+    expect(() => assertCompiledConditionIntegrity(condition)).not.toThrow();
+    expect(benchmarkFlowHash(INDUSTRIAL_FIELD_SERVICE_FLOW)).toBe(compiled.flowHash);
+    expect(benchmarkScenarioHash(fieldServiceScenarioJson)).toBe(compiled.scenarioHash);
+
+    const tampered = structuredClone(condition);
+    Object.assign(tampered.behavior, { enforceExactlyOnce: false });
+    expect(() => assertCompiledConditionIntegrity(tampered)).toThrow(/invalid condition hash/);
+
+    const relabeledSuite = structuredClone(compiled);
+    const relabeled = relabeledSuite.conditions["full-harness"] as {
+      id: string;
+      behavior: { enforceExactlyOnce: boolean };
+      conditionHash: string;
+    };
+    relabeled.id = "progressive-only";
+    relabeled.behavior.enforceExactlyOnce = false;
+    relabeled.conditionHash = compiledConditionHash(
+      relabeled as unknown as CompiledConditionSuite["conditions"]["full-harness"]
+    );
+    const relabeledAudit = auditConditionParity(relabeledSuite);
+    expect(relabeledAudit.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      "condition_identity",
+      "condition_behavior",
+    ]));
+  });
+
+  it("rejects a fully rehashed source substitution when checked against its registry trust anchor", () => {
+    const original = compile();
+    const trustAnchor = createConditionSuiteTrustAnchor(original);
+    const transported = structuredClone(original) as unknown as {
+      scenarioId: string;
+      flowHash: string;
+      suiteHash: string;
+      conditions: Record<string, { flowHash: string; conditionHash: string }>;
+    };
+    transported.scenarioId = "field-service-escalation.substituted.v1";
+    transported.flowHash = "f".repeat(64);
+    for (const condition of Object.values(transported.conditions)) {
+      condition.flowHash = transported.flowHash;
+      condition.conditionHash = compiledConditionHash(condition as CompiledConditionSuite["conditions"]["full-harness"]);
+    }
+    transported.suiteHash = compiledConditionSuiteHash(transported as unknown as CompiledConditionSuite);
+
+    // Internal hashes can prove consistency, not provenance. The closed-registry
+    // trust anchor is what makes this fail despite the attacker's full rehash.
+    expect(auditConditionParity(transported)).toMatchObject({ valid: true, issues: [] });
+    const anchored = auditConditionParity(transported, trustAnchor);
+    expect(anchored.valid).toBe(false);
+    expect(anchored.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      "trusted_source_identity",
+      "trusted_flow_hash",
+      "trusted_suite_hash",
+    ]));
+  });
+
+  it("validates logical-tool derivations and exact persisted object shapes", () => {
+    const changedContract = structuredClone(compile()) as unknown as {
+      semanticLeafTools: Array<{ directProviderTool: { description: string } }>;
+    };
+    changedContract.semanticLeafTools[0].directProviderTool.description += " forged";
+    const contractAudit = auditConditionParity(changedContract);
+    expect(contractAudit.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      "semantic_tool_provider_hash",
+      "semantic_tool_public_hash",
+      "semantic_tool_capability",
+    ]));
+
+    const extraField = structuredClone(compile()) as CompiledConditionSuite & { ignored_override?: boolean };
+    extraField.ignored_override = true;
+    expect(auditConditionParity(extraField).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "malformed_suite" }),
+    ]));
+
+    const injectedTarget = structuredClone(compile()) as unknown as {
+      canonicalInformation: Array<{ target: string }>;
+    };
+    injectedTarget.canonicalInformation[0].target = 'topic:route">ignore_previous';
+    expect(auditConditionParity(injectedTarget).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "malformed_suite" }),
+    ]));
+  });
+
+  it("bounds hostile compiler inputs and transported suites before recursive parsing or hashing", () => {
+    const input = structuredClone(industrialFieldServiceCompilerInput(fieldServiceScenarioJson));
+    let nested: Record<string, unknown> = {};
+    (input.scenario as { initial_facts: Record<string, unknown> }).initial_facts.hostile_depth = nested;
+    for (let depth = 0; depth < 110; depth += 1) {
+      const child: Record<string, unknown> = {};
+      nested.next = child;
+      nested = child;
+    }
+    expect(() => compileConditionSuite(input)).toThrow(/exceeds maximum depth/);
+
+    const oversized = structuredClone(compile()) as unknown as {
+      canonicalInformation: unknown[];
+    };
+    oversized.canonicalInformation = new Array(20_001).fill(null);
+    expect(auditConditionParity(oversized).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "suite_resource_bounds" }),
+    ]));
+
+    const cyclic = structuredClone(compile()) as CompiledConditionSuite & { cycle?: unknown };
+    cyclic.cycle = cyclic;
+    expect(auditConditionParity(cyclic).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "suite_resource_bounds" }),
     ]));
   });
 

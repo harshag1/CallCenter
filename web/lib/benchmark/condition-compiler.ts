@@ -104,6 +104,12 @@ export type ConditionBehavior = Readonly<{
 
 export type CompiledBenchmarkCondition = Readonly<{
   id: BenchmarkConditionId;
+  /** Exact canonical compiler source shared by every arm in this suite. */
+  sourceHash: string;
+  /** Prevents a self-consistent condition from being paired with another scenario. */
+  scenarioHash: string;
+  /** Prevents a self-consistent condition from being paired with another flow. */
+  flowHash: string;
   behavior: ConditionBehavior;
   initialInformation: readonly CompiledInformationUnit[];
   visibleCapabilities: readonly CompiledCapability[];
@@ -153,6 +159,33 @@ export type ConditionParityAudit = Readonly<{
   semanticToolsHash: string | null;
 }>;
 
+/**
+ * Small, externally persistable trust root for one deterministic compiler
+ * output. The suite hash binds every treatment prompt and disclosure, while
+ * the individual hashes make source-substitution failures diagnosable.
+ */
+export type ConditionSuiteTrustAnchor = Readonly<{
+  schemaVersion: 1;
+  compilerVersion: typeof CONDITION_COMPILER_VERSION;
+  scenarioId: string;
+  scenarioVersion: string;
+  sourceHash: string;
+  scenarioHash: string;
+  flowHash: string;
+  informationHash: string;
+  semanticToolsHash: string;
+  suiteHash: string;
+}>;
+
+export type BenchmarkJsonResourceBounds = Readonly<{
+  maxDepth: number;
+  maxNodes: number;
+  maxArrayLength: number;
+  maxObjectKeys: number;
+  maxStringLength: number;
+  maxAggregateStringLength: number;
+}>;
+
 export class ConditionCompilerError extends Error {
   constructor(message: string) {
     super(message);
@@ -160,9 +193,187 @@ export class ConditionCompilerError extends Error {
   }
 }
 
+export class BenchmarkJsonResourceLimitError extends ConditionCompilerError {
+  constructor(message: string) {
+    super(message);
+    this.name = "BenchmarkJsonResourceLimitError";
+  }
+}
+
 const HASH_DOMAIN = "harshas-amazing-call-center/voice-condition-compiler/v1";
 const DURABLE_MEMORY_NAME = "durable_memory";
 const FLOW_ID_PATTERN = /^[a-z][a-z0-9_-]{1,63}$/;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const SAFE_INFORMATION_ID_PATTERN = /^[A-Za-z0-9_.-]{1,512}$/;
+const SAFE_CAPABILITY_NAME_PATTERN = /^[a-z][a-z0-9_.-]{1,95}$/;
+const NON_BASE_DISCLOSURE_TARGET_PATTERN = /^(?:topic:[a-z][a-z0-9_-]{1,63}|step:[a-z][a-z0-9_-]{1,63}(?:\.[a-z][a-z0-9_-]{1,63})+)$/;
+
+const CONDITION_INPUT_RESOURCE_BOUNDS: BenchmarkJsonResourceBounds = Object.freeze({
+  maxDepth: 96,
+  maxNodes: 250_000,
+  maxArrayLength: 20_000,
+  maxObjectKeys: 20_000,
+  maxStringLength: 2 * 1024 * 1024,
+  maxAggregateStringLength: 8 * 1024 * 1024,
+});
+
+const COMPILED_SUITE_RESOURCE_BOUNDS: BenchmarkJsonResourceBounds = Object.freeze({
+  maxDepth: 96,
+  maxNodes: 250_000,
+  maxArrayLength: 20_000,
+  maxObjectKeys: 20_000,
+  maxStringLength: 2 * 1024 * 1024,
+  maxAggregateStringLength: 8 * 1024 * 1024,
+});
+
+type ResourceFrame = Readonly<{
+  value: unknown;
+  depth: number;
+  path: string;
+  exit?: object;
+}>;
+
+function childPath(parent: string, segment: string): string {
+  const suffix = segment.length > 80 ? `${segment.slice(0, 77)}...` : segment;
+  const next = `${parent}.${suffix}`;
+  return next.length > 256 ? `${next.slice(0, 253)}...` : next;
+}
+
+/**
+ * Iterative JSON preflight used before Zod parsing or canonical hashing.
+ * Besides bounding work, this rejects accessors, sparse/named arrays, class
+ * instances, symbols, and cycles whose runtime semantics are not JSON data.
+ */
+export function assertBenchmarkJsonResourceBounds(
+  value: unknown,
+  label: string,
+  bounds: BenchmarkJsonResourceBounds = CONDITION_INPUT_RESOURCE_BOUNDS
+): void {
+  const stack: ResourceFrame[] = [{ value, depth: 0, path: "$" }];
+  const ancestors = new Set<object>();
+  let nodes = 0;
+  let aggregateStringLength = 0;
+
+  const chargeString = (text: string, path: string): void => {
+    if (text.length > bounds.maxStringLength) {
+      throw new BenchmarkJsonResourceLimitError(
+        `${label} exceeds maximum string length ${bounds.maxStringLength} at ${path}`
+      );
+    }
+    aggregateStringLength += text.length;
+    if (aggregateStringLength > bounds.maxAggregateStringLength) {
+      throw new BenchmarkJsonResourceLimitError(
+        `${label} exceeds aggregate string budget ${bounds.maxAggregateStringLength}`
+      );
+    }
+  };
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.exit) {
+      ancestors.delete(frame.exit);
+      continue;
+    }
+    nodes += 1;
+    if (nodes > bounds.maxNodes) {
+      throw new BenchmarkJsonResourceLimitError(`${label} exceeds node budget ${bounds.maxNodes}`);
+    }
+    if (frame.depth > bounds.maxDepth) {
+      throw new BenchmarkJsonResourceLimitError(
+        `${label} exceeds maximum depth ${bounds.maxDepth} at ${frame.path}`
+      );
+    }
+
+    const current = frame.value;
+    if (current === null || typeof current === "boolean") continue;
+    if (typeof current === "string") {
+      chargeString(current, frame.path);
+      continue;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current) || (Number.isInteger(current) && !Number.isSafeInteger(current))) {
+        throw new BenchmarkJsonResourceLimitError(`${label} contains an invalid JSON number at ${frame.path}`);
+      }
+      continue;
+    }
+    if (typeof current !== "object") {
+      throw new BenchmarkJsonResourceLimitError(`${label} contains a non-JSON value at ${frame.path}`);
+    }
+    if (ancestors.has(current)) {
+      throw new BenchmarkJsonResourceLimitError(`${label} contains a cycle at ${frame.path}`);
+    }
+    const prototype = Object.getPrototypeOf(current);
+    if (Array.isArray(current) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+      throw new BenchmarkJsonResourceLimitError(`${label} contains a non-plain object at ${frame.path}`);
+    }
+    if (Object.getOwnPropertySymbols(current).length > 0) {
+      throw new BenchmarkJsonResourceLimitError(`${label} contains symbol properties at ${frame.path}`);
+    }
+
+    ancestors.add(current);
+    stack.push({ value: null, depth: frame.depth, path: frame.path, exit: current });
+    const enumerableKeys = Object.keys(current);
+    if (Array.isArray(current)) {
+      if (current.length > bounds.maxArrayLength) {
+        throw new BenchmarkJsonResourceLimitError(
+          `${label} exceeds maximum array length ${bounds.maxArrayLength} at ${frame.path}`
+        );
+      }
+      const ownNames = Object.getOwnPropertyNames(current);
+      if (
+        ownNames.length !== current.length + 1
+        || !ownNames.includes("length")
+        || enumerableKeys.length !== current.length
+      ) {
+        throw new BenchmarkJsonResourceLimitError(
+          `${label} contains a sparse, accessor-backed, or named-property array at ${frame.path}`
+        );
+      }
+      for (let index = current.length - 1; index >= 0; index -= 1) {
+        const key = String(index);
+        if (!Object.prototype.hasOwnProperty.call(current, key)) {
+          throw new BenchmarkJsonResourceLimitError(`${label} contains a sparse array at ${frame.path}`);
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (!descriptor || !("value" in descriptor)) {
+          throw new BenchmarkJsonResourceLimitError(`${label} contains an accessor at ${frame.path}[${index}]`);
+        }
+        stack.push({
+          value: descriptor.value,
+          depth: frame.depth + 1,
+          path: childPath(frame.path, `[${index}]`),
+        });
+      }
+      continue;
+    }
+
+    const ownNames = Object.getOwnPropertyNames(current);
+    if (ownNames.length !== enumerableKeys.length) {
+      throw new BenchmarkJsonResourceLimitError(`${label} contains non-enumerable properties at ${frame.path}`);
+    }
+    if (enumerableKeys.length > bounds.maxObjectKeys) {
+      throw new BenchmarkJsonResourceLimitError(
+        `${label} exceeds maximum object key count ${bounds.maxObjectKeys} at ${frame.path}`
+      );
+    }
+    for (let index = enumerableKeys.length - 1; index >= 0; index -= 1) {
+      const key = enumerableKeys[index];
+      if (key === "__proto__") {
+        throw new BenchmarkJsonResourceLimitError(`${label} contains forbidden key __proto__ at ${frame.path}`);
+      }
+      chargeString(key, childPath(frame.path, "<key>"));
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (!descriptor || !("value" in descriptor)) {
+        throw new BenchmarkJsonResourceLimitError(`${label} contains an accessor at ${childPath(frame.path, key)}`);
+      }
+      stack.push({
+        value: descriptor.value,
+        depth: frame.depth + 1,
+        path: childPath(frame.path, key),
+      });
+    }
+  }
+}
 
 const SHARED_VOICE_RULES = [
   "You are operating a realtime voice agent. Keep spoken replies concise and do not claim an action succeeded without an authoritative tool receipt.",
@@ -172,7 +383,7 @@ const SHARED_VOICE_RULES = [
 
 const DIRECT_CONTROL = [
   SHARED_VOICE_RULES,
-  `All business actions are invoked through ${CAPABILITY_GATEWAY_NAME} using one static full-catalog grant. The gateway applies ordinary action-schema and world validation but no flow routing, transition, or framework idempotency enforcement.`,
+  `All business actions are invoked through ${CAPABILITY_GATEWAY_NAME} using static full-catalog action-bound grants. The gateway applies ordinary action-schema and world validation but no flow routing, transition, or framework idempotency enforcement.`,
 ].join("\n");
 
 const GATEWAY_CONTROL = [
@@ -216,6 +427,203 @@ const BEHAVIORS: Readonly<Record<BenchmarkConditionId, ConditionBehavior>> = Obj
   }),
 });
 
+const SUITE_KEYS = [
+  "schemaVersion", "compilerVersion", "scenarioId", "scenarioVersion", "sourceHash",
+  "scenarioHash", "flowHash", "informationHash", "semanticToolsHash", "oracleRoute",
+  "canonicalInformation", "semanticLeafTools", "flowControlCapabilities", "conditions", "suiteHash",
+] as const;
+const CONDITION_KEYS = [
+  "id", "sourceHash", "scenarioHash", "flowHash", "behavior", "initialInformation",
+  "visibleCapabilities", "disclosures", "providerTools", "semanticLeafTools", "initialPrompt",
+  "initialPromptHash", "providerToolsHash", "conditionHash",
+] as const;
+const BEHAVIOR_KEYS = [
+  "toolExposure", "progressiveDisclosure", "genericDurableMemory", "durableFlowState",
+  "enforceTransitions", "enforceCapabilityGrants", "enforceExactlyOnce", "oracleRoute",
+] as const;
+const INFORMATION_KEYS = ["id", "kind", "target", "payload", "contentHash"] as const;
+const CAPABILITY_KEYS = ["name", "category", "description", "inputSchema", "semanticHash"] as const;
+const LOGICAL_TOOL_KEYS = [
+  "name", "kind", "duplicatePolicy", "prerequisiteDescriptions", "directProviderTool",
+  "semanticDefinitionHash", "publicContractHash", "providerSchemaHash", "capability",
+] as const;
+const PROVIDER_TOOL_KEYS = ["type", "name", "description", "parameters"] as const;
+const TOOL_REF_KEYS = ["name", "semanticDefinitionHash", "publicContractHash", "providerSchemaHash"] as const;
+const DISCLOSURE_KEYS = [
+  "target", "information", "visibleCapabilities", "prompt", "promptHash", "disclosureHash",
+] as const;
+const TRUST_ANCHOR_KEYS = [
+  "schemaVersion", "compilerVersion", "scenarioId", "scenarioVersion", "sourceHash",
+  "scenarioHash", "flowHash", "informationHash", "semanticToolsHash", "suiteHash",
+] as const;
+
+function exactRecord(value: unknown, keys: readonly string[], path: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConditionCompilerError(`${path} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new ConditionCompilerError(`${path} must contain exactly: ${expected.join(", ")}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function arrayValue(value: unknown, path: string): readonly unknown[] {
+  if (!Array.isArray(value)) throw new ConditionCompilerError(`${path} must be an array`);
+  return value;
+}
+
+function stringValue(value: unknown, path: string): string {
+  if (typeof value !== "string") throw new ConditionCompilerError(`${path} must be a string`);
+  return value;
+}
+
+function assertInformationShape(value: unknown, path: string): void {
+  const record = exactRecord(value, INFORMATION_KEYS, path);
+  if (!SAFE_INFORMATION_ID_PATTERN.test(stringValue(record.id, `${path}.id`))) {
+    throw new ConditionCompilerError(`${path}.id is not safe for prompt serialization`);
+  }
+  if (!["instructions", "objective", "routes", "fact", "topic", "step"].includes(stringValue(record.kind, `${path}.kind`))) {
+    throw new ConditionCompilerError(`${path}.kind is invalid`);
+  }
+  const target = stringValue(record.target, `${path}.target`);
+  if (target !== "$base" && !NON_BASE_DISCLOSURE_TARGET_PATTERN.test(target)) {
+    throw new ConditionCompilerError(`${path}.target is invalid`);
+  }
+  stringValue(record.contentHash, `${path}.contentHash`);
+}
+
+function assertCapabilityShape(value: unknown, path: string): void {
+  const record = exactRecord(value, CAPABILITY_KEYS, path);
+  if (!SAFE_CAPABILITY_NAME_PATTERN.test(stringValue(record.name, `${path}.name`))) {
+    throw new ConditionCompilerError(`${path}.name is invalid`);
+  }
+  if (!["leaf", "flow-control", "memory-control"].includes(stringValue(record.category, `${path}.category`))) {
+    throw new ConditionCompilerError(`${path}.category is invalid`);
+  }
+  stringValue(record.description, `${path}.description`);
+  stringValue(record.semanticHash, `${path}.semanticHash`);
+}
+
+function assertProviderToolShape(value: unknown, path: string): void {
+  const record = exactRecord(value, PROVIDER_TOOL_KEYS, path);
+  if (record.type !== "function") throw new ConditionCompilerError(`${path}.type must be function`);
+  if (!SAFE_CAPABILITY_NAME_PATTERN.test(stringValue(record.name, `${path}.name`))) {
+    throw new ConditionCompilerError(`${path}.name is invalid`);
+  }
+  stringValue(record.description, `${path}.description`);
+  if (record.parameters === null || typeof record.parameters !== "object" || Array.isArray(record.parameters)) {
+    throw new ConditionCompilerError(`${path}.parameters must be an object`);
+  }
+}
+
+function assertToolReferenceShape(value: unknown, path: string): void {
+  const record = exactRecord(value, TOOL_REF_KEYS, path);
+  for (const key of TOOL_REF_KEYS) stringValue(record[key], `${path}.${key}`);
+}
+
+function assertLogicalToolShape(value: unknown, path: string): void {
+  const record = exactRecord(value, LOGICAL_TOOL_KEYS, path);
+  stringValue(record.name, `${path}.name`);
+  if (!["query", "mutation"].includes(stringValue(record.kind, `${path}.kind`))) {
+    throw new ConditionCompilerError(`${path}.kind is invalid`);
+  }
+  if (!["execute", "return_prior", "reject"].includes(stringValue(record.duplicatePolicy, `${path}.duplicatePolicy`))) {
+    throw new ConditionCompilerError(`${path}.duplicatePolicy is invalid`);
+  }
+  for (const [index, description] of arrayValue(record.prerequisiteDescriptions, `${path}.prerequisiteDescriptions`).entries()) {
+    stringValue(description, `${path}.prerequisiteDescriptions[${index}]`);
+  }
+  assertProviderToolShape(record.directProviderTool, `${path}.directProviderTool`);
+  for (const key of ["semanticDefinitionHash", "publicContractHash", "providerSchemaHash"] as const) {
+    stringValue(record[key], `${path}.${key}`);
+  }
+  assertCapabilityShape(record.capability, `${path}.capability`);
+}
+
+function assertDisclosureShape(value: unknown, path: string): void {
+  const record = exactRecord(value, DISCLOSURE_KEYS, path);
+  const target = stringValue(record.target, `${path}.target`);
+  if (!NON_BASE_DISCLOSURE_TARGET_PATTERN.test(target)) {
+    throw new ConditionCompilerError(`${path}.target must be a safe non-base disclosure target`);
+  }
+  for (const [index, unit] of arrayValue(record.information, `${path}.information`).entries()) {
+    assertInformationShape(unit, `${path}.information[${index}]`);
+  }
+  for (const [index, capability] of arrayValue(record.visibleCapabilities, `${path}.visibleCapabilities`).entries()) {
+    assertCapabilityShape(capability, `${path}.visibleCapabilities[${index}]`);
+  }
+  for (const key of ["prompt", "promptHash", "disclosureHash"] as const) {
+    stringValue(record[key], `${path}.${key}`);
+  }
+}
+
+function assertConditionShape(value: unknown, path: string): asserts value is CompiledBenchmarkCondition {
+  const record = exactRecord(value, CONDITION_KEYS, path);
+  const embeddedId = stringValue(record.id, `${path}.id`);
+  if (!(BENCHMARK_CONDITION_IDS as readonly string[]).includes(embeddedId)) {
+    throw new ConditionCompilerError(`${path}.id is not a benchmark condition id`);
+  }
+  for (const key of ["sourceHash", "scenarioHash", "flowHash"] as const) {
+    stringValue(record[key], `${path}.${key}`);
+  }
+  const behavior = exactRecord(record.behavior, BEHAVIOR_KEYS, `${path}.behavior`);
+  if (behavior.toolExposure !== "gateway") throw new ConditionCompilerError(`${path}.behavior.toolExposure is invalid`);
+  for (const key of BEHAVIOR_KEYS.filter((key) => key !== "toolExposure")) {
+    if (typeof behavior[key] !== "boolean") throw new ConditionCompilerError(`${path}.behavior.${key} must be boolean`);
+  }
+  for (const [index, unit] of arrayValue(record.initialInformation, `${path}.initialInformation`).entries()) {
+    assertInformationShape(unit, `${path}.initialInformation[${index}]`);
+  }
+  for (const [index, capability] of arrayValue(record.visibleCapabilities, `${path}.visibleCapabilities`).entries()) {
+    assertCapabilityShape(capability, `${path}.visibleCapabilities[${index}]`);
+  }
+  for (const [index, disclosure] of arrayValue(record.disclosures, `${path}.disclosures`).entries()) {
+    assertDisclosureShape(disclosure, `${path}.disclosures[${index}]`);
+  }
+  for (const [index, tool] of arrayValue(record.providerTools, `${path}.providerTools`).entries()) {
+    assertProviderToolShape(tool, `${path}.providerTools[${index}]`);
+  }
+  for (const [index, tool] of arrayValue(record.semanticLeafTools, `${path}.semanticLeafTools`).entries()) {
+    assertToolReferenceShape(tool, `${path}.semanticLeafTools[${index}]`);
+  }
+  for (const key of ["initialPrompt", "initialPromptHash", "providerToolsHash", "conditionHash"] as const) {
+    stringValue(record[key], `${path}.${key}`);
+  }
+}
+
+function assertPersistedSuiteShape(value: unknown): asserts value is CompiledConditionSuite {
+  const suite = exactRecord(value, SUITE_KEYS, "compiled suite");
+  if (typeof suite.schemaVersion !== "number") throw new ConditionCompilerError("compiled suite.schemaVersion must be a number");
+  for (const key of [
+    "compilerVersion", "scenarioId", "scenarioVersion", "sourceHash", "scenarioHash", "flowHash",
+    "informationHash", "semanticToolsHash", "suiteHash",
+  ] as const) stringValue(suite[key], `compiled suite.${key}`);
+  for (const [index, route] of arrayValue(suite.oracleRoute, "compiled suite.oracleRoute").entries()) {
+    stringValue(route, `compiled suite.oracleRoute[${index}]`);
+  }
+  for (const [index, unit] of arrayValue(suite.canonicalInformation, "compiled suite.canonicalInformation").entries()) {
+    assertInformationShape(unit, `compiled suite.canonicalInformation[${index}]`);
+  }
+  for (const [index, tool] of arrayValue(suite.semanticLeafTools, "compiled suite.semanticLeafTools").entries()) {
+    assertLogicalToolShape(tool, `compiled suite.semanticLeafTools[${index}]`);
+  }
+  for (const [index, capability] of arrayValue(suite.flowControlCapabilities, "compiled suite.flowControlCapabilities").entries()) {
+    assertCapabilityShape(capability, `compiled suite.flowControlCapabilities[${index}]`);
+  }
+  const conditions = exactRecord(suite.conditions, BENCHMARK_CONDITION_IDS, "compiled suite.conditions");
+  for (const id of BENCHMARK_CONDITION_IDS) assertConditionShape(conditions[id], `compiled suite.conditions.${id}`);
+}
+
+function assertTrustAnchorShape(value: unknown): asserts value is ConditionSuiteTrustAnchor {
+  const anchor = exactRecord(value, TRUST_ANCHOR_KEYS, "condition suite trust anchor");
+  if (anchor.schemaVersion !== 1) throw new ConditionCompilerError("condition suite trust anchor schemaVersion must be 1");
+  for (const key of TRUST_ANCHOR_KEYS.filter((key) => key !== "schemaVersion")) {
+    stringValue(anchor[key], `condition suite trust anchor.${key}`);
+  }
+}
+
 type NormalizedSource = {
   scenario: BenchmarkScenario;
   flow: AgentFlow;
@@ -243,6 +651,7 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 }
 
 function normalizeSource(input: CanonicalConditionCompilerInput): NormalizedSource {
+  assertBenchmarkJsonResourceBounds(input, "condition compiler input", CONDITION_INPUT_RESOURCE_BOUNDS);
   const scenario = BenchmarkScenarioSchema.parse(input.scenario);
   const flow = AgentFlowSchema.parse(input.flow);
   if (flow.schema_version !== 2) {
@@ -717,6 +1126,9 @@ function conditionBody(
 ): unknown {
   return {
     id: condition.id,
+    sourceHash: condition.sourceHash,
+    scenarioHash: condition.scenarioHash,
+    flowHash: condition.flowHash,
     behavior: condition.behavior,
     initialInformation: condition.initialInformation,
     visibleCapabilities: condition.visibleCapabilities,
@@ -729,9 +1141,34 @@ function conditionBody(
   };
 }
 
+/** Recompute the self-authenticating condition digest before a runner trusts behavior flags. */
+export function compiledConditionHash(condition: CompiledBenchmarkCondition): string {
+  return hashJson("condition", conditionBody(condition));
+}
+
+export function assertCompiledConditionIntegrity(condition: unknown): asserts condition is CompiledBenchmarkCondition {
+  assertBenchmarkJsonResourceBounds(condition, "compiled condition", COMPILED_SUITE_RESOURCE_BOUNDS);
+  assertConditionShape(condition, "compiled condition");
+  if (condition.conditionHash !== compiledConditionHash(condition)) {
+    throw new ConditionCompilerError(`compiled condition ${condition.id} has an invalid condition hash`);
+  }
+}
+
+/** Digests used to bind a treatment kernel to the exact compiler source inputs. */
+export function benchmarkFlowHash(flow: unknown): string {
+  assertBenchmarkJsonResourceBounds(flow, "benchmark flow", CONDITION_INPUT_RESOURCE_BOUNDS);
+  return hashJson("flow", AgentFlowSchema.parse(flow));
+}
+
+export function benchmarkScenarioHash(scenario: unknown): string {
+  assertBenchmarkJsonResourceBounds(scenario, "benchmark scenario", CONDITION_INPUT_RESOURCE_BOUNDS);
+  return hashJson("scenario", BenchmarkScenarioSchema.parse(scenario));
+}
+
 function compileCondition(
   id: BenchmarkConditionId,
   source: NormalizedSource,
+  bindings: Readonly<{ sourceHash: string; scenarioHash: string; flowHash: string }>,
   information: readonly CompiledInformationUnit[],
   tools: readonly CompiledLogicalTool[],
   controls: readonly CompiledCapability[],
@@ -757,6 +1194,7 @@ function compileCondition(
   const initialPrompt = renderInitialPrompt(id, initialInformation, visibleCapabilities, source.oracleRoute);
   const withoutHash: Omit<CompiledBenchmarkCondition, "conditionHash"> = {
     id,
+    ...bindings,
     behavior,
     initialInformation,
     visibleCapabilities,
@@ -789,20 +1227,38 @@ function suiteBody(suite: Omit<CompiledConditionSuite, "suiteHash"> | CompiledCo
   };
 }
 
+/** Recompute the exact persisted-suite digest (excluding its digest field). */
+export function compiledConditionSuiteHash(suite: CompiledConditionSuite): string {
+  return hashJson("suite", suiteBody(suite));
+}
+
+/**
+ * Extract a compact trust anchor only after the full suite has passed its
+ * self-consistency and preregistered-treatment audit.
+ */
+export function createConditionSuiteTrustAnchor(suite: unknown): ConditionSuiteTrustAnchor {
+  assertConditionParity(suite);
+  const trusted = suite as CompiledConditionSuite;
+  return Object.freeze({
+    schemaVersion: trusted.schemaVersion,
+    compilerVersion: trusted.compilerVersion,
+    scenarioId: trusted.scenarioId,
+    scenarioVersion: trusted.scenarioVersion,
+    sourceHash: trusted.sourceHash,
+    scenarioHash: trusted.scenarioHash,
+    flowHash: trusted.flowHash,
+    informationHash: trusted.informationHash,
+    semanticToolsHash: trusted.semanticToolsHash,
+    suiteHash: trusted.suiteHash,
+  });
+}
+
 /**
  * Compile every preregistered arm from one canonical scenario/flow source.
  * There are intentionally no per-condition fact, policy, or leaf-tool inputs.
  */
 export function compileConditionSuite(input: CanonicalConditionCompilerInput): CompiledConditionSuite {
   const source = normalizeSource(input);
-  const information = buildInformation(source);
-  const tools = buildLogicalTools(source.scenario);
-  const controls = buildFlowControlCapabilities();
-  const disclosures = buildDisclosureTemplates(source.flow, information, tools, controls);
-  const conditions = Object.fromEntries(BENCHMARK_CONDITION_IDS.map((id) => [
-    id,
-    compileCondition(id, source, information, tools, controls, disclosures),
-  ])) as Record<BenchmarkConditionId, CompiledBenchmarkCondition>;
   const sourceMaterial = {
     scenario: source.scenario,
     flow: source.flow,
@@ -810,14 +1266,27 @@ export function compileConditionSuite(input: CanonicalConditionCompilerInput): C
     fact_disclosures: source.factDisclosures,
     oracle_route: source.oracleRoute,
   };
+  const bindings = Object.freeze({
+    sourceHash: hashJson("source", sourceMaterial),
+    scenarioHash: hashJson("scenario", source.scenario),
+    flowHash: hashJson("flow", source.flow),
+  });
+  const information = buildInformation(source);
+  const tools = buildLogicalTools(source.scenario);
+  const controls = buildFlowControlCapabilities();
+  const disclosures = buildDisclosureTemplates(source.flow, information, tools, controls);
+  const conditions = Object.fromEntries(BENCHMARK_CONDITION_IDS.map((id) => [
+    id,
+    compileCondition(id, source, bindings, information, tools, controls, disclosures),
+  ])) as Record<BenchmarkConditionId, CompiledBenchmarkCondition>;
   const withoutHash: Omit<CompiledConditionSuite, "suiteHash"> = {
     schemaVersion: 1,
     compilerVersion: CONDITION_COMPILER_VERSION,
     scenarioId: source.scenario.id,
     scenarioVersion: source.scenario.version,
-    sourceHash: hashJson("source", sourceMaterial),
-    scenarioHash: hashJson("scenario", source.scenario),
-    flowHash: hashJson("flow", source.flow),
+    sourceHash: bindings.sourceHash,
+    scenarioHash: bindings.scenarioHash,
+    flowHash: bindings.flowHash,
     informationHash: hashJson("information-catalog", information),
     semanticToolsHash: hashJson("semantic-tools", semanticToolRefs(tools)),
     oracleRoute: source.oracleRoute,
@@ -863,18 +1332,94 @@ function unitSetHash(units: readonly CompiledInformationUnit[], kind?: CompiledI
   return hashJson(kind === "fact" ? "fact-set" : "information-set", pairs);
 }
 
-/** Re-audit persisted or transported compilation artifacts before scheduling paid runs. */
-export function auditConditionParity(suite: CompiledConditionSuite): ConditionParityAudit {
+/**
+ * Re-audit persisted or transported compilation artifacts before scheduling
+ * paid runs. Supplying the trust anchor derived from the closed source
+ * registry additionally prevents a fully rehashed but source-substituted suite.
+ */
+export function auditConditionParity(
+  suiteInput: unknown,
+  trustAnchor?: ConditionSuiteTrustAnchor
+): ConditionParityAudit {
   const issues: ParityIssue[] = [];
   let rawFactHash: string | null = null;
   let progressiveFactHash: string | null = null;
   let semanticToolsHash: string | null = null;
   try {
+    assertBenchmarkJsonResourceBounds(suiteInput, "compiled condition suite", COMPILED_SUITE_RESOURCE_BOUNDS);
+    assertPersistedSuiteShape(suiteInput);
+    const suite = suiteInput;
+    if (trustAnchor !== undefined) {
+      assertBenchmarkJsonResourceBounds(trustAnchor, "condition suite trust anchor", {
+        maxDepth: 4,
+        maxNodes: 32,
+        maxArrayLength: 1,
+        maxObjectKeys: TRUST_ANCHOR_KEYS.length,
+        maxStringLength: 512,
+        maxAggregateStringLength: 4_096,
+      });
+      assertTrustAnchorShape(trustAnchor);
+      if (suite.scenarioId !== trustAnchor.scenarioId || suite.scenarioVersion !== trustAnchor.scenarioVersion) {
+        addIssue(issues, "trusted_source_identity", "suite scenario id/version differ from its trusted source anchor");
+      }
+      if (suite.sourceHash !== trustAnchor.sourceHash) {
+        addIssue(issues, "trusted_source_hash", "suite source hash differs from its trusted source anchor");
+      }
+      if (suite.scenarioHash !== trustAnchor.scenarioHash) {
+        addIssue(issues, "trusted_scenario_hash", "suite scenario hash differs from its trusted source anchor");
+      }
+      if (suite.flowHash !== trustAnchor.flowHash) {
+        addIssue(issues, "trusted_flow_hash", "suite flow hash differs from its trusted source anchor");
+      }
+      if (suite.informationHash !== trustAnchor.informationHash) {
+        addIssue(issues, "trusted_information_catalog", "suite information catalog differs from its trusted source anchor");
+      }
+      if (suite.semanticToolsHash !== trustAnchor.semanticToolsHash) {
+        addIssue(issues, "trusted_tool_catalog", "suite semantic tool catalog differs from its trusted source anchor");
+      }
+      if (
+        suite.schemaVersion !== trustAnchor.schemaVersion
+        || suite.compilerVersion !== trustAnchor.compilerVersion
+        || suite.suiteHash !== trustAnchor.suiteHash
+      ) {
+        addIssue(issues, "trusted_suite_hash", "suite digest/compiler identity differ from its trusted source anchor");
+      }
+    }
+    if (suite.schemaVersion !== 1) {
+      addIssue(issues, "suite_schema_version", `unsupported suite schema version ${suite.schemaVersion}`);
+    }
     if (suite.compilerVersion !== CONDITION_COMPILER_VERSION) {
       addIssue(issues, "compiler_version", `unsupported compiler version ${suite.compilerVersion}`);
     }
+    for (const [name, digest] of [
+      ["sourceHash", suite.sourceHash],
+      ["scenarioHash", suite.scenarioHash],
+      ["flowHash", suite.flowHash],
+      ["informationHash", suite.informationHash],
+      ["semanticToolsHash", suite.semanticToolsHash],
+      ["suiteHash", suite.suiteHash],
+    ] as const) {
+      if (!SHA256_PATTERN.test(digest)) addIssue(issues, "suite_digest_format", `${name} is not a lowercase SHA-256 digest`);
+    }
     if (!sameStringSet(Object.keys(suite.conditions), BENCHMARK_CONDITION_IDS)) {
       addIssue(issues, "condition_set", "compiled suite does not contain exactly the six preregistered conditions");
+    }
+    const duplicateValues = (values: readonly string[]): string[] => {
+      const seen = new Set<string>();
+      const duplicates = new Set<string>();
+      for (const value of values) (seen.has(value) ? duplicates : seen).add(value);
+      return [...duplicates].sort();
+    };
+    const duplicateCanonicalIds = duplicateValues(suite.canonicalInformation.map((unit) => unit.id));
+    if (duplicateCanonicalIds.length) {
+      addIssue(issues, "duplicate_canonical_information", `canonical information contains duplicate ids: ${duplicateCanonicalIds.join(", ")}`);
+    }
+    const sortedCanonicalIds = suite.canonicalInformation.map((unit) => unit.id).sort((left, right) => left.localeCompare(right));
+    if (canonicalJson(suite.canonicalInformation.map((unit) => unit.id)) !== canonicalJson(sortedCanonicalIds)) {
+      addIssue(issues, "canonical_information_order", "canonical information is not in canonical id order");
+    }
+    if (suite.informationHash !== hashJson("information-catalog", suite.canonicalInformation)) {
+      addIssue(issues, "information_catalog_hash", "suite canonical information catalog hash is invalid");
     }
     const canonicalUnits = new Map(suite.canonicalInformation.map((unit) => [unit.id, unit]));
     const canonicalUnitIds = [...canonicalUnits.keys()];
@@ -882,16 +1427,156 @@ export function auditConditionParity(suite: CompiledConditionSuite): ConditionPa
       const expected = hashJson("information", { id: unit.id, kind: unit.kind, payload: unit.payload });
       if (unit.contentHash !== expected) addIssue(issues, "information_hash", `canonical information ${unit.id} has an invalid content hash`);
     }
+    if (suite.oracleRoute.length === 0) {
+      addIssue(issues, "oracle_route", "suite oracle route must contain at least one step");
+    } else {
+      const stepUnit = (path: string): CompiledInformationUnit | undefined => {
+        const unit = canonicalUnits.get(`step.${path}`);
+        return unit?.kind === "step" && unit.target === `step:${path}` ? unit : undefined;
+      };
+      for (const path of suite.oracleRoute) {
+        if (!stepUnit(path)) addIssue(issues, "oracle_route", `suite oracle route references unknown step ${path}`);
+      }
+      const firstPayload = stepUnit(suite.oracleRoute[0])?.payload;
+      if (
+        firstPayload === null
+        || typeof firstPayload !== "object"
+        || Array.isArray(firstPayload)
+        || firstPayload.entry !== true
+      ) {
+        addIssue(issues, "oracle_route", "suite oracle route does not begin at an entry step");
+      }
+      for (let index = 1; index < suite.oracleRoute.length; index += 1) {
+        const previousPath = suite.oracleRoute[index - 1];
+        const nextPath = suite.oracleRoute[index];
+        const previousPayload = stepUnit(previousPath)?.payload;
+        if (previousPayload === null || typeof previousPayload !== "object" || Array.isArray(previousPayload)) continue;
+        const directChild = nextPath.startsWith(`${previousPath}.`)
+          && nextPath.split(".").length === previousPath.split(".").length + 1;
+        const transitions = Array.isArray(previousPayload.transitions) ? previousPayload.transitions : [];
+        const declaredTransition = transitions.some((transition) =>
+          transition !== null
+          && typeof transition === "object"
+          && !Array.isArray(transition)
+          && transition.to === nextPath
+        );
+        if (!directChild && !declaredTransition && previousPayload.on_failure !== nextPath) {
+          addIssue(issues, "oracle_route", `suite oracle route transition ${previousPath} -> ${nextPath} is not declared`);
+        }
+      }
+    }
+    const duplicateSemanticTools = duplicateValues(suite.semanticLeafTools.map((tool) => tool.name));
+    if (duplicateSemanticTools.length) {
+      addIssue(issues, "duplicate_semantic_tools", `semantic tool catalog contains duplicate names: ${duplicateSemanticTools.join(", ")}`);
+    }
+    const sortedSemanticToolNames = suite.semanticLeafTools.map((tool) => tool.name).sort((left, right) => left.localeCompare(right));
+    if (canonicalJson(suite.semanticLeafTools.map((tool) => tool.name)) !== canonicalJson(sortedSemanticToolNames)) {
+      addIssue(issues, "semantic_tool_order", "suite semantic tools are not in canonical name order");
+    }
+    for (const tool of suite.semanticLeafTools) {
+      const expectedProviderSchemaHash = hashJson("provider-tool", tool.directProviderTool);
+      const expectedPublicContractHash = hashJson("tool-public-contract", {
+        name: tool.name,
+        kind: tool.kind,
+        duplicate_policy: tool.duplicatePolicy,
+        prerequisites: tool.prerequisiteDescriptions,
+        provider_tool: tool.directProviderTool,
+      });
+      const expectedCapability: CompiledCapability = {
+        name: tool.name,
+        category: "leaf",
+        description: tool.directProviderTool.description,
+        inputSchema: asImmutableJson(tool.directProviderTool.parameters),
+        semanticHash: expectedPublicContractHash,
+      };
+      if (tool.directProviderTool.name !== tool.name) {
+        addIssue(issues, "semantic_tool_provider_name", `semantic tool ${tool.name} has a differently named provider contract`);
+      }
+      if (tool.providerSchemaHash !== expectedProviderSchemaHash) {
+        addIssue(issues, "semantic_tool_provider_hash", `semantic tool ${tool.name} has an invalid provider schema hash`);
+      }
+      if (tool.publicContractHash !== expectedPublicContractHash) {
+        addIssue(issues, "semantic_tool_public_hash", `semantic tool ${tool.name} has an invalid public contract hash`);
+      }
+      if (!SHA256_PATTERN.test(tool.semanticDefinitionHash)) {
+        addIssue(issues, "semantic_tool_definition_hash", `semantic tool ${tool.name} has an invalid definition digest`);
+      }
+      if (canonicalJson(tool.capability) !== canonicalJson(expectedCapability)) {
+        addIssue(issues, "semantic_tool_capability", `semantic tool ${tool.name} capability is not derived from its public contract`);
+      }
+    }
     const canonicalToolRefs = semanticToolRefs(suite.semanticLeafTools);
     semanticToolsHash = hashJson("semantic-tools", canonicalToolRefs);
     if (semanticToolsHash !== suite.semanticToolsHash) {
       addIssue(issues, "semantic_tools_catalog_hash", "suite semantic tool catalog hash is invalid");
     }
+    const expectedControls = buildFlowControlCapabilities();
+    if (canonicalJson(suite.flowControlCapabilities) !== canonicalJson(expectedControls)) {
+      addIssue(issues, "flow_control_catalog", "suite flow-control catalog differs from the compiler-defined controls");
+    }
+    const expectedLeafCapabilities = suite.semanticLeafTools
+      .map((tool) => tool.capability)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const expectedStateOnlyCapabilities = [...expectedControls, ...expectedLeafCapabilities]
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const expectedBaseInformation = suite.canonicalInformation.filter((unit) => unit.target === "$base");
+    const expectedDisclosureTargets = sortedUnique(suite.canonicalInformation
+      .map((unit) => unit.target)
+      .filter((target): target is Exclude<DisclosureTarget, "$base"> => target !== "$base"));
 
     for (const id of BENCHMARK_CONDITION_IDS) {
       const condition = suite.conditions[id];
       if (!condition) continue;
+      if (condition.id !== id) {
+        addIssue(issues, "condition_identity", "condition embedded id differs from its suite key", id);
+      }
+      if (canonicalJson(condition.behavior) !== canonicalJson(BEHAVIORS[id])) {
+        addIssue(issues, "condition_behavior", "condition behavior differs from the preregistered treatment table", id);
+      }
+      if (
+        condition.sourceHash !== suite.sourceHash
+        || condition.scenarioHash !== suite.scenarioHash
+        || condition.flowHash !== suite.flowHash
+      ) {
+        addIssue(issues, "condition_source_binding", "condition source/scenario/flow hashes differ from its suite", id);
+      }
       const union = unitUnion(condition);
+      const duplicateUnitIds = duplicateValues(union.map((unit) => unit.id));
+      if (duplicateUnitIds.length) {
+        addIssue(issues, "duplicate_condition_information", `condition repeats information ids: ${duplicateUnitIds.join(", ")}`, id);
+      }
+      const duplicateDisclosureTargets = duplicateValues(condition.disclosures.map((disclosure) => disclosure.target));
+      if (duplicateDisclosureTargets.length) {
+        addIssue(issues, "duplicate_disclosure_target", `condition repeats disclosure targets: ${duplicateDisclosureTargets.join(", ")}`, id);
+      }
+      const disclosureTargets = condition.disclosures.map((disclosure) => disclosure.target);
+      if (canonicalJson(disclosureTargets) !== canonicalJson([...disclosureTargets].sort((left, right) => left.localeCompare(right)))) {
+        addIssue(issues, "disclosure_order", "condition disclosures are not in canonical target order", id);
+      }
+      if (condition.behavior.progressiveDisclosure) {
+        if (canonicalJson(condition.initialInformation) !== canonicalJson(expectedBaseInformation)) {
+          addIssue(issues, "progressive_initial_catalog", "progressive initial information differs from the canonical base catalog", id);
+        }
+        if (!sameStringSet(condition.disclosures.map((disclosure) => disclosure.target), expectedDisclosureTargets)) {
+          addIssue(issues, "progressive_disclosure_catalog", "progressive disclosure targets differ from the canonical target catalog", id);
+        }
+        if (condition.initialInformation.some((unit) => unit.target !== "$base")) {
+          addIssue(issues, "information_container_target", "progressive initial information contains a non-base target", id);
+        }
+        for (const disclosure of condition.disclosures) {
+          const expectedInformation = suite.canonicalInformation.filter((unit) => unit.target === disclosure.target);
+          if (canonicalJson(disclosure.information) !== canonicalJson(expectedInformation)) {
+            addIssue(issues, "progressive_target_information", `disclosure ${disclosure.target} differs from its canonical information`, id);
+          }
+          if (disclosure.information.some((unit) => unit.target !== disclosure.target)) {
+            addIssue(issues, "information_container_target", `disclosure ${disclosure.target} contains information for another target`, id);
+          }
+        }
+      } else if (condition.disclosures.length !== 0) {
+        addIssue(issues, "unexpected_disclosure", "non-progressive condition contains disclosure stages", id);
+      } else if (canonicalJson(condition.initialInformation) !== canonicalJson(suite.canonicalInformation)) {
+        addIssue(issues, "nonprogressive_information_catalog", "non-progressive initial information differs from the canonical catalog", id);
+      }
       const byId = new Map<string, CompiledInformationUnit>();
       for (const unit of union) {
         const prior = byId.get(unit.id);
@@ -918,12 +1603,51 @@ export function auditConditionParity(suite: CompiledConditionSuite): ConditionPa
       }
 
       const expectedToolRefs = new Map(canonicalToolRefs.map((tool) => [tool.name, tool]));
+      const duplicateConditionToolRefs = duplicateValues(condition.semanticLeafTools.map((tool) => tool.name));
+      if (duplicateConditionToolRefs.length) {
+        addIssue(issues, "duplicate_condition_tool_refs", `condition repeats semantic tool references: ${duplicateConditionToolRefs.join(", ")}`, id);
+      }
       if (!sameStringSet(condition.semanticLeafTools.map((tool) => tool.name), [...expectedToolRefs.keys()])) {
         addIssue(issues, "semantic_tool_parity", "condition semantic leaf-tool names differ from canonical", id);
+      }
+      if (canonicalJson(condition.semanticLeafTools) !== canonicalJson(canonicalToolRefs)) {
+        addIssue(issues, "semantic_tool_catalog", "condition semantic tool catalog differs from canonical order or content", id);
       }
       for (const tool of condition.semanticLeafTools) {
         if (canonicalJson(tool) !== canonicalJson(expectedToolRefs.get(tool.name))) {
           addIssue(issues, "semantic_tool_mismatch", `condition changed semantic tool ${tool.name}`, id);
+        }
+      }
+      const capabilityContainers = [
+        { label: "initial", target: "$base" as DisclosureTarget, capabilities: condition.visibleCapabilities },
+        ...condition.disclosures.map((disclosure) => ({
+          label: disclosure.target,
+          target: disclosure.target as DisclosureTarget,
+          capabilities: disclosure.visibleCapabilities,
+        })),
+      ];
+      for (const container of capabilityContainers) {
+        const duplicates = duplicateValues(container.capabilities.map((capability) => capability.name));
+        if (duplicates.length) {
+          addIssue(issues, "duplicate_capability", `${container.label} repeats capabilities: ${duplicates.join(", ")}`, id);
+        }
+        const names = container.capabilities.map((capability) => capability.name);
+        if (canonicalJson(names) !== canonicalJson([...names].sort((left, right) => left.localeCompare(right)))) {
+          addIssue(issues, "capability_order", `${container.label} capabilities are not in canonical name order`, id);
+        }
+        if (condition.behavior.progressiveDisclosure) {
+          const actualControls = container.capabilities.filter((capability) => capability.category === "flow-control");
+          const expectedTargetControls = flowControlsAtTarget(container.target, expectedControls);
+          if (canonicalJson(actualControls) !== canonicalJson(expectedTargetControls)) {
+            addIssue(issues, "target_flow_controls", `${container.label} has incorrect flow controls for its disclosure target`, id);
+          }
+        }
+      }
+      const allVisibleCapabilities = capabilityContainers.flatMap((container) => container.capabilities);
+      const canonicalLeafByName = new Map(suite.semanticLeafTools.map((tool) => [tool.name, tool.capability]));
+      for (const capability of allVisibleCapabilities.filter((candidate) => candidate.category === "leaf")) {
+        if (canonicalJson(capability) !== canonicalJson(canonicalLeafByName.get(capability.name))) {
+          addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${capability.name}`, id);
         }
       }
       const leafCapabilities = new Map(leafCapabilityUnion(condition).map((capability) => [capability.name, capability]));
@@ -934,6 +1658,42 @@ export function auditConditionParity(suite: CompiledConditionSuite): ConditionPa
         if (canonicalJson(leafCapabilities.get(tool.name)) !== canonicalJson(tool.capability)) {
           addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${tool.name}`, id);
         }
+      }
+      const controlUnion = [...new Map(allVisibleCapabilities
+        .filter((capability) => capability.category === "flow-control")
+        .map((capability) => [capability.name, capability] as const)).values()]
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const expectedControlUnion = (id === "raw-full" || id === "raw-memory") ? [] : expectedControls;
+      if (canonicalJson(controlUnion) !== canonicalJson(expectedControlUnion)) {
+        addIssue(issues, "condition_flow_controls", "condition flow-control capability union differs from its treatment contract", id);
+      }
+      for (const capability of allVisibleCapabilities.filter((candidate) => candidate.category === "flow-control")) {
+        const expected = expectedControls.find((candidate) => candidate.name === capability.name);
+        if (canonicalJson(capability) !== canonicalJson(expected)) {
+          addIssue(issues, "flow_control_capability_mismatch", `condition changed flow control ${capability.name}`, id);
+        }
+      }
+      const memoryCapabilities = allVisibleCapabilities.filter((capability) => capability.category === "memory-control");
+      if (id === "raw-memory") {
+        if (memoryCapabilities.length !== 1 || canonicalJson(memoryCapabilities[0]) !== canonicalJson(durableMemoryCapability())) {
+          addIssue(issues, "durable_memory_contract", "raw-memory must expose exactly the compiler-defined durable_memory capability", id);
+        }
+      } else if (memoryCapabilities.length !== 0) {
+        addIssue(issues, "unexpected_memory_control", "condition exposes a memory-control capability outside raw-memory", id);
+      }
+
+      const expectedInitialCapabilities = id === "raw-full"
+        ? expectedLeafCapabilities
+        : id === "raw-memory"
+          ? [...expectedLeafCapabilities, durableMemoryCapability()].sort((left, right) => left.name.localeCompare(right.name))
+          : id === "state-only"
+            ? expectedStateOnlyCapabilities
+            : null;
+      if (
+        expectedInitialCapabilities
+        && canonicalJson(condition.visibleCapabilities) !== canonicalJson(expectedInitialCapabilities)
+      ) {
+        addIssue(issues, "initial_capability_catalog", "initial capability catalog differs from its treatment contract", id);
       }
 
       const expectedProviderTools = [CAPABILITY_GATEWAY_TOOL];
@@ -988,11 +1748,25 @@ export function auditConditionParity(suite: CompiledConditionSuite): ConditionPa
     )) {
       addIssue(issues, "enforcement_prompt_confound", "progressive-only and full-harness are not provider-visible identical");
     }
-    if (suite.suiteHash !== hashJson("suite", suiteBody(suite))) {
+    const oracle = suite.conditions["oracle-route"];
+    if (progressiveOnly && progressive && oracle && (
+      canonicalJson(progressiveOnly.initialInformation) !== canonicalJson(progressive.initialInformation)
+      || canonicalJson(progressiveOnly.initialInformation) !== canonicalJson(oracle.initialInformation)
+      || canonicalJson(progressiveOnly.visibleCapabilities) !== canonicalJson(progressive.visibleCapabilities)
+      || canonicalJson(progressiveOnly.visibleCapabilities) !== canonicalJson(oracle.visibleCapabilities)
+      || canonicalJson(progressiveOnly.disclosures) !== canonicalJson(oracle.disclosures)
+    )) {
+      addIssue(issues, "progressive_catalog_confound", "progressive treatment arms do not share one exact disclosure/capability catalog");
+    }
+    if (suite.suiteHash !== compiledConditionSuiteHash(suite)) {
       addIssue(issues, "suite_hash", "compiled suite hash is invalid");
     }
   } catch (error) {
-    addIssue(issues, "malformed_suite", error instanceof Error ? error.message : String(error));
+    addIssue(
+      issues,
+      error instanceof BenchmarkJsonResourceLimitError ? "suite_resource_bounds" : "malformed_suite",
+      error instanceof Error ? error.message : String(error)
+    );
   }
   return {
     valid: issues.length === 0,
@@ -1003,8 +1777,11 @@ export function auditConditionParity(suite: CompiledConditionSuite): ConditionPa
   };
 }
 
-export function assertConditionParity(suite: CompiledConditionSuite): void {
-  const audit = auditConditionParity(suite);
+export function assertConditionParity(
+  suite: unknown,
+  trustAnchor?: ConditionSuiteTrustAnchor
+): asserts suite is CompiledConditionSuite {
+  const audit = auditConditionParity(suite, trustAnchor);
   if (!audit.valid) {
     throw new ConditionCompilerError(`condition parity audit failed: ${audit.issues.map((issue) => `${issue.code}: ${issue.message}`).join("; ")}`);
   }
