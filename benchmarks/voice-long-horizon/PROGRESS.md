@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This file is append-only after the protocol freeze. Entries use Pacific Time and distinguish implementation evidence from scientific evidence. Provider spend is recorded in [BUDGET.md](BUDGET.md).
+This file is append-only after the protocol freeze. Entries use Pacific Time and distinguish implementation evidence from scientific evidence. Provider spend is recorded in [BUDGET.md](BUDGET.md); historical `paid spend` labels below mean voice-provider spend, not the separately tracked auxiliary review.
 
 ## 2026-07-10 — Program opened
 
@@ -32,6 +32,24 @@ Completed:
 - Added a $900 automatic scheduling ceiling so metering lag and in-flight work cannot consume the $100 hard-ceiling reserve by design.
 
 Evidence: first-party provider links are embedded in [PROVIDERS.md](PROVIDERS.md). No provider session was opened.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Database concurrency proof completed
+
+Applied migrations `001` through `008` to a fresh local Postgres 16/pgvector database. Migration `008_flow_integrity.sql` completed without error.
+
+The opt-in integration test in `flow-state-store.integration.test.ts` then opened 50 concurrent identical reservations against the real database:
+
+- exactly one caller received execution ownership;
+- all 50 calls converged on one persisted receipt;
+- the winning receipt settled successfully; and
+- 25 further concurrent retries all replayed that same successful receipt without receiving dispatch ownership.
+
+Evidence: commits `b6835ef` and `7a414e7`; local command `FLOW_INTEGRATION_DATABASE_URL=... npm run test -- --run lib/__tests__/flow-state-store.integration.test.ts`. The database URL is intentionally not recorded in tracked artifacts.
+
+This verifies database admission/replay concurrency. It does not claim exactly-once completion for an arbitrary downstream API after a network timeout; opaque outcomes remain indeterminate until reconciled.
 
 - Spend delta: **$0.00**
 - Cumulative paid spend: **$0.00**
@@ -124,3 +142,150 @@ This is implementation evidence, not a model-quality result.
 
 - Spend delta: **$0.00**
 - Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Audible State Commit checkpoint committed
+
+Source commit: `f2edaa2` (`feat: track audible state commits`).
+
+Completed:
+
+- Added a provider-neutral, revision-bound reducer that separately records generated audio, played audio, provider-retained history, interruptions, reconnect invalidation, explicit provider-history repair, and downstream dependencies on unheard content.
+- Made post-final provider-history changes fail closed unless they arrive as explicit repair evidence.
+- Required terminal generation plus observed provider history before an interrupted response can be declared aligned or committed.
+- Split provider-retained inaudible exposure from true Unheard-Content Leakage Rate; UCLR now requires an evidence-linked downstream dependency and completed horizon analysis.
+- Kept retry tracking O(1) in retained state so long calls do not make evidence reduction quadratic.
+
+Validation at the checkpoint:
+
+- Focused Vitest: **7 tests passed**.
+- Focused ESLint and isolated strict TypeScript: passed.
+- Independent adversarial and fuzz review: no remaining stop-ship findings after repair-bypass, premature-alignment, and metric-definition issues were corrected.
+- Synthetic 5,000-event reduction: approximately **23 ms** with a serialized reducer state of approximately **1.3 KB** on the development machine. This is an implementation microbenchmark, not provider-performance evidence.
+
+No realtime provider session was opened. The orchestrator still must bind these events to actual playback and provider-history repair before paid canaries.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Causally matched true-audio runner checkpoint
+
+Committed implementation checkpoints:
+
+- `da76fef`: compiled all six conditions from one canonical scenario/Flow source, mechanically audited fact/tool parity, and exposed the same single native `capability_gateway` schema to every provider and condition.
+- `9e742ba`: added a bounded, cancellable Streamable HTTP MCP client with atomic initialization, resumable SSE, catalog invalidation, endpoint policy, pagination caps, and redacted failures.
+- `82bee68` and `6a1e572`: added normalized OpenAI/xAI/Gemini server clients with manual PCM turns, terminal tool-call provenance, immutable observer events, usage evidence, strict format acknowledgement, cancellation, and reconnect/resumption evidence.
+- `dee0fa6` and `842f2b7`: added the paired realtime trial orchestrator, exact PCM hashes, common-gateway tool loop, authoritative-versus-model-visible outcomes, hard resource caps, Audible State Commit artifacts, 20 ms realtime packet pacing, and a backpressured redacted crash journal.
+- `0fd05dc`: added frozen 16/24 kHz caller-audio preparation and paid loading with exact toolchain/voice/signal provenance, same-descriptor no-follow reads, signal-quality gates, path-independent semantic identities, toolchain re-hashing, and no synthesis in paid mode.
+
+Focused evidence at these checkpoints included 66 cross-provider protocol tests, 13 orchestrator tests, 23 environment/audio tests, and repeated local native audio renders with identical PCM/manifest hashes. These counts overlap and are implementation evidence, not session outcomes.
+
+No realtime provider session was opened.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Adversarial flow and study-design corrections
+
+Adversarial traces found and corrected production/runtime defects before provider spend:
+
+- real Postgres concurrency proved one execution owner across 50 reservations and one replayed settled receipt across 25 concurrent retries (`b6835ef`, `7a414e7`);
+- call-scoped evidence now survives a legitimate same-step retry without redispatch (`cea5d7a`);
+- unresolved old-epoch effects block step retry, transition, and completion (`4e740c4`);
+- per-step/per-arguments idempotency keys now include the step attempt and no longer collide with the call-wide database unique index (`af1f11f`);
+- multiple successful intents for one output binding now fail as ambiguous instead of silently selecting the latest receipt (`a06df88`); and
+- the lease signer retains a five-minute production default but can bind a declared session up to one hour, preventing an artificial five-minute treatment failure (`2c5a4e3`).
+
+Outcome-blind exact paired-power calculations replaced the inefficient 48-template × 2-correlated-variant draft. The current recommendation is 107 independent held-out templates per provider, one primary variant, two headline arms, and 642 sessions total. At alpha 0.05 this provides 90% power for a 20-point paired strict-success improvement when discordance is at most 0.40 and at least 80% power when discordance is at most 0.50. Low/nominal/stress planning envelopes are approximately $196/$364/$740 before exploratory spend. This remains an unfrozen design recommendation, not collected evidence.
+
+Open paid-run blockers remain: complete the atomic indeterminate-effect reconciliation path, finish ToolWorld/caller-scheduler hardening and secret-boundary integration, pass the seeded offline fault E2E, freeze a canary plan, and verify the CLI ledger/journal from a clean checkout.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Zero-cost transactional fault sensitivity passed
+
+The executable offline CLI completed two immutable, network-disabled runs against the same sixteen-turn industrial ToolWorld:
+
+- `industrial-full-harness-fault-e2e` completed all seven ordered checkpoints, preserved the corrected `V-9B` valve, contained a premature forged close, retried only the declared pre-commit approval failure, recovered the timeout-after-commit close through authoritative state, and ended with `close_count=1`, `notification_count=1`, and `world_task_success=true`.
+- `industrial-raw-unsafe-sensitivity` intentionally used the unenforced raw path and the same semantic fault probes. It ended with `close_count=2`, `close_retry_contained=false`, and `world_task_success=false`.
+
+Complete artifact directories are content-addressed by:
+
+- full harness: `3419833d65f1bd0b7d567150f15778441a9356e2c9783847cc9901e7ab1822df`;
+- raw sensitivity control: `a589e5f8e535408d42c0d8331872c519e8086ef92e5b77262834d4ac9e186c33`.
+
+The run journal also passed an APFS-specific immutable-publication smoke test without weakening Linux link-count checks. The deterministic caller/world scheduler and claim-gated report generator were committed as `2e3e241` and `83fb3f6`.
+
+This is a $0 scripted-runtime sensitivity check. It proves that the measurement stack can detect the intended exactly-once/containment intervention; it is **not** evidence that any realtime model is better under the harness. Paid model canaries remain blocked while adversarial review closes provider tool-schema parity, event/turn identity, signed final-kernel attestation, reconciliation, and public secret-boundary findings.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-10 — Flow-independent mission runtime earned an exploratory provider arm
+
+Implemented an experimental mission runtime for cases where one fixed path is the wrong abstraction. It persists a focus-scoped goal stack, provenance-sensitive fact revisions, proof-carrying obligations, proposal-bound confirmation, correction-triggered authority revocation, saga compensation, idempotent receipts, a transition hash chain, and exact-state cross-channel continuation.
+
+A 1,000-seed same-intent offline sensitivity run compared the runtime with an unenforced controller:
+
+- raw strict pass: **245 / 1,000 (24.5%)**;
+- mission strict pass: **1,000 / 1,000 (100.0%)**;
+- raw unsafe/duplicate effects: **922**;
+- mission adversarial attempts rejected: **1,151**, plus **183** idempotently suppressed duplicate deliveries (**1,334** contained opportunities total);
+- partial saga failures recovered through compensation: **153 / 153**;
+- mission runtime failures and terminal open obligations: **0 / 0**;
+- semantic result hash: `b91d50cf6b1f477713000671f31ea57a6de026ff22e569b98d4a5e7a63a689b2`.
+
+The full methodology, per-fault counts, serialized artifact hash, command, and claim boundary are in [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md). This is deterministic runtime-containment evidence only. It earns an exploratory `adaptive-mission` provider arm; it does not alter the preregistered raw-versus-full-harness headline comparison and does not support a model-quality claim.
+
+- Spend delta: **$0.00**
+- Cumulative paid spend: **$0.00**
+
+## 2026-07-16 — Hostile claim-boundary and public-release audit
+
+An external Fable/Claude Code architecture review was purchased for **$0.65141**. The saved response is [unverified peer-review input](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md), not C1–C5 evidence. It challenged the signed-attestation trust boundary and the risk that a conjunctive strict endpoint could make treatment-enforced containment look like reduced model drift.
+
+The draft protocol now requires separate `task_completion`, `model_integrity`, and `system_integrity` effects beside `strict_success`; explicit provenance-versus-replay wording; fail-closed retention of missing final proof; requested-versus-acknowledged provider identity; and a written no-spend/canary acceptance packet.
+
+Public-release review also kept the paid gate closed. The stock Twilio/xAI SIP ingress, high-authority builder SQL/JavaScript tools, open operator enrollment/spend surfaces, database tenant enforcement, scheduler-secret failure mode, caller-identity handling, recording retention, and standalone bridge authentication/backpressure/client-side tool-loop boundaries require code fixes before the repository can be described as a hardened public multi-tenant deployment. These findings are documented in [SECURITY.md](../../SECURITY.md); documentation warnings are not mitigations.
+
+Numerical artifact reconciliation corrected one presentation error without changing the underlying mission result: the 1,000-seed JSON records **1,151 rejected attempts plus 183 idempotently suppressed duplicate deliveries = 1,334 contained opportunities**, not “1,151 blocked or deduplicated.” The semantic result hash remains `b91d50cf6b1f477713000671f31ea57a6de026ff22e569b98d4a5e7a63a689b2`; serialized SHA-256 remains `f8013b93e8ca92ce71cfb7ab6ceb4a190941691fad8da9a690f9655fddccef0b`.
+
+First-party OpenAI, xAI, and Gemini model/protocol/pricing pages were rechecked on 2026-07-16; the candidate provider targets did not change. Live acknowledgement remains unverified until canaries.
+
+Final local doc-audit snapshot before handoff: ToolWorld hardening/replay **25/25 passed**; the mid-integration kernel-attestation suite **2/8 passed and 6/8 failed** because the generated and parsed schemas had diverged; the strict-endpoint expansion had declared ten criteria before `scoreStrictPass` wired all ten; and the kernel-transcript benchmark could not rerun because `gateway-kernel.ts` referenced an undeclared private field. These are explicit executable stop-ships, not evidence. Counts must be refreshed after the code lanes settle.
+
+- Voice-provider spend delta: **$0.00**
+- Cumulative paid voice-provider spend: **$0.00**
+- Auxiliary review spend delta/cumulative: **$0.65141**
+- Total recorded program cash spend: **$0.65141**
+- Paid canary gate: **closed**
+
+## 2026-07-16 — Database-tenancy adversarial review
+
+A second Fable/Claude Code review cost **$0.762557** and is preserved as [unverified database-tenancy advice](../../docs/research/external/2026-07-16-database-tenancy-fable.md). It identified concrete tests for structurally safe role selection, `FORCE ROW LEVEL SECURITY`, worker `WITH CHECK` policies, and sequence/table grants. Those suggestions do not count as repository evidence; only the disposable-Postgres migration tests can close the tenancy gate.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
+- Auxiliary review spend delta: **$0.762557**
+- Cumulative auxiliary review spend: **$1.413967**
+- Total recorded program cash spend: **$1.413967**
+- Paid canary gate: **closed**
+
+## 2026-07-16 — Campaign scheduler authority review
+
+A third Fable/Claude Code review cost **$0.752466** and is preserved as [unverified campaign-scheduler authority advice](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md). It independently reviewed commit-barrier behavior, campaign-state rechecks, database-time leases, recipient privacy, and unknown-outcome handling. Its findings remain advisory only; executable reconciliation, crash, privacy, and authorization tests are the evidence gate.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
+- Auxiliary review spend delta: **$0.752466**
+- Cumulative auxiliary review spend: **$2.166433**
+- Total recorded program cash spend: **$2.166433**
+- Paid canary gate: **closed**
+
+## 2026-07-16 — Authentication and credential-boundary review
+
+A fourth Fable/Claude Code review cost **$0.458499** (rounded from the provider record) and is preserved as [unverified authentication and credential-boundary advice](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md). Follow-up executable tests cover durable sink-generation decryption after ephemeral slot cleanup and lease-expiry fencing during stalled MCP discovery. The review itself remains advisory and does not advance an evidence class.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
+- Auxiliary review spend delta: **$0.458499**
+- Cumulative auxiliary review spend: **$2.624932**
+- Total recorded program cash spend: **$2.624932**
+- Paid canary gate: **closed**

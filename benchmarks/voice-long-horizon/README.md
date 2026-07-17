@@ -4,7 +4,7 @@
 
 This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. It compares the same model against itself: the raw agent receives the entire workflow and action catalog up front, while the harness progressively discloses the current objective and routes actions through durable, runtime-enforced state.
 
-**Current status: protocol and infrastructure work, with $0.00 in paid experiment spend. No superiority result exists yet.** A public claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
+**Current status: draft protocol and infrastructure work, with $0.00 in paid voice-provider session spend. No superiority result exists yet.** Four separately tracked unverified architecture/security reviews cost **$2.624932** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
 
 The benchmark is designed to answer six questions:
 
@@ -17,11 +17,19 @@ The benchmark is designed to answer six questions:
 
 Primary scores come from deterministic hidden world state, tool traces, authoritative receipts, playback traces, and declared invariants. Transcript or model-graded quality is secondary and can never override executable evidence.
 
+The report decomposes three different questions:
+
+- `task_completion`: did the agent reach the intended world/checkpoint result with complete required-action receipts and no false completion or critical unsupported spoken-policy act?
+- `model_integrity`: did the model avoid illegal attempts, stale facts, skipped requirements, and false completion through the evaluated horizon?
+- `system_integrity`: did the runtime prevent unauthorized, duplicate, invalid, or unverified effects from executing?
+
+The conjunctive `strict_success` product endpoint remains useful, but some of its safety terms are enforced by the harness. A strict-success gain alone therefore cannot support “the model drifted less.” That wording additionally requires paired model-integrity and relevant component evidence; containment claims use system-integrity evidence. `task_completion` must be implemented and frozen before effectiveness collection.
+
 ## Conditions
 
-The frozen headline comparison will be:
+The candidate headline comparison, which is not yet frozen, is:
 
-- `raw-full`: one complete workflow prompt and all direct action tools are exposed from turn one. Tools retain normal schema and business validation, but receive no framework flow grants, state machine, or exactly-once layer.
+- `raw-full`: one complete workflow prompt and the full logical action catalog are exposed from turn one behind the same native capability-gateway schema used by every arm. Actions retain normal schema and business validation, but receive no framework flow grants, state machine, or exactly-once layer.
 - `full-harness`: the model starts with a stable capability gateway. Context and logical capabilities—including always-available actions—are disclosed for the current state, and every consequential transition or action passes through durable Flow v2 enforcement.
 
 The causal matrix adds `progressive-only` and `state-only` arms to distinguish disclosure effects from runtime enforcement. `raw-memory` is a stronger raw baseline with generic durable memory, and `oracle-route` is a diagnostic ceiling rather than a headline condition. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md).
@@ -44,10 +52,12 @@ These are design hypotheses until the implementation and confirmatory evidence a
 
 ## Evidence policy
 
-- Every paid run writes an immutable manifest, raw provider event trace, normalized event trace, usage record, score record, and hashes for input/output audio and transcripts.
+- Every paid run writes a hash-manifested bundle with a redacted provider-event projection, normalized event trace, usage record, score record, and hashes for input/output audio and transcripts.
 - Failed, disconnected, blocked, and timed-out runs remain in the dataset.
 - Provider/model IDs, source commit, scenario version, prompt/tool hashes, audio hashes, randomization seed, adapter version, and evaluator version are recorded.
 - Model violations are reported separately from runtime containment. Blocking an illegal action supports a containment claim; it does not prove that the model became safer or better aligned.
+- A plan-pinned Ed25519 kernel attestation binds an artifact to its run, condition, source/build hashes, final heads, and signing identity. Because the signer currently runs in-process, that signature proves provenance and detects mutation/substitution; it does **not** prove that the kernel described itself honestly. Replayable ToolWorld/event/receipt claims get their truth from independent deterministic replay against the frozen source. Private Flow claims remain tied to the pinned implementation and must not be described as independently observed. Provider settings that are not acknowledged stay labeled `unverifiable`.
+- Missing, invalid, or non-replayable final evidence is preserved and fails the strict endpoint. A kernel crash or absent attestation is never silently excluded.
 - Results include sample counts, paired effect sizes, uncertainty intervals, and per-provider breakdowns. No claim is made from a showcase run or a selectively retained subset.
 - Costs are controlled by [BUDGET.md](BUDGET.md). New sessions stop being scheduled at $900, leaving a $100 hard-ceiling reserve.
 
@@ -57,8 +67,15 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - [PREREGISTRATION.md](PREREGISTRATION.md): fields that must be frozen before confirmatory runs
 - [PROVIDERS.md](PROVIDERS.md): July 2026 model, protocol, session, and pricing constraints
 - [PRIOR_ART.md](PRIOR_ART.md): closest systems, benchmarks, and exact claim boundaries
-- [ARTIFACTS.md](ARTIFACTS.md): immutable run bundle and evidence-integrity contract
+- [ARTIFACTS.md](ARTIFACTS.md): hash-manifested run bundle, replay, and evidence-integrity contract
 - [BUDGET.md](BUDGET.md): fail-closed spend gates and live ledger
 - [PROGRESS.md](PROGRESS.md): dated implementation and experiment log
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
 - [RESULTS.md](RESULTS.md): artifact-derived outcomes; currently records that no results exist
+- [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
+- [DECISION_EVIDENCE.md](DECISION_EVIDENCE.md): claim-by-claim evidence level and the next numerical gate for every retained framework decision
+- [KERNEL_TRANSCRIPT_REPLAY.md](KERNEL_TRANSCRIPT_REPLAY.md): reproducible $0 signed public-transcript and durable-memory replay sensitivity
+- [External Fable claim-architecture review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
+- [External Fable database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
+- [External Fable campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
+- [External Fable authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
