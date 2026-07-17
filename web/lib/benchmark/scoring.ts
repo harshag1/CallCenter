@@ -2599,12 +2599,12 @@ export function reliableSemanticHorizon(
       point.lower_bound !== expectedInterval.lower
       || point.upper_bound !== expectedInterval.upper
     ) throw new Error("Semantic CIC confidence bounds do not match the registered method and counts");
-    if (point.lower_bound < threshold) {
+    if (limitingOpportunityIndex === null && point.lower_bound < threshold) {
       limitingOpportunityIndex = point.opportunity_index;
       limitingOpportunityId = point.opportunity_id;
-      break;
+    } else if (limitingOpportunityIndex === null) {
+      opportunities = point.opportunity_index;
     }
-    opportunities = point.opportunity_index;
   }
   return Object.freeze({
     threshold,

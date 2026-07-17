@@ -1298,6 +1298,29 @@ describe("strict long-horizon benchmark scoring", () => {
           }
         : point
     ), 0.8)).toThrow(/cumulative counts cannot recover/);
+    expect(() => reliableSemanticHorizon(modelCurve.map((point, index) =>
+      index === 3
+        ? { ...point, lower_bound: adjacentPositiveFloat(point.lower_bound, "up") }
+        : point
+    ), 0.8)).toThrow(/confidence bounds do not match/);
+    expect(() => reliableSemanticHorizon(modelCurve.map((point, index) =>
+      index === 3
+        ? { ...point, upper_bound: adjacentPositiveFloat(point.upper_bound, "down") }
+        : point
+    ), 0.8)).toThrow(/confidence bounds do not match/);
+    expect(() => reliableSemanticHorizon(modelCurve.map((point, index) =>
+      index === 3
+        ? {
+            ...point,
+            intact_units: 100,
+            failed_units: 0,
+            truncated_units: 0,
+            integrity: 1,
+            lower_bound: 1,
+            upper_bound: 1,
+          }
+        : point
+    ), 0.8)).toThrow(/cumulative counts cannot recover/);
   });
 
   it("uses exact binomial bounds at the Wilson boundary-undercoverage counterexample", () => {

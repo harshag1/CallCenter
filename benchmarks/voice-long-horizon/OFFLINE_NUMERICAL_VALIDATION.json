@@ -75,5 +75,104 @@
     "source_files": {
       "web/lib/benchmark/statistics.ts": "d2e5b20824baa4044a2f64b20d7a9d95f7cb9c7efe5d268f16116f6ac264263e"
     }
+  },
+  "semantic_horizon_interval_falsification": {
+    "evidence_class": "design_falsification",
+    "claim_scope": "exact Binomial coverage audit of the pre-fix Bonferroni-Wilson semantic-horizon band",
+    "verdict": "invalid_uniform_simultaneous_coverage",
+    "sample_size": 107,
+    "family_alpha": 0.05,
+    "cases": [
+      {
+        "opportunities": 4,
+        "pointwise_confidence": 0.9875,
+        "worst_one_sided_coverage": 0.883904715424,
+        "worst_probability_left_limit": 0.001152662371,
+        "first_nonzero_count": 1,
+        "rh_0_90_false_positive_union_bound": 0.004212786979
+      },
+      {
+        "opportunities": 16,
+        "pointwise_confidence": 0.996875,
+        "worst_one_sided_coverage": 0.910188561074,
+        "worst_probability_left_limit": 0.000879085256,
+        "first_nonzero_count": 1,
+        "rh_0_90_false_positive_union_bound": 0.002619895521
+      },
+      {
+        "opportunities": 32,
+        "pointwise_confidence": 0.9984375,
+        "worst_one_sided_coverage": 0.919445407942,
+        "worst_probability_left_limit": 0.000784594924,
+        "first_nonzero_count": 1,
+        "rh_0_90_false_positive_union_bound": 0.000406535512
+      }
+    ],
+    "interpretation": "The checked 0.90 threshold decision is conservative in these cases, but the Wilson curve is not a uniform 95% simultaneous confidence band. Inferential RH remains disabled until an exact method and coverage test replace it.",
+    "required_replacement": "Bonferroni-adjusted exact Clopper-Pearson lower limits or exact multiplicity-adjusted Binomial threshold tests",
+    "independent_cross_check": {
+      "implementation": "SciPy binom and norm",
+      "version": "1.17.1",
+      "simulation": false
+    },
+    "tested_source_files": {
+      "web/lib/benchmark/scoring.ts": "a866225f14a8a9761dee3f23929d3bc59a359f5d06bf5a69102c45f6cf622510",
+      "web/lib/benchmark/statistics.ts": "d2e5b20824baa4044a2f64b20d7a9d95f7cb9c7efe5d268f16116f6ac264263e"
+    }
+  },
+  "clopper_pearson_replacement_verification": {
+    "evidence_class": "design_verification",
+    "claim_scope": "exact endpoint and coverage audit of the scorer-level interval implementation; not report integration or provider efficacy",
+    "verdict": "verified_for_checked_registered_sizes",
+    "method": "bonferroni_clopper_pearson_simultaneous_band",
+    "sample_size": 107,
+    "family_confidence": 0.95,
+    "cases": [
+      {
+        "opportunities": 1,
+        "pointwise_confidence": 0.95,
+        "minimum_exact_coverage": 0.950019875361
+      },
+      {
+        "opportunities": 4,
+        "pointwise_confidence": 0.9875,
+        "minimum_exact_coverage": 0.987514066942
+      },
+      {
+        "opportunities": 16,
+        "pointwise_confidence": 0.996875,
+        "minimum_exact_coverage": 0.996879451539
+      },
+      {
+        "opportunities": 32,
+        "pointwise_confidence": 0.9984375,
+        "minimum_exact_coverage": 0.998444176986
+      },
+      {
+        "opportunities": 64,
+        "pointwise_confidence": 0.99921875,
+        "minimum_exact_coverage": 0.99922283268
+      },
+      {
+        "opportunities": 120,
+        "pointwise_confidence": 0.9995833333333334,
+        "minimum_exact_coverage": 0.999592543956
+      }
+    ],
+    "n_1_minimum_coverages": [0.975, 0.99375, 0.9984375, 0.99921875],
+    "n_0_behavior": "rejected: total must be a positive safe integer",
+    "ordered": true,
+    "monotone_in_success_count": true,
+    "repeat_stable": true,
+    "adjacent_float_bound_mutations_rejected": true,
+    "maximum_absolute_scipy_endpoint_error": 4.6629367034256575e-15,
+    "independent_cross_check": {
+      "implementation": "SciPy beta and binom",
+      "version": "1.17.1",
+      "simulation": false
+    },
+    "tested_source_files": {
+      "web/lib/benchmark/scoring.ts": "53d9ec5e091872c471ec15d90bbcd31776573ccd7ea599641dd22ed1dce585d9"
+    }
   }
 }
