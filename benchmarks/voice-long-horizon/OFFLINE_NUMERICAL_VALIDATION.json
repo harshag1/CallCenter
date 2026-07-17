@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "artifact_type": "offline_numerical_validation",
+  "source_commit": "7336a32d1c03a7e29dbba1301b5efeda37079143",
+  "source_state": "dirty_worktree; source/result hashes bind the tested bytes and outputs, so this is not a clean-build claim",
+  "run_date": "2026-07-16",
+  "provider_sessions": 0,
+  "provider_spend_usd": 0,
+  "mission_runtime": {
+    "evidence_class": "C2",
+    "claim_scope": "deterministic runtime sensitivity against an intentionally unenforced controller; not speech-model quality",
+    "command": "cd web && npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out /tmp/hacc-mission-runtime-sensitivity-7336a32d.json",
+    "trials": 1000,
+    "seed_start": 1,
+    "raw_strict_pass_count": 245,
+    "raw_strict_pass_rate": 0.245,
+    "mission_strict_pass_count": 1000,
+    "mission_strict_pass_rate": 1,
+    "absolute_difference": 0.755,
+    "raw_unsafe_effect_count": 922,
+    "mission_blocked_attempt_count": 1151,
+    "mission_runtime_failure_count": 0,
+    "mission_terminal_open_obligation_count": 0,
+    "source_files": {
+      "web/lib/benchmark/mission-runtime-sensitivity.ts": "2de05248033135e9962c2992c14b0b55f1b172c24136ad6abf644cac7f98c6de",
+      "web/lib/mission-runtime.ts": "f2d092122e19a1c3fe57d15ff538448d4bbabd96828db8af17258ac98b396aa7"
+    },
+    "semantic_result_sha256": "b91d50cf6b1f477713000671f31ea57a6de026ff22e569b98d4a5e7a63a689b2",
+    "pretty_json_sha256": "f8013b93e8ca92ce71cfb7ab6ceb4a190941691fad8da9a690f9655fddccef0b"
+  },
+  "tool_world_causal_containment": {
+    "evidence_class": "C1_C2",
+    "claim_scope": "fixed deterministic synthetic ToolWorld contract schedules; not population or provider inference",
+    "command": "cd web && npx tsx scripts/tool-world-causal-containment.ts --check",
+    "trial_count": 160,
+    "seed_start": 7301,
+    "seeds_per_case": 32,
+    "naive_comparator_unsafe_accept_count": 160,
+    "harness_contained_count": 160,
+    "harness_corrupt_state_rejection_count": 64,
+    "harness_idempotent_suppression_count": 96,
+    "semantic_result_sha256": "f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab",
+    "trial_set_sha256": "d1ac1e90e5701109e0eece6a98256baa7068c642d5b718293f3ac9ff5be0e09d",
+    "schedule_set_sha256": "2fd7948bcb01ee2d5a98e9c4fa0519b668f000d7ebe28c42da13560149379fc2",
+    "artifact_file_sha256": "d17b59e6bbbbba1645da56ff4068cea689e4d5063e1df5ba2c93f89aae50bac4",
+    "provenance_file_sha256": "f6e3c3383a047b3cf9169a403c2dc2f4266afafaa7d78f90b6eebe460d0ed34b"
+  },
+  "paired_power_candidate": {
+    "evidence_class": "design_calculation",
+    "claim_scope": "planning-only exact conditional McNemar power; not power for the different current report decision rule",
+    "method": "exact_conditional_mcnemar_two_sided",
+    "sample_size": 107,
+    "risk_difference": 0.2,
+    "alpha": 0.05,
+    "cases": [
+      {
+        "discordance": 0.4,
+        "treatment_only_probability": 0.3,
+        "baseline_only_probability": 0.1,
+        "power": 0.901694818246
+      },
+      {
+        "discordance": 0.5,
+        "treatment_only_probability": 0.35,
+        "baseline_only_probability": 0.15,
+        "power": 0.817718446241
+      }
+    ],
+    "independent_cross_check": {
+      "implementation": "SciPy binom",
+      "version": "1.17.1",
+      "normal_approximation": false,
+      "simulation": false
+    },
+    "source_files": {
+      "web/lib/benchmark/statistics.ts": "d2e5b20824baa4044a2f64b20d7a9d95f7cb9c7efe5d268f16116f6ac264263e"
+    }
+  }
+}
