@@ -129,7 +129,22 @@ END
 $policy$;
 
 REVOKE ALL ON mcp_tool_invocation_receipts FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON mcp_tool_invocation_receipts TO hacc_backend;
+GRANT SELECT, DELETE ON mcp_tool_invocation_receipts TO hacc_backend;
+-- Before migration 028 exists, INSERT is needed by the prerelease store. Once
+-- the atomic quota function is installed, a standalone reapply of this older
+-- migration must never reopen direct receipt insertion.
+DO $mcp_receipt_runtime_insert$
+BEGIN
+  IF to_regprocedure(
+    'public.admit_mcp_tool_invocation(uuid,uuid,text,text,jsonb,text,text,integer,uuid,integer)'
+  ) IS NULL
+     AND to_regclass('public.mcp_call_invocation_quotas') IS NULL THEN
+    GRANT INSERT, UPDATE ON mcp_tool_invocation_receipts TO hacc_backend;
+  ELSE
+    REVOKE INSERT, UPDATE ON mcp_tool_invocation_receipts FROM hacc_backend;
+  END IF;
+END
+$mcp_receipt_runtime_insert$;
 DO $api_revokes$
 DECLARE
   api_role text;

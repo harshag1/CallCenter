@@ -28,6 +28,7 @@ const IDS = Object.freeze({
   recordingConsentCallA: "00000000-0000-4000-8000-000000000042",
   recordingConsentCallB: "00000000-0000-4000-8000-000000000043",
   recordingConsentCallC: "00000000-0000-4000-8000-000000000044",
+  recordingRetentionCall: "00000000-0000-4000-8000-000000000045",
   credentialSlotA: "00000000-0000-4000-8000-000000000051",
   credentialSlotB: "00000000-0000-4000-8000-000000000052",
   flowA: "00000000-0000-4000-8000-000000000061",
@@ -705,10 +706,12 @@ async function main() {
         `INSERT INTO call_recordings(
            call_id, mime, data, consent_receipt_hmac_sha256, consent_granted_at,
            consent_notice_version, retained_until, byte_length, sha256
-         ) VALUES (
-           $1,'audio/webm',decode('010203','hex'),$2,now(),'recording-v1',
-           now() + interval '1 day',3,encode(digest(decode('010203','hex'),'sha256'),'hex')
-         )`,
+         )
+         SELECT $1,'audio/webm',decode('010203','hex'),$2,receipt.granted_at,
+                receipt.notice_version,receipt.granted_at + interval '1 day',3,
+                encode(digest(decode('010203','hex'),'sha256'),'hex')
+         FROM recording_consent_receipts receipt
+         WHERE receipt.receipt_hmac_sha256 = $2`,
         [IDS.recordingConsentCallA, receiptDigest]
       );
       await runtime.query("DELETE FROM calls WHERE id = $1", [IDS.recordingConsentCallA]);
@@ -1368,19 +1371,48 @@ async function main() {
     });
 
     await withClient(socket, port, "hacc_runtime", async (runtime) => {
+      const retentionReceiptDigest = "9".repeat(64);
+      const retentionUploadHash = "8".repeat(64);
       await runtime.query(
-        "UPDATE calls SET recording_path = $2 WHERE id = $1",
-        [IDS.callA, `db:${IDS.callA}`]
+        `INSERT INTO calls(
+           id,agent_id,agent_version,direction,status,recording_path
+         ) VALUES ($1,$2,1,'web','completed',$3)`,
+        [
+          IDS.recordingRetentionCall,
+          IDS.agentA,
+          `db:${IDS.recordingRetentionCall}`,
+        ]
+      );
+      await runtime.query(
+        `INSERT INTO recording_consent_receipts(
+           org_id,receipt_hmac_sha256,call_id,granted_at,notice_version,
+           retention_days,source,upload_token_hash,upload_expires_at,created_at
+         ) VALUES (
+           $1,$2,$3,now() - interval '2 days','recording-v1',1,
+           'authenticated_web_session',$4,now() - interval '46 hours',
+           now() - interval '2 days'
+         )`,
+        [
+          IDS.orgA,
+          retentionReceiptDigest,
+          IDS.recordingRetentionCall,
+          retentionUploadHash,
+        ]
       );
       await runtime.query(
         `INSERT INTO call_recordings(
-           call_id, mime, data, created_at, retained_until, byte_length, sha256, updated_at
-         ) VALUES (
-           $1,'audio/basic;rate=8000',decode('010203','hex'),
-           now() - interval '2 days',now() - interval '1 day',3,
-           encode(digest(decode('010203','hex'),'sha256'),'hex'),now() - interval '2 days'
-         )`,
-        [IDS.callA]
+           call_id, mime, data, consent_receipt_hmac_sha256,
+           consent_granted_at, consent_notice_version, created_at,
+           retained_until, byte_length, sha256, updated_at
+         )
+         SELECT $1,'audio/basic;rate=8000',decode('010203','hex'),$2,
+                receipt.granted_at,receipt.notice_version,
+                receipt.granted_at,receipt.granted_at + interval '1 day',3,
+                encode(digest(decode('010203','hex'),'sha256'),'hex'),
+                receipt.granted_at
+         FROM recording_consent_receipts receipt
+         WHERE receipt.receipt_hmac_sha256 = $2`,
+        [IDS.recordingRetentionCall, retentionReceiptDigest]
       );
       const purged = await runtime.query("SELECT purge_expired_call_recordings(500)::int AS count");
       invariant(purged.rows[0]?.count === 1, "retention worker did not purge the expired recording");
@@ -1395,7 +1427,7 @@ async function main() {
            ORDER BY deleted_at DESC LIMIT 1
          ) d ON true
          WHERE c.id = $1`,
-        [IDS.callA]
+        [IDS.recordingRetentionCall]
       );
       const row = lifecycle.rows[0];
       invariant(
@@ -1411,9 +1443,13 @@ async function main() {
       await expectDenied(
         runtime,
         "UPDATE call_recording_deletions SET actor = 'tampered' WHERE call_id = $1",
-        [IDS.callA]
+        [IDS.recordingRetentionCall]
       );
-      await expectDenied(runtime, "DELETE FROM call_recording_deletions WHERE call_id = $1", [IDS.callA]);
+      await expectDenied(
+        runtime,
+        "DELETE FROM call_recording_deletions WHERE call_id = $1",
+        [IDS.recordingRetentionCall]
+      );
       recordingRetentionLifecycleVerified = true;
     });
 
