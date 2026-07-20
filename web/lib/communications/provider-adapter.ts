@@ -4,8 +4,10 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
  * Provider-neutral communication boundary.
  *
  * This module deliberately does not mint approval or spend authority. A caller
- * must inject a durable authority verifier, and provider I/O is unreachable
- * until that verifier confirms exclusive ownership of an exact reservation.
+ * must inject a durable authority claimer, and provider mutation/dispatch is
+ * unreachable until it atomically claims the exact reservation. Configuration,
+ * normalization, and quote hooks run before that claim and must be local/pure
+ * unless a deployment separately authorizes provider read traffic.
  */
 
 export const COMMUNICATION_ADAPTER_CONTRACT_VERSION =
@@ -118,7 +120,8 @@ export type FundedCommunicationAuthorityExpectationV1 = Readonly<{
 }>;
 
 export type VerifiedFundedCommunicationAuthorityV1 = Readonly<{
-  state: "reserved-and-exclusively-owned";
+  state: "claimed-for-exclusive-dispatch";
+  attempt: 1;
   approvalId: string;
   executionId: string;
   /** Must equal executionId; the model cannot choose this value. */
@@ -129,8 +132,13 @@ export type VerifiedFundedCommunicationAuthorityV1 = Readonly<{
   expiresAt: string;
 }>;
 
-export interface FundedCommunicationAuthorityVerifierV1 {
-  verify(
+export interface FundedCommunicationAuthorityClaimerV1 {
+  /**
+   * Atomically consumes/claims the reservation for its sole provider attempt.
+   * Replays and concurrent losers must return null; a read-only verifier is not
+   * sufficient for mutations that lack provider-native idempotency.
+   */
+  claimForDispatch(
     expectation: FundedCommunicationAuthorityExpectationV1
   ): Promise<VerifiedFundedCommunicationAuthorityV1 | null>;
 }
@@ -252,6 +260,7 @@ export type AcceptedCommunicationReceiptV1 = Readonly<{
   requestBindingSha256: string;
   quoteSha256: string;
   acceptedAt: string;
+  receiptProofSha256: string;
 }>;
 
 export type TerminalCommunicationReceiptV1 = Readonly<{
@@ -296,6 +305,7 @@ export type NonAcceptedCommunicationReceiptV1 = Readonly<{
   requestBindingSha256: string;
   quoteSha256: string;
   recordedAt: string;
+  receiptProofSha256: string;
 }>;
 
 export type CommunicationDispatchReceiptV1 =
@@ -311,6 +321,17 @@ export type CommunicationReconciliationResultV1 =
       idempotencyKey: string;
     }>;
 
+export interface TerminalCommunicationReceiptStoreV1 {
+  /**
+   * Atomically applies a terminal transition with message identity + sequence
+   * CAS semantics. Return `exact-replay` only for the same already-applied
+   * event; return null for stale, conflicting, or out-of-order transitions.
+   */
+  apply(
+    candidate: TerminalCommunicationReceiptV1
+  ): Promise<"applied" | "exact-replay" | null>;
+}
+
 type QuoteInput = Readonly<{
   adapter: CommunicationProviderAdapterV1<unknown, unknown>;
   rawConfiguration: unknown;
@@ -318,7 +339,6 @@ type QuoteInput = Readonly<{
   destination: unknown;
   payload: unknown;
   receiptBindingSecret: string;
-  now?: Date;
 }>;
 
 const IDENTIFIER = /^[a-z][a-z0-9.-]{0,127}$/;
@@ -376,6 +396,13 @@ function exactRecord(
       actual.every((key, index) => key === expected[index]),
     `${label} has an unsupported shape`
   );
+  for (const key of actual) {
+    const property = Object.getOwnPropertyDescriptor(record, key);
+    assertCondition(
+      property && "value" in property && property.enumerable,
+      `${label} may contain only enumerable data properties`
+    );
+  }
   return record;
 }
 
@@ -479,7 +506,13 @@ function safeInteger(value: unknown, label: string, minimum = 0): number {
 function descriptorOf(
   adapter: CommunicationProviderAdapterV1<unknown, unknown>
 ): CommunicationAdapterDescriptorV1 {
-  const descriptor = adapter?.descriptor;
+  assertCondition(adapter !== null && typeof adapter === "object", "communication adapter is required");
+  const descriptorProperty = Object.getOwnPropertyDescriptor(adapter, "descriptor");
+  assertCondition(
+    descriptorProperty && "value" in descriptorProperty,
+    "communication adapter descriptor must be an own data property"
+  );
+  const descriptor = descriptorProperty.value as CommunicationAdapterDescriptorV1;
   exactRecord(descriptor, [
     "adapterId",
     "adapterVersion",
@@ -514,7 +547,12 @@ function descriptorOf(
   assertCondition(operationKeys.length > 0, "communication adapter has no operations");
   for (const operation of operationKeys) {
     assertCondition(OPERATION_SET.has(operation), `unsupported communication operation ${operation}`);
-    const contract = descriptor.operations[operation as CommunicationOperation];
+    const operationProperty = Object.getOwnPropertyDescriptor(descriptor.operations, operation);
+    assertCondition(
+      operationProperty && "value" in operationProperty && operationProperty.enumerable,
+      `communication operation ${operation} must be an enumerable data property`
+    );
+    const contract = operationProperty.value as CommunicationOperationContractV1;
     exactRecord(contract, [
       "idempotency",
       "pricingFormulaVersion",
@@ -794,7 +832,7 @@ function exactQuote(left: CommunicationQuoteV1, right: CommunicationQuoteV1): bo
 export async function quoteCommunication(
   input: QuoteInput
 ): Promise<CommunicationQuoteV1> {
-  const quotedAt = input.now ?? new Date();
+  const quotedAt = new Date();
   const context = await resolveQuoteContext({
     ...input,
     quotedAt,
@@ -836,6 +874,7 @@ function validateAuthority(
   assertCondition(value, "funded communication authority was denied");
   exactRecord(value, [
     "approvalId",
+    "attempt",
     "executionId",
     "expiresAt",
     "idempotencyKey",
@@ -845,7 +884,8 @@ function validateAuthority(
     "units",
   ], "funded communication authority");
   assertCondition(
-    value.state === "reserved-and-exclusively-owned" &&
+    value.state === "claimed-for-exclusive-dispatch" &&
+      value.attempt === 1 &&
       value.approvalId === expectation.approvalId &&
       UUID.test(value.executionId) &&
       value.idempotencyKey === value.executionId &&
@@ -905,10 +945,11 @@ function acceptedReceipt(
   base: ReturnType<typeof baseReceipt>,
   providerMessageId: string,
   acceptedAt: Date,
-  evidenceSource: AcceptedCommunicationReceiptV1["evidenceSource"]
+  evidenceSource: AcceptedCommunicationReceiptV1["evidenceSource"],
+  receiptBindingSecret: string
 ): AcceptedCommunicationReceiptV1 {
   boundedText(providerMessageId, "provider message identity", 2_048);
-  return Object.freeze({
+  const core = {
     ...base,
     status: "accepted",
     evidenceSource,
@@ -916,6 +957,16 @@ function acceptedReceipt(
     retrySafe: false,
     providerMessageId,
     acceptedAt: canonicalTimestamp(acceptedAt, "acceptance time"),
+  } as const;
+  return Object.freeze({
+    ...core,
+    receiptProofSha256: keyedBinding(
+      // The caller-facing receipt is integrity protected independently of the
+      // provider webhook. It cannot be substituted before reconciliation.
+      receiptBindingSecret,
+      "accepted-receipt-proof",
+      core
+    ),
   });
 }
 
@@ -923,15 +974,24 @@ function nonAcceptedReceipt(
   base: ReturnType<typeof baseReceipt>,
   status: NonAcceptedCommunicationReceiptV1["status"],
   code: string,
-  recordedAt: Date
+  recordedAt: Date,
+  receiptBindingSecret: string
 ): NonAcceptedCommunicationReceiptV1 {
-  return Object.freeze({
+  const core = {
     ...base,
     status,
     code,
     verifiedTerminal: false,
     retrySafe: false,
     recordedAt: canonicalTimestamp(recordedAt, "receipt time"),
+  } as const;
+  return Object.freeze({
+    ...core,
+    receiptProofSha256: keyedBinding(
+      receiptBindingSecret,
+      "non-accepted-receipt-proof",
+      core
+    ),
   });
 }
 
@@ -939,11 +999,11 @@ export async function dispatchCommunication(
   input: QuoteInput & Readonly<{
     approvedQuote: unknown;
     approvalId: string;
-    authorityVerifier: FundedCommunicationAuthorityVerifierV1;
+    authorityClaimer: FundedCommunicationAuthorityClaimerV1;
     signal?: AbortSignal;
   }>
 ): Promise<CommunicationDispatchReceiptV1> {
-  const now = input.now ?? new Date();
+  const now = new Date();
   const quote = parseQuote(input.approvedQuote);
   assertCondition(
     quote.operation === input.operation,
@@ -970,7 +1030,7 @@ export async function dispatchCommunication(
   );
   const expectation = authorityExpectation(input.approvalId, quote);
   const authority = validateAuthority(
-    await input.authorityVerifier.verify(expectation),
+    await input.authorityClaimer.claimForDispatch(expectation),
     expectation,
     now
   );
@@ -992,15 +1052,40 @@ export async function dispatchCommunication(
     });
   } catch {
     // Once provider dispatch is entered, an exception cannot prove absence.
-    return nonAcceptedReceipt(base, "indeterminate", "provider_outcome_unknown", now);
+    return nonAcceptedReceipt(
+      base,
+      "indeterminate",
+      "provider_outcome_unknown",
+      now,
+      input.receiptBindingSecret
+    );
   }
 
   if (!outcome || typeof outcome !== "object") {
-    return nonAcceptedReceipt(base, "indeterminate", "provider_evidence_invalid", now);
+    return nonAcceptedReceipt(
+      base,
+      "indeterminate",
+      "provider_evidence_invalid",
+      now,
+      input.receiptBindingSecret
+    );
   }
-  if (outcome.status === "accepted") {
+  let outcomeStatus: unknown;
+  try {
+    outcomeStatus = outcome.status;
+  } catch {
+    return nonAcceptedReceipt(
+      base,
+      "indeterminate",
+      "provider_evidence_invalid",
+      now,
+      input.receiptBindingSecret
+    );
+  }
+  if (outcomeStatus === "accepted") {
     try {
-      exactRecord(outcome, [
+      const accepted = outcome as Extract<ProviderDispatchOutcomeV1, { status: "accepted" }>;
+      exactRecord(accepted, [
         "idempotencyKey",
         "providerAccountId",
         "providerDestination",
@@ -1008,41 +1093,78 @@ export async function dispatchCommunication(
         "status",
       ], "accepted provider outcome");
       assertCondition(
-        providerIdentityMatches(context, outcome, authority),
+        providerIdentityMatches(context, accepted, authority),
         "accepted provider identity mismatch"
       );
       return acceptedReceipt(
         base,
-        outcome.providerMessageId,
+        accepted.providerMessageId,
         now,
-        "provider-dispatch-response"
+        "provider-dispatch-response",
+        input.receiptBindingSecret
       );
     } catch {
-      return nonAcceptedReceipt(base, "indeterminate", "provider_evidence_invalid", now);
-    }
-  }
-  if (outcome.status === "rejected") {
-    try {
-      exactRecord(outcome, ["code", "status"], "rejected provider outcome");
-      return nonAcceptedReceipt(base, "rejected", outcomeCode(outcome.code, "provider_rejected"), now);
-    } catch {
-      return nonAcceptedReceipt(base, "indeterminate", "provider_evidence_invalid", now);
-    }
-  }
-  if (outcome.status === "indeterminate") {
-    try {
-      exactRecord(outcome, ["code", "status"], "indeterminate provider outcome");
       return nonAcceptedReceipt(
         base,
         "indeterminate",
-        outcomeCode(outcome.code, "provider_outcome_unknown"),
-        now
+        "provider_evidence_invalid",
+        now,
+        input.receiptBindingSecret
       );
-    } catch {
-      return nonAcceptedReceipt(base, "indeterminate", "provider_evidence_invalid", now);
     }
   }
-  return nonAcceptedReceipt(base, "indeterminate", "provider_evidence_invalid", now);
+  if (outcomeStatus === "rejected") {
+    try {
+      const rejected = outcome as Extract<ProviderDispatchOutcomeV1, { status: "rejected" }>;
+      exactRecord(rejected, ["code", "status"], "rejected provider outcome");
+      return nonAcceptedReceipt(
+        base,
+        "rejected",
+        outcomeCode(rejected.code, "provider_rejected"),
+        now,
+        input.receiptBindingSecret
+      );
+    } catch {
+      return nonAcceptedReceipt(
+        base,
+        "indeterminate",
+        "provider_evidence_invalid",
+        now,
+        input.receiptBindingSecret
+      );
+    }
+  }
+  if (outcomeStatus === "indeterminate") {
+    try {
+      const indeterminate = outcome as Extract<
+        ProviderDispatchOutcomeV1,
+        { status: "indeterminate" }
+      >;
+      exactRecord(indeterminate, ["code", "status"], "indeterminate provider outcome");
+      return nonAcceptedReceipt(
+        base,
+        "indeterminate",
+        outcomeCode(indeterminate.code, "provider_outcome_unknown"),
+        now,
+        input.receiptBindingSecret
+      );
+    } catch {
+      return nonAcceptedReceipt(
+        base,
+        "indeterminate",
+        "provider_evidence_invalid",
+        now,
+        input.receiptBindingSecret
+      );
+    }
+  }
+  return nonAcceptedReceipt(
+    base,
+    "indeterminate",
+    "provider_evidence_invalid",
+    now,
+    input.receiptBindingSecret
+  );
 }
 
 function parseDispatchReceipt(
@@ -1131,6 +1253,18 @@ function terminalReceipt(
   });
 }
 
+async function applyTerminalReceipt(
+  store: TerminalCommunicationReceiptStoreV1,
+  candidate: TerminalCommunicationReceiptV1
+): Promise<TerminalCommunicationReceiptV1> {
+  const result = await store.apply(candidate);
+  assertCondition(
+    result === "applied" || result === "exact-replay",
+    "terminal communication transition was rejected"
+  );
+  return candidate;
+}
+
 async function reconciliationContext<Configuration, PreparedRequest>(
   input: Readonly<{
     adapter: CommunicationProviderAdapterV1<Configuration, PreparedRequest>;
@@ -1143,6 +1277,21 @@ async function reconciliationContext<Configuration, PreparedRequest>(
   }>
 ) {
   const receipt = parseDispatchReceipt(input.receipt);
+  const { receiptProofSha256, ...receiptCore } = receipt;
+  assertCondition(
+    SHA256.test(receiptProofSha256) &&
+      sameDigest(
+        receiptProofSha256,
+        keyedBinding(
+          input.receiptBindingSecret,
+          receipt.status === "accepted"
+            ? "accepted-receipt-proof"
+            : "non-accepted-receipt-proof",
+          receiptCore
+        )
+      ),
+    "communication receipt proof is invalid"
+  );
   const descriptor = descriptorOf(
     input.adapter as CommunicationProviderAdapterV1<unknown, unknown>
   );
@@ -1219,11 +1368,11 @@ export async function reconcileCommunication(
     payload: unknown;
     receiptBindingSecret: string;
     receipt: CommunicationDispatchReceiptV1;
-    now?: Date;
+    terminalStore: TerminalCommunicationReceiptStoreV1;
     signal?: AbortSignal;
   }>
 ): Promise<CommunicationReconciliationResultV1> {
-  const now = input.now ?? new Date();
+  const now = new Date();
   const context = await reconciliationContext(input);
   let outcome: ProviderReconciliationOutcomeV1;
   try {
@@ -1250,15 +1399,29 @@ export async function reconcileCommunication(
       idempotencyKey: context.receipt.idempotencyKey,
     });
   }
-  if (outcome.status === "authoritative_absent" || outcome.status === "unknown") {
+  let outcomeStatus: unknown;
+  try {
+    outcomeStatus = outcome.status;
+  } catch {
+    return Object.freeze({
+      status: "unknown",
+      retrySafe: false,
+      idempotencyKey: context.receipt.idempotencyKey,
+    });
+  }
+  if (outcomeStatus === "authoritative_absent" || outcomeStatus === "unknown") {
     try {
-      exactRecord(outcome, ["idempotencyKey", "status"], "provider reconciliation outcome");
+      const absent = outcome as Extract<
+        ProviderReconciliationOutcomeV1,
+        { status: "authoritative_absent" | "unknown" }
+      >;
+      exactRecord(absent, ["idempotencyKey", "status"], "provider reconciliation outcome");
       assertCondition(
-        outcome.idempotencyKey === context.receipt.idempotencyKey,
+        absent.idempotencyKey === context.receipt.idempotencyKey,
         "provider reconciliation idempotency identity mismatch"
       );
       return Object.freeze({
-        status: outcome.status,
+        status: absent.status,
         retrySafe: false,
         idempotencyKey: context.receipt.idempotencyKey,
       });
@@ -1271,15 +1434,19 @@ export async function reconcileCommunication(
     }
   }
   try {
-    if (outcome.status === "pending") {
-      exactRecord(outcome, [
+    if (outcomeStatus === "pending") {
+      const pending = outcome as Extract<
+        ProviderReconciliationOutcomeV1,
+        { status: "pending" }
+      >;
+      exactRecord(pending, [
         "idempotencyKey",
         "providerAccountId",
         "providerDestination",
         "providerMessageId",
         "status",
       ], "pending provider reconciliation");
-      validateReconciliationIdentity(context, outcome, context.receipt);
+      validateReconciliationIdentity(context, pending, context.receipt);
       const accepted = context.receipt.status === "accepted"
         ? context.receipt
         : acceptedReceipt(
@@ -1297,20 +1464,25 @@ export async function reconcileCommunication(
               requestBindingSha256: context.receipt.requestBindingSha256,
               quoteSha256: context.receipt.quoteSha256,
             },
-            outcome.providerMessageId,
+            pending.providerMessageId,
             now,
-            "authoritative-provider-read"
+            "authoritative-provider-read",
+            input.receiptBindingSecret
           );
       return Object.freeze({ status: "pending", receipt: accepted });
     }
-    if (outcome.status !== "delivered" && outcome.status !== "terminal_failure") {
+    if (outcomeStatus !== "delivered" && outcomeStatus !== "terminal_failure") {
       return Object.freeze({
         status: "unknown",
         retrySafe: false,
         idempotencyKey: context.receipt.idempotencyKey,
       });
     }
-    exactRecord(outcome, [
+    const terminal = outcome as Extract<
+      ProviderReconciliationOutcomeV1,
+      { status: "delivered" | "terminal_failure" }
+    >;
+    exactRecord(terminal, [
       "idempotencyKey",
       "providerAccountId",
       "providerDestination",
@@ -1319,7 +1491,7 @@ export async function reconcileCommunication(
       "sequence",
       "status",
     ], "terminal provider reconciliation");
-    validateReconciliationIdentity(context, outcome, context.receipt);
+    validateReconciliationIdentity(context, terminal, context.receipt);
     const accepted = context.receipt.status === "accepted"
       ? context.receipt
       : acceptedReceipt(
@@ -1337,20 +1509,22 @@ export async function reconcileCommunication(
             requestBindingSha256: context.receipt.requestBindingSha256,
             quoteSha256: context.receipt.quoteSha256,
           },
-          outcome.providerMessageId,
+          terminal.providerMessageId,
           now,
-          "authoritative-provider-read"
+          "authoritative-provider-read",
+          input.receiptBindingSecret
         );
     const receipt = terminalReceipt({
       accepted,
-      status: outcome.status,
-      providerStatus: outcome.providerStatus,
-      sequence: outcome.sequence,
+      status: terminal.status,
+      providerStatus: terminal.providerStatus,
+      sequence: terminal.sequence,
       verifiedAt: now,
       evidenceSource: "authoritative-provider-read",
       receiptBindingSecret: input.receiptBindingSecret,
     });
-    return Object.freeze({ status: outcome.status, receipt });
+    const applied = await applyTerminalReceipt(input.terminalStore, receipt);
+    return Object.freeze({ status: terminal.status, receipt: applied });
   } catch {
     return Object.freeze({
       status: "unknown",
@@ -1411,11 +1585,11 @@ export async function reconcileCommunicationWebhook(
     payload: unknown;
     receiptBindingSecret: string;
     acceptedReceipt: AcceptedCommunicationReceiptV1;
+    terminalStore: TerminalCommunicationReceiptStoreV1;
     webhook: CommunicationWebhookRequestV1;
-    now?: Date;
   }>
 ): Promise<TerminalCommunicationReceiptV1> {
-  const now = input.now ?? new Date();
+  const now = new Date();
   const context = await reconciliationContext({
     adapter: input.adapter,
     rawConfiguration: input.rawConfiguration,
@@ -1434,40 +1608,45 @@ export async function reconcileCommunicationWebhook(
     contract.reconciliation === "verified-webhook-and-authoritative-read",
     "communication operation does not admit webhook reconciliation"
   );
-  const verified = await input.adapter.verifyWebhook({
-    configuration: context.configured.value,
-    request: normalizeWebhookRequest(input.webhook),
-  });
-  assertCondition(verified, "communication webhook verification failed");
-  exactRecord(verified, [
-    "providerAccountId",
-    "providerDestination",
-    "providerMessageId",
-    "providerStatus",
-    "sequence",
-    "status",
-  ], "verified communication webhook event");
-  assertCondition(
-    verified.status === "delivered" || verified.status === "terminal_failure",
-    "verified communication webhook is not terminal"
-  );
-  validateReconciliationIdentity(
-    context,
-    {
-      ...verified,
-      idempotencyKey: context.receipt.idempotencyKey,
-    },
-    context.receipt
-  );
-  return terminalReceipt({
-    accepted: context.receipt,
-    status: verified.status,
-    providerStatus: verified.providerStatus,
-    sequence: verified.sequence,
-    verifiedAt: now,
-    evidenceSource: "verified-provider-webhook",
-    receiptBindingSecret: input.receiptBindingSecret,
-  });
+  const webhook = normalizeWebhookRequest(input.webhook);
+  try {
+    const verified = await input.adapter.verifyWebhook({
+      configuration: context.configured.value,
+      request: webhook,
+    });
+    assertCondition(verified, "communication webhook verification failed");
+    exactRecord(verified, [
+      "providerAccountId",
+      "providerDestination",
+      "providerMessageId",
+      "providerStatus",
+      "sequence",
+      "status",
+    ], "verified communication webhook event");
+    assertCondition(
+      verified.status === "delivered" || verified.status === "terminal_failure",
+      "verified communication webhook is not terminal"
+    );
+    validateReconciliationIdentity(
+      context,
+      {
+        ...verified,
+        idempotencyKey: context.receipt.idempotencyKey,
+      },
+      context.receipt
+    );
+    return await applyTerminalReceipt(input.terminalStore, terminalReceipt({
+      accepted: context.receipt,
+      status: verified.status,
+      providerStatus: verified.providerStatus,
+      sequence: verified.sequence,
+      verifiedAt: now,
+      evidenceSource: "verified-provider-webhook",
+      receiptBindingSecret: input.receiptBindingSecret,
+    }));
+  } catch {
+    throw new Error("communication webhook verification failed");
+  }
 }
 
 /**
@@ -1477,6 +1656,24 @@ export async function reconcileCommunicationWebhook(
 export function defineCommunicationProviderAdapter<Configuration, PreparedRequest>(
   adapter: CommunicationProviderAdapterV1<Configuration, PreparedRequest>
 ): CommunicationProviderAdapterV1<Configuration, PreparedRequest> {
+  assertCondition(
+    adapter !== null && typeof adapter === "object",
+    "communication adapter is required"
+  );
+  for (const method of [
+    "validateConfiguration",
+    "prepareRequest",
+    "quote",
+    "dispatch",
+    "reconcile",
+    "verifyWebhook",
+  ] as const) {
+    const property = Object.getOwnPropertyDescriptor(adapter, method);
+    assertCondition(
+      property && "value" in property && typeof property.value === "function",
+      `communication adapter ${method} must be an own data function`
+    );
+  }
   const descriptor = descriptorOf(
     adapter as CommunicationProviderAdapterV1<unknown, unknown>
   );
@@ -1486,10 +1683,15 @@ export function defineCommunicationProviderAdapter<Configuration, PreparedReques
     if (contract) operations[operation] = Object.freeze({ ...contract });
   }
   return Object.freeze({
-    ...adapter,
     descriptor: Object.freeze({
       ...descriptor,
       operations: Object.freeze(operations),
     }),
+    validateConfiguration: adapter.validateConfiguration,
+    prepareRequest: adapter.prepareRequest,
+    quote: adapter.quote,
+    dispatch: adapter.dispatch,
+    reconcile: adapter.reconcile,
+    verifyWebhook: adapter.verifyWebhook,
   });
 }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COMMUNICATION_ADAPTER_CONTRACT_VERSION,
   defineCommunicationProviderAdapter,
@@ -11,9 +11,10 @@ import {
   type CommunicationOperation,
   type CommunicationProviderAdapterV1,
   type FundedCommunicationAuthorityExpectationV1,
-  type FundedCommunicationAuthorityVerifierV1,
+  type FundedCommunicationAuthorityClaimerV1,
   type ProviderDispatchOutcomeV1,
   type ProviderReconciliationOutcomeV1,
+  type TerminalCommunicationReceiptStoreV1,
   type VerifiedProviderWebhookEventV1,
 } from "../provider-adapter";
 
@@ -33,6 +34,15 @@ const PAYLOAD = Object.freeze({ message: "Your renewal is ready." });
 const PRICING_SNAPSHOT = "1".repeat(64);
 const FORMULA = "2".repeat(64);
 const LIMITS = "3".repeat(64);
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -175,18 +185,22 @@ function makeHarness(): {
   return { state, adapter };
 }
 
-function authorityVerifier(
+function authorityClaimer(
   events: string[],
   mutate?: (
     expectation: FundedCommunicationAuthorityExpectationV1
-  ) => Partial<Awaited<ReturnType<FundedCommunicationAuthorityVerifierV1["verify"]>>>
-): FundedCommunicationAuthorityVerifierV1 & {
-  verify: ReturnType<typeof vi.fn>;
+  ) => Partial<Awaited<ReturnType<FundedCommunicationAuthorityClaimerV1["claimForDispatch"]>>>
+): FundedCommunicationAuthorityClaimerV1 & {
+  claimForDispatch: ReturnType<typeof vi.fn>;
 } {
-  const verify = vi.fn(async (expectation: FundedCommunicationAuthorityExpectationV1) => {
+  let claimed = false;
+  const claimForDispatch = vi.fn(async (expectation: FundedCommunicationAuthorityExpectationV1) => {
     events.push("verify-authority");
+    if (claimed) return null;
+    claimed = true;
     return {
-      state: "reserved-and-exclusively-owned" as const,
+      state: "claimed-for-exclusive-dispatch" as const,
+      attempt: 1 as const,
       approvalId: APPROVAL_ID,
       executionId: EXECUTION_ID,
       idempotencyKey: EXECUTION_ID,
@@ -197,7 +211,33 @@ function authorityVerifier(
       ...(mutate?.(expectation) ?? {}),
     };
   });
-  return { verify };
+  return { claimForDispatch };
+}
+
+function terminalStore(): TerminalCommunicationReceiptStoreV1 {
+  let applied: Readonly<{
+    providerMessageId: string;
+    status: string;
+    providerStatus: string;
+    sequence: number;
+  }> | null = null;
+  return {
+    apply: vi.fn(async (candidate) => {
+      const identity = {
+        providerMessageId: candidate.providerMessageId,
+        status: candidate.status,
+        providerStatus: candidate.providerStatus,
+        sequence: candidate.sequence,
+      };
+      if (!applied) {
+        applied = identity;
+        return "applied" as const;
+      }
+      return JSON.stringify(applied) === JSON.stringify(identity)
+        ? "exact-replay" as const
+        : null;
+    }),
+  };
 }
 
 async function quoteFor(
@@ -211,13 +251,12 @@ async function quoteFor(
     destination: DESTINATION,
     payload: PAYLOAD,
     receiptBindingSecret: RECEIPT_SECRET,
-    now: NOW,
   });
 }
 
 async function dispatchFor(
   adapter: CommunicationProviderAdapterV1<unknown, unknown>,
-  verifier: FundedCommunicationAuthorityVerifierV1,
+  claimer: FundedCommunicationAuthorityClaimerV1,
   approvedQuote: unknown,
   operation: CommunicationOperation = "voice.call",
   overrides: Partial<{
@@ -226,6 +265,7 @@ async function dispatchFor(
     payload: unknown;
   }> = {}
 ) {
+  vi.setSystemTime(DISPATCH_NOW);
   return dispatchCommunication({
     adapter,
     rawConfiguration: overrides.rawConfiguration ?? CONFIGURATION,
@@ -235,8 +275,7 @@ async function dispatchFor(
     receiptBindingSecret: RECEIPT_SECRET,
     approvedQuote,
     approvalId: APPROVAL_ID,
-    authorityVerifier: verifier,
-    now: DISPATCH_NOW,
+    authorityClaimer: claimer,
   });
 }
 
@@ -273,6 +312,17 @@ describe("communication provider adapter manifest", () => {
         adapterId: "../unsafe",
       },
     })).toThrow("invalid communication adapter id");
+
+    const accessor = { ...adapter };
+    Object.defineProperty(accessor, "descriptor", {
+      enumerable: true,
+      get() {
+        throw new Error(`secret descriptor for ${DESTINATION}`);
+      },
+    });
+    expect(() => defineCommunicationProviderAdapter(accessor)).toThrow(
+      "descriptor must be an own data property"
+    );
   });
 });
 
@@ -285,7 +335,7 @@ describe("communication quote and funded dispatch conformance", () => {
   ] as const)("supports %s without a provider-specific runtime switch", async (operation) => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter, operation);
-    const verifier = authorityVerifier(state.events);
+    const verifier = authorityClaimer(state.events);
     const receipt = await dispatchFor(adapter, verifier, quote, operation);
 
     expect(receipt.status).toBe("accepted");
@@ -304,10 +354,10 @@ describe("communication quote and funded dispatch conformance", () => {
   it("binds exact configuration, account, destination, request, formula, and reservation", async () => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter);
-    const verifier = authorityVerifier(state.events);
+    const verifier = authorityClaimer(state.events);
     const receipt = await dispatchFor(adapter, verifier, quote);
 
-    expect(verifier.verify).toHaveBeenCalledWith(expect.objectContaining({
+    expect(verifier.claimForDispatch).toHaveBeenCalledWith(expect.objectContaining({
       approvalId: APPROVAL_ID,
       adapterId: "synthetic-communications",
       providerId: "synthetic-provider",
@@ -335,8 +385,8 @@ describe("communication quote and funded dispatch conformance", () => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter);
     state.events.length = 0;
-    const denied: FundedCommunicationAuthorityVerifierV1 = {
-      verify: vi.fn(async () => {
+    const denied: FundedCommunicationAuthorityClaimerV1 = {
+      claimForDispatch: vi.fn(async () => {
         state.events.push("verify-authority");
         return null;
       }),
@@ -357,7 +407,7 @@ describe("communication quote and funded dispatch conformance", () => {
   it("rejects request, configuration, price, and reservation drift before provider I/O", async () => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter);
-    const verifier = authorityVerifier(state.events);
+    const verifier = authorityClaimer(state.events);
 
     await expect(dispatchFor(adapter, verifier, quote, "voice.call", {
       payload: { message: "substituted" },
@@ -372,7 +422,7 @@ describe("communication quote and funded dispatch conformance", () => {
     expect(state.events).not.toContain("verify-authority");
 
     state.pricingSnapshotSha256 = PRICING_SNAPSHOT;
-    const wrongReservation = authorityVerifier(state.events, () => ({
+    const wrongReservation = authorityClaimer(state.events, () => ({
       reservationMicroUsd: 1,
     }));
     await expect(dispatchFor(adapter, wrongReservation, quote)).rejects.toThrow(
@@ -381,23 +431,39 @@ describe("communication quote and funded dispatch conformance", () => {
     expect(state.events.at(-1)).toBe("verify-authority");
   });
 
-  it("forwards one stable execution id as provider idempotency identity", async () => {
+  it("forwards one stable execution id once and denies sequential replay", async () => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter, "email.send");
-    const verifier = authorityVerifier(state.events);
+    const claimer = authorityClaimer(state.events);
 
-    const first = await dispatchFor(adapter, verifier, quote, "email.send");
-    const second = await dispatchFor(adapter, verifier, quote, "email.send");
+    const first = await dispatchFor(adapter, claimer, quote, "email.send");
+    await expect(dispatchFor(adapter, claimer, quote, "email.send")).rejects.toThrow(
+      "funded communication authority was denied"
+    );
 
     expect(first.idempotencyKey).toBe(EXECUTION_ID);
-    expect(second.idempotencyKey).toBe(EXECUTION_ID);
-    expect(first.quoteSha256).toBe(second.quoteSha256);
+    expect(state.events.filter((event) => event === "dispatch")).toHaveLength(1);
+  });
+
+  it("admits exactly one provider dispatch under a concurrent approval race", async () => {
+    const { adapter, state } = makeHarness();
+    const quote = await quoteFor(adapter, "voice.call");
+    const claimer = authorityClaimer(state.events);
+
+    const results = await Promise.allSettled([
+      dispatchFor(adapter, claimer, quote, "voice.call"),
+      dispatchFor(adapter, claimer, quote, "voice.call"),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(state.events.filter((event) => event === "dispatch")).toHaveLength(1);
   });
 
   it("classifies throws and malformed post-dispatch evidence as indeterminate do-not-retry", async () => {
     const { adapter, state } = makeHarness();
     const quote = await quoteFor(adapter);
-    const verifier = authorityVerifier(state.events);
+    const verifier = authorityClaimer(state.events);
     const throwingAdapter = {
       ...adapter,
       dispatch: vi.fn(async () => {
@@ -420,12 +486,37 @@ describe("communication quote and funded dispatch conformance", () => {
       providerDestination: DESTINATION,
       idempotencyKey: EXECUTION_ID,
     };
-    const malformed = await dispatchFor(adapter, verifier, quote);
+    const malformed = await dispatchFor(
+      adapter,
+      authorityClaimer(state.events),
+      quote
+    );
     expect(malformed).toEqual(expect.objectContaining({
       status: "indeterminate",
       code: "provider_evidence_invalid",
       retrySafe: false,
     }));
+
+    const accessorAdapter = {
+      ...adapter,
+      dispatch: vi.fn(async () => Object.defineProperty({}, "status", {
+        enumerable: true,
+        get() {
+          throw new Error(`secret provider status for ${DESTINATION}`);
+        },
+      }) as ProviderDispatchOutcomeV1),
+    };
+    const accessorOutcome = await dispatchFor(
+      accessorAdapter,
+      authorityClaimer(state.events),
+      quote
+    );
+    expect(accessorOutcome).toEqual(expect.objectContaining({
+      status: "indeterminate",
+      code: "provider_evidence_invalid",
+      retrySafe: false,
+    }));
+    expect(JSON.stringify(accessorOutcome)).not.toContain("secret provider status");
   });
 });
 
@@ -435,7 +526,7 @@ describe("accepted versus terminal reconciliation conformance", () => {
     const quote = await quoteFor(harness.adapter);
     const receipt = await dispatchFor(
       harness.adapter,
-      authorityVerifier(harness.state.events),
+      authorityClaimer(harness.state.events),
       quote
     );
     expect(receipt.status).toBe("accepted");
@@ -449,12 +540,33 @@ describe("accepted versus terminal reconciliation conformance", () => {
     const { receipt } = await acceptedFixture();
     expect(receipt.status).toBe("accepted");
     expect(receipt.verifiedTerminal).toBe(false);
+    expect(receipt.receiptProofSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(receipt).not.toHaveProperty("providerStatus");
     expect(receipt).not.toHaveProperty("terminalProofSha256");
   });
 
+  it("rejects a substituted public receipt before provider reconciliation", async () => {
+    const { adapter, state, receipt } = await acceptedFixture();
+    state.events.length = 0;
+    await expect(reconcileCommunication({
+      adapter,
+      rawConfiguration: CONFIGURATION,
+      operation: "voice.call",
+      destination: DESTINATION,
+      payload: PAYLOAD,
+      receiptBindingSecret: RECEIPT_SECRET,
+      receipt: {
+        ...receipt,
+        providerMessageId: "substituted-provider-message",
+      },
+      terminalStore: terminalStore(),
+    })).rejects.toThrow("communication receipt proof is invalid");
+    expect(state.events).not.toContain("reconcile");
+  });
+
   it("requires a verified webhook before issuing a terminal receipt", async () => {
-    const { adapter, receipt } = await acceptedFixture();
+    const { adapter, state, receipt } = await acceptedFixture();
+    const store = terminalStore();
     const base = {
       adapter,
       rawConfiguration: CONFIGURATION,
@@ -463,7 +575,7 @@ describe("accepted versus terminal reconciliation conformance", () => {
       payload: PAYLOAD,
       receiptBindingSecret: RECEIPT_SECRET,
       acceptedReceipt: receipt,
-      now: new Date("2026-07-19T20:01:00.000Z"),
+      terminalStore: store,
     };
 
     await expect(reconcileCommunicationWebhook({
@@ -497,6 +609,22 @@ describe("accepted versus terminal reconciliation conformance", () => {
     expect(terminal.terminalProofSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(terminal)).not.toContain(ACCOUNT);
     expect(JSON.stringify(terminal)).not.toContain(DESTINATION);
+
+    state.webhookEvent = {
+      ...state.webhookEvent!,
+      status: "terminal_failure",
+      providerStatus: "failed",
+      sequence: 6,
+    };
+    await expect(reconcileCommunicationWebhook({
+      ...base,
+      webhook: {
+        method: "POST",
+        url: "https://hooks.example.test/communications",
+        headers: { "x-synthetic-signature": "valid" },
+        rawBody: new TextEncoder().encode("{}"),
+      },
+    })).rejects.toThrow("webhook verification failed");
   });
 
   it("fails closed on webhook identity substitution and oversized input", async () => {
@@ -513,14 +641,14 @@ describe("accepted versus terminal reconciliation conformance", () => {
       payload: PAYLOAD,
       receiptBindingSecret: RECEIPT_SECRET,
       acceptedReceipt: receipt,
+      terminalStore: terminalStore(),
       webhook: {
         method: "POST",
         url: "https://hooks.example.test/communications",
         headers: { "x-synthetic-signature": "valid" },
         rawBody: new TextEncoder().encode("{}"),
       },
-      now: DISPATCH_NOW,
-    })).rejects.toThrow("reconciliation identity mismatch");
+    })).rejects.toThrow("webhook verification failed");
 
     await expect(reconcileCommunicationWebhook({
       adapter,
@@ -530,13 +658,13 @@ describe("accepted versus terminal reconciliation conformance", () => {
       payload: PAYLOAD,
       receiptBindingSecret: RECEIPT_SECRET,
       acceptedReceipt: receipt,
+      terminalStore: terminalStore(),
       webhook: {
         method: "POST",
         url: "https://hooks.example.test/communications",
         headers: { "x-synthetic-signature": "valid" },
         rawBody: new Uint8Array(64 * 1024 + 1),
       },
-      now: DISPATCH_NOW,
     })).rejects.toThrow("webhook body is invalid");
   });
 
@@ -550,7 +678,7 @@ describe("accepted versus terminal reconciliation conformance", () => {
       payload: PAYLOAD,
       receiptBindingSecret: RECEIPT_SECRET,
       receipt,
-      now: new Date("2026-07-19T20:02:00.000Z"),
+      terminalStore: terminalStore(),
     };
 
     const pending = await reconcileCommunication(base);
