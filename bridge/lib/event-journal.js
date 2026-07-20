@@ -644,7 +644,10 @@ export class EventJournal {
         controller.abort(error);
         resolve({ kind: "request_timeout", error });
       }, this.#requestTimeoutMs);
-      timeoutHandle?.unref?.();
+      // This timer is the only bounded completion authority when a custom
+      // fetch or response body stalls without retaining a Node handle. Keep it
+      // referenced so a CLI/worker cannot exit with an unresolved flush and
+      // silently abandon the retained journal batch.
     });
     this.#currentAbortController = controller;
     try {

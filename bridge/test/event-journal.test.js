@@ -223,9 +223,19 @@ describe("EventJournal", () => {
 
   it("bounds normal flush fetch and acknowledgement-body stalls without losing the batch", async () => {
     let fetchSignal;
+    let timeoutUnrefCalls = 0;
     const stalledFetch = journal({
       maxAttempts: 1,
       requestTimeoutMs: 5,
+      setTimeoutImpl: (callback, ms) => {
+        const handle = setTimeout(callback, ms);
+        const unref = handle.unref.bind(handle);
+        handle.unref = () => {
+          timeoutUnrefCalls += 1;
+          return unref();
+        };
+        return handle;
+      },
       fetchImpl: async (_url, init) => {
         fetchSignal = init.signal;
         return new Promise(() => {});
@@ -235,6 +245,7 @@ describe("EventJournal", () => {
     await assert.rejects(stalledFetch.flush(), EventJournalDeliveryError);
     assert.equal(fetchSignal.aborted, true);
     assert.equal(stalledFetch.pendingCount, 1);
+    assert.equal(timeoutUnrefCalls, 0, "the timeout must keep a stalled flush alive until it settles");
 
     let bodySignal;
     const stalledBody = journal({
