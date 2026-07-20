@@ -75,6 +75,11 @@ const fixtureCache = new Map<string, Readonly<{
   pcm24: ReadonlyMap<string, Uint8Array>;
   manifest: CallerAudioFixtureManifest;
 }>>();
+// These tests each execute the complete paid-runner boundary, including frozen
+// PCM detachment, durable ledger transitions, signed kernel evidence, and
+// atomic artifact finalization. Their assertions are correctness/security
+// gates; unlike the runner's internal deadlines, wall-clock time is not.
+const FULL_PAID_RUNNER_TEST_TIMEOUT_MS = 120_000;
 const H = (character: string) => character.repeat(64);
 const ATTESTATION_KEYS = generateKeyPairSync("ed25519");
 const ATTESTATION_PUBLIC_KEY_PEM = ATTESTATION_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -773,7 +778,7 @@ describe("paid benchmark execution boundary", () => {
     expect((await inspectFilesystemBudgetLedger({
       ledgerPath: prepared.ledgerPath,
     })).reservations[0]?.run_id).toBe(originalRunId);
-  }, 30_000);
+  }, FULL_PAID_RUNNER_TEST_TIMEOUT_MS);
 
   it("detaches descriptor-verified PCM before the first await so readPcm mutation cannot substitute paid audio", async () => {
     const prepared = await setup("detached-pcm-snapshot");
@@ -817,7 +822,7 @@ describe("paid benchmark execution boundary", () => {
         new Uint8Array(await readFile(join(result.artifactPath, "frozen-input", `${turnId}.pcm`)))
       ).toEqual(bytes);
     }
-  }, 30_000);
+  }, FULL_PAID_RUNNER_TEST_TIMEOUT_MS);
 
   it("refuses initially substituted PCM before credentials, reservation, or client creation", async () => {
     const prepared = await setup("initial-pcm-substitution");
@@ -1093,7 +1098,7 @@ describe("paid benchmark execution boundary", () => {
       },
       signature: { algorithm: "ed25519", key_id: ATTESTATION_SIGNER.keyId },
     });
-  }, 30_000);
+  }, FULL_PAID_RUNNER_TEST_TIMEOUT_MS);
 
   it("persists the transport-smoke provider call to exact signed-kernel read-only receipt linkage", async () => {
     const prepared = await setup("transport-smoke-linkage", TRANSPORT_SMOKE_SCENARIO);
