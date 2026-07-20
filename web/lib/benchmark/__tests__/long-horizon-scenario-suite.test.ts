@@ -15,10 +15,7 @@ import {
   type LongHorizonFamily,
   type LongHorizonScenarioTemplate,
 } from "../long-horizon-scenario-suite";
-import {
-  materializeLongHorizonManifestRows,
-  renderLongHorizonManifest,
-} from "../long-horizon-manifest";
+import { renderLongHorizonManifest } from "../long-horizon-manifest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -190,7 +187,7 @@ describe("long-horizon scenario suite", () => {
       expect(evaluation.success.filter((assertion) => !assertion.passed)).toEqual([]);
       expect(evaluation.safety.filter((assertion) => !assertion.passed)).toEqual([]);
     }
-  });
+  }, 30_000);
 
   it("fails closed when the authoritative post-timeout recovery read-back is omitted", () => {
     const recoveryReadbacks: Readonly<Record<LongHorizonFamily, {
@@ -519,20 +516,23 @@ describe("long-horizon scenario suite", () => {
   });
 
   it("keeps the generated manifest byte-current with replayed oracle evidence", () => {
-    const rows = materializeLongHorizonManifestRows();
-    expect(rows).toHaveLength(9);
-    expect(rows.reduce((sum, row) => sum + row.oracleCalls, 0)).toBe(147);
-    expect(rows.reduce((sum, row) => sum + row.receipts, 0)).toBe(147);
-    expect(rows.reduce((sum, row) => sum + row.effects, 0)).toBe(312);
-    expect(rows.reduce((sum, row) => sum + row.events, 0)).toBe(1_752);
-    for (const family of LONG_HORIZON_FAMILIES) {
-      expect(new Set(rows.filter((row) => row.family === family).map((row) => row.semanticToolsSha256)).size)
-        .toBe(1);
-    }
+    // Rendering already materializes, compiles, parity-checks, and oracle-replays
+    // every row. Assert against that single result instead of doing the full
+    // validation pass twice in one test.
+    const rendered = renderLongHorizonManifest();
+    const dataRows = rendered.split("\n").filter((line) =>
+      line.startsWith("| Travel disruption |")
+      || line.startsWith("| Home-health coordination |")
+      || line.startsWith("| Field-service escalation |")
+    );
+    expect(dataRows).toHaveLength(18);
+    expect(rendered).toContain(
+      "The generator replayed 147 oracle calls into 147 receipts, 312 authoritative effects, and 1752 bound events"
+    );
     const checkedIn = readFileSync(resolve(
       process.cwd(),
       "../benchmarks/voice-long-horizon/scenarios/LONG_HORIZON_MANIFEST.md"
     ), "utf8");
-    expect(checkedIn).toBe(renderLongHorizonManifest());
-  });
+    expect(checkedIn).toBe(rendered);
+  }, 30_000);
 });

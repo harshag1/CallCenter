@@ -21,7 +21,7 @@ Completed:
 
 ## 2026-07-10 — Provider, protocol, and pricing audit completed
 
-Source state at audit: branch `codex/pre-evening-batch-2026-07-02`; research documents were being edited in a dirty worktree alongside in-progress framework changes.
+Historical source state at audit: an in-progress pre-release branch with research documents being edited in a dirty worktree alongside framework changes. This was development provenance, not a clean release attestation.
 
 Completed:
 
@@ -288,4 +288,32 @@ A fourth Fable/Claude Code review cost **$0.458499** (rounded from the provider 
 - Auxiliary review spend delta: **$0.458499**
 - Cumulative auxiliary review spend: **$2.624932**
 - Total recorded program cash spend: **$2.624932**
+- Paid canary gate: **closed**
+
+## 2026-07-16 — Active-catalog artifact corrected after independent red-team
+
+The first draft of this C1 artifact was withdrawn after review found that it omitted the two JSON array brackets, conflated logical-entry bytes with the provider instruction surface, and described a preselected linear census as “reachability.” The corrected deterministic benchmark exercises a public 64-tool corpus through one sequential eight-phase Flow-v2 route and 18 real runtime snapshots while reporting three separate byte surfaces.
+
+The non-dispatchable raw-full canonical logical-entry array is 63,960 UTF-8 bytes (T4 15,990). Each active phase exposes exactly eight business tools plus three controls. Active business-entry arrays are 7,944–8,075 bytes with median 7,989, a median byte reduction of 87.5094%. Full production catalogs are 10,956–11,702 bytes with median 11,363; exact production provider instruction blocks are 11,733–12,479 bytes with median 12,140.
+
+All 64 target definitions were catalog-exposed once across the eight preselected active snapshots. That is a frozen no-retry census, not proof of arbitrary-path reachability or invocation success. Missing targets, cross-phase business-tool leakage, forbidden private-key hits, and private grant/expiry sentinel hits were all zero. Sixty-four exposed logical names resolved to private host bindings in memory without executing an integration. Reversing source order and changing private grant/expiry bytes left every public catalog and digest unchanged. The hierarchical flow passed production closure; flat disclosure failed both the 16-tool Flow reliability guard and direct active-catalog construction.
+
+The reference and active entries are not byte-identical because their state-bound 64-character lease-scope digests differ: exact byte matches were 0/64. Normalizing only that digest produced 64/64 logical-definition and byte-shape matches with zero other mismatches.
+
+Evidence:
+
+- report: [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md);
+- portable semantic result: `8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1`;
+- source manifest: `fd84bb08347983e660bc77f672901620b26e8748f62463354312a6359ba2918a`;
+- deterministic build manifest: `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`;
+- observed toolchain manifest: `7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212`;
+- source/build/toolchain-bound evidence: `aaa7f173833121ff5ca6152ad7f687ad052ec0d1c186a2e53b0bd1a2b0241c67`;
+- raw corpus file: 13,497 bytes, `67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b`;
+- parsed canonical corpus: 11,932 bytes, `89452f09d62f3588e6b37acdd914aaa1c3b612c7ed89cb9b1a7ca3beeabc72c7`;
+- corrected focused freeze: 5/5 tests passed;
+- provider spend: $0.00.
+
+This is C1 engineering evidence only. T4 is `ceil(bytes / 4)`, not provider-reported token usage. No model spoke, no provider session opened, and no claim about reduced drift, prompt or billed-token savings, latency, or model superiority is supported by this artifact.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
 - Paid canary gate: **closed**

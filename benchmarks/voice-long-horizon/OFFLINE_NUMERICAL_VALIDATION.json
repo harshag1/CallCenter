@@ -1,15 +1,19 @@
 {
   "schema_version": 1,
   "artifact_type": "offline_numerical_validation",
-  "source_commit": "7336a32d1c03a7e29dbba1301b5efeda37079143",
-  "source_state": "dirty_worktree; source/result hashes bind the tested bytes and outputs, so this is not a clean-build claim",
+  "source_binding": {
+    "kind": "per_section_source_and_result_sha256",
+    "measurement_worktree_state": "dirty",
+    "commit_binding": "external_release_proof_packet",
+    "limitation": "section hashes bind the measured bytes and outputs; only the external final proof packet may bind this tracked artifact to a clean commit and tree"
+  },
   "run_date": "2026-07-16",
   "provider_sessions": 0,
   "provider_spend_usd": 0,
   "mission_runtime": {
     "evidence_class": "C2",
     "claim_scope": "deterministic runtime sensitivity against an intentionally unenforced controller; not speech-model quality",
-    "command": "cd web && npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out /tmp/hacc-mission-runtime-sensitivity-7336a32d.json",
+    "command": "cd web && npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out /tmp/hacc-mission-runtime-sensitivity.json",
     "trials": 1000,
     "seed_start": 1,
     "raw_strict_pass_count": 245,
@@ -125,6 +129,7 @@
     "claim_scope": "exact endpoint and coverage audit of the scorer-level interval implementation; not report integration or provider efficacy",
     "verdict": "verified_for_checked_registered_sizes",
     "method": "bonferroni_clopper_pearson_simultaneous_band",
+    "implementation_supported_total_max": 100000,
     "sample_size": 107,
     "family_confidence": 0.95,
     "cases": [
@@ -171,8 +176,17 @@
       "version": "1.17.1",
       "simulation": false
     },
+    "executable_scipy_oracle": {
+      "command": "python3 web/scripts/verify-clopper-pearson-scipy.py",
+      "script_sha256": "45715cff7746fe4862f88c13203e0d2bf5084a38527fdb54280dbf6172691d05",
+      "endpoint_decimal_places": 12,
+      "absolute_quantization_tolerance": 5e-13,
+      "interval_rows": 648,
+      "endpoint_values": 1296,
+      "endpoint_table_sha256": "fa7d422fce6c93a56f2b42eb719fb102db22b34110b9ad99fc30b5a000a900bd"
+    },
     "tested_source_files": {
-      "web/lib/benchmark/scoring.ts": "53d9ec5e091872c471ec15d90bbcd31776573ccd7ea599641dd22ed1dce585d9"
+      "web/lib/benchmark/scoring.ts": "b80b5eb8d25bcb35c11ed896292ea9c2c26c1ab85ea4ae4a9ca8b5c54f323138"
     }
   }
 }

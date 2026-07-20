@@ -125,6 +125,7 @@ function sourceAndToolchainProvenance() {
   const packageLockBytes = readProjectFile("web/package-lock.json");
   const packageJson = JSON.parse(packageJsonBytes.toString("utf8")) as {
     engines?: { node?: string };
+    scripts?: Record<string, string>;
   };
   const packageLock = JSON.parse(packageLockBytes.toString("utf8")) as {
     lockfileVersion?: number;
@@ -166,6 +167,10 @@ function sourceAndToolchainProvenance() {
       architecture: process.arch,
     },
     declared_node_engine: packageJson.engines?.node ?? null,
+    declared_commands: {
+      benchmark_active_catalog: packageJson.scripts?.["benchmark:active-catalog"] ?? null,
+      db_test_integration: packageJson.scripts?.["db:test-integration"] ?? null,
+    },
     package_lock_version: packageLock.lockfileVersion ?? null,
     locked_packages: lockedPackages,
     observed_packages: observedPackages,

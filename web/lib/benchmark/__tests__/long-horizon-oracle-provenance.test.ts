@@ -64,5 +64,8 @@ describe("long-horizon oracle argument provenance", () => {
         }
       }
     }
-  });
+    // This deliberately scans caller history and replays every oracle
+    // invocation across all nine long-horizon fixtures. Provenance coverage,
+    // not wall-clock performance, is the invariant under test.
+  }, 60_000);
 });

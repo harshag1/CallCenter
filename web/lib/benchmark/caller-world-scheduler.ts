@@ -305,8 +305,12 @@ export type PollCallerOpportunitiesResult = Readonly<{
 export type RecordedGatewayCall = Readonly<{
   receipt_id: string;
   provider_call_id: string;
-  capability_epoch: number;
   call: CapabilityGatewayCall;
+  /** Below-provider host authority captured separately from model arguments. */
+  host_authority: Readonly<{
+    capability_epoch: number;
+    capability_grant: string;
+  }>;
 }>;
 
 export type MaterializedGatewayDelivery = Readonly<{
@@ -317,7 +321,13 @@ export type MaterializedGatewayDelivery = Readonly<{
   source_capability_epoch: number;
   emitted_capability_epoch: number;
   observed_current_capability_epoch: number;
+  /** Exact provider stimulus. It can never carry host authority. */
   call: CapabilityGatewayCall;
+  /** Fault injection seam below the provider/model boundary. */
+  host_authority: Readonly<{
+    capability_epoch: number;
+    capability_grant: string;
+  }>;
   relation: Readonly<{
     same_call_id: boolean;
     same_semantic_intent: true;
@@ -333,6 +343,8 @@ export type MaterializedGatewayDelivery = Readonly<{
     source_call_sha256: string;
     emitted_call_sha256: string;
     semantic_intent_sha256: string;
+    source_host_authority_sha256: string;
+    emitted_host_authority_sha256: string;
     grant_relation: "exact_original" | "current" | "stale_original";
   }>;
 }>;
@@ -1418,11 +1430,19 @@ export function createDeterministicCallerWorldScheduler(
 }
 
 function semanticIntent(call: CapabilityGatewayCall): ArtifactJsonValue {
-  return asImmutable({ action: call.action, arguments: call.arguments }) as unknown as ArtifactJsonValue;
+  return asImmutable({ tool_name: call.tool_name, arguments: call.arguments }) as unknown as ArtifactJsonValue;
 }
 
-function deliveryHash(callId: string, epoch: number, call: CapabilityGatewayCall): string {
-  return sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson({ call_id: callId, capability_epoch: epoch, call })}`);
+function deliveryHash(
+  callId: string,
+  call: CapabilityGatewayCall,
+  hostAuthority: RecordedGatewayCall["host_authority"]
+): string {
+  return sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson({
+    call_id: callId,
+    call,
+    host_authority_sha256: sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson(hostAuthority)}`),
+  })}`);
 }
 
 /**
@@ -1433,15 +1453,13 @@ export function materializeGatewayDelivery(input: Readonly<{
   opportunity: ScheduledGatewayDeliveryOpportunity;
   original: RecordedGatewayCall;
   new_provider_call_id?: string;
-  current_capability_grant?: string;
-  current_capability_epoch?: number;
+  current_host_authority?: RecordedGatewayCall["host_authority"];
 }>): MaterializedGatewayDelivery {
   assertOnlyKeys(input, [
     "opportunity",
     "original",
     "new_provider_call_id",
-    "current_capability_grant",
-    "current_capability_epoch",
+    "current_host_authority",
   ], "materializeGatewayDelivery input");
   assertOnlyKeys(input.opportunity, [
     "id",
@@ -1452,59 +1470,63 @@ export function materializeGatewayDelivery(input: Readonly<{
     "observation_sha256",
   ], "materializeGatewayDelivery opportunity");
   if (input.opportunity.kind !== "gateway_delivery") throw new Error("delivery opportunity kind must be gateway_delivery");
-  assertOnlyKeys(input.original, ["receipt_id", "provider_call_id", "capability_epoch", "call"], "original gateway call");
+  assertOnlyKeys(input.original, ["receipt_id", "provider_call_id", "call", "host_authority"], "original gateway call");
+  assertOnlyKeys(input.original.host_authority, ["capability_epoch", "capability_grant"], "original host authority");
   if (input.original.receipt_id !== input.opportunity.source_receipt_id) {
     throw new Error("original gateway call is not bound to the opportunity source receipt");
   }
   const originalCall = CapabilityGatewayCallSchema.parse(input.original.call);
   assertNonEmpty(input.original.receipt_id, "original receipt_id", 512);
   assertNonEmpty(input.original.provider_call_id, "original provider_call_id", 512);
-  assertNonNegativeInteger(input.original.capability_epoch, "original capability_epoch");
+  assertNonNegativeInteger(input.original.host_authority.capability_epoch, "original capability_epoch");
+  assertNonEmpty(input.original.host_authority.capability_grant, "original capability_grant", 8192);
   const sourceIntent = semanticIntent(originalCall);
 
   let emittedProviderCallId: string;
   let emittedEpoch: number;
   let observedCurrentEpoch: number;
   let call: CapabilityGatewayCall;
+  let hostAuthority: RecordedGatewayCall["host_authority"];
   let grantRelation: MaterializedGatewayDelivery["relation"]["grant"];
 
   if (input.opportunity.delivery_mode === "exact_same_call_id") {
     if (
       input.new_provider_call_id !== undefined
-      || input.current_capability_grant !== undefined
-      || input.current_capability_epoch !== undefined
+      || input.current_host_authority !== undefined
     ) throw new Error("exact same-call-ID replay does not accept a new ID or current grant");
     emittedProviderCallId = input.original.provider_call_id;
-    emittedEpoch = input.original.capability_epoch;
-    observedCurrentEpoch = input.original.capability_epoch;
+    emittedEpoch = input.original.host_authority.capability_epoch;
+    observedCurrentEpoch = input.original.host_authority.capability_epoch;
     call = originalCall;
+    hostAuthority = input.original.host_authority;
     grantRelation = "exact_original";
   } else {
     assertNonEmpty(input.new_provider_call_id, "new_provider_call_id", 512);
     if (input.new_provider_call_id === input.original.provider_call_id) {
       throw new Error(`${input.opportunity.delivery_mode} requires a new provider call ID`);
     }
-    assertNonEmpty(input.current_capability_grant, "current_capability_grant", 8192);
-    assertNonNegativeInteger(input.current_capability_epoch, "current_capability_epoch");
-    if (input.current_capability_epoch < input.original.capability_epoch) {
+    if (!input.current_host_authority) throw new Error("current_host_authority is required");
+    assertOnlyKeys(input.current_host_authority, ["capability_epoch", "capability_grant"], "current host authority");
+    assertNonEmpty(input.current_host_authority.capability_grant, "current capability_grant", 8192);
+    assertNonNegativeInteger(input.current_host_authority.capability_epoch, "current capability_epoch");
+    if (input.current_host_authority.capability_epoch < input.original.host_authority.capability_epoch) {
       throw new Error("current capability epoch cannot precede the original epoch");
     }
     emittedProviderCallId = input.new_provider_call_id;
-    observedCurrentEpoch = input.current_capability_epoch;
+    observedCurrentEpoch = input.current_host_authority.capability_epoch;
     if (input.opportunity.delivery_mode === "new_id_semantic_duplicate") {
-      emittedEpoch = input.current_capability_epoch;
-      call = CapabilityGatewayCallSchema.parse({
-        ...originalCall,
-        capability_grant: input.current_capability_grant,
-      });
+      emittedEpoch = input.current_host_authority.capability_epoch;
+      call = originalCall;
+      hostAuthority = input.current_host_authority;
       grantRelation = "current";
     } else {
       if (
-        input.current_capability_epoch <= input.original.capability_epoch
-        || input.current_capability_grant === originalCall.capability_grant
+        input.current_host_authority.capability_epoch <= input.original.host_authority.capability_epoch
+        || input.current_host_authority.capability_grant === input.original.host_authority.capability_grant
       ) throw new Error("stale-grant replay requires an observably newer, different current grant");
-      emittedEpoch = input.original.capability_epoch;
+      emittedEpoch = input.original.host_authority.capability_epoch;
       call = originalCall;
+      hostAuthority = input.original.host_authority;
       grantRelation = "stale_original";
     }
   }
@@ -1518,9 +1540,11 @@ export function materializeGatewayDelivery(input: Readonly<{
     delivery_mode: input.opportunity.delivery_mode,
     source_provider_call_id: input.original.provider_call_id,
     emitted_provider_call_id: emittedProviderCallId,
-    source_call_sha256: deliveryHash(input.original.provider_call_id, input.original.capability_epoch, originalCall),
-    emitted_call_sha256: deliveryHash(emittedProviderCallId, emittedEpoch, call),
+    source_call_sha256: deliveryHash(input.original.provider_call_id, originalCall, input.original.host_authority),
+    emitted_call_sha256: deliveryHash(emittedProviderCallId, call, hostAuthority),
     semantic_intent_sha256: sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson(sourceIntent)}`),
+    source_host_authority_sha256: sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson(input.original.host_authority)}`),
+    emitted_host_authority_sha256: sha256Hex(`${DELIVERY_HASH_DOMAIN}${canonicalJson(hostAuthority)}`),
     grant_relation: grantRelation,
   });
   return asImmutable({
@@ -1528,10 +1552,11 @@ export function materializeGatewayDelivery(input: Readonly<{
     delivery_mode: input.opportunity.delivery_mode,
     source_provider_call_id: input.original.provider_call_id,
     emitted_provider_call_id: emittedProviderCallId,
-    source_capability_epoch: input.original.capability_epoch,
+    source_capability_epoch: input.original.host_authority.capability_epoch,
     emitted_capability_epoch: emittedEpoch,
     observed_current_capability_epoch: observedCurrentEpoch,
     call,
+    host_authority: hostAuthority,
     relation: {
       same_call_id: emittedProviderCallId === input.original.provider_call_id,
       same_semantic_intent: true,

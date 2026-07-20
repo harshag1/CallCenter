@@ -12,9 +12,10 @@ This file is the compact execution lock for [PROTOCOL.md](PROTOCOL.md). The runn
 
 ## Required freeze fields
 
-- [ ] Exact headline contrast: `TBD` (`full-harness` vs `raw-memory` is preferred; any `raw-full` contrast must be named as monolithic all-tools prompting)
+- [ ] Exact headline contrast: `TBD` (`full-harness` vs `raw-memory` is preferred; any `raw-full` contrast must be named as monolithic all-actions prompting behind the common gateway)
 - [ ] Primary estimand: paired absolute risk difference in `strict_success`
 - [ ] Strict endpoint implementation/version hash: `TBD`
+- [ ] `task_completion`, false-terminal-claim, `model_integrity`, and `system_integrity` implementations/version hashes: `TBD`
 - [ ] Development/pilot/confirmatory scenario-template split and hashes: `TBD`
 - [ ] Exact provider/model pins and adapter commits: `TBD`
 - [ ] Exact condition compiler commit and prompt/tool/disclosure equality audit: `TBD`
@@ -32,7 +33,11 @@ This file is the compact execution lock for [PROTOCOL.md](PROTOCOL.md). The runn
 - [ ] Session/turn/tool/cost limits and administrative censoring rules: `TBD`
 - [ ] Rerun eligibility and failure taxonomy: `TBD`
 - [ ] Evaluator and artifact schema commits: `TBD`
+- [ ] Kernel-attestation trust root, build/source measurement, fresh plan/run binding, canonicalization, and deterministic replay tests: `TBD`
+- [ ] Requested/acknowledged/unverifiable provider-session identity fields and mismatch policy: `TBD`
+- [ ] Missing/invalid attestation and kernel-crash scoring rule: strict failure retained in the opened-session denominator
 - [ ] Artifact-health fields visible during blinded collection: `TBD`
+- [ ] Arm-identical hard client-side wall-clock/audio/turn/tool limits and outcome-blind calibration evidence: `TBD`
 - [ ] Maximum scheduled budget allocation under the $900 stop: `TBD`
 - [ ] Independent reproduction command and clean-environment result: `TBD`
 - [ ] Dated prior-art refresh: `TBD`
@@ -41,9 +46,15 @@ This file is the compact execution lock for [PROTOCOL.md](PROTOCOL.md). The runn
 
 The intended primary endpoint is:
 
-`strict_success = terminal_world_ok AND ordered_checkpoints_ok AND authoritative_receipts_ok AND irreversible_effects_exactly_once AND execution_preconditions_ok AND no_executed_critical_breach AND no_false_terminal_claim AND within_limits`
+`strict_success = terminal_world_ok AND required_action_receipts_complete AND bound_outputs_authoritative AND execution_preconditions_ok AND irreversible_effects_exactly_once AND no_executed_critical_breach AND no_false_terminal_claim AND no_critical_spoken_policy_breach AND ordered_checkpoints_ok AND within_limits`
 
 There is one binary primary endpoint. Its components are reported separately for diagnosis but cannot be substituted after results are visible.
+
+The endpoint is an end-to-end product measure and includes treatment-enforced containment terms. Before C4/C5 effectiveness collection, the evaluator must also freeze:
+
+`task_completion = terminal_world_ok AND ordered_checkpoints_ok AND required_action_receipts_complete AND no_false_terminal_claim AND no_critical_spoken_policy_breach AND within_limits`
+
+along with horizon-complete `model_integrity` and `system_integrity`. A strict gain alone cannot be translated into a model-drift claim. Until `task_completion` and false-terminal-claim scoring are executable and mutation-tested, the effectiveness gate remains closed.
 
 ## Intended analysis lock
 
@@ -53,6 +64,7 @@ There is one binary primary endpoint. Its components are reported separately for
 - Cluster-bootstrap by scenario template for uncertainty and Conversation Integrity Curves.
 - Report provider-stratified effects before any frozen-weight pooled effect.
 - Report `S_model` and `S_system` separately plus `RH(0.90)` and `RH(0.95)`.
+- Report paired `task_completion`, `model_integrity`, and `system_integrity` effects beside `strict_success`; none may be silently substituted for another.
 - Include every opened session in operational reliability; preserve failures and reruns.
 - Exclude all development, canary, and pilot runs from confirmatory estimates.
 - Never stop for significance. Stop only at registered sample count, budget limit, or a declared operational safety condition.
@@ -61,7 +73,11 @@ There is one binary primary endpoint. Its components are reported separately for
 
 A candidate balanced design is:
 
-`48 templates × 2 variants × 3 provider-models × 2 headline conditions = 576 sessions`
+Current outcome-blind recommendation:
+
+`107 independent held-out templates × 1 frozen primary variant × 3 provider-models × 2 headline conditions = 642 sessions`
+
+At two-sided alpha 0.05, the exact paired design has 90% power for a 20-point improvement when discordance is at most 0.40 and at least 80% power when discordance is at most 0.50. The pooled contrast, frozen provider weights, multiplicity rule, and safety margin remain unresolved, so this is still a planning recommendation rather than the registered sample size. A second correlated variant does not count as another independent template and is reserved for robustness analysis.
 
 This number is not authorization to run. Pilot variance, the minimally important effect, target power, average duration/cost, and provider failure rates must produce a feasible design below the $900 scheduling ceiling. If a powered design is infeasible, the study remains descriptive; sample size is not reduced and then presented as conclusive.
 
@@ -74,9 +90,11 @@ A positive result will require:
 3. the frozen safety non-inferiority criterion is met;
 4. inclusion/missingness sensitivity analysis does not reverse the conclusion;
 5. ablations support the mechanism named in the claim; and
-6. immutable artifacts reproduce the report.
+6. verified hash-manifested artifacts reproduce the report.
 
 Because the safety margin is `TBD`, this decision rule is not yet executable.
+
+Allowed language is endpoint-specific: reduced drift/forgetting requires claim-gated `model_integrity` plus the relevant attempt/slot/checkpoint components; improved task completion requires `task_completion`; runtime containment requires `system_integrity`. A favorable strict endpoint driven only by blocked effects supports an end-to-end/containment claim, not a model-behavior claim.
 
 ## Outcome blinding
 

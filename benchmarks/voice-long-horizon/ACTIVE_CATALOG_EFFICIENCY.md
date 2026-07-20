@@ -9,11 +9,11 @@ Status: **C1 engineering evidence**, `$0` provider spend. This benchmark measure
 An independent red-team review rejected the first draft because it omitted the two JSON array brackets, conflated logical-entry bytes with provider instructions, and called a fixed linear census “reachability.” The result below supersedes that withdrawn draft.
 
 - Portable semantic result hash: `8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1`
-- Source-manifest hash: `bfdacb8cc341c668ec48b8d4ffd8471804fa66832f8f3c8fdb901e8693e43813`
+- Source-manifest hash: `fd84bb08347983e660bc77f672901620b26e8748f62463354312a6359ba2918a`
 - Deterministic-build manifest hash: `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`
-- Observed-toolchain manifest hash: `7beaf4d8ae665b1834ddb1f2a2f6dfa14c06955ee9a7fdc74e25166a67a0c076`
-- Source/build/toolchain-bound evidence hash: `db1594f76dd0270cebf92abc5dc5595057d792ca081a5c63d033a0f9b8e9aac6`
-- Pretty JSON artifact in the recorded environment: 37,186 bytes; SHA-256 `031fca457c88bcb75fe51db62b53361d599927be42ec7e4b2175a80fbc2931c8`
+- Observed-toolchain manifest hash: `7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212`
+- Source/build/toolchain-bound evidence hash: `aaa7f173833121ff5ca6152ad7f687ad052ec0d1c186a2e53b0bd1a2b0241c67`
+- Pretty JSON artifact in the recorded environment: 37,400 bytes; SHA-256 `f5c26fbcfe4102bcf9927d4f7bb430429c1affdd0fbbe8611b04eab695aabd99`
 - Raw corpus file: 13,497 bytes; SHA-256 `67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b`
 - Parsed canonical corpus JSON: 11,932 bytes; SHA-256 `89452f09d62f3588e6b37acdd914aaa1c3b612c7ed89cb9b1a7ca3beeabc72c7`
 - Corpus: 8 sequential phases × 8 unique tools = 64 tools; 32 read and 32 write
@@ -21,7 +21,7 @@ An independent red-team review rejected the first draft because it omitted the t
 - Frozen catalog exposure: all 64 target definitions appeared once across the eight preselected active snapshots; 0 missing targets and 0 cross-phase business-tool leaks
 - Private binding: 64/64 exposed logical names resolved to private host bindings in memory; 0 forbidden private-key hits and 0 private grant/expiry sentinel hits in catalogs, instruction blocks, or the report
 
-The observed artifact was generated on Node `v24.8.0` / V8 `13.6.233.10-node.27`, Darwin arm64, with installed and lockfile versions equal for tsx `4.23.0`, TypeScript `5.9.3`, Vitest `4.1.10`, and Zod `4.4.3`. A run on another valid runtime can retain the portable semantic result hash while producing a different toolchain/evidence hash and pretty-file hash.
+The observed artifact was generated on Node `v24.8.0` / V8 `13.6.233.10-node.27`, Darwin arm64, under the declared Node engine `^20.19.0 || ^22.13.0 || >=24.0.0`, with installed and lockfile versions equal for tsx `4.23.0`, TypeScript `5.9.3`, Vitest `4.1.10`, and Zod `4.4.3`. The toolchain manifest also records the exact `benchmark:active-catalog` command and the truthful `db:test-integration` alias (`node scripts/test-tenant-isolation.mjs`). A run on another valid runtime can retain the portable semantic result hash while producing a different toolchain/evidence hash and pretty-file hash.
 
 The public corpus is [active-catalog-efficiency-64.v1.json](corpora/active-catalog-efficiency-64.v1.json). It spans identity, membership, billing, orders, returns, scheduling, communications, and escalation rather than optimizing for one call-center script.
 

@@ -61,6 +61,18 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - Results include sample counts, paired effect sizes, uncertainty intervals, and per-provider breakdowns. No claim is made from a showcase run or a selectively retained subset.
 - Costs are controlled by [BUDGET.md](BUDGET.md). New sessions stop being scheduled at $900, leaving a $100 hard-ceiling reserve.
 
+## Reproduce the current zero-provider-spend evidence
+
+From `web/`, these commands verify the checked-in numerical claims and regenerate the two principal deterministic engineering artifacts under the ignored `.local/` directory:
+
+```bash
+npm run benchmark:claims:verify
+npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out ../benchmarks/voice-long-horizon/.local/mission-runtime-local.json
+npm run benchmark:active-catalog -- --out ../benchmarks/voice-long-horizon/.local/active-catalog-local.json
+```
+
+They do not load provider credentials, open realtime sessions, or create C3–C5 evidence. The default `npm run check` also does not execute the 18 conditional PostgreSQL suites unless their four integration database environments are supplied; see the root [verification instructions](../../README.md#verification).
+
 ## Research documents
 
 - [PROTOCOL.md](PROTOCOL.md): scenarios, conditions, endpoints, metrics, and analysis plan
@@ -73,6 +85,7 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
 - [RESULTS.md](RESULTS.md): artifact-derived outcomes; currently records that no results exist
 - [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
+- [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result
 - [DECISION_EVIDENCE.md](DECISION_EVIDENCE.md): claim-by-claim evidence level and the next numerical gate for every retained framework decision
 - [KERNEL_TRANSCRIPT_REPLAY.md](KERNEL_TRANSCRIPT_REPLAY.md): reproducible $0 signed public-transcript and durable-memory replay sensitivity
 - [External Fable claim-architecture review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md): paid, unverified peer-review input; not repository or benchmark evidence

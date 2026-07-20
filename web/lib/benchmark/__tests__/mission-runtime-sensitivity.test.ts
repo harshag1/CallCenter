@@ -45,7 +45,9 @@ describe("mission runtime seeded sensitivity benchmark", () => {
       raw_executed: 0,
     });
     expect(report.design_note).toMatch(/not realtime model quality/);
-  });
+    // All 100 seeded trials and exact containment totals are correctness
+    // evidence. This offline sensitivity test makes no latency claim.
+  }, 60_000);
 
   it("caps resource use and validates seeds", () => {
     expect(() => runMissionRuntimeSensitivityBenchmark({ trials: 0 })).toThrow(/1..100000/);

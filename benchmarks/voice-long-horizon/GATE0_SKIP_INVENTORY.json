@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "artifact_type": "gate0_test_skip_inventory",
+  "source_binding": {
+    "kind": "canonical_relevant_source_manifest",
+    "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
+    "source_manifest_sha256": "6bcf23f9c694812a988aae1aa4826ecf80ec165a947ee549aedf33be551dc6c4",
+    "source_manifest_file_count": 173,
+    "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
+    "scope": [
+      "web/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs}",
+      "web/vitest.config.ts",
+      "web/package.json"
+    ],
+    "commit_binding": "external_gate0_proof_packet"
+  },
+  "policy": {
+    "unexpected_skip": "fail",
+    "known_conditional_skip": "must_run_for_gate0",
+    "zero_failures_with_skips": "insufficient"
+  },
+  "entries": [
+    {
+      "path": "web/lib/__tests__/action-migration-reapply.integration.test.ts",
+      "content_sha256": "98a1f6ec77d9ff39f960d095fd70a671f4ee0542b9f101219a6778ba4556f7b8",
+      "test_count": 4,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/action-reconciliation.integration.test.ts",
+      "content_sha256": "34750e7cff7755f471e06ca7384be9ad4a1216042e71ce7faaff65e207aa5cc6",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/auth-verification.integration.test.ts",
+      "content_sha256": "81b75be87fd11bbdd73cdde41330e0ac76ae9675162f5f9530be9f8260ab8ac1",
+      "test_count": 6,
+      "condition": "AUTH_SECURITY_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/authoritative-absence-reconciliation.integration.test.ts",
+      "content_sha256": "df41ccb91ba452600c23df8f5bcba484ab54e2ad06282ad3d7eadb567716e0b8",
+      "test_count": 1,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/call-bound-runtime-authority.integration.test.ts",
+      "content_sha256": "6b4f79f060827a6a33b8e147f7ad0880005eb5355f8decd5dddbfee47a0741da",
+      "test_count": 2,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/credential-vault.integration.test.ts",
+      "content_sha256": "2f3f27968f25b74d60f168ac5d8febd0d83b17e2208e97633623d51e2ca205e5",
+      "test_count": 8,
+      "condition": "CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/flow-action-ledger-security.integration.test.ts",
+      "content_sha256": "067b09c32ce087a144e5ad1562d4c0ddd5a0440571b82e0da64f6830c99e81c1",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/flow-state-store.integration.test.ts",
+      "content_sha256": "36fa943a8e1532e8f52289a0efdc6e6478a48bbf1aa696eaeed558d4b436d737",
+      "test_count": 3,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/flow-storage-budgets.integration.test.ts",
+      "content_sha256": "7ed293848141ed54bbaa530a353d8099c369c9a9ec378f64b5d17601729c2502",
+      "test_count": 2,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/generated-tool-cleanup.integration.test.ts",
+      "content_sha256": "1316972276009d0a96e6c23a54dda4611e00bebbc2a443ee3700a6aaaec2dcc7",
+      "test_count": 4,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/mcp-invocation-store.integration.test.ts",
+      "content_sha256": "279e3fb3af09fd2ef9cd01494d2d673b863e9e91c9bc4b377f47d7134e5257f4",
+      "test_count": 7,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/mcp-route-replay.integration.test.ts",
+      "content_sha256": "661dbc277fcfa1855d646a83639b21a3d56de439239f16eca04d0e8adfef2499",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/recording-consent-authority-upgrade.integration.test.ts",
+      "content_sha256": "abf766bb1aba14ec4f50a97d59ebfbb1e877a04341f9f2d239bbae1e2108a241",
+      "test_count": 4,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/remote-mcp-revision.integration.test.ts",
+      "content_sha256": "1f8d03a3c6856f46ab0b293559bc04e6b7bbc3e0a795313f800ea6713688f2ac",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/security-migration-upgrade.integration.test.ts",
+      "content_sha256": "101d1f9e65f858c068c4a23e2eac59a4e82a092a98ac6ba67404b2514c98b2e7",
+      "test_count": 3,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/telephony-number-assignment-migration.integration.test.ts",
+      "content_sha256": "6bb582443978f77a6d1edef93f11c1a1699e4d8f3d1ed78901f6a189a33aff19",
+      "test_count": 4,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/tool-authority-revocation.integration.test.ts",
+      "content_sha256": "7658354b97205f8ba516461f10cd789bb31d887cccc7be7b0480aad33df18df6",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/tool-invocation-revision.integration.test.ts",
+      "content_sha256": "e387a5b4307d681eafca2bf967b1b9d2b047cd56fb9e7131a29ee2a9cdc9c8a9",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    }
+  ],
+  "total_skipped_suites_when_unconfigured": 18,
+  "total_skipped_tests_when_unconfigured": 54
+}

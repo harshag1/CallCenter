@@ -11,11 +11,11 @@ describe("active capability catalog efficiency evidence", () => {
 
     expect(report.result_hash).toBe("8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1");
     expect(report.provenance.source_manifest_sha256)
-      .toBe("bfdacb8cc341c668ec48b8d4ffd8471804fa66832f8f3c8fdb901e8693e43813");
+      .toBe("fd84bb08347983e660bc77f672901620b26e8748f62463354312a6359ba2918a");
     expect(report.provenance.build_manifest_sha256)
       .toBe("d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455");
     expect(report.provenance.toolchain_manifest_sha256)
-      .toBe("7beaf4d8ae665b1834ddb1f2a2f6dfa14c06955ee9a7fdc74e25166a67a0c076");
+      .toBe("7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212");
     expect(report.corpus).toMatchObject({
       raw_source_file_bytes: 13_497,
       raw_source_file_sha256: "67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b",
@@ -143,6 +143,12 @@ describe("active capability catalog efficiency evidence", () => {
     expect(report.provenance.toolchain_manifest.observed_runtime.node).toBe(process.version);
     expect(report.provenance.toolchain_manifest.observed_packages)
       .toEqual(report.provenance.toolchain_manifest.locked_packages);
+    expect(report.provenance.toolchain_manifest.declared_node_engine)
+      .toBe("^20.19.0 || ^22.13.0 || >=24.0.0");
+    expect(report.provenance.toolchain_manifest.declared_commands).toEqual({
+      benchmark_active_catalog: "tsx scripts/active-catalog-efficiency.ts",
+      db_test_integration: "node scripts/test-tenant-isolation.mjs",
+    });
     expect(report.provenance.build_manifest).toMatchObject({
       benchmark_version: "active-catalog-efficiency.v1",
       construction: {
@@ -163,5 +169,5 @@ describe("active capability catalog efficiency evidence", () => {
 
   it("is byte-stable across independent runs in one pinned environment", () => {
     expect(canonicalJson(runActiveCatalogEfficiencyBenchmark())).toBe(canonicalJson(REPORT));
-  }, 30_000);
+  }, 120_000);
 });

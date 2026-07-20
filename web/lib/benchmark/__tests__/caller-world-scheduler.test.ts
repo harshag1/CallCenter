@@ -476,12 +476,11 @@ describe("deterministic caller/world scheduler", () => {
     const original = {
       receipt_id: "receipt-close-001",
       provider_call_id: "provider-call-original",
-      capability_epoch: 4,
       call: {
-        action: "close_job",
+        tool_name: "close_job",
         arguments: { asset_id: "ASSET-B" },
-        capability_grant: "grant.old",
       },
+      host_authority: { capability_epoch: 4, capability_grant: "grant.old" },
     };
     const exact = materializeGatewayDelivery({
       opportunity: byMode.get("exact_same_call_id")!,
@@ -491,47 +490,49 @@ describe("deterministic caller/world scheduler", () => {
       opportunity: byMode.get("new_id_semantic_duplicate")!,
       original,
       new_provider_call_id: "provider-call-semantic-duplicate",
-      current_capability_grant: "grant.current",
-      current_capability_epoch: 5,
+      current_host_authority: { capability_epoch: 5, capability_grant: "grant.current" },
     });
     const stale = materializeGatewayDelivery({
       opportunity: byMode.get("stale_grant_replay")!,
       original,
       new_provider_call_id: "provider-call-stale-grant",
-      current_capability_grant: "grant.current",
-      current_capability_epoch: 5,
+      current_host_authority: { capability_epoch: 5, capability_grant: "grant.current" },
     });
 
     expect(exact).toMatchObject({
       emitted_provider_call_id: "provider-call-original",
       emitted_capability_epoch: 4,
-      call: { capability_grant: "grant.old" },
+      call: { tool_name: "close_job", arguments: { asset_id: "ASSET-B" } },
+      host_authority: { capability_grant: "grant.old" },
       relation: { same_call_id: true, same_semantic_intent: true, grant: "exact_original" },
     });
     expect(semantic).toMatchObject({
       emitted_provider_call_id: "provider-call-semantic-duplicate",
       emitted_capability_epoch: 5,
-      call: { capability_grant: "grant.current" },
+      call: { tool_name: "close_job", arguments: { asset_id: "ASSET-B" } },
+      host_authority: { capability_grant: "grant.current" },
       relation: { same_call_id: false, same_semantic_intent: true, grant: "current" },
     });
     expect(stale).toMatchObject({
       emitted_provider_call_id: "provider-call-stale-grant",
       emitted_capability_epoch: 4,
       observed_current_capability_epoch: 5,
-      call: { capability_grant: "grant.old" },
+      call: { tool_name: "close_job", arguments: { asset_id: "ASSET-B" } },
+      host_authority: { capability_grant: "grant.old" },
       relation: { same_call_id: false, same_semantic_intent: true, grant: "stale_original" },
     });
     expect(exact.evidence.semantic_intent_sha256).toBe(semantic.evidence.semantic_intent_sha256);
     expect(semantic.evidence.semantic_intent_sha256).toBe(stale.evidence.semantic_intent_sha256);
     expect(Object.isFrozen(stale.call.arguments)).toBe(true);
     expect(Object.isFrozen(stale.evidence)).toBe(true);
+    expect(stale.call).not.toHaveProperty("capability_grant");
+    expect(JSON.stringify(stale.call)).not.toContain("grant.old");
 
     expect(() => materializeGatewayDelivery({
       opportunity: byMode.get("stale_grant_replay")!,
       original,
       new_provider_call_id: "provider-call-stale-invalid",
-      current_capability_grant: "grant.old",
-      current_capability_epoch: 4,
+      current_host_authority: { capability_epoch: 4, capability_grant: "grant.old" },
     })).toThrow(/observably newer, different current grant/);
   });
 

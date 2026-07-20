@@ -2361,14 +2361,22 @@ function betaQuantile(probability: number, a: number, b: number): number {
   return (lower + upper) / 2;
 }
 
-/** Exact equal-tailed binomial interval; coverage is conservative, never asymptotic. */
+/**
+ * Exact equal-tailed binomial interval; coverage is conservative, never
+ * asymptotic. The dependency-free beta inverse is deliberately bounded to the
+ * benchmark-scale range covered by its numeric stress tests.
+ */
+export const EXACT_CLOPPER_PEARSON_MAX_TOTAL = 100_000;
+
 export function exactClopperPearsonInterval(
   successes: number,
   total: number,
   confidenceLevel = 0.95
 ): ConfidenceInterval {
-  if (!Number.isSafeInteger(total) || total <= 0) {
-    throw new Error("total must be a positive safe integer");
+  if (!Number.isSafeInteger(total) || total <= 0 || total > EXACT_CLOPPER_PEARSON_MAX_TOTAL) {
+    throw new Error(
+      `total must be a positive safe integer no greater than ${EXACT_CLOPPER_PEARSON_MAX_TOTAL}`
+    );
   }
   if (!Number.isSafeInteger(successes) || successes < 0 || successes > total) {
     throw new Error("successes must be an integer between zero and total");

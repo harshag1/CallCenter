@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const { Client } = pg;
@@ -54,6 +56,170 @@ function run(file, args, options = {}) {
   execFileSync(file, args, { stdio: "pipe", ...options });
 }
 
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function runGate0ConditionalDatabaseTests({
+  root,
+  host,
+  port,
+  user,
+  database,
+  adminUser,
+  adminDatabase,
+}) {
+  const inventoryPath = fileURLToPath(
+    new URL("../../benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json", import.meta.url)
+  );
+  const webRoot = fileURLToPath(new URL("../", import.meta.url));
+  const inventoryBytes = await readFile(inventoryPath);
+  const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+  invariant(
+    inventory?.schema_version === 1
+      && inventory.artifact_type === "gate0_test_skip_inventory"
+      && Array.isArray(inventory.entries)
+      && Number.isSafeInteger(inventory.total_skipped_suites_when_unconfigured)
+      && Number.isSafeInteger(inventory.total_skipped_tests_when_unconfigured)
+      && inventory.entries.length === inventory.total_skipped_suites_when_unconfigured,
+    "Gate 0 conditional-test inventory is malformed"
+  );
+  const testFiles = [];
+  let declaredTests = 0;
+  for (const entry of inventory.entries) {
+    invariant(
+      entry?.gate0_disposition === "must_run"
+        && typeof entry.path === "string"
+        && entry.path.startsWith("web/")
+        && Number.isSafeInteger(entry.test_count)
+        && entry.test_count > 0
+        && typeof entry.content_sha256 === "string",
+      "Gate 0 conditional-test inventory entry is malformed"
+    );
+    const relativePath = entry.path.slice("web/".length);
+    const source = await readFile(join(webRoot, relativePath));
+    invariant(
+      sha256(source) === entry.content_sha256,
+      `Gate 0 conditional-test source differs from inventory: ${entry.path}`
+    );
+    testFiles.push(relativePath);
+    declaredTests += entry.test_count;
+  }
+  invariant(
+    declaredTests === inventory.total_skipped_tests_when_unconfigured,
+    "Gate 0 conditional-test inventory total is inconsistent"
+  );
+
+  const reportPath = join(root, "gate0-conditional-vitest.json");
+  const databaseUrl =
+    `postgresql://${encodeURIComponent(user)}@${host}:${port}/${database}`;
+  const adminDatabaseUrl =
+    `postgresql://${encodeURIComponent(adminUser)}@${host}:${port}/${adminDatabase}`;
+  let commandError = null;
+  try {
+    run(
+      fileURLToPath(new URL("../node_modules/.bin/vitest", import.meta.url)),
+      [
+        "run",
+        ...testFiles,
+        "--maxWorkers=1",
+        "--reporter=verbose",
+        "--reporter=json",
+        `--outputFile.json=${reportPath}`,
+      ],
+      {
+        cwd: webRoot,
+        env: {
+          ...process.env,
+          DATABASE_URL: databaseUrl,
+          DATABASE_SSL: "disable",
+          FLOW_INTEGRATION_DATABASE_URL: databaseUrl,
+          SECURITY_MIGRATION_INTEGRATION_DATABASE_URL: adminDatabaseUrl,
+          AUTH_SECURITY_INTEGRATION_DATABASE_URL: databaseUrl,
+          CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL: databaseUrl,
+        },
+        maxBuffer: 16 * 1024 * 1024,
+      }
+    );
+  } catch (error) {
+    commandError = error;
+  }
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  if (commandError) {
+    const failedFiles = Array.isArray(report.testResults)
+      ? report.testResults
+          .filter((result) => result?.status !== "passed")
+          .map((result) => ({
+            file: result.name,
+            status: result.status,
+            message: result.message,
+            diagnostic: Object.fromEntries(
+              Object.entries(result)
+                .filter(([key]) => key !== "assertionResults"),
+            ),
+          }))
+      : [];
+    const incomplete = Array.isArray(report.testResults)
+      ? report.testResults.flatMap((result) => (
+          Array.isArray(result?.assertionResults)
+            ? result.assertionResults
+                .filter((assertion) => assertion?.status !== "passed")
+                .map((assertion) => ({
+                  file: result.name,
+                  test: assertion.fullName,
+                  status: assertion.status,
+                  failures: Array.isArray(assertion.failureMessages)
+                    ? assertion.failureMessages
+                    : [],
+                }))
+            : []
+        ))
+      : [];
+    throw new Error(
+      `Gate 0 conditional database test command failed: ${JSON.stringify({
+        failed_tests: report.numFailedTests,
+        failed_test_suites: report.numFailedTestSuites,
+        pending_tests: report.numPendingTests,
+        command_stdout:
+          commandError?.stdout instanceof Buffer
+            ? commandError.stdout.toString("utf8").slice(-16_384)
+            : "",
+        command_stderr:
+          commandError?.stderr instanceof Buffer
+            ? commandError.stderr.toString("utf8").slice(-16_384)
+            : "",
+        failed_files: failedFiles,
+        incomplete,
+      })}`,
+      { cause: commandError },
+    );
+  }
+  const executedFiles = Array.isArray(report.testResults)
+    ? report.testResults.map((result) => result?.name).filter((name) => typeof name === "string")
+    : [];
+  invariant(
+    report.success === true
+      && report.numFailedTests === 0
+      && report.numPendingTests === 0
+      && report.numPassedTests === declaredTests
+      && report.numTotalTests === declaredTests
+      && executedFiles.length === testFiles.length
+      && new Set(executedFiles).size === testFiles.length
+      && report.testResults.every((result) => result.status === "passed"),
+    "Gate 0 conditional database tests did not execute completely"
+  );
+  return Object.freeze({
+    inventory_sha256: sha256(inventoryBytes),
+    test_file_count: testFiles.length,
+    total_tests: declaredTests,
+    passed_tests: report.numPassedTests,
+    failed_tests: report.numFailedTests,
+    pending_tests: report.numPendingTests,
+    provider_sessions_opened: 0,
+    spend_usd: 0,
+  });
+}
+
 async function unusedPort() {
   const server = createServer();
   await new Promise((resolve, reject) => {
@@ -78,6 +244,26 @@ async function withClient(host, port, user, fn, database = "hacc_tenant_test") {
   } finally {
     await client.end();
   }
+}
+
+async function applyMigrationFiles(host, port, user, database, migrationsDir, migrationFiles) {
+  await withClient(host, port, user, async (client) => {
+    for (const name of migrationFiles) {
+      const sql = await readFile(new URL(name, migrationsDir), "utf8");
+      await client.query("BEGIN");
+      try {
+        await client.query(sql);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw new Error(
+          `conditional-test database migration ${name} failed `
+            + `[${error.code ?? "unknown"}]: ${error.message}`,
+          { cause: error },
+        );
+      }
+    }
+  }, database);
 }
 
 async function expectDenied(client, sql, params = []) {
@@ -1697,6 +1883,36 @@ async function main() {
       operatorActionCostUpgradeVerified = true;
     }, upgradeDatabase);
 
+    const conditionalDatabase = "hacc_gate0_integration";
+    await withClient(socket, port, owner, async (superuser) => {
+      await superuser.query(
+        `CREATE DATABASE ${quoteIdentifier(conditionalDatabase)}
+         OWNER hacc_migrator`
+      );
+    }, "postgres");
+    await withClient(socket, port, owner, async (superuser) => {
+      await superuser.query("CREATE EXTENSION IF NOT EXISTS vector");
+      await superuser.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+    }, conditionalDatabase);
+    await applyMigrationFiles(
+      "127.0.0.1",
+      port,
+      "hacc_migrator",
+      conditionalDatabase,
+      migrationsDir,
+      migrationFiles,
+    );
+
+    const conditionalDatabaseTests = await runGate0ConditionalDatabaseTests({
+      root,
+      host: "127.0.0.1",
+      port,
+      user: "hacc_migrator",
+      database: conditionalDatabase,
+      adminUser: owner,
+      adminDatabase: conditionalDatabase,
+    });
+
     process.stdout.write(`${JSON.stringify({
       ok: true,
       migrations: migrationFiles.length,
@@ -1783,6 +1999,7 @@ async function main() {
         concurrent_proposals_accepted: concurrentProposalLimitAccepted,
         final_hourly_proposal_rows: concurrentProposalLimitFinalRows,
       },
+      conditional_database_tests: conditionalDatabaseTests,
       provider_sessions_opened: 0,
       spend_usd: 0,
     })}\n`);

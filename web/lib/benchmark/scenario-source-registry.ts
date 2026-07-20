@@ -27,17 +27,23 @@ import {
   BenchmarkScenarioSchema,
   type BenchmarkScenario,
 } from "./scenario-schema";
+import {
+  TRANSPORT_SMOKE_SCENARIO,
+  transportSmokeCompilerInput,
+} from "./transport-smoke-scenario";
 
 export const SCENARIO_SOURCE_REGISTRY_VERSION = "voice-scenario-source-registry.v1" as const;
 
-export type BenchmarkScenarioFamily = "industrial-field-service" | LongHorizonFamily;
+export type BenchmarkScenarioFamily = "industrial-field-service" | "transport-smoke" | LongHorizonFamily;
 export type BenchmarkScenarioStudyRole = "development" | "confirmatory-held-out";
+export type BenchmarkScenarioExecutionScope = "benchmark" | "c3-transport-smoke-only";
 
 export type RegisteredScenarioSource = Readonly<{
   registryVersion: typeof SCENARIO_SOURCE_REGISTRY_VERSION;
   registryKey: string;
   family: BenchmarkScenarioFamily;
   studyRole: BenchmarkScenarioStudyRole;
+  executionScope: BenchmarkScenarioExecutionScope;
   heldOut: boolean;
   scenarioId: string;
   scenarioVersion: string;
@@ -59,6 +65,7 @@ export type ScenarioSourceCatalogEntry = Readonly<{
   registryEntryHash: string;
   family: BenchmarkScenarioFamily;
   studyRole: BenchmarkScenarioStudyRole;
+  executionScope: BenchmarkScenarioExecutionScope;
   heldOut: boolean;
   scenarioId: string;
   scenarioVersion: string;
@@ -197,7 +204,8 @@ function buildEntry(
   scenarioInput: unknown,
   compilerInputFactory: (scenario: BenchmarkScenario) => CanonicalConditionCompilerInput,
   studyRole: BenchmarkScenarioStudyRole = "development",
-  heldOut = false
+  heldOut = false,
+  executionScope: BenchmarkScenarioExecutionScope = "benchmark"
 ): RegisteredScenarioSource {
   if (heldOut !== (studyRole === "confirmatory-held-out")) {
     throw new ScenarioSourceRegistryError(
@@ -239,6 +247,7 @@ function buildEntry(
     registry_key: registryKey,
     family,
     study_role: studyRole,
+    execution_scope: executionScope,
     held_out: heldOut,
     scenario,
     flow,
@@ -253,6 +262,7 @@ function buildEntry(
     registryKey,
     family,
     studyRole,
+    executionScope,
     heldOut,
     scenarioId: scenario.id,
     scenarioVersion: scenario.version,
@@ -278,6 +288,14 @@ const entries: RegisteredScenarioSource[] = [
     source.studyRole,
     source.heldOut
   )),
+  buildEntry(
+    "transport-smoke",
+    TRANSPORT_SMOKE_SCENARIO,
+    transportSmokeCompilerInput,
+    "development",
+    false,
+    "c3-transport-smoke-only"
+  ),
 ];
 
 const byIdentity = new Map<string, RegisteredScenarioSource>();
@@ -310,6 +328,7 @@ export const SCENARIO_SOURCE_CATALOG = immutableJson(
     registryEntryHash: entry.registryEntryHash,
     family: entry.family,
     studyRole: entry.studyRole,
+    executionScope: entry.executionScope,
     heldOut: entry.heldOut,
     scenarioId: entry.scenarioId,
     scenarioVersion: entry.scenarioVersion,

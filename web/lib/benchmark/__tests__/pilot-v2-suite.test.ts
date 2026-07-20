@@ -289,7 +289,9 @@ describe("pilot-v2 development suite", () => {
       }
     }
     expect(omissions).toBe(30);
-  });
+    // This is an exhaustive 30-way causal omission proof over complete oracle
+    // replays. The endpoint assertions are the subject; elapsed time is not.
+  }, 60_000);
 
   it("round-trips the durable world at the frozen reconnect boundary and completes without replay", () => {
     for (const template of PILOT_V2_DEVELOPMENT_SUITE) {

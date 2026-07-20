@@ -1,7 +1,9 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
 import { verifyEventChain, verifyRunManifest } from "../artifacts";
 import { createBudgetLedger } from "../budget";
+import { createFlowExecutionState } from "../../flow-runtime";
 import {
   createPairedAudioManifest,
   runBenchmarkTrial,
@@ -23,8 +25,26 @@ import {
   type ProviderCapabilitySnapshot,
 } from "../capability-gateway";
 import type { BenchmarkConditionId, CompiledBenchmarkCondition } from "../condition-compiler";
-import { compileConditionSuite } from "../condition-compiler";
+import {
+  benchmarkScenarioHash,
+  compileConditionSuite,
+  compiledConditionHash,
+} from "../condition-compiler";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
+import {
+  benchmarkKernelAttestationPublicKeyFingerprint,
+  createBenchmarkKernelAttestationSigner,
+  createBenchmarkKernelCapabilityHead,
+  createBenchmarkKernelFinalAttestation,
+  type BenchmarkKernelCapabilityHead,
+} from "../kernel-attestation";
+import {
+  appendKernelTranscriptInvocation,
+  createKernelTranscript,
+  encodeKernelTranscript,
+  kernelTranscriptReference,
+  type KernelTranscript,
+} from "../kernel-transcript";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
 import type {
   NormalizedRealtimeClient,
@@ -179,17 +199,55 @@ const limits: TrialLimits = Object.freeze({
 });
 
 const HASH = "a".repeat(64);
+const TEST_PLAN_HASH = "b".repeat(64);
+const TEST_FREEZE_LOCK_HASH = "c".repeat(64);
+const TEST_KERNEL_BUILD_HASH = "d".repeat(64);
+const TEST_PAIR_INVARIANTS_HASH = "e".repeat(64);
+const TEST_STUDY_PLAN_HASH = "f".repeat(64);
+const TEST_ATTESTATION_KEYS = generateKeyPairSync("ed25519");
+const TEST_ATTESTATION_PRIVATE_KEY_PEM = TEST_ATTESTATION_KEYS.privateKey
+  .export({ format: "pem", type: "pkcs8" }).toString();
+const TEST_ATTESTATION_PUBLIC_KEY_PEM = TEST_ATTESTATION_KEYS.publicKey
+  .export({ format: "pem", type: "spki" }).toString();
+const TEST_ATTESTATION_SIGNER = createBenchmarkKernelAttestationSigner({
+  keyId: "orchestrator-test-key",
+  privateKeyPem: TEST_ATTESTATION_PRIVATE_KEY_PEM,
+  publicKeyPem: TEST_ATTESTATION_PUBLIC_KEY_PEM,
+});
+const TEST_ATTESTATION_EVIDENCE = Object.freeze({
+  pairId: "pair-fixture-001",
+  leaseSubjectId: "pair-fixture-001",
+  provider: "openai" as const,
+  model: "fake-realtime-model",
+  planSha256: TEST_PLAN_HASH,
+  freezeLockSha256: TEST_FREEZE_LOCK_HASH,
+  kernelBuildSha256: TEST_KERNEL_BUILD_HASH,
+});
+const TEST_ATTESTATION_EXPECTATION = Object.freeze({
+  evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+  trust: Object.freeze({
+    keyId: TEST_ATTESTATION_SIGNER.keyId,
+    publicKeySha256: benchmarkKernelAttestationPublicKeyFingerprint(TEST_ATTESTATION_PUBLIC_KEY_PEM),
+    publicKeyPem: TEST_ATTESTATION_PUBLIC_KEY_PEM,
+  }),
+});
 
-function conditionFor(id: BenchmarkConditionId = "raw-full"): CompiledBenchmarkCondition {
-  const capabilities = scenario.tools.map((tool) => ({
+function conditionFor(
+  id: BenchmarkConditionId = "raw-full",
+  scenarioInput: BenchmarkScenario = scenario
+): CompiledBenchmarkCondition {
+  const capabilities = scenarioInput.tools.map((tool) => ({
     name: tool.name,
     category: "leaf" as const,
     description: tool.description,
     inputSchema: { type: "object", additionalProperties: true },
     semanticHash: HASH,
   }));
-  return Object.freeze({
+  const condition = {
     id,
+    sourceHash: HASH,
+    scenarioHash: benchmarkScenarioHash(scenarioInput),
+    flowHash: HASH,
     behavior: Object.freeze({
       toolExposure: "gateway" as const,
       progressiveDisclosure: id === "progressive-only" || id === "full-harness" || id === "oracle-route",
@@ -204,7 +262,7 @@ function conditionFor(id: BenchmarkConditionId = "raw-full"): CompiledBenchmarkC
     visibleCapabilities: Object.freeze(capabilities),
     disclosures: Object.freeze([]),
     providerTools: Object.freeze([CAPABILITY_GATEWAY_TOOL]),
-    semanticLeafTools: Object.freeze(scenario.tools.map((tool) => Object.freeze({
+    semanticLeafTools: Object.freeze(scenarioInput.tools.map((tool) => Object.freeze({
       name: tool.name,
       semanticDefinitionHash: HASH,
       publicContractHash: HASH,
@@ -213,12 +271,23 @@ function conditionFor(id: BenchmarkConditionId = "raw-full"): CompiledBenchmarkC
     initialPrompt: `INITIAL PROMPT FOR ${id}`,
     initialPromptHash: HASH,
     providerToolsHash: HASH,
-    conditionHash: HASH,
-  });
+    conditionHash: "",
+  } satisfies CompiledBenchmarkCondition;
+  return rehashCondition(condition);
+}
+
+function rehashCondition(input: CompiledBenchmarkCondition): CompiledBenchmarkCondition {
+  const detached = structuredClone(input);
+  return Object.freeze({ ...detached, conditionHash: compiledConditionHash(detached) });
 }
 
 function snapshot(condition: CompiledBenchmarkCondition): ProviderCapabilitySnapshot {
-  return snapshotFor(condition.visibleCapabilities, `test:${condition.id}`, 0, "grant");
+  return snapshotFor(
+    condition.visibleCapabilities,
+    condition.behavior.progressiveDisclosure ? "$base" : "$full-catalog",
+    0,
+    "grant"
+  );
 }
 
 function snapshotFor(
@@ -242,16 +311,57 @@ function snapshotFor(
 }
 
 class DirectGatewayKernel implements BenchmarkGatewayKernel {
+  private replay: KernelTranscript | null = null;
+  private flowState = null as ReturnType<typeof createFlowExecutionState> | null;
+  private capabilityHead: BenchmarkKernelCapabilityHead | null = null;
+
   constructor(private readonly inspect?: (invocation: BenchmarkGatewayInvocation) => void) {}
 
-  initialize({ condition }: { condition: CompiledBenchmarkCondition }): ProviderCapabilitySnapshot {
-    return snapshot(condition);
+  initialize(input: Parameters<BenchmarkGatewayKernel["initialize"]>[0]): ProviderCapabilitySnapshot {
+    const visible = snapshot(input.condition);
+    this.flowState = input.condition.behavior.durableFlowState
+      ? createFlowExecutionState("2026-07-10T12:00:00.000Z")
+      : null;
+    this.capabilityHead = createBenchmarkKernelCapabilityHead({
+      condition: input.condition,
+      epoch: 0,
+      target: input.condition.behavior.progressiveDisclosure ? "$base" : "$full-catalog",
+      catalogMode: "target",
+      internalFlowScope: this.flowState ? "$flow.routing" : null,
+    });
+    this.replay = createKernelTranscript({
+      runId: input.runId,
+      condition: input.condition,
+      scenario: input.scenario,
+      world: input.world,
+      flowState: this.flowState,
+      capabilityHead: this.capabilityHead,
+      providerVisibleCapabilitySnapshot: visible,
+      dataClassification: "synthetic_benchmark_only",
+      sensitiveValueSecret: "orchestrator-test-public-commitment-secret-v1",
+    });
+    return visible;
+  }
+
+  attestFinal(input: Parameters<BenchmarkGatewayKernel["attestFinal"]>[0]) {
+    if (!this.replay || !this.capabilityHead) throw new Error("test kernel was not initialized");
+    return attestTestKernel(input, this.transcriptReference(), this.capabilityHead, this.flowState);
+  }
+
+  encodedTranscript(): string {
+    if (!this.replay) throw new Error("test kernel was not initialized");
+    return encodeKernelTranscript(this.replay);
+  }
+
+  transcriptReference() {
+    if (!this.replay) throw new Error("test kernel was not initialized");
+    return kernelTranscriptReference(this.replay);
   }
 
   invoke(invocation: BenchmarkGatewayInvocation) {
     this.inspect?.(invocation);
     if (invocation.call.capability_grant !== `grant.${invocation.call.action}`) {
-      return {
+      const outcome = {
         result: {
           ok: false as const,
           gateway_version: CAPABILITY_GATEWAY_VERSION,
@@ -261,6 +371,8 @@ class DirectGatewayKernel implements BenchmarkGatewayKernel {
           retriable: false,
         },
       };
+      this.record(invocation, outcome, invocation.world);
+      return outcome;
     }
     const execution = invocation.executeLeaf({
       action: invocation.call.action,
@@ -278,13 +390,49 @@ class DirectGatewayKernel implements BenchmarkGatewayKernel {
           : "executed",
       authoritative_result: execution.receipt.authoritative_result ?? {},
     };
-    return execution.visible_result.ok
+    const outcome = execution.visible_result.ok
       ? { result: authoritativeResult }
       : {
           result: authoritativeResult,
           providerVisibleOutput: execution.visible_result,
         };
+    this.record(invocation, outcome, execution.state);
+    return outcome;
   }
+
+  private record(
+    invocation: BenchmarkGatewayInvocation,
+    outcome: ReturnType<DirectGatewayKernel["invoke"]>,
+    postWorld: Parameters<typeof appendKernelTranscriptInvocation>[1]["postWorld"]
+  ) {
+    if (!this.replay || !this.capabilityHead) throw new Error("test kernel was not initialized");
+    this.replay = appendKernelTranscriptInvocation(this.replay, {
+      invocation,
+      outcome,
+      postWorld,
+      preFlowState: this.flowState,
+      postFlowState: this.flowState,
+      preCapabilityHead: this.capabilityHead,
+      postCapabilityHead: this.capabilityHead,
+      sensitiveValueSecret: "orchestrator-test-public-commitment-secret-v1",
+    });
+  }
+}
+
+function attestTestKernel(
+  input: Parameters<BenchmarkGatewayKernel["attestFinal"]>[0],
+  transcriptReference: ReturnType<BenchmarkGatewayKernel["transcriptReference"]>,
+  capabilityHead: BenchmarkKernelCapabilityHead,
+  state: ReturnType<typeof createFlowExecutionState> | null
+) {
+  return createBenchmarkKernelFinalAttestation({
+    ...input,
+    capabilityHead,
+    flowState: state,
+    evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+    signer: TEST_ATTESTATION_SIGNER,
+    transcriptReference,
+  });
 }
 
 function runtimeBindings(
@@ -300,6 +448,9 @@ function runtimeBindings(
     provider: "openai" as const,
     condition,
     gatewayKernel: options.kernel ?? new DirectGatewayKernel(),
+    kernelAttestationExpectation: TEST_ATTESTATION_EXPECTATION,
+    pairInvariantsHash: TEST_PAIR_INVARIANTS_HASH,
+    studyPlanHash: TEST_STUDY_PLAN_HASH,
     createClient(configuration: TrialSessionConfiguration) {
       options.sessions?.push(configuration);
       return client;
@@ -482,9 +633,8 @@ function validCall(callId: string, name: string, argumentsJson: Record<string, u
 
 function gatewayCall(callId: string, action: string, argumentsJson: Record<string, unknown>) {
   return validCall(callId, CAPABILITY_GATEWAY_NAME, {
-    action,
+    tool_name: action,
     arguments: argumentsJson,
-    capability_grant: `grant.${action}`,
   });
 }
 
@@ -702,6 +852,31 @@ describe("provider-neutral benchmark trial orchestrator", () => {
 
     expect(verifyEventChain(result.artifacts.events).valid).toBe(true);
     expect(verifyRunManifest(result.artifacts.manifest).valid).toBe(true);
+    expect(result.artifacts.events.at(-1)?.event_type).toBe("trial.finished");
+    expect(result.artifacts.events[0]?.payload).toMatchObject({
+      scenario_id: scenario.id,
+      scenario_version: scenario.version,
+      pair_invariants_hash: TEST_PAIR_INVARIANTS_HASH,
+      freeze_lock_hash: TEST_FREEZE_LOCK_HASH,
+      plan_hash: TEST_STUDY_PLAN_HASH,
+      execution_plan_sha256: TEST_PLAN_HASH,
+      kernel_build_sha256: TEST_KERNEL_BUILD_HASH,
+      lease_subject_id: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+    });
+    expect(result.artifacts.manifest.metadata).toMatchObject({
+      scenario_id: scenario.id,
+      scenario_version: scenario.version,
+      pair_invariants_hash: TEST_PAIR_INVARIANTS_HASH,
+      freeze_lock_hash: TEST_FREEZE_LOCK_HASH,
+      plan_hash: TEST_STUDY_PLAN_HASH,
+      execution_plan_sha256: TEST_PLAN_HASH,
+      kernel_build_sha256: TEST_KERNEL_BUILD_HASH,
+      lease_subject_id: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+      kernel_attestation: expect.objectContaining({
+        path: "kernel-attestation.json",
+        attestation_hash: result.kernelAttestation.attestation_hash,
+      }),
+    });
     expect(result.artifacts.files.map((file) => file.path)).toEqual(expect.arrayContaining([
       "events.jsonl",
       "provider-wire.jsonl",
@@ -719,6 +894,170 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(result.inputAudioHashes).toEqual([pairedAudio.turns[0].sha256]);
   });
 
+  it("binds response IDs to their original caller turn and ignores delayed stale mutations", async () => {
+    const twoTurnScenario = BenchmarkScenarioSchema.parse({
+      ...structuredClone(scenario),
+      id: "orchestrator-two-turn",
+      max_turns: 2,
+      caller: {
+        ...structuredClone(scenario.caller),
+        turns: [
+          structuredClone(scenario.caller.turns[0]),
+          {
+            ...structuredClone(scenario.caller.turns[0]),
+            id: "caller-two",
+            phase: "follow-up",
+            utterance: "Please confirm the second turn without changing anything.",
+          },
+        ],
+      },
+    });
+    const twoTurnAudio: readonly CallerAudioTurn[] = Object.freeze([
+      Object.freeze({
+        turnId: "caller-one",
+        audio: Object.freeze({ ...AUDIO_FORMAT, data: Uint8Array.from([1, 0]) }),
+      }),
+      Object.freeze({
+        turnId: "caller-two",
+        audio: Object.freeze({ ...AUDIO_FORMAT, data: Uint8Array.from([2, 0]) }),
+      }),
+    ]);
+    const pair = createPairedAudioManifest({
+      pairId: "two-turn-response-binding",
+      scenario: twoTurnScenario,
+      callerTurns: twoTurnAudio,
+    });
+    let turn = 0;
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        turn += 1;
+        if (turn === 1) {
+          fake.emit(event("response.started", { responseId: "response-turn-one" }));
+          fake.emit(event("output.audio", {
+            responseId: "response-turn-one",
+            audio: Uint8Array.from([1, 0]),
+            format: AUDIO_FORMAT,
+          }));
+          fake.emit(event("response.completed", { responseId: "response-turn-one", status: "completed" }));
+          return;
+        }
+
+        // These events arrive after the first logical response has closed. The
+        // persistent response-ID binding must prevent all three from touching
+        // turn two: audio, an executable tool, and a premature completion.
+        fake.emit(event("output.audio", {
+          responseId: "response-turn-one",
+          audio: Uint8Array.from([9, 0]),
+          format: AUDIO_FORMAT,
+        }));
+        fake.emit(event("tool.calls", {
+          responseId: "response-turn-one",
+          calls: [gatewayCall("stale-commit", "commit_action", { job_id: "J-1" })],
+        }));
+        fake.emit(event("response.completed", { responseId: "response-turn-one", status: "completed" }));
+        fake.emit(event("response.started", { responseId: "response-turn-two" }));
+        fake.emit(event("output.audio", {
+          responseId: "response-turn-two",
+          audio: Uint8Array.from([2, 0]),
+          format: AUDIO_FORMAT,
+        }));
+        fake.emit(event("response.completed", { responseId: "response-turn-two", status: "completed" }));
+      },
+      onToolResults() {
+        throw new Error("a stale prior-turn tool call must never be submitted");
+      },
+    });
+    const trialBudget = budget("two-turn-response-binding");
+    const result = await runBenchmarkTrial({
+      runId: "two-turn-response-binding",
+      model: "fake-realtime-model",
+      scenario: twoTurnScenario,
+      ...runtimeBindings(client, { condition: conditionFor("raw-full", twoTurnScenario) }),
+      callerTurns: twoTurnAudio,
+      pairedAudio: pair,
+      limits: { ...limits, maxTurns: 2 },
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsSent: 2, outputAudioBytes: 4, toolCalls: 0 });
+    expect(result.world.facts.commit_count).toBe(0);
+    expect(result.world.receipts).toHaveLength(0);
+    expect(client.resultBatches).toHaveLength(0);
+    const outputs = result.artifacts.files
+      .filter((file) => file.path.startsWith("audio/output/"))
+      .map((file) => Array.from(file.content as Uint8Array));
+    expect(outputs).toEqual([[1, 0], [2, 0]]);
+    const ignored = result.artifacts.events.filter((entry) => entry.event_type === "provider.response_event_ignored");
+    expect(ignored).toHaveLength(3);
+    expect(ignored.every((entry) => (entry.payload as { reason?: unknown }).reason === "stale_response_turn")).toBe(true);
+  });
+
+  it("binds malformed provider call IDs before parsing so conflicting reuse cannot execute", async () => {
+    let resultRound = 0;
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("response.started", { responseId: "malformed-first-response" }));
+        fake.emit(event("tool.calls", {
+          responseId: "malformed-first-response",
+          calls: [{
+            callId: "reused-provider-call",
+            name: CAPABILITY_GATEWAY_NAME,
+            argumentsText: "{bad-json",
+            argumentsJson: null,
+            argumentsError: "invalid JSON",
+          }],
+        }));
+        fake.emit(event("response.completed", { responseId: "malformed-first-response", status: "completed" }));
+      },
+      onToolResults(fake, results) {
+        resultRound += 1;
+        if (resultRound === 1) {
+          expect(results[0].output).toMatchObject({ code: "malformed_gateway_call" });
+          fake.emit(event("response.started", { responseId: "conflicting-reuse-response" }));
+          fake.emit(event("tool.calls", {
+            responseId: "conflicting-reuse-response",
+            calls: [gatewayCall("reused-provider-call", "commit_action", { job_id: "J-1" })],
+          }));
+          fake.emit(event("response.completed", { responseId: "conflicting-reuse-response", status: "completed" }));
+          return;
+        }
+        expect(results[0].output).toMatchObject({
+          ok: false,
+          action: "commit_action",
+          code: "provider_call_id_conflict",
+        });
+        fake.emit(event("response.started", { responseId: "post-conflict-response" }));
+        fake.emit(event("response.completed", { responseId: "post-conflict-response", status: "completed" }));
+      },
+    });
+    const trialBudget = budget("malformed-provider-id-reuse");
+    const result = await runBenchmarkTrial({
+      runId: "malformed-provider-id-reuse",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters.toolCalls).toBe(2);
+    expect(client.resultBatches).toHaveLength(2);
+    expect(result.world.facts.commit_count).toBe(0);
+    expect(result.world.receipts).toHaveLength(0);
+    expect(result.artifacts.events).toContainEqual(expect.objectContaining({
+      event_type: "tool.call_result",
+      payload: expect.objectContaining({
+        provider_call_id: "reused-provider-call",
+        provider_call_identity_conflict: true,
+        execution_disposition: "not_executed",
+      }),
+    }));
+  });
+
   it("uses the same paired audio hash while routing the harness arm only through an injected stable gateway", async () => {
     let handled = 0;
     const client = new FakeRealtimeClient({
@@ -726,9 +1065,8 @@ describe("provider-neutral benchmark trial orchestrator", () => {
         fake.emit(event("tool.calls", {
           responseId: "harness-response-1",
           calls: [validCall("gateway-1", CAPABILITY_GATEWAY_NAME, {
-            action: "commit_action",
+            tool_name: "commit_action",
             arguments: { job_id: "J-1" },
-            capability_grant: "grant.commit_action",
           })],
         }));
         fake.emit(event("response.completed", { responseId: "harness-response-1", status: "completed" }));
@@ -781,11 +1119,11 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     const baseProgressive = conditionFor("full-harness");
     const lookupCapability = baseProgressive.visibleCapabilities.find((capability) => capability.name === "lookup_value")!;
     const commitCapability = baseProgressive.visibleCapabilities.find((capability) => capability.name === "commit_action")!;
-    const progressiveCondition: CompiledBenchmarkCondition = Object.freeze({
+    const progressiveCondition: CompiledBenchmarkCondition = rehashCondition({
       ...baseProgressive,
       visibleCapabilities: Object.freeze([lookupCapability]),
       disclosures: Object.freeze([{
-        target: "step:commit" as const,
+        target: "topic:commit" as const,
         information: Object.freeze([]),
         visibleCapabilities: Object.freeze([commitCapability]),
         prompt: "COMPILED COMMIT STAGE DISCLOSURE",
@@ -795,14 +1133,17 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     });
     const direct = new DirectGatewayKernel();
     const progressiveKernel: BenchmarkGatewayKernel = {
-      initialize: (input) => snapshot(input.condition),
+      initialize: (input) => direct.initialize(input),
+      attestFinal: (input) => direct.attestFinal(input),
+      encodedTranscript: () => direct.encodedTranscript(),
+      transcriptReference: () => direct.transcriptReference(),
       async invoke(invocation) {
         const outcome = await direct.invoke(invocation);
         return {
           ...outcome,
           disclosure: {
-            target: "step:commit",
-            snapshot: snapshotFor([commitCapability], "step:commit", 1, "next"),
+            target: "topic:commit",
+            snapshot: snapshotFor([commitCapability], "topic:commit", 1, "next"),
           },
         };
       },
@@ -821,7 +1162,9 @@ describe("provider-neutral benchmark trial orchestrator", () => {
           progressive_disclosure: "COMPILED COMMIT STAGE DISCLOSURE",
         });
         expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
-          .toContain('"capability_grant":"next.commit_action"');
+          .not.toContain("capability_grant");
+        expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
+          .toContain('"name":"commit_action"');
         fake.emit(event("response.completed", { responseId: "progressive-2", status: "completed" }));
       },
     });
@@ -842,13 +1185,16 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(progressiveResult.status).toBe("completed");
     expect(progressiveResult.artifacts.events).toContainEqual(expect.objectContaining({
       event_type: "tool.call_result",
-      payload: expect.objectContaining({ disclosure_target: "step:commit" }),
+      payload: expect.objectContaining({ disclosure_target: "topic:commit" }),
     }));
 
     const stateCondition = progressiveCondition;
     const stateDirect = new DirectGatewayKernel();
     const stateKernel: BenchmarkGatewayKernel = {
-      initialize: (input) => snapshot(input.condition),
+      initialize: (input) => stateDirect.initialize(input),
+      attestFinal: (input) => stateDirect.attestFinal(input),
+      encodedTranscript: () => stateDirect.encodedTranscript(),
+      transcriptReference: () => stateDirect.transcriptReference(),
       async invoke(invocation) {
         const outcome = await stateDirect.invoke(invocation);
         return {
@@ -868,7 +1214,9 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       onToolResults(fake, results) {
         expect(results[0].output).not.toHaveProperty("progressive_disclosure");
         expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
-          .toContain('"capability_grant":"rotated.commit_action"');
+          .not.toContain("capability_grant");
+        expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
+          .toContain('"capability_epoch":2');
         fake.emit(event("response.completed", { responseId: "state-2", status: "completed" }));
       },
     });
@@ -895,7 +1243,10 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     const lookup = stateCondition.visibleCapabilities.find((capability) => capability.name === "lookup_value")!;
     const direct = new DirectGatewayKernel();
     const stateKernel: BenchmarkGatewayKernel = {
-      initialize: (input) => snapshot(input.condition),
+      initialize: (input) => direct.initialize(input),
+      attestFinal: (input) => direct.attestFinal(input),
+      encodedTranscript: () => direct.encodedTranscript(),
+      transcriptReference: () => direct.transcriptReference(),
       async invoke(invocation) {
         const outcome = await direct.invoke(invocation);
         return {
@@ -932,11 +1283,11 @@ describe("provider-neutral benchmark trial orchestrator", () => {
 
     const progressiveBase = conditionFor("full-harness");
     const commit = progressiveBase.visibleCapabilities.find((capability) => capability.name === "commit_action")!;
-    const progressiveCondition: CompiledBenchmarkCondition = Object.freeze({
+    const progressiveCondition: CompiledBenchmarkCondition = rehashCondition({
       ...progressiveBase,
       visibleCapabilities: Object.freeze([lookup]),
       disclosures: Object.freeze([{
-        target: "step:commit" as const,
+        target: "topic:commit" as const,
         information: Object.freeze([]),
         visibleCapabilities: Object.freeze([commit]),
         prompt: "COMMIT STAGE",
@@ -944,10 +1295,14 @@ describe("provider-neutral benchmark trial orchestrator", () => {
         disclosureHash: HASH,
       }]),
     });
+    const descriptionDirect = new DirectGatewayKernel();
     const descriptionKernel: BenchmarkGatewayKernel = {
-      initialize: (input) => snapshot(input.condition),
+      initialize: (input) => descriptionDirect.initialize(input),
+      attestFinal: (input) => descriptionDirect.attestFinal(input),
+      encodedTranscript: () => descriptionDirect.encodedTranscript(),
+      transcriptReference: () => descriptionDirect.transcriptReference(),
       async invoke(invocation) {
-        const outcome = await direct.invoke(invocation);
+        const outcome = await descriptionDirect.invoke(invocation);
         const rotated = snapshotFor([commit], "tampered-description", 1, "tampered");
         return {
           ...outcome,
@@ -1055,6 +1410,40 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(timeoutClient.connectCalls).toBe(1);
     expect(timeoutClient.turns).toHaveLength(1);
     expect(timeoutResult.counters.retries).toBe(0);
+  });
+
+  it("closes the provider on the independent wall-clock deadline even while journal durability is hung", async () => {
+    const client = new FakeRealtimeClient();
+    const never = new Promise<void>(() => undefined);
+    const hangingJournal: TrialJournalSink = {
+      append: () => undefined,
+      beforeClientCreate: () => undefined,
+      onSessionOpened: () => never,
+      finalize: () => undefined,
+    };
+    const trialBudget = budget("hard-wall-clock-kill");
+    const unfinishedTrial = runBenchmarkTrial({
+      runId: "hard-wall-clock-kill",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client),
+      callerTurns,
+      pairedAudio,
+      limits: {
+        ...limits,
+        maxSessionMs: 25,
+        sessionReadyTimeoutMs: 10,
+        responseTimeoutMs: 10,
+      },
+      budget: trialBudget.value,
+      journal: hangingJournal,
+    });
+    // The run itself intentionally remains blocked on the simulated fsync.
+    // The assertion is that provider billing cannot remain open with it.
+    void unfinishedTrial.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(client.closeCalls).toBe(1);
+    expect(client.state).toBe("closed");
   });
 
   it("enforces input, output, tool-call, and monotonic session caps before excess work", async () => {
@@ -1313,6 +1702,9 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       scenario,
       condition: conditionFor(),
       gatewayKernel: new DirectGatewayKernel(),
+      kernelAttestationExpectation: TEST_ATTESTATION_EXPECTATION,
+      pairInvariantsHash: TEST_PAIR_INVARIANTS_HASH,
+      studyPlanHash: TEST_STUDY_PLAN_HASH,
       createClient() {
         factoryCalls += 1;
         return beforeClient;

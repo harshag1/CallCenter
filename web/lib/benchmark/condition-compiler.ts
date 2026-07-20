@@ -383,12 +383,12 @@ const SHARED_VOICE_RULES = [
 
 const DIRECT_CONTROL = [
   SHARED_VOICE_RULES,
-  `All business actions are invoked through ${CAPABILITY_GATEWAY_NAME} using static full-catalog action-bound grants. The gateway applies ordinary action-schema and world validation but no flow routing, transition, or framework idempotency enforcement.`,
+  `All business actions are invoked through ${CAPABILITY_GATEWAY_NAME} using the exact disclosed tool_name and arguments. The host binds authority outside model-authored arguments. The gateway applies ordinary action-schema and world validation but no flow routing, transition, or framework idempotency enforcement.`,
 ].join("\n");
 
 const GATEWAY_CONTROL = [
   SHARED_VOICE_RULES,
-  `All logical actions are invoked through ${CAPABILITY_GATEWAY_NAME}. Use only the latest disclosed action catalog and copy its current opaque capability grant exactly.`,
+  `All logical actions are invoked through ${CAPABILITY_GATEWAY_NAME}. Use only the latest disclosed tool catalog; send exactly tool_name and arguments. The host binds the current capability grant and epoch outside model-authored arguments.`,
   "Flow-control actions move between disclosures; business actions retain the same canonical argument schemas as their direct-function counterparts.",
 ].join("\n");
 

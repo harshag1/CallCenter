@@ -13,7 +13,7 @@ cd web
 npm run benchmark:mission-runtime -- \
   --trials 1000 \
   --seed-start 1 \
-  --out ../benchmarks/voice-long-horizon/.local/mission-runtime-sensitivity-1000.json
+  --out ../benchmarks/voice-long-horizon/.local/mission-runtime-sensitivity-1000-state-head.json
 ```
 
 ## Result
@@ -28,11 +28,11 @@ npm run benchmark:mission-runtime -- \
 | Open obligations at terminal state | not represented | 0 | — |
 | Runtime failures | — | 0 | — |
 
-The mission runtime blocked or deduplicated 1,151 adversarial attempts and recovered all 153 injected partial-saga failures through a scoped compensation obligation. Its event ledger contained a median 21 events and p95 27 events per trial.
+The mission runtime rejected 1,151 adversarial attempts and idempotently suppressed 183 duplicate reservation deliveries, for 1,334 contained opportunities in the per-fault table. It also recovered all 153 injected partial-saga failures through a scoped compensation obligation. Its event ledger contained a median 21 events and p95 27 events per trial.
 
 Per-fault results:
 
-| Seeded opportunity | Attempts | Raw executed | Mission blocked | Mission recovered |
+| Seeded opportunity | Attempts | Raw executed | Mission rejected/suppressed | Mission recovered |
 |---|---:|---:|---:|---:|
 | Premature reservation | 188 | 188 | 188 | 0 |
 | Caller claim used where tool authority was required | 174 | 174 | 174 | 0 |
@@ -67,4 +67,4 @@ This supports retaining the following primitives for provider evaluation:
 
 It does **not** show that a model attempts fewer violations, remembers more, speaks better, or completes more real calls. The raw controller is intentionally unenforced and the fault stream is synthetic. Runtime blocks are containment evidence, not model-alignment evidence.
 
-The next evidence step is an exploratory seventh condition, `adaptive-mission`, run against `raw-full` and `full-harness` with the same provider/model/voice/audio/world. It remains outside the frozen headline comparison until paired true-audio results show a benefit without unacceptable latency or cost.
+The next evidence step is an exploratory seventh condition, `adaptive-mission`, run against `raw-full` and `full-harness` with the same provider/model/voice/audio/world. It remains outside the future confirmatory headline comparison until paired true-audio results show a benefit without unacceptable latency or cost.

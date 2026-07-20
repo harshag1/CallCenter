@@ -39,11 +39,13 @@ import {
 import {
   CAPABILITY_GATEWAY_NAME,
   CAPABILITY_GATEWAY_VERSION,
+  AuthorizedCapabilityGatewayCallSchema,
   CapabilityGatewayCallSchema,
   CapabilityGatewayResultSchema,
   ProviderCapabilitySnapshotSchema,
+  bindCapabilityGatewayCall,
   renderProviderCapabilitySnapshot,
-  type CapabilityGatewayCall,
+  type AuthorizedCapabilityGatewayCall,
   type CapabilityGatewayResult,
   type ProviderCapabilitySnapshot,
   type ProviderFunctionTool,
@@ -53,6 +55,30 @@ import type {
   CompiledBenchmarkCondition,
   CompiledDisclosure,
 } from "./condition-compiler";
+import {
+  benchmarkKernelAttestationJson,
+  benchmarkKernelAttestationReference,
+  verifyBenchmarkKernelFinalAttestation,
+  type BenchmarkKernelAttestationTrust,
+  type BenchmarkKernelEvidenceBinding,
+  type BenchmarkKernelFinalAttestation,
+} from "./kernel-attestation";
+import {
+  verifyKernelTranscript,
+  type KernelTranscriptReference,
+} from "./kernel-transcript";
+import {
+  buildProviderTransportEvidence,
+  type ProviderNormalizedWireLink,
+  type ProviderPcmEvidence,
+  type ProviderTransportEvidence,
+} from "./provider-transport-evidence";
+import {
+  createProviderReadOnlyReceiptLinkage,
+  deriveProviderReceiptInvocationId,
+  type ProviderReadOnlyReceiptLinkage,
+} from "./provider-receipt-linkage";
+import { TRANSPORT_SMOKE_SCENARIO_ID } from "./transport-smoke-scenario";
 import {
   applyAudibilityEvent,
   createAudibilityState,
@@ -69,8 +95,12 @@ import type {
   Pcm16Audio,
   RealtimeToolCall,
   RealtimeToolResult,
+  RealtimeWireObservation,
   ServerRealtimeProvider,
+  SessionConfigurationAcknowledgement,
 } from "../realtime/client/types";
+import type { ProviderHardSessionCaps } from "./provider-pricing-proof";
+import { realtimeWireIdentitySha256 } from "../realtime/client/wire-evidence";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -84,7 +114,9 @@ export type GatewayLeafExecutor = (
 
 export type BenchmarkGatewayInvocation = Readonly<{
   providerCallId: string;
-  call: CapabilityGatewayCall;
+  /** Host-bound call; grant and epoch were never model-authored. */
+  call: AuthorizedCapabilityGatewayCall;
+  capabilityEpoch: number;
   condition: CompiledBenchmarkCondition;
   turn: number;
   world: ToolWorldState;
@@ -120,6 +152,21 @@ export interface BenchmarkGatewayKernel {
     world: ToolWorldState;
   }>): ProviderCapabilitySnapshot | Promise<ProviderCapabilitySnapshot>;
   invoke(input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome | Promise<BenchmarkGatewayOutcome>;
+  /**
+   * Read-only final-state proof. Implementations must bind their exact internal
+   * treatment state to the supplied authoritative world without rotating
+   * grants, advancing epochs, or changing either state machine.
+   */
+  attestFinal(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    world: ToolWorldState;
+  }>): BenchmarkKernelFinalAttestation | Promise<BenchmarkKernelFinalAttestation>;
+  /** Canonical, grant-free replay artifact whose reference is signed by attestFinal. */
+  encodedTranscript(): string;
+  /** Exact reference to encodedTranscript(), signed into the final attestation. */
+  transcriptReference(): KernelTranscriptReference;
 }
 
 export type TrialSessionConfiguration = Readonly<{
@@ -374,8 +421,11 @@ export type TrialResult = Readonly<{
   inputAudioHashes: readonly string[];
   outputAudioHashes: readonly string[];
   usage: readonly NormalizedRealtimeUsage[];
+  providerEvidence: ProviderTransportEvidence;
+  providerReceiptLinkage: ProviderReadOnlyReceiptLinkage | null;
   audibility: TrialAudibilityReport;
   audioDelivery: TrialAudioDeliveryReport;
+  kernelAttestation: BenchmarkKernelFinalAttestation;
   world: ToolWorldState;
   budgetLedger: BudgetLedger;
   artifacts: TrialArtifacts;
@@ -389,6 +439,14 @@ export type RunTrialInput = Readonly<{
   createClient: TrialClientFactory;
   condition: CompiledBenchmarkCondition;
   gatewayKernel: BenchmarkGatewayKernel;
+  /**
+   * Independently pinned verification material. This must come from the
+   * execution plan, never from the treatment kernel whose proof it verifies.
+   */
+  kernelAttestationExpectation: Readonly<{
+    evidenceBinding: BenchmarkKernelEvidenceBinding;
+    trust: BenchmarkKernelAttestationTrust;
+  }>;
   audibilitySink?: TrialAudibilitySink;
   journal?: TrialJournalSink;
   /** Exact loaded secrets; used only for pre-sink scanning and never serialized. */
@@ -397,7 +455,13 @@ export type RunTrialInput = Readonly<{
   sleep?: TrialSleep;
   callerTurns: readonly CallerAudioTurn[];
   pairedAudio: PairedAudioManifest;
+  /** Frozen hash shared by the baseline/treatment pair and preregistration. */
+  pairInvariantsHash: string;
+  /** Shared study/registration plan hash; distinct from each cell's execution plan. */
+  studyPlanHash: string;
   limits: TrialLimits;
+  /** Exact fresh provider pricing-proof caps for paid execution. */
+  providerHardCaps?: ProviderHardSessionCaps;
   budget: TrialBudget;
   clock?: TrialClock;
 }>;
@@ -419,6 +483,8 @@ type PreparedTurn = Readonly<{
 type QueuedEvent = Readonly<{
   sequence: number;
   event: NormalizedRealtimeEvent;
+  /** Caller turn to which a response-scoped event was bound at receipt time. */
+  responseTurn: number | null;
 }>;
 
 type RawWireRecord = Readonly<{
@@ -436,6 +502,11 @@ type UsageRecord = Readonly<{
   usage: ArtifactJsonValue;
 }>;
 
+type ProviderCallIdentity = Readonly<{
+  fingerprint: string;
+  invocationId: string;
+}>;
+
 type MutableRuntime = {
   status: TrialStatus;
   errors: TrialError[];
@@ -451,6 +522,8 @@ type MutableRuntime = {
   usage: NormalizedRealtimeUsage[];
   usageRecords: UsageRecord[];
   wireRecords: RawWireRecord[];
+  wireObservations: RealtimeWireObservation[];
+  normalizedWireLinks: ProviderNormalizedWireLink[];
   outputByTurn: Uint8Array[][];
   outputFormatByTurn: Array<Pick<Pcm16Audio, "encoding" | "sampleRateHz" | "channels"> | null>;
   responseAudio: Map<string, {
@@ -459,11 +532,21 @@ type MutableRuntime = {
     format: Pick<Pcm16Audio, "encoding" | "sampleRateHz" | "channels">;
   }>;
   activeResponseId: string | null;
+  responseTurnById: Map<string, number>;
+  terminalResponseIds: Set<string>;
+  responseWindowOpen: boolean;
   audibilityState: AudibilityState;
   audibilityEvents: AudibilityEvent[];
   audioDeliveries: TrialAudioChunkDelivery[];
   currentTurnIndex: number;
+  currentCapabilitySnapshot: ProviderCapabilitySnapshot;
   sessionReady: boolean;
+  sessionIdSha256: string | null;
+  sessionConfiguration: SessionConfigurationAcknowledgement | null;
+  normalizedToolCallCount: number;
+  normalizedTerminalCount: number;
+  responseGenerations: number;
+  kernelProviderCallIds: string[];
   connected: boolean;
   eventSequence: number;
   terminalError: TrialError | null;
@@ -549,6 +632,10 @@ function requirePositiveInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive safe integer`);
   }
+}
+
+function requireSha256(value: string, label: string): void {
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new Error(`${label} must be a lowercase SHA-256 hex digest`);
 }
 
 function validateLimits(limits: TrialLimits): void {
@@ -1113,6 +1200,53 @@ function sessionRemainingMs(clock: TrialClock, startedMs: number, maxSessionMs: 
   return maxSessionMs - Math.max(0, clock.monotonicNowMs() - startedMs);
 }
 
+function usageCapError(
+  provider: ServerRealtimeProvider,
+  usage: readonly NormalizedRealtimeUsage[],
+  caps: ProviderHardSessionCaps,
+): string | null {
+  const sum = (key: keyof NormalizedRealtimeUsage): number => usage.reduce((total, event) => {
+    const value = event[key];
+    return total + (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  }, 0);
+  if (provider === "xai" && caps.provider === "xai") {
+    if (
+      Math.ceil(sum("inputAudioMinutes") * 60_000)
+      >= caps.max_sent_audio_ms - caps.max_unreported_sent_audio_ms
+    ) {
+      return "xAI sent-audio pricing cap exceeded";
+    }
+    if (
+      Math.ceil(sum("outputAudioMinutes") * 60_000)
+      >= caps.max_received_audio_ms - caps.max_unreported_received_audio_ms
+    ) {
+      return "xAI received-audio pricing cap exceeded";
+    }
+    if (
+      sum("billableTextInputEvents")
+      >= caps.max_billable_text_events - caps.max_unreported_billable_text_events
+    ) {
+      return "xAI billable-text pricing cap exceeded";
+    }
+    return null;
+  }
+  if (provider === "openai" && caps.provider === "openai") {
+    if (sum("inputTextTokens") >= caps.max_billed_input_text_tokens - caps.max_unreported_input_text_tokens) return "OpenAI input-text pricing cap exceeded";
+    if (sum("inputAudioTokens") >= caps.max_billed_input_audio_tokens - caps.max_unreported_input_audio_tokens) return "OpenAI input-audio pricing cap exceeded";
+    if (sum("outputTextTokens") >= caps.max_billed_output_text_tokens - caps.max_unreported_output_text_tokens) return "OpenAI output-text pricing cap exceeded";
+    if (sum("outputAudioTokens") >= caps.max_billed_output_audio_tokens - caps.max_unreported_output_audio_tokens) return "OpenAI output-audio pricing cap exceeded";
+    return null;
+  }
+  if (provider === "gemini" && caps.provider === "gemini") {
+    if (sum("inputTextTokens") >= caps.max_billed_input_text_tokens - caps.max_unreported_input_text_tokens) return "Gemini input-text pricing cap exceeded";
+    if (sum("inputAudioTokens") >= caps.max_billed_input_audio_tokens - caps.max_unreported_input_audio_tokens) return "Gemini input-audio pricing cap exceeded";
+    if (sum("outputTextTokens") >= caps.max_billed_output_text_tokens - caps.max_unreported_output_text_tokens) return "Gemini output-text pricing cap exceeded";
+    if (sum("outputAudioTokens") >= caps.max_billed_output_audio_tokens - caps.max_unreported_output_audio_tokens) return "Gemini output-audio pricing cap exceeded";
+    return null;
+  }
+  return "provider pricing caps do not match the realtime client";
+}
+
 async function racePromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   if (timeoutMs <= 0) throw new WaitExpiredError();
   return new Promise<T>((resolve, reject) => {
@@ -1163,8 +1297,125 @@ function outputDurationMs(event: Extract<NormalizedRealtimeEvent, { type: "outpu
   return event.audio.byteLength / 2 / event.format.sampleRateHz * 1_000;
 }
 
-function invocationIdFor(index: number): string {
-  return `model_call_${String(index).padStart(6, "0")}`;
+function providerCallFingerprint(call: RealtimeToolCall): string {
+  return sha256Hex(`harshas-amazing-call-center/provider-tool-call/v1\n${canonicalArtifactJson(artifactJson({
+    name: call.name,
+    arguments_text: call.argumentsText,
+    arguments_json: call.argumentsJson,
+    arguments_error: call.argumentsError ?? null,
+  }))}`);
+}
+
+function reserveProviderCallIdentity(
+  identities: Map<string, ProviderCallIdentity>,
+  call: RealtimeToolCall
+): Readonly<{ identity: ProviderCallIdentity; conflict: boolean }> {
+  const fingerprint = providerCallFingerprint(call);
+  const prior = identities.get(call.callId);
+  if (prior) return Object.freeze({ identity: prior, conflict: prior.fingerprint !== fingerprint });
+  const identity = Object.freeze({
+    fingerprint,
+    invocationId: deriveProviderReceiptInvocationId(call.callId),
+  });
+  identities.set(call.callId, identity);
+  return Object.freeze({ identity, conflict: false });
+}
+
+function responseIdForEvent(event: NormalizedRealtimeEvent): string | undefined {
+  switch (event.type) {
+    case "response.started":
+    case "response.completed":
+    case "tool.calls":
+    case "output.audio":
+    case "output.transcript":
+    case "turn.interrupted":
+      return event.responseId;
+    default:
+      return undefined;
+  }
+}
+
+function requiresResponseIdentity(event: NormalizedRealtimeEvent): boolean {
+  return event.type === "response.started"
+    || event.type === "response.completed"
+    || event.type === "tool.calls"
+    || event.type === "output.audio"
+    || event.type === "output.transcript"
+    || event.type === "turn.interrupted";
+}
+
+type ResponseEventBinding = Readonly<{
+  accepted: boolean;
+  responseTurn: number | null;
+  responseId: string | null;
+  reason?: "before_caller_turn" | "outside_response_window" | "stale_response_turn" | "event_after_response_terminal";
+}>;
+
+/**
+ * Bind provider response IDs to exactly one caller turn at receipt time.
+ *
+ * Realtime callbacks can arrive after awaitLogicalResponse has returned. A
+ * bare `currentTurnIndex` lookup would then let delayed audio, tool calls, or a
+ * terminal event mutate/end the next caller turn. The persistent ID map and
+ * receipt-time turn stamp make that impossible. Adapters normally provide an
+ * explicit response ID; the anonymous ID is a fail-safe for legacy adapters
+ * and remains scoped to one open caller response window.
+ */
+function bindResponseEvent(
+  runtime: MutableRuntime,
+  event: NormalizedRealtimeEvent
+): ResponseEventBinding {
+  if (!requiresResponseIdentity(event)) {
+    return Object.freeze({ accepted: true, responseTurn: null, responseId: null });
+  }
+  const responseTurn = runtime.currentTurnIndex + 1;
+  const explicitId = responseIdForEvent(event);
+  if (responseTurn <= 0) {
+    return Object.freeze({
+      accepted: false,
+      responseTurn: null,
+      responseId: explicitId ?? null,
+      reason: "before_caller_turn",
+    });
+  }
+  if (!runtime.responseWindowOpen) {
+    return Object.freeze({
+      accepted: false,
+      responseTurn,
+      responseId: explicitId ?? runtime.activeResponseId,
+      reason: "outside_response_window",
+    });
+  }
+
+  const responseId = explicitId
+    ?? runtime.activeResponseId
+    ?? `__anonymous_response_turn_${responseTurn}`;
+  const priorTurn = runtime.responseTurnById.get(responseId);
+  if (priorTurn !== undefined && priorTurn !== responseTurn) {
+    return Object.freeze({
+      accepted: false,
+      responseTurn: priorTurn,
+      responseId,
+      reason: "stale_response_turn",
+    });
+  }
+  if (runtime.terminalResponseIds.has(responseId)) {
+    return Object.freeze({
+      accepted: false,
+      responseTurn,
+      responseId,
+      reason: "event_after_response_terminal",
+    });
+  }
+  if (priorTurn === undefined) runtime.responseTurnById.set(responseId, responseTurn);
+  if (
+    event.type === "response.started"
+    || runtime.activeResponseId === null
+    || (explicitId !== undefined && priorTurn === undefined)
+  ) {
+    runtime.activeResponseId = responseId;
+  }
+  return Object.freeze({ accepted: true, responseTurn, responseId });
 }
 
 function gatewayFailure(code: string, message: string, action?: string): CapabilityGatewayResult {
@@ -1185,6 +1436,7 @@ async function dispatchToolCall(input: Readonly<{
   scenario: BenchmarkScenario;
   runtime: MutableRuntime;
   invocationId: string;
+  identityConflict: boolean;
   turn: number;
 }>): Promise<Readonly<{
   result: RealtimeToolResult;
@@ -1193,9 +1445,26 @@ async function dispatchToolCall(input: Readonly<{
   authoritativeResult: CapabilityGatewayResult | null;
   disclosure: Readonly<{ target: string; prompt: string; renderedSnapshot: string }> | null;
 }>> {
-  const { call, condition, gatewayKernel, scenario, runtime, invocationId, turn } = input;
+  const { call, condition, gatewayKernel, scenario, runtime, invocationId, identityConflict, turn } = input;
   if (!call.callId) {
     throw trialError("protocol_error", "missing_tool_call_id", "Provider tool call omitted callId", "tool", { fatal: true });
+  }
+  if (identityConflict) {
+    const parsed = CapabilityGatewayCallSchema.safeParse(call.argumentsJson);
+    return Object.freeze({
+      result: {
+        callId: call.callId,
+        output: gatewayFailure(
+          "provider_call_id_conflict",
+          "Provider call ID was reused with different tool-call content",
+          parsed.success ? parsed.data.tool_name : undefined
+        ),
+      },
+      execution: null,
+      action: parsed.success ? parsed.data.tool_name : null,
+      authoritativeResult: null,
+      disclosure: null,
+    });
   }
   if (call.name !== CAPABILITY_GATEWAY_NAME) {
     return Object.freeze({
@@ -1213,17 +1482,35 @@ async function dispatchToolCall(input: Readonly<{
     });
   }
   const parsedCall = CapabilityGatewayCallSchema.safeParse(call.argumentsJson);
-  if (!parsedCall.success) {
+  if (call.argumentsError || !parsedCall.success) {
     return Object.freeze({
       result: {
         callId: call.callId,
         output: gatewayFailure(
           "malformed_gateway_call",
-          call.argumentsError ?? "Gateway call must contain action, arguments, and capability_grant"
+          call.argumentsError ?? "Gateway call must contain exactly tool_name and arguments"
         ),
       },
       execution: null,
       action: null,
+      authoritativeResult: null,
+      disclosure: null,
+    });
+  }
+
+  const boundCall = bindCapabilityGatewayCall(parsedCall.data, runtime.currentCapabilitySnapshot);
+  if (!boundCall) {
+    return Object.freeze({
+      result: {
+        callId: call.callId,
+        output: gatewayFailure(
+          "undisclosed_action",
+          "Requested tool is absent from the current host capability catalog",
+          parsedCall.data.tool_name
+        ),
+      },
+      execution: null,
+      action: parsedCall.data.tool_name,
       authoritativeResult: null,
       disclosure: null,
     });
@@ -1249,7 +1536,8 @@ async function dispatchToolCall(input: Readonly<{
   try {
     outcome = await gatewayKernel.invoke(Object.freeze({
       providerCallId: call.callId,
-      call: parsedCall.data,
+      call: AuthorizedCapabilityGatewayCallSchema.parse(boundCall.call),
+      capabilityEpoch: boundCall.capabilityEpoch,
       condition,
       turn,
       world: ToolWorldStateSchema.parse(structuredClone(runtime.world)),
@@ -1293,6 +1581,7 @@ async function dispatchToolCall(input: Readonly<{
       template.visibleCapabilities,
       `disclosure ${template.target}`
     );
+    runtime.currentCapabilitySnapshot = snapshot;
     const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: template.target, prompt: template.prompt, renderedSnapshot });
     providerOutput = {
@@ -1306,6 +1595,7 @@ async function dispatchToolCall(input: Readonly<{
       condition,
       "rotated"
     );
+    runtime.currentCapabilitySnapshot = snapshot;
     const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: "$grant-rotation", prompt: "", renderedSnapshot });
     providerOutput = {
@@ -1316,7 +1606,7 @@ async function dispatchToolCall(input: Readonly<{
   return Object.freeze({
     result: { callId: call.callId, output: providerOutput },
     execution,
-    action: parsedCall.data.action,
+    action: parsedCall.data.tool_name,
     authoritativeResult: result,
     disclosure,
   });
@@ -1426,8 +1716,15 @@ async function deliverCallerAudio(input: Readonly<{
   await input.journal.flush();
   try {
     input.client.commitInputAudio();
+    // Open the response window only after caller audio is durably committed,
+    // but before createResponse because test and provider adapters may emit
+    // normalized response events synchronously from that call.
+    input.runtime.responseWindowOpen = true;
+    input.runtime.activeResponseId = null;
     input.client.createResponse();
   } catch (error) {
+    input.runtime.responseWindowOpen = false;
+    input.runtime.activeResponseId = null;
     throw trialError("protocol_error", "audio_turn_commit_failed", errorMessage(error), "turn", { fatal: true });
   }
 }
@@ -1587,16 +1884,20 @@ async function awaitLogicalResponse(input: Readonly<{
   clock: TrialClock;
   sessionStartedMs: number;
   record(type: string, payload: unknown): void;
-  callInvocationIds: Map<string, string>;
+  providerCallIdentities: Map<string, ProviderCallIdentity>;
   journal: TrialJournalCoordinator;
 }>): Promise<void> {
-  const responseStartedMs = input.clock.monotonicNowMs();
+  let responseStartedMs = input.clock.monotonicNowMs();
   let lastSubmissionBarrier = -1;
   while (true) {
     if (input.runtime.terminalError) {
       const terminal = input.runtime.terminalError;
       throw new TrialRuntimeError(
-        terminal.code === "output_audio_cap_exceeded" ? "cap_exceeded" : "protocol_error",
+        terminal.code === "output_audio_cap_exceeded"
+          ? "cap_exceeded"
+          : terminal.code === "session_hard_deadline_exceeded"
+            ? "session_timeout"
+            : "protocol_error",
         terminal
       );
     }
@@ -1623,6 +1924,19 @@ async function awaitLogicalResponse(input: Readonly<{
     }
     const event = queued.event;
     await input.journal.flush();
+    if (
+      queued.responseTurn !== null
+      && queued.responseTurn !== input.runtime.currentTurnIndex + 1
+    ) {
+      input.record("provider.response_event_ignored", {
+        event_type: event.type,
+        response_id: responseIdForEvent(event) ?? null,
+        bound_turn: queued.responseTurn,
+        active_turn: input.runtime.currentTurnIndex + 1,
+        reason: "queued_for_prior_turn",
+      });
+      continue;
+    }
     if (event.type === "error") {
       const providerError: TrialError = {
         code: "provider_error",
@@ -1680,11 +1994,11 @@ async function awaitLogicalResponse(input: Readonly<{
       const results: RealtimeToolResult[] = [];
       for (const call of event.calls) {
         await input.journal.flush();
-        let invocationId = input.callInvocationIds.get(call.callId);
-        if (!invocationId) {
-          invocationId = invocationIdFor(input.callInvocationIds.size + 1);
-          input.callInvocationIds.set(call.callId, invocationId);
-        }
+        // Reserve every syntactically present provider ID before validating the
+        // tool name or arguments. A malformed first use therefore cannot evade
+        // identity binding and later reuse the same ID for executable content.
+        const reservedIdentity = reserveProviderCallIdentity(input.providerCallIdentities, call);
+        const invocationId = reservedIdentity.identity.invocationId;
         const dispatched = await dispatchToolCall({
           call,
           condition: input.condition,
@@ -1692,13 +2006,16 @@ async function awaitLogicalResponse(input: Readonly<{
           scenario: input.scenario,
           runtime: input.runtime,
           invocationId,
+          identityConflict: reservedIdentity.conflict,
           turn: input.runtime.currentTurnIndex + 1,
         });
+        if (dispatched.execution) input.runtime.kernelProviderCallIds.push(call.callId);
         results.push(dispatched.result);
         input.record("tool.call_result", {
           turn: input.runtime.currentTurnIndex + 1,
           provider_call_id: call.callId,
           invocation_id: invocationId,
+          provider_call_identity_conflict: reservedIdentity.conflict,
           requested_tool: call.name,
           action: dispatched.action,
           execution_disposition: dispatched.execution?.disposition ?? "not_executed",
@@ -1727,6 +2044,11 @@ async function awaitLogicalResponse(input: Readonly<{
       } catch (error) {
         throw trialError("protocol_error", "tool_result_submission_failed", errorMessage(error), "tool", { fatal: true });
       }
+      // A submitted tool batch starts a new provider response round. Local
+      // kernel execution, durable journaling, and ToolWorld receipt work are
+      // still bounded by the independent session deadline, but must not consume
+      // the provider's response-wait allowance for the continuation.
+      responseStartedMs = input.clock.monotonicNowMs();
       // Provider normalizers may enqueue response.completed from the function-call
       // response before submitToolResults returns. Only a later completion can end
       // this logical caller turn.
@@ -1778,6 +2100,12 @@ function assertCompleteTrialArtifacts(
     turnsSent: number;
     pair: PairedAudioManifest;
     audioDelivery: TrialAudioDeliveryReport;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    world: ToolWorldState;
+    kernelAttestation: BenchmarkKernelFinalAttestation;
+    kernelTranscript: string;
+    kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
   }>
 ): void {
   const eventVerification = verifyEventChain(artifacts.events);
@@ -1804,8 +2132,12 @@ function assertCompleteTrialArtifacts(
   const required = [
     "events.jsonl",
     "provider-wire.jsonl",
+    "provider-wire-observations.jsonl",
+    "provider-transport-evidence.json",
     "usage.json",
     "world-final.json",
+    "kernel-transcript.jsonl",
+    "kernel-attestation.json",
     "trial-result.json",
     "budget-ledger.json",
     "audibility.json",
@@ -1814,6 +2146,48 @@ function assertCompleteTrialArtifacts(
   ];
   for (const path of required) {
     if (!fileByPath.has(path)) throw new Error(`required trial artifact ${path} is missing`);
+  }
+  if (
+    expected.scenario.id === TRANSPORT_SMOKE_SCENARIO_ID
+    && !fileByPath.has("provider-read-only-receipt-linkage.json")
+  ) {
+    throw new Error("transport smoke is missing its signed-kernel read-only receipt linkage");
+  }
+  const kernelVerification = verifyBenchmarkKernelFinalAttestation(expected.kernelAttestation, {
+    runId: expected.runId,
+    condition: expected.condition,
+    scenario: expected.scenario,
+    world: expected.world,
+    transcriptReference: expected.kernelAttestation.transcript_reference,
+    evidenceBinding: expected.kernelAttestationExpectation.evidenceBinding,
+    trust: expected.kernelAttestationExpectation.trust,
+  });
+  if (!kernelVerification.valid) {
+    throw new Error(`kernel final attestation is invalid: ${kernelVerification.errors.join("; ")}`);
+  }
+  const transcriptVerification = verifyKernelTranscript({
+    transcript: expected.kernelTranscript,
+    finalAttestation: expected.kernelAttestation,
+    attestationExpectation: {
+      runId: expected.runId,
+      condition: expected.condition,
+      scenario: expected.scenario,
+      world: expected.world,
+      transcriptReference: expected.kernelAttestation.transcript_reference,
+      evidenceBinding: expected.kernelAttestationExpectation.evidenceBinding,
+      trust: expected.kernelAttestationExpectation.trust,
+    },
+  });
+  if (!transcriptVerification.valid || transcriptVerification.authenticity !== "signed_attestation_verified") {
+    throw new Error(`kernel transcript replay is invalid: ${transcriptVerification.errors.join("; ")}`);
+  }
+  const kernelFile = fileByPath.get("kernel-attestation.json");
+  if (!kernelFile || typeof kernelFile.content !== "string" || kernelFile.content !== benchmarkKernelAttestationJson(expected.kernelAttestation)) {
+    throw new Error("kernel-attestation.json does not contain the verified final kernel proof");
+  }
+  const transcriptFile = fileByPath.get("kernel-transcript.jsonl");
+  if (!transcriptFile || typeof transcriptFile.content !== "string" || transcriptFile.content !== expected.kernelTranscript) {
+    throw new Error("kernel-transcript.jsonl does not contain the signed replay artifact");
   }
   for (const [index, turn] of expected.planned.entries()) {
     if (!fileByPath.has(pcmPath("input", index + 1, turn.turnId))) {
@@ -1858,7 +2232,7 @@ function buildArtifacts(input: Readonly<{
   scenario: BenchmarkScenario;
   provider: ServerRealtimeProvider;
   model: string;
-  condition: BenchmarkConditionId;
+  condition: CompiledBenchmarkCondition;
   status: TrialStatus;
   errors: readonly TrialError[];
   counters: TrialCounters;
@@ -1867,7 +2241,15 @@ function buildArtifacts(input: Readonly<{
   outputFormatByTurn: ReadonlyArray<Pick<Pcm16Audio, "encoding" | "sampleRateHz" | "channels"> | null>;
   usageRecords: readonly UsageRecord[];
   wireRecords: readonly RawWireRecord[];
+  wireObservations: readonly RealtimeWireObservation[];
+  providerEvidence: ProviderTransportEvidence;
+  providerReceiptLinkage: ProviderReadOnlyReceiptLinkage | null;
   world: ToolWorldState;
+  kernelAttestation: BenchmarkKernelFinalAttestation;
+  kernelTranscript: string;
+  kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
+  pairInvariantsHash: string;
+  studyPlanHash: string;
   ledger: BudgetLedger;
   audibility: TrialAudibilityReport;
   audioDelivery: TrialAudioDeliveryReport;
@@ -1881,6 +2263,26 @@ function buildArtifacts(input: Readonly<{
     ? ""
     : `${input.wireRecords.map((record) => canonicalArtifactJson(record)).join("\n")}\n`;
   files.push(makeArtifactFile("provider-wire.jsonl", wireJsonl, "application/x-ndjson"));
+  const wireObservationJsonl = input.wireObservations.length === 0
+    ? ""
+    : `${input.wireObservations.map((observation) => canonicalArtifactJson(artifactJson(observation))).join("\n")}\n`;
+  files.push(makeArtifactFile(
+    "provider-wire-observations.jsonl",
+    wireObservationJsonl,
+    "application/x-ndjson"
+  ));
+  files.push(makeArtifactFile(
+    "provider-transport-evidence.json",
+    `${canonicalArtifactJson(artifactJson(input.providerEvidence))}\n`,
+    "application/json"
+  ));
+  if (input.providerReceiptLinkage) {
+    files.push(makeArtifactFile(
+      "provider-read-only-receipt-linkage.json",
+      `${canonicalArtifactJson(artifactJson(input.providerReceiptLinkage))}\n`,
+      "application/json",
+    ));
+  }
   files.push(makeArtifactFile(
     "usage.json",
     `${canonicalArtifactJson({ schema_version: 1, events: input.usageRecords })}\n`,
@@ -1889,6 +2291,16 @@ function buildArtifacts(input: Readonly<{
   files.push(makeArtifactFile(
     "world-final.json",
     `${canonicalArtifactJson(input.world)}\n`,
+    "application/json"
+  ));
+  files.push(makeArtifactFile(
+    "kernel-transcript.jsonl",
+    input.kernelTranscript,
+    "application/x-ndjson"
+  ));
+  files.push(makeArtifactFile(
+    "kernel-attestation.json",
+    benchmarkKernelAttestationJson(input.kernelAttestation),
     "application/json"
   ));
   files.push(makeArtifactFile(
@@ -1921,8 +2333,26 @@ function buildArtifacts(input: Readonly<{
       scenario_version: input.scenario.version,
       provider: input.provider,
       model: input.model,
-      condition: input.condition,
+      condition: input.condition.id,
+      pair_invariants_hash: input.pairInvariantsHash,
+      freeze_lock_hash: input.kernelAttestationExpectation.evidenceBinding.freezeLockSha256,
+      plan_hash: input.studyPlanHash,
+      execution_plan_sha256: input.kernelAttestationExpectation.evidenceBinding.planSha256,
+      kernel_build_sha256: input.kernelAttestationExpectation.evidenceBinding.kernelBuildSha256,
+      lease_subject_id: input.kernelAttestationExpectation.evidenceBinding.leaseSubjectId,
+      condition_hash: input.condition.conditionHash,
+      source_hash: input.condition.sourceHash,
+      scenario_hash: input.condition.scenarioHash,
+      flow_hash: input.condition.flowHash,
+      kernel_attestation: benchmarkKernelAttestationReference(input.kernelAttestation),
+      kernel_transcript: input.kernelAttestation.transcript_reference,
       status: input.status,
+      provider_transport_evidence: {
+        path: "provider-transport-evidence.json",
+        gate1_eligible: input.providerEvidence.gate1_transport_smoke.eligible,
+        wire_chain_head_sha256: input.providerEvidence.wire.chain_head_sha256,
+        read_only_receipt_linkage_sha256: input.providerReceiptLinkage?.linkage_sha256 ?? null,
+      },
       audibility_applicability: input.audibility.applicability,
       audio_delivery_profile_hash: input.audioDelivery.profile_hash,
       errors: input.errors,
@@ -1961,10 +2391,27 @@ function buildArtifacts(input: Readonly<{
     metadata: {
       benchmark: "voice-long-horizon",
       pair_id: input.pair.pair_id,
+      scenario_id: input.scenario.id,
+      scenario_version: input.scenario.version,
       provider: input.provider,
       model: input.model,
-      condition: input.condition,
+      condition: input.condition.id,
       status: input.status,
+      pair_invariants_hash: input.pairInvariantsHash,
+      freeze_lock_hash: input.kernelAttestationExpectation.evidenceBinding.freezeLockSha256,
+      plan_hash: input.studyPlanHash,
+      execution_plan_sha256: input.kernelAttestationExpectation.evidenceBinding.planSha256,
+      kernel_build_sha256: input.kernelAttestationExpectation.evidenceBinding.kernelBuildSha256,
+      lease_subject_id: input.kernelAttestationExpectation.evidenceBinding.leaseSubjectId,
+      condition_hash: input.condition.conditionHash,
+      source_hash: input.condition.sourceHash,
+      scenario_hash: input.condition.scenarioHash,
+      flow_hash: input.condition.flowHash,
+      kernel_attestation_hash: input.kernelAttestation.attestation_hash,
+      kernel_attestation: benchmarkKernelAttestationReference(input.kernelAttestation),
+      kernel_transcript: input.kernelAttestation.transcript_reference,
+      kernel_world_state_sha256: input.kernelAttestation.world_head.state_sha256,
+      kernel_flow_execution_state_sha256: input.kernelAttestation.flow_proof.execution_state_sha256,
     },
   });
   const artifacts = Object.freeze({
@@ -1979,6 +2426,12 @@ function buildArtifacts(input: Readonly<{
     turnsSent: input.counters.turnsSent,
     pair: input.pair,
     audioDelivery: input.audioDelivery,
+    condition: input.condition,
+    scenario: input.scenario,
+    world: input.world,
+    kernelAttestation: input.kernelAttestation,
+    kernelTranscript: input.kernelTranscript,
+    kernelAttestationExpectation: input.kernelAttestationExpectation,
   });
   return artifacts;
 }
@@ -1992,7 +2445,22 @@ function buildArtifacts(input: Readonly<{
 export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResult> {
   requireNonEmpty(input.runId, "runId");
   requireNonEmpty(input.model, "model");
+  requireSha256(input.pairInvariantsHash, "pairInvariantsHash");
+  requireSha256(input.studyPlanHash, "studyPlanHash");
   validateLimits(input.limits);
+  if (input.providerHardCaps) {
+    if (
+      input.providerHardCaps.provider !== input.provider
+      || input.providerHardCaps.max_session_ms !== input.limits.maxSessionMs
+      || input.providerHardCaps.max_input_audio_bytes !== input.limits.maxInputAudioBytes
+      || input.providerHardCaps.max_output_audio_bytes !== input.limits.maxOutputAudioBytes
+      || input.providerHardCaps.max_tool_calls !== input.limits.maxToolCalls
+      || input.providerHardCaps.provider_transcription.input !== "disabled"
+      || input.providerHardCaps.provider_transcription.output !== "disabled"
+    ) {
+      throw new Error("provider pricing-proof caps differ from the exact trial limits");
+    }
+  }
   validateCompiledCondition(input.condition);
   const scenario = BenchmarkScenarioSchema.parse(input.scenario);
   const audioDeliveryProfile = normalizeAudioDeliveryProfile(input.audioDeliveryProfile);
@@ -2050,6 +2518,12 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       provider: input.provider,
       model: input.model,
       condition: input.condition.id,
+      pair_invariants_hash: input.pairInvariantsHash,
+      freeze_lock_hash: input.kernelAttestationExpectation.evidenceBinding.freezeLockSha256,
+      plan_hash: input.studyPlanHash,
+      execution_plan_sha256: input.kernelAttestationExpectation.evidenceBinding.planSha256,
+      kernel_build_sha256: input.kernelAttestationExpectation.evidenceBinding.kernelBuildSha256,
+      lease_subject_id: input.kernelAttestationExpectation.evidenceBinding.leaseSubjectId,
       condition_hash: input.condition.conditionHash,
       initial_prompt_hash: input.condition.initialPromptHash,
       initial_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
@@ -2128,30 +2602,94 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     usage: [],
     usageRecords: [],
     wireRecords: [],
+    wireObservations: [],
+    normalizedWireLinks: [],
     outputByTurn: planned.map(() => []),
     outputFormatByTurn: planned.map(() => null),
     responseAudio: new Map(),
     activeResponseId: null,
+    responseTurnById: new Map(),
+    terminalResponseIds: new Set(),
+    responseWindowOpen: false,
     audibilityState: createAudibilityState(),
     audibilityEvents: [],
     audioDeliveries: [],
     currentTurnIndex: -1,
+    currentCapabilitySnapshot: initialSnapshot,
     sessionReady: false,
+    sessionIdSha256: null,
+    sessionConfiguration: null,
+    normalizedToolCallCount: 0,
+    normalizedTerminalCount: 0,
+    responseGenerations: 0,
+    kernelProviderCallIds: [],
     connected: false,
     eventSequence: 0,
     terminalError: null,
   };
   const inbox = new EventInbox();
-  const callInvocationIds = new Map<string, string>();
+  const providerCallIdentities = new Map<string, ProviderCallIdentity>();
 
   const unsubscribeEvent = client.onEvent((event) => {
     runtime.normalizedEvents += 1;
     runtime.eventSequence += 1;
+    runtime.normalizedWireLinks.push(Object.freeze({
+      normalized_sequence: runtime.eventSequence,
+      normalized_type: event.type,
+      wire_type: event.wireType,
+      attribution: event.wireObservation ?? Object.freeze({
+        availability: "unavailable" as const,
+        reason: "legacy_adapter" as const,
+      }),
+    }));
     record("provider.normalized", normalizedEventPayload(event));
-    if (event.type === "session.ready") runtime.sessionReady = true;
-    if (event.type === "response.started") {
-      runtime.activeResponseId = event.responseId ?? `turn-${runtime.currentTurnIndex + 1}-response`;
+    const responseBinding = bindResponseEvent(runtime, event);
+    if (!responseBinding.accepted) {
+      record("provider.response_event_ignored", {
+        event_type: event.type,
+        response_id: responseBinding.responseId,
+        bound_turn: responseBinding.responseTurn,
+        active_turn: runtime.currentTurnIndex + 1,
+        reason: responseBinding.reason,
+      });
+      if (event.type === "output.audio" && responseBinding.reason === "before_caller_turn") {
+        runtime.terminalError = {
+          code: "unscoped_output_audio",
+          message: "Provider emitted output audio before any caller turn",
+          phase: "turn",
+          fatal: true,
+        };
+      }
+      return;
     }
+    if (event.type === "session.ready") {
+      runtime.sessionReady = true;
+      runtime.sessionIdSha256 = event.sessionId
+        ? realtimeWireIdentitySha256("session", event.sessionId)
+        : null;
+      runtime.sessionConfiguration = event.configuration ?? client.sessionConfigurationAcknowledgement ?? null;
+    }
+    if (event.type === "tool.calls") {
+      runtime.normalizedToolCallCount += event.calls.filter(
+        (call) => call.name === CAPABILITY_GATEWAY_NAME,
+      ).length;
+    }
+    if (event.type === "response.started") {
+      runtime.responseGenerations += 1;
+      if (
+        input.providerHardCaps
+        && runtime.responseGenerations > input.providerHardCaps.max_response_generations
+      ) {
+        runtime.terminalError = {
+          code: "provider_response_generation_cap_exceeded",
+          message: "Provider exceeded the verified response-generation pricing cap",
+          phase: "turn",
+          fatal: true,
+        };
+        safeClose(client, "provider response-generation cap exceeded");
+      }
+    }
+    if (event.type === "response.completed") runtime.normalizedTerminalCount += 1;
     if (event.type === "error") {
       addErrorOnce(runtime, {
         code: "provider_error",
@@ -2173,11 +2711,23 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         usage: artifactJson(event.usage),
       }));
       journal.append("usage", "provider.usage", event);
+      if (input.providerHardCaps) {
+        const capError = usageCapError(input.provider, runtime.usage, input.providerHardCaps);
+        if (capError) {
+          runtime.terminalError = {
+            code: "provider_pricing_cap_exceeded",
+            message: capError,
+            phase: "turn",
+            fatal: true,
+          };
+          safeClose(client, "provider pricing cap exceeded");
+        }
+      }
     }
     if (event.type === "output.audio") {
       journal.append("audio", "provider.output_audio", {
-        turn: runtime.currentTurnIndex + 1,
-        response_id: event.responseId ?? runtime.activeResponseId,
+        turn: responseBinding.responseTurn ?? runtime.currentTurnIndex + 1,
+        response_id: responseBinding.responseId,
         byte_length: event.audio.byteLength,
         sha256: sha256Hex(event.audio),
         format: event.format,
@@ -2217,9 +2767,8 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         } else {
           runtime.outputFormatByTurn[runtime.currentTurnIndex] = { ...event.format };
           runtime.outputByTurn[runtime.currentTurnIndex].push(new Uint8Array(event.audio));
-          const responseId = event.responseId
-            ?? runtime.activeResponseId
-            ?? `turn-${runtime.currentTurnIndex + 1}-response`;
+          const responseId = responseBinding.responseId
+            ?? `__anonymous_response_turn_${runtime.currentTurnIndex + 1}`;
           const responseAudio = runtime.responseAudio.get(responseId) ?? {
             turn: runtime.currentTurnIndex + 1,
             chunks: [],
@@ -2245,7 +2794,15 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         }
       }
     }
-    inbox.push(Object.freeze({ sequence: runtime.eventSequence, event }));
+    inbox.push(Object.freeze({
+      sequence: runtime.eventSequence,
+      event,
+      responseTurn: responseBinding.responseTurn,
+    }));
+    if (event.type === "response.completed" && responseBinding.responseId) {
+      runtime.terminalResponseIds.add(responseBinding.responseId);
+      if (runtime.activeResponseId === responseBinding.responseId) runtime.activeResponseId = null;
+    }
   });
   const unsubscribeWire = client.onWireEvent((event) => {
     runtime.rawWireEvents += 1;
@@ -2267,8 +2824,37 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       wire_type: isPlainRecord(event) && typeof event.type === "string" ? event.type : null,
     });
   });
+  const unsubscribeWireObservation = client.onWireObservation?.((observation) => {
+    runtime.wireObservations.push(observation);
+    journal.append("raw_wire", "provider.wire_observation", observation);
+    record("provider.wire_observation", {
+      sequence: observation.sequence,
+      direction: observation.direction,
+      wire_type: observation.wireType,
+      observation_sha256: observation.observationSha256,
+      previous_observation_sha256: observation.previousObservationSha256,
+      projection_sha256: observation.projectionSha256,
+      payload_sha256: observation.payloadSha256,
+    });
+  }) ?? (() => undefined);
 
+  let providerLifetimeTimer: ReturnType<typeof setTimeout> | null = null;
   try {
+    // This deadline deliberately uses the host wall clock, not the injectable
+    // benchmark clock or an awaited race. It is a last-resort billing kill
+    // switch: even a hung journal/fsync hook cannot prevent socket closure.
+    const providerBillingDeadlineMs = input.providerHardCaps
+      ? input.providerHardCaps.max_session_ms - input.providerHardCaps.forced_close_lead_ms
+      : input.limits.maxSessionMs;
+    providerLifetimeTimer = setTimeout(() => {
+      runtime.terminalError ??= {
+        code: "session_hard_deadline_exceeded",
+        message: `Provider client exceeded the ${input.limits.maxSessionMs}ms hard wall-clock lifetime`,
+        phase: "session",
+        fatal: true,
+      };
+      safeClose(client, "benchmark hard session deadline exceeded");
+    }, providerBillingDeadlineMs);
     const readyTimeout = Math.min(
       input.limits.sessionReadyTimeoutMs,
       sessionRemainingMs(clock, sessionStartedMs, input.limits.maxSessionMs)
@@ -2289,6 +2875,8 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     record("session.acknowledged", {
       provider: client.provider,
       state: client.state,
+      session_id_sha256: runtime.sessionIdSha256,
+      configuration: runtime.sessionConfiguration,
       condition: input.condition.id,
       initial_prompt_hash: input.condition.initialPromptHash,
       rendered_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
@@ -2337,20 +2925,25 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         sha256: turn.material.hash,
         format: turn.material.format,
       });
-      await awaitLogicalResponse({
-        inbox,
-        client,
-        condition: input.condition,
-        gatewayKernel: input.gatewayKernel,
-        scenario,
-        runtime,
-        limits: input.limits,
-        clock,
-        sessionStartedMs,
-        record,
-        callInvocationIds,
-        journal,
-      });
+      try {
+        await awaitLogicalResponse({
+          inbox,
+          client,
+          condition: input.condition,
+          gatewayKernel: input.gatewayKernel,
+          scenario,
+          runtime,
+          limits: input.limits,
+          clock,
+          sessionStartedMs,
+          record,
+          providerCallIdentities,
+          journal,
+        });
+      } finally {
+        runtime.responseWindowOpen = false;
+        runtime.activeResponseId = null;
+      }
       record("caller.turn_completed", {
         ordinal: index + 1,
         turn_id: turn.turnId,
@@ -2363,9 +2956,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     addErrorOnce(runtime, failure.trialError);
     record("trial.runtime_failed", { status: runtime.status, error: failure.trialError });
   } finally {
+    if (providerLifetimeTimer !== null) clearTimeout(providerLifetimeTimer);
     safeClose(client, runtime.status === "completed" ? "benchmark trial completed" : "benchmark trial failed");
     unsubscribeEvent();
     unsubscribeWire();
+    unsubscribeWireObservation();
   }
 
   let audibility: TrialAudibilityReport;
@@ -2482,6 +3077,108 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     profile_hash: audioDeliveryProfileHash,
     deliveries: Object.freeze([...runtime.audioDeliveries]),
   });
+  // The treatment kernel is the only component that can prove its private
+  // final FlowExecutionState. Require that proof for every terminal outcome,
+  // including provider/timeout failures, before emitting a complete run.
+  const attestationWorld = ToolWorldStateSchema.parse(structuredClone(runtime.world));
+  const kernelAttestation = await input.gatewayKernel.attestFinal(Object.freeze({
+    runId: input.runId,
+    condition: input.condition,
+    scenario,
+    world: attestationWorld,
+  }));
+  const kernelTranscript = input.gatewayKernel.encodedTranscript();
+  const transcriptReference = input.gatewayKernel.transcriptReference();
+  const kernelVerification = verifyBenchmarkKernelFinalAttestation(kernelAttestation, {
+    runId: input.runId,
+    condition: input.condition,
+    scenario,
+    world: attestationWorld,
+    transcriptReference,
+    evidenceBinding: input.kernelAttestationExpectation.evidenceBinding,
+    trust: input.kernelAttestationExpectation.trust,
+  });
+  if (!kernelVerification.valid) {
+    throw trialError(
+      "protocol_error",
+      "invalid_kernel_final_attestation",
+      `Kernel final-state proof failed closed: ${kernelVerification.errors.join("; ")}`,
+      "artifact",
+      { fatal: true }
+    );
+  }
+  const transcriptVerification = verifyKernelTranscript({
+    transcript: kernelTranscript,
+    finalAttestation: kernelAttestation,
+    attestationExpectation: {
+      runId: input.runId,
+      condition: input.condition,
+      scenario,
+      world: attestationWorld,
+      transcriptReference,
+      evidenceBinding: input.kernelAttestationExpectation.evidenceBinding,
+      trust: input.kernelAttestationExpectation.trust,
+    },
+  });
+  if (!transcriptVerification.valid || transcriptVerification.authenticity !== "signed_attestation_verified") {
+    throw trialError(
+      "protocol_error",
+      "invalid_kernel_transcript",
+      `Kernel transcript replay failed closed: ${transcriptVerification.errors.join("; ")}`,
+      "artifact",
+      { fatal: true }
+    );
+  }
+  let providerReceiptLinkage: ProviderReadOnlyReceiptLinkage | null = null;
+  if (scenario.id === TRANSPORT_SMOKE_SCENARIO_ID) {
+    if (runtime.kernelProviderCallIds.length !== 1) {
+      throw trialError(
+        "protocol_error",
+        "transport_smoke_gateway_count",
+        `Transport smoke requires exactly one kernel-admitted provider call, observed ${runtime.kernelProviderCallIds.length}`,
+        "artifact",
+        { fatal: true },
+      );
+    }
+    providerReceiptLinkage = createProviderReadOnlyReceiptLinkage({
+      providerCallId: runtime.kernelProviderCallIds[0]!,
+      transcript: kernelTranscript,
+      finalAttestation: kernelAttestation,
+      attestationExpectation: {
+        runId: input.runId,
+        condition: input.condition,
+        scenario,
+        world: attestationWorld,
+        transcriptReference,
+        evidenceBinding: input.kernelAttestationExpectation.evidenceBinding,
+        trust: input.kernelAttestationExpectation.trust,
+      },
+    });
+  }
+  record("kernel.final_state_attested", {
+    attestation_hash: kernelAttestation.attestation_hash,
+    world_state_sha256: kernelAttestation.world_head.state_sha256,
+    capability_epoch: kernelAttestation.capability_head.epoch,
+    capability_target: kernelAttestation.capability_head.target,
+    capability_catalog_mode: kernelAttestation.capability_head.catalog_mode,
+    provider_grant_scope: kernelAttestation.capability_head.provider_grant_scope,
+    internal_flow_scope: kernelAttestation.capability_head.internal_flow_scope,
+    capability_catalog_sha256: kernelAttestation.capability_head.catalog_sha256,
+    capability_action_count: kernelAttestation.capability_head.action_count,
+    flow_execution_state_sha256: kernelAttestation.flow_proof.execution_state_sha256,
+    checkpoint_ledger_sha256: kernelAttestation.flow_proof.checkpoint_ledger_sha256,
+    action_receipt_ledger_sha256: kernelAttestation.flow_proof.action_receipt_ledger_sha256,
+    transcript_sha256: transcriptReference.transcript_sha256,
+    transcript_head_sha256: transcriptReference.transcript_head_sha256,
+    transcript_entry_count: transcriptReference.transcript_entry_count,
+    provider_read_only_receipt_linkage_sha256: providerReceiptLinkage?.linkage_sha256 ?? null,
+  });
+  await journal.flush();
+
+  // `trial.finished` is the unique semantic end marker consumed by the report
+  // auditor, so every proof and settlement event must precede it. If this final
+  // durable append fails, fail closed instead of emitting an apparently
+  // complete artifact with a non-terminal or unjournaled finish marker.
   record("trial.finished", {
     status: runtime.status,
     counters,
@@ -2490,24 +3187,57 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       (reservation) => reservation.reservation_id === input.budget.reservationId
     )?.status ?? "missing",
   });
-  if (!journal.failed) {
-    try {
-      await journal.flush();
-    } catch (error) {
-      const failure = asTrialRuntimeError(error, "artifact");
-      runtime.status = failure.status;
-      addErrorOnce(runtime, failure.trialError);
-      record("journal.failed", { error: failure.trialError });
-    }
-  }
+  await journal.flush();
 
+  const providerInputAudio: ProviderPcmEvidence[] = planned
+    .slice(0, runtime.turnsSent)
+    .map((turn, index) => Object.freeze({
+      ordinal: index + 1,
+      byte_length: turn.material.bytes.byteLength,
+      sha256: turn.material.hash,
+      sample_rate_hz: turn.material.format.sampleRateHz,
+      channels: 1 as const,
+      encoding: "pcm16" as const,
+    }));
+  const providerOutputAudio: ProviderPcmEvidence[] = runtime.outputByTurn
+    .slice(0, runtime.turnsSent)
+    .flatMap((chunks, index) => {
+      const bytes = concatBytes(chunks);
+      const format = runtime.outputFormatByTurn[index];
+      if (bytes.byteLength === 0 || !format) return [];
+      return [Object.freeze({
+        ordinal: index + 1,
+        byte_length: bytes.byteLength,
+        sha256: sha256Hex(bytes),
+        sample_rate_hz: format.sampleRateHz,
+        channels: 1 as const,
+        encoding: "pcm16" as const,
+      })];
+    });
+  const providerEvidence = buildProviderTransportEvidence({
+    provider: input.provider,
+    model: input.model,
+    sessionReady: runtime.sessionReady,
+    ...(runtime.sessionIdSha256 ? { sessionIdSha256: runtime.sessionIdSha256 } : {}),
+    sessionConfiguration: runtime.sessionConfiguration,
+    wireObservations: runtime.wireObservations,
+    normalizedLinks: runtime.normalizedWireLinks,
+    inputAudio: providerInputAudio,
+    outputAudio: providerOutputAudio,
+    normalizedToolCallCount: runtime.normalizedToolCallCount,
+    kernelInvocationCount: runtime.toolCalls,
+    usage: runtime.usage,
+    normalizedTerminalCount: runtime.normalizedTerminalCount,
+    limits: input.limits,
+    elapsedMs: counters.elapsedMs,
+  });
   const artifacts = buildArtifacts({
     runId: input.runId,
     pair: input.pairedAudio,
     scenario,
     provider: input.provider,
     model: input.model,
-    condition: input.condition.id,
+    condition: input.condition,
     status: runtime.status,
     errors: publicErrors,
     counters,
@@ -2516,7 +3246,15 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     outputFormatByTurn: runtime.outputFormatByTurn,
     usageRecords: runtime.usageRecords,
     wireRecords: runtime.wireRecords,
+    wireObservations: runtime.wireObservations,
+    providerEvidence,
+    providerReceiptLinkage,
     world: runtime.world,
+    kernelAttestation,
+    kernelTranscript,
+    kernelAttestationExpectation: input.kernelAttestationExpectation,
+    pairInvariantsHash: input.pairInvariantsHash,
+    studyPlanHash: input.studyPlanHash,
     ledger: budgetLedger,
     audibility,
     audioDelivery,
@@ -2536,8 +3274,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     inputAudioHashes: Object.freeze(planned.map((turn) => turn.material.hash)),
     outputAudioHashes: Object.freeze(runtime.outputByTurn.slice(0, runtime.turnsSent).map((chunks) => sha256Hex(concatBytes(chunks)))),
     usage: Object.freeze([...runtime.usage]),
+    providerEvidence,
+    providerReceiptLinkage,
     audibility,
     audioDelivery,
+    kernelAttestation,
     world: ToolWorldStateSchema.parse(runtime.world),
     budgetLedger,
     artifacts,

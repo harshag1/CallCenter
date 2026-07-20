@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=20.9.0"
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
   "overrides": {
     "postcss": "8.5.16"
@@ -17,7 +17,21 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check": "npm run test && npm run lint && npm run typecheck",
-    "db:migrate": "node --env-file=.env.local scripts/migrate.mjs"
+    "db:migrate": "node --env-file=.env.local scripts/migrate.mjs",
+    "db:test-isolation": "node scripts/test-tenant-isolation.mjs",
+    "db:test-integration": "node scripts/test-tenant-isolation.mjs",
+    "audit:public:worktree": "tsx scripts/working-tree-secret-audit.ts ..",
+    "audit:public:history": "tsx scripts/public-history-audit.ts ..",
+    "audit:public": "npm run audit:public:worktree && npm run audit:public:history",
+    "benchmark:voice": "tsx scripts/voice-benchmark.ts",
+    "benchmark:voice:offline": "tsx scripts/voice-benchmark-offline.ts",
+    "benchmark:voice:offline:imports": "tsx scripts/check-offline-benchmark-imports.ts",
+    "benchmark:precanary:imports": "tsx scripts/check-pre-canary-imports.ts",
+    "benchmark:precanary:packet": "tsx scripts/pre-canary-proof.ts",
+    "benchmark:claims:verify": "vitest run lib/benchmark/__tests__/offline-numerical-validation.test.ts lib/benchmark/__tests__/gate0-skip-inventory.test.ts lib/benchmark/__tests__/report.test.ts lib/benchmark/__tests__/scoring.test.ts lib/benchmark/__tests__/evaluation-evidence.test.ts",
+    "benchmark:voice:test": "vitest run lib/benchmark/__tests__/benchmark-cli.test.ts lib/benchmark/__tests__/execution-plan.test.ts lib/benchmark/__tests__/filesystem-budget-ledger.test.ts lib/benchmark/__tests__/filesystem-budget-ledger-process.test.ts lib/benchmark/__tests__/run-journal.test.ts lib/benchmark/__tests__/paid-runner.test.ts",
+    "benchmark:mission-runtime": "tsx scripts/mission-runtime-sensitivity.ts",
+    "benchmark:active-catalog": "tsx scripts/active-catalog-efficiency.ts"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

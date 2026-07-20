@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-Reviewed against first-party documentation on **2026-07-10**. Model aliases, preview status, protocol behavior, and prices can change; every run manifest must capture the exact requested and returned model IDs, relevant provider configuration, and a pricing snapshot identifier. These experiments compare harness conditions **within the same pinned model**. They are not a cross-provider model leaderboard.
+Reviewed against first-party documentation again on **2026-07-16**. Model aliases, preview status, protocol behavior, and prices can change; every run manifest must capture the exact requested model and every identity/configuration field the provider actually acknowledges, plus a pricing snapshot identifier. These experiments compare harness conditions **within the same pinned model**. They are not a cross-provider model leaderboard.
 
 ## Primary model pins
 
@@ -13,6 +13,16 @@ Reviewed against first-party documentation on **2026-07-10**. Model aliases, pre
 | Google | [`gemini-3.1-flash-live-preview`](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview) | `gemini-2.5-flash-native-audio-preview-12-2025` only as a labeled secondary comparison | Preview | `BidiGenerateContent` WebSocket (`v1beta`) |
 
 Do not use mutable `latest` aliases in reported runs. xAI documents that `grok-voice-latest` currently resolves to `grok-voice-think-fast-1.0` and recommends pinning the versioned ID; the older `grok-voice-fast-1.0` is deprecated.
+
+### Requested versus acknowledged identity
+
+Connection acceptance is not proof that a provider honored every requested setting. For model, voice, instructions, native tool schema, tool-choice policy, turn detection, audio format, and reasoning setting, artifacts store separate `requested`, `acknowledged`, and verification-status values:
+
+- `verified`: the provider explicitly echoed a matching value in a terminal setup/session acknowledgement;
+- `mismatch`: the provider echoed a different value; the canary fails and effectiveness collection is forbidden; or
+- `unverifiable`: the provider did not acknowledge that field; the request is retained but may not be relabeled as returned/verified state.
+
+The exact acknowledgement surface differs by provider and must be fixture-tested before a paid connection. Model identity in a result always names whether it was provider-verified or request-only.
 
 ## Protocol constraints
 
@@ -84,7 +94,7 @@ The minute equivalents are **not** a reliable total-cost estimator for a long Li
 
 1. Manual turn boundaries are primary; native VAD and barge-in are secondary, explicitly labeled experiments.
 2. The harness uses a single stable native gateway across all providers. Changing native tool declarations is an OpenAI/xAI-only ablation.
-3. Exact input PCM fixture bytes are paired. Adapters perform deterministic, manifest-recorded resampling where provider formats differ.
+3. Exact input PCM fixture bytes are paired. Fixture preparation freezes and hashes one native-rate rendition per provider format; paid-run adapters select verified in-memory bytes and never resample during a trial.
 4. Every provider event is stored raw before normalization. Cumulative xAI transcript updates and independently ordered Gemini transcriptions must not be concatenated as ordinary deltas.
 5. Usage payloads, audio durations, and pricing snapshot are retained even when a provider call fails.
 6. Unsupported sampling or reasoning parameters are recorded as unsupported, never silently emulated.

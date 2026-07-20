@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
+import { LOCAL_TOOL_PROXY_FUNCTION } from "../../realtime/client/types";
+import { canonicalJson } from "../artifacts";
 import {
   BENCHMARK_CONDITION_IDS,
   assertCompiledConditionIntegrity,
@@ -32,8 +34,13 @@ describe("canonical benchmark condition compiler", () => {
     expect(audit.rawFactHash).toBe(audit.progressiveFactHash);
     expect(Object.keys(suite.conditions).sort()).toEqual([...BENCHMARK_CONDITION_IDS].sort());
     expect(new Set(Object.values(suite.conditions).map((condition) => condition.providerToolsHash)).size).toBe(1);
+    const canonicalLiveGateway = canonicalJson([LOCAL_TOOL_PROXY_FUNCTION]);
+    expect(new Set(Object.values(suite.conditions).map((condition) => canonicalJson(condition.providerTools))))
+      .toEqual(new Set([canonicalLiveGateway]));
     for (const condition of Object.values(suite.conditions)) {
       expect(condition.providerTools.map((tool) => tool.name)).toEqual(["capability_gateway"]);
+      expect(canonicalJson(condition.providerTools)).toBe(canonicalLiveGateway);
+      expect(canonicalJson(condition.providerTools)).not.toContain("capability_grant");
       expect(condition.semanticLeafTools.map((tool) => tool.name)).toEqual(
         suite.semanticLeafTools.map((tool) => tool.name)
       );

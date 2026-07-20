@@ -12,6 +12,7 @@ import {
   assembleStrictPassEvidence,
   conversationIntegrityCurve,
   decomposeStrictPass,
+  EXACT_CLOPPER_PEARSON_MAX_TOTAL,
   exactClopperPearsonInterval,
   hasVerifiedExternalDelivery,
   reliableHorizon,
@@ -1325,6 +1326,11 @@ describe("strict long-horizon benchmark scoring", () => {
 
   it("uses exact binomial bounds at the Wilson boundary-undercoverage counterexample", () => {
     expect(() => exactClopperPearsonInterval(0, 0, 0.95)).toThrow(/positive safe integer/);
+    expect(() => exactClopperPearsonInterval(
+      0,
+      EXACT_CLOPPER_PEARSON_MAX_TOTAL + 1,
+      0.95
+    )).toThrow(/no greater than 100000/);
     expect(exactClopperPearsonInterval(0, 1, 0.95)).toEqual({
       confidence_level: 0.95,
       lower: 0,

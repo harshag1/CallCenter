@@ -24,15 +24,16 @@ function detached<T>(value: T): T {
 
 describe("scenario source registry", () => {
   it("binds industrial and every long-horizon fixture to an exact canonical compiler source", () => {
-    expect(REGISTERED_SCENARIO_SOURCES).toHaveLength(10);
+    expect(REGISTERED_SCENARIO_SOURCES).toHaveLength(11);
     expect(new Set(REGISTERED_SCENARIO_SOURCES.map((entry) => entry.family))).toEqual(new Set([
       "industrial-field-service",
       "travel-disruption",
       "home-health-coordination",
       "field-service-escalation",
+      "transport-smoke",
     ]));
-    expect(new Set(REGISTERED_SCENARIO_SOURCES.map((entry) => entry.registryKey)).size).toBe(10);
-    expect(SCENARIO_SOURCE_CATALOG).toHaveLength(10);
+    expect(new Set(REGISTERED_SCENARIO_SOURCES.map((entry) => entry.registryKey)).size).toBe(11);
+    expect(SCENARIO_SOURCE_CATALOG).toHaveLength(11);
     expect(listScenarioSources()).toBe(SCENARIO_SOURCE_CATALOG);
     expect(Object.isFrozen(SCENARIO_SOURCE_CATALOG)).toBe(true);
     expect(SCENARIO_SOURCE_REGISTRY_HASH).toMatch(/^[a-f0-9]{64}$/);
@@ -72,7 +73,18 @@ describe("scenario source registry", () => {
     expect(SCENARIO_SOURCE_CATALOG.filter((entry) => !entry.heldOut).every((entry) =>
       entry.studyRole === "development"
     )).toBe(true);
-  });
+    expect(SCENARIO_SOURCE_CATALOG.filter((entry) =>
+      entry.executionScope === "c3-transport-smoke-only"
+    )).toEqual([
+      expect.objectContaining({
+        family: "transport-smoke",
+        studyRole: "development",
+        heldOut: false,
+        maxTurns: 1,
+        callerTurns: 1,
+      }),
+    ]);
+  }, 60_000);
 
   it("returns the registry-owned detached source instead of an equivalent caller object", () => {
     const callerOwned = detached(industrialFieldServiceJson);

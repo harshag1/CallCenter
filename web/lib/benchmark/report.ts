@@ -28,6 +28,22 @@ import {
   type ConfidenceInterval,
   type Seed,
 } from "./statistics";
+import {
+  benchmarkKernelAttestationJson,
+  benchmarkKernelAttestationPublicKeyFingerprint,
+  benchmarkKernelAttestationReference,
+  verifyBenchmarkKernelFinalAttestation,
+  type BenchmarkKernelAttestationTrust,
+  type BenchmarkKernelFinalAttestation,
+} from "./kernel-attestation";
+import {
+  verifyKernelTranscript,
+  type KernelTranscriptReference,
+  type KernelTranscriptVerification,
+} from "./kernel-transcript";
+import type { CompiledBenchmarkCondition } from "./condition-compiler";
+import type { BenchmarkScenario } from "./scenario-schema";
+import type { ToolWorldState } from "./tool-world";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}$/;
@@ -57,6 +73,16 @@ const TRIAL_STATUSES = [
 
 export type ReportPhase = "exploratory" | "pilot" | "confirmatory";
 export type RunFailureClass = (typeof FAILURE_CLASSES)[number];
+
+/**
+ * Schema-v1 score artifacts are evaluator assertions: a trusted evaluator can
+ * sign any internally consistent endpoint value without supplying the replay
+ * evidence needed to reproduce it. Keep every report that consumes that legacy
+ * shape descriptive until the report independently replays a schema-v2
+ * evaluation bundle and verifies each reported endpoint against the replay.
+ */
+export const LEGACY_SCORE_CLAIM_BLOCK_REASON =
+  "legacy schema-v1 evaluator score artifacts are not replay-derived claim evidence; endpoint evidence schema v2 is required";
 
 const CountSchema = z.number().int().nonnegative().max(10_000_000);
 const PositiveCountSchema = z.number().int().positive().max(10_000_000);
@@ -284,7 +310,28 @@ export type DetachedAttestation = Readonly<{
 export type BenchmarkRunBundle = Readonly<{
   manifest: RunManifest;
   events: readonly BenchmarkEventEnvelope[] | null;
+  kernel: KernelAttestationEvidence | null;
   score: ImmutableScoreArtifact | null;
+}>;
+
+/** Source bytes used to independently replay a manifest-bound kernel proof.
+ * The manifest remains the sole descriptor authority, avoiding a second,
+ * potentially divergent copy of byte length or content hash. */
+export type KernelAttestationEvidence = Readonly<{
+  attestation: Readonly<{
+    path: "kernel-attestation.json";
+    content: string | Uint8Array;
+  }>;
+  transcript: Readonly<{
+    path: "kernel-transcript.jsonl";
+    content: string | Uint8Array;
+  }>;
+  world: Readonly<{
+    path: "world-final.json";
+    content: string | Uint8Array;
+  }>;
+  condition: CompiledBenchmarkCondition;
+  scenario: BenchmarkScenario;
 }>;
 
 export type ExpectedPair = Readonly<{
@@ -295,6 +342,8 @@ export type ExpectedPair = Readonly<{
   scenario_version: string;
   baseline_run_id: string;
   treatment_run_id: string;
+  baseline_execution_plan_sha256: string;
+  treatment_execution_plan_sha256: string;
   pair_invariants_hash: string;
 }>;
 
@@ -310,6 +359,9 @@ export type ClaimRegistrationBody = Readonly<{
   registration_attestation_public_key_sha256: string;
   evaluator_attestation_key_id: string;
   evaluator_attestation_public_key_sha256: string;
+  kernel_attestation_key_id: string;
+  kernel_attestation_public_key_sha256: string;
+  kernel_build_sha256: string;
   protocol_id: string;
   evaluator_version_hash: string;
   baseline_condition: string;
@@ -349,6 +401,7 @@ export type GenerateBenchmarkReportInput = Readonly<{
   registration?: ClaimRegistration | null;
   trusted_registration_keys?: Readonly<Record<string, string>>;
   trusted_evaluator_keys?: Readonly<Record<string, string>>;
+  trusted_kernel_keys?: Readonly<Record<string, string>>;
 }>;
 
 export type ArtifactAuditClass =
@@ -360,6 +413,12 @@ export type ArtifactAuditClass =
   | "event_chain_invalid"
   | "event_log_mismatch"
   | "event_artifact_mismatch"
+  | "kernel_attestation_missing"
+  | "kernel_attestation_invalid"
+  | "kernel_attestation_binding_mismatch"
+  | "kernel_transcript_missing"
+  | "kernel_transcript_invalid"
+  | "kernel_transcript_binding_mismatch"
   | "score_missing"
   | "score_hash_mismatch"
   | "score_noncanonical"
@@ -383,6 +442,14 @@ export type RunAudit = Readonly<{
   evaluator_attestation_verified: boolean;
   evaluator_attestation_key_id: string | null;
   evaluator_attestation_hash: string | null;
+  kernel_attestation_verified: boolean;
+  kernel_signature_verified: boolean;
+  kernel_attestation_key_id: string | null;
+  kernel_attestation_hash: string | null;
+  kernel_attestation_sha256: string | null;
+  kernel_transcript_verified: boolean;
+  kernel_transcript_authenticity: KernelTranscriptVerification["authenticity"];
+  kernel_transcript_sha256: string | null;
   errors: readonly string[];
 }>;
 
@@ -398,7 +465,21 @@ type TrustedIdentity = Readonly<{
   scenario_version: string;
   pair_invariants_hash: string;
   freeze_lock_hash: string;
+  execution_plan_sha256: string;
   plan_hash: string;
+  kernel_build_sha256: string;
+  lease_subject_id: string;
+  condition_hash: string;
+  source_hash: string;
+  scenario_hash: string;
+  flow_hash: string;
+  kernel_attestation_reference: Readonly<{
+    path: "kernel-attestation.json";
+    attestation_hash: string;
+    world_state_sha256: string;
+    flow_execution_state_sha256: string | null;
+  }>;
+  kernel_transcript_reference: KernelTranscriptReference;
 }>;
 
 type AnalyzedRun = Readonly<{
@@ -558,6 +639,7 @@ export type BenchmarkReport = Readonly<{
     registration: ClaimRegistration | null;
     trusted_registration_keys: readonly Readonly<{ key_id: string; public_key_sha256: string }>[];
     trusted_evaluator_keys: readonly Readonly<{ key_id: string; public_key_sha256: string }>[];
+    trusted_kernel_keys: readonly Readonly<{ key_id: string; public_key_sha256: string }>[];
   }>;
   source_artifact_digest: string;
   registration_digest: string | null;
@@ -568,6 +650,9 @@ export type BenchmarkReport = Readonly<{
     trusted_identity_count: number;
     evaluator_score_count: number;
     verified_evaluator_attestation_count: number;
+    verified_kernel_attestation_count: number;
+    verified_kernel_signature_count: number;
+    verified_kernel_transcript_count: number;
     protocol_fail_closed_endpoint_count: number;
     untrusted_bundle_count: number;
     duplicate_headline_cells: readonly string[];
@@ -611,6 +696,38 @@ function nonEmpty(value: unknown): string | null {
     : null;
 }
 
+function manifestKernelTranscriptReference(value: unknown): KernelTranscriptReference | null {
+  if (!isRecord(value)) return null;
+  const expectedKeys = [
+    "byte_length",
+    "encoding",
+    "schema_version",
+    "transcript_entry_count",
+    "transcript_head_sha256",
+    "transcript_sha256",
+    "transcript_type",
+    "view",
+  ];
+  if (Object.keys(value).sort().join("\u001f") !== expectedKeys.join("\u001f")) return null;
+  if (
+    value.schema_version !== 1
+    || value.transcript_type !== "benchmark_kernel_replay_public_commitment"
+    || value.encoding !== "canonical-jsonl-public-commitment"
+    || value.view !== "public_commitment"
+    || !Number.isSafeInteger(value.transcript_entry_count)
+    || (value.transcript_entry_count as number) < 1
+    || (value.transcript_entry_count as number) > 4_096
+    || typeof value.transcript_head_sha256 !== "string"
+    || !SHA256.test(value.transcript_head_sha256)
+    || typeof value.transcript_sha256 !== "string"
+    || !SHA256.test(value.transcript_sha256)
+    || !Number.isSafeInteger(value.byte_length)
+    || (value.byte_length as number) < 1
+    || (value.byte_length as number) > 64 * 1_024 * 1_024
+  ) return null;
+  return immutableJson(value) as unknown as KernelTranscriptReference;
+}
+
 function metadataIdentity(manifest: RunManifest): TrustedIdentity | null {
   if (!isRecord(manifest.metadata)) return null;
   const pairId = nonEmpty(manifest.metadata.pair_id);
@@ -622,12 +739,41 @@ function metadataIdentity(manifest: RunManifest): TrustedIdentity | null {
   const scenarioVersion = nonEmpty(manifest.metadata.scenario_version);
   const pairInvariantsHash = nonEmpty(manifest.metadata.pair_invariants_hash);
   const freezeLockHash = nonEmpty(manifest.metadata.freeze_lock_hash);
+  const executionPlanSha256 = nonEmpty(manifest.metadata.execution_plan_sha256);
   const planHash = nonEmpty(manifest.metadata.plan_hash);
+  const kernelBuildSha256 = nonEmpty(manifest.metadata.kernel_build_sha256);
+  const leaseSubjectId = nonEmpty(manifest.metadata.lease_subject_id);
+  const conditionHash = nonEmpty(manifest.metadata.condition_hash);
+  const sourceHash = nonEmpty(manifest.metadata.source_hash);
+  const scenarioHash = nonEmpty(manifest.metadata.scenario_hash);
+  const flowHash = nonEmpty(manifest.metadata.flow_hash);
+  const reference = manifest.metadata.kernel_attestation;
+  const transcriptReference = manifestKernelTranscriptReference(manifest.metadata.kernel_transcript);
+  const referenceValid = isRecord(reference)
+    && Object.keys(reference).sort().join("\u001f")
+      === "attestation_hash\u001fflow_execution_state_sha256\u001fpath\u001fworld_state_sha256"
+    && reference.path === "kernel-attestation.json"
+    && typeof reference.attestation_hash === "string"
+    && SHA256.test(reference.attestation_hash)
+    && typeof reference.world_state_sha256 === "string"
+    && SHA256.test(reference.world_state_sha256)
+    && (reference.flow_execution_state_sha256 === null
+      || (typeof reference.flow_execution_state_sha256 === "string"
+        && SHA256.test(reference.flow_execution_state_sha256)));
   if (
     !pairId || !provider || !model || !condition || !status || !scenarioId || !scenarioVersion
     || !pairInvariantsHash || !SHA256.test(pairInvariantsHash)
     || !freezeLockHash || !SHA256.test(freezeLockHash)
+    || !executionPlanSha256 || !SHA256.test(executionPlanSha256)
     || !planHash || !SHA256.test(planHash)
+    || !kernelBuildSha256 || !SHA256.test(kernelBuildSha256)
+    || !leaseSubjectId
+    || !conditionHash || !SHA256.test(conditionHash)
+    || !sourceHash || !SHA256.test(sourceHash)
+    || !scenarioHash || !SHA256.test(scenarioHash)
+    || !flowHash || !SHA256.test(flowHash)
+    || !referenceValid
+    || transcriptReference === null
   ) return null;
   return Object.freeze({
     run_id: manifest.run_id,
@@ -641,7 +787,21 @@ function metadataIdentity(manifest: RunManifest): TrustedIdentity | null {
     scenario_version: scenarioVersion,
     pair_invariants_hash: pairInvariantsHash,
     freeze_lock_hash: freezeLockHash,
+    execution_plan_sha256: executionPlanSha256,
     plan_hash: planHash,
+    kernel_build_sha256: kernelBuildSha256,
+    lease_subject_id: leaseSubjectId,
+    condition_hash: conditionHash,
+    source_hash: sourceHash,
+    scenario_hash: scenarioHash,
+    flow_hash: flowHash,
+    kernel_attestation_reference: Object.freeze({
+      path: "kernel-attestation.json" as const,
+      attestation_hash: reference.attestation_hash as string,
+      world_state_sha256: reference.world_state_sha256 as string,
+      flow_execution_state_sha256: reference.flow_execution_state_sha256 as string | null,
+    }),
+    kernel_transcript_reference: transcriptReference,
   });
 }
 
@@ -753,10 +913,373 @@ export function createImmutableScoreArtifact(
   return Object.freeze({ path, content, sha256: sha256Hex(content), attestation });
 }
 
+type KernelProofAudit = Readonly<{
+  valid: boolean;
+  signatureVerified: boolean;
+  transcriptVerified: boolean;
+  transcriptAuthenticity: KernelTranscriptVerification["authenticity"];
+  keyId: string | null;
+  attestationHash: string | null;
+  artifactSha256: string | null;
+  transcriptSha256: string | null;
+  artifactClass:
+    | "kernel_attestation_missing"
+    | "kernel_attestation_invalid"
+    | "kernel_attestation_binding_mismatch"
+    | "kernel_transcript_missing"
+    | "kernel_transcript_invalid"
+    | "kernel_transcript_binding_mismatch"
+    | null;
+  errors: readonly string[];
+}>;
+
+function kernelProofFailure(
+  artifactClass: Exclude<KernelProofAudit["artifactClass"], null>,
+  errors: readonly string[],
+  partial: Partial<Pick<KernelProofAudit,
+    | "signatureVerified"
+    | "transcriptVerified"
+    | "transcriptAuthenticity"
+    | "keyId"
+    | "attestationHash"
+    | "artifactSha256"
+    | "transcriptSha256"
+  >> = {}
+): KernelProofAudit {
+  return Object.freeze({
+    valid: false,
+    signatureVerified: partial.signatureVerified ?? false,
+    transcriptVerified: partial.transcriptVerified ?? false,
+    transcriptAuthenticity: partial.transcriptAuthenticity ?? "unverified_invalid",
+    keyId: partial.keyId ?? null,
+    attestationHash: partial.attestationHash ?? null,
+    artifactSha256: partial.artifactSha256 ?? null,
+    transcriptSha256: partial.transcriptSha256 ?? null,
+    artifactClass,
+    errors: Object.freeze([...errors]),
+  });
+}
+
+function exactArtifactEvidence(
+  value: unknown,
+  expectedPath: "kernel-attestation.json" | "kernel-transcript.jsonl" | "world-final.json"
+): value is Readonly<{ path: typeof expectedPath; content: string | Uint8Array }> {
+  return isRecord(value)
+    && Object.keys(value).sort().join("\u001f") === "content\u001fpath"
+    && value.path === expectedPath
+    && (typeof value.content === "string" || value.content instanceof Uint8Array);
+}
+
+function auditKernelProof(
+  bundle: BenchmarkRunBundle,
+  identity: TrustedIdentity,
+  trustedKeys: Readonly<Record<string, string>>
+): KernelProofAudit {
+  const kernel = bundle.kernel;
+  if (kernel === null) {
+    return kernelProofFailure("kernel_attestation_missing", ["manifest-bound kernel attestation evidence is missing"]);
+  }
+  if (
+    isRecord(kernel)
+    && !Object.hasOwn(kernel, "transcript")
+  ) {
+    return kernelProofFailure("kernel_transcript_missing", ["manifest-bound kernel transcript evidence is missing"]);
+  }
+  if (
+    !isRecord(kernel)
+    || Object.keys(kernel).sort().join("\u001f") !== "attestation\u001fcondition\u001fscenario\u001ftranscript\u001fworld"
+    || !exactArtifactEvidence(kernel.attestation, "kernel-attestation.json")
+    || !exactArtifactEvidence(kernel.transcript, "kernel-transcript.jsonl")
+    || !exactArtifactEvidence(kernel.world, "world-final.json")
+  ) {
+    return kernelProofFailure("kernel_attestation_invalid", [
+      "kernel evidence must contain exactly canonical attestation/transcript/world artifacts plus condition and scenario inputs",
+    ]);
+  }
+
+  const attestationBytes = typeof kernel.attestation.content === "string"
+    ? new TextEncoder().encode(kernel.attestation.content)
+    : new Uint8Array(kernel.attestation.content);
+  const worldBytes = typeof kernel.world.content === "string"
+    ? new TextEncoder().encode(kernel.world.content)
+    : new Uint8Array(kernel.world.content);
+  const transcriptBytes = typeof kernel.transcript.content === "string"
+    ? new TextEncoder().encode(kernel.transcript.content)
+    : new Uint8Array(kernel.transcript.content);
+  const artifactSha256 = sha256Hex(attestationBytes);
+  const transcriptSha256 = sha256Hex(transcriptBytes);
+  if (
+    attestationBytes.byteLength > 64 * 1_024 * 1_024
+    || worldBytes.byteLength > 64 * 1_024 * 1_024
+    || transcriptBytes.byteLength > 64 * 1_024 * 1_024
+  ) {
+    return kernelProofFailure("kernel_attestation_invalid", ["kernel proof artifacts exceed the 64 MiB per-artifact limit"], { artifactSha256 });
+  }
+
+  const attestationDescriptor = bundle.manifest.artifacts.find((artifact) => artifact.path === kernel.attestation.path);
+  const transcriptDescriptor = bundle.manifest.artifacts.find((artifact) => artifact.path === kernel.transcript.path);
+  const worldDescriptor = bundle.manifest.artifacts.find((artifact) => artifact.path === kernel.world.path);
+  const descriptorErrors: string[] = [];
+  if (!attestationDescriptor) descriptorErrors.push("kernel-attestation.json descriptor is absent from the run manifest");
+  else {
+    if (attestationDescriptor.media_type !== "application/json") descriptorErrors.push("kernel attestation descriptor has the wrong media type");
+    if (!verifyArtifactContent(attestationDescriptor, kernel.attestation.content).valid) {
+      descriptorErrors.push("kernel attestation bytes do not match the exact manifest descriptor");
+    }
+  }
+  if (!worldDescriptor) descriptorErrors.push("world-final.json descriptor is absent from the run manifest");
+  else {
+    if (worldDescriptor.media_type !== "application/json") descriptorErrors.push("final world descriptor has the wrong media type");
+    if (!verifyArtifactContent(worldDescriptor, kernel.world.content).valid) {
+      descriptorErrors.push("final world bytes do not match the exact manifest descriptor");
+    }
+  }
+  if (!transcriptDescriptor) {
+    return kernelProofFailure("kernel_transcript_missing", [
+      "kernel-transcript.jsonl descriptor is absent from the run manifest",
+    ], { artifactSha256, transcriptSha256 });
+  }
+  const transcriptDescriptorErrors: string[] = [];
+  if (transcriptDescriptor.media_type !== "application/x-ndjson") {
+    transcriptDescriptorErrors.push("kernel transcript descriptor has the wrong media type");
+  }
+  if (!verifyArtifactContent(transcriptDescriptor, kernel.transcript.content).valid) {
+    transcriptDescriptorErrors.push("kernel transcript bytes do not match the exact manifest descriptor");
+  }
+  if (transcriptDescriptorErrors.length > 0) {
+    return kernelProofFailure("kernel_transcript_invalid", transcriptDescriptorErrors, {
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+  if (descriptorErrors.length > 0) {
+    return kernelProofFailure("kernel_attestation_invalid", descriptorErrors, { artifactSha256, transcriptSha256 });
+  }
+
+  let attestationRaw: unknown;
+  let worldRaw: unknown;
+  let attestationText: string;
+  let transcriptText: string;
+  let worldText: string;
+  try {
+    attestationText = readUtf8(kernel.attestation.content);
+    transcriptText = readUtf8(kernel.transcript.content);
+    worldText = readUtf8(kernel.world.content);
+    attestationRaw = JSON.parse(attestationText);
+    worldRaw = JSON.parse(worldText);
+  } catch (error) {
+    return kernelProofFailure("kernel_attestation_invalid", [`kernel proof artifacts are unreadable: ${errorText(error)}`], {
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+  let canonicalAttestationText: string;
+  let canonicalWorldText: string;
+  try {
+    canonicalAttestationText = `${canonicalJson(attestationRaw)}\n`;
+    canonicalWorldText = `${canonicalJson(worldRaw)}\n`;
+  } catch (error) {
+    return kernelProofFailure("kernel_attestation_invalid", [`kernel proof JSON cannot be canonicalized: ${errorText(error)}`], { artifactSha256 });
+  }
+  if (attestationText !== canonicalAttestationText || worldText !== canonicalWorldText) {
+    return kernelProofFailure("kernel_attestation_invalid", [
+      "kernel proof artifacts must be canonical JSON with exactly one trailing newline",
+    ], { artifactSha256 });
+  }
+
+  const signature = isRecord(attestationRaw) && isRecord(attestationRaw.signature)
+    ? attestationRaw.signature
+    : null;
+  const keyId = signature ? nonEmpty(signature.key_id) : null;
+  const attestationHash = isRecord(attestationRaw) && typeof attestationRaw.attestation_hash === "string"
+    && SHA256.test(attestationRaw.attestation_hash)
+    ? attestationRaw.attestation_hash
+    : null;
+  const bindingErrors: string[] = [];
+  if (identity.provider !== "openai" && identity.provider !== "xai" && identity.provider !== "gemini" && identity.provider !== "offline") {
+    bindingErrors.push("manifest provider is not supported by the kernel evidence schema");
+  }
+  if (
+    !isRecord(kernel.condition)
+    || kernel.condition.id !== identity.condition
+    || kernel.condition.conditionHash !== identity.condition_hash
+    || kernel.condition.sourceHash !== identity.source_hash
+    || kernel.condition.scenarioHash !== identity.scenario_hash
+    || kernel.condition.flowHash !== identity.flow_hash
+  ) {
+    bindingErrors.push("compiled condition evidence does not match manifest identity hashes");
+  }
+  if (!isRecord(kernel.scenario) || kernel.scenario.id !== identity.scenario_id || kernel.scenario.version !== identity.scenario_version) {
+    bindingErrors.push("scenario evidence does not match manifest identity");
+  }
+  const publicKeyPem = keyId ? trustedKeys[keyId] : undefined;
+  let trust: BenchmarkKernelAttestationTrust | null = null;
+  if (!keyId || !publicKeyPem) {
+    bindingErrors.push("kernel attestation is not signed by a configured trust key");
+  } else {
+    try {
+      trust = Object.freeze({
+        keyId,
+        publicKeySha256: benchmarkKernelAttestationPublicKeyFingerprint(publicKeyPem),
+        publicKeyPem,
+      });
+    } catch (error) {
+      bindingErrors.push(`kernel trust key is invalid: ${errorText(error)}`);
+    }
+  }
+  if (bindingErrors.length > 0 || trust === null) {
+    return kernelProofFailure("kernel_attestation_binding_mismatch", bindingErrors, {
+      keyId,
+      attestationHash,
+      artifactSha256,
+    });
+  }
+
+  let canonicalAttestation: string | null = null;
+  let reference: unknown = null;
+  try {
+    canonicalAttestation = benchmarkKernelAttestationJson(attestationRaw as BenchmarkKernelFinalAttestation);
+    reference = benchmarkKernelAttestationReference(attestationRaw as BenchmarkKernelFinalAttestation);
+  } catch (error) {
+    return kernelProofFailure("kernel_attestation_invalid", [errorText(error)], {
+      keyId,
+      attestationHash,
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+
+  const attestationRelationErrors: string[] = [];
+  if (canonicalAttestation !== attestationText) {
+    attestationRelationErrors.push("kernel attestation bytes are not the strict canonical schema serialization");
+  }
+  if (canonicalJson(reference) !== canonicalJson(identity.kernel_attestation_reference)) {
+    attestationRelationErrors.push("kernel attestation reference does not exactly match manifest metadata");
+  }
+  const parsedAttestation = attestationRaw as BenchmarkKernelFinalAttestation;
+  const signedTranscriptReference = parsedAttestation.transcript_reference;
+  if (canonicalJson(signedTranscriptReference) !== canonicalJson(identity.kernel_transcript_reference)) {
+    attestationRelationErrors.push("signed kernel transcript reference does not exactly match manifest metadata");
+  }
+  const evidenceBinding = Object.freeze({
+    pairId: identity.pair_id,
+    leaseSubjectId: identity.lease_subject_id,
+    provider: identity.provider as "openai" | "xai" | "gemini" | "offline",
+    model: identity.model,
+    planSha256: identity.execution_plan_sha256,
+    freezeLockSha256: identity.freeze_lock_hash,
+    kernelBuildSha256: identity.kernel_build_sha256,
+  });
+  const independentlyVerifiedAttestation = verifyBenchmarkKernelFinalAttestation(parsedAttestation, {
+    runId: identity.run_id,
+    condition: kernel.condition as CompiledBenchmarkCondition,
+    scenario: kernel.scenario as BenchmarkScenario,
+    world: worldRaw as ToolWorldState,
+    transcriptReference: signedTranscriptReference,
+    evidenceBinding,
+    trust,
+  });
+  const signatureVerified = independentlyVerifiedAttestation.signature_verified;
+
+  let replay: KernelTranscriptVerification;
+  try {
+    replay = verifyKernelTranscript({
+      transcript: transcriptText,
+      finalAttestation: parsedAttestation,
+      attestationExpectation: {
+        runId: identity.run_id,
+        condition: kernel.condition as CompiledBenchmarkCondition,
+        scenario: kernel.scenario as BenchmarkScenario,
+        world: worldRaw as ToolWorldState,
+        transcriptReference: identity.kernel_transcript_reference,
+        evidenceBinding,
+        trust,
+      },
+    });
+  } catch (error) {
+    return kernelProofFailure("kernel_transcript_invalid", [
+      `kernel transcript replay threw: ${errorText(error)}`,
+    ], {
+      signatureVerified,
+      keyId,
+      attestationHash,
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+  const transcriptRelationErrors = [...replay.errors];
+  if (replay.reference === null) {
+    transcriptRelationErrors.push("kernel transcript did not produce a canonical public commitment reference");
+  } else if (canonicalJson(replay.reference) !== canonicalJson(identity.kernel_transcript_reference)) {
+    transcriptRelationErrors.push("replayed kernel transcript reference does not exactly match manifest metadata");
+  }
+  if (replay.reference === null && replay.authenticity === "unverified_invalid") {
+    return kernelProofFailure("kernel_transcript_invalid", transcriptRelationErrors, {
+      signatureVerified,
+      transcriptVerified: false,
+      transcriptAuthenticity: replay.authenticity,
+      keyId,
+      attestationHash,
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+  if (
+    attestationRelationErrors.length > 0
+    || !independentlyVerifiedAttestation.valid
+    || replay.authenticity !== "signed_attestation_verified"
+  ) {
+    return kernelProofFailure("kernel_attestation_binding_mismatch", [
+      ...attestationRelationErrors,
+      ...independentlyVerifiedAttestation.errors,
+      ...transcriptRelationErrors,
+      ...(replay.authenticity === "signed_attestation_verified"
+        ? []
+        : ["kernel transcript authenticity is not signed_attestation_verified"]),
+    ], {
+      signatureVerified,
+      transcriptVerified: false,
+      transcriptAuthenticity: replay.authenticity,
+      keyId,
+      attestationHash,
+      artifactSha256,
+      transcriptSha256,
+    });
+  }
+  if (!replay.valid || transcriptRelationErrors.length > 0) {
+    return kernelProofFailure(
+      replay.reference === null ? "kernel_transcript_invalid" : "kernel_transcript_binding_mismatch",
+      transcriptRelationErrors,
+      {
+        signatureVerified: true,
+        transcriptVerified: false,
+        transcriptAuthenticity: replay.authenticity,
+        keyId,
+        attestationHash,
+        artifactSha256,
+        transcriptSha256,
+      }
+    );
+  }
+  return Object.freeze({
+    valid: true,
+    signatureVerified: true,
+    transcriptVerified: true,
+    transcriptAuthenticity: "signed_attestation_verified" as const,
+    keyId,
+    attestationHash,
+    artifactSha256,
+    transcriptSha256,
+    artifactClass: null,
+    errors: Object.freeze([]),
+  });
+}
+
 function auditBundle(
   bundle: BenchmarkRunBundle,
   inputIndex: number,
-  trustedKeys: Readonly<Record<string, string>>,
+  trustedEvaluatorKeys: Readonly<Record<string, string>>,
+  trustedKernelKeys: Readonly<Record<string, string>>,
   reportGeneratedAt: string
 ): AnalyzedRun {
   const errors: string[] = [];
@@ -780,6 +1303,14 @@ function auditBundle(
       evaluator_attestation_verified: false,
       evaluator_attestation_key_id: null,
       evaluator_attestation_hash: null,
+      kernel_attestation_verified: false,
+      kernel_signature_verified: false,
+      kernel_attestation_key_id: null,
+      kernel_attestation_hash: null,
+      kernel_attestation_sha256: null,
+      kernel_transcript_verified: false,
+      kernel_transcript_authenticity: "unverified_invalid",
+      kernel_transcript_sha256: null,
       errors,
     }, null, null, null, "artifact_untrusted");
   }
@@ -804,6 +1335,14 @@ function auditBundle(
       evaluator_attestation_verified: false,
       evaluator_attestation_key_id: null,
       evaluator_attestation_hash: null,
+      kernel_attestation_verified: false,
+      kernel_signature_verified: false,
+      kernel_attestation_key_id: null,
+      kernel_attestation_hash: null,
+      kernel_attestation_sha256: null,
+      kernel_transcript_verified: false,
+      kernel_transcript_authenticity: "unverified_invalid",
+      kernel_transcript_sha256: null,
       errors,
     }, null, null, null, "artifact_untrusted");
   }
@@ -872,6 +1411,7 @@ function auditBundle(
     [firstPayload?.["scenario_version"], identity.scenario_version, "trial.started scenario_version"],
     [firstPayload?.["pair_invariants_hash"], identity.pair_invariants_hash, "trial.started pair_invariants_hash"],
     [firstPayload?.["freeze_lock_hash"], identity.freeze_lock_hash, "trial.started freeze_lock_hash"],
+    [firstPayload?.["execution_plan_sha256"], identity.execution_plan_sha256, "trial.started execution_plan_sha256"],
     [firstPayload?.["plan_hash"], identity.plan_hash, "trial.started plan_hash"],
     [lastPayload?.["status"], identity.status, "trial.finished status"],
   ];
@@ -898,9 +1438,24 @@ function auditBundle(
     return failClosed(baseAudit, identity, "event_artifact_mismatch", errors, eventVerification.chain_head);
   }
 
+  const kernelAudit = auditKernelProof(bundle, identity, trustedKernelKeys);
+  if (!kernelAudit.valid) {
+    if (kernelAudit.artifactClass !== null) {
+      return failClosed(
+        baseAudit,
+        identity,
+        kernelAudit.artifactClass,
+        kernelAudit.errors,
+        eventVerification.chain_head,
+        kernelAudit
+      );
+    }
+    return failClosed(baseAudit, identity, "kernel_attestation_invalid", ["kernel attestation verification failed"], eventVerification.chain_head, kernelAudit);
+  }
+
   if (bundle.score === null) {
     errors.push("independently hashed evaluator score artifact is missing");
-    return failClosed(baseAudit, identity, "score_missing", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_missing", errors, eventVerification.chain_head, kernelAudit);
   }
   if (
     !isRecord(bundle.score)
@@ -910,7 +1465,7 @@ function auditBundle(
     || (typeof bundle.score.content !== "string" && !(bundle.score.content instanceof Uint8Array))
   ) {
     errors.push("score artifact must contain exactly a normalized path, SHA-256, and UTF-8/byte content");
-    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head, kernelAudit);
   }
   const scoreArtifact = bundle.score as ImmutableScoreArtifact;
   const scoreBytes = typeof scoreArtifact.content === "string"
@@ -918,12 +1473,12 @@ function auditBundle(
     : new Uint8Array(scoreArtifact.content);
   if (scoreBytes.byteLength > 16 * 1_024 * 1_024) {
     errors.push("score artifact exceeds the 16 MiB reporting limit");
-    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head, kernelAudit);
   }
   const actualScoreHash = sha256Hex(scoreBytes);
   if (!SHA256.test(scoreArtifact.sha256) || actualScoreHash !== scoreArtifact.sha256) {
     errors.push("score content does not match its declared SHA-256");
-    return failClosed({ ...baseAudit, score_hash: actualScoreHash }, identity, "score_hash_mismatch", errors, eventVerification.chain_head);
+    return failClosed({ ...baseAudit, score_hash: actualScoreHash }, identity, "score_hash_mismatch", errors, eventVerification.chain_head, kernelAudit);
   }
 
   let rawScore: unknown;
@@ -933,17 +1488,17 @@ function auditBundle(
     rawScore = JSON.parse(scoreText);
   } catch (error) {
     errors.push(`score JSON is unreadable: ${errorText(error)}`);
-    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head, kernelAudit);
   }
   const parsed = RunScoreArtifactSchema.safeParse(rawScore);
   if (!parsed.success) {
     errors.push(...scoreIssues(parsed.error));
-    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_invalid", errors, eventVerification.chain_head, kernelAudit);
   }
   const canonicalScore = `${canonicalJson(parsed.data)}\n`;
   if (scoreText !== canonicalScore) {
     errors.push("score artifact is not canonical JSON with one trailing newline");
-    return failClosed(baseAudit, identity, "score_noncanonical", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_noncanonical", errors, eventVerification.chain_head, kernelAudit);
   }
   const score = parsed.data;
   const bindings: Array<[boolean, string]> = [
@@ -961,7 +1516,7 @@ function auditBundle(
   ];
   errors.push(...bindings.filter(([matches]) => !matches).map(([, message]) => message));
   if (errors.length > 0) {
-    return failClosed(baseAudit, identity, "score_binding_mismatch", errors, eventVerification.chain_head);
+    return failClosed(baseAudit, identity, "score_binding_mismatch", errors, eventVerification.chain_head, kernelAudit);
   }
 
   const scoreAttestation = validAttestation(scoreArtifact.attestation)
@@ -976,7 +1531,7 @@ function auditBundle(
         scoreAttestation.key_id,
         scoreAttestation.signed_at
       ),
-      trustedKeys
+      trustedEvaluatorKeys
     )
     && Date.parse(scoreAttestation.signed_at) >= Date.parse(identity.created_at)
     && Date.parse(scoreAttestation.signed_at) <= Date.parse(reportGeneratedAt);
@@ -996,6 +1551,14 @@ function auditBundle(
     evaluator_attestation_hash: scoreAttestation
       ? sha256Hex(`hacc/detached-attestation/v1\n${canonicalJson(scoreAttestation)}`)
       : null,
+    kernel_attestation_verified: kernelAudit.valid,
+    kernel_signature_verified: kernelAudit.signatureVerified,
+    kernel_attestation_key_id: kernelAudit.keyId,
+    kernel_attestation_hash: kernelAudit.attestationHash,
+    kernel_attestation_sha256: kernelAudit.artifactSha256,
+    kernel_transcript_verified: kernelAudit.transcriptVerified,
+    kernel_transcript_authenticity: kernelAudit.transcriptAuthenticity,
+    kernel_transcript_sha256: kernelAudit.transcriptSha256,
     errors: Object.freeze([]),
   });
   return Object.freeze({
@@ -1039,7 +1602,8 @@ function failClosed(
   identity: TrustedIdentity,
   artifactClass: Exclude<ArtifactAuditClass, "valid" | "manifest_invalid" | "identity_missing">,
   errors: readonly string[],
-  eventChainHead: string | null
+  eventChainHead: string | null,
+  kernelAudit: KernelProofAudit | null = null
 ): AnalyzedRun {
   return analyzedFromAudit({
     ...base,
@@ -1051,6 +1615,14 @@ function failClosed(
     evaluator_attestation_verified: false,
     evaluator_attestation_key_id: null,
     evaluator_attestation_hash: null,
+    kernel_attestation_verified: kernelAudit?.valid ?? false,
+    kernel_signature_verified: kernelAudit?.signatureVerified ?? false,
+    kernel_attestation_key_id: kernelAudit?.keyId ?? null,
+    kernel_attestation_hash: kernelAudit?.attestationHash ?? null,
+    kernel_attestation_sha256: kernelAudit?.artifactSha256 ?? null,
+    kernel_transcript_verified: kernelAudit?.transcriptVerified ?? false,
+    kernel_transcript_authenticity: kernelAudit?.transcriptAuthenticity ?? "unverified_invalid",
+    kernel_transcript_sha256: kernelAudit?.transcriptSha256 ?? null,
     errors,
   }, identity, null, false, "artifact");
 }
@@ -1100,6 +1672,7 @@ function validateInput(input: GenerateBenchmarkReportInput): void {
   for (const [role, keys] of [
     ["registration", input.trusted_registration_keys ?? {}],
     ["evaluator", input.trusted_evaluator_keys ?? {}],
+    ["kernel", input.trusted_kernel_keys ?? {}],
   ] as const) {
     for (const [keyId, publicKey] of Object.entries(keys)) {
       checkedIdentifier(keyId, `trusted ${role} key ID`);
@@ -1107,19 +1680,29 @@ function validateInput(input: GenerateBenchmarkReportInput): void {
         throw new Error(`trusted ${role} key ${keyId} is invalid`);
       }
       try {
-        attestationPublicKeyFingerprint(publicKey);
+        if (role === "kernel") benchmarkKernelAttestationPublicKeyFingerprint(publicKey);
+        else attestationPublicKeyFingerprint(publicKey);
       } catch {
-        throw new Error(`trusted ${role} key ${keyId} is not a parseable public key`);
+        throw new Error(`trusted ${role} key ${keyId} is not a valid public key for its role`);
       }
     }
   }
   const registrationFingerprints = new Set(Object.values(input.trusted_registration_keys ?? {}).map(attestationPublicKeyFingerprint));
   const evaluatorFingerprints = new Set(Object.values(input.trusted_evaluator_keys ?? {}).map(attestationPublicKeyFingerprint));
+  const kernelFingerprints = new Set(Object.values(input.trusted_kernel_keys ?? {}).map(benchmarkKernelAttestationPublicKeyFingerprint));
+  const trustStores = [
+    ["registration", input.trusted_registration_keys ?? {}, registrationFingerprints],
+    ["evaluator", input.trusted_evaluator_keys ?? {}, evaluatorFingerprints],
+    ["kernel", input.trusted_kernel_keys ?? {}, kernelFingerprints],
+  ] as const;
+  const overlap = trustStores.some(([, leftKeys, leftFingerprints], leftIndex) =>
+    trustStores.slice(leftIndex + 1).some(([, rightKeys, rightFingerprints]) =>
+      Object.keys(leftKeys).some((keyId) => Object.prototype.hasOwnProperty.call(rightKeys, keyId))
+      || [...leftFingerprints].some((fingerprint) => rightFingerprints.has(fingerprint))));
   if (
-    Object.keys(input.trusted_registration_keys ?? {}).some((keyId) => Object.prototype.hasOwnProperty.call(input.trusted_evaluator_keys ?? {}, keyId))
-    || [...registrationFingerprints].some((fingerprint) => evaluatorFingerprints.has(fingerprint))
+    overlap
   ) {
-    throw new Error("registration-root and evaluator trust stores must be cryptographically disjoint");
+    throw new Error("registration-root, evaluator, and kernel trust stores must be cryptographically disjoint");
   }
 }
 
@@ -1128,8 +1711,11 @@ function validateRegistration(registration: ClaimRegistration): void {
   checkedIdentifier(registration.freeze_ref, "registration freeze_ref");
   checkedIdentifier(registration.registration_attestation_key_id, "registration attestation key ID");
   checkedIdentifier(registration.evaluator_attestation_key_id, "evaluator attestation key ID");
+  checkedIdentifier(registration.kernel_attestation_key_id, "kernel attestation key ID");
   if (!SHA256.test(registration.registration_attestation_public_key_sha256)) throw new Error("registration attestation public-key fingerprint must be SHA-256");
   if (!SHA256.test(registration.evaluator_attestation_public_key_sha256)) throw new Error("evaluator attestation public-key fingerprint must be SHA-256");
+  if (!SHA256.test(registration.kernel_attestation_public_key_sha256)) throw new Error("kernel attestation public-key fingerprint must be SHA-256");
+  if (!SHA256.test(registration.kernel_build_sha256)) throw new Error("registration kernel_build_sha256 must be SHA-256");
   checkedTimestamp(registration.frozen_at);
   if (!validAttestation(registration.attestation)) throw new Error("registration needs a valid detached Ed25519 attestation");
   if (registration.attestation.signed_at !== registration.frozen_at) throw new Error("registration attestation time must equal frozen_at");
@@ -1189,6 +1775,11 @@ function validateRegistration(registration: ClaimRegistration): void {
     checkedIdentifier(pair.baseline_run_id, "expected baseline_run_id");
     checkedIdentifier(pair.treatment_run_id, "expected treatment_run_id");
     if (pair.baseline_run_id === pair.treatment_run_id) throw new Error("expected paired run IDs must differ");
+    if (!SHA256.test(pair.baseline_execution_plan_sha256)) throw new Error("expected baseline_execution_plan_sha256 must be SHA-256");
+    if (!SHA256.test(pair.treatment_execution_plan_sha256)) throw new Error("expected treatment_execution_plan_sha256 must be SHA-256");
+    if (pair.baseline_execution_plan_sha256 === pair.treatment_execution_plan_sha256) {
+      throw new Error("paired condition-specific execution-plan hashes must differ");
+    }
     for (const runId of [pair.baseline_run_id, pair.treatment_run_id]) {
       if (registeredRunIds.has(runId)) throw new Error(`duplicate registered run ID: ${runId}`);
       registeredRunIds.add(runId);
@@ -1993,6 +2584,7 @@ function claimGate(input: Readonly<{
   registrationAttestationVerified: boolean;
   trustedRegistrationKeys: Readonly<Record<string, string>>;
   trustedEvaluatorKeys: Readonly<Record<string, string>>;
+  trustedKernelKeys: Readonly<Record<string, string>>;
   baseline: string;
   treatment: string;
   runs: readonly AnalyzedRun[];
@@ -2004,7 +2596,7 @@ function claimGate(input: Readonly<{
   strata: readonly ProviderStratum[];
   effects: BenchmarkReport["headline_effects"];
 }>): BenchmarkReport["claim_gate"] {
-  const reasons: string[] = [];
+  const reasons: string[] = [LEGACY_SCORE_CLAIM_BLOCK_REASON];
   const registration = input.registration;
   if (input.phase !== "confirmatory") reasons.push(`phase is ${input.phase}, not confirmatory`);
   if (!registration) reasons.push("no claim registration was supplied");
@@ -2034,6 +2626,9 @@ function claimGate(input: Readonly<{
     if (!fingerprintMatches(input.trustedEvaluatorKeys, registration.evaluator_attestation_key_id, registration.evaluator_attestation_public_key_sha256)) {
       reasons.push("evaluator attestation trust key does not match the frozen public-key fingerprint");
     }
+    if (!fingerprintMatches(input.trustedKernelKeys, registration.kernel_attestation_key_id, registration.kernel_attestation_public_key_sha256)) {
+      reasons.push("kernel attestation trust key does not match the frozen public-key fingerprint");
+    }
     if (registration.protocol_id !== input.protocolId) reasons.push("report protocol differs from the registered protocol");
     if (registration.baseline_condition !== input.baseline || registration.treatment_condition !== input.treatment) {
       reasons.push("report comparator differs from the registered comparator");
@@ -2055,6 +2650,9 @@ function claimGate(input: Readonly<{
       const expectedRunId = run.identity.condition === input.baseline
         ? expectedPair.baseline_run_id
         : expectedPair.treatment_run_id;
+      const expectedExecutionPlanSha256 = run.identity.condition === input.baseline
+        ? expectedPair.baseline_execution_plan_sha256
+        : expectedPair.treatment_execution_plan_sha256;
       const checks: Array<[boolean, string]> = [
         [run.identity.run_id === expectedRunId, `run ID ${run.identity.run_id} differs from registered ${expectedRunId}`],
         [run.identity.scenario_id === expectedPair.scenario_id, `scenario ${run.identity.scenario_id} differs from registered ${expectedPair.scenario_id}`],
@@ -2062,6 +2660,8 @@ function claimGate(input: Readonly<{
         [run.identity.pair_invariants_hash === expectedPair.pair_invariants_hash, "pair-invariants hash differs from registration"],
         [run.identity.freeze_lock_hash === registration.freeze_lock_hash, "freeze-lock hash differs from registration"],
         [run.identity.plan_hash === registration.plan_hash, "plan hash differs from registration"],
+        [run.identity.execution_plan_sha256 === expectedExecutionPlanSha256, "condition-specific execution-plan hash differs from registration"],
+        [run.identity.kernel_build_sha256 === registration.kernel_build_sha256, "kernel build hash differs from registration"],
         [Date.parse(run.identity.created_at) >= Date.parse(registration.frozen_at), "run manifest predates the frozen registration"],
       ];
       for (const [matches, message] of checks) {
@@ -2077,6 +2677,17 @@ function claimGate(input: Readonly<{
     const wrongEvaluatorKeys = headlineRuns.filter((run) =>
       run.score && run.audit.evaluator_attestation_key_id !== registration.evaluator_attestation_key_id).length;
     if (wrongEvaluatorKeys > 0) reasons.push(`${wrongEvaluatorKeys} evaluator score artifacts use an unregistered attestation key`);
+    const unverifiedKernelProofs = headlineRuns.filter((run) =>
+      !run.audit.kernel_attestation_verified
+      || !run.audit.kernel_signature_verified
+      || !run.audit.kernel_transcript_verified
+      || run.audit.kernel_transcript_authenticity !== "signed_attestation_verified").length;
+    if (unverifiedKernelProofs > 0) {
+      reasons.push(`${unverifiedKernelProofs} headline bundles lack a manifest-bound replayed kernel transcript with a verified signature`);
+    }
+    const wrongKernelKeys = headlineRuns.filter((run) =>
+      run.audit.kernel_attestation_key_id !== registration.kernel_attestation_key_id).length;
+    if (wrongKernelKeys > 0) reasons.push(`${wrongKernelKeys} kernel proof artifacts use an unregistered attestation key`);
     const failClosed = headlineRuns.filter((run) => run.audit.strict_endpoint_source === "protocol_fail_closed").length;
     if (failClosed > 0) {
       reasons.push(`${failClosed} headline endpoints lack signed evaluator evidence; artifact-derived failures are descriptive only`);
@@ -2153,6 +2764,8 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
     ?? Object.freeze({} as Record<string, string>);
   const trustedEvaluatorKeys: Readonly<Record<string, string>> = input.trusted_evaluator_keys
     ?? Object.freeze({} as Record<string, string>);
+  const trustedKernelKeys: Readonly<Record<string, string>> = input.trusted_kernel_keys
+    ?? Object.freeze({} as Record<string, string>);
   const registrationAttestationVerified = input.registration
     ? verifyDetachedAttestation(
         input.registration.attestation,
@@ -2170,7 +2783,7 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
     return compareText(leftKey, rightKey);
   });
   const analyzed = Object.freeze(orderedBundles.map((bundle, index) =>
-    auditBundle(bundle, index, trustedEvaluatorKeys, input.generated_at)));
+    auditBundle(bundle, index, trustedEvaluatorKeys, trustedKernelKeys, input.generated_at)));
   const sortedRuns = Object.freeze([...analyzed].sort((left, right) =>
     compareText(left.audit.run_id ?? "", right.audit.run_id ?? "") || left.audit.input_index - right.audit.input_index
   ));
@@ -2234,6 +2847,14 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
     event_chain_head: audit.event_chain_head,
     score_hash: audit.score_hash,
     evaluator_attestation_hash: audit.evaluator_attestation_hash,
+    kernel_attestation_hash: audit.kernel_attestation_hash,
+    kernel_attestation_sha256: audit.kernel_attestation_sha256,
+    kernel_attestation_key_id: audit.kernel_attestation_key_id,
+    kernel_attestation_verified: audit.kernel_attestation_verified,
+    kernel_signature_verified: audit.kernel_signature_verified,
+    kernel_transcript_verified: audit.kernel_transcript_verified,
+    kernel_transcript_authenticity: audit.kernel_transcript_authenticity,
+    kernel_transcript_sha256: audit.kernel_transcript_sha256,
     artifact_class: audit.artifact_class,
     strict_pass: audit.strict_pass,
     errors: audit.errors,
@@ -2242,14 +2863,18 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
   const registrationDigest = input.registration
     ? sha256Hex(`hacc/benchmark-registration-snapshot/v1\n${canonicalJson(input.registration)}`)
     : null;
-  const keyDigests = (keys: Readonly<Record<string, string>>) => Object.entries(keys)
+  const keyDigests = (
+    keys: Readonly<Record<string, string>>,
+    fingerprint: (publicKey: string) => string = attestationPublicKeyFingerprint
+  ) => Object.entries(keys)
     .sort(([left], [right]) => compareText(left, right))
     .map(([keyId, publicKey]) => Object.freeze({
       key_id: keyId,
-      public_key_sha256: attestationPublicKeyFingerprint(publicKey),
+      public_key_sha256: fingerprint(publicKey),
     }));
   const trustedRegistrationKeyDigests = keyDigests(trustedRegistrationKeys);
   const trustedEvaluatorKeyDigests = keyDigests(trustedEvaluatorKeys);
+  const trustedKernelKeyDigests = keyDigests(trustedKernelKeys, benchmarkKernelAttestationPublicKeyFingerprint);
   const analysisSpec = Object.freeze({
     confidence_level: confidence,
     reliable_horizon_thresholds: thresholds,
@@ -2259,6 +2884,7 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
     registration: input.registration ?? null,
     trusted_registration_keys: Object.freeze(trustedRegistrationKeyDigests),
     trusted_evaluator_keys: Object.freeze(trustedEvaluatorKeyDigests),
+    trusted_kernel_keys: Object.freeze(trustedKernelKeyDigests),
   });
   const analysisDigest = sha256Hex(`hacc/benchmark-report-analysis/v1\n${canonicalJson({
     protocol_id: input.protocol_id,
@@ -2289,6 +2915,9 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
       trusted_identity_count: sortedRuns.filter((run) => run.identity !== null).length,
       evaluator_score_count: sortedRuns.filter((run) => run.score !== null).length,
       verified_evaluator_attestation_count: sortedRuns.filter((run) => run.evaluator_attestation_verified).length,
+      verified_kernel_attestation_count: audits.filter((audit) => audit.kernel_attestation_verified).length,
+      verified_kernel_signature_count: audits.filter((audit) => audit.kernel_signature_verified).length,
+      verified_kernel_transcript_count: audits.filter((audit) => audit.kernel_transcript_verified).length,
       protocol_fail_closed_endpoint_count: audits.filter((audit) => audit.strict_endpoint_source === "protocol_fail_closed").length,
       untrusted_bundle_count: audits.filter((audit) => audit.strict_endpoint_source === "untrusted").length,
       duplicate_headline_cells: duplicates,
@@ -2314,6 +2943,7 @@ export function generateBenchmarkReport(input: GenerateBenchmarkReportInput): Be
     registrationAttestationVerified,
     trustedRegistrationKeys,
     trustedEvaluatorKeys,
+    trustedKernelKeys,
     baseline: input.baseline_condition,
     treatment: input.treatment_condition,
     runs: sortedRuns,
@@ -2478,6 +3108,9 @@ export function renderBenchmarkReportMarkdown(report: BenchmarkReport): string {
     `- Trusted run identities: ${report.data_quality.trusted_identity_count}`,
     `- Valid evaluator scores: ${report.data_quality.evaluator_score_count}`,
     `- Verified evaluator attestations: ${report.data_quality.verified_evaluator_attestation_count}`,
+    `- Verified manifest-bound kernel attestations: ${report.data_quality.verified_kernel_attestation_count}`,
+    `- Verified kernel signatures: ${report.data_quality.verified_kernel_signature_count}`,
+    `- Verified signed public kernel transcripts: ${report.data_quality.verified_kernel_transcript_count}`,
     `- Protocol fail-closed strict failures: ${report.data_quality.protocol_fail_closed_endpoint_count}`,
     `- Untrusted bundles excluded from denominators: ${report.data_quality.untrusted_bundle_count}`,
     `- Missing registered cells: ${report.data_quality.expected_missing_cells.length}`,

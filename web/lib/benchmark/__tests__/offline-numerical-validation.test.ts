@@ -4,7 +4,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import validation from "../../../../benchmarks/voice-long-horizon/OFFLINE_NUMERICAL_VALIDATION.json";
 import { runMissionRuntimeSensitivityBenchmark } from "../mission-runtime-sensitivity";
-import { exactClopperPearsonInterval } from "../scoring";
+import {
+  EXACT_CLOPPER_PEARSON_MAX_TOTAL,
+  exactClopperPearsonInterval,
+} from "../scoring";
 import { exactConditionalMcNemarPower, wilsonScoreInterval } from "../statistics";
 import { runToolWorldCausalContainment } from "../tool-world-causal-containment";
 
@@ -92,6 +95,12 @@ function clopperPearsonCoverageAtEveryJump(
 
 describe("public offline numerical validation artifact", () => {
   it("recomputes the 1,000-seed mission-runtime numbers and exact output hash", () => {
+    expect(validation).not.toHaveProperty("source_commit");
+    expect(validation.source_binding).toMatchObject({
+      kind: "per_section_source_and_result_sha256",
+      measurement_worktree_state: "dirty",
+      commit_binding: "external_release_proof_packet",
+    });
     const expected = validation.mission_runtime;
     const report = runMissionRuntimeSensitivityBenchmark({
       trials: expected.trials,
@@ -115,7 +124,9 @@ describe("public offline numerical validation artifact", () => {
     for (const [path, expectedHash] of Object.entries(expected.source_files)) {
       expect(sha256(readFileSync(resolve(repositoryRoot, path))), path).toBe(expectedHash);
     }
-  }, 20_000);
+  // This deterministic 1,000-seed recomputation has no latency claim. Allow
+  // shared-CI contention while retaining exact count and hash assertions.
+  }, 120_000);
 
   it("recomputes the 160 ToolWorld schedules and verifies checked artifact bytes", () => {
     const expected = validation.tool_world_causal_containment;
@@ -144,7 +155,7 @@ describe("public offline numerical validation artifact", () => {
       repositoryRoot,
       "benchmarks/voice-long-horizon/scenarios/tool-world-causal-containment.v1.provenance.json"
     )))).toBe(expected.provenance_file_sha256);
-  });
+  }, 60_000);
 
   it("recomputes both planning-only exact McNemar powers from the executable method", () => {
     const expected = validation.paired_power_candidate;
@@ -209,15 +220,31 @@ describe("public offline numerical validation artifact", () => {
 
   it("verifies exact Clopper-Pearson coverage at every registered 107-unit jump", () => {
     const expected = validation.clopper_pearson_replacement_verification;
+    const oracleRows: Array<[number, number, string, string]> = [];
+    expect(expected.implementation_supported_total_max).toBe(EXACT_CLOPPER_PEARSON_MAX_TOTAL);
     expect(() => exactClopperPearsonInterval(0, 0, 0.95)).toThrow(
       "total must be a positive safe integer"
     );
     for (const candidate of expected.cases) {
+      expect(candidate.pointwise_confidence).toBe(
+        1 - (1 - expected.family_confidence) / candidate.opportunities
+      );
       const { intervals, minimumCoverage } = clopperPearsonCoverageAtEveryJump(
         expected.sample_size,
         candidate.pointwise_confidence
       );
       for (let index = 0; index < intervals.length; index += 1) {
+        expect(exactClopperPearsonInterval(
+          index,
+          expected.sample_size,
+          candidate.pointwise_confidence
+        )).toEqual(intervals[index]);
+        oracleRows.push([
+          candidate.opportunities,
+          index,
+          intervals[index].lower.toFixed(expected.executable_scipy_oracle.endpoint_decimal_places),
+          intervals[index].upper.toFixed(expected.executable_scipy_oracle.endpoint_decimal_places),
+        ]);
         expect(intervals[index].lower).toBeLessThanOrEqual(intervals[index].upper);
         if (index > 0) {
           expect(intervals[index].lower).toBeGreaterThanOrEqual(intervals[index - 1].lower);
@@ -236,6 +263,15 @@ describe("public offline numerical validation artifact", () => {
         candidate.pointwise_confidence - 1e-12
       );
     });
+    expect(oracleRows).toHaveLength(expected.executable_scipy_oracle.interval_rows);
+    expect(oracleRows.length * 2).toBe(expected.executable_scipy_oracle.endpoint_values);
+    expect(sha256(JSON.stringify(oracleRows))).toBe(
+      expected.executable_scipy_oracle.endpoint_table_sha256
+    );
+    expect(sha256(readFileSync(resolve(
+      repositoryRoot,
+      "web/scripts/verify-clopper-pearson-scipy.py"
+    )))).toBe(expected.executable_scipy_oracle.script_sha256);
     expect(expected.verdict).toBe("verified_for_checked_registered_sizes");
     expect(expected.adjacent_float_bound_mutations_rejected).toBe(true);
     for (const [path, expectedHash] of Object.entries(expected.tested_source_files)) {

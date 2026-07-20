@@ -1,7 +1,10 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
+import { createFlowExecutionState, flowCapabilityScope } from "../../flow-runtime";
 import {
   buildEventChain,
+  canonicalJson,
   createArtifactDescriptor,
   createRunManifest,
   encodeEventJsonl,
@@ -9,12 +12,30 @@ import {
   type BenchmarkEventEnvelope,
   type RunManifest,
 } from "../artifacts";
+import { compileConditionSuite, type CompiledConditionSuite } from "../condition-compiler";
+import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
+import {
+  benchmarkKernelAttestationJson,
+  benchmarkKernelAttestationPublicKeyFingerprint,
+  benchmarkKernelAttestationReference,
+  createBenchmarkKernelAttestationSigner,
+  createBenchmarkKernelCapabilityHead,
+  createBenchmarkKernelFinalAttestation,
+} from "../kernel-attestation";
+import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
+import { createToolWorld } from "../tool-world";
+import {
+  createKernelTranscript,
+  encodeKernelTranscript,
+  kernelTranscriptReference,
+} from "../kernel-transcript";
 import {
   benchmarkProviderStratumKey,
   attestationPublicKeyFingerprint,
   claimRegistrationBody,
   createImmutableScoreArtifact,
   generateBenchmarkReport,
+  LEGACY_SCORE_CLAIM_BLOCK_REASON,
   registrationAttestationPayload,
   renderBenchmarkReportJson,
   renderBenchmarkReportMarkdown,
@@ -23,6 +44,7 @@ import {
   type ClaimRegistration,
   type ClaimRegistrationBody,
   type DetachedAttestation,
+  type KernelAttestationEvidence,
   type RunScoreArtifact,
 } from "../report";
 
@@ -30,14 +52,25 @@ const EVALUATOR_HASH = "e".repeat(64);
 const ANALYSIS_HASH = "a".repeat(64);
 const FREEZE_LOCK_HASH = "f".repeat(64);
 const PLAN_HASH = "9".repeat(64);
+const KERNEL_BUILD_HASH = "6".repeat(64);
 const REGISTRATION_KEY_ID = "synthetic-registration-key";
 const EVALUATOR_KEY_ID = "synthetic-evaluator-key";
+const KERNEL_KEY_ID = "synthetic-kernel-key";
 const { privateKey: REGISTRATION_PRIVATE_KEY, publicKey: REGISTRATION_PUBLIC_KEY } = generateKeyPairSync("ed25519");
 const { privateKey: EVALUATOR_PRIVATE_KEY, publicKey: EVALUATOR_PUBLIC_KEY } = generateKeyPairSync("ed25519");
+const { privateKey: KERNEL_PRIVATE_KEY, publicKey: KERNEL_PUBLIC_KEY } = generateKeyPairSync("ed25519");
 const REGISTRATION_PUBLIC_PEM = REGISTRATION_PUBLIC_KEY.export({ type: "spki", format: "pem" }).toString();
 const EVALUATOR_PUBLIC_PEM = EVALUATOR_PUBLIC_KEY.export({ type: "spki", format: "pem" }).toString();
+const KERNEL_PRIVATE_PEM = KERNEL_PRIVATE_KEY.export({ type: "pkcs8", format: "pem" }).toString();
+const KERNEL_PUBLIC_PEM = KERNEL_PUBLIC_KEY.export({ type: "spki", format: "pem" }).toString();
 const REGISTRATION_PUBLIC_FINGERPRINT = attestationPublicKeyFingerprint(REGISTRATION_PUBLIC_PEM);
 const EVALUATOR_PUBLIC_FINGERPRINT = attestationPublicKeyFingerprint(EVALUATOR_PUBLIC_PEM);
+const KERNEL_PUBLIC_FINGERPRINT = benchmarkKernelAttestationPublicKeyFingerprint(KERNEL_PUBLIC_PEM);
+const KERNEL_SIGNER = createBenchmarkKernelAttestationSigner({
+  keyId: KERNEL_KEY_ID,
+  privateKeyPem: KERNEL_PRIVATE_PEM,
+  publicKeyPem: KERNEL_PUBLIC_PEM,
+});
 
 function attest(
   payload: string,
@@ -76,6 +109,29 @@ function pairInvariantsHash(pairId: string, scenarioId: string, provider: string
   return sha256Hex(JSON.stringify({ pairId, scenarioId, provider, model, fixture: "fixture-v1", configuration: "config-v1" }));
 }
 
+function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function executionPlanSha256(runId: string, condition: string): string {
+  return sha256Hex(canonicalJson({ schema_version: 1, run_id: runId, condition, frozen_study_plan_sha256: PLAN_HASH }));
+}
+
+const compiledFixtures = new Map<string, Readonly<{ scenario: BenchmarkScenario; suite: CompiledConditionSuite }>>();
+
+function compiledFixture(scenarioId: string): Readonly<{ scenario: BenchmarkScenario; suite: CompiledConditionSuite }> {
+  const existing = compiledFixtures.get(scenarioId);
+  if (existing) return existing;
+  const scenario = BenchmarkScenarioSchema.parse({ ...scenarioJson, id: scenarioId });
+  const canonicalCompilerInput = industrialFieldServiceCompilerInput(scenarioJson);
+  const fixture = Object.freeze({
+    scenario,
+    suite: compileConditionSuite({ ...canonicalCompilerInput, scenario }),
+  });
+  compiledFixtures.set(scenarioId, fixture);
+  return fixture;
+}
+
 type BundleOptions = Readonly<{
   runId: string;
   pairId: string;
@@ -101,11 +157,86 @@ type BundleOptions = Readonly<{
 function makeSource(options: BundleOptions): Readonly<{
   manifest: RunManifest;
   events: readonly BenchmarkEventEnvelope[];
+  kernel: KernelAttestationEvidence;
 }> {
   const provider = options.provider ?? "openai";
   const model = options.model ?? "gpt-realtime-test";
   const status = options.status ?? "completed";
   const pairInvariants = pairInvariantsHash(options.pairId, options.scenarioId, provider, model);
+  const executionPlan = executionPlanSha256(options.runId, options.condition);
+  const { scenario, suite } = compiledFixture(options.scenarioId);
+  const condition = suite.conditions[options.condition];
+  const world = createToolWorld(scenario);
+  const flowState = options.condition === "full-harness"
+    ? createFlowExecutionState("2026-07-10T12:00:00.000Z")
+    : null;
+  const capabilityHead = createBenchmarkKernelCapabilityHead({
+    condition,
+    epoch: flowState?.capabilityEpoch ?? 0,
+    target: flowState ? "$base" : "$full-catalog",
+    catalogMode: "target",
+    internalFlowScope: flowState ? flowCapabilityScope(flowState).step : null,
+  });
+  const capabilities = new Map(
+    [...condition.visibleCapabilities, ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities)]
+      .map((capability) => [capability.name, capability] as const)
+  );
+  const providerVisibleCapabilitySnapshot = {
+    gateway_version: 1 as const,
+    scope: capabilityHead.provider_grant_scope,
+    capability_epoch: capabilityHead.epoch,
+    actions: capabilityHead.catalog.map((entry, index) => {
+      const capability = capabilities.get(entry.name);
+      if (!capability || capability.inputSchema === null || typeof capability.inputSchema !== "object" || Array.isArray(capability.inputSchema)) {
+        throw new Error(`synthetic capability ${entry.name} lacks an object input schema`);
+      }
+      return {
+        name: capability.name,
+        description: capability.description,
+        input_schema: capability.inputSchema,
+        semantic_hash: capability.semanticHash,
+        capability_grant: `fixture-grant-${index}`,
+      };
+    }),
+  };
+  const transcript = createKernelTranscript({
+    runId: options.runId,
+    condition,
+    scenario,
+    world,
+    flowState,
+    capabilityHead,
+    providerVisibleCapabilitySnapshot,
+    dataClassification: "synthetic_benchmark_only",
+    sensitiveValueSecret: "report-fixture-public-commitment-secret-v1",
+    durableMemoryState: condition.behavior.genericDurableMemory ? new Map() : null,
+  });
+  const transcriptContent = encodeKernelTranscript(transcript);
+  const transcriptReference = kernelTranscriptReference(transcript);
+  if (provider !== "openai" && provider !== "xai" && provider !== "gemini" && provider !== "offline") {
+    throw new Error(`unsupported synthetic provider: ${provider}`);
+  }
+  const kernelAttestation = createBenchmarkKernelFinalAttestation({
+    runId: options.runId,
+    condition,
+    scenario,
+    world,
+    capabilityHead,
+    flowState,
+    transcriptReference,
+    evidenceBinding: {
+      pairId: options.pairId,
+      leaseSubjectId: options.pairId,
+      provider,
+      model,
+      planSha256: executionPlan,
+      freezeLockSha256: FREEZE_LOCK_HASH,
+      kernelBuildSha256: KERNEL_BUILD_HASH,
+    },
+    signer: KERNEL_SIGNER,
+  });
+  const kernelContent = benchmarkKernelAttestationJson(kernelAttestation);
+  const worldContent = `${canonicalJson(world)}\n`;
   const events = buildEventChain(options.runId, [
     {
       observed_at: "2026-07-10T12:00:00.000Z",
@@ -119,6 +250,7 @@ function makeSource(options: BundleOptions): Readonly<{
         scenario_version: "1.0.0",
         pair_invariants_hash: pairInvariants,
         freeze_lock_hash: FREEZE_LOCK_HASH,
+        execution_plan_sha256: executionPlan,
         plan_hash: PLAN_HASH,
       },
     },
@@ -130,10 +262,13 @@ function makeSource(options: BundleOptions): Readonly<{
   ]);
   const encoded = encodeEventJsonl(events);
   const descriptor = createArtifactDescriptor("events.jsonl", encoded, "application/x-ndjson");
+  const kernelDescriptor = createArtifactDescriptor("kernel-attestation.json", kernelContent, "application/json");
+  const transcriptDescriptor = createArtifactDescriptor("kernel-transcript.jsonl", transcriptContent, "application/x-ndjson");
+  const worldDescriptor = createArtifactDescriptor("world-final.json", worldContent, "application/json");
   const manifest = createRunManifest({
     run_id: options.runId,
     created_at: "2026-07-10T12:00:02.000Z",
-    artifacts: [descriptor],
+    artifacts: [descriptor, kernelDescriptor, transcriptDescriptor, worldDescriptor],
     event_log: {
       path: descriptor.path,
       event_count: events.length,
@@ -150,10 +285,29 @@ function makeSource(options: BundleOptions): Readonly<{
       scenario_version: "1.0.0",
       pair_invariants_hash: pairInvariants,
       freeze_lock_hash: FREEZE_LOCK_HASH,
+      execution_plan_sha256: executionPlan,
       plan_hash: PLAN_HASH,
+      kernel_build_sha256: KERNEL_BUILD_HASH,
+      lease_subject_id: options.pairId,
+      condition_hash: condition.conditionHash,
+      source_hash: condition.sourceHash,
+      scenario_hash: condition.scenarioHash,
+      flow_hash: condition.flowHash,
+      kernel_attestation: benchmarkKernelAttestationReference(kernelAttestation),
+      kernel_transcript: transcriptReference,
     },
   });
-  return { manifest, events };
+  return {
+    manifest,
+    events,
+    kernel: Object.freeze({
+      attestation: Object.freeze({ path: "kernel-attestation.json", content: kernelContent }),
+      transcript: Object.freeze({ path: "kernel-transcript.jsonl", content: transcriptContent }),
+      world: Object.freeze({ path: "world-final.json", content: worldContent }),
+      condition,
+      scenario,
+    }),
+  };
 }
 
 function makeBundle(options: BundleOptions): BenchmarkRunBundle {
@@ -278,6 +432,7 @@ function baseInput(bundles: readonly BenchmarkRunBundle[]) {
     seed: "synthetic-seed",
     trusted_registration_keys: { [REGISTRATION_KEY_ID]: REGISTRATION_PUBLIC_PEM },
     trusted_evaluator_keys: { [EVALUATOR_KEY_ID]: EVALUATOR_PUBLIC_PEM },
+    trusted_kernel_keys: { [KERNEL_KEY_ID]: KERNEL_PUBLIC_PEM },
   };
 }
 
@@ -398,7 +553,7 @@ describe("deterministic benchmark reporting", () => {
     expect(report.claim_gate.reasons).toContain("at least one supplied bundle has an untrusted manifest identity");
   });
 
-  it("emits positive confirmatory language only when the frozen design gate and CI support it", () => {
+  it("keeps legacy scores descriptive and rejects trusted-key arbitrary rescoring even when design and CI gates support benefit", () => {
     const pairIds = ["a", "b", "c", "d", "e", "f", "g", "h"];
     const bundles = pairIds.flatMap((pairId, index) => [
       makeBundle({ runId: `${pairId}-raw`, pairId, scenarioId: `s${index}`, condition: "raw-memory", strictPass: false, modelFailure: true, systemFailure: true }),
@@ -416,6 +571,9 @@ describe("deterministic benchmark reporting", () => {
       registration_attestation_public_key_sha256: REGISTRATION_PUBLIC_FINGERPRINT,
       evaluator_attestation_key_id: EVALUATOR_KEY_ID,
       evaluator_attestation_public_key_sha256: EVALUATOR_PUBLIC_FINGERPRINT,
+      kernel_attestation_key_id: KERNEL_KEY_ID,
+      kernel_attestation_public_key_sha256: KERNEL_PUBLIC_FINGERPRINT,
+      kernel_build_sha256: KERNEL_BUILD_HASH,
       protocol_id: "HACC-LHVR-v0.1",
       evaluator_version_hash: EVALUATOR_HASH,
       baseline_condition: "raw-memory",
@@ -432,6 +590,8 @@ describe("deterministic benchmark reporting", () => {
         scenario_version: "1.0.0",
         baseline_run_id: `${pairId}-raw`,
         treatment_run_id: `${pairId}-harness`,
+        baseline_execution_plan_sha256: executionPlanSha256(`${pairId}-raw`, "raw-memory"),
+        treatment_execution_plan_sha256: executionPlanSha256(`${pairId}-harness`, "full-harness"),
         pair_invariants_hash: pairInvariantsHash(pairId, `s${index}`, "openai", "gpt-realtime-test"),
       })),
       minimum_complete_pairs_per_stratum: 8,
@@ -448,13 +608,13 @@ describe("deterministic benchmark reporting", () => {
     });
 
     expect(report.claim_gate).toMatchObject({
-      design_eligible: true,
-      reasons: [],
-      strict_success: { outcome: "supports_benefit" },
+      design_eligible: false,
+      strict_success: { outcome: "not_eligible" },
       model_integrity: { outcome: "not_eligible" },
       system_integrity: { outcome: "not_eligible" },
     });
-    expect(report.claim_gate.strict_success.allowed_language).toContain("preregistered confirmatory benchmark");
+    expect(report.claim_gate.reasons).toContain(LEGACY_SCORE_CLAIM_BLOCK_REASON);
+    expect(report.claim_gate.strict_success.allowed_language).toContain("descriptive only");
     expect(report.claim_gate.strict_success.allowed_language).not.toContain("proven");
 
     const threePairReport = generateBenchmarkReport({
@@ -466,12 +626,12 @@ describe("deterministic benchmark reporting", () => {
         minimum_scenario_clusters_per_stratum: 3,
       }),
     });
-    expect(threePairReport.claim_gate.design_eligible).toBe(true);
+    expect(threePairReport.claim_gate.design_eligible).toBe(false);
     expect(threePairReport.headline_effects.strict_success).toMatchObject({
       estimate: 1,
       paired_randomization_p_value: 0.25,
     });
-    expect(threePairReport.claim_gate.strict_success.outcome).toBe("does_not_establish_benefit");
+    expect(threePairReport.claim_gate.strict_success.outcome).toBe("not_eligible");
 
     const underpowered = generateBenchmarkReport({
       ...baseInput(bundles),
@@ -531,6 +691,384 @@ describe("deterministic benchmark reporting", () => {
     expect(selfRehashed.data_quality.verified_evaluator_attestation_count).toBe(bundles.length - 1);
     expect(selfRehashed.claim_gate.design_eligible).toBe(false);
     expect(selfRehashed.claim_gate.reasons.join(" ")).toContain("lack a verified detached attestation");
+
+    // A trusted evaluator key can re-sign arbitrary schema-v1 endpoint values.
+    // The legacy stop-gate must survive a cryptographically valid forgery, not
+    // merely reject a missing or stale detached signature.
+    const forgedBareScore = createImmutableScoreArtifact("evaluation/score.json", selfRehashedScore);
+    const forgedSignedScore = createImmutableScoreArtifact(
+      "evaluation/score.json",
+      selfRehashedScore,
+      attest(
+        scoreAttestationPayload(
+          forgedBareScore.path,
+          forgedBareScore.sha256,
+          EVALUATOR_KEY_ID,
+          "2026-07-10T13:30:00.000Z"
+        ),
+        "2026-07-10T13:30:00.000Z",
+        EVALUATOR_KEY_ID,
+        EVALUATOR_PRIVATE_KEY
+      )
+    );
+    const trustedKeyForgery = generateBenchmarkReport({
+      ...baseInput([
+        { ...bundles[0], score: forgedSignedScore },
+        ...bundles.slice(1),
+      ]),
+      phase: "confirmatory",
+      registration,
+    });
+    expect(trustedKeyForgery.data_quality.verified_evaluator_attestation_count).toBe(bundles.length);
+    expect(trustedKeyForgery.claim_gate.design_eligible).toBe(false);
+    expect(trustedKeyForgery.claim_gate.reasons).toContain(LEGACY_SCORE_CLAIM_BLOCK_REASON);
+    expect(trustedKeyForgery.claim_gate.strict_success.outcome).toBe("not_eligible");
+    // This correctness test builds and cryptographically verifies 16 complete
+    // synthetic bundles across several counterfactual reports. Its statistical
+    // and fail-closed assertions above are the subject; wall-clock performance
+    // is neither measured nor claimed here.
+  }, 60_000);
+
+  it("requires a manifest-bound trusted kernel proof and distinct frozen execution plans for every claim cell", () => {
+    const raw = makeBundle({
+      runId: "kernel-proof-raw",
+      pairId: "kernel-proof-pair",
+      scenarioId: "kernel-proof-scenario",
+      condition: "raw-memory",
+      strictPass: false,
+    });
+    const harness = makeBundle({
+      runId: "kernel-proof-harness",
+      pairId: "kernel-proof-pair",
+      scenarioId: "kernel-proof-scenario",
+      condition: "full-harness",
+      strictPass: true,
+    });
+    const registration = attestRegistration({
+      status: "frozen",
+      registration_id: "kernel-proof-registration",
+      analysis_plan_hash: ANALYSIS_HASH,
+      freeze_lock_hash: FREEZE_LOCK_HASH,
+      plan_hash: PLAN_HASH,
+      frozen_at: "2026-07-10T11:00:00.000Z",
+      freeze_ref: "refs/tags/kernel-proof-freeze",
+      registration_attestation_key_id: REGISTRATION_KEY_ID,
+      registration_attestation_public_key_sha256: REGISTRATION_PUBLIC_FINGERPRINT,
+      evaluator_attestation_key_id: EVALUATOR_KEY_ID,
+      evaluator_attestation_public_key_sha256: EVALUATOR_PUBLIC_FINGERPRINT,
+      kernel_attestation_key_id: KERNEL_KEY_ID,
+      kernel_attestation_public_key_sha256: KERNEL_PUBLIC_FINGERPRINT,
+      kernel_build_sha256: KERNEL_BUILD_HASH,
+      protocol_id: "HACC-LHVR-v0.1",
+      evaluator_version_hash: EVALUATOR_HASH,
+      baseline_condition: "raw-memory",
+      treatment_condition: "full-harness",
+      confidence_level: 0.95,
+      reliable_horizon_thresholds: [0.9, 0.95],
+      bootstrap_iterations: 500,
+      seed: "synthetic-seed",
+      expected_pairs: [{
+        pair_id: "kernel-proof-pair",
+        provider: "openai",
+        model: "gpt-realtime-test",
+        scenario_id: "kernel-proof-scenario",
+        scenario_version: "1.0.0",
+        baseline_run_id: "kernel-proof-raw",
+        treatment_run_id: "kernel-proof-harness",
+        baseline_execution_plan_sha256: executionPlanSha256("kernel-proof-raw", "raw-memory"),
+        treatment_execution_plan_sha256: executionPlanSha256("kernel-proof-harness", "full-harness"),
+        pair_invariants_hash: pairInvariantsHash(
+          "kernel-proof-pair",
+          "kernel-proof-scenario",
+          "openai",
+          "gpt-realtime-test"
+        ),
+      }],
+      minimum_complete_pairs_per_stratum: 1,
+      minimum_scenario_clusters_per_stratum: 1,
+      provider_weights: { [benchmarkProviderStratumKey("openai", "gpt-realtime-test")]: 1 },
+      minimally_important_strict_risk_difference: 0,
+      allow_fail_closed_artifact_endpoints: false,
+      claim_multiplicity: { strategy: "primary_only", primary_endpoint: "strict_success" },
+    });
+    const confirmatoryInput = (bundles: readonly BenchmarkRunBundle[]) => ({
+      ...baseInput(bundles),
+      phase: "confirmatory" as const,
+      registration,
+    });
+
+    const valid = generateBenchmarkReport(confirmatoryInput([raw, harness]));
+    expect(valid.claim_gate.design_eligible).toBe(false);
+    expect(valid.claim_gate.reasons).toContain(LEGACY_SCORE_CLAIM_BLOCK_REASON);
+    expect(valid.data_quality).toMatchObject({
+      verified_kernel_attestation_count: 2,
+      verified_kernel_signature_count: 2,
+      verified_kernel_transcript_count: 2,
+      verified_evaluator_attestation_count: 2,
+    });
+    expect(valid.data_quality.audits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kernel_transcript_verified: true,
+        kernel_transcript_authenticity: "signed_attestation_verified",
+      }),
+    ]));
+    const rawMetadata = raw.manifest.metadata;
+    const harnessMetadata = harness.manifest.metadata;
+    if (!isPlainRecord(rawMetadata)) {
+      throw new Error("synthetic raw manifest metadata is not an object");
+    }
+    if (!isPlainRecord(harnessMetadata)) {
+      throw new Error("synthetic harness manifest metadata is not an object");
+    }
+    expect(rawMetadata.plan_hash).toBe(PLAN_HASH);
+    expect(harnessMetadata.plan_hash).toBe(PLAN_HASH);
+    expect(rawMetadata.execution_plan_sha256).not.toBe(harnessMetadata.execution_plan_sha256);
+
+    const missing = generateBenchmarkReport(confirmatoryInput([{ ...raw, kernel: null }, harness]));
+    expect(missing.claim_gate.design_eligible).toBe(false);
+    expect(missing.data_quality.artifact_class_counts).toMatchObject({ kernel_attestation_missing: 1 });
+    expect(missing.claim_gate.reasons.join(" ")).toContain("lack a manifest-bound replayed kernel transcript with a verified signature");
+
+    if (!raw.kernel) throw new Error("synthetic bundle lacks kernel evidence");
+    if (!harness.kernel) throw new Error("synthetic harness bundle lacks kernel evidence");
+    const kernelWithoutTranscript = {
+      attestation: raw.kernel.attestation,
+      world: raw.kernel.world,
+      condition: raw.kernel.condition,
+      scenario: raw.kernel.scenario,
+    };
+    const missingTranscript = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      kernel: kernelWithoutTranscript as unknown as KernelAttestationEvidence,
+    }, harness]));
+    expect(missingTranscript.claim_gate.design_eligible).toBe(false);
+    expect(missingTranscript.data_quality.artifact_class_counts).toMatchObject({ kernel_transcript_missing: 1 });
+    expect(missingTranscript.data_quality.verified_kernel_transcript_count).toBe(1);
+
+    const transcriptDescriptorMissingManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts.filter((artifact) => artifact.path !== "kernel-transcript.jsonl"),
+      event_log: raw.manifest.event_log,
+      metadata: raw.manifest.metadata,
+    });
+    const transcriptDescriptorMissing = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: transcriptDescriptorMissingManifest,
+    }, harness]));
+    expect(transcriptDescriptorMissing.claim_gate.design_eligible).toBe(false);
+    expect(transcriptDescriptorMissing.data_quality.artifact_class_counts).toMatchObject({ kernel_transcript_missing: 1 });
+
+    const transcriptReferenceMissingManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts,
+      event_log: raw.manifest.event_log,
+      metadata: Object.fromEntries(
+        Object.entries(rawMetadata).filter(([key]) => key !== "kernel_transcript")
+      ),
+    });
+    const transcriptReferenceMissing = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: transcriptReferenceMissingManifest,
+    }, harness]));
+    expect(transcriptReferenceMissing.claim_gate.design_eligible).toBe(false);
+    expect(transcriptReferenceMissing.data_quality.artifact_class_counts).toMatchObject({ identity_missing: 1 });
+
+    const byteTamperedTranscript = `${String(raw.kernel.transcript.content)}\n`;
+    const byteTampered = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      kernel: {
+        ...raw.kernel,
+        transcript: { path: "kernel-transcript.jsonl", content: byteTamperedTranscript },
+      },
+    }, harness]));
+    expect(byteTampered.claim_gate.design_eligible).toBe(false);
+    expect(byteTampered.data_quality.artifact_class_counts).toMatchObject({ kernel_transcript_invalid: 1 });
+    expect(byteTampered.data_quality.audits.flatMap((audit) => audit.errors).join(" ")).toContain(
+      "kernel transcript bytes do not match the exact manifest descriptor"
+    );
+
+    const rehashedTamperedTranscript = String(raw.kernel.transcript.content).replaceAll(
+      raw.manifest.run_id,
+      "tampered-cross-run-id"
+    );
+    const rehashedTamperedDescriptor = createArtifactDescriptor(
+      "kernel-transcript.jsonl",
+      rehashedTamperedTranscript,
+      "application/x-ndjson"
+    );
+    const rehashedTamperedManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts.map((artifact) =>
+        artifact.path === rehashedTamperedDescriptor.path ? rehashedTamperedDescriptor : artifact),
+      event_log: raw.manifest.event_log,
+      metadata: raw.manifest.metadata,
+    });
+    const rehashedTampered = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: rehashedTamperedManifest,
+      kernel: {
+        ...raw.kernel,
+        transcript: { path: "kernel-transcript.jsonl", content: rehashedTamperedTranscript },
+      },
+    }, harness]));
+    expect(rehashedTampered.claim_gate.design_eligible).toBe(false);
+    expect(rehashedTampered.data_quality.artifact_class_counts).toMatchObject({ kernel_transcript_binding_mismatch: 1 });
+    expect(rehashedTampered.data_quality.audits.find((audit) => audit.run_id === raw.manifest.run_id)).toMatchObject({
+      kernel_signature_verified: true,
+      kernel_transcript_verified: false,
+      kernel_transcript_authenticity: "signed_attestation_verified",
+    });
+
+    const crossViewTranscript = String(raw.kernel.transcript.content).replaceAll(
+      "benchmark_kernel_replay_public_commitment",
+      "benchmark_kernel_replay_restricted_exact"
+    );
+    const crossViewDescriptor = createArtifactDescriptor(
+      "kernel-transcript.jsonl",
+      crossViewTranscript,
+      "application/x-ndjson"
+    );
+    const crossViewManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts.map((artifact) =>
+        artifact.path === crossViewDescriptor.path ? crossViewDescriptor : artifact),
+      event_log: raw.manifest.event_log,
+      metadata: raw.manifest.metadata,
+    });
+    const crossView = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: crossViewManifest,
+      kernel: {
+        ...raw.kernel,
+        transcript: { path: "kernel-transcript.jsonl", content: crossViewTranscript },
+      },
+    }, harness]));
+    expect(crossView.claim_gate.design_eligible).toBe(false);
+    expect(crossView.data_quality.artifact_class_counts).toMatchObject({ kernel_transcript_invalid: 1 });
+
+    const substitutedTranscriptDescriptor = createArtifactDescriptor(
+      "kernel-transcript.jsonl",
+      harness.kernel.transcript.content,
+      "application/x-ndjson"
+    );
+    const substitutedTranscriptManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts.map((artifact) =>
+        artifact.path === substitutedTranscriptDescriptor.path ? substitutedTranscriptDescriptor : artifact),
+      event_log: raw.manifest.event_log,
+      metadata: {
+        ...rawMetadata,
+        kernel_transcript: harnessMetadata.kernel_transcript,
+      },
+    });
+    const substitutedTranscript = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: substitutedTranscriptManifest,
+      kernel: {
+        ...raw.kernel,
+        transcript: harness.kernel.transcript,
+      },
+    }, harness]));
+    expect(substitutedTranscript.claim_gate.design_eligible).toBe(false);
+    expect(substitutedTranscript.data_quality.audits.flatMap((audit) => audit.errors).join(" ")).toContain(
+      "signed kernel transcript reference does not exactly match manifest metadata"
+    );
+
+    const tamperedAttestation = JSON.parse(String(raw.kernel.attestation.content)) as {
+      signature: { signature_base64: string };
+    };
+    const signatureBytes = Buffer.from(tamperedAttestation.signature.signature_base64, "base64");
+    signatureBytes[0] ^= 1;
+    tamperedAttestation.signature.signature_base64 = signatureBytes.toString("base64");
+    const tamperedContent = `${canonicalJson(tamperedAttestation)}\n`;
+    const tamperedDescriptor = createArtifactDescriptor("kernel-attestation.json", tamperedContent, "application/json");
+    const tamperedManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts.map((descriptor) =>
+        descriptor.path === tamperedDescriptor.path ? tamperedDescriptor : descriptor),
+      event_log: raw.manifest.event_log,
+      metadata: raw.manifest.metadata,
+    });
+    const tampered = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: tamperedManifest,
+      kernel: {
+        ...raw.kernel,
+        attestation: { path: "kernel-attestation.json", content: tamperedContent },
+      },
+    }, harness]));
+    expect(tampered.claim_gate.design_eligible).toBe(false);
+    expect(tampered.data_quality.artifact_class_counts).toMatchObject({ kernel_attestation_binding_mismatch: 1 });
+    expect(tampered.data_quality.audits.find((audit) => audit.run_id === raw.manifest.run_id)).toMatchObject({
+      kernel_attestation_verified: false,
+      kernel_signature_verified: false,
+    });
+    expect(tampered.data_quality.audits.flatMap((audit) => audit.errors).join(" ")).toContain("signature verification failed");
+
+    const originalReference = rawMetadata.kernel_attestation as Record<string, unknown>;
+    const referenceManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts,
+      event_log: raw.manifest.event_log,
+      metadata: {
+        ...rawMetadata,
+        kernel_attestation: { ...originalReference, attestation_hash: "1".repeat(64) },
+      },
+    });
+    const badReference = generateBenchmarkReport(confirmatoryInput([{ ...raw, manifest: referenceManifest }, harness]));
+    expect(badReference.claim_gate.design_eligible).toBe(false);
+    expect(badReference.data_quality.audits.find((audit) => audit.run_id === raw.manifest.run_id)).toMatchObject({
+      artifact_class: "kernel_attestation_binding_mismatch",
+      kernel_signature_verified: true,
+      kernel_attestation_verified: false,
+    });
+    expect(badReference.data_quality.audits.flatMap((audit) => audit.errors).join(" ")).toContain(
+      "reference does not exactly match manifest metadata"
+    );
+
+    const originalTranscriptReference = rawMetadata.kernel_transcript as Record<string, unknown>;
+    const transcriptReferenceManifest = createRunManifest({
+      run_id: raw.manifest.run_id,
+      created_at: raw.manifest.created_at,
+      artifacts: raw.manifest.artifacts,
+      event_log: raw.manifest.event_log,
+      metadata: {
+        ...rawMetadata,
+        kernel_transcript: { ...originalTranscriptReference, transcript_sha256: "2".repeat(64) },
+      },
+    });
+    const badTranscriptReference = generateBenchmarkReport(confirmatoryInput([{
+      ...raw,
+      manifest: transcriptReferenceManifest,
+    }, harness]));
+    expect(badTranscriptReference.claim_gate.design_eligible).toBe(false);
+    expect(badTranscriptReference.data_quality.audits.find((audit) => audit.run_id === raw.manifest.run_id)).toMatchObject({
+      artifact_class: "kernel_attestation_binding_mismatch",
+      kernel_transcript_verified: false,
+      kernel_transcript_authenticity: "signed_attestation_invalid",
+    });
+    expect(badTranscriptReference.data_quality.audits.flatMap((audit) => audit.errors).join(" ")).toContain(
+      "signed kernel transcript reference does not exactly match manifest metadata"
+    );
+
+    const substitutedPair = generateKeyPairSync("ed25519");
+    const substitutedPublicPem = substitutedPair.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const substituted = generateBenchmarkReport({
+      ...confirmatoryInput([raw, harness]),
+      trusted_kernel_keys: { [KERNEL_KEY_ID]: substitutedPublicPem },
+    });
+    expect(substituted.claim_gate.design_eligible).toBe(false);
+    expect(substituted.data_quality.verified_kernel_signature_count).toBe(0);
+    expect(substituted.claim_gate.reasons).toContain(
+      "kernel attestation trust key does not match the frozen public-key fingerprint"
+    );
   });
 
   it("uses frozen provider weights for the pooled confirmatory effect instead of sample-count weights", () => {
@@ -552,6 +1090,9 @@ describe("deterministic benchmark reporting", () => {
       registration_attestation_public_key_sha256: REGISTRATION_PUBLIC_FINGERPRINT,
       evaluator_attestation_key_id: EVALUATOR_KEY_ID,
       evaluator_attestation_public_key_sha256: EVALUATOR_PUBLIC_FINGERPRINT,
+      kernel_attestation_key_id: KERNEL_KEY_ID,
+      kernel_attestation_public_key_sha256: KERNEL_PUBLIC_FINGERPRINT,
+      kernel_build_sha256: KERNEL_BUILD_HASH,
       protocol_id: "HACC-LHVR-v0.1",
       evaluator_version_hash: EVALUATOR_HASH,
       baseline_condition: "raw-memory",
@@ -569,6 +1110,8 @@ describe("deterministic benchmark reporting", () => {
           scenario_version: "1.0.0",
           baseline_run_id: "openai-raw",
           treatment_run_id: "openai-harness",
+          baseline_execution_plan_sha256: executionPlanSha256("openai-raw", "raw-memory"),
+          treatment_execution_plan_sha256: executionPlanSha256("openai-harness", "full-harness"),
           pair_invariants_hash: pairInvariantsHash("openai-pair", "shared-scenario", "openai", "openai-model"),
         },
         {
@@ -579,6 +1122,8 @@ describe("deterministic benchmark reporting", () => {
           scenario_version: "1.0.0",
           baseline_run_id: "xai-raw",
           treatment_run_id: "xai-harness",
+          baseline_execution_plan_sha256: executionPlanSha256("xai-raw", "raw-memory"),
+          treatment_execution_plan_sha256: executionPlanSha256("xai-harness", "full-harness"),
           pair_invariants_hash: pairInvariantsHash("xai-pair", "shared-scenario", "xai", "xai-model"),
         },
       ],
@@ -608,8 +1153,9 @@ describe("deterministic benchmark reporting", () => {
       weighting: "equal_scenario_clusters",
     });
     expect(report.provider_strata.find((stratum) => stratum.provider === "xai")?.effects.strict_success.estimate).toBe(0);
-    expect(report.claim_gate.design_eligible).toBe(true);
-    expect(report.claim_gate.strict_success.outcome).toBe("does_not_establish_benefit");
+    expect(report.claim_gate.design_eligible).toBe(false);
+    expect(report.claim_gate.reasons).toContain(LEGACY_SCORE_CLAIM_BLOCK_REASON);
+    expect(report.claim_gate.strict_success.outcome).toBe("not_eligible");
 
     const wrongScenario = generateBenchmarkReport({
       ...baseInput(bundles),
@@ -673,7 +1219,7 @@ describe("deterministic benchmark reporting", () => {
       runId: "markdown-safety",
       pairId: "markdown-pair",
       scenarioId: "scenario",
-      provider: "provider",
+      provider: "openai",
       model: "model<script>`unsafe`",
       condition: "raw-memory",
       strictPass: false,
@@ -725,6 +1271,10 @@ describe("deterministic benchmark reporting", () => {
       ...baseInput([]),
       trusted_evaluator_keys: { [REGISTRATION_KEY_ID]: REGISTRATION_PUBLIC_PEM },
     })).toThrow(/trust stores must be cryptographically disjoint/);
+    expect(() => generateBenchmarkReport({
+      ...baseInput([]),
+      trusted_evaluator_keys: { [KERNEL_KEY_ID]: KERNEL_PUBLIC_PEM },
+    })).toThrow(/trust stores must be cryptographically disjoint/);
 
     const body: ClaimRegistrationBody = {
       status: "frozen",
@@ -738,6 +1288,9 @@ describe("deterministic benchmark reporting", () => {
       registration_attestation_public_key_sha256: REGISTRATION_PUBLIC_FINGERPRINT,
       evaluator_attestation_key_id: EVALUATOR_KEY_ID,
       evaluator_attestation_public_key_sha256: EVALUATOR_PUBLIC_FINGERPRINT,
+      kernel_attestation_key_id: KERNEL_KEY_ID,
+      kernel_attestation_public_key_sha256: KERNEL_PUBLIC_FINGERPRINT,
+      kernel_build_sha256: KERNEL_BUILD_HASH,
       protocol_id: "HACC-LHVR-v0.1",
       evaluator_version_hash: EVALUATOR_HASH,
       baseline_condition: "raw-memory",
@@ -754,6 +1307,8 @@ describe("deterministic benchmark reporting", () => {
         scenario_version: "1.0.0",
         baseline_run_id: "raw",
         treatment_run_id: "harness",
+        baseline_execution_plan_sha256: executionPlanSha256("raw", "raw-memory"),
+        treatment_execution_plan_sha256: executionPlanSha256("harness", "full-harness"),
         pair_invariants_hash: pairInvariantsHash("pair", "scenario", "openai", "gpt-realtime-test"),
       }],
       minimum_complete_pairs_per_stratum: 1,
