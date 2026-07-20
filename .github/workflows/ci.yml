@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  web:
+    name: Web (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "20.19.0"
+          - "22.x"
+    steps:
+      - name: Check out the complete repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run the web test suite
+        working-directory: web
+        run: npm test
+
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Type-check
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Build without provider credentials or external egress
+        working-directory: web
+        env:
+          NEXT_PUBLIC_APP_NAME: Harsha's Amazing Call Center
+          PUBLIC_ORIGIN: http://127.0.0.1:3000
+          HACC_ENABLE_EXTERNAL_EGRESS: "false"
+        run: npm run build
+
+  bridge:
+    name: Realtime bridge (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "20.19.0"
+          - "22.x"
+    steps:
+      - name: Check out the complete repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+
+      - name: Install locked bridge dependencies
+        working-directory: bridge
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        working-directory: bridge
+        run: npm run check
+
+      - name: Run bridge tests
+        working-directory: bridge
+        run: npm test
+
+  public-release-audit:
+    name: Public-release secret gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the complete repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked scanner dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Audit locked web dependencies
+        working-directory: web
+        run: |
+          npm audit --package-lock-only --audit-level=high
+          npm audit --package-lock-only --omit=dev --audit-level=high
+
+      - name: Audit locked bridge dependencies
+        working-directory: bridge
+        run: |
+          npm audit --package-lock-only --audit-level=high
+          npm audit --package-lock-only --omit=dev --audit-level=high
+
+      - name: Verify repository object integrity
+        run: git fsck --full --strict
+
+      - name: Scan the exact publishable working tree
+        working-directory: web
+        run: npm run audit:public:worktree
+
+      - name: Scan every reachable public-history object
+        working-directory: web
+        run: npm run audit:public:history
+
+  database-security:
+    name: PostgreSQL, pgvector, RLS, migration, and replay gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        # Linux/amd64 pgvector PostgreSQL 16 image resolved from the pg16 tag.
+        image: pgvector/pgvector@sha256:eb2a451bbc37d71947fafac0bb76d2992c6aafb305942a708e0d6c567eb42985
+        env:
+          POSTGRES_DB: voice_agents
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          # Avoid colliding with PostgreSQL preinstalled on the hosted runner.
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d voice_agents"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out the complete repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install pgvector for the runner's PostgreSQL 16 isolation cluster
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-16-pgvector
+          test "$(pg_config --version | cut -d' ' -f2 | cut -d. -f1)" = "16"
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+
+      - name: Apply migrations to the pgvector service twice
+        working-directory: web
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          DATABASE_SSL: disable
+        run: |
+          node scripts/migrate.mjs
+          node scripts/migrate.mjs
+
+      - name: Run the exact 18-suite, 54-test conditional database inventory
+        working-directory: web
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          DATABASE_SSL: disable
+          FLOW_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          SECURITY_MIGRATION_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          AUTH_SECURITY_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+        run: |
+          mapfile -t test_files < <(
+            node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const inventory = JSON.parse(
+            readFileSync("../benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json", "utf8")
+          );
+          if (
+            inventory.total_skipped_suites_when_unconfigured !== 18
+            || inventory.total_skipped_tests_when_unconfigured !== 54
+            || inventory.entries.length !== 18
+          ) {
+            throw new Error("Gate 0 database inventory is not the expected 18 suites / 54 tests");
+          }
+          for (const entry of inventory.entries) {
+            if (entry.gate0_disposition !== "must_run" || !entry.path.startsWith("web/")) {
+              throw new Error("Gate 0 database inventory contains an invalid entry");
+            }
+            process.stdout.write(`${entry.path.slice("web/".length)}\n`);
+          }
+          NODE
+          )
+          test "${#test_files[@]}" -eq 18
+          ./node_modules/.bin/vitest run "${test_files[@]}" \
+            --maxWorkers=1 \
+            --reporter=json \
+            --outputFile=.ci-database-results.json
+          node --input-type=module <<'NODE'
+          import { readFileSync, rmSync } from "node:fs";
+
+          const reportPath = ".ci-database-results.json";
+          const report = JSON.parse(readFileSync(reportPath, "utf8"));
+          if (
+            report.success !== true
+            || report.numPassedTests !== 54
+            || report.numTotalTests !== 54
+            || report.numFailedTests !== 0
+            || report.numPendingTests !== 0
+            || report.testResults.length !== 18
+          ) {
+            throw new Error("conditional database suite did not execute exactly 18 files / 54 tests");
+          }
+          rmSync(reportPath);
+          NODE
+
+      - name: Run tenant isolation, RLS, migration reapplication, and all conditional database suites
+        working-directory: web
+        env:
+          DATABASE_SSL: disable
+        run: npm run db:test-isolation
