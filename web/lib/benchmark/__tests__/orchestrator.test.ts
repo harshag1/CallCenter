@@ -894,6 +894,78 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(result.inputAudioHashes).toEqual([pairedAudio.turns[0].sha256]);
   });
 
+  it("executes host-authored local proxy dispatches before accepting response completion", async () => {
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("response.started", { responseId: "proxy-response-1" }));
+        fake.emit(event("tool.dispatch", {
+          responseId: "proxy-response-1",
+          gateway: CAPABILITY_GATEWAY_NAME,
+          dispatches: [{
+            callId: "proxy-lookup-1",
+            request: {
+              method: "tools/call",
+              params: {
+                name: "lookup_value",
+                arguments: { key: "primary" },
+                _meta: {
+                  "hacc/provider_tool_call_id": "proxy-lookup-1",
+                  "com.harsha.callcenter/provider-provenance": {
+                    schemaVersion: 1,
+                    provider: "openai",
+                    nativeCallId: "proxy-lookup-1",
+                    nativeResponseId: "proxy-response-1",
+                    terminalEventId: "proxy-terminal-1",
+                    terminalWireType: "response.done",
+                  },
+                },
+              },
+            },
+            provenance: {
+              schemaVersion: 1,
+              provider: "openai",
+              nativeCallId: "proxy-lookup-1",
+              nativeResponseId: "proxy-response-1",
+              terminalEventId: "proxy-terminal-1",
+              terminalWireType: "response.done",
+            },
+          }],
+        }));
+        fake.emit(event("response.completed", { responseId: "proxy-response-1", status: "completed" }));
+      },
+      onToolResults(fake, results) {
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+          callId: "proxy-lookup-1",
+          output: { ok: true, action: "lookup_value" },
+        });
+        fake.emit(event("response.started", { responseId: "proxy-response-2" }));
+        fake.emit(event("output.audio", {
+          responseId: "proxy-response-2",
+          audio: Uint8Array.from([9, 0]),
+          format: AUDIO_FORMAT,
+        }));
+        fake.emit(event("response.completed", { responseId: "proxy-response-2", status: "completed" }));
+      },
+    });
+    const trialBudget = budget("local-proxy-dispatch");
+    const result = await runBenchmarkTrial({
+      runId: "local-proxy-dispatch",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsSent: 1, toolCalls: 1, outputAudioBytes: 2 });
+    expect(client.resultBatches).toHaveLength(1);
+    expect(result.artifacts.events.some((entry) => entry.event_type === "tool.batch_submitted")).toBe(true);
+  });
+
   it("binds response IDs to their original caller turn and ignores delayed stale mutations", async () => {
     const twoTurnScenario = BenchmarkScenarioSchema.parse({
       ...structuredClone(scenario),

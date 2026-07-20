@@ -1326,6 +1326,7 @@ function responseIdForEvent(event: NormalizedRealtimeEvent): string | undefined 
     case "response.started":
     case "response.completed":
     case "tool.calls":
+    case "tool.dispatch":
     case "output.audio":
     case "output.transcript":
     case "turn.interrupted":
@@ -1339,9 +1340,32 @@ function requiresResponseIdentity(event: NormalizedRealtimeEvent): boolean {
   return event.type === "response.started"
     || event.type === "response.completed"
     || event.type === "tool.calls"
+    || event.type === "tool.dispatch"
     || event.type === "output.audio"
     || event.type === "output.transcript"
     || event.type === "turn.interrupted";
+}
+
+function executableToolCalls(
+  event: Extract<NormalizedRealtimeEvent, { type: "tool.calls" | "tool.dispatch" }>
+): readonly RealtimeToolCall[] {
+  if (event.type === "tool.calls") return event.calls;
+  return Object.freeze(event.dispatches.map((dispatch) => {
+    const argumentsJson = Object.freeze({
+      tool_name: dispatch.request.params.name,
+      arguments: dispatch.request.params.arguments,
+    });
+    return Object.freeze({
+      callId: dispatch.callId,
+      name: event.gateway,
+      argumentsText: canonicalArtifactJson(artifactJson(argumentsJson)),
+      argumentsJson,
+      ...(dispatch.provenance.nativeItemId ? { itemId: dispatch.provenance.nativeItemId } : {}),
+      responseId: event.responseId,
+      terminalEventId: dispatch.provenance.terminalEventId,
+      terminalWireType: dispatch.provenance.terminalWireType,
+    });
+  }));
 }
 
 type ResponseEventBinding = Readonly<{
@@ -1967,11 +1991,12 @@ async function awaitLogicalResponse(input: Readonly<{
         { fatal: true }
       );
     }
-    if (event.type === "tool.calls") {
-      if (event.calls.length === 0) {
+    if (event.type === "tool.calls" || event.type === "tool.dispatch") {
+      const calls = executableToolCalls(event);
+      if (calls.length === 0) {
         throw trialError("protocol_error", "empty_tool_batch", "Provider emitted an empty tool call batch", "tool", { fatal: true });
       }
-      if (input.runtime.toolCalls + event.calls.length > input.limits.maxToolCalls) {
+      if (input.runtime.toolCalls + calls.length > input.limits.maxToolCalls) {
         throw trialError(
           "cap_exceeded",
           "tool_call_cap_exceeded",
@@ -1980,19 +2005,19 @@ async function awaitLogicalResponse(input: Readonly<{
           { fatal: true }
         );
       }
-      const ids = event.calls.map((call) => call.callId);
+      const ids = calls.map((call) => call.callId);
       if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
         throw trialError("protocol_error", "invalid_tool_batch_ids", "Tool batch contains missing or duplicate call IDs", "tool", { fatal: true });
       }
-      input.runtime.toolCalls += event.calls.length;
+      input.runtime.toolCalls += calls.length;
       input.record("tool.batch_received", {
         turn: input.runtime.currentTurnIndex + 1,
         response_id: event.responseId ?? null,
-        call_count: event.calls.length,
+        call_count: calls.length,
         call_ids: ids,
       });
       const results: RealtimeToolResult[] = [];
-      for (const call of event.calls) {
+      for (const call of calls) {
         await input.journal.flush();
         // Reserve every syntactically present provider ID before validating the
         // tool name or arguments. A malformed first use therefore cannot evade
@@ -2669,8 +2694,8 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         : null;
       runtime.sessionConfiguration = event.configuration ?? client.sessionConfigurationAcknowledgement ?? null;
     }
-    if (event.type === "tool.calls") {
-      runtime.normalizedToolCallCount += event.calls.filter(
+    if (event.type === "tool.calls" || event.type === "tool.dispatch") {
+      runtime.normalizedToolCallCount += executableToolCalls(event).filter(
         (call) => call.name === CAPABILITY_GATEWAY_NAME,
       ).length;
     }
