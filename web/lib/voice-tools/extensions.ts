@@ -10,5 +10,13 @@
 // }];
 
 import type { VoiceToolExtension } from "./types";
+import { defineVoiceToolPack } from "./packs";
 
 export const VOICE_TOOL_EXTENSIONS: VoiceToolExtension[] = [];
+
+/** Add independently versioned packs here; local extensions remain a compatibility on-ramp. */
+export const VOICE_TOOL_PACKS = [defineVoiceToolPack({
+  id: "local",
+  version: "1",
+  tools: VOICE_TOOL_EXTENSIONS,
+})];

@@ -10,6 +10,8 @@ export const TOPIC_ICONS = [
 ] as const;
 
 const TOOL_NAME = /^[a-z][a-z0-9_.-]{1,63}$/;
+const FLOW_PATH_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+const UNSAFE_OUTPUT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 export type FlowTransition = {
   to: string;
@@ -40,6 +42,10 @@ export type FlowActionPolicy = {
   max_calls?: number;
   /** Runtime-generated deduplication scope for late/replayed realtime tool events. */
   idempotency?: "none" | "per_step" | "per_arguments" | "per_call" | "per_call_arguments";
+  /** Immutable operator-authored effect classification; never accepted from a live tool call. */
+  effect?: "read" | "write" | "opaque";
+  /** Pinned server-side read-back contract. Parsed against the strict reconciliation schema. */
+  reconciliation?: unknown;
 };
 
 export type FlowStep = {
@@ -103,6 +109,8 @@ export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
       tool: z.string().regex(TOOL_NAME),
       max_calls: z.number().int().min(1).max(100).optional(),
       idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
+      effect: z.enum(["read", "write", "opaque"]).optional(),
+      reconciliation: z.record(z.string(), z.unknown()).optional(),
     })).optional(),
     success_criteria: z.array(z.string().min(1)).optional(),
     transitions: z.array(FlowTransitionSchema).optional(),
@@ -148,6 +156,8 @@ export const AgentFlowSchema = z.object({
     tool: z.string().regex(TOOL_NAME),
     max_calls: z.number().int().min(1).max(100).optional(),
     idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
+    effect: z.enum(["read", "write", "opaque"]).optional(),
+    reconciliation: z.record(z.string(), z.unknown()).optional(),
   })).optional(),
   /** gateway exposes one guarded run_action tool; direct exposes every attached tool up front. */
   tool_exposure: z.enum(["gateway", "direct"]).optional(),
@@ -160,6 +170,16 @@ export const AgentFlowSchema = z.object({
     label: z.string().optional(),
     when: z.string().optional(),
   })),
+}).superRefine((flow, ctx) => {
+  const version = flow.schema_version ?? 1;
+  const exposure = flow.tool_exposure ?? (version === 2 ? "gateway" : "direct");
+  if ((version === 2 && exposure !== "gateway") || (version !== 2 && exposure !== "direct")) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["tool_exposure"],
+      message: "Flow v2 requires gateway exposure; Flow v1 requires direct exposure",
+    });
+  }
 });
 
 export type FlowNode = z.infer<typeof FlowNodeSchema>;
@@ -173,10 +193,10 @@ export type FlowDiagnostic = {
 
 export type StepRef = { path: string; nodeId: string; step: FlowStep; ancestors: FlowStep[] };
 
-const DEFAULT_ALWAYS_TOOLS = ["contact_support", "request_recall", "log_note", "end_call"];
+const DEFAULT_ALWAYS_TOOLS = ["contact_support", "log_note", "end_call"];
 const DEFAULT_ALWAYS_ACTION_POLICIES: FlowActionPolicy[] = [
   { tool: "contact_support", max_calls: 1, idempotency: "per_call" },
-  { tool: "request_recall", max_calls: 3, idempotency: "per_call_arguments" },
+  { tool: "log_note", max_calls: 100, idempotency: "per_call_arguments" },
   { tool: "end_call", max_calls: 1, idempotency: "per_call" },
 ];
 
@@ -196,6 +216,16 @@ export function alwaysActionPolicies(flow: AgentFlow): FlowActionPolicy[] {
     ...DEFAULT_ALWAYS_ACTION_POLICIES.filter((policy) => granted.has(policy.tool) && !explicit.has(policy.tool)),
     ...explicit.values(),
   ];
+}
+
+/** Resolves immutable action authority for the receipt's exact admitted step. */
+export function actionPolicyFor(
+  flow: AgentFlow,
+  stepPath: string,
+  tool: string
+): FlowActionPolicy | undefined {
+  return findStep(flow, stepPath)?.step.action_policies?.find((policy) => policy.tool === tool)
+    ?? alwaysActionPolicies(flow).find((policy) => policy.tool === tool);
 }
 
 export function listStepRefs(flow: AgentFlow): StepRef[] {
@@ -253,6 +283,9 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
   const nodeIds = new Set<string>();
   for (const [index, node] of flow.nodes.entries()) {
     if (nodeIds.has(node.id)) diagnostics.push({ level: "error", path: `nodes.${index}.id`, message: `duplicate node id "${node.id}"` });
+    if (flow.schema_version === 2 && !FLOW_PATH_SEGMENT.test(node.id)) {
+      diagnostics.push({ level: "error", path: `nodes.${index}.id`, message: "Flow v2 node ids must be 1-64 letters, numbers, underscores, or hyphens" });
+    }
     nodeIds.add(node.id);
   }
   for (const [index, edge] of flow.edges.entries()) {
@@ -275,13 +308,24 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
     if (!globalTools.has(policy.tool)) {
       diagnostics.push({ level: "error", path: `always_action_policies.${index}.tool`, message: `global action policy tool "${policy.tool}" is not in always_tools` });
     }
+    if (policy.reconciliation !== undefined &&
+        (!policy.effect || policy.effect === "read" || !policy.idempotency || policy.idempotency === "none")) {
+      diagnostics.push({
+        level: "error",
+        path: `always_action_policies.${index}.reconciliation`,
+        message: "reconciliation requires a non-read effect and explicit non-none idempotency",
+      });
+    }
   }
   const stepPaths = new Set(refs.map((ref) => ref.path));
   const seenPaths = new Set<string>();
   for (const ref of refs) {
     if (seenPaths.has(ref.path)) diagnostics.push({ level: "error", path: ref.path, message: `duplicate step path "${ref.path}"` });
     seenPaths.add(ref.path);
-    if (ref.path.split(".").length - 1 > 8) diagnostics.push({ level: "error", path: ref.path, message: "step nesting exceeds the supported depth of 8" });
+    if (flow.schema_version === 2 && !FLOW_PATH_SEGMENT.test(ref.step.id)) {
+      diagnostics.push({ level: "error", path: `${ref.path}.id`, message: "Flow v2 step ids must be 1-64 letters, numbers, underscores, or hyphens" });
+    }
+    if (ref.ancestors.length + 1 > 8) diagnostics.push({ level: "error", path: ref.path, message: "step nesting exceeds the supported depth of 8" });
     if (ref.ancestors.length > 0 && ref.step.entry !== undefined) {
       diagnostics.push({ level: "error", path: `${ref.path}.entry`, message: "entry may only be set on top-level steps" });
     }
@@ -293,11 +337,24 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
       ...(ref.step.tools ?? []),
     ]);
     const bindingOutputs = new Set<string>();
+    const requiredOutputs = new Set<string>();
+    for (const [requiredIndex, output] of (ref.step.required_outputs ?? []).entries()) {
+      if (requiredOutputs.has(output)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.required_outputs.${requiredIndex}`, message: `duplicate required output "${output}"` });
+      }
+      requiredOutputs.add(output);
+      if (UNSAFE_OUTPUT_KEYS.has(output)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.required_outputs.${requiredIndex}`, message: `unsafe output key "${output}"` });
+      }
+    }
     for (const [bindingIndex, binding] of (ref.step.output_bindings ?? []).entries()) {
       if (bindingOutputs.has(binding.output)) {
         diagnostics.push({ level: "error", path: `${ref.path}.output_bindings.${bindingIndex}.output`, message: `duplicate output binding "${binding.output}"` });
       }
       bindingOutputs.add(binding.output);
+      if (UNSAFE_OUTPUT_KEYS.has(binding.output)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.output_bindings.${bindingIndex}.output`, message: `unsafe output key "${binding.output}"` });
+      }
       if (!granted.has(binding.tool)) {
         diagnostics.push({ level: "error", path: `${ref.path}.output_bindings.${bindingIndex}.tool`, message: `binding tool "${binding.tool}" is not granted in this step` });
       }
@@ -311,9 +368,23 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
       if (!granted.has(policy.tool)) {
         diagnostics.push({ level: "error", path: `${ref.path}.action_policies.${policyIndex}.tool`, message: `policy tool "${policy.tool}" is not granted in this step` });
       }
+      if (policy.reconciliation !== undefined &&
+          (!policy.effect || policy.effect === "read" || !policy.idempotency || policy.idempotency === "none")) {
+        diagnostics.push({
+          level: "error",
+          path: `${ref.path}.action_policies.${policyIndex}.reconciliation`,
+          message: "reconciliation requires a non-read effect and explicit non-none idempotency",
+        });
+      }
     }
     for (const transition of ref.step.transitions ?? []) {
       if (!stepPaths.has(transition.to)) diagnostics.push({ level: "error", path: `${ref.path}.transitions`, message: `transition targets unknown step "${transition.to}"` });
+      if (transition.condition && UNSAFE_OUTPUT_KEYS.has(transition.condition.output)) {
+        diagnostics.push({ level: "error", path: `${ref.path}.transitions`, message: `transition uses unsafe output key "${transition.condition.output}"` });
+      }
+      if (transition.condition && !bindingOutputs.has(transition.condition.output)) {
+        diagnostics.push({ level: "warning", path: `${ref.path}.transitions`, message: `branch output "${transition.condition.output}" is model-authored rather than receipt-bound` });
+      }
     }
     if (ref.step.on_failure && !stepPaths.has(ref.step.on_failure)) {
       diagnostics.push({ level: "error", path: `${ref.path}.on_failure`, message: `failure target "${ref.step.on_failure}" does not exist` });
@@ -338,6 +409,33 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
         if (!hasCrossTopicInbound) {
           diagnostics.push({ level: "error", path: `nodes.${node.id}.steps`, message: "topic needs an entry step or an inbound cross-topic transition" });
         }
+      }
+    }
+
+    const reachableSteps = new Set<string>();
+    const queue = flow.nodes
+      .filter((node) => node.kind === "topic")
+      .flatMap((node) => topicEntryStepPaths(flow, node.id));
+    for (const path of queue) reachableSteps.add(path);
+    while (queue.length) {
+      const path = queue.shift()!;
+      const ref = refs.find((candidate) => candidate.path === path);
+      if (!ref) continue;
+      const targets = [
+        ...(ref.step.steps ?? []).map((child) => `${ref.path}.${child.id}`),
+        ...(ref.step.transitions ?? []).map((transition) => transition.to),
+        ...(ref.step.on_failure ? [ref.step.on_failure] : []),
+      ];
+      for (const target of targets) {
+        if (stepPaths.has(target) && !reachableSteps.has(target)) {
+          reachableSteps.add(target);
+          queue.push(target);
+        }
+      }
+    }
+    for (const ref of refs) {
+      if (!reachableSteps.has(ref.path)) {
+        diagnostics.push({ level: "error", path: ref.path, message: "step is unreachable from every classified entry" });
       }
     }
   }

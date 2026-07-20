@@ -4,8 +4,12 @@ import {
   FlowExecutionStateSchema,
   completeFlowStep,
   createFlowExecutionState,
+  deriveFlowActionInvocationId,
   enterFlowStep,
   hashFlowValue,
+  markFlowActionDispatchStarted,
+  proveIndeterminateFlowActionAbsent,
+  promoteIndeterminateFlowAction,
   reserveFlowAction,
   selectFlowTopic,
   settleFlowAction,
@@ -68,6 +72,7 @@ function reserve(
 ) {
   const reservation = reserveFlowAction(flow, state, {
     receiptId,
+    invocationId: deriveFlowActionInvocationId(`test:${receiptId}`),
     tool,
     arguments: actionArguments,
     capabilityEpoch: state.capabilityEpoch,
@@ -82,7 +87,14 @@ function settle(
   status: "succeeded" | "failed" | "indeterminate",
   result?: unknown,
 ) {
-  const settlement = settleFlowAction(state, {
+  const receipt = state.actionReceipts.find((candidate) => candidate.id === receiptId);
+  let dispatchState = state;
+  if ((status === "succeeded" || status === "indeterminate") && receipt?.status === "reserved" && !receipt.dispatchStartedAt) {
+    const marked = markFlowActionDispatchStarted(state, { receiptId }, "2026-07-10T00:00:02.500Z");
+    if ("error" in marked) throw new Error(`${marked.code}: ${marked.error}`);
+    dispatchState = marked.state;
+  }
+  const settlement = settleFlowAction(dispatchState, {
     receiptId,
     status,
     ...(result === undefined ? {} : { result }),
@@ -92,6 +104,161 @@ function settle(
 }
 
 describe("flow action evidence", () => {
+  it("derives stable, opaque, fixed-width downstream invocation identities", () => {
+    const first = deriveFlowActionInvocationId("call-1:provider-call-9");
+    expect(first).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(deriveFlowActionInvocationId("call-1:provider-call-9")).toBe(first);
+    expect(deriveFlowActionInvocationId("call-2:provider-call-9")).not.toBe(first);
+    expect(() => deriveFlowActionInvocationId("")).toThrow(/1 to 2048/);
+  });
+
+  it("replays one provider delivery identity but rejects changed semantics", () => {
+    const flow = evidenceFlow();
+    const state = activeStep(flow);
+    const first = reserveFlowAction(flow, state, {
+      receiptId: "server-generated-invocation-1",
+      invocationId: deriveFlowActionInvocationId("provider-session-1:tool-call-9"),
+      providerInvocationId: "provider-session-1:tool-call-9",
+      tool: CASE_TOOL,
+      arguments: { member: "m-1" },
+      capabilityEpoch: state.capabilityEpoch,
+    });
+    if ("error" in first) throw new Error(first.error);
+    expect(first.receipt).toMatchObject({
+      invocationId: deriveFlowActionInvocationId("provider-session-1:tool-call-9"),
+      providerInvocationId: "provider-session-1:tool-call-9",
+    });
+
+    const exact = reserveFlowAction(flow, first.state, {
+      receiptId: "different-server-candidate",
+      invocationId: deriveFlowActionInvocationId("provider-session-1:tool-call-9"),
+      providerInvocationId: "provider-session-1:tool-call-9",
+      tool: CASE_TOOL,
+      arguments: { member: "m-1" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    });
+    expect(exact).toMatchObject({ execute: false, receipt: { id: "server-generated-invocation-1" } });
+    expect(reserveFlowAction(flow, first.state, {
+      receiptId: "different-server-candidate",
+      invocationId: deriveFlowActionInvocationId("provider-session-1:tool-call-9"),
+      providerInvocationId: "provider-session-1:tool-call-9",
+      tool: CASE_TOOL,
+      arguments: { member: "m-2" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    })).toMatchObject({ code: "invocation_identity_conflict" });
+  });
+
+  it("records a one-way dispatch boundary and promotes ambiguity only through proof", () => {
+    const flow = evidenceFlow();
+    const reserved = reserve(flow, activeStep(flow), "dispatch-boundary", CASE_TOOL, { member: "m-1" });
+    const marked = markFlowActionDispatchStarted(reserved.state, { receiptId: reserved.receipt.id });
+    if ("error" in marked) throw new Error(marked.error);
+    expect(marked.receipt).toMatchObject({ dispatchAttempt: 1 });
+    expect(markFlowActionDispatchStarted(marked.state, { receiptId: reserved.receipt.id })).toMatchObject({
+      code: "dispatch_already_started",
+    });
+    const ambiguous = settle(marked.state, reserved.receipt.id, "indeterminate");
+    const promoted = promoteIndeterminateFlowAction(ambiguous.state, {
+      receiptId: reserved.receipt.id,
+      proofId: "proof-1",
+      result: { data: { case: { id: "case-read-back" } } },
+    });
+    if ("error" in promoted) throw new Error(promoted.error);
+    expect(promoted.receipt).toMatchObject({
+      status: "succeeded",
+      reconciliationProofId: "proof-1",
+      result: { data: { case: { id: "case-read-back" } } },
+    });
+    expect(promoteIndeterminateFlowAction(promoted.state, {
+      receiptId: reserved.receipt.id,
+      proofId: "proof-2",
+      result: {},
+    })).toMatchObject({ code: "receipt_not_indeterminate" });
+  });
+
+  it("makes only an exact authoritative-absence proof retry-safe", () => {
+    const flow = evidenceFlow();
+    const reserved = reserve(flow, activeStep(flow), "absence-original", CASE_TOOL, { member: "m-1" });
+    const marked = markFlowActionDispatchStarted(reserved.state, { receiptId: reserved.receipt.id });
+    if ("error" in marked) throw new Error(marked.error);
+    const ambiguous = settle(marked.state, reserved.receipt.id, "indeterminate");
+
+    const absent = proveIndeterminateFlowActionAbsent(ambiguous.state, {
+      receiptId: reserved.receipt.id,
+      proofId: "proof-absent",
+    });
+    if ("error" in absent) throw new Error(absent.error);
+    expect(absent.receipt).toMatchObject({
+      status: "failed",
+      reconciliationProofId: "proof-absent",
+      error: expect.stringContaining("not committed"),
+    });
+    expect(FlowExecutionStateSchema.parse(absent.state)).toEqual(absent.state);
+
+    const retry = reserveFlowAction(flow, absent.state, {
+      receiptId: "absence-retry",
+      invocationId: deriveFlowActionInvocationId("absence-retry"),
+      tool: CASE_TOOL,
+      arguments: { member: "m-1" },
+      capabilityEpoch: absent.state.capabilityEpoch,
+    });
+    expect(retry).toMatchObject({ execute: true, receipt: { status: "reserved" } });
+    expect(proveIndeterminateFlowActionAbsent(absent.state, {
+      receiptId: reserved.receipt.id,
+      proofId: "proof-rewrite",
+    })).toMatchObject({ code: "receipt_not_indeterminate" });
+  });
+
+  it("requires a dispatch boundary and makes terminal settlement exactly replayable", () => {
+    const flow = evidenceFlow();
+    const reserved = reserve(flow, activeStep(flow), "exact-settlement", CASE_TOOL, { member: "m-1" });
+    expect(settleFlowAction(reserved.state, {
+      receiptId: reserved.receipt.id,
+      status: "succeeded",
+      result: { ok: true },
+    })).toMatchObject({ code: "dispatch_not_started" });
+    const dispatched = markFlowActionDispatchStarted(reserved.state, { receiptId: reserved.receipt.id });
+    if ("error" in dispatched) throw new Error(dispatched.error);
+    const succeeded = settleFlowAction(dispatched.state, {
+      receiptId: reserved.receipt.id,
+      status: "succeeded",
+      result: { ok: true },
+    });
+    if ("error" in succeeded) throw new Error(succeeded.error);
+    const replay = settleFlowAction(succeeded.state, {
+      receiptId: reserved.receipt.id,
+      status: "succeeded",
+      result: { ok: true },
+    });
+    if ("error" in replay) throw new Error(replay.error);
+    expect(replay.state).toBe(succeeded.state);
+    expect(settleFlowAction(succeeded.state, {
+      receiptId: reserved.receipt.id,
+      status: "failed",
+      error: "rewrite",
+    })).toMatchObject({ code: "receipt_settlement_conflict" });
+  });
+
+  it("rejects receipt-id and downstream-id reuse with changed semantics", () => {
+    const flow = evidenceFlow();
+    const state = activeStep(flow);
+    const first = reserve(flow, state, "stable-receipt", CASE_TOOL, { member: "m-1" });
+    expect(reserveFlowAction(flow, first.state, {
+      receiptId: "stable-receipt",
+      invocationId: deriveFlowActionInvocationId("different-downstream-identity"),
+      tool: CASE_TOOL,
+      arguments: { member: "m-1" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    })).toMatchObject({ code: "receipt_identity_conflict" });
+    expect(reserveFlowAction(flow, first.state, {
+      receiptId: "different-receipt",
+      invocationId: first.receipt.invocationId!,
+      tool: CASE_TOOL,
+      arguments: { member: "m-2" },
+      capabilityEpoch: first.state.capabilityEpoch,
+    })).toMatchObject({ code: "invocation_identity_conflict" });
+  });
+
   it("deduplicates always-available effects across capability-epoch transitions", () => {
     const flow = AgentFlowSchema.parse({
       ...evidenceFlow(),
@@ -114,6 +281,7 @@ describe("flow action evidence", () => {
 
     const replay = reserveFlowAction(flow, selected, {
       receiptId: "recall-after-transition",
+      invocationId: deriveFlowActionInvocationId("test:recall-after-transition"),
       tool: "request_recall",
       arguments: {
         run_at: "2026-07-10T20:00:00.000Z",
@@ -171,7 +339,7 @@ describe("flow action evidence", () => {
       { data: { case: { id: "case-before-retry" } } },
     );
     expect(settlement.state.capabilityEpoch).toBe(2);
-    expect(settlement.state.revision).toBe(reservation.state.revision + 1);
+    expect(settlement.state.revision).toBe(reservation.state.revision + 2);
 
     const retried = enterFlowStep(flow, settlement.state, STEP, "2026-07-10T00:00:04.000Z");
     if ("error" in retried) throw new Error(retried.error);
@@ -273,6 +441,7 @@ describe("flow action evidence", () => {
 
     expect(reserveFlowAction(flow, state, {
       receiptId: "stale-receipt",
+      invocationId: deriveFlowActionInvocationId("test:stale-receipt"),
       tool: CASE_TOOL,
       arguments: { member: "m-1" },
       capabilityEpoch: state.capabilityEpoch - 1,
@@ -287,6 +456,7 @@ describe("flow action evidence", () => {
 
     const whileReserved = reserveFlowAction(flow, first.state, {
       receiptId: "case-receipt-2",
+      invocationId: deriveFlowActionInvocationId("test:case-receipt-2"),
       tool: CASE_TOOL,
       arguments: { member: "different-member" },
       capabilityEpoch: first.state.capabilityEpoch,
@@ -307,6 +477,7 @@ describe("flow action evidence", () => {
     );
     const afterSuccess = reserveFlowAction(flow, succeeded.state, {
       receiptId: "case-receipt-3",
+      invocationId: deriveFlowActionInvocationId("test:case-receipt-3"),
       tool: CASE_TOOL,
       arguments: { member: "another-member" },
       capabilityEpoch: succeeded.state.capabilityEpoch,
@@ -328,6 +499,7 @@ describe("flow action evidence", () => {
 
     const reordered = reserveFlowAction(flow, first.state, {
       receiptId: "tag-receipt-2",
+      invocationId: deriveFlowActionInvocationId("test:tag-receipt-2"),
       tool: "tag_case",
       arguments: {
         tags: ["urgent", "member"],
@@ -340,6 +512,7 @@ describe("flow action evidence", () => {
 
     const distinct = reserveFlowAction(flow, first.state, {
       receiptId: "tag-receipt-3",
+      invocationId: deriveFlowActionInvocationId("test:tag-receipt-3"),
       tool: "tag_case",
       arguments: {
         tags: ["member", "urgent"],
@@ -358,6 +531,7 @@ describe("flow action evidence", () => {
 
     expect(reserveFlowAction(flow, first.state, {
       receiptId: "notice-receipt-2",
+      invocationId: deriveFlowActionInvocationId("test:notice-receipt-2"),
       tool: "notify_case",
       arguments: { channel: "email" },
       capabilityEpoch: first.state.capabilityEpoch,
@@ -366,6 +540,7 @@ describe("flow action evidence", () => {
     const failed = settle(first.state, first.receipt.id, "failed", { provider: "unavailable" });
     const retry = reserveFlowAction(flow, failed.state, {
       receiptId: "notice-receipt-3",
+      invocationId: deriveFlowActionInvocationId("test:notice-receipt-3"),
       tool: "notify_case",
       arguments: { channel: "email" },
       capabilityEpoch: failed.state.capabilityEpoch,
@@ -487,5 +662,13 @@ describe("flow action evidence", () => {
     const selected = selectFlowTopic(evidenceFlow(), hydrated, TOPIC);
     if ("error" in selected) throw new Error(selected.error);
     expect(selected.capabilityEpoch).toBe(1);
+  });
+
+  it("rejects persisted receipt evidence whose canonical hashes were modified", () => {
+    const flow = evidenceFlow();
+    const reserved = reserve(flow, activeStep(flow), "tamper-evidence", CASE_TOOL, { member: "m-1" });
+    const tampered = structuredClone(reserved.state);
+    tampered.actionReceipts[0].arguments = { member: "attacker" };
+    expect(FlowExecutionStateSchema.safeParse(tampered).success).toBe(false);
   });
 });

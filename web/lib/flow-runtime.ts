@@ -13,6 +13,25 @@ import {
   type StepRef,
 } from "./flow";
 
+const FLOW_ACTION_INVOCATION_ID = /^[A-Za-z0-9_-]{24}$/;
+
+/**
+ * Derives the opaque, provider-neutral identity forwarded to an integration.
+ * Callers must include the call/session scope in `stableIdentity`; provider call IDs alone are
+ * not globally unique. Eighteen digest bytes encode to exactly 24 unpadded base64url characters.
+ */
+export function deriveFlowActionInvocationId(stableIdentity: string): string {
+  if (!stableIdentity || stableIdentity.length > 2_048) {
+    throw new Error("stable action identity must contain 1 to 2048 characters");
+  }
+  return createHash("sha256")
+    .update("hacc/flow-action-invocation/v1\0", "utf8")
+    .update(stableIdentity, "utf8")
+    .digest()
+    .subarray(0, 18)
+    .toString("base64url");
+}
+
 export const FlowActionReceiptSchema = z.object({
   id: z.string().min(1),
   idempotencyKey: z.string().min(1),
@@ -21,13 +40,20 @@ export const FlowActionReceiptSchema = z.object({
   capabilityEpoch: z.number().int().nonnegative(),
   arguments: z.record(z.string(), z.unknown()),
   argumentsHash: z.string().regex(/^[a-f0-9]{64}$/),
+  /** Server-generated identity propagated to integrations; the provider cannot choose it. */
+  invocationId: z.string().regex(FLOW_ACTION_INVOCATION_ID).optional(),
+  /** Provider request correlation is only a call-scoped replay key, never downstream authority. */
+  providerInvocationId: z.string().min(1).max(256).optional(),
+  dispatchStartedAt: z.iso.datetime().optional(),
+  dispatchAttempt: z.number().int().nonnegative().optional(),
+  reconciliationProofId: z.string().min(1).optional(),
   status: z.enum(["reserved", "succeeded", "failed", "indeterminate"]),
   result: z.unknown().optional(),
   resultHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   error: z.string().optional(),
-  reservedAt: z.string(),
-  settledAt: z.string().optional(),
-});
+  reservedAt: z.iso.datetime(),
+  settledAt: z.iso.datetime().optional(),
+}).strict();
 
 export type FlowActionReceipt = z.infer<typeof FlowActionReceiptSchema>;
 
@@ -39,13 +65,116 @@ export const FlowExecutionStateSchema = z.object({
   completedSteps: z.array(z.string()),
   attempts: z.record(z.string(), z.number().int().nonnegative()),
   outputs: z.record(z.string(), z.record(z.string(), z.unknown())),
-  checkpoints: z.array(z.object({ step: z.string(), at: z.string() })),
+  checkpoints: z.array(z.object({ step: z.string(), at: z.iso.datetime() }).strict()),
   /** Changes only when the active capability set changes, never for receipt writes. */
   capabilityEpoch: z.number().int().nonnegative().default(0),
   /** Embedded receipts keep the pure runtime replayable; production also persists an atomic ledger. */
   actionReceipts: z.array(FlowActionReceiptSchema).default([]),
   revision: z.number().int().nonnegative(),
-  updatedAt: z.string(),
+  updatedAt: z.iso.datetime(),
+}).strict().superRefine((state, ctx) => {
+  const duplicate = (values: readonly string[]) => values.find((value, index) => values.indexOf(value) !== index);
+  const duplicateCompleted = duplicate(state.completedSteps);
+  if (duplicateCompleted) {
+    ctx.addIssue({ code: "custom", path: ["completedSteps"], message: `duplicate completed step "${duplicateCompleted}"` });
+  }
+  if (state.status === "routing" && (state.nodeId !== null || state.currentStep !== null)) {
+    ctx.addIssue({ code: "custom", message: "routing state cannot retain a topic or active step" });
+  }
+  if (state.status === "active" && state.nodeId === null) {
+    ctx.addIssue({ code: "custom", path: ["nodeId"], message: "active state requires a selected topic" });
+  }
+  if ((state.status === "completed" || state.status === "failed") && state.currentStep !== null) {
+    ctx.addIssue({ code: "custom", path: ["currentStep"], message: "terminal state cannot retain an active step" });
+  }
+  for (const step of state.completedSteps) {
+    if (!Object.prototype.hasOwnProperty.call(state.outputs, step)) {
+      ctx.addIssue({ code: "custom", path: ["outputs", step], message: "completed step is missing its durable output record" });
+    }
+  }
+  for (const step of Object.keys(state.outputs)) {
+    if (!state.completedSteps.includes(step)) {
+      ctx.addIssue({ code: "custom", path: ["outputs", step], message: "output record belongs to an incomplete step" });
+    }
+    try {
+      hashFlowValue(state.outputs[step]);
+    } catch (error) {
+      ctx.addIssue({ code: "custom", path: ["outputs", step], message: (error as Error).message });
+    }
+  }
+  for (const [index, checkpoint] of state.checkpoints.entries()) {
+    if (!state.completedSteps.includes(checkpoint.step)) {
+      ctx.addIssue({ code: "custom", path: ["checkpoints", index], message: "checkpoint belongs to an incomplete step" });
+    }
+  }
+
+  const receiptIds = new Set<string>();
+  const invocationIds = new Set<string>();
+  const providerInvocationIds = new Set<string>();
+  for (const [index, receipt] of state.actionReceipts.entries()) {
+    const path = ["actionReceipts", index] as (string | number)[];
+    if (receiptIds.has(receipt.id)) {
+      ctx.addIssue({ code: "custom", path: [...path, "id"], message: "duplicate action receipt identity" });
+    }
+    receiptIds.add(receipt.id);
+    if (receipt.invocationId) {
+      if (invocationIds.has(receipt.invocationId)) {
+        ctx.addIssue({ code: "custom", path: [...path, "invocationId"], message: "duplicate downstream invocation identity" });
+      }
+      invocationIds.add(receipt.invocationId);
+    }
+    if (receipt.providerInvocationId) {
+      if (providerInvocationIds.has(receipt.providerInvocationId)) {
+        ctx.addIssue({ code: "custom", path: [...path, "providerInvocationId"], message: "duplicate provider invocation identity" });
+      }
+      providerInvocationIds.add(receipt.providerInvocationId);
+    }
+    try {
+      if (hashFlowValue(receipt.arguments) !== receipt.argumentsHash) {
+        ctx.addIssue({ code: "custom", path: [...path, "argumentsHash"], message: "action argument evidence hash is invalid" });
+      }
+    } catch (error) {
+      ctx.addIssue({ code: "custom", path: [...path, "arguments"], message: (error as Error).message });
+    }
+    const hasResult = Object.prototype.hasOwnProperty.call(receipt, "result");
+    if (hasResult !== (receipt.resultHash !== undefined)) {
+      ctx.addIssue({ code: "custom", path: [...path, "resultHash"], message: "action result and its evidence hash must be present together" });
+    } else if (hasResult) {
+      try {
+        if (hashFlowValue(receipt.result) !== receipt.resultHash) {
+          ctx.addIssue({ code: "custom", path: [...path, "resultHash"], message: "action result evidence hash is invalid" });
+        }
+      } catch (error) {
+        ctx.addIssue({ code: "custom", path: [...path, "result"], message: (error as Error).message });
+      }
+    }
+    if (receipt.dispatchStartedAt && (receipt.dispatchAttempt ?? 0) < 1) {
+      ctx.addIssue({ code: "custom", path: [...path, "dispatchAttempt"], message: "dispatched action needs a positive attempt count" });
+    }
+    if (!receipt.dispatchStartedAt && (receipt.dispatchAttempt ?? 0) !== 0) {
+      ctx.addIssue({ code: "custom", path: [...path, "dispatchAttempt"], message: "undispatched action cannot have dispatch attempts" });
+    }
+    if ((receipt.status === "succeeded" || receipt.status === "indeterminate") && !receipt.dispatchStartedAt) {
+      ctx.addIssue({ code: "custom", path: [...path, "dispatchStartedAt"], message: `${receipt.status} action is missing its dispatch boundary` });
+    }
+    if ((receipt.status === "reserved") === (receipt.settledAt !== undefined)) {
+      ctx.addIssue({ code: "custom", path: [...path, "settledAt"], message: "receipt status and settlement timestamp disagree" });
+    }
+    if (receipt.reconciliationProofId && receipt.status !== "succeeded" && receipt.status !== "failed") {
+      ctx.addIssue({
+        code: "custom",
+        path: [...path, "reconciliationProofId"],
+        message: "only proof-resolved receipts may carry reconciliation evidence",
+      });
+    }
+    if (receipt.reconciliationProofId && receipt.status === "failed" && hasResult) {
+      ctx.addIssue({
+        code: "custom",
+        path: [...path, "result"],
+        message: "authoritatively absent actions cannot carry a committed result",
+      });
+    }
+  }
 });
 
 export type FlowExecutionState = z.infer<typeof FlowExecutionStateSchema>;
@@ -107,6 +236,10 @@ function canonicalJson(value: unknown, seen = new Set<object>()): string {
     return encoded;
   }
   if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("flow values must contain only JSON objects and arrays");
+    }
     if (seen.has(value)) throw new Error("action arguments must not contain cycles");
     seen.add(value);
     const record = value as Record<string, unknown>;
@@ -148,16 +281,17 @@ function transitionMatches(
 ): boolean {
   const condition = transition.condition;
   if (!condition) return true;
+  const present = Object.prototype.hasOwnProperty.call(outputs, condition.output);
   const actual = outputs[condition.output];
   switch (condition.operator) {
     case "exists":
-      return actual !== undefined && actual !== null;
+      return present && actual !== undefined && actual !== null;
     case "equals":
-      return Object.is(actual, condition.value);
+      return present && valuesEqual(actual, condition.value);
     case "not_equals":
-      return !Object.is(actual, condition.value);
+      return present && !valuesEqual(actual, condition.value);
     case "in":
-      return Array.isArray(condition.value) && condition.value.some((candidate) => Object.is(actual, candidate));
+      return present && Array.isArray(condition.value) && condition.value.some((candidate) => valuesEqual(actual, candidate));
   }
 }
 
@@ -189,6 +323,9 @@ export function selectFlowTopic(
   nodeId: string,
   now?: string
 ): FlowExecutionState | RuntimeError {
+  if (state.status === "completed" || state.status === "failed") {
+    return { error: "flow is already finished", code: "flow_finished" };
+  }
   const node = topic(flow, nodeId);
   if (!node) return { error: `unknown topic "${nodeId}"`, code: "unknown_topic" };
   if (node.kind === "topic" && flow.schema_version === 2 && !topicEntryStepPaths(flow, node.id).length) {
@@ -205,6 +342,16 @@ export function selectFlowTopic(
       code: "active_step_incomplete",
       allowed: allowedStepPaths(flow, state),
     };
+  }
+  if (state.status === "active" && state.currentStep) {
+    const pending = allowedStepPaths(flow, state);
+    if (pending.length) {
+      return {
+        error: `enter the pending flow transition before changing topics`,
+        code: "pending_flow_transition",
+        allowed: pending,
+      };
+    }
   }
   return updateCapabilities(state, { status: "active", nodeId: node.id, currentStep: null }, now);
 }
@@ -256,6 +403,16 @@ export function enterFlowStep(
   if (!isRetry && !allowed.includes(path)) {
     return { error: `step "${path}" is not reachable from the current checkpoint`, code: "step_not_reachable", allowed };
   }
+  const incompleteAncestor = ref.ancestors
+    .map((_ancestor, index) => ref.path.split(".").slice(0, index + 2).join("."))
+    .find((ancestorPath) => !state.completedSteps.includes(ancestorPath));
+  if (incompleteAncestor) {
+    return {
+      error: `step "${path}" cannot inherit authority from incomplete ancestor "${incompleteAncestor}"`,
+      code: "ancestor_step_incomplete",
+      allowed,
+    };
+  }
 
   const attempts = (state.attempts[path] ?? 0) + 1;
   if (attempts > (ref.step.max_attempts ?? 3)) {
@@ -269,15 +426,18 @@ export function enterFlowStep(
       allowed: [],
     };
   }
-  const outputs = { ...state.outputs };
-  delete outputs[path];
+  const inReenteredSubtree = (candidate: string) => candidate === path || candidate.startsWith(`${path}.`);
+  const outputs = Object.fromEntries(
+    Object.entries(state.outputs).filter(([candidate]) => !inReenteredSubtree(candidate))
+  );
   const nextState = updateCapabilities(state, {
     status: "active",
     nodeId: ref.nodeId,
     currentStep: path,
-    completedSteps: state.completedSteps.filter((completed) => completed !== path),
+    completedSteps: state.completedSteps.filter((completed) => !inReenteredSubtree(completed)),
     attempts: { ...state.attempts, [path]: attempts },
     outputs,
+    checkpoints: state.checkpoints.filter((checkpoint) => !inReenteredSubtree(checkpoint.step)),
   }, now);
   return {
     state: nextState,
@@ -325,9 +485,12 @@ export function reserveFlowAction(
   state: FlowExecutionState,
   args: {
     receiptId: string;
+    /** Opaque gateway-derived identity forwarded to the downstream integration. */
+    invocationId: string;
     tool: string;
     arguments: Record<string, unknown>;
     capabilityEpoch: number;
+    providerInvocationId?: string;
   },
   now?: string
 ): FlowActionReservation | RuntimeError {
@@ -338,6 +501,15 @@ export function reserveFlowAction(
     };
   }
   if (!args.receiptId) return { error: "receipt id is required", code: "invalid_receipt" };
+  if (!FLOW_ACTION_INVOCATION_ID.test(args.invocationId)) {
+    return {
+      error: "action invocation identity must be exactly 24 base64url characters",
+      code: "invalid_invocation_identity",
+    };
+  }
+  if (args.providerInvocationId !== undefined && (args.providerInvocationId.length < 1 || args.providerInvocationId.length > 256)) {
+    return { error: "provider invocation identity is invalid", code: "invalid_invocation_identity" };
+  }
   const scope = flowCapabilityScope(state);
   const ref = state.currentStep && !state.completedSteps.includes(state.currentStep)
     ? findStep(flow, state.currentStep)
@@ -358,6 +530,64 @@ export function reserveFlowAction(
     argumentsHash = hashFlowValue(args.arguments);
   } catch (error) {
     return { error: (error as Error).message, code: "invalid_arguments" };
+  }
+  const semanticIdentityMatches = (receipt: FlowActionReceipt): boolean =>
+    receipt.tool === args.tool &&
+    receipt.argumentsHash === argumentsHash &&
+    receipt.step === scope.step;
+  const exactReceipt = state.actionReceipts.find((receipt) => receipt.id === args.receiptId);
+  if (exactReceipt) {
+    if (exactReceipt.invocationId !== args.invocationId || !semanticIdentityMatches(exactReceipt)) {
+      return {
+        error: "receipt identity was replayed with different action semantics",
+        code: "receipt_identity_conflict",
+      };
+    }
+    return {
+      state,
+      receipt: exactReceipt,
+      execute: false,
+      replayed: exactReceipt.status === "succeeded",
+    };
+  }
+  const exactInvocation = state.actionReceipts.find((receipt) =>
+    receipt.invocationId === args.invocationId
+  );
+  if (exactInvocation) {
+    if (!semanticIdentityMatches(exactInvocation)) {
+      return {
+        error: "action invocation identity was replayed with different action semantics",
+        code: "invocation_identity_conflict",
+      };
+    }
+    return {
+      state,
+      receipt: exactInvocation,
+      execute: false,
+      replayed: exactInvocation.status === "succeeded",
+    };
+  }
+  if (args.providerInvocationId) {
+    const delivered = state.actionReceipts.find((receipt) =>
+      receipt.providerInvocationId === args.providerInvocationId
+    );
+    if (delivered) {
+      if (
+        delivered.invocationId !== args.invocationId ||
+        !semanticIdentityMatches(delivered)
+      ) {
+        return {
+          error: "provider invocation identity was replayed with different action semantics",
+          code: "invocation_identity_conflict",
+        };
+      }
+      return {
+        state,
+        receipt: delivered,
+        execute: false,
+        replayed: delivered.status === "succeeded",
+      };
+    }
   }
   const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === args.tool)
     ?? alwaysActionPolicies(flow).find((candidate) => candidate.tool === args.tool);
@@ -405,6 +635,8 @@ export function reserveFlowAction(
     capabilityEpoch: state.capabilityEpoch,
     arguments: structuredClone(args.arguments),
     argumentsHash,
+    invocationId: args.invocationId,
+    ...(args.providerInvocationId ? { providerInvocationId: args.providerInvocationId } : {}),
     status: "reserved",
     reservedAt: nowIso(now),
   };
@@ -414,6 +646,31 @@ export function reserveFlowAction(
     execute: true,
     replayed: false,
   };
+}
+
+/** Persists the one-way dispatch boundary before any integration receives the request. */
+export function markFlowActionDispatchStarted(
+  state: FlowExecutionState,
+  args: { receiptId: string },
+  now?: string
+): { state: FlowExecutionState; receipt: FlowActionReceipt } | RuntimeError {
+  const index = state.actionReceipts.findIndex((receipt) => receipt.id === args.receiptId);
+  if (index < 0) return { error: `unknown action receipt "${args.receiptId}"`, code: "unknown_receipt" };
+  const current = state.actionReceipts[index];
+  if (current.status !== "reserved") {
+    return { error: `action receipt "${args.receiptId}" is not dispatchable`, code: "receipt_not_dispatchable" };
+  }
+  if (current.dispatchStartedAt) {
+    return { error: `action receipt "${args.receiptId}" already crossed the dispatch boundary`, code: "dispatch_already_started" };
+  }
+  const receipt: FlowActionReceipt = {
+    ...current,
+    dispatchStartedAt: nowIso(now),
+    dispatchAttempt: (current.dispatchAttempt ?? 0) + 1,
+  };
+  const actionReceipts = [...state.actionReceipts];
+  actionReceipts[index] = receipt;
+  return { state: updateState(state, { actionReceipts }, now), receipt };
 }
 
 /** Records the authoritative action outcome without changing the active capability set. */
@@ -430,7 +687,6 @@ export function settleFlowAction(
   const index = state.actionReceipts.findIndex((receipt) => receipt.id === args.receiptId);
   if (index < 0) return { error: `unknown action receipt "${args.receiptId}"`, code: "unknown_receipt" };
   const current = state.actionReceipts[index];
-  if (current.status !== "reserved") return { state, receipt: current };
   let resultHash: string | undefined;
   if (args.result !== undefined) {
     try {
@@ -438,6 +694,23 @@ export function settleFlowAction(
     } catch (error) {
       return { error: (error as Error).message, code: "invalid_result" };
     }
+  }
+  if (current.status !== "reserved") {
+    const exactReplay = current.status === args.status &&
+      current.resultHash === resultHash &&
+      current.error === (args.error || undefined);
+    return exactReplay
+      ? { state, receipt: current }
+      : {
+          error: `terminal receipt "${args.receiptId}" cannot be rewritten with a different outcome`,
+          code: "receipt_settlement_conflict",
+        };
+  }
+  if ((args.status === "succeeded" || args.status === "indeterminate") && !current.dispatchStartedAt) {
+    return {
+      error: `action receipt "${args.receiptId}" has not crossed the durable dispatch boundary`,
+      code: "dispatch_not_started",
+    };
   }
   const receipt: FlowActionReceipt = {
     ...current,
@@ -451,7 +724,102 @@ export function settleFlowAction(
   return { state: updateState(state, { actionReceipts }, now), receipt };
 }
 
+/** The only legal promotion for an ambiguous action: exact, persisted read-back proof. */
+export function promoteIndeterminateFlowAction(
+  state: FlowExecutionState,
+  args: { receiptId: string; proofId: string; result: unknown },
+  now?: string
+): { state: FlowExecutionState; receipt: FlowActionReceipt } | RuntimeError {
+  const index = state.actionReceipts.findIndex((receipt) => receipt.id === args.receiptId);
+  if (index < 0) return { error: `unknown action receipt "${args.receiptId}"`, code: "unknown_receipt" };
+  const current = state.actionReceipts[index];
+  if (current.status !== "indeterminate") {
+    return { error: "only an indeterminate action can be reconciled", code: "receipt_not_indeterminate" };
+  }
+  if (!current.dispatchStartedAt) {
+    return { error: "indeterminate action is missing its dispatch boundary", code: "receipt_dispatch_boundary_missing" };
+  }
+  let resultHash: string;
+  try {
+    resultHash = hashFlowValue(args.result);
+  } catch (error) {
+    return { error: (error as Error).message, code: "invalid_result" };
+  }
+  const receipt: FlowActionReceipt = {
+    ...current,
+    status: "succeeded",
+    result: structuredClone(args.result),
+    resultHash,
+    reconciliationProofId: args.proofId,
+    settledAt: nowIso(now),
+  };
+  const actionReceipts = [...state.actionReceipts];
+  actionReceipts[index] = receipt;
+  return { state: updateState(state, { actionReceipts }, now), receipt };
+}
+
+/**
+ * The only retry-safe resolution for an ambiguous mutation: an exact persisted proof that the
+ * gateway invocation is authoritatively absent downstream. Timeouts, pending states, and
+ * unrecognized responses remain indeterminate.
+ */
+export function proveIndeterminateFlowActionAbsent(
+  state: FlowExecutionState,
+  args: { receiptId: string; proofId: string },
+  now?: string
+): { state: FlowExecutionState; receipt: FlowActionReceipt } | RuntimeError {
+  const index = state.actionReceipts.findIndex((receipt) => receipt.id === args.receiptId);
+  if (index < 0) return { error: `unknown action receipt "${args.receiptId}"`, code: "unknown_receipt" };
+  const current = state.actionReceipts[index];
+  if (current.status !== "indeterminate") {
+    return { error: "only an indeterminate action can be reconciled", code: "receipt_not_indeterminate" };
+  }
+  if (!current.dispatchStartedAt) {
+    return { error: "indeterminate action is missing its dispatch boundary", code: "receipt_dispatch_boundary_missing" };
+  }
+  if (!args.proofId) {
+    return { error: "authoritative absence requires a proof identity", code: "invalid_reconciliation_proof" };
+  }
+  const receipt: FlowActionReceipt = {
+    ...current,
+    status: "failed",
+    error: "authoritative read-back proved this invocation was not committed",
+    reconciliationProofId: args.proofId,
+    settledAt: nowIso(now),
+  };
+  const actionReceipts = [...state.actionReceipts];
+  actionReceipts[index] = receipt;
+  return { state: updateState(state, { actionReceipts }, now), receipt };
+}
+
+/** Crash recovery never redispatches receipts that may have crossed the network boundary. */
+export function markStaleDispatchedActionsIndeterminate(
+  state: FlowExecutionState,
+  receiptIds: readonly string[],
+  now?: string
+): FlowExecutionState {
+  const stale = new Set(receiptIds);
+  let changed = false;
+  const actionReceipts = state.actionReceipts.map((receipt) => {
+    if (!stale.has(receipt.id) || receipt.status !== "reserved" || !receipt.dispatchStartedAt) {
+      return receipt;
+    }
+    changed = true;
+    return {
+      ...receipt,
+      status: "indeterminate" as const,
+      error: "dispatch owner expired after the action crossed the durable dispatch boundary",
+      settledAt: nowIso(now),
+    };
+  });
+  return changed ? updateState(state, { actionReceipts }, now) : state;
+}
+
 const UNSAFE_PATH_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+
+function safeFlowOutputKey(key: string): boolean {
+  return key.length > 0 && !UNSAFE_PATH_SEGMENTS.has(key);
+}
 
 function resultAtPath(result: unknown, path: string): { found: boolean; value?: unknown } {
   const normalized = path === "$" ? [] : path.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -556,6 +924,18 @@ export function completeFlowStep(
     };
   }
   const supplied = args.outputs ?? {};
+  if (supplied === null || Array.isArray(supplied) || typeof supplied !== "object") {
+    return { error: "step outputs must be a JSON object", code: "invalid_outputs" };
+  }
+  const unsafeOutput = Object.keys(supplied).find((key) => !safeFlowOutputKey(key));
+  if (unsafeOutput) {
+    return { error: `step output key "${unsafeOutput}" is unsafe`, code: "invalid_outputs" };
+  }
+  try {
+    hashFlowValue(supplied);
+  } catch (error) {
+    return { error: (error as Error).message, code: "invalid_outputs" };
+  }
   const verified = verifiedOutputs(state, ref, supplied);
   if ("error" in verified) return verified;
   const outputs = verified.outputs;

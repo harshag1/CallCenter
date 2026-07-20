@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { CallRuntimeSnapshotSchema, callRuntimeDigest } from "../call-runtime-snapshot";
 import { AgentFlowSchema } from "../flow";
-import { enterFlowStep, selectFlowTopic } from "../flow-runtime";
+import { deriveFlowActionInvocationId, enterFlowStep, selectFlowTopic } from "../flow-runtime";
 import type { AtomicActionReservation } from "../flow-state-store";
 
 vi.mock("server-only", () => ({}));
@@ -39,6 +40,50 @@ integration("atomic Flow v2 action persistence", () => {
     ],
     edges: [{ from: "entry", to: "operations" }],
   });
+  const runtimeSnapshot = CallRuntimeSnapshotSchema.parse({
+    v: 2,
+    agentVersion: 1,
+    namedFlowId: null,
+    flow,
+    instructions: "Test exact atomic action persistence.",
+    codeRevision: "flow-state-store-integration-test",
+    toolManifest: [],
+    extensionManifest: [{
+      name: "commit_operation",
+      description: "Commit one test operation.",
+      implementationDigest: "1".repeat(64),
+      admissionScopeDigest: "a".repeat(64),
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          operation_id: { type: "string" },
+          amount: { type: "number" },
+        },
+        required: ["operation_id", "amount"],
+      },
+      outputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          operation_id: { type: "string" },
+          committed: { type: "boolean" },
+        },
+        required: ["operation_id", "committed"],
+      },
+      effect: "write",
+    }],
+    externalMcpManifest: [],
+    environment: {
+      internetEnabled: false,
+      allowedDomains: [],
+      docsReady: false,
+      datasetSlugs: [],
+      holdMusic: false,
+    },
+    createdAt: "2026-07-16T12:00:00.000Z",
+  });
+  const runtimeDigest = callRuntimeDigest(runtimeSnapshot);
   let modules: Awaited<ReturnType<typeof loadModules>>;
 
   async function loadModules() {
@@ -46,8 +91,12 @@ integration("atomic Flow v2 action persistence", () => {
       process.env.DATABASE_URL = databaseUrl;
       process.env.DATABASE_SSL = "disable";
     }
-    const [db, store] = await Promise.all([import("../db"), import("../flow-state-store")]);
-    return { db, store };
+    const [db, store, mcp] = await Promise.all([
+      import("../db"),
+      import("../flow-state-store"),
+      import("../mcp"),
+    ]);
+    return { db, store, mcp };
   }
 
   beforeAll(async () => {
@@ -63,8 +112,10 @@ integration("atomic Flow v2 action persistence", () => {
       [ids.agent, JSON.stringify(flow)]
     );
     await modules.db.q(
-      "INSERT INTO calls (id, agent_id, agent_version, direction) VALUES ($1,$2,1,'web')",
-      [ids.call, ids.agent]
+      `INSERT INTO calls
+        (id, agent_id, agent_version, direction, runtime_snapshot, runtime_digest)
+       VALUES ($1,$2,1,'web',$3,$4)`,
+      [ids.call, ids.agent, JSON.stringify(runtimeSnapshot), runtimeDigest]
     );
     await modules.store.withLockedFlowState(ids.call, (state) => {
       const selected = selectFlowTopic(flow, state, "operations");
@@ -88,11 +139,13 @@ integration("atomic Flow v2 action persistence", () => {
 
   it("admits exactly one owner across concurrent identical reservations", async () => {
     const current = await modules.store.loadFlowState(ids.call);
+    const stableInvocationId = deriveFlowActionInvocationId(`${ids.call}:operation-1`);
     const reservations = await Promise.all(Array.from({ length: 50 }, () =>
       modules.store.reserveFlowActionAtomic(ids.call, flow, {
         receiptId: randomUUID(),
+        invocationId: stableInvocationId,
         ownerToken: randomUUID(),
-        runtimeDigest: "a".repeat(64),
+        runtimeDigest,
         tool: "commit_operation",
         arguments: { operation_id: "operation-1", amount: 42 },
         capabilityEpoch: current.capabilityEpoch,
@@ -115,6 +168,13 @@ integration("atomic Flow v2 action persistence", () => {
 
     const owner = successful.find((result) => result.execute);
     if (!owner?.ownerToken) throw new Error("reservation owner token was not returned");
+    const marked = await modules.store.markFlowActionDispatchStartedAtomic(ids.call, {
+      receiptId: owner.receipt.id,
+      ownerToken: owner.ownerToken,
+      runtimeDigest,
+    });
+    if ("error" in marked) throw new Error(marked.error);
+    expect(marked.receipt.dispatchStartedAt).toBeTruthy();
     const settled = await modules.store.settleFlowActionAtomic(ids.call, {
       receiptId: owner.receipt.id,
       ownerToken: owner.ownerToken,
@@ -129,8 +189,9 @@ integration("atomic Flow v2 action persistence", () => {
     const replays = await Promise.all(Array.from({ length: 25 }, () =>
       modules.store.reserveFlowActionAtomic(ids.call, flow, {
         receiptId: randomUUID(),
+        invocationId: stableInvocationId,
         ownerToken: randomUUID(),
-        runtimeDigest: "a".repeat(64),
+        runtimeDigest,
         tool: "commit_operation",
         arguments: { amount: 42, operation_id: "operation-1" },
         capabilityEpoch: replayState.capabilityEpoch,
@@ -138,5 +199,17 @@ integration("atomic Flow v2 action persistence", () => {
     ));
     expect(replays.every((result) => !("error" in result) && !result.execute && result.replayed)).toBe(true);
     expect(new Set(replays.flatMap((result) => "error" in result ? [] : [result.receipt.id])).size).toBe(1);
+
+    const beforeNoop = await modules.store.loadFlowState(ids.call);
+    const noop = await modules.store.withLockedFlowState(ids.call, (state) => ({ state, value: state.revision }));
+    expect(noop.state.revision).toBe(beforeNoop.revision);
+    expect(noop.value).toBe(beforeNoop.revision);
   }, 20_000);
+
+  it("revokes scoped tool authority as soon as the call is no longer active", async () => {
+    const scope = { callId: ids.call, agentId: ids.agent, orgId: ids.org };
+    await expect(modules.mcp.listToolsFor(scope)).resolves.toBeInstanceOf(Array);
+    await modules.db.q("UPDATE calls SET status = 'completed', ended_at = now() WHERE id = $1", [ids.call]);
+    await expect(modules.mcp.listToolsFor(scope)).rejects.toThrow(/authority is no longer active/);
+  });
 });

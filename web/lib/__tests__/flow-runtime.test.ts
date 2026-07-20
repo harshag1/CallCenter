@@ -104,7 +104,11 @@ describe("flow v2 validation", () => {
   it("accepts arbitrarily nested, explicitly transitioned steps", () => {
     const result = validateAgentFlow(deepFlow);
     expect(result.flow).toBeDefined();
-    expect(result.diagnostics).toEqual([]);
+    expect(result.diagnostics.filter((diagnostic) => diagnostic.level === "error")).toEqual([]);
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      level: "warning",
+      message: expect.stringContaining("model-authored rather than receipt-bound"),
+    }));
   });
 
   it("reports dangling graph and step transitions", () => {
@@ -116,8 +120,34 @@ describe("flow v2 validation", () => {
     expect(messages).toContain('transition targets unknown step "returns.nope"');
   });
 
+  it("rejects ambiguous path segments, unsafe output keys, and unreachable hidden steps", () => {
+    const unsafe = structuredClone(deepFlow);
+    unsafe.nodes[1].steps![0].id = "verify.account";
+    unsafe.nodes[1].steps![0].required_outputs = ["constructor"];
+    const messages = validateAgentFlow(unsafe).diagnostics.map((diagnostic) => diagnostic.message);
+    expect(messages).toContain("Flow v2 step ids must be 1-64 letters, numbers, underscores, or hyphens");
+    expect(messages).toContain('unsafe output key "constructor"');
+
+    const hidden = AgentFlowSchema.parse({
+      schema_version: 2,
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "topic", label: "Topic", kind: "topic", steps: [
+          { id: "visible", label: "Visible", instructions: "Visible.", entry: true },
+          { id: "hidden", label: "Hidden", instructions: "Hidden.", entry: false },
+        ] },
+      ],
+      edges: [{ from: "entry", to: "topic" }],
+    });
+    expect(validateAgentFlow(hidden).diagnostics).toContainEqual(expect.objectContaining({
+      level: "error",
+      path: "topic.hidden",
+      message: "step is unreachable from every classified entry",
+    }));
+  });
+
   it("accepts transition-only topics without exposing them to initial classification", () => {
-    expect(validateAgentFlow(crossTopicFlow).diagnostics).toEqual([]);
+    expect(validateAgentFlow(crossTopicFlow).diagnostics.filter((diagnostic) => diagnostic.level === "error")).toEqual([]);
     expect(topicNodes(crossTopicFlow).map((node) => node.id)).toEqual(["intake"]);
     expect(selectFlowTopic(crossTopicFlow, createFlowExecutionState(), "fulfillment")).toMatchObject({
       code: "transition_only_topic",
@@ -279,6 +309,125 @@ describe("flow v2 execution", () => {
     if ("error" in entered) throw new Error(entered.error);
     expect(selectFlowTopic(deepFlow, entered.state, "other")).toMatchObject({
       code: "active_step_incomplete",
+    });
+  });
+
+  it("does not allow reclassification to abandon a pending child or reopen a terminal flow", () => {
+    const selected = selectFlowTopic(deepFlow, createFlowExecutionState(), "returns");
+    if ("error" in selected) throw new Error(selected.error);
+    const verify = enterFlowStep(deepFlow, selected, "returns.verify");
+    if ("error" in verify) throw new Error(verify.error);
+    const verified = completeFlowStep(deepFlow, verify.state, { outputs: { order_id: "order_123" } });
+    if ("error" in verified) throw new Error(verified.error);
+    expect(selectFlowTopic(deepFlow, verified.state, "other")).toMatchObject({
+      code: "pending_flow_transition",
+      allowed: ["returns.verify.eligibility"],
+    });
+
+    const eligibility = enterFlowStep(deepFlow, verified.state, "returns.verify.eligibility");
+    if ("error" in eligibility) throw new Error(eligibility.error);
+    const finished = completeFlowStep(deepFlow, eligibility.state, { outputs: { eligible: false } });
+    if ("error" in finished) throw new Error(finished.error);
+    expect(selectFlowTopic(deepFlow, finished.state, "returns")).toMatchObject({ code: "flow_finished" });
+  });
+
+  it("matches structured branch values canonically and never treats a missing value as not-equal", () => {
+    const structured = AgentFlowSchema.parse({
+      schema_version: 2,
+      always_tools: [],
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "route", label: "Route", kind: "topic", steps: [
+          { id: "capture", label: "Capture", instructions: "Capture.", transitions: [{
+            to: "route.finish",
+            condition: { output: "decision", operator: "equals", value: { code: 7, tags: ["a", "b"] } },
+          }] },
+          { id: "finish", label: "Finish", instructions: "Finish." },
+        ] },
+      ],
+      edges: [{ from: "entry", to: "route" }],
+    });
+    const selected = selectFlowTopic(structured, createFlowExecutionState(), "route");
+    if ("error" in selected) throw new Error(selected.error);
+    const entered = enterFlowStep(structured, selected, "route.capture");
+    if ("error" in entered) throw new Error(entered.error);
+    const matched = completeFlowStep(structured, entered.state, {
+      outputs: { decision: { tags: ["a", "b"], code: 7 } },
+    });
+    if ("error" in matched) throw new Error(matched.error);
+    expect(matched.nextSteps).toEqual(["route.finish"]);
+
+    const missingFlow = structuredClone(structured);
+    missingFlow.nodes[1].steps![0].transitions![0].condition = {
+      output: "missing",
+      operator: "not_equals",
+      value: "blocked",
+    };
+    const missingSelected = selectFlowTopic(missingFlow, createFlowExecutionState(), "route");
+    if ("error" in missingSelected) throw new Error(missingSelected.error);
+    const missingEntered = enterFlowStep(missingFlow, missingSelected, "route.capture");
+    if ("error" in missingEntered) throw new Error(missingEntered.error);
+    const missing = completeFlowStep(missingFlow, missingEntered.state, { outputs: {} });
+    if ("error" in missing) throw new Error(missing.error);
+    expect(missing.nextSteps).toEqual([]);
+  });
+
+  it("invalidates completed descendant outputs and checkpoints when a cycle re-enters an ancestor", () => {
+    const cyclic = AgentFlowSchema.parse({
+      schema_version: 2,
+      always_tools: [],
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "work", label: "Work", kind: "topic", steps: [{
+          id: "parent", label: "Parent", instructions: "Parent.", entry: true, checkpoint: true, steps: [{
+            id: "child", label: "Child", instructions: "Child.", checkpoint: true, transitions: [{ to: "work.parent" }],
+          }],
+        }] },
+      ],
+      edges: [{ from: "entry", to: "work" }],
+    });
+    const selected = selectFlowTopic(cyclic, createFlowExecutionState(), "work");
+    if ("error" in selected) throw new Error(selected.error);
+    const parent = enterFlowStep(cyclic, selected, "work.parent");
+    if ("error" in parent) throw new Error(parent.error);
+    const parentDone = completeFlowStep(cyclic, parent.state, { outputs: { parent_revision: 1 } });
+    if ("error" in parentDone) throw new Error(parentDone.error);
+    const child = enterFlowStep(cyclic, parentDone.state, "work.parent.child");
+    if ("error" in child) throw new Error(child.error);
+    const childDone = completeFlowStep(cyclic, child.state, { outputs: { child_revision: 1 } });
+    if ("error" in childDone) throw new Error(childDone.error);
+    expect(childDone.nextSteps).toEqual(["work.parent"]);
+    const reentered = enterFlowStep(cyclic, childDone.state, "work.parent");
+    if ("error" in reentered) throw new Error(reentered.error);
+    expect(reentered.state.completedSteps).toEqual([]);
+    expect(reentered.state.outputs).toEqual({});
+    expect(reentered.state.checkpoints).toEqual([]);
+  });
+
+  it("does not grant nested-step authority when a transition bypasses its parent", () => {
+    const bypass = AgentFlowSchema.parse({
+      schema_version: 2,
+      always_tools: [],
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "work", label: "Work", kind: "topic", steps: [
+          { id: "start", label: "Start", instructions: "Start.", entry: true, transitions: [{ to: "work.parent.child" }] },
+          { id: "parent", label: "Parent", instructions: "Establish parent evidence.", entry: false, tools: ["parent_authority"], steps: [
+            { id: "child", label: "Child", instructions: "Use parent evidence." },
+          ] },
+        ] },
+      ],
+      edges: [{ from: "entry", to: "work" }],
+    });
+    const selected = selectFlowTopic(bypass, createFlowExecutionState(), "work");
+    if ("error" in selected) throw new Error(selected.error);
+    const start = enterFlowStep(bypass, selected, "work.start");
+    if ("error" in start) throw new Error(start.error);
+    const completed = completeFlowStep(bypass, start.state, { outputs: {} });
+    if ("error" in completed) throw new Error(completed.error);
+    expect(completed.nextSteps).toEqual(["work.parent.child"]);
+    expect(enterFlowStep(bypass, completed.state, "work.parent.child")).toMatchObject({
+      code: "ancestor_step_incomplete",
     });
   });
 
