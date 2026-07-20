@@ -12,6 +12,8 @@ const SESSION_TTL_MS = 30 * 24 * 3600_000;
 const IDLE_TTL_MS = 7 * 24 * 3600_000;
 const AUTH_CODE_KEY_DOMAIN = "harshas-amazing-call-center/auth-code/v2\n";
 const AUTH_ABUSE_SOURCE_KEY_DOMAIN = "harshas-amazing-call-center/auth-abuse-source/v1\n";
+const AUTH_LOCAL_DEVELOPMENT_SOURCE_KEY_DOMAIN =
+  "harshas-amazing-call-center/auth-local-development-source/v1\n";
 const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 export const SECURE_SESSION_COOKIE_NAME = "__Host-hacc_session";
 export const DEVELOPMENT_SESSION_COOKIE_NAME = "hacc_dev_session";
@@ -196,6 +198,59 @@ function canonicalClientIp(value: string): string | null {
 }
 
 /**
+ * Gives a plain `next dev` server one deliberately shared abuse-budget
+ * identity without pretending a browser-controlled header is a client IP.
+ *
+ * This path is restricted to explicit stdout delivery in development, no
+ * configured Resend credential, and a plaintext loopback PUBLIC_ORIGIN that
+ * exactly matches the absolute Request.url authority. Request.url can itself
+ * be derived from HTTP authority by a server adapter, so this is deliberately
+ * a local quickstart gate, not socket-level client identity. Forwarding,
+ * Origin, and fetch-metadata headers are not consulted. All local callers
+ * share one durable budget instead of gaining a fresh budget by changing an
+ * email address or a spoofable header.
+ */
+function localDevelopmentAuthAbuseAuthority(request: Request): string | null {
+  if (
+    process.env.NODE_ENV !== "development"
+    || process.env.ALLOW_DEV_OTP_STDOUT !== "true"
+    || Boolean(process.env.RESEND_API_KEY)
+  ) {
+    return null;
+  }
+
+  const configured = process.env.PUBLIC_ORIGIN?.trim();
+  if (!configured) return null;
+
+  try {
+    const publicOrigin = new URL(configured);
+    const requestUrl = new URL(request.url);
+    if (
+      publicOrigin.protocol !== "http:"
+      || requestUrl.protocol !== "http:"
+      || !isLoopbackSessionHostname(publicOrigin.hostname)
+      || !isLoopbackSessionHostname(requestUrl.hostname)
+      || publicOrigin.username
+      || publicOrigin.password
+      || publicOrigin.pathname !== "/"
+      || publicOrigin.search
+      || publicOrigin.hash
+      || requestUrl.username
+      || requestUrl.password
+      || requestUrl.origin !== publicOrigin.origin
+      || requestUrl.pathname !== "/api/auth/send-code"
+      || requestUrl.search
+      || requestUrl.hash
+    ) {
+      return null;
+    }
+    return publicOrigin.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Returns a non-reversible source binding only when the deployment explicitly
  * identifies a trusted proxy header. Vercel's platform-authenticated header is
  * the sole implicit policy; self-hosted deployments must opt into the header
@@ -203,6 +258,14 @@ function canonicalClientIp(value: string): string | null {
  * let anonymous callers rotate this abuse boundary.
  */
 export function anonymousAuthAbuseSourceHmac(request: Request): string | null {
+  const localDevelopmentAuthority = localDevelopmentAuthAbuseAuthority(request);
+  if (localDevelopmentAuthority) {
+    return createHmac("sha256", authCodeHmacKey())
+      .update(AUTH_LOCAL_DEVELOPMENT_SOURCE_KEY_DOMAIN, "utf8")
+      .update(localDevelopmentAuthority, "utf8")
+      .digest("hex");
+  }
+
   const configured = process.env.AUTH_TRUSTED_CLIENT_IP_HEADER?.trim().toLowerCase();
   const headerName = configured || (process.env.VERCEL === "1" ? "x-vercel-forwarded-for" : "");
   if (!TRUSTED_CLIENT_IP_HEADERS.has(headerName)) return null;

@@ -1,10 +1,8 @@
 // Author: Harsha Gundala
-// db.ts — Postgres pool (pinned Supabase CA, strict TLS) + query helper.
+// db.ts — Postgres pool (verified TLS, optional custom/Supabase CA) + query helper.
 
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { resolveDatabaseSslMode } from "./database-ssl.mjs";
+import { loadDatabaseConnectionConfig } from "./database-connection";
 
 const SAFE_ROLE = /^[a-z][a-z0-9_]{0,62}$/;
 
@@ -62,22 +60,7 @@ function enforceLeastPrivilegeDatabaseRole(): boolean {
 }
 
 function makePool(): Pool {
-  const connectionString = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
-  if (!connectionString) throw new Error("DATABASE_URL or SUPABASE_DB_URL is required");
-  const sslMode = resolveDatabaseSslMode({
-    connectionString,
-    configuredMode: process.env.DATABASE_SSL,
-    nodeEnv: process.env.NODE_ENV,
-  });
-  const defaultCaPath = join(process.cwd(), "certs", "supabase-ca.crt");
-  const ssl = sslMode === "disable"
-    ? false
-    : {
-        rejectUnauthorized: true,
-        ...(process.env.DATABASE_CA_CERT
-          ? { ca: process.env.DATABASE_CA_CERT.replace(/\\n/g, "\n") }
-          : existsSync(defaultCaPath) ? { ca: readFileSync(defaultCaPath, "utf8") } : {}),
-      };
+  const { connectionString, ssl } = loadDatabaseConnectionConfig();
   return new Pool({
     connectionString,
     ssl,

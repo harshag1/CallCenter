@@ -2,10 +2,9 @@
 // events/stream — org-scoped SSE fan-out of pg NOTIFY 'org_events' via a dedicated LISTEN connection.
 
 import { Client } from "pg";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { loadDatabaseConnectionConfig } from "@/lib/database-connection";
 
 export const maxDuration = 800;
 
@@ -13,13 +12,16 @@ export async function GET(req: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const ca = readFileSync(join(process.cwd(), "certs", "supabase-ca.crt"), "utf8");
-  const client = new Client({ connectionString: process.env.SUPABASE_DB_URL, ssl: { ca } });
+  let client: Client | undefined;
   try {
+    client = new Client(loadDatabaseConnectionConfig());
     await client.connect();
     await client.query("LISTEN org_events");
   } catch {
-    void client.end().catch(() => {});
+    void client?.end().catch(() => {});
+    return NextResponse.json({ error: "stream unavailable" }, { status: 503 });
+  }
+  if (!client) {
     return NextResponse.json({ error: "stream unavailable" }, { status: 503 });
   }
 

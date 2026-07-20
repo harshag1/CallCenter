@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   q: vi.fn(),
@@ -41,6 +41,8 @@ describe("authentication tenant isolation", () => {
       return { rows: [] };
     });
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   it("does not authorize organization membership from a matching email domain", async () => {
     const bearer = await establishSession("New.User@Example.Test");
@@ -208,6 +210,7 @@ describe("authentication tenant isolation", () => {
 
   it("derives the anonymous abuse identity only from an explicitly trusted edge header", () => {
     vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+    vi.stubEnv("PUBLIC_ORIGIN", "https://app.example.test");
     vi.stubEnv("AUTH_TRUSTED_CLIENT_IP_HEADER", "x-real-ip");
     const trusted = new Request("https://app.example.test/api/auth/send-code", {
       headers: {
@@ -228,6 +231,110 @@ describe("authentication tenant isolation", () => {
       "https://app.example.test/api/auth/send-code",
       { headers: { "x-forwarded-for": "198.51.100.9" } },
     ))).toBeNull();
-    vi.unstubAllEnvs();
+  });
+
+  it("uses one header-independent abuse identity for exact plaintext loopback development", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+    vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+    vi.stubEnv("AUTH_TRUSTED_CLIENT_IP_HEADER", "");
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("ALLOW_DEV_OTP_STDOUT", "true");
+    vi.stubEnv("RESEND_API_KEY", "");
+
+    const ordinary = new Request("http://localhost:3000/api/auth/send-code");
+    const poisoned = new Request("http://localhost:3000/api/auth/send-code", {
+      headers: {
+        host: "remote.example.test",
+        origin: "https://remote.example.test",
+        forwarded: "for=198.51.100.9;host=remote.example.test;proto=https",
+        "cf-connecting-ip": "198.51.100.10",
+        "x-forwarded-for": "198.51.100.11, 127.0.0.1",
+        "x-forwarded-host": "remote.example.test",
+        "x-forwarded-proto": "https",
+        "x-real-ip": "198.51.100.12",
+        "x-vercel-forwarded-for": "198.51.100.13",
+      },
+    });
+
+    expect(anonymousAuthAbuseSourceHmac(ordinary)).toMatch(/^[a-f0-9]{64}$/);
+    expect(anonymousAuthAbuseSourceHmac(poisoned))
+      .toBe(anonymousAuthAbuseSourceHmac(ordinary));
+  });
+
+  it.each([
+    ["remote HTTP authority", "http://198.51.100.20:3000/api/auth/send-code"],
+    ["remote HTTPS authority", "https://remote.example.test/api/auth/send-code"],
+    ["HTTPS loopback", "https://localhost:3000/api/auth/send-code"],
+    ["lookalike localhost suffix", "http://localhost.example.test:3000/api/auth/send-code"],
+    ["different loopback alias", "http://127.0.0.1:3000/api/auth/send-code"],
+    ["different loopback port", "http://localhost:3001/api/auth/send-code"],
+    ["different route", "http://localhost:3000/api/auth/verify-code"],
+    ["query-bearing route", "http://localhost:3000/api/auth/send-code?source=local"],
+  ])("does not let spoofed proxy headers turn %s into a local development source", (_label, url) => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+    vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+    vi.stubEnv("AUTH_TRUSTED_CLIENT_IP_HEADER", "");
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("ALLOW_DEV_OTP_STDOUT", "true");
+    vi.stubEnv("RESEND_API_KEY", "");
+
+    const request = new Request(url, {
+      headers: {
+        host: "localhost:3000",
+        origin: "http://localhost:3000",
+        forwarded: "for=127.0.0.1;host=localhost:3000;proto=http",
+        "cf-connecting-ip": "127.0.0.1",
+        "x-forwarded-for": "127.0.0.1",
+        "x-forwarded-host": "localhost:3000",
+        "x-forwarded-proto": "http",
+        "x-real-ip": "127.0.0.1",
+        "x-vercel-forwarded-for": "127.0.0.1",
+      },
+    });
+
+    expect(anonymousAuthAbuseSourceHmac(request)).toBeNull();
+  });
+
+  it.each(["production", "test", ""])(
+    "keeps the loopback fallback disabled when NODE_ENV is %j",
+    (nodeEnv) => {
+      vi.stubEnv("NODE_ENV", nodeEnv);
+      vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+      vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+      vi.stubEnv("AUTH_TRUSTED_CLIENT_IP_HEADER", "");
+      vi.stubEnv("VERCEL", "");
+      vi.stubEnv("ALLOW_DEV_OTP_STDOUT", "true");
+      vi.stubEnv("RESEND_API_KEY", "");
+
+      expect(anonymousAuthAbuseSourceHmac(new Request(
+        "http://localhost:3000/api/auth/send-code",
+        {
+          headers: {
+            "x-forwarded-for": "127.0.0.1",
+            "x-real-ip": "127.0.0.1",
+          },
+        },
+      ))).toBeNull();
+    },
+  );
+
+  it.each([
+    ["stdout opt-in absent", "", ""],
+    ["stdout opt-in false", "false", ""],
+    ["provider-backed email configured", "true", "re_test_provider_key"],
+  ])("keeps the loopback fallback closed when %s", (_label, stdoutOptIn, resendKey) => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+    vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+    vi.stubEnv("AUTH_TRUSTED_CLIENT_IP_HEADER", "");
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("ALLOW_DEV_OTP_STDOUT", stdoutOptIn);
+    vi.stubEnv("RESEND_API_KEY", resendKey);
+
+    expect(anonymousAuthAbuseSourceHmac(new Request(
+      "http://localhost:3000/api/auth/send-code",
+    ))).toBeNull();
   });
 });
