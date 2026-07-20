@@ -4,7 +4,7 @@
 
 This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. It compares the same model against itself: the raw agent receives the entire workflow and action catalog up front, while the harness progressively discloses the current objective and routes actions through durable, runtime-enforced state.
 
-**Current status: draft protocol and infrastructure work, with $0.00 in paid voice-provider session spend. No superiority result exists yet.** Five separately tracked unverified architecture/security reviews cost **$3.312551** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
+**Current status: one 32-session exploratory paid development batch is complete. Every strict arm scored 0%, so no superiority result exists.** The batch completed 433 of 1,024 planned voice-to-voice interactions; provider reconciliation is pending. Five separately tracked unverified architecture/security reviews cost **$3.312551** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. The null development result is published in [RESULTS.md](RESULTS.md).
 
 The benchmark is designed to answer six questions:
 
@@ -61,7 +61,7 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - Results include sample counts, paired effect sizes, uncertainty intervals, and per-provider breakdowns. No claim is made from a showcase run or a selectively retained subset.
 - Costs are controlled by [BUDGET.md](BUDGET.md). New sessions stop being scheduled at $900, leaving a $100 hard-ceiling reserve.
 
-## Reproduce the current zero-provider-spend evidence
+## Reproduce the deterministic engineering evidence
 
 From `web/`, these commands verify the checked-in numerical claims and regenerate the two principal deterministic engineering artifacts under the ignored `.local/` directory:
 
@@ -83,7 +83,8 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 - [BUDGET.md](BUDGET.md): fail-closed spend gates and live ledger
 - [PROGRESS.md](PROGRESS.md): dated implementation and experiment log
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
-- [RESULTS.md](RESULTS.md): artifact-derived outcomes; currently records that no results exist
+- [RESULTS.md](RESULTS.md): exploratory live outcome and exact claim boundary
+- [LIVE_STS_DEVELOPMENT_RESULT.json](LIVE_STS_DEVELOPMENT_RESULT.json): public machine-readable summary of the 32-session development batch
 - [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
 - [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result
 - [DECISION_EVIDENCE.md](DECISION_EVIDENCE.md): claim-by-claim evidence level and the next numerical gate for every retained framework decision

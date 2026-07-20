@@ -370,3 +370,21 @@ pretending omitted fields were echoed.
 - Conservative filesystem-ledger liability settled: **$10.00**
 - Provider-reconciled billed amount: **unavailable**
 - Paid canary gate: **closed**
+
+## 2026-07-20 — Exploratory 32-session live STS batch completed with a null strict result
+
+The source-frozen v2 development experiment opened all 32 scheduled sessions across 16 matched raw-full/full-harness pairs with no retries. It used OpenAI `gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, and xAI `grok-voice-think-fast-1.0` over two deterministic 32-turn synthetic caller scenarios.
+
+The initial v1 canary exposed a real orchestrator incompatibility: OpenAI and xAI emitted the newer host-authored `tool.dispatch` normalized event, while the trial loop consumed only `tool.calls`. Those v1 cells were preserved as an invalidated pilot. Commit `968276f` added response-bound execution for local proxy dispatches and a focused regression; the dependent orchestrator and realtime-client slice passed 150/150 tests. The corrected experiment was separately versioned and frozen at commit `0738f5b` before any v2 audio session.
+
+V2 completed **433 / 1,024** planned voice-to-voice interactions. Terminal session counts were 12 completed, 10 provider errors, 1 response timeout, and 9 runner exceptions. Every strict arm scored 0%: GPT raw 0/6, Gemini raw 0/5, Grok raw 0/5, pooled HACC 0/16, and each provider-specific HACC arm 0. No harness-superiority claim is supported.
+
+Evidence:
+
+- public result: [LIVE_STS_DEVELOPMENT_RESULT.json](LIVE_STS_DEVELOPMENT_RESULT.json);
+- result SHA-256: `a2d0ac00506a327f2ec2bd432e629443de5d4be7d6c9e42677dbe43a01ddcf4e`;
+- plan SHA-256: `87cdaee2a7c8c7c239b717fec47230203499088163f5f5228d97e0ed102b47e1`;
+- schedule SHA-256: `9d660facc978272979215f7148791dab66f6a9de5f1e5f62b80da3362a56a621`;
+- fixture manifest SHA-256: `1ecfe632e8ee39169e20b4f1343e45c543cbdc7e52c71d6ae7b598e48aeefb49`.
+
+This is exploratory API-model evidence with synthetic caller speech, not a consumer ChatGPT Voice benchmark or confirmatory result. Provider billing reconciliation remains pending; the frozen batch admitted at most 32 local $5 reservations for a $160 ceiling.
