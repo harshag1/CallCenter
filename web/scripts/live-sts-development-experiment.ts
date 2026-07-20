@@ -52,7 +52,7 @@ import type { NormalizedRealtimeClient } from "../lib/realtime/client/types";
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/live-sts-development-v1");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/live-sts-development-v2");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "experiment-plan.json";
 const RESULT_FILE = "experiment-results.json";
@@ -263,7 +263,7 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "live-sts-development-v1",
+    keyId: "live-sts-development-v2",
     privateKeyPem,
     publicKeyPem,
   });

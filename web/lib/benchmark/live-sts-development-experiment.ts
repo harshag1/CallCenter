@@ -1,8 +1,8 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
 import type { BenchmarkConditionId } from "./condition-compiler";
 
-export const LIVE_STS_EXPERIMENT_ID = "live-sts-long-flow-development-v1";
-export const LIVE_STS_EXPERIMENT_SEED = "hacc-live-sts-20260720-v1";
+export const LIVE_STS_EXPERIMENT_ID = "live-sts-long-flow-development-v2";
+export const LIVE_STS_EXPERIMENT_SEED = "hacc-live-sts-20260720-v2";
 export const LIVE_STS_TURNS_PER_SESSION = 32;
 
 export const LIVE_STS_PROVIDER_SPECS = Object.freeze({
