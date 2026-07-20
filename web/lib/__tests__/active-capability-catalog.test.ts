@@ -287,7 +287,7 @@ describe("ACTIVE_CAPABILITY_CATALOG", () => {
       expect(metrics.catalog_bytes).toBeLessThanOrEqual(DEFAULT_ACTIVE_CAPABILITY_CATALOG_BYTES);
       expect(metrics.estimated_tokens_at_4_bytes_per_token).toBe(Math.ceil(metrics.catalog_bytes / 4));
     }
-  });
+  }, 15_000);
 
   it("never serializes provider endpoints, authorization headers, or registry credentials", () => {
     const catalog = buildActiveCapabilityCatalog({

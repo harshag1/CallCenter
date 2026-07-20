@@ -7,9 +7,17 @@ import {
   allowedStepPaths,
   describeNextSteps,
   flowCapabilityScope,
+  hashFlowValue,
   type FlowExecutionState,
 } from "./flow-runtime";
 import type { VoiceToolDefinition } from "./voice-tools";
+
+const MAX_DISCLOSED_COMPLETED_STEPS = 8;
+const MAX_DISCLOSED_CHECKPOINTS = 4;
+const MAX_DISCLOSED_PENDING_RECEIPTS = 16;
+const MAX_DISCLOSED_DURABLE_OUTPUTS = 12;
+const MAX_DISCLOSED_OMITTED_OUTPUTS = 4;
+const MAX_DURABLE_OUTPUT_BYTES = 4 * 1024;
 
 function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
@@ -125,10 +133,64 @@ export function activeFlowControlDefinitions(
     if (current) controls.push(completeStepDefinition(current.path));
     const indeterminate = uniqueSorted(state.actionReceipts
       .filter((receipt) => receipt.status === "indeterminate")
-      .map((receipt) => receipt.id));
+      .map((receipt) => receipt.id))
+      .slice(0, MAX_DISCLOSED_PENDING_RECEIPTS);
     if (indeterminate.length) controls.push(reconcileDefinition(indeterminate));
   }
   return controls.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+}
+
+function boundedDurableContext(
+  flow: AgentFlow,
+  state: FlowExecutionState,
+  current: ReturnType<typeof activeStep>
+): Readonly<{
+  outputs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  omitted: readonly Readonly<{ step: string; sha256: string; bytes: number }>[];
+  omittedCount: number;
+}> {
+  const priority = new Set<string>();
+  if (state.currentStep) priority.add(state.currentStep);
+  for (const [index] of (current?.ancestors ?? []).entries()) {
+    priority.add(current!.path.split(".").slice(0, index + 2).join("."));
+  }
+  for (const next of allowedStepPaths(flow, state)) {
+    const ref = findStep(flow, next);
+    for (const [index] of (ref?.ancestors ?? []).entries()) {
+      priority.add(ref!.path.split(".").slice(0, index + 2).join("."));
+    }
+  }
+  for (const path of [...state.completedSteps].reverse()) priority.add(path);
+
+  const outputs: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const omitted: Array<Readonly<{ step: string; sha256: string; bytes: number }>> = [];
+  let usedBytes = 2;
+  let considered = 0;
+  let omittedCount = 0;
+  for (const path of priority) {
+    const value = state.outputs[path];
+    if (!value) continue;
+    considered += 1;
+    const bytes = Buffer.byteLength(JSON.stringify({ [path]: value }), "utf8");
+    if (
+      Object.keys(outputs).length < MAX_DISCLOSED_DURABLE_OUTPUTS &&
+      usedBytes + bytes <= MAX_DURABLE_OUTPUT_BYTES
+    ) {
+      outputs[path] = value;
+      usedBytes += bytes;
+      continue;
+    }
+    omittedCount += 1;
+    if (omitted.length < MAX_DISCLOSED_OMITTED_OUTPUTS) {
+      omitted.push(Object.freeze({ step: path, sha256: hashFlowValue(value), bytes }));
+    }
+  }
+  omittedCount += Math.max(0, Object.keys(state.outputs).length - considered);
+  return Object.freeze({
+    outputs: Object.freeze(outputs),
+    omitted: Object.freeze(omitted),
+    omittedCount,
+  });
 }
 
 /** Bounded later by the catalog serializer; never contains grants, credentials, or action args. */
@@ -138,7 +200,8 @@ export function activeFlowContext(
 ): Readonly<Record<string, unknown>> {
   const current = activeStep(flow, state);
   const scope = flowCapabilityScope(state);
-  const pending = unresolvedReceipts(state).map((receipt) => ({
+  const allPending = unresolvedReceipts(state);
+  const pending = allPending.slice(0, MAX_DISCLOSED_PENDING_RECEIPTS).map((receipt) => ({
     receipt_id: receipt.id,
     step: receipt.step,
     tool: receipt.tool,
@@ -153,6 +216,9 @@ export function activeFlowContext(
       tool: receipt.tool,
       status: receipt.status,
     }));
+  const durable = boundedDurableContext(flow, state, current);
+  const completedSteps = state.completedSteps.slice(-MAX_DISCLOSED_COMPLETED_STEPS);
+  const checkpoints = state.checkpoints.slice(-MAX_DISCLOSED_CHECKPOINTS);
   return {
     catalog_mode: state.status === "routing"
       ? "routing"
@@ -188,10 +254,19 @@ export function activeFlowContext(
       },
     } : {}),
     next_steps: describeNextSteps(flow, state),
-    completed_steps: state.completedSteps,
-    durable_outputs: state.outputs,
-    checkpoints: state.checkpoints,
+    completed_step_count: state.completedSteps.length,
+    completed_steps: completedSteps,
+    completed_steps_truncated: completedSteps.length !== state.completedSteps.length,
+    durable_output_count: Object.keys(state.outputs).length,
+    durable_outputs: durable.outputs,
+    omitted_durable_outputs: durable.omitted,
+    omitted_durable_output_count: durable.omittedCount,
+    checkpoint_count: state.checkpoints.length,
+    checkpoints,
+    checkpoints_truncated: checkpoints.length !== state.checkpoints.length,
+    pending_action_receipt_count: allPending.length,
     pending_action_receipts: pending,
+    pending_action_receipts_truncated: pending.length !== allPending.length,
     recent_settled_actions: recentSettled,
   };
 }

@@ -63,6 +63,8 @@ export const FlowExecutionStateSchema = z.object({
   nodeId: z.string().nullable(),
   currentStep: z.string().nullable(),
   completedSteps: z.array(z.string()),
+  /** Total step admissions across successful cycles and retries; absent on legacy persisted state. */
+  stepEntries: z.number().int().nonnegative().optional(),
   attempts: z.record(z.string(), z.number().int().nonnegative()),
   outputs: z.record(z.string(), z.record(z.string(), z.unknown())),
   checkpoints: z.array(z.object({ step: z.string(), at: z.iso.datetime() }).strict()),
@@ -202,6 +204,7 @@ export function createFlowExecutionState(now?: string): FlowExecutionState {
     nodeId: null,
     currentStep: null,
     completedSteps: [],
+    stepEntries: 0,
     attempts: {},
     outputs: {},
     checkpoints: [],
@@ -414,11 +417,18 @@ export function enterFlowStep(
     };
   }
 
-  const attempts = (state.attempts[path] ?? 0) + 1;
+  // A successful transition back to the same path starts a new iteration, not another retry.
+  // Consecutive retries of the still-active step continue to consume max_attempts.
+  const attempts = isRetry ? (state.attempts[path] ?? 0) + 1 : 1;
   if (attempts > (ref.step.max_attempts ?? 3)) {
     return { error: `step "${path}" exceeded its attempt limit`, code: "attempt_limit", allowed: ref.step.on_failure ? [ref.step.on_failure] : allowed };
   }
-  const totalEntries = Object.values(state.attempts).reduce((sum, count) => sum + count, 0) + 1;
+  const totalEntries = (
+    state.stepEntries ??
+    // Legacy state did not distinguish completed iterations from retries. Preserve the
+    // conservative historical lower bound, then use the monotonic counter from this entry on.
+    Object.values(state.attempts).reduce((sum, count) => sum + count, 0)
+  ) + 1;
   if (flow.max_step_entries && totalEntries > flow.max_step_entries) {
     return {
       error: `flow exceeded its ${flow.max_step_entries}-entry circuit breaker`,
@@ -435,6 +445,7 @@ export function enterFlowStep(
     nodeId: ref.nodeId,
     currentStep: path,
     completedSteps: state.completedSteps.filter((completed) => !inReenteredSubtree(completed)),
+    stepEntries: totalEntries,
     attempts: { ...state.attempts, [path]: attempts },
     outputs,
     checkpoints: state.checkpoints.filter((checkpoint) => !inReenteredSubtree(checkpoint.step)),

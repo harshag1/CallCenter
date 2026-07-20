@@ -404,6 +404,48 @@ describe("flow v2 execution", () => {
     expect(reentered.state.checkpoints).toEqual([]);
   });
 
+  it("supports long successful cycles while keeping consecutive retry limits independent", () => {
+    const repeatable = AgentFlowSchema.parse({
+      schema_version: 2,
+      always_tools: [],
+      max_step_entries: 100,
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "work", label: "Work", kind: "topic", steps: [{
+          id: "repeat",
+          label: "Repeat",
+          instructions: "Complete one repeatable unit.",
+          entry: true,
+          max_attempts: 2,
+          transitions: [{ to: "work.repeat" }],
+        }] },
+      ],
+      edges: [{ from: "entry", to: "work" }],
+    });
+    let state = selectFlowTopic(repeatable, createFlowExecutionState(), "work");
+    if ("error" in state) throw new Error(state.error);
+    for (let iteration = 1; iteration <= 25; iteration += 1) {
+      const entered = enterFlowStep(repeatable, state, "work.repeat");
+      if ("error" in entered) throw new Error(entered.error);
+      expect(entered.state.attempts["work.repeat"]).toBe(1);
+      expect(entered.state.stepEntries).toBe(iteration);
+      const completed = completeFlowStep(repeatable, entered.state, {
+        outputs: { iteration },
+      });
+      if ("error" in completed) throw new Error(completed.error);
+      state = completed.state;
+    }
+
+    const retryOne = enterFlowStep(repeatable, state, "work.repeat");
+    if ("error" in retryOne) throw new Error(retryOne.error);
+    const retryTwo = enterFlowStep(repeatable, retryOne.state, "work.repeat");
+    if ("error" in retryTwo) throw new Error(retryTwo.error);
+    expect(retryTwo.state.attempts["work.repeat"]).toBe(2);
+    expect(enterFlowStep(repeatable, retryTwo.state, "work.repeat")).toMatchObject({
+      code: "attempt_limit",
+    });
+  });
+
   it("does not grant nested-step authority when a transition bypasses its parent", () => {
     const bypass = AgentFlowSchema.parse({
       schema_version: 2,
@@ -438,6 +480,38 @@ describe("flow v2 execution", () => {
     const first = enterFlowStep(capped, selected, "returns.verify");
     if ("error" in first) throw new Error(first.error);
     expect(enterFlowStep(capped, first.state, "returns.verify")).toMatchObject({
+      code: "flow_entry_limit",
+    });
+  });
+
+  it("counts successful loop iterations toward the call-level step-entry circuit breaker", () => {
+    const capped = AgentFlowSchema.parse({
+      schema_version: 2,
+      always_tools: [],
+      max_step_entries: 2,
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        { id: "work", label: "Work", kind: "topic", steps: [{
+          id: "repeat",
+          label: "Repeat",
+          instructions: "Repeat.",
+          entry: true,
+          transitions: [{ to: "work.repeat" }],
+        }] },
+      ],
+      edges: [{ from: "entry", to: "work" }],
+    });
+    const selected = selectFlowTopic(capped, createFlowExecutionState(), "work");
+    if ("error" in selected) throw new Error(selected.error);
+    const first = enterFlowStep(capped, selected, "work.repeat");
+    if ("error" in first) throw new Error(first.error);
+    const firstDone = completeFlowStep(capped, first.state, { outputs: {} });
+    if ("error" in firstDone) throw new Error(firstDone.error);
+    const second = enterFlowStep(capped, firstDone.state, "work.repeat");
+    if ("error" in second) throw new Error(second.error);
+    const secondDone = completeFlowStep(capped, second.state, { outputs: {} });
+    if ("error" in secondDone) throw new Error(secondDone.error);
+    expect(enterFlowStep(capped, secondDone.state, "work.repeat")).toMatchObject({
       code: "flow_entry_limit",
     });
   });

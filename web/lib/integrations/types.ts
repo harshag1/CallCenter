@@ -1,19 +1,26 @@
 export type IntegrationCategory = "voice" | "telephony" | "email" | "data" | "deployment";
 
 export type IntegrationDefinition = {
-  id: string;
-  label: string;
-  category: IntegrationCategory;
-  description: string;
-  docsUrl: string;
-  requiredEnv: string[];
+  readonly id: string;
+  readonly label: string;
+  readonly category: IntegrationCategory;
+  readonly description: string;
+  readonly docsUrl: string;
+  readonly requiredEnv: readonly string[];
   /** At least one complete alternative must be configured. */
-  alternativeEnv?: string[][];
-  optionalEnv?: string[];
-  capabilities: string[];
+  readonly alternativeEnv?: readonly (readonly string[])[];
+  readonly optionalEnv?: readonly string[];
+  readonly capabilities: readonly string[];
 };
 export type IntegrationStatus = IntegrationDefinition & {
-  configured: boolean;
-  missingEnv: string[];
-  missingAlternatives: string[][];
+  readonly configured: boolean;
+  readonly missingEnv: readonly string[];
+  readonly missingAlternatives: readonly (readonly string[])[];
 };
+
+export type IntegrationEnvironment = Readonly<Record<string, string | undefined>>;
+
+export type IntegrationRegistry = Readonly<{
+  definitions: readonly IntegrationDefinition[];
+  statuses(environment?: IntegrationEnvironment): readonly IntegrationStatus[];
+}>;

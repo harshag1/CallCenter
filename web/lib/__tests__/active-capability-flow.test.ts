@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { activeFlowContext, activeFlowControlDefinitions } from "../active-capability-flow";
+import { buildActiveCapabilityCatalog } from "../active-capability-catalog";
 import { AgentFlowSchema } from "../flow";
 import {
   completeFlowStep,
@@ -177,5 +178,55 @@ describe("active Flow-v2 capability projection", () => {
     expect(activeFlowContext(flow, withReceipt)).toMatchObject({
       pending_action_receipts: [{ receipt_id: receiptId, status: "indeterminate" }],
     });
+  });
+
+  it("keeps a thousand-step recovery projection below the active catalog budget", () => {
+    const completedSteps = Array.from({ length: 1_000 }, (_, index) => `membership.history_${index}`);
+    const outputs = Object.fromEntries(completedSteps.map((step, index) => [
+      step,
+      {
+        index,
+        caller_visible_summary: `completed-${index}`,
+        payload: "x".repeat(2_048),
+      },
+    ]));
+    const longState: FlowExecutionState = {
+      ...createFlowExecutionState("2026-01-01T00:00:00.000Z"),
+      status: "active",
+      nodeId: "membership",
+      currentStep: null,
+      completedSteps,
+      outputs,
+      checkpoints: completedSteps.map((step) => ({
+        step,
+        at: "2026-01-01T00:00:00.000Z",
+      })),
+    };
+    const context = activeFlowContext(flow, longState);
+    expect(context).toMatchObject({
+      completed_step_count: 1_000,
+      completed_steps_truncated: true,
+      durable_output_count: 1_000,
+      checkpoint_count: 1_000,
+      checkpoints_truncated: true,
+    });
+    expect(context.completed_steps).toHaveLength(8);
+    expect(Object.keys(context.durable_outputs as object).length).toBeLessThanOrEqual(12);
+    expect(context.omitted_durable_output_count).toBeGreaterThan(900);
+
+    const catalog = buildActiveCapabilityCatalog({
+      runtimeDigest: "a".repeat(64),
+      state: {
+        status: "active",
+        topic: "membership",
+        step: "$flow.membership",
+        attempt: 0,
+        capabilityEpoch: 1,
+        stateRevision: 1,
+      },
+      context,
+      sources: [],
+    });
+    expect(Buffer.byteLength(JSON.stringify(catalog), "utf8")).toBeLessThanOrEqual(32 * 1024);
   });
 });
