@@ -24,3 +24,10 @@ __pycache__/
 
 # OS / editor
 .DS_Store
+
+# Local benchmark evidence can contain large audio, raw provider payloads, and
+# resumable partial journals. Protocols, scenarios, and curated redacted reports
+# remain intentionally trackable.
+benchmarks/voice-long-horizon/results/
+benchmarks/voice-long-horizon/.local/
+benchmarks/voice-long-horizon/fixtures/generated/

@@ -72,14 +72,14 @@
         {
           "id": "confirm",
           "label": "Confirm result",
-          "instructions": "Read back the new expiration date and offer a receipt.",
-          "tools": ["send_email"],
-          "required_outputs": ["confirmation_delivered"],
+          "instructions": "Read back the new expiration date and offer a receipt. If the provider accepts the email request, say it was accepted for sending; do not claim inbox delivery.",
+          "tools": ["send_membership_confirmation"],
+          "required_outputs": ["confirmation_accepted"],
           "output_bindings": [
-            { "output": "confirmation_delivered", "tool": "send_email", "result_path": "ok", "value_type": "boolean" }
+            { "output": "confirmation_accepted", "tool": "send_membership_confirmation", "result_path": "accepted", "value_type": "boolean" }
           ],
           "action_policies": [
-            { "tool": "send_email", "max_calls": 1, "idempotency": "per_arguments" }
+            { "tool": "send_membership_confirmation", "max_calls": 1, "idempotency": "per_arguments" }
           ]
         },
         {
@@ -93,7 +93,7 @@
       "id": "returns",
       "label": "Return an order",
       "kind": "topic",
-      "context": "Locate an order, evaluate policy, and create a return without skipping consent or durable recording.",
+      "context": "Locate an order, evaluate policy, and create a return without skipping consent or durable action receipts.",
       "steps": [
         {
           "id": "locate",
@@ -127,15 +127,15 @@
                   "id": "create",
                   "label": "Create return",
                   "instructions": "Confirm the return method and create the return exactly once.",
-                  "tools": ["create_return", "send_email"],
-                  "required_outputs": ["return_id", "label_delivered"],
+                  "tools": ["create_return", "send_return_label"],
+                  "required_outputs": ["return_id", "label_submission_accepted"],
                   "output_bindings": [
                     { "output": "return_id", "tool": "create_return", "result_path": "return_id", "value_type": "string" },
-                    { "output": "label_delivered", "tool": "send_email", "result_path": "ok", "value_type": "boolean" }
+                    { "output": "label_submission_accepted", "tool": "send_return_label", "result_path": "accepted", "value_type": "boolean" }
                   ],
                   "action_policies": [
                     { "tool": "create_return", "max_calls": 1, "idempotency": "per_step" },
-                    { "tool": "send_email", "max_calls": 1, "idempotency": "per_arguments" }
+                    { "tool": "send_return_label", "max_calls": 1, "idempotency": "per_arguments" }
                   ]
                 }
               ]
