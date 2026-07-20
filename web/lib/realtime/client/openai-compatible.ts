@@ -1707,7 +1707,7 @@ export function withManualPcmSession(
     session: {
       ...sessionWithoutDetection,
       audio,
-      ...(provider === "xai" ? { turn_detection: null } : {}),
+      ...(provider === "xai" ? { turn_detection: { type: null } } : {}),
     },
   };
 }
@@ -1745,7 +1745,16 @@ export function validateManualPcmSessionAcknowledgement(
       mismatches.push("OpenAI returned an active session-level turn detector");
     }
   } else {
-    if (session.turn_detection !== null) mismatches.push("xAI session.turn_detection is not null");
+    const xaiTurnDetection = session.turn_detection;
+    if (
+      !isRecord(xaiTurnDetection)
+      || (
+        Object.keys(xaiTurnDetection).length > 0
+        && xaiTurnDetection.type !== null
+      )
+    ) {
+      mismatches.push("xAI session.turn_detection.type is not null");
+    }
     if (acknowledgedInput.turn_detection !== undefined && acknowledgedInput.turn_detection !== null) {
       mismatches.push("xAI returned an active audio.input turn detector");
     }
@@ -1857,7 +1866,12 @@ function sessionIdentityFields(
     output_audio: outputAudio,
     turn_detection: provider === "openai"
       ? record(inputAudio).turn_detection
-      : session.turn_detection,
+      // xAI currently echoes an accepted `{ type: null }` manual-turn request
+      // as `{}`. Canonicalize only that exact empty-object wire shape; any
+      // populated detector still has to match byte-for-byte below.
+      : isRecord(session.turn_detection) && Object.keys(session.turn_detection).length === 0
+        ? { type: null }
+        : session.turn_detection,
   };
 }
 
@@ -2312,7 +2326,7 @@ function isPreReadinessControlEvent(
   // xAI assigns the conversation identity before session.updated. The client
   // already withholds a resumability claim until the requested setting is
   // acknowledged, so this is control-plane metadata rather than app work.
-  return provider === "xai" && wireType === "conversation.created";
+  return provider === "xai" && (wireType === "conversation.created" || wireType === "ping");
 }
 
 function unexpectedProviderCapabilityWidening(

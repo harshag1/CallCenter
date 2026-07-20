@@ -116,7 +116,7 @@ function sessionAcknowledgement(
     type: "session.updated",
     session: {
       id: "sess_1",
-      ...(provider === "xai" ? { turn_detection: null } : {}),
+      ...(provider === "xai" ? { turn_detection: { type: null } } : {}),
       ...(resumption ? { resumption: { enabled: true } } : {}),
       audio: {
         input: {
@@ -1423,6 +1423,29 @@ describe("OpenAI-compatible realtime client", () => {
     }));
   });
 
+  it("accepts xAI keepalive pings before session configuration acknowledgement", async () => {
+    const { client, socket } = fakeClient("xai");
+    const observed: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => observed.push(event));
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "ping",
+      event_id: "keepalive_1",
+      timestamp: 1_752_000_000,
+    }));
+
+    expect(client.state).toBe("connecting");
+    expect(observed).not.toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "pre_ready_application_event",
+    }));
+
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+    expect(client.state).toBe("ready");
+  });
+
   it("revalidates every post-ready session.updated against the frozen configuration", async () => {
     const exact = fakeClient();
     const exactEvents: NormalizedRealtimeEvent[] = [];
@@ -2537,7 +2560,7 @@ describe("manual PCM session compilation", () => {
           input: { format: { type: "audio/pcm", rate: 24_000 } },
           output: { format: { type: "audio/pcm", rate: 24_000 } },
         },
-        turn_detection: null,
+        turn_detection: { type: null },
       },
     };
     const proof = buildSessionConfigurationAcknowledgement({
@@ -2550,7 +2573,7 @@ describe("manual PCM session compilation", () => {
           voice: "ara",
           instructions: "Use every available tool.",
           audio: requested.session.audio,
-          turn_detection: null,
+          turn_detection: { type: null },
         },
       },
     });
@@ -2585,7 +2608,7 @@ describe("manual PCM session compilation", () => {
   it("pins xAI's session-level VAD to manual boundaries", () => {
     expect(withManualPcmSession("xai", baseSession)).toMatchObject({
       session: {
-        turn_detection: null,
+        turn_detection: { type: null },
         audio: {
           input: { format: { type: "audio/pcm", rate: 24_000 } },
           output: { format: { type: "audio/pcm", rate: 24_000 } },
@@ -2599,13 +2622,32 @@ describe("manual PCM session compilation", () => {
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("xai"))).toEqual({ ok: true });
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("openai"))).toMatchObject({
       ok: false,
-      mismatches: expect.arrayContaining(["xAI session.turn_detection is not null"]),
+      mismatches: expect.arrayContaining(["xAI session.turn_detection.type is not null"]),
     });
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("xai"), PCM, PCM, true))
       .toMatchObject({
         ok: false,
         mismatches: expect.arrayContaining(["xAI resumption.enabled was not acknowledged"]),
       });
+  });
+
+  it("normalizes xAI's empty manual-turn acknowledgement to the requested null type", () => {
+    const requested = withManualPcmSession("xai", baseSession);
+    const acknowledged = sessionAcknowledgement("xai") as Record<string, unknown>;
+    recordForTest(acknowledged.session).turn_detection = {};
+
+    expect(validateManualPcmSessionAcknowledgement("xai", acknowledged)).toEqual({ ok: true });
+    const proof = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: requested,
+      requestedModel: "grok-voice-think-fast-1.0",
+      acknowledgedModel: {
+        value: "grok-voice-think-fast-1.0",
+        wireType: "session.created",
+      },
+      acknowledgedEvent: acknowledged,
+    });
+    expect(proof.fields.turn_detection).toMatchObject({ status: "verified" });
   });
 
   it("enforces each hosted provider's documented PCM rates", () => {

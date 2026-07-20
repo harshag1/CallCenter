@@ -503,6 +503,24 @@ describe("append-only filesystem budget ledger", () => {
     }), "invalid_input");
   });
 
+  it("does not confuse xAI provider labels in run identities with API keys", async () => {
+    const path = await ledgerPath();
+    await initialize(path);
+
+    const accepted = await reserveFilesystemBudget({
+      ...reservation(path, "xai-provider-canary", 1),
+      reservationId: "c3-xai-20260720-v6-reservation",
+      runId: "c3-xai-20260720-v6-full-harness",
+      provider: "xai",
+      model: "grok-voice-think-fast-1.0",
+    });
+
+    expect(accepted.snapshot.reservations).toContainEqual(expect.objectContaining({
+      reservation_id: "c3-xai-20260720-v6-reservation",
+      provider: "xai",
+    }));
+  });
+
   it("never steals a dead same-host lock or exposes its partial append", async () => {
     const path = await ledgerPath();
     await initialize(path);

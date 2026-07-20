@@ -391,7 +391,7 @@ function containsSensitiveKey(key: string): boolean {
 }
 
 function looksLikeSecret(value: string): boolean {
-  return /(?:Bearer\s+[A-Za-z0-9._~+\/-]{12,}|\bsk-[A-Za-z0-9_-]{12,}|\bxai-[A-Za-z0-9_-]{12,}|\bAIza[A-Za-z0-9_-]{20,})/i.test(value);
+  return /(?:Bearer\s+[A-Za-z0-9._~+\/-]{12,}|\bsk-[A-Za-z0-9_-]{12,}|\bxai-[A-Za-z0-9_]{20,}|\bAIza[A-Za-z0-9_-]{20,})/i.test(value);
 }
 
 function assertNoCredentialMaterial(value: unknown, path = "payload"): void {
