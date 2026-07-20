@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LIVE_STS_TURNS_PER_SESSION,
+  createLiveStsCanaryRunIds,
   createLiveStsCells,
   createLiveStsPairs,
   liveStsScheduleArtifact,
@@ -19,6 +20,12 @@ describe("live STS development experiment", () => {
     expect(schedule.plannedVoiceToVoiceInteractions).toBe(1_024);
     expect(schedule.scheduleSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(new Set(cells.map((cell) => cell.runId)).size).toBe(cells.length);
+    expect(createLiveStsCanaryRunIds()).toHaveLength(3);
+    expect(new Set(createLiveStsCanaryRunIds())).toEqual(new Set([
+      cells.find((cell) => cell.provider === "openai")!.runId,
+      cells.find((cell) => cell.provider === "gemini")!.runId,
+      cells.find((cell) => cell.provider === "xai")!.runId,
+    ]));
     for (const pair of pairs) {
       expect(pair.armOrder.slice().sort()).toEqual(["full-harness", "raw-full"]);
       expect(cells.filter((cell) => cell.pairId === pair.pairId)).toHaveLength(2);

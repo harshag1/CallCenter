@@ -96,6 +96,15 @@ export function createLiveStsCells(): readonly LiveStsCell[] {
   })));
 }
 
+export function createLiveStsCanaryRunIds(): readonly string[] {
+  const cells = createLiveStsCells();
+  return Object.freeze((Object.keys(LIVE_STS_PROVIDER_SPECS) as LiveStsProvider[]).map((provider) => {
+    const cell = cells.find((candidate) => candidate.provider === provider);
+    if (!cell) throw new Error(`missing live STS canary cell for ${provider}`);
+    return cell.runId;
+  }));
+}
+
 export type LiveStsRunSummary = Readonly<{
   runId: string;
   pairId: string;
@@ -194,6 +203,7 @@ export function liveStsScheduleArtifact() {
     matchedPairs: pairs.length,
     plannedVoiceToVoiceInteractions: cells.length * LIVE_STS_TURNS_PER_SESSION,
     providers: LIVE_STS_PROVIDER_SPECS,
+    transportCanaryRunIds: createLiveStsCanaryRunIds(),
     pairs,
     cells,
   });

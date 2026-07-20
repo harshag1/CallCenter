@@ -109,8 +109,10 @@ type ExperimentPlan = Readonly<{
   planSha256: string;
 }>;
 
+type RunPhase = "canary" | "remaining" | "all";
+
 function usage(): never {
-  throw new Error("usage: live-sts-development-experiment <prepare|run|score> [--root DIR] [--concurrency 1..8]");
+  throw new Error("usage: live-sts-development-experiment <prepare|run|score> [--root DIR] [--concurrency 1..8] [--phase canary|remaining|all]");
 }
 
 function option(name: string): string | undefined {
@@ -642,17 +644,23 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LiveStsCell, ap
   process.stdout.write(`${canonicalJson({ action: "cell-retained", ordinal: cell.ordinal, runId: cell.runId, status: summary.status })}\n`);
 }
 
-async function run(root: string, concurrency: number): Promise<void> {
+async function run(root: string, concurrency: number, phase: RunPhase): Promise<void> {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("concurrency must be from 1 through 8");
+  if (!(["canary", "remaining", "all"] as const).includes(phase)) throw new Error("phase must be canary, remaining, or all");
   const plan = await loadPlan(root);
   await assertCleanSource(plan);
   await verifyFixtures(root, plan);
   const keys = await providerKeys();
-  const cells = createLiveStsCells();
-  if (cells.length !== plan.execution.maximumSessions) throw new Error("scheduled session count exceeds frozen maximum");
+  const scheduled = createLiveStsCells();
+  if (scheduled.length !== plan.execution.maximumSessions) throw new Error("scheduled session count exceeds frozen maximum");
+  const canaryRunIds = new Set(plan.schedule.transportCanaryRunIds);
+  const cells = scheduled.filter((cell) => (
+    phase === "all"
+    || (phase === "canary" ? canaryRunIds.has(cell.runId) : !canaryRunIds.has(cell.runId))
+  ));
   await mkdir(resolve(root, "runs"), { recursive: true, mode: 0o700 });
   await mapConcurrent(cells, concurrency, async (cell) => runCell(root, plan, cell, keys[cell.provider]));
-  process.stdout.write(`${canonicalJson({ action: "batch-retained", sessions: cells.length, scoresOpened: false })}\n`);
+  process.stdout.write(`${canonicalJson({ action: "batch-retained", phase, sessions: cells.length, scoresOpened: false })}\n`);
 }
 
 async function loadRunSummaries(root: string): Promise<LiveStsRunSummary[]> {
@@ -717,7 +725,11 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   const root = rootDirectory();
   if (command === "prepare") return prepare(root);
-  if (command === "run") return run(root, Number(option("concurrency") ?? "4"));
+  if (command === "run") return run(
+    root,
+    Number(option("concurrency") ?? "4"),
+    (option("phase") ?? "all") as RunPhase,
+  );
   if (command === "score") return score(root);
   usage();
 }
