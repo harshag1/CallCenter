@@ -11,10 +11,22 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
 import type { Surface, Block } from "@/lib/surface-dsl";
+import {
+  createCredentialSubmissionId,
+  submitCredentialToSink,
+} from "@/lib/credential-form-client";
 
 type Send = (prompt: string) => void;
 
 const GRAYS = ["#111", "#555", "#999", "#ccc", "#777", "#333"];
+
+function blockInstanceKey(block: Block, index: number): string | number {
+  // A newly issued slot at the same surface position is a new security ceremony. Remounting
+  // prevents a prior form's saved/error state and submission id from crossing into that slot.
+  return block.kind === "credential_form" && typeof block.slotId === "string"
+    ? `credential-form:${block.slotId}`
+    : index;
+}
 
 function template(prompt: string, row: Record<string, unknown>): string {
   return prompt.replace(/\{\{(\w+)\}\}/g, (_, k) => String(row[k] ?? ""));
@@ -124,6 +136,18 @@ function BlockView({ block, send }: { block: Block; send: Send }) {
       );
     case "form":
       return <Form fields={block.fields as never} submit={block.submit as never} send={send} />;
+    case "credential_form":
+      return (
+        <CredentialForm
+          slotId={block.slotId as string}
+          label={block.label as string}
+          credentialLabel={block.credentialLabel as string | undefined}
+          submitLabel={block.submitLabel as string | undefined}
+          expiresAt={block.expiresAt as string | undefined}
+          destination={block.destination as string | undefined}
+          allowedTools={block.allowedTools as "all" | string[] | undefined}
+        />
+      );
     case "markdown":
       return (
         <div className="prose prose-sm prose-neutral max-w-none text-sm leading-relaxed [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm">
@@ -167,7 +191,9 @@ function Tabs({ tabs, send }: { tabs: { label: string; blocks: Block[] }[]; send
         ))}
       </div>
       <div className="space-y-4">
-        {tabs[active]?.blocks.map((b, i) => <BlockView key={i} block={b} send={send} />)}
+        {tabs[active]?.blocks.map((b, i) => (
+          <BlockView key={blockInstanceKey(b, i)} block={b} send={send} />
+        ))}
       </div>
     </div>
   );
@@ -244,11 +270,121 @@ function Form({ fields, submit, send }: {
   );
 }
 
+function CredentialForm({ slotId, label, credentialLabel, submitLabel, expiresAt, destination, allowedTools }: {
+  slotId: string;
+  label: string;
+  credentialLabel?: string;
+  submitLabel?: string;
+  expiresAt?: string;
+  destination?: string;
+  allowedTools?: "all" | string[];
+}) {
+  const [credential, setCredential] = useState("");
+  const [state, setState] = useState<
+    "idle" | "submitting" | "saved" | "rejected" | "already_used" | "unavailable"
+  >("idle");
+  const [expired, setExpired] = useState(false);
+  const submissionId = useRef<string | null>(null);
+  useEffect(() => {
+    if (expiresAt === undefined) return;
+    const expiresAtMs = Date.parse(expiresAt);
+    const delay = Number.isFinite(expiresAtMs)
+      ? Math.max(0, Math.min(expiresAtMs - Date.now(), 2_147_483_647))
+      : 0;
+    const timeout = window.setTimeout(() => setExpired(true), delay);
+    return () => window.clearTimeout(timeout);
+  }, [expiresAt]);
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!credential || state === "submitting" || state === "saved" || state === "already_used" || expired) return;
+    const secret = credential;
+    setState("submitting");
+    // Clear the React state before awaiting I/O. The only copy we retain is the
+    // request body sent straight to the same-origin sink; it is never passed to send().
+    setCredential("");
+    try {
+      submissionId.current ??= createCredentialSubmissionId();
+    } catch {
+      setState("unavailable");
+      return;
+    }
+    const result = await submitCredentialToSink({
+      slotId,
+      submissionId: submissionId.current,
+      credential: secret,
+    });
+    setState(result);
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3 rounded-xl border border-[var(--border)] p-4">
+      <p className="text-sm leading-relaxed text-neutral-700">{label}</p>
+      {destination && (
+        <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-neutral-800">
+          <div>
+            <span className="block font-medium text-neutral-600">Authorization destination</span>
+            <code className="mt-0.5 block break-all font-mono">{destination}</code>
+          </div>
+          <div>
+            <span className="block font-medium text-neutral-600">Framework remote-tool allowlist</span>
+            {allowedTools === "all" ? (
+              <span>The framework may call all tools advertised by this server</span>
+            ) : (
+              <div className="mt-1 max-h-28 overflow-y-auto font-mono">
+                {(allowedTools ?? []).map((tool) => <div key={tool}>{tool}</div>)}
+              </div>
+            )}
+            <span className="mt-1 block text-neutral-500">
+              This limits later framework calls; the credential itself is sent to the destination above.
+            </span>
+          </div>
+        </div>
+      )}
+      <label className="block">
+        <span className="mb-1 block text-[11px] uppercase tracking-wide text-neutral-400">
+          {credentialLabel ?? "Credential"}
+        </span>
+        <input
+          type="password"
+          name="credential"
+          value={credential}
+          onChange={(event) => {
+            setCredential(event.target.value);
+            if (state === "rejected" || state === "unavailable") setState("idle");
+          }}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          disabled={state === "submitting" || state === "saved" || state === "already_used" || expired}
+          className="w-full rounded-lg border border-[var(--border)] bg-white px-3 py-2 text-sm outline-none focus:border-neutral-900 disabled:bg-neutral-50"
+        />
+      </label>
+      <div className="flex items-center gap-3">
+        <button
+          type="submit"
+          disabled={!credential || state === "submitting" || state === "saved" || state === "already_used" || expired}
+          className="rounded-lg bg-neutral-900 px-4 py-2 text-xs text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {state === "submitting" ? "Saving…" : state === "saved" ? "Saved" : submitLabel ?? "Save securely"}
+        </button>
+        {state === "saved" && <span role="status" className="text-xs text-emerald-700">Stored securely. The assistant never received it.</span>}
+        {state === "rejected" && <span role="alert" className="text-xs text-red-600">The destination rejected this credential. Re-enter it and retry.</span>}
+        {state === "unavailable" && <span role="alert" className="text-xs text-red-600">The secure handoff was interrupted. Re-enter the same credential to retry safely.</span>}
+        {state === "already_used" && <span role="alert" className="text-xs text-red-600">This form was already used by another submission. Ask the assistant to open a new secure form.</span>}
+        {expired && <span role="alert" className="text-xs text-neutral-500">This secure form expired. Ask the assistant to open a new one.</span>}
+      </div>
+    </form>
+  );
+}
+
 export default function SurfaceView({ surface, send }: { surface: Surface; send: Send }) {
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-semibold tracking-tight">{surface.title}</h2>
-      {surface.blocks.map((b, i) => <BlockView key={i} block={b} send={send} />)}
+      {surface.blocks.map((b, i) => (
+        <BlockView key={blockInstanceKey(b, i)} block={b} send={send} />
+      ))}
     </div>
   );
 }

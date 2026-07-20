@@ -2,13 +2,10 @@
 // vault.ts — AES-256-GCM primitives. Credential sinks use versioned, context-bound AEAD.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { envVaultMasterKey } from "./high-authority-secrets";
 
 function key(): Buffer {
-  const hex = process.env.ENV_VAULT_MASTER_KEY;
-  if (!hex || !/^[a-f0-9]{64}$/i.test(hex)) {
-    throw new Error("ENV_VAULT_MASTER_KEY missing/invalid");
-  }
-  return Buffer.from(hex, "hex");
+  return envVaultMasterKey();
 }
 
 const CREDENTIAL_ENVELOPE_VERSION = "hacc_v2";

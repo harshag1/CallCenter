@@ -1,18 +1,21 @@
 // Author: Harsha Gundala
-// bridge.ts — Twilio Media Streams ↔ OpenAI-compatible realtime providers: μ-law passthrough, mixed recording,
+// bridge.ts — Twilio Media Streams ↔ OpenAI-compatible realtime providers: μ-law passthrough,
 // turn-boundary events, hold-music playback, and observe mode (human-transfer transcription).
 
 import WebSocket from "ws";
 import { q, qOne } from "./db";
-import { verifyScope, loadActiveAgent, voiceSessionSpecForCall } from "./voice";
+import { verifyScope, loadActiveAgent, voiceSessionSpecForCall, type ScopeClaims } from "./voice";
 import { createServerRealtimeConnection } from "./realtime/registry";
-import { mixUlaw } from "./audio";
+import {
+  requirePublicOrigin,
+  twilioAccountSid,
+  twilioRestAuthorization,
+} from "./telephony";
 import { transcribeUlaw } from "./stt";
 import { log } from "./log";
 
 const L = log("bridge");
 const FRAME = 160; // 20ms of 8kHz μ-law
-const REC_FLUSH_MS = 5000;
 const HOLD_POLL_MS = 2000;
 const STT_FLUSH_MS = 6000;
 const STT_MIN_BYTES = 8000; // ≥1s of audio before a Whisper round-trip
@@ -27,25 +30,27 @@ export type BridgeSocket = {
 
 type TwilioMessage = {
   event: string;
-  start?: { streamSid: string; customParameters?: Record<string, string> };
+  start?: {
+    accountSid: string;
+    callSid: string;
+    streamSid: string;
+    customParameters?: Record<string, string>;
+  };
   media?: { track?: string; payload: string };
+  stop?: { accountSid: string; callSid: string; streamSid: string };
 };
 
-type Scope = { callId: string; agentId: string; orgId: string };
+type Scope = ScopeClaims;
 
 export class BridgeSession {
   private providerSocket: WebSocket | null = null;
   private streamSid: string | null = null;
   private callId: string | null = null;
+  private providerCallSid: string | null = null;
+  private providerAccountSid: string | null = null;
   private mode: "agent" | "observe" = "agent";
   private done = false;
-
-  // Recording: caller frames are the 20ms clock; far-side audio queues and drains at that pace,
-  // mirroring what Twilio actually plays out (a `clear` drops the queue like Twilio drops its buffer).
-  private recChunks: Buffer[] = [];
-  private farQueue: Buffer = EMPTY;
-  private recFlush: ReturnType<typeof setInterval> | null = null;
-  private recPathSet = false;
+  private inbound = Promise.resolve();
 
   // Turn boundaries.
   private agentSpoke = false;
@@ -65,9 +70,16 @@ export class BridgeSession {
 
   constructor(private twilio: BridgeSocket) {
     twilio.on("message", (data) => {
-      try {
-        this.onTwilio(JSON.parse(String(data)) as TwilioMessage);
-      } catch { /* ignore non-JSON frames */ }
+      this.inbound = this.inbound
+        .then(async () => {
+          const raw = String(data);
+          if (Buffer.byteLength(raw, "utf8") > 256 * 1024) throw new Error("oversized Twilio frame");
+          await this.onTwilio(JSON.parse(raw) as TwilioMessage);
+        })
+        .catch((error) => {
+          L.error("invalid Twilio stream message", { err: (error as Error).message });
+          this.twilio.close();
+        });
     });
     twilio.on("close", () => void this.teardown());
     twilio.on("error", () => void this.teardown());
@@ -76,15 +88,21 @@ export class BridgeSession {
   private async onTwilio(msg: TwilioMessage) {
     switch (msg.event) {
       case "start": {
-        this.streamSid = msg.start!.streamSid;
-        const params = msg.start!.customParameters ?? {};
-        this.mode = params.mode === "observe" ? "observe" : "agent";
-        try {
-          await this.begin(params.scope ?? "");
-        } catch (e) {
-          L.error("bridge connect failed", { err: (e as Error).message });
-          this.twilio.close();
-        }
+        if (this.streamSid || !msg.start) throw new Error("duplicate or malformed stream start");
+        const { accountSid, callSid, streamSid } = msg.start;
+        if (!/^MZ[0-9a-fA-F]{32}$/.test(streamSid)) throw new Error("invalid StreamSid");
+        const params = msg.start.customParameters ?? {};
+        const scope = verifyScope(params.capability ?? "", {
+          audience: "twilio-bridge",
+          purpose: "media-stream",
+          method: "GET",
+          provider: "twilio",
+          providerCallId: callSid,
+          providerAccountId: accountSid,
+        });
+        if (!scope?.bridgeMode) throw new Error("invalid bridge capability");
+        this.mode = scope.bridgeMode;
+        await this.begin(scope, msg.start);
         break;
       }
       case "media": {
@@ -92,7 +110,6 @@ export class BridgeSession {
         if (this.mode === "observe") {
           this.onObserveFrame(msg.media!.track === "outbound" ? "outbound" : "inbound", ulaw);
         } else {
-          this.recordCallerFrame(ulaw);
           if (this.providerSocket?.readyState === WebSocket.OPEN) {
             this.providerSocket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media!.payload }));
           }
@@ -100,31 +117,83 @@ export class BridgeSession {
         break;
       }
       case "stop":
+        if (
+          !msg.stop || msg.stop.streamSid !== this.streamSid ||
+          msg.stop.callSid !== this.providerCallSid ||
+          msg.stop.accountSid !== this.providerAccountSid || !this.callId
+        ) throw new Error("stop identity does not match the active stream");
         void this.teardown();
         break;
     }
   }
 
-  private async begin(scopeToken: string) {
-    const scope = verifyScope(scopeToken);
-    if (!scope) throw new Error("invalid scope");
-    this.callId = scope.callId;
+  private async begin(
+    scope: Scope,
+    start: NonNullable<TwilioMessage["start"]>
+  ) {
+    const bound = await qOne<{ id: string }>(
+      `WITH matched AS (
+         SELECT c.id FROM calls c JOIN agents a ON a.id = c.agent_id
+         WHERE c.id = $1 AND c.agent_id = $2 AND a.org_id = $3
+           AND c.twilio_call_sid = $4 AND c.twilio_account_sid = $5 AND c.to_number = $6
+           AND c.status IN ('active','dialing')
+       ),
+       stream AS (
+         INSERT INTO telephony_stream_bindings (
+           stream_sid, call_id, provider, provider_account_sid, provider_call_sid, to_number, mode
+         )
+         SELECT $7, matched.id, 'twilio', $5, $4, $6, $8 FROM matched
+         ON CONFLICT (stream_sid) DO UPDATE SET stream_sid = telephony_stream_bindings.stream_sid
+         WHERE telephony_stream_bindings.call_id = EXCLUDED.call_id
+           AND telephony_stream_bindings.provider = EXCLUDED.provider
+           AND telephony_stream_bindings.provider_account_sid = EXCLUDED.provider_account_sid
+           AND telephony_stream_bindings.provider_call_sid = EXCLUDED.provider_call_sid
+           AND telephony_stream_bindings.to_number = EXCLUDED.to_number
+           AND telephony_stream_bindings.mode = EXCLUDED.mode
+         RETURNING call_id
+       ),
+       consumed AS (
+         INSERT INTO telephony_capability_consumptions (jti, audience, call_id, stream_sid, expires_at)
+         SELECT $9, 'twilio-bridge', stream.call_id, $7, to_timestamp($10) FROM stream
+         ON CONFLICT (jti) DO UPDATE SET jti = telephony_capability_consumptions.jti
+         WHERE telephony_capability_consumptions.call_id = EXCLUDED.call_id
+           AND telephony_capability_consumptions.stream_sid = EXCLUDED.stream_sid
+           AND telephony_capability_consumptions.audience = EXCLUDED.audience
+         RETURNING call_id
+       )
+       SELECT consumed.call_id AS id FROM consumed`,
+      [
+        scope.callId,
+        scope.agentId,
+        scope.orgId,
+        start.callSid,
+        start.accountSid,
+        scope.providerTo,
+        start.streamSid,
+        scope.bridgeMode,
+        scope.jti,
+        scope.exp,
+      ]
+    );
+    if (!bound) throw new Error("stream identity or capability replay rejected");
+    this.callId = bound.id;
+    this.streamSid = start.streamSid;
+    this.providerCallSid = start.callSid;
+    this.providerAccountSid = start.accountSid;
 
     const head = await qOne<{ max: string }>(
       "SELECT COALESCE(MAX(id),0)::text AS max FROM call_events WHERE call_id = $1", [scope.callId]
     );
     this.lastHoldEventId = Number(head?.max ?? 0);
 
-    // An observe leg (post-transfer) continues the original call's recording, so keep the
-    // timeline origin stable: only the first stream on a call emits audio_start.
+    // Only the first stream on a call emits audio_start, keeping the timeline origin stable
+    // across a post-transfer observe leg.
     await q(
       `INSERT INTO call_events (call_id, type, payload)
        SELECT $1, 'audio_start', $2::jsonb
        WHERE NOT EXISTS (SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'audio_start')`,
       [scope.callId, JSON.stringify({ at: new Date().toISOString() })]
     ).catch(() => {});
-    this.recFlush = setInterval(() => void this.flushRecording(), REC_FLUSH_MS);
-
     if (this.mode === "observe") {
       this.sttTimer = setInterval(() => void this.flushStt(), STT_FLUSH_MS);
       return;
@@ -145,7 +214,7 @@ export class BridgeSession {
     ]);
     if (!agent || !call) throw new Error("call or agent missing");
 
-    const origin = process.env.PUBLIC_ORIGIN!;
+    const origin = requirePublicOrigin();
     const sessionSpec = await voiceSessionSpecForCall(agent, scope.callId, call.direction, origin);
     if (call.direction === "outbound" && call.metadata?.reason) {
       sessionSpec.instructions +=
@@ -159,15 +228,31 @@ export class BridgeSession {
       this.providerSocket!.send(JSON.stringify({ type: "response.create" }));
       void this.save("state", { state: "bridged", provider: connection.provider, model: connection.model });
     });
-    this.providerSocket.on("message", (raw) => this.onProviderEvent(JSON.parse(String(raw))));
-    this.providerSocket.on("close", () => void this.teardown());
-    this.providerSocket.on("error", (e) => {
-      L.error("realtime provider ws error", { callId: this.callId ?? undefined, err: (e as Error).message });
-      void this.teardown();
+    this.providerSocket.on("message", (raw) => {
+      try {
+        this.onProviderEvent(JSON.parse(String(raw)), connection.provider);
+      } catch {
+        void this.save("error", { code: "invalid_provider_event" });
+      }
     });
+    this.providerSocket.on("close", () => void this.teardown());
+    this.providerSocket.on("error", (error) => this.onProviderSocketError(connection.provider, error));
   }
 
-  private onProviderEvent(ev: { type: string; delta?: string; transcript?: string }) {
+  private onProviderSocketError(provider: string, _error: unknown) {
+    void _error;
+    L.error("realtime provider ws error", {
+      callId: this.callId ?? undefined,
+      code: "provider_runtime_error",
+      provider,
+    });
+    void this.teardown();
+  }
+
+  private onProviderEvent(
+    ev: { type: string; delta?: string; transcript?: string },
+    provider: string,
+  ) {
     switch (ev.type) {
       case "response.output_audio.delta":
       case "response.audio.delta": {
@@ -176,7 +261,6 @@ export class BridgeSession {
           void this.save("speech", { who: "agent", at: new Date().toISOString() });
         }
         if (this.holding) break; // hold music owns the line
-        this.farQueue = Buffer.concat([this.farQueue, Buffer.from(String(ev.delta), "base64")]);
         this.sendTwilio({ event: "media", streamSid: this.streamSid, media: { payload: ev.delta } });
         break;
       }
@@ -186,7 +270,6 @@ export class BridgeSession {
         break;
       case "input_audio_buffer.speech_started":
         this.agentSpoke = false;
-        this.farQueue = EMPTY; // mirror Twilio's buffer flush
         void this.save("speech", { who: "caller", at: new Date().toISOString() });
         this.sendTwilio({ event: "clear", streamSid: this.streamSid }); // barge-in
         break;
@@ -205,33 +288,8 @@ export class BridgeSession {
         void this.save("agent_said", { text: ev.transcript });
         break;
       case "error":
-        void this.save("error", ev);
+        void this.save("error", { code: "provider_runtime_error", provider });
         break;
-    }
-  }
-
-  // ---- recording -----------------------------------------------------------
-
-  /** Mixes one caller frame with far-side audio dequeued at line rate. */
-  private recordCallerFrame(ulaw: Buffer) {
-    const take = this.farQueue.subarray(0, ulaw.length);
-    this.farQueue = this.farQueue.subarray(take.length);
-    this.recChunks.push(take.length ? mixUlaw(ulaw, take) : ulaw);
-  }
-
-  private async flushRecording() {
-    if (!this.callId || !this.recChunks.length) return;
-    const chunk = Buffer.concat(this.recChunks.splice(0));
-    await q(
-      `INSERT INTO call_recordings (call_id, mime, data) VALUES ($1,'audio/basic;rate=8000',$2)
-       ON CONFLICT (call_id) DO UPDATE SET data = call_recordings.data || EXCLUDED.data, mime = EXCLUDED.mime`,
-      [this.callId, chunk]
-    ).catch(() => {});
-    if (!this.recPathSet) {
-      this.recPathSet = true;
-      void q("UPDATE calls SET recording_path = $2 WHERE id = $1 AND recording_path IS NULL", [
-        this.callId, `db:${this.callId}`,
-      ]).catch(() => {});
     }
   }
 
@@ -276,7 +334,6 @@ export class BridgeSession {
           this.holdPos = (this.holdPos + 1) % clip.length; // loop the clip
         }
         this.sendTwilio({ event: "media", streamSid: this.streamSid, media: { payload: frame.toString("base64") } });
-        this.farQueue = Buffer.concat([this.farQueue, frame]); // hold music lands in the recording too
       }, 20);
     }
     // Safety expiry in case hold_end is missed.
@@ -290,17 +347,14 @@ export class BridgeSession {
     this.holdPacer = null;
     if (this.holdDeadline) clearTimeout(this.holdDeadline);
     this.holdDeadline = null;
-    this.farQueue = EMPTY;
     this.sendTwilio({ event: "clear", streamSid: this.streamSid });
   }
 
   // ---- observe mode --------------------------------------------------------
 
-  /** both_tracks stream: inbound (caller) is the mix clock, outbound (human agent) queues like xAI audio. */
+  /** Observe both tracks independently for post-transfer transcription. */
   private onObserveFrame(track: "inbound" | "outbound", ulaw: Buffer) {
     this.sttBuf[track] = Buffer.concat([this.sttBuf[track], ulaw]);
-    if (track === "inbound") this.recordCallerFrame(ulaw);
-    else this.farQueue = Buffer.concat([this.farQueue, ulaw]);
   }
 
   private async flushStt(final = false) {
@@ -361,19 +415,25 @@ export class BridgeSession {
     const capMs = (row.campaign_id ? 4 : 10) * 60_000; // campaign calls 4 min, ad-hoc outbound 10 min
     setTimeout(() => {
       if (this.done) return;
-      void this.save("state", { state: "duration_cap" });
       const sid = row.twilio_call_sid;
       if (sid && process.env.TWILIO_ACCOUNT_SID) {
-        const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
-        void fetch(
-          `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Calls/${sid}.json`,
-          {
-            method: "POST",
-            headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ Status: "completed" }),
-          }
-        ).catch(() => {});
+        try {
+          const accountSid = twilioAccountSid();
+          const auth = twilioRestAuthorization();
+          void this.save("state", { state: "duration_cap" });
+          void fetch(
+            `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${sid}.json`,
+            {
+              method: "POST",
+              headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ Status: "completed" }),
+            }
+          ).catch(() => {});
+        } catch {
+          void this.teardown();
+        }
       } else {
+        void this.save("state", { state: "duration_cap", local_only: true });
         void this.teardown();
       }
     }, capMs);
@@ -382,19 +442,19 @@ export class BridgeSession {
   private async teardown() {
     if (this.done) return;
     this.done = true;
-    for (const t of [this.recFlush, this.holdPacer, this.holdPoll, this.sttTimer]) if (t) clearInterval(t);
+    for (const t of [this.holdPacer, this.holdPoll, this.sttTimer]) if (t) clearInterval(t);
     if (this.holdDeadline) clearTimeout(this.holdDeadline);
     try { this.providerSocket?.close(); } catch {}
     try { this.twilio.close(); } catch {}
 
     if (this.mode === "observe") await this.flushStt(true).catch(() => {});
-    if (this.farQueue.length) { // tail audio already sent to the caller
-      this.recChunks.push(this.farQueue);
-      this.farQueue = EMPTY;
-    }
-    await this.flushRecording();
-
     if (this.callId) {
+      if (this.streamSid) {
+        await q(
+          "UPDATE telephony_stream_bindings SET stopped_at = COALESCE(stopped_at, now()) WHERE stream_sid = $1 AND call_id = $2",
+          [this.streamSid, this.callId]
+        ).catch(() => {});
+      }
       const closed = await q(
         `UPDATE calls SET status = 'completed', ended_at = now(),
          duration_s = EXTRACT(EPOCH FROM (now() - started_at))::int

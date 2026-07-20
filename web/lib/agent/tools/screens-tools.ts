@@ -2,7 +2,7 @@
 // screens-tools.ts — operator tool: create Notion-like screens from Surface DSL blocks.
 
 import { qOne } from "../../db";
-import { SurfaceSchema } from "../../surface-dsl";
+import { containsCredentialForm, SurfaceSchema } from "../../surface-dsl";
 import type { OperatorTool } from "../types";
 
 export const createScreen: OperatorTool = {
@@ -26,6 +26,9 @@ export const createScreen: OperatorTool = {
           error: `invalid blocks: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
         },
       };
+    }
+    if (containsCredentialForm(parsed.data)) {
+      return { output: { error: "credential forms are ephemeral and cannot be saved as screens" } };
     }
     const screen = await qOne<{ id: string }>(
       `INSERT INTO screens (org_id, title, icon, spec, created_by)

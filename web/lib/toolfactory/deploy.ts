@@ -10,6 +10,9 @@ import {
   type ToolInvocationContext,
   type ToolInvocationSigner,
 } from "./invocation";
+import {
+  assertPublicReleaseEgressEnabled,
+} from "../public-release-egress";
 
 const API = "https://api.vercel.com";
 const L = log("toolfactory/deploy");
@@ -125,6 +128,7 @@ export class ToolInvocationIndeterminateError extends Error {
 
 /** Idempotently removes one revision-isolated project, including its deployments and env. */
 export async function cleanupToolProject(project: string): Promise<void> {
+  assertPublicReleaseEgressEnabled("generatedToolDeployment");
   if (!isRevisionIsolatedToolProject(project)) {
     throw new Error("invalid isolated tool project name");
   }
@@ -142,6 +146,7 @@ export async function deployTool(
   wrappedSource: string,
   options: DeployToolOptions
 ): Promise<DeployOutcome> {
+  assertPublicReleaseEgressEnabled("generatedToolDeployment");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 64) {
     throw new Error("invalid generated tool slug");
   }
@@ -270,6 +275,7 @@ export function prepareToolInvocation(
   signer: ToolInvocationSigner | undefined,
   context?: ToolInvocationContext
 ): PreparedToolInvocation {
+  assertPublicReleaseEgressEnabled("generatedToolInvocation");
   if (!signer) throw new Error("generated tool invocation credential is missing; redeploy this legacy tool");
   if (!context) throw new Error("generated tool invocation context is required");
   const prepared = Object.freeze({
@@ -289,6 +295,7 @@ export function prepareToolInvocation(
 export async function executePreparedToolInvocation(
   prepared: PreparedToolInvocation
 ): Promise<ToolInvocationOutcome> {
+  assertPublicReleaseEgressEnabled("generatedToolInvocation");
   if (!livePreparedInvocations.delete(prepared)) {
     throw new Error("generated tool invocation was not prepared here or was already consumed");
   }

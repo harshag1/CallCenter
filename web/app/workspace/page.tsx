@@ -12,6 +12,11 @@ import SurfaceView from "@/components/surface/SurfaceView";
 import FlowPanel, { type ExperimentBadge } from "@/components/flow/FlowPanel";
 import FlowPicker from "@/components/flow/FlowPicker";
 import ChatPanel, { type ChatItem } from "@/components/chat/ChatPanel";
+import {
+  operatorActionConfirmationFromWire,
+  type OperatorActionApprovalStatus,
+  withOperatorActionApprovalStatus,
+} from "@/components/chat/OperatorActionApprovalCard";
 import HomeBoard from "@/components/platform/HomeBoard";
 import CallsTable, { type CallFocus } from "@/components/platform/CallsTable";
 import TablesView from "@/components/platform/TablesView";
@@ -182,6 +187,14 @@ export default function Workspace() {
   }, [flows]);
 
   const focusAgentId = focus?.agentId ?? null;
+  const updateOperatorActionStatus = useCallback((proposalId: string, status: OperatorActionApprovalStatus) => {
+    setItems((prev) => prev.map((item) =>
+      item.kind === "operator_action_confirmation"
+        ? withOperatorActionApprovalStatus(item, proposalId, status)
+        : item
+    ));
+  }, []);
+
   const send = useCallback(async (text: string) => {
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
     setStreaming(true);
@@ -228,6 +241,13 @@ export default function Workspace() {
               }
               return [...prev, { kind: "tool", name: ev.name, status: ev.status }];
             });
+          } else if (ev.type === "operator_action_confirmation") {
+            const confirmation = operatorActionConfirmationFromWire(ev.proposal);
+            if (confirmation) {
+              setItems((prev) => prev.some((item) =>
+                item.kind === "operator_action_confirmation" && item.proposalId === confirmation.proposalId
+              ) ? prev : [...prev, confirmation]);
+            }
           } else if (ev.type === "surface") {
             if (!navigated) setSurface(ev.surface);
           } else if (ev.type === "flow") {
@@ -560,7 +580,12 @@ export default function Workspace() {
             )}
           </div>
           <div className="min-h-0 flex-1">
-            <ChatPanel items={items} streaming={streaming} onSend={send} />
+            <ChatPanel
+              items={items}
+              streaming={streaming}
+              onSend={send}
+              onOperatorActionStatusChange={updateOperatorActionStatus}
+            />
           </div>
         </div>
       </div>

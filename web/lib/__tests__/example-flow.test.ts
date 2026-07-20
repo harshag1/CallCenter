@@ -4,8 +4,10 @@ import { validateAgentFlow, type AgentFlow } from "../flow";
 import {
   completeFlowStep,
   createFlowExecutionState,
+  deriveFlowActionInvocationId,
   describeNextSteps,
   enterFlowStep,
+  markFlowActionDispatchStarted,
   reserveFlowAction,
   selectFlowTopic,
   settleFlowAction,
@@ -25,12 +27,15 @@ function successfulAction(
 ): FlowExecutionState {
   const reserved = reserveFlowAction(flow, state, {
     receiptId,
+    invocationId: deriveFlowActionInvocationId(`example:${receiptId}`),
     tool,
     arguments: args,
     capabilityEpoch: state.capabilityEpoch,
   });
   if ("error" in reserved) throw new Error(reserved.error);
-  const settled = settleFlowAction(reserved.state, { receiptId, status: "succeeded", result });
+  const dispatched = markFlowActionDispatchStarted(reserved.state, { receiptId });
+  if ("error" in dispatched) throw new Error(dispatched.error);
+  const settled = settleFlowAction(dispatched.state, { receiptId, status: "succeeded", result });
   if ("error" in settled) throw new Error(settled.error);
   return settled.state;
 }

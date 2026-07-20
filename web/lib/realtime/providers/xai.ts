@@ -5,7 +5,12 @@ import type {
   RealtimeProviderAdapter,
   ServerRealtimeConnection,
 } from "../types";
-import { buildXaiSessionUpdate } from "./xai-protocol";
+import { browserProviderSessionSpec } from "./browser-direct-mcp";
+import {
+  buildXaiBrowserProtocols,
+  buildXaiClientSecretPayload,
+  buildXaiSessionUpdate,
+} from "./xai-protocol";
 
 const API = "https://api.x.ai/v1";
 
@@ -18,7 +23,7 @@ async function mintToken(): Promise<string> {
   const response = await fetch(`${API}/realtime/client_secrets`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ expires_after: { seconds: 600 } }),
+    body: JSON.stringify(buildXaiClientSecretPayload()),
   });
   if (!response.ok) throw new Error(`xAI realtime token ${response.status}: ${(await response.text()).slice(0, 300)}`);
   const json = await response.json() as { value?: string; client_secret?: { value?: string }; token?: string };
@@ -30,7 +35,7 @@ async function mintToken(): Promise<string> {
 export const xaiAdapter: RealtimeProviderAdapter = {
   id: "xai",
   label: "xAI Voice Agent API",
-  defaultModel: "grok-voice-latest",
+  defaultModel: "grok-voice-think-fast-1.0",
   defaultVoice: "ara",
   env: ["XAI_API_KEY"],
   capabilities: {
@@ -38,11 +43,16 @@ export const xaiAdapter: RealtimeProviderAdapter = {
     telephony: "native-pcmu",
     remoteMcp: true,
     clientFunctions: true,
-    sessionResumption: true,
-    notes: ["OpenAI-Realtime-compatible wire protocol", "Pin grok-voice-think-fast-1.0 for release stability"],
+    sessionResumption: { supported: true, enabledByDefault: false },
+    notes: [
+      "OpenAI-Realtime-compatible wire protocol",
+      "Version-pinned by default; mutable aliases require an explicit voice_model override",
+    ],
   },
   buildSessionUpdate: buildXaiSessionUpdate,
   async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+    if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
+    const providerSpec = browserProviderSessionSpec(spec);
     const token = await mintToken();
     return {
       provider: "xai",
@@ -51,8 +61,14 @@ export const xaiAdapter: RealtimeProviderAdapter = {
       voice: spec.voice,
       token,
       wsUrl: `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(spec.model)}`,
-      protocols: ["realtime", `xai-client-secret.${token}`],
-      sessionUpdate: buildXaiSessionUpdate(spec, "pcm"),
+      // xAI authenticates browser sockets through this single subprotocol.
+      // `realtime` is not part of the documented ephemeral-token handshake.
+      protocols: buildXaiBrowserProtocols(token),
+      sessionUpdate: buildXaiSessionUpdate(providerSpec, "pcm"),
+      toolProxyUrl: spec.toolProxyUrl,
+      toolProxyToken: spec.toolProxyToken,
+      toolProxyRotation: spec.toolProxyRotation,
+      activeCatalogAuthority: spec.activeCatalogAuthority,
     };
   },
   async createServerConnection(spec, audio): Promise<ServerRealtimeConnection> {

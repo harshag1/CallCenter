@@ -406,7 +406,9 @@ describe("flow-independent mission runtime", () => {
   });
 
   it("rejects cyclic definitions and resource-abusive values", () => {
-    const cyclic = structuredClone(publicExample);
+    const cyclic = structuredClone(publicExample) as {
+      goals: Array<{ depends_on: string[] }>;
+    };
     cyclic.goals[0].depends_on = ["schedule_followup"];
     cyclic.goals[1].depends_on = ["repair"];
     expect(() => MissionDefinitionSchema.parse(cyclic)).toThrow(/cycle/);

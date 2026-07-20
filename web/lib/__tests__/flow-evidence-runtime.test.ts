@@ -2,10 +2,16 @@ import { describe, expect, it } from "vitest";
 import { AgentFlowSchema, type AgentFlow, type FlowOutputBinding } from "../flow";
 import {
   FlowExecutionStateSchema,
+  MAX_FLOW_ACTION_ARGUMENT_BYTES,
+  MAX_FLOW_ACTION_ERROR_BYTES,
+  MAX_FLOW_ACTION_RECEIPTS_PER_CALL,
+  MAX_FLOW_ACTION_RESULT_BYTES,
+  MAX_FLOW_HOT_STATE_BYTES,
   completeFlowStep,
   createFlowExecutionState,
   deriveFlowActionInvocationId,
   enterFlowStep,
+  flowStateStorageBytes,
   hashFlowValue,
   markFlowActionDispatchStarted,
   proveIndeterminateFlowActionAbsent,
@@ -63,6 +69,16 @@ function activeStep(flow = evidenceFlow()): FlowExecutionState {
   return entered.state;
 }
 
+const storageFlow = AgentFlowSchema.parse({
+  schema_version: 2,
+  always_tools: ["storage_action"],
+  nodes: [
+    { id: "entry", label: "Incoming call", kind: "incoming_call" },
+    { id: "operations", label: "Operations", kind: "topic" },
+  ],
+  edges: [{ from: "entry", to: "operations" }],
+});
+
 function reserve(
   flow: AgentFlow,
   state: FlowExecutionState,
@@ -104,6 +120,110 @@ function settle(
 }
 
 describe("flow action evidence", () => {
+  it("rejects oversized action payloads before mutating durable state", () => {
+    const state = createFlowExecutionState();
+    expect(reserveFlowAction(storageFlow, state, {
+      receiptId: "oversized-arguments",
+      invocationId: deriveFlowActionInvocationId("oversized-arguments"),
+      tool: "storage_action",
+      arguments: { value: "x".repeat(MAX_FLOW_ACTION_ARGUMENT_BYTES) },
+      capabilityEpoch: state.capabilityEpoch,
+    })).toMatchObject({ code: "action_arguments_too_large" });
+    expect(state.actionReceipts).toEqual([]);
+
+    const reserved = reserve(storageFlow, state, "oversized-result", "storage_action", {});
+    const dispatched = markFlowActionDispatchStarted(reserved.state, { receiptId: reserved.receipt.id });
+    if ("error" in dispatched) throw new Error(dispatched.error);
+    expect(settleFlowAction(dispatched.state, {
+      receiptId: reserved.receipt.id,
+      status: "succeeded",
+      result: { value: "x".repeat(MAX_FLOW_ACTION_RESULT_BYTES) },
+    })).toMatchObject({ code: "action_result_too_large" });
+    expect(dispatched.state.actionReceipts[0]).toMatchObject({ status: "reserved" });
+    expect(settleFlowAction(dispatched.state, {
+      receiptId: reserved.receipt.id,
+      status: "failed",
+      error: "x".repeat(MAX_FLOW_ACTION_ERROR_BYTES),
+    })).toMatchObject({ code: "action_error_too_large" });
+    expect(dispatched.state.actionReceipts[0]).toMatchObject({ status: "reserved" });
+  });
+
+  it("admits 512 fresh receipts, rejects the 513th, and keeps exact replay free", () => {
+    let state = createFlowExecutionState();
+    let first: ReturnType<typeof reserveFlowAction> | undefined;
+    for (let index = 0; index < MAX_FLOW_ACTION_RECEIPTS_PER_CALL; index += 1) {
+      const reserved = reserveFlowAction(storageFlow, state, {
+        receiptId: `bounded-receipt-${index}`,
+        invocationId: deriveFlowActionInvocationId(`bounded-receipt-${index}`),
+        tool: "storage_action",
+        arguments: { index },
+        capabilityEpoch: state.capabilityEpoch,
+      });
+      if ("error" in reserved) throw new Error(`${reserved.code}: ${reserved.error}`);
+      first ??= reserved;
+      state = reserved.state;
+    }
+    expect(state.actionReceipts).toHaveLength(MAX_FLOW_ACTION_RECEIPTS_PER_CALL);
+    expect(reserveFlowAction(storageFlow, state, {
+      receiptId: "bounded-receipt-overflow",
+      invocationId: deriveFlowActionInvocationId("bounded-receipt-overflow"),
+      tool: "storage_action",
+      arguments: { overflow: true },
+      capabilityEpoch: state.capabilityEpoch,
+    })).toMatchObject({ code: "flow_receipt_quota_exceeded" });
+    if (!first || "error" in first) throw new Error("first receipt was not admitted");
+    expect(reserveFlowAction(storageFlow, state, {
+      receiptId: first.receipt.id,
+      invocationId: first.receipt.invocationId!,
+      tool: first.receipt.tool,
+      arguments: first.receipt.arguments!,
+      capabilityEpoch: state.capabilityEpoch,
+    })).toMatchObject({ execute: false, receipt: { id: first.receipt.id } });
+  });
+
+  it("rejects a hot state over 8 MiB before adding another durable receipt", () => {
+    const state = createFlowExecutionState();
+    state.outputs = { adversarial: { blob: "x".repeat(MAX_FLOW_HOT_STATE_BYTES) } };
+    expect(flowStateStorageBytes(state)).toBeGreaterThan(MAX_FLOW_HOT_STATE_BYTES);
+    expect(reserveFlowAction(storageFlow, state, {
+      receiptId: "hot-state-overflow",
+      invocationId: deriveFlowActionInvocationId("hot-state-overflow"),
+      tool: "storage_action",
+      arguments: {},
+      capabilityEpoch: state.capabilityEpoch,
+    })).toMatchObject({ code: "flow_state_storage_quota_exceeded" });
+    expect(state.actionReceipts).toEqual([]);
+  });
+
+  it("compacts completed replay payloads while preserving exact evidence and bound outputs", () => {
+    const flow = evidenceFlow();
+    const reservation = reserve(flow, activeStep(flow), "compact-case", CASE_TOOL, { member: "m-1" });
+    const succeeded = settle(
+      reservation.state,
+      reservation.receipt.id,
+      "succeeded",
+      { data: { case: { id: "case-compact" } }, verbose: "x".repeat(8_000) },
+    );
+    const completed = completeFlowStep(flow, succeeded.state, {});
+    if ("error" in completed) throw new Error(completed.error);
+
+    expect(completed.state.outputs[STEP]).toEqual({ case_id: "case-compact" });
+    expect(completed.state.actionReceipts[0]).toMatchObject({
+      id: reservation.receipt.id,
+      status: "succeeded",
+      argumentsHash: hashFlowValue({ member: "m-1" }),
+      argumentsBytes: expect.any(Number),
+      argumentsCompacted: true,
+      resultHash: hashFlowValue({ data: { case: { id: "case-compact" } }, verbose: "x".repeat(8_000) }),
+      resultBytes: expect.any(Number),
+      resultCompacted: true,
+    });
+    expect(completed.state.actionReceipts[0]).not.toHaveProperty("arguments");
+    expect(completed.state.actionReceipts[0]).not.toHaveProperty("result");
+    expect(FlowExecutionStateSchema.parse(completed.state)).toEqual(completed.state);
+    expect(flowStateStorageBytes(completed.state)).toBeLessThan(flowStateStorageBytes(succeeded.state));
+  });
+
   it("derives stable, opaque, fixed-width downstream invocation identities", () => {
     const first = deriveFlowActionInvocationId("call-1:provider-call-9");
     expect(first).toMatch(/^[A-Za-z0-9_-]{24}$/);

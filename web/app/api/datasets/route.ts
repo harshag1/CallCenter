@@ -4,12 +4,36 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession } from "@/lib/auth";
-import { listDatasets, createDataset } from "@/lib/datasets";
+import { listDatasets, createDataset, publicDatasetError } from "@/lib/datasets";
+import {
+  assertSameOriginBrowserMutation,
+  PRIVATE_NO_STORE_HEADERS,
+  PrivateRequestError,
+  readPrivateJsonObject,
+} from "@/lib/private-json-request";
+
+const MAX_CREATE_DATASET_BODY_BYTES = 64 * 1024;
 
 const CreateSchema = z.object({
   name: z.string().min(1).max(80),
   columns: z.array(z.union([z.string(), z.record(z.string(), z.unknown())])).max(32).default([]),
-});
+}).strict();
+
+function privateRequestError(error: unknown): NextResponse {
+  const status = error instanceof PrivateRequestError ? error.status : 400;
+  const message = status === 403
+    ? "forbidden"
+    : status === 413
+      ? "payload too large"
+      : status === 415
+        ? "unsupported media type"
+        : "invalid request";
+  return NextResponse.json({ error: message }, { status, headers: PRIVATE_NO_STORE_HEADERS });
+}
+
+function privateJson(body: Record<string, unknown>, status = 200): NextResponse {
+  return NextResponse.json(body, { status, headers: PRIVATE_NO_STORE_HEADERS });
+}
 
 export async function GET() {
   const session = await getSession();
@@ -18,14 +42,23 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  let rawBody: Record<string, unknown>;
+  try {
+    assertSameOriginBrowserMutation(req);
+    rawBody = await readPrivateJsonObject(req, MAX_CREATE_DATASET_BODY_BYTES);
+  } catch (error) {
+    return privateRequestError(error);
+  }
+  const parsed = CreateSchema.safeParse(rawBody);
+  if (!parsed.success) return privateJson({ error: "name required" }, 400);
+
   const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const parsed = CreateSchema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return NextResponse.json({ error: "name required" }, { status: 400 });
+  if (!session) return privateJson({ error: "unauthorized" }, 401);
   try {
     const dataset = await createDataset(session.orgId, parsed.data.name, parsed.data.columns, session.email);
-    return NextResponse.json({ dataset }, { status: 201 });
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 409 });
+    return privateJson({ dataset }, 201);
+  } catch (error) {
+    const projected = publicDatasetError(error);
+    return privateJson({ error: projected.message }, projected.status);
   }
 }

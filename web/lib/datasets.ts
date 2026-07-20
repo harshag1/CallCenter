@@ -5,6 +5,48 @@ import { q, qOne } from "./db";
 
 export const ROW_CAP = 5000;
 
+export type DatasetErrorCode =
+  | "invalid_name"
+  | "already_exists"
+  | "not_found"
+  | "column_cap"
+  | "invalid_column"
+  | "unknown_column"
+  | "row_cap"
+  | "unknown_table";
+
+const DATASET_PUBLIC_ERRORS: Readonly<Record<DatasetErrorCode, Readonly<{
+  status: 400 | 404 | 409;
+  message: string;
+}>>> = Object.freeze({
+  invalid_name: { status: 400, message: "dataset name required" },
+  invalid_column: { status: 400, message: "column name required" },
+  not_found: { status: 404, message: "dataset not found" },
+  unknown_table: { status: 404, message: "dataset not found" },
+  already_exists: { status: 409, message: "dataset already exists" },
+  column_cap: { status: 409, message: "column cap reached" },
+  unknown_column: { status: 409, message: "column not found" },
+  row_cap: { status: 409, message: "row cap reached" },
+});
+
+/** Expected dataset failures are typed so routes never reflect raw database errors. */
+export class DatasetError extends Error {
+  constructor(readonly code: DatasetErrorCode) {
+    super(DATASET_PUBLIC_ERRORS[code].message);
+    this.name = "DatasetError";
+  }
+}
+
+export function publicDatasetError(error: unknown): Readonly<{
+  status: 400 | 404 | 409 | 500;
+  message: string;
+}> {
+  if (!(error instanceof DatasetError)) {
+    return { status: 500, message: "dataset operation failed" };
+  }
+  return DATASET_PUBLIC_ERRORS[error.code];
+}
+
 export type DatasetColumn = { key: string; label: string; type: "text" | "number" | "phone" | "date" };
 
 export type DatasetRow = { id: string; data: Record<string, unknown>; created_at: string; updated_at: string };
@@ -62,7 +104,7 @@ export async function createDataset(
   createdBy = "operator"
 ): Promise<Dataset> {
   const slug = slugify(name);
-  if (!slug) throw new Error("dataset name required");
+  if (!slug) throw new DatasetError("invalid_name");
   const cols = normalizeColumns(columns);
   const row = await qOne<Dataset>(
     `INSERT INTO datasets (org_id, slug, name, icon, columns, created_by)
@@ -71,7 +113,7 @@ export async function createDataset(
      RETURNING id, slug, name, icon, columns, created_by, created_at`,
     [orgId, slug, name, JSON.stringify(cols), createdBy]
   );
-  if (!row) throw new Error(`dataset "${slug}" already exists`);
+  if (!row) throw new DatasetError("already_exists");
   return row;
 }
 
@@ -100,35 +142,35 @@ async function writeColumns(orgId: string, datasetId: string, columns: DatasetCo
 /** Appends a column; key derived from label when omitted, de-duped with a numeric suffix. */
 export async function addColumn(orgId: string, datasetId: string, label: string, keyHint?: string): Promise<Dataset> {
   const ds = await getDatasetById(orgId, datasetId);
-  if (!ds) throw new Error("dataset not found");
-  if (ds.columns.length >= 32) throw new Error("column cap of 32 reached");
+  if (!ds) throw new DatasetError("not_found");
+  if (ds.columns.length >= 32) throw new DatasetError("column_cap");
   const base = slugify(keyHint || label);
-  if (!base) throw new Error("column name required");
+  if (!base) throw new DatasetError("invalid_column");
   let key = base;
   for (let n = 2; ds.columns.some((c) => c.key === key); n++) key = `${base}_${n}`;
   const updated = await writeColumns(orgId, datasetId, [...ds.columns, { key, label: label.trim() || key, type: "text" }]);
-  if (!updated) throw new Error("dataset not found");
+  if (!updated) throw new DatasetError("not_found");
   return updated;
 }
 
 /** Relabels a column; the key (and stored row data) stays stable. */
 export async function renameColumn(orgId: string, datasetId: string, key: string, label: string): Promise<Dataset> {
   const ds = await getDatasetById(orgId, datasetId);
-  if (!ds) throw new Error("dataset not found");
-  if (!ds.columns.some((c) => c.key === key)) throw new Error(`unknown column "${key}"`);
+  if (!ds) throw new DatasetError("not_found");
+  if (!ds.columns.some((c) => c.key === key)) throw new DatasetError("unknown_column");
   const next = ds.columns.map((c) => (c.key === key ? { ...c, label: label.trim() || c.label } : c));
   const updated = await writeColumns(orgId, datasetId, next);
-  if (!updated) throw new Error("dataset not found");
+  if (!updated) throw new DatasetError("not_found");
   return updated;
 }
 
 /** Removes a column and strips its key from every stored row. */
 export async function dropColumn(orgId: string, datasetId: string, key: string): Promise<Dataset> {
   const ds = await getDatasetById(orgId, datasetId);
-  if (!ds) throw new Error("dataset not found");
-  if (!ds.columns.some((c) => c.key === key)) throw new Error(`unknown column "${key}"`);
+  if (!ds) throw new DatasetError("not_found");
+  if (!ds.columns.some((c) => c.key === key)) throw new DatasetError("unknown_column");
   const updated = await writeColumns(orgId, datasetId, ds.columns.filter((c) => c.key !== key));
-  if (!updated) throw new Error("dataset not found");
+  if (!updated) throw new DatasetError("not_found");
   await q("UPDATE dataset_rows SET data = data - $3, updated_at = now() WHERE org_id = $1 AND dataset_id = $2 AND data ? $3", [
     orgId, datasetId, key,
   ]);
@@ -163,7 +205,7 @@ export async function queryRows(
 
 async function assertCap(datasetId: string): Promise<void> {
   const c = await qOne<{ n: number }>("SELECT count(*)::int AS n FROM dataset_rows WHERE dataset_id = $1", [datasetId]);
-  if ((c?.n ?? 0) >= ROW_CAP) throw new Error(`row cap of ${ROW_CAP} reached`);
+  if ((c?.n ?? 0) >= ROW_CAP) throw new DatasetError("row_cap");
 }
 
 /** Flexible schema: unknown row keys auto-become columns so written data is never invisible. */
@@ -196,7 +238,7 @@ export async function insertRow(orgId: string, datasetId: string, data: Record<s
      RETURNING id, data, created_at, updated_at`,
     [datasetId, orgId, JSON.stringify(data)]
   );
-  if (!row) throw new Error("dataset not found");
+  if (!row) throw new DatasetError("not_found");
   return row;
 }
 
@@ -246,7 +288,7 @@ export async function upsertRow(
   match?: Record<string, unknown>
 ): Promise<{ id: string; data: Record<string, unknown>; updated: boolean }> {
   const dataset = await getDatasetBySlug(orgId, slug);
-  if (!dataset) throw new Error(`unknown table "${slug}"`);
+  if (!dataset) throw new DatasetError("unknown_table");
   await ensureColumns(orgId, dataset.id, [{ ...(match ?? {}), ...data }]);
   if (match && Object.keys(match).length) {
     const updated = await qOne<{ id: string; data: Record<string, unknown> }>(

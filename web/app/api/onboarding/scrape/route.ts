@@ -6,6 +6,8 @@ import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
 import { researchJSON } from "@/lib/xai";
 import { log } from "@/lib/log";
+import { allowsLocalDevelopmentFundedAi } from "@/lib/deployment-funded-ai";
+import { PRIVATE_NO_STORE_HEADERS } from "@/lib/private-json-request";
 
 const L = log("onboarding/scrape");
 export const maxDuration = 60;
@@ -19,11 +21,23 @@ type Scrape = {
 
 export async function GET() {
   const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!session.orgDomain) return NextResponse.json({ scrape: null });
+  if (!session) {
+    return NextResponse.json(
+      { error: "unauthorized" },
+      { status: 401, headers: PRIVATE_NO_STORE_HEADERS },
+    );
+  }
+  if (!session.orgDomain) {
+    return NextResponse.json({ scrape: null }, { headers: PRIVATE_NO_STORE_HEADERS });
+  }
 
   const cached = await qOne<{ scrape: Scrape | null }>("SELECT scrape FROM orgs WHERE id = $1", [session.orgId]);
-  if (cached?.scrape) return NextResponse.json({ scrape: cached.scrape });
+  if (cached?.scrape) {
+    return NextResponse.json({ scrape: cached.scrape }, { headers: PRIVATE_NO_STORE_HEADERS });
+  }
+  if (!allowsLocalDevelopmentFundedAi()) {
+    return NextResponse.json({ scrape: null }, { headers: PRIVATE_NO_STORE_HEADERS });
+  }
 
   try {
     const scrape = await researchJSON<Scrape>(
@@ -36,9 +50,9 @@ Give exactly 4 suggestions covering distinct purposes, grounded in what the comp
     await q("UPDATE orgs SET scrape = $2, name = COALESCE($3, name) WHERE id = $1", [
       session.orgId, JSON.stringify(scrape), scrape.company ?? null,
     ]);
-    return NextResponse.json({ scrape });
+    return NextResponse.json({ scrape }, { headers: PRIVATE_NO_STORE_HEADERS });
   } catch (e) {
     L.warn("scrape failed", { orgId: session.orgId, err: (e as Error).message });
-    return NextResponse.json({ scrape: null });
+    return NextResponse.json({ scrape: null }, { headers: PRIVATE_NO_STORE_HEADERS });
   }
 }

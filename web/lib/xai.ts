@@ -7,7 +7,7 @@ export const MODELS = {
   operator: "grok-4.20-non-reasoning",
   reasoning: "grok-4.20",
   fast: "grok-4.20-non-reasoning",
-  voice: "grok-voice-latest",
+  voice: "grok-voice-think-fast-1.0",
 } as const;
 
 export type ChatMessage = {

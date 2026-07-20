@@ -37,11 +37,19 @@ export const geminiAdapter: RealtimeProviderAdapter = {
     telephony: "requires-transcoding",
     remoteMcp: false,
     clientFunctions: true,
-    sessionResumption: true,
-    notes: ["Live API and ephemeral tokens are preview", "Audio input PCM16; audio output 24kHz PCM16"],
+    sessionResumption: { supported: true, enabledByDefault: false },
+    notes: [
+      "Live API and ephemeral tokens are preview",
+      "Audio input is PCM16 LE at 16kHz; output is PCM16 LE at 24kHz",
+      "Audio-only sessions are capped at 15 minutes",
+      "Gemini 3.1 function calls are sequential; NON_BLOCKING is unsupported",
+      "Provider-native resumption is experimental, plan-pinned, and disabled by default",
+      "Provider input/output transcription is disabled; use an independently metered played-PCM ASR pipeline",
+    ],
   },
   buildSessionUpdate: buildGeminiSetup,
   async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+    if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
     const token = await mintToken();
     return {
       provider: "gemini",
@@ -53,6 +61,8 @@ export const geminiAdapter: RealtimeProviderAdapter = {
       setup: buildGeminiSetup(spec),
       toolProxyUrl: spec.toolProxyUrl,
       toolProxyToken: spec.toolProxyToken,
+      toolProxyRotation: spec.toolProxyRotation,
+      activeCatalogAuthority: spec.activeCatalogAuthority,
     };
   },
   async createServerConnection(): Promise<never> {

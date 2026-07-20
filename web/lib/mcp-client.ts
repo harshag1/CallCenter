@@ -3,6 +3,7 @@
 // results, error messages, or logs. This module intentionally has no logger.
 
 import { createHash } from "node:crypto";
+import { types as nodeTypes } from "node:util";
 
 export const MCP_LATEST_PROTOCOL_VERSION = "2025-11-25";
 export const MCP_SUPPORTED_PROTOCOL_VERSIONS = [
@@ -10,6 +11,13 @@ export const MCP_SUPPORTED_PROTOCOL_VERSIONS = [
   "2025-06-18",
   "2025-03-26",
 ] as const;
+
+/**
+ * Client-owned identity of the provider tool use that caused an MCP tools/call.
+ * This lives in request params._meta, never in model-controlled tool arguments.
+ */
+export const MCP_PROVIDER_TOOL_CALL_ID_META_KEY = "hacc/provider_tool_call_id";
+export const MCP_MAX_PROVIDER_TOOL_CALL_ID_BYTES = 256;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
@@ -19,6 +27,8 @@ const DEFAULT_MAX_PAGES = 100;
 const DEFAULT_MAX_TOOLS = 10_000;
 const DEFAULT_MAX_SSE_RESUMPTIONS = 3;
 const MAX_SSE_RETRY_MS = 5_000;
+const MAX_SSE_OUT_OF_BAND_MESSAGES = 32;
+const MAX_PENDING_SSE_REPLIES = 16;
 const CANCELLATION_TIMEOUT_MS = 500;
 const MAX_SESSION_ID_BYTES = 4_096;
 const MAX_CURSOR_BYTES = 16_384;
@@ -102,6 +112,21 @@ export type McpRequestOptions = {
   signal?: AbortSignal;
   /** Total deadline for initialization plus the requested operation. */
   timeoutMs?: number;
+};
+
+/** Gateway-owned metadata for one mutating remote tool dispatch. Model arguments cannot set it. */
+export type McpToolCallMetadata = Readonly<{
+  "hacc/invocation_id": string;
+  "hacc/idempotency_key": string;
+}>;
+
+export type McpToolCallOptions = McpRequestOptions & {
+  metadata?: McpToolCallMetadata;
+  /**
+   * Exact, persistent identity assigned by the model provider to this tool use.
+   * It must survive transport reconnects and must not be a resettable JSON-RPC id.
+   */
+  persistentProviderToolCallId?: string;
 };
 
 export type StreamableHttpMcpClientOptions = {
@@ -205,10 +230,14 @@ type JsonRpcResponse = {
 
 type ParsedTransportResponse = {
   response: JsonRpcResponse;
-  sessionId: string | null;
+  transportState: McpTransportState;
 };
 
-type McpTransportState = { protocolVersion: string; sessionId: string | null };
+type McpTransportState = Readonly<{
+  protocolVersion: string;
+  sessionId: string | null;
+  generation: number;
+}>;
 
 type JsonSanitizerState = {
   nodes: number;
@@ -251,6 +280,97 @@ function assertToolName(value: unknown, configuration = false): asserts value is
     if (configuration) configurationError();
     invalidResponse();
   }
+}
+
+function validatedToolCallMetadata(
+  value: McpToolCallMetadata | undefined
+): Record<string, McpJsonValue> | undefined {
+  if (value === undefined) return undefined;
+  let invocationId: unknown;
+  let idempotencyKey: unknown;
+  try {
+    if (!isRecord(value) || nodeTypes.isProxy(value)) configurationError();
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) configurationError();
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== 2 ||
+      !keys.includes("hacc/invocation_id") ||
+      !keys.includes("hacc/idempotency_key")
+    ) {
+      configurationError();
+    }
+    const invocationDescriptor = Object.getOwnPropertyDescriptor(value, "hacc/invocation_id");
+    const idempotencyDescriptor = Object.getOwnPropertyDescriptor(value, "hacc/idempotency_key");
+    if (
+      !invocationDescriptor || !idempotencyDescriptor ||
+      !invocationDescriptor.enumerable || !idempotencyDescriptor.enumerable ||
+      invocationDescriptor.get || invocationDescriptor.set ||
+      idempotencyDescriptor.get || idempotencyDescriptor.set
+    ) {
+      configurationError();
+    }
+    invocationId = invocationDescriptor.value;
+    idempotencyKey = idempotencyDescriptor.value;
+  } catch (error) {
+    if (error instanceof McpClientError) throw error;
+    configurationError();
+  }
+  if (
+    typeof invocationId !== "string" ||
+    typeof idempotencyKey !== "string" ||
+    !/^[A-Za-z0-9_-]{24}$/.test(invocationId) ||
+    !/^[a-f0-9]{64}$/.test(idempotencyKey)
+  ) configurationError();
+  return Object.freeze({
+    "hacc/invocation_id": invocationId,
+    "hacc/idempotency_key": idempotencyKey,
+  });
+}
+
+function snapshotToolCallOptions(options: McpToolCallOptions): McpToolCallOptions {
+  try {
+    if (!isRecord(options) || nodeTypes.isProxy(options)) configurationError();
+    const prototype = Object.getPrototypeOf(options);
+    if (prototype !== Object.prototype && prototype !== null) configurationError();
+    const allowed = new Set([
+      "signal",
+      "timeoutMs",
+      "metadata",
+      "persistentProviderToolCallId",
+    ]);
+    const snapshot: McpToolCallOptions = {};
+    for (const key of Reflect.ownKeys(options)) {
+      if (typeof key !== "string" || !allowed.has(key)) configurationError();
+      const descriptor = Object.getOwnPropertyDescriptor(options, key);
+      if (!descriptor || !descriptor.enumerable || descriptor.get || descriptor.set) {
+        configurationError();
+      }
+      Object.defineProperty(snapshot, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return Object.freeze(snapshot);
+  } catch (error) {
+    if (error instanceof McpClientError) throw error;
+    configurationError();
+  }
+}
+
+function validatedPersistentProviderToolCallId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    Buffer.byteLength(value, "utf8") > MCP_MAX_PROVIDER_TOOL_CALL_ID_BYTES ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    configurationError();
+  }
+  return value;
 }
 
 function safeString(
@@ -804,6 +924,14 @@ function validateSessionId(value: string | null): string | null {
   return value;
 }
 
+function immutableTransportState(
+  protocolVersion: string,
+  sessionId: string | null,
+  generation: number
+): McpTransportState {
+  return Object.freeze({ protocolVersion, sessionId, generation });
+}
+
 function parseInitializeResult(
   value: unknown,
   supportedVersions: ReadonlySet<string>
@@ -907,8 +1035,18 @@ export class StreamableHttpMcpClient {
     controller: AbortController;
     waiters: number;
   }>();
+  #pendingInitializeState: McpTransportState | null = null;
+  #teardownState: McpTransportState | null = null;
+  #closePromise: Promise<void> | null = null;
+  #closeRefs = new Map<Promise<void>, {
+    controller: AbortController;
+    waiters: number;
+  }>();
   #advertisedTools: ReadonlySet<string> | null = null;
   #lifecycleGeneration = 0;
+  #pendingSseReplies = 0;
+  #sseReplyTail: Promise<void> = Promise.resolve();
+  #closing = false;
 
   constructor(options: StreamableHttpMcpClientOptions) {
     const allowInsecureLocalhost = process.env.NODE_ENV !== "production"
@@ -1004,18 +1142,31 @@ export class StreamableHttpMcpClient {
     }
   }
 
-  #headers(initializing = false, transportState?: McpTransportState): Headers {
+  #currentTransportState(): McpTransportState | null {
+    if (!this.#initializeResult) return null;
+    return immutableTransportState(
+      this.#initializeResult.protocolVersion,
+      this.#sessionId,
+      this.#lifecycleGeneration
+    );
+  }
+
+  #isCurrentTransportState(state: McpTransportState): boolean {
+    return this.#initializeResult !== null &&
+      state.generation === this.#lifecycleGeneration &&
+      state.protocolVersion === this.#initializeResult.protocolVersion &&
+      state.sessionId === this.#sessionId;
+  }
+
+  #headers(initializing: boolean, transportState: McpTransportState): Headers {
     const headers = new Headers({
       Accept: "application/json, text/event-stream",
       "Content-Type": "application/json",
     });
     if (this.#authorization) headers.set("Authorization", this.#authorization);
-    const state = transportState ?? (!initializing && this.#initializeResult
-      ? { protocolVersion: this.#initializeResult.protocolVersion, sessionId: this.#sessionId }
-      : null);
-    if (state) {
-      headers.set("MCP-Protocol-Version", state.protocolVersion);
-      if (state.sessionId) headers.set("MCP-Session-Id", state.sessionId);
+    if (!initializing) {
+      headers.set("MCP-Protocol-Version", transportState.protocolVersion);
+      if (transportState.sessionId) headers.set("MCP-Session-Id", transportState.sessionId);
     }
     return headers;
   }
@@ -1039,14 +1190,15 @@ export class StreamableHttpMcpClient {
     body: string,
     signal: AbortSignal,
     initializing: boolean,
-    transportState?: McpTransportState
+    transportState: McpTransportState
   ): Promise<Response> {
     if (new TextEncoder().encode(body).byteLength > this.#maxRequestBytes) {
       throw new McpClientError("request_too_large");
     }
     await this.#assertEndpointPolicy(signal);
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     try {
-      return await this.#fetch(this.#endpoint, {
+      const pending = this.#fetch(this.#endpoint, {
         method: "POST",
         headers: this.#headers(initializing, transportState),
         body,
@@ -1054,13 +1206,15 @@ export class StreamableHttpMcpClient {
         redirect: "error",
         cache: "no-store",
       });
+      return await waitForPromiseWithSignal(Promise.resolve(pending), signal);
     } catch (error) {
       if (signal.aborted) throw error;
       throw new McpClientError("transport_error");
     }
   }
 
-  #expireSession(): void {
+  #expireSession(state: McpTransportState): void {
+    if (!this.#isCurrentTransportState(state)) return;
     this.#sessionId = null;
     this.#initializeResult = null;
     this.#initializePromise = null;
@@ -1068,11 +1222,14 @@ export class StreamableHttpMcpClient {
     this.#lifecycleGeneration += 1;
   }
 
-  async #requireSuccessfulResponse(response: Response): Promise<void> {
+  async #requireSuccessfulResponse(
+    response: Response,
+    state: McpTransportState
+  ): Promise<void> {
     if (response.ok) return;
     void response.body?.cancel().catch(() => undefined);
-    if (response.status === 404 && this.#sessionId) {
-      this.#expireSession();
+    if (response.status === 404 && state.sessionId) {
+      this.#expireSession(state);
       throw new McpClientError("session_expired", { httpStatus: 404 });
     }
     throw new McpClientError("http_error", { httpStatus: response.status });
@@ -1088,14 +1245,16 @@ export class StreamableHttpMcpClient {
     headers.delete("Content-Type");
     headers.set("Accept", "text/event-stream");
     headers.set("Last-Event-ID", lastEventId);
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     try {
-      return await this.#fetch(this.#endpoint, {
+      const pending = this.#fetch(this.#endpoint, {
         method: "GET",
         headers,
         signal,
         redirect: "error",
         cache: "no-store",
       });
+      return await waitForPromiseWithSignal(Promise.resolve(pending), signal);
     } catch (error) {
       if (signal.aborted) throw error;
       throw new McpClientError("transport_error");
@@ -1103,9 +1262,10 @@ export class StreamableHttpMcpClient {
   }
 
   #handleSseOutOfBand(message: unknown, state: McpTransportState): void {
+    if (this.#closing) return;
     if (!isRecord(message) || message.jsonrpc !== "2.0") invalidResponse();
     if (message.method === "notifications/tools/list_changed" && message.id === undefined) {
-      this.#advertisedTools = null;
+      if (this.#isCurrentTransportState(state)) this.#advertisedTools = null;
       return;
     }
     if (typeof message.method !== "string" ||
@@ -1119,8 +1279,10 @@ export class StreamableHttpMcpClient {
           id: message.id,
           error: { code: -32601, message: "Method not found" },
         };
-    const reply = makeOperationSignal(undefined, CANCELLATION_TIMEOUT_MS);
-    void (async () => {
+    if (this.#pendingSseReplies >= MAX_PENDING_SSE_REPLIES) invalidResponse();
+    this.#pendingSseReplies += 1;
+    const sendReply = async () => {
+      const reply = makeOperationSignal(undefined, CANCELLATION_TIMEOUT_MS);
       try {
         const http = await this.#fetchResponse(
           JSON.stringify(response),
@@ -1136,19 +1298,34 @@ export class StreamableHttpMcpClient {
       } finally {
         reply.cleanup();
       }
-    })().catch(() => undefined);
+    };
+    const queued = this.#sseReplyTail.then(sendReply, sendReply);
+    const finalized = queued.finally(() => {
+      this.#pendingSseReplies -= 1;
+    });
+    this.#sseReplyTail = finalized.catch(() => undefined);
+    void finalized.catch(() => undefined);
   }
 
   async #postRequest(
     request: JsonRpcRequest,
     signal: AbortSignal,
-    initializing = false
+    initializing: boolean,
+    requestState: McpTransportState
   ): Promise<ParsedTransportResponse> {
-    const response = await this.#fetchResponse(JSON.stringify(request), signal, initializing);
-    await this.#requireSuccessfulResponse(response);
+    const response = await this.#fetchResponse(
+      JSON.stringify(request),
+      signal,
+      initializing,
+      requestState
+    );
+    await this.#requireSuccessfulResponse(response, requestState);
     const sessionId = initializing
       ? validateSessionId(response.headers.get("mcp-session-id"))
-      : null;
+      : requestState.sessionId;
+    const responseState = initializing
+      ? immutableTransportState(requestState.protocolVersion, sessionId, requestState.generation)
+      : requestState;
     const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
     if (contentType !== "application/json" && contentType !== "text/event-stream") {
       void response.body?.cancel().catch(() => undefined);
@@ -1164,20 +1341,15 @@ export class StreamableHttpMcpClient {
       }
       return {
         response: parseJsonRpcResponse(candidate, request.id),
-        sessionId,
+        transportState: responseState,
       };
     }
 
-    const state: McpTransportState = initializing
-      ? { protocolVersion: this.#requestedProtocolVersion, sessionId }
-      : {
-          protocolVersion: this.#initializeResult?.protocolVersion ?? this.#requestedProtocolVersion,
-          sessionId: this.#sessionId,
-        };
     let current = response;
     let remainingBytes = this.#maxResponseBytes;
+    let outOfBandMessages = 0;
     for (let resume = 0; resume <= this.#maxSseResumptions; resume += 1) {
-      await this.#requireSuccessfulResponse(current);
+      await this.#requireSuccessfulResponse(current, responseState);
       const resumedType = current.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
       if (resumedType !== "text/event-stream") {
         void current.body?.cancel().catch(() => undefined);
@@ -1193,15 +1365,22 @@ export class StreamableHttpMcpClient {
         request.id,
         remainingBytes,
         signal,
-        (message) => this.#handleSseOutOfBand(message, state)
+        (message) => {
+          outOfBandMessages += 1;
+          if (outOfBandMessages > MAX_SSE_OUT_OF_BAND_MESSAGES) invalidResponse();
+          this.#handleSseOutOfBand(message, responseState);
+        }
       );
       remainingBytes -= event.bytesRead;
       if (event.message !== undefined) {
-        return { response: parseJsonRpcResponse(event.message, request.id), sessionId };
+        return {
+          response: parseJsonRpcResponse(event.message, request.id),
+          transportState: responseState,
+        };
       }
       if (!event.lastEventId || resume === this.#maxSseResumptions) invalidResponse();
       await abortableDelay(event.retryMs ?? 0, signal);
-      current = await this.#resumeSse(event.lastEventId, signal, state);
+      current = await this.#resumeSse(event.lastEventId, signal, responseState);
     }
     invalidResponse();
   }
@@ -1209,7 +1388,7 @@ export class StreamableHttpMcpClient {
   async #postNotification(
     notification: JsonRpcNotification,
     signal: AbortSignal,
-    transportState?: McpTransportState
+    transportState: McpTransportState
   ): Promise<void> {
     const response = await this.#fetchResponse(
       JSON.stringify(notification),
@@ -1229,9 +1408,18 @@ export class StreamableHttpMcpClient {
     method: string,
     params: Record<string, McpJsonValue> | undefined,
     signal: AbortSignal,
-    initializing = false
-  ): Promise<{ result: unknown; sessionId: string | null }> {
+    initializing = false,
+    transportState?: McpTransportState
+  ): Promise<{ result: unknown; transportState: McpTransportState }> {
     const id = this.#nextRequestId++;
+    const requestState = transportState ?? (initializing
+      ? immutableTransportState(
+          this.#requestedProtocolVersion,
+          null,
+          this.#lifecycleGeneration
+        )
+      : this.#currentTransportState());
+    if (!requestState) throw new McpClientError("transport_error");
     const request: JsonRpcRequest = {
       jsonrpc: "2.0",
       id,
@@ -1240,10 +1428,12 @@ export class StreamableHttpMcpClient {
     };
     let transport: ParsedTransportResponse;
     try {
-      transport = await this.#postRequest(request, signal, initializing);
+      transport = await this.#postRequest(request, signal, initializing, requestState);
     } catch (error) {
-      if (signal.aborted && !initializing && this.#initializeResult) {
-        await this.#sendCancellation(id).catch(() => undefined);
+      if (signal.aborted && !initializing) {
+        // Cancellation is advisory and independently bounded. It must never extend
+        // the caller's already-expired total deadline.
+        void this.#sendCancellation(id, requestState).catch(() => undefined);
       }
       throw error;
     }
@@ -1252,31 +1442,46 @@ export class StreamableHttpMcpClient {
         rpcCode: transport.response.error.code,
       });
     }
-    return { result: transport.response.result, sessionId: transport.sessionId };
+    return {
+      result: transport.response.result,
+      transportState: transport.transportState,
+    };
   }
 
-  async #sendCancellation(requestId: JsonRpcId): Promise<void> {
-    if (!this.#initializeResult) return;
+  async #sendCancellation(
+    requestId: JsonRpcId,
+    transportState: McpTransportState
+  ): Promise<void> {
     const cancellation = makeOperationSignal(undefined, CANCELLATION_TIMEOUT_MS);
     try {
       await this.#postNotification({
         jsonrpc: "2.0",
         method: "notifications/cancelled",
         params: { requestId, reason: "client request ended" },
-      }, cancellation.signal);
+      }, cancellation.signal, transportState);
     } finally {
       cancellation.cleanup();
     }
   }
 
   async #initializeCore(signal: AbortSignal): Promise<McpInitializeResult> {
+    if (this.#closePromise) {
+      await waitForPromiseWithSignal(this.#closePromise, signal);
+    }
+    if (this.#teardownState) throw new McpClientError("transport_error");
     if (this.#initializeResult) return this.#initializeResult;
     if (!this.#initializePromise) {
       const generation = this.#lifecycleGeneration;
+      const initializeState = immutableTransportState(
+        this.#requestedProtocolVersion,
+        null,
+        generation
+      );
       const controller = new AbortController();
       const internal = makeOperationSignal(controller.signal, this.#requestTimeoutMs);
       this.#initializeController = controller;
       const promise = (async () => {
+        let pendingState: McpTransportState | null = null;
         try {
           const response = await this.#rpc(
             "initialize",
@@ -1289,33 +1494,49 @@ export class StreamableHttpMcpClient {
               },
             },
             internal.signal,
-            true
+            true,
+            initializeState
           );
+          // Own the provisional server session before validating or acknowledging
+          // the handshake so close() can always tear it down.
+          pendingState = response.transportState;
+          this.#pendingInitializeState = pendingState;
           const initialized = parseInitializeResult(
             response.result,
             this.#supportedProtocolVersions
           );
-          const transportState = {
-            protocolVersion: initialized.protocolVersion,
-            sessionId: response.sessionId,
-          };
+          pendingState = immutableTransportState(
+            initialized.protocolVersion,
+            response.transportState.sessionId,
+            generation
+          );
+          this.#pendingInitializeState = pendingState;
           await this.#postNotification(
             { jsonrpc: "2.0", method: "notifications/initialized" },
             internal.signal,
-            transportState
+            pendingState
           );
-          if (generation !== this.#lifecycleGeneration) {
+          if (
+            generation !== this.#lifecycleGeneration ||
+            this.#pendingInitializeState !== pendingState
+          ) {
             throw new McpClientError("aborted");
           }
           // Publish the session atomically only after the lifecycle handshake completes.
-          this.#sessionId = response.sessionId;
+          this.#sessionId = pendingState.sessionId;
           this.#initializeResult = initialized;
+          this.#pendingInitializeState = null;
+          pendingState = null;
           return initialized;
         } catch (error) {
           if (internal.timedOut()) throw new McpClientError("timeout");
           if (controller.signal.aborted) throw new McpClientError("aborted");
           throw error;
         } finally {
+          if (pendingState && this.#pendingInitializeState === pendingState) {
+            this.#pendingInitializeState = null;
+            this.#stageTeardown(pendingState);
+          }
           internal.cleanup();
           if (this.#initializeController === controller) this.#initializeController = null;
         }
@@ -1354,6 +1575,8 @@ export class StreamableHttpMcpClient {
   async #listToolsCore(signal: AbortSignal): Promise<McpToolDefinition[]> {
     const initialized = await this.#initializeCore(signal);
     if (!initialized.capabilities.tools) throw new McpClientError("missing_capability");
+    const transportState = this.#currentTransportState();
+    if (!transportState) throw new McpClientError("transport_error");
     const output: McpToolDefinition[] = [];
     const remoteNames = new Set<string>();
     const cursors = new Set<string>();
@@ -1363,7 +1586,9 @@ export class StreamableHttpMcpClient {
       const response = await this.#rpc(
         "tools/list",
         cursor === undefined ? undefined : { cursor },
-        signal
+        signal,
+        false,
+        transportState
       );
       if (!isRecord(response.result) || !Array.isArray(response.result.tools)) invalidResponse();
       remoteToolCount += response.result.tools.length;
@@ -1376,7 +1601,9 @@ export class StreamableHttpMcpClient {
       }
       const nextCursor = response.result.nextCursor;
       if (nextCursor === undefined || nextCursor === null) {
-        this.#advertisedTools = remoteNames;
+        if (this.#isCurrentTransportState(transportState)) {
+          this.#advertisedTools = remoteNames;
+        }
         return output;
       }
       if (
@@ -1402,14 +1629,27 @@ export class StreamableHttpMcpClient {
   callTool(
     name: string,
     args: Record<string, unknown> = {},
-    options: McpRequestOptions = {}
+    options: McpToolCallOptions = {}
   ): Promise<McpToolCallResult> {
     assertToolName(name, true);
     if (this.#allowedTools && !this.#allowedTools.has(name)) {
       return Promise.reject(new McpClientError("tool_not_allowed"));
     }
     const safeArgs = cloneRequestJsonObject(args);
-    return this.#runOperation(options, this.#toolCallTimeoutMs, async (signal) => {
+    const safeOptions = snapshotToolCallOptions(options);
+    const metadata = validatedToolCallMetadata(safeOptions.metadata);
+    const persistentProviderToolCallId = validatedPersistentProviderToolCallId(
+      safeOptions.persistentProviderToolCallId
+    );
+    const trustedMetadata = metadata || persistentProviderToolCallId !== undefined
+      ? {
+          ...(metadata ?? {}),
+          ...(persistentProviderToolCallId === undefined
+            ? {}
+            : { [MCP_PROVIDER_TOOL_CALL_ID_META_KEY]: persistentProviderToolCallId }),
+        }
+      : undefined;
+    return this.#runOperation(safeOptions, this.#toolCallTimeoutMs, async (signal) => {
       const initialized = await this.#initializeCore(signal);
       if (!initialized.capabilities.tools) throw new McpClientError("missing_capability");
       if (!this.#allowedTools) {
@@ -1418,51 +1658,125 @@ export class StreamableHttpMcpClient {
       }
       const response = await this.#rpc(
         "tools/call",
-        { name, arguments: safeArgs },
+        {
+          name,
+          arguments: safeArgs,
+          ...(trustedMetadata ? { _meta: trustedMetadata } : {}),
+        },
         signal
       );
       return extractSafeMcpToolResult(response.result);
     });
   }
 
-  /** Ends a stateful HTTP session. HTTP 405 is allowed by the MCP transport. */
-  close(options: McpRequestOptions = {}): Promise<void> {
+  #stageTeardown(state: McpTransportState | null): void {
+    if (!state?.sessionId) return;
+    if (!this.#teardownState) {
+      this.#teardownState = state;
+      return;
+    }
+    if (
+      this.#teardownState.generation !== state.generation ||
+      this.#teardownState.protocolVersion !== state.protocolVersion ||
+      this.#teardownState.sessionId !== state.sessionId
+    ) {
+      // A new session is not allowed to publish while an older teardown is pending.
+      throw new McpClientError("transport_error");
+    }
+  }
+
+  async #deleteStagedSession(signal: AbortSignal): Promise<void> {
+    const state = this.#teardownState;
+    if (!state?.sessionId) return;
+    // Server requests discovered before close retain the exact authenticated transport
+    // state they arrived on. Drain those bounded replies before deleting that session;
+    // otherwise DELETE can overtake a required ping/error response on the wire.
+    while (this.#pendingSseReplies > 0) {
+      const replies = this.#sseReplyTail;
+      await waitForPromiseWithSignal(replies, signal);
+      if (replies === this.#sseReplyTail && this.#pendingSseReplies === 0) break;
+    }
+    await this.#assertEndpointPolicy(signal);
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const headers = new Headers({
+      Accept: "application/json, text/event-stream",
+      "MCP-Protocol-Version": state.protocolVersion,
+      "MCP-Session-Id": state.sessionId,
+    });
+    if (this.#authorization) headers.set("Authorization", this.#authorization);
+    let response: Response;
+    try {
+      const pending = this.#fetch(this.#endpoint, {
+        method: "DELETE",
+        headers,
+        signal,
+        redirect: "error",
+        cache: "no-store",
+      });
+      response = await waitForPromiseWithSignal(Promise.resolve(pending), signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new McpClientError("transport_error");
+    }
+    if (![200, 202, 204, 405].includes(response.status)) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new McpClientError("http_error", { httpStatus: response.status });
+    }
+    void response.body?.cancel().catch(() => undefined);
+    if (this.#teardownState === state) this.#teardownState = null;
+  }
+
+  #startClose(): void {
+    const publishedState = this.#currentTransportState();
+    const pendingState = this.#pendingInitializeState;
+    this.#stageTeardown(pendingState ?? publishedState);
     this.#lifecycleGeneration += 1;
+    this.#closing = true;
     this.#initializeController?.abort();
-    const sessionId = this.#sessionId;
-    const initialized = this.#initializeResult;
     this.#sessionId = null;
     this.#initializeResult = null;
     this.#initializePromise = null;
     this.#initializeController = null;
+    this.#pendingInitializeState = null;
     this.#advertisedTools = null;
-    return this.#runOperation(options, this.#requestTimeoutMs, async (signal) => {
-      if (!sessionId || !initialized) return;
-      await this.#assertEndpointPolicy(signal);
-      const headers = new Headers({
-        Accept: "application/json, text/event-stream",
-        "MCP-Protocol-Version": initialized.protocolVersion,
-        "MCP-Session-Id": sessionId,
-      });
-      if (this.#authorization) headers.set("Authorization", this.#authorization);
-      let response: Response;
-      try {
-        response = await this.#fetch(this.#endpoint, {
-          method: "DELETE",
-          headers,
-          signal,
-          redirect: "error",
-          cache: "no-store",
-        });
-      } catch (error) {
-        if (signal.aborted) throw error;
-        throw new McpClientError("transport_error");
+
+    const controller = new AbortController();
+    const promise = this.#runOperation(
+      { signal: controller.signal },
+      this.#requestTimeoutMs,
+      (signal) => this.#deleteStagedSession(signal)
+    );
+    this.#closePromise = promise;
+    this.#closeRefs.set(promise, { controller, waiters: 0 });
+    void promise.finally(() => {
+      if (this.#closePromise === promise) {
+        this.#closePromise = null;
+        this.#closing = false;
       }
-      if (![200, 202, 204, 405].includes(response.status)) {
-        void response.body?.cancel().catch(() => undefined);
-        throw new McpClientError("http_error", { httpStatus: response.status });
-      }
-      void response.body?.cancel().catch(() => undefined);
-    });
+      this.#closeRefs.delete(promise);
+    }).catch(() => undefined);
+  }
+
+  async #closeCore(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    if (!this.#closePromise) this.#startClose();
+    const pending = this.#closePromise;
+    if (!pending) throw new McpClientError("transport_error");
+    const reference = this.#closeRefs.get(pending);
+    if (!reference) throw new McpClientError("transport_error");
+    reference.waiters += 1;
+    try {
+      await waitForPromiseWithSignal(pending, signal);
+    } finally {
+      reference.waiters -= 1;
+      if (reference.waiters === 0) reference.controller.abort();
+    }
+  }
+
+  /** Ends a stateful HTTP session. HTTP 405 is allowed by the MCP transport. */
+  close(options: McpRequestOptions = {}): Promise<void> {
+    return this.#runOperation(options, this.#requestTimeoutMs, (signal) =>
+      this.#closeCore(signal)
+    );
   }
 }

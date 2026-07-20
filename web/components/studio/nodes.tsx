@@ -46,6 +46,8 @@ export const IncomingCallNode = memo(function IncomingCallNode({ data }: NodePro
             <div className="text-[12px] tabular-nums text-neutral-500">{number}</div>
           ) : status === "failed" ? (
             <div className="text-[11px] text-red-400">provisioning failed</div>
+          ) : status === "awaiting_operator_provisioning" ? (
+            <div className="text-[11px] text-neutral-500">number setup requires approval</div>
           ) : status === "none" ? null : (
             <div className="mt-0.5 h-3.5 w-24 animate-pulse rounded bg-neutral-100" />
           )}

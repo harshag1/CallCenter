@@ -1,6 +1,11 @@
 // Short-lived, revision-scoped action leases for realtime tool calls.
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  deriveDomainSeparatedSecretKey,
+  mcpGatewaySecret,
+  validateMcpGatewaySecret,
+} from "./high-authority-secrets";
 
 const DOMAIN = "harshas-amazing-call-center:flow-action-lease:v1";
 const DEFAULT_TTL_SECONDS = 5 * 60;
@@ -34,8 +39,7 @@ export type FlowCapabilityError = {
 };
 
 function signingKey(secret: string): Buffer {
-  if (secret.length < 32) throw new Error("MCP_GATEWAY_SECRET must be at least 32 characters");
-  return createHmac("sha256", secret).update(DOMAIN).digest();
+  return deriveDomainSeparatedSecretKey(validateMcpGatewaySecret(secret), DOMAIN);
 }
 
 function signature(body: string, secret: string): Buffer {
@@ -43,9 +47,7 @@ function signature(body: string, secret: string): Buffer {
 }
 
 export function actionCapabilitySecret(): string {
-  const secret = process.env.MCP_GATEWAY_SECRET;
-  if (!secret) throw new Error("MCP_GATEWAY_SECRET is required for flow action leases");
-  return secret;
+  return mcpGatewaySecret();
 }
 
 export function signFlowCapability(

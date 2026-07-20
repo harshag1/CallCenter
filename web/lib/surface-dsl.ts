@@ -21,13 +21,30 @@ const Field = z.object({
   options: z.array(z.string()).optional(),
 });
 
+const CredentialForm = z.object({
+  kind: z.literal("credential_form"),
+  // The slot is correlation-only and cannot read or redirect the credential. The
+  // server binds it to an authenticated org and immutable sink before it reaches UI.
+  slotId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+  label: z.string().min(1).max(512),
+  credentialLabel: z.string().min(1).max(128).optional(),
+  submitLabel: z.string().min(1).max(128).optional(),
+  expiresAt: z.string().max(64).optional(),
+  /** Server-derived consent context. Never substitute a model-authored display label. */
+  destination: z.string().url().max(2_048).optional(),
+  allowedTools: z.union([
+    z.literal("all"),
+    z.array(z.string().regex(/^[A-Za-z0-9_.:/-]{1,128}$/)).max(256),
+  ]).optional(),
+}).strict();
+
 export type Block = {
   kind: string;
   [key: string]: unknown;
 };
 
 const KINDS = new Set([
-  "stat_row", "table", "chart", "tabs", "transcript", "audio", "code", "form", "markdown", "actions",
+  "stat_row", "table", "chart", "tabs", "transcript", "audio", "code", "form", "credential_form", "markdown", "actions",
 ]);
 
 const CHART_TYPES = new Set(["line", "bar", "area", "donut", "pie"]);
@@ -78,6 +95,7 @@ const BlockSchema: z.ZodType<Block> = z.lazy(() =>
     z.object({ kind: z.literal("audio"), src: z.string() }),
     z.object({ kind: z.literal("code"), language: z.string().default("typescript"), source: z.string() }),
     z.object({ kind: z.literal("form"), fields: z.array(Field), submit: Action }),
+    CredentialForm,
     z.object({ kind: z.literal("markdown"), body: z.string() }),
     z.object({ kind: z.literal("actions"), actions: z.array(Action) }),
   ])) as z.ZodType<Block>
@@ -89,6 +107,16 @@ export const SurfaceSchema = z.object({
 });
 
 export type Surface = z.infer<typeof SurfaceSchema>;
+
+/** Credential forms are deliberately ephemeral and must never be saved as screens/pinned surfaces. */
+export function containsCredentialForm(surface: Surface): boolean {
+  const visit = (blocks: Surface["blocks"]): boolean => blocks.some((block) => {
+    if (block.kind === "credential_form") return true;
+    return block.kind === "tabs"
+      && (block.tabs as { blocks: Surface["blocks"] }[]).some((tab) => visit(tab.blocks));
+  });
+  return visit(surface.blocks);
+}
 
 export const FlowSchema = z.object({
   nodes: z.array(

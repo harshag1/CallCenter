@@ -30,6 +30,7 @@ const SOURCE = `async function run(input, env) {
 }`;
 
 const ORIGINAL_ENV = { ...process.env };
+const VAULT_MASTER_KEY = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 const INVOCATION_CONTEXT = {
   orgId: "org-1",
   toolId: "tool-1",
@@ -44,7 +45,7 @@ const INVOCATION_CONTEXT = {
 
 describe("generated-tool secret boundary", () => {
   beforeEach(() => {
-    process.env.ENV_VAULT_MASTER_KEY = "11".repeat(32);
+    process.env.ENV_VAULT_MASTER_KEY = VAULT_MASTER_KEY;
     process.env.VERCEL_TOKEN = "vercel-control-plane-root";
     process.env.MCP_GATEWAY_SECRET = "framework-mcp-root-must-never-deploy";
     process.env.TOOL_SHARED_SECRET = "legacy-wrapper-root-must-never-deploy";

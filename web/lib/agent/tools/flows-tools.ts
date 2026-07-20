@@ -2,11 +2,74 @@
 // flows-tools.ts — operator tools: outbound flows, campaign runs/scheduling, recall policy control.
 
 import { q, qOne } from "../../db";
-import { createFlow, updateFlow, listFlows, launchCampaign, kickCampaign, cancelCampaign, campaignStats } from "../../campaigns";
+import {
+  campaignAuthorizationArguments,
+  campaignStats,
+  cancelCampaign,
+  createFlow,
+  listFlows,
+  previewCampaignForProposal,
+  updateFlow,
+} from "../../campaigns";
 import { slimInstructions, AgentFlowSchema, normalizeFlow } from "../../flow";
+import {
+  createVoiceCampaignCostQuote,
+  resolveVoiceMaxDurationSeconds,
+} from "../../operator-pricing";
 import type { OperatorTool } from "../types";
+import {
+  operatorActionArgumentsSha256,
+  proposeOperatorAction,
+} from "./operator-capability-policy";
 
 const FLOW_DOC = `Prefer Flow v2: {schema_version:2,always_tools?:[tool],tool_exposure:"gateway",nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,tools?:[tool],steps?:[Step],support_number?,table?}],edges:[{from,to,when?}]}. Step is recursive: {id,label,instructions,context?,tools?:[tool],required_outputs?:[key],success_criteria?:[text],checkpoint?:boolean,max_attempts?:number,steps?:[Step],transitions?:[{to:"absolute.step.path",when?,label?}],on_failure?:"absolute.step.path"}. RULES: exactly one entry with no steps; topic steps may nest up to 8 levels; grant only the tools needed at each step; use required_outputs for deterministic completion; all transition targets are absolute paths; when recording data, grant write_table and require the durable row id/output.`;
+const CAMPAIGN_REQUEST_PROPERTIES = Object.freeze({
+  agent_id: { type: "string" },
+  flow_id: { type: "string" },
+  name: { type: "string", description: "Campaign name, e.g. 'July satisfaction survey'" },
+  dataset: { type: "string", description: "Table slug holding the targets, e.g. customers" },
+  phone_column: { type: "string", default: "phone" },
+  run_at: { type: "string", description: "ISO-8601 to schedule for later; omit to make the jobs immediately eligible." },
+  max_duration_seconds: { type: "number", description: "Optional per-call connected duration limit; defaults to the deployment cap." },
+});
+
+async function prepareCampaign(args: Record<string, unknown>, orgId: string) {
+  const targetSnapshot = await previewCampaignForProposal(orgId, {
+    agentId: String(args.agent_id ?? ""),
+    flowId: String(args.flow_id ?? ""),
+    datasetSlug: String(args.dataset ?? ""),
+    phoneColumn: args.phone_column ? String(args.phone_column) : undefined,
+  });
+  const preview = targetSnapshot.preview;
+  const agent = await qOne<{ phone_number: string | null }>(
+    "SELECT phone_number FROM agents WHERE id = $1 AND org_id = $2",
+    [preview.agentId, orgId]
+  );
+  if (!agent?.phone_number) throw new Error("campaign agent has no approved outbound phone number");
+  const maxDurationSeconds = resolveVoiceMaxDurationSeconds(args.max_duration_seconds);
+  const costQuote = createVoiceCampaignCostQuote({
+    originE164: agent.phone_number,
+    destinationE164s: targetSnapshot.displayTargets,
+    targetSetSha256: preview.targetSetSha256,
+    maxDurationSeconds,
+  });
+  const reservationMicroUsd = costQuote.reservationMicroUsd;
+  const authorization = campaignAuthorizationArguments(preview, {
+    name: String(args.name ?? ""),
+    runAt: args.run_at ? String(args.run_at) : null,
+    fromNumber: agent.phone_number,
+    maxDurationSeconds,
+    costQuote,
+    worstCaseMicroUsd: reservationMicroUsd,
+  });
+  return Object.freeze({
+    preview,
+    costQuote,
+    reservationMicroUsd,
+    authorization,
+    privateDisplay: Object.freeze({ targets: targetSnapshot.displayTargets }),
+  });
+}
 
 export const createFlowTool: OperatorTool = {
   name: "create_flow",
@@ -25,7 +88,7 @@ export const createFlowTool: OperatorTool = {
     const owned = await qOne("SELECT id FROM agents WHERE id = $1 AND org_id = $2", [args.agent_id, ctx.orgId]);
     if (!owned) return { output: { error: "agent not found" } };
     try {
-      const parsed = AgentFlowSchema.parse({ schema_version: 2, tool_exposure: "gateway", ...args.flow as object });
+      const parsed = AgentFlowSchema.parse({ ...args.flow as object, schema_version: 2, tool_exposure: "gateway" });
       const normalized = normalizeFlow(parsed, "outbound");
       if ("error" in normalized) return { output: normalized };
       const row = await createFlow(ctx.orgId, String(args.agent_id), {
@@ -61,7 +124,7 @@ export const updateFlowTool: OperatorTool = {
   },
   async execute(args, ctx) {
     try {
-      let parsed = args.flow ? AgentFlowSchema.parse({ schema_version: 2, tool_exposure: "gateway", ...args.flow as object }) : null;
+      let parsed = args.flow ? AgentFlowSchema.parse({ ...args.flow as object, schema_version: 2, tool_exposure: "gateway" }) : null;
       if (parsed) {
         const normalized = normalizeFlow(parsed, "outbound");
         if ("error" in normalized) return { output: normalized };
@@ -75,8 +138,9 @@ export const updateFlowTool: OperatorTool = {
       });
       if (!ok) return { output: { error: "flow not found" } };
       const row = await qOne<{ name: string; flow: unknown }>(
-        "SELECT name, flow FROM flows WHERE id = $1", [args.flow_id]
+        "SELECT name, flow FROM flows WHERE id = $1 AND org_id = $2", [args.flow_id, ctx.orgId]
       );
+      if (!row) return { output: { error: "flow not found" } };
       return {
         output: { ok: true },
         flow: row!.flow as never,
@@ -140,45 +204,66 @@ export const listFlowsTool: OperatorTool = {
   },
 };
 
-export const runCampaignTool: OperatorTool = {
-  name: "run_campaign",
+export const previewCampaignTool: OperatorTool = {
+  name: "preview_campaign",
   description:
-    "Run an outbound flow against every valid phone number in a table — NOW (parallel dialing starts immediately) or at a scheduled time. Calls appear in the log live; a Scheduled tab tracks pending work.",
+    "Freeze and preview the exact tenant-owned target set, schedule, per-call duration cap, and configured call spend reservation before asking the human to confirm run_campaign. This never creates jobs or dials.",
   parameters: {
     type: "object",
-    properties: {
-      agent_id: { type: "string" },
-      flow_id: { type: "string" },
-      name: { type: "string", description: "Campaign name, e.g. 'July satisfaction survey'" },
-      dataset: { type: "string", description: "Table slug holding the targets, e.g. customers" },
-      phone_column: { type: "string", default: "phone" },
-      run_at: { type: "string", description: "ISO-8601 to schedule for later; omit to dial now." },
-    },
+    additionalProperties: false,
+    properties: CAMPAIGN_REQUEST_PROPERTIES,
     required: ["agent_id", "flow_id", "name", "dataset"],
   },
   async execute(args, ctx) {
     try {
-      const launch = await launchCampaign(ctx.orgId, {
-        agentId: String(args.agent_id),
-        flowId: String(args.flow_id),
-        name: String(args.name),
-        datasetSlug: String(args.dataset),
-        phoneColumn: args.phone_column ? String(args.phone_column) : undefined,
-        runAt: args.run_at ? String(args.run_at) : null,
-        createdBy: `operator (${ctx.email})`,
-      });
-      if (!launch.scheduled) {
-        const { waitUntil } = await import("@vercel/functions");
-        waitUntil(kickCampaign(launch.campaignId).then(() => undefined).catch(() => {}));
-      }
+      const prepared = await prepareCampaign(args, ctx.orgId);
       return {
-        output: { ...launch },
-        notice: launch.scheduled
-          ? `Campaign scheduled — ${launch.targets} calls at ${args.run_at}`
-          : `Dialing ${launch.targets} numbers now`,
+        output: {
+          requires_confirmation: true,
+          target_preview: prepared.preview,
+          authorization_arguments: prepared.authorization,
+          authorization_arguments_sha256: operatorActionArgumentsSha256(
+            "run_campaign",
+            prepared.authorization
+          ),
+          spend_reservation_usd: prepared.reservationMicroUsd / 1_000_000,
+        },
+        notice: `Previewed ${prepared.preview.targetCount} unique targets; no calls were scheduled or placed`,
       };
     } catch (e) {
-      return { output: { error: (e as Error).message } };
+      return { output: { error: (e as Error).message.slice(0, 400) } };
+    }
+  },
+};
+
+export const runCampaignTool: OperatorTool = {
+  name: "run_campaign",
+  description:
+    "Propose an outbound campaign from a fresh tenant-owned target snapshot. The browser must show and approve the exact targets, runtime, schedule, duration cap, and configured spend reservation before the server materializes or dials anything.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: CAMPAIGN_REQUEST_PROPERTIES,
+    required: ["agent_id", "flow_id", "name", "dataset"],
+  },
+  async execute(args, ctx) {
+    try {
+      const prepared = await prepareCampaign(args, ctx.orgId);
+      const proposal = await proposeOperatorAction({
+        ctx,
+        capability: "run_campaign",
+        argumentsValue: prepared.authorization,
+        privateDisplay: prepared.privateDisplay,
+        estimatedUnits: prepared.costQuote.units,
+        estimatedMicroUsd: prepared.reservationMicroUsd,
+      });
+      return {
+        output: { status: "human_confirmation_required", proposal_id: proposal.proposalId },
+        operatorActionConfirmation: proposal,
+        notice: `Review ${prepared.preview.targetCount} exact campaign targets; no jobs or calls were created`,
+      };
+    } catch (e) {
+      return { output: { error: (e as Error).message.slice(0, 400) } };
     }
   },
 };
@@ -197,6 +282,8 @@ export const cancelCampaignTool: OperatorTool = {
   description: "Cancel a campaign: pending calls are dropped; completed calls keep their data.",
   parameters: { type: "object", properties: { campaign_id: { type: "string" } }, required: ["campaign_id"] },
   async execute(args, ctx) {
+    const owned = await qOne("SELECT id FROM campaigns WHERE id = $1 AND org_id = $2", [args.campaign_id, ctx.orgId]);
+    if (!owned) return { output: { error: "campaign not found" } };
     const n = await cancelCampaign(ctx.orgId, String(args.campaign_id));
     return { output: { ok: true, canceled_pending: n }, notice: `Campaign canceled (${n} pending calls dropped)` };
   },

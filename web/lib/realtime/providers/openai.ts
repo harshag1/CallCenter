@@ -7,6 +7,7 @@ import type {
   ServerRealtimeConnection,
   VoiceSessionSpec,
 } from "../types";
+import { browserProviderSessionSpec } from "./browser-direct-mcp";
 import { buildOpenAIClientSecretPayload, buildOpenAISession } from "./openai-protocol";
 
 const API = "https://api.openai.com/v1";
@@ -44,18 +45,24 @@ export const openaiAdapter: RealtimeProviderAdapter = {
     telephony: "native-pcmu",
     remoteMcp: true,
     clientFunctions: true,
-    sessionResumption: false,
+    sessionResumption: { supported: false, enabledByDefault: false },
     notes: ["GPT-Live is not yet available in the API", "WebRTC is preferred for browser media"],
   },
   buildSessionUpdate: buildOpenAISessionUpdate,
   async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+    if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
+    const providerSpec = browserProviderSessionSpec(spec);
     return {
       provider: "openai",
       transport: "webrtc",
       model: spec.model,
       voice: spec.voice,
-      token: await mintToken(spec),
+      token: await mintToken(providerSpec),
       endpoint: `${API}/realtime/calls`,
+      toolProxyUrl: spec.toolProxyUrl,
+      toolProxyToken: spec.toolProxyToken,
+      toolProxyRotation: spec.toolProxyRotation,
+      activeCatalogAuthority: spec.activeCatalogAuthority,
     };
   },
   async createServerConnection(spec, audio): Promise<ServerRealtimeConnection> {

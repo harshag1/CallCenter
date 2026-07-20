@@ -8,10 +8,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUp, ChevronRight, MessageSquare, Wrench } from "lucide-react";
 import { toolDisplay } from "./tool-display";
+import OperatorActionApprovalCard, {
+  type OperatorActionApprovalStatus,
+  type OperatorActionConfirmationItem,
+} from "./OperatorActionApprovalCard";
 
 export type ChatItem =
   | { kind: "text"; role: "user" | "assistant"; text: string }
-  | { kind: "tool"; name: string; status: "start" | "done" | "error" };
+  | { kind: "tool"; name: string; status: "start" | "done" | "error" }
+  | OperatorActionConfirmationItem;
 
 /** Bare single-line tool activity: pulsing icon + shimmering label while running. */
 export function ToolLine({ name, status }: { name: string; status: "start" | "done" | "error" }) {
@@ -65,8 +70,9 @@ export const ASSISTANT_PROSE =
 
 type TextItem = Extract<ChatItem, { kind: "text" }>;
 type ToolItem = Extract<ChatItem, { kind: "tool" }>;
+type ConfirmationItem = Extract<ChatItem, { kind: "operator_action_confirmation" }>;
 type Grouped =
-  | { kind: "single"; item: TextItem | ToolItem }
+  | { kind: "single"; item: TextItem | ToolItem | ConfirmationItem }
   | { kind: "toolgroup"; items: ToolItem[]; live: boolean };
 
 /** Consecutive tool calls collapse into one expandable group once the turn has moved on. */
@@ -117,8 +123,13 @@ export function ToolGroup({ items, live }: { items: ToolItem[]; live: boolean })
 const MAX_INPUT_PX = 330; // ~15 lines before scrolling
 
 export default function ChatPanel({
-  items, streaming, onSend,
-}: { items: ChatItem[]; streaming: boolean; onSend: (text: string) => void }) {
+  items, streaming, onSend, onOperatorActionStatusChange,
+}: {
+  items: ChatItem[];
+  streaming: boolean;
+  onSend: (text: string) => void;
+  onOperatorActionStatusChange: (proposalId: string, status: OperatorActionApprovalStatus) => void;
+}) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -156,6 +167,12 @@ export default function ChatPanel({
             <ToolGroup key={i} items={g.items} live={g.live} />
           ) : g.item.kind === "tool" ? (
             <ToolLine key={i} name={g.item.name} status={g.item.status} />
+          ) : g.item.kind === "operator_action_confirmation" ? (
+            <OperatorActionApprovalCard
+              key={g.item.proposalId}
+              item={g.item}
+              onStatusChange={onOperatorActionStatusChange}
+            />
           ) : g.item.role === "user" ? (
             <div key={i} className="flex justify-end">
               <div className={USER_BUBBLE}>{g.item.text}</div>

@@ -2,7 +2,7 @@
 // ui.ts — operator tools: render dynamic surfaces and drive the flow panel.
 
 import { q } from "../../db";
-import { SurfaceSchema, FlowSchema } from "../../surface-dsl";
+import { containsCredentialForm, SurfaceSchema, FlowSchema } from "../../surface-dsl";
 import type { OperatorTool } from "../types";
 
 const DSL_DOC = `Blocks: stat_row{stats:[{label,value,delta?}]}, table{columns:[{key,label}],rows:[{...}],rowAction?:{prompt}}, chart{type:line|bar|area|donut,series:[{name,points:[{x,y}]}]}, tabs{tabs:[{label,blocks}]}, transcript{callId}, audio{src}, code{language,source}, form{fields:[{name,label,type,options?}],submit:{label?,prompt}}, markdown{body}, actions{actions:[{label,prompt}]}.
@@ -31,6 +31,13 @@ export const renderSurface: OperatorTool = {
     const parsed = SurfaceSchema.safeParse(args.surface);
     if (!parsed.success) {
       return { output: { error: `invalid surface: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` } };
+    }
+    if (containsCredentialForm(parsed.data)) {
+      return {
+        output: {
+          error: "credential forms can only be issued by trusted credential tools and cannot be rendered generically",
+        },
+      };
     }
     if (args.pin) {
       await q(

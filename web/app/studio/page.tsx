@@ -8,7 +8,19 @@ import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { LogOut, Phone, ArrowUp, ArrowRight, Play, Loader2, LayoutGrid } from "lucide-react";
-import { ASSISTANT_PROSE, PixelLoader, ToolGroup, USER_BUBBLE, groupItems } from "@/components/chat/ChatPanel";
+import {
+  ASSISTANT_PROSE,
+  PixelLoader,
+  ToolGroup,
+  USER_BUBBLE,
+  groupItems,
+  type ChatItem,
+} from "@/components/chat/ChatPanel";
+import OperatorActionApprovalCard, {
+  operatorActionConfirmationFromWire,
+  type OperatorActionApprovalStatus,
+  withOperatorActionApprovalStatus,
+} from "@/components/chat/OperatorActionApprovalCard";
 import Tooltip from "@/components/ui/Tooltip";
 import FlowCanvas from "@/components/studio/FlowCanvas";
 import TopPills from "@/components/studio/TopPills";
@@ -19,10 +31,6 @@ import { shortBrand } from "@/lib/brand";
 import NodeEditor from "@/components/studio/NodeEditor";
 import TracePanel, { type TraceEvent } from "@/components/studio/TracePanel";
 import { PRODUCT_NAME } from "@/lib/product";
-
-type ChatItem =
-  | { kind: "text"; role: "user" | "assistant"; text: string }
-  | { kind: "tool"; name: string; status: "start" | "done" | "error" };
 
 type Status = {
   onboarding: { agent_id?: string; company?: string; number_status?: string; number?: string; flow_ready?: boolean };
@@ -103,6 +111,14 @@ export default function Studio() {
       .catch(() => {});
   }, [filesOpen]);
 
+  const updateOperatorActionStatus = useCallback((proposalId: string, status: OperatorActionApprovalStatus) => {
+    setItems((prev) => prev.map((item) =>
+      item.kind === "operator_action_confirmation"
+        ? withOperatorActionApprovalStatus(item, proposalId, status)
+        : item
+    ));
+  }, []);
+
   const send = useCallback(async (text: string) => {
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
     setStreaming(true);
@@ -143,6 +159,13 @@ export default function Studio() {
               }
               return [...prev, { kind: "tool", name: ev.name, status: ev.status }];
             });
+          } else if (ev.type === "operator_action_confirmation") {
+            const confirmation = operatorActionConfirmationFromWire(ev.proposal);
+            if (confirmation) {
+              setItems((prev) => prev.some((item) =>
+                item.kind === "operator_action_confirmation" && item.proposalId === confirmation.proposalId
+              ) ? prev : [...prev, confirmation]);
+            }
           } else if (ev.type === "flow") {
             const parsed = AgentFlowSchema.safeParse(ev.flow);
             if (parsed.success) setFlow(parsed.data);
@@ -362,11 +385,17 @@ export default function Studio() {
 
         {/* Inline chat — flows straight on the page */}
         <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto py-5">
-          {groupItems(items as never, streaming).map((g, i) =>
+          {groupItems(items, streaming).map((g, i) =>
             g.kind === "toolgroup" ? (
               <ToolGroup key={i} items={g.items} live={g.live} />
             ) : g.item.kind === "tool" ? (
               <ToolGroup key={i} items={[g.item]} live />
+            ) : g.item.kind === "operator_action_confirmation" ? (
+              <OperatorActionApprovalCard
+                key={g.item.proposalId}
+                item={g.item}
+                onStatusChange={updateOperatorActionStatus}
+              />
             ) : g.item.role === "user" ? (
               <div key={i} className="flex justify-end">
                 <div className={USER_BUBBLE}>{g.item.text}</div>

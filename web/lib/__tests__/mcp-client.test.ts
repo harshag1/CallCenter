@@ -210,6 +210,49 @@ describe("MCP lifecycle and transport", () => {
     expect(initializeCount).toBe(2);
   });
 
+  it("deletes a provisional session when close interrupts the initialized handshake", async () => {
+    let initializeCount = 0;
+    let deleteCount = 0;
+    const deletedSessions: string[] = [];
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") {
+        deleteCount += 1;
+        deletedSessions.push(headersFor(init).get("mcp-session-id") ?? "");
+        expect(headersFor(init).get("mcp-protocol-version")).toBe("2025-11-25");
+        return new Response(null, { status: 204 });
+      }
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        initializeCount += 1;
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": initializeCount === 1 ? "provisional-s1" : "published-s2",
+        });
+      }
+      if (rpc.method === "notifications/initialized" && initializeCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+          if (init.signal?.aborted) rejectAbort();
+          else init.signal?.addEventListener("abort", rejectAbort, { once: true });
+        });
+      }
+      if (rpc.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+
+    const initializing = client.initialize();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await expect(client.close()).resolves.toBeUndefined();
+    await expect(initializing).rejects.toMatchObject({ code: "aborted" });
+    expect(deleteCount).toBe(1);
+    expect(deletedSessions).toEqual(["provisional-s1"]);
+
+    await expect(client.initialize()).resolves.toMatchObject({ protocolVersion: "2025-11-25" });
+    expect(initializeCount).toBe(2);
+  });
+
   it("accepts an SSE response and selects only the matching JSON-RPC response", async () => {
     let pingReplies = 0;
     const fetch = initializeThen((rpc) => {
@@ -261,6 +304,425 @@ describe("MCP lifecycle and transport", () => {
       value: { ok: true },
     });
     await vi.waitFor(() => expect(pingReplies).toBe(1));
+  });
+
+  it("serializes authenticated replies to concurrent SSE server requests", async () => {
+    let activeReplies = 0;
+    let maxActiveReplies = 0;
+    const repliedIds: Array<string | number> = [];
+    const fetch = initializeThen(async (rpc) => {
+      if (rpc.method === undefined) {
+        activeReplies += 1;
+        maxActiveReplies = Math.max(maxActiveReplies, activeReplies);
+        repliedIds.push(rpc.id as string | number);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activeReplies -= 1;
+        return new Response(null, { status: 202 });
+      }
+      expect(rpc.method).toBe("tools/call");
+      const id = rpc.id as number;
+      const requests = Array.from({ length: 8 }, (_, index) => [
+        "event: message",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: `server-ping-${index}`,
+          method: "ping",
+        })}`,
+        "",
+      ].join("\n"));
+      return new Response([
+        ...requests,
+        "event: message",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: "{\"ok\":true}" }], isError: false },
+        })}`,
+        "",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["lookup"],
+      fetch,
+    });
+
+    await expect(client.callTool("lookup")).resolves.toMatchObject({ value: { ok: true } });
+    await vi.waitFor(() => expect(repliedIds).toHaveLength(8));
+    expect(maxActiveReplies).toBe(1);
+    expect(repliedIds).toEqual(Array.from({ length: 8 }, (_, index) => `server-ping-${index}`));
+  });
+
+  it("drains authenticated SSE server replies before deleting the session", async () => {
+    const order: string[] = [];
+    const replyHeaders: Headers[] = [];
+    let releaseFirstReply!: () => void;
+    const firstReply = new Promise<Response>((resolve) => {
+      releaseFirstReply = () => resolve(new Response(null, { status: 202 }));
+    });
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") {
+        order.push("delete");
+        const headers = headersFor(init);
+        expect(headers.get("authorization")).toBe("Bearer reply-secret");
+        expect(headers.get("mcp-session-id")).toBe("reply-session");
+        return new Response(null, { status: 204 });
+      }
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": "reply-session",
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (rpc.method === undefined) {
+        const id = String(rpc.id);
+        order.push(id);
+        replyHeaders.push(headersFor(init));
+        return id === "server-ping-1" ? firstReply : new Response(null, { status: 202 });
+      }
+      expect(rpc.method).toBe("tools/call");
+      const id = rpc.id as number;
+      return new Response([
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: "server-ping-1", method: "ping" })}`,
+        "",
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: "server-ping-2", method: "ping" })}`,
+        "",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: "{\"ok\":true}" }], isError: false },
+        })}`,
+        "",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      authorization: "Bearer reply-secret",
+      allowedTools: ["lookup"],
+      fetch,
+    });
+
+    await expect(client.callTool("lookup")).resolves.toMatchObject({ value: { ok: true } });
+    await vi.waitFor(() => expect(order).toEqual(["server-ping-1"]));
+    const closing = client.close();
+    await Promise.resolve();
+    expect(order).toEqual(["server-ping-1"]);
+    releaseFirstReply();
+    await closing;
+
+    expect(order).toEqual(["server-ping-1", "server-ping-2", "delete"]);
+    expect(replyHeaders).toHaveLength(2);
+    for (const headers of replyHeaders) {
+      expect(headers.get("authorization")).toBe("Bearer reply-secret");
+      expect(headers.get("mcp-session-id")).toBe("reply-session");
+      expect(headers.get("mcp-protocol-version")).toBe("2025-11-25");
+    }
+  });
+
+  it("does not let a stale session 404 expire a newer published session", async () => {
+    let initializeCount = 0;
+    let releaseOld!: () => void;
+    let oldPosts = 0;
+    const seenToolSessions: string[] = [];
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        initializeCount += 1;
+        return jsonResponse(rpc.id as number, {
+          ...INITIALIZE_RESULT,
+          protocolVersion: initializeCount === 1 ? "2025-06-18" : "2025-11-25",
+        }, {
+          "MCP-Session-Id": `session-${initializeCount}`,
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (rpc.method === "tools/call") {
+        const session = headersFor(init).get("mcp-session-id") ?? "";
+        seenToolSessions.push(session);
+        if (session === "session-1") {
+          oldPosts += 1;
+          return new Promise<Response>((resolve) => {
+            releaseOld = () => resolve(new Response(null, { status: 404 }));
+          });
+        }
+        return jsonResponse(rpc.id as number, {
+          content: [{ type: "text", text: "new-session-ok" }],
+        });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["lookup"],
+      fetch,
+    });
+
+    await client.initialize();
+    const staleCall = client.callTool("lookup");
+    await vi.waitFor(() => expect(oldPosts).toBe(1));
+    await client.close();
+    await client.initialize();
+    releaseOld();
+    await expect(staleCall).rejects.toMatchObject({ code: "session_expired", httpStatus: 404 });
+    await expect(client.callTool("lookup")).resolves.toMatchObject({ value: "new-session-ok" });
+
+    expect(initializeCount).toBe(2);
+    expect(seenToolSessions).toEqual(["session-1", "session-2"]);
+  });
+
+  it("pins delayed SSE replies to the request's original session and protocol", async () => {
+    let initializeCount = 0;
+    let releaseOld!: () => void;
+    let oldPosts = 0;
+    const pingSessions: Array<{ session: string | null; protocol: string | null }> = [];
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        initializeCount += 1;
+        return jsonResponse(rpc.id as number, {
+          ...INITIALIZE_RESULT,
+          protocolVersion: initializeCount === 1 ? "2025-06-18" : "2025-11-25",
+        }, {
+          "MCP-Session-Id": `session-${initializeCount}`,
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (rpc.method === undefined) {
+        pingSessions.push({
+          session: headersFor(init).get("mcp-session-id"),
+          protocol: headersFor(init).get("mcp-protocol-version"),
+        });
+        return new Response(null, { status: 202 });
+      }
+      if (rpc.method === "tools/call" && headersFor(init).get("mcp-session-id") === "session-1") {
+        oldPosts += 1;
+        const id = rpc.id as number;
+        return new Promise<Response>((resolve) => {
+          releaseOld = () => resolve(new Response([
+            `data: ${JSON.stringify({ jsonrpc: "2.0", id: "old-ping", method: "ping" })}`,
+            "",
+            `data: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              result: { content: [{ type: "text", text: "old-result" }] },
+            })}`,
+            "",
+            "",
+          ].join("\n"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }));
+        });
+      }
+      if (rpc.method === "tools/call") {
+        return jsonResponse(rpc.id as number, {
+          content: [{ type: "text", text: "new-result" }],
+        });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["lookup"],
+      fetch,
+    });
+
+    await client.initialize();
+    const oldCall = client.callTool("lookup");
+    await vi.waitFor(() => expect(oldPosts).toBe(1));
+    await client.close();
+    await client.initialize();
+    releaseOld();
+    await expect(oldCall).resolves.toMatchObject({ value: "old-result" });
+    await vi.waitFor(() => expect(pingSessions).toHaveLength(1));
+    expect(pingSessions).toEqual([{ session: "session-1", protocol: "2025-06-18" }]);
+    await expect(client.callTool("lookup")).resolves.toMatchObject({ value: "new-result" });
+    expect(initializeCount).toBe(2);
+  });
+
+  it("does not let a stale catalog overwrite a newer session's advertised tools", async () => {
+    let initializeCount = 0;
+    let listPosts = 0;
+    const listSessions: string[] = [];
+    let releaseOldList!: () => void;
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        initializeCount += 1;
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": `catalog-session-${initializeCount}`,
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (rpc.method === "tools/list") {
+        listPosts += 1;
+        const session = headersFor(init).get("mcp-session-id") ?? "";
+        const cursor = (rpc.params as Record<string, unknown> | undefined)?.cursor;
+        listSessions.push(session);
+        if (session === "catalog-session-1" && cursor === undefined) {
+          return new Promise<Response>((resolve) => {
+            releaseOldList = () => resolve(jsonResponse(rpc.id as number, {
+              tools: [{ name: "old-page-one", inputSchema: { type: "object" } }],
+              nextCursor: "old-page-2",
+            }));
+          });
+        }
+        if (session === "catalog-session-1" && cursor === "old-page-2") {
+          return jsonResponse(rpc.id as number, {
+            tools: [{ name: "old-page-two", inputSchema: { type: "object" } }],
+          });
+        }
+        return jsonResponse(rpc.id as number, {
+          tools: [{ name: "new-only", inputSchema: { type: "object" } }],
+        });
+      }
+      if (rpc.method === "tools/call") {
+        return jsonResponse(rpc.id as number, {
+          content: [{ type: "text", text: "new-tool-ok" }],
+        });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+
+    await client.initialize();
+    const staleList = client.listTools();
+    await vi.waitFor(() => expect(listPosts).toBe(1));
+    await client.close();
+    await client.initialize();
+    await expect(client.listTools()).resolves.toEqual([
+      { name: "new-only", inputSchema: { type: "object" } },
+    ]);
+    releaseOldList();
+    await expect(staleList).resolves.toEqual([
+      { name: "old-page-one", inputSchema: { type: "object" } },
+      { name: "old-page-two", inputSchema: { type: "object" } },
+    ]);
+    await expect(client.callTool("old-page-two"))
+      .rejects.toMatchObject({ code: "tool_not_allowed" });
+    await expect(client.callTool("new-only")).resolves.toMatchObject({ value: "new-tool-ok" });
+    expect(listPosts).toBe(3);
+    expect(listSessions).toEqual([
+      "catalog-session-1",
+      "catalog-session-2",
+      "catalog-session-1",
+    ]);
+  });
+
+  it("joins concurrent close callers onto one teardown", async () => {
+    let deleteCount = 0;
+    let releaseDelete!: () => void;
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") {
+        deleteCount += 1;
+        return new Promise<Response>((resolve) => {
+          releaseDelete = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": "joined-session",
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+    await client.initialize();
+
+    let firstSettled = false;
+    let secondSettled = false;
+    const first = client.close().finally(() => { firstSettled = true; });
+    const second = client.close().finally(() => { secondSettled = true; });
+    await vi.waitFor(() => expect(deleteCount).toBe(1));
+    expect(firstSettled).toBe(false);
+    expect(secondSettled).toBe(false);
+    releaseDelete();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(deleteCount).toBe(1);
+  });
+
+  it("retains failed DELETE state so close can retry the exact session", async () => {
+    let initializeCount = 0;
+    const deleteHeaders: Headers[] = [];
+    const fetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") {
+        deleteHeaders.push(headersFor(init));
+        return deleteHeaders.length === 1
+          ? new Response(null, { status: 503 })
+          : new Response(null, { status: 204 });
+      }
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        initializeCount += 1;
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": "retry-session",
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+    await client.initialize();
+
+    await expect(client.close()).rejects.toMatchObject({ code: "http_error", httpStatus: 503 });
+    await expect(client.close()).resolves.toBeUndefined();
+    expect(deleteHeaders).toHaveLength(2);
+    for (const headers of deleteHeaders) {
+      expect(headers.get("mcp-session-id")).toBe("retry-session");
+      expect(headers.get("mcp-protocol-version")).toBe("2025-11-25");
+    }
+    expect(initializeCount).toBe(1);
+  });
+
+  it("rejects an SSE response with unbounded out-of-band message fan-out", async () => {
+    const fetch = initializeThen((rpc) => {
+      expect(rpc.method).toBe("tools/call");
+      const id = rpc.id as number;
+      const notifications = Array.from({ length: 33 }, (_, index) => [
+        "event: message",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: { progress: index },
+        })}`,
+        "",
+      ].join("\n"));
+      return new Response([
+        ...notifications,
+        "event: message",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: "late" }] },
+        })}`,
+        "",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["lookup"],
+      fetch,
+    });
+
+    await expect(client.callTool("lookup")).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("does not advance an SSE resume cursor for an incomplete event", async () => {
@@ -377,6 +839,42 @@ describe("MCP lifecycle and transport", () => {
     expect(hangingFetch).toHaveBeenCalledTimes(2);
   });
 
+  it("enforces total deadlines when custom fetch ignores abort signals", async () => {
+    const neverSettles = new Promise<Response>(() => undefined);
+    const initializeFetch = vi.fn(() => neverSettles) as unknown as McpFetch;
+    const initializeClient = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      fetch: initializeFetch,
+    });
+    await expect(initializeClient.initialize({ timeoutMs: 10 }))
+      .rejects.toMatchObject({ code: "timeout" });
+    expect(initializeFetch).toHaveBeenCalledTimes(1);
+
+    let deleteCount = 0;
+    const closeFetch: McpFetch = vi.fn(async (_input, init = {}) => {
+      if (init.method === "DELETE") {
+        deleteCount += 1;
+        return deleteCount === 1 ? neverSettles : new Response(null, { status: 204 });
+      }
+      const rpc = rpcBody(init);
+      if (rpc.method === "initialize") {
+        return jsonResponse(rpc.id as number, INITIALIZE_RESULT, {
+          "MCP-Session-Id": "deadline-session",
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return new Response(null, { status: 500 });
+    });
+    const closeClient = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      fetch: closeFetch,
+    });
+    await closeClient.initialize();
+    await expect(closeClient.close({ timeoutMs: 10 })).rejects.toMatchObject({ code: "timeout" });
+    await expect(closeClient.close()).resolves.toBeUndefined();
+    expect(deleteCount).toBe(2);
+  });
+
   it("sends explicit MCP cancellation when an in-flight tool request is aborted", async () => {
     let cancellations = 0;
     const fetch = fixtureFetch((rpc) => {
@@ -406,6 +904,44 @@ describe("MCP lifecycle and transport", () => {
     controller.abort();
     await expect(call).rejects.toMatchObject({ code: "aborted" });
     await vi.waitFor(() => expect(cancellations).toBe(1));
+  });
+
+  it("does not extend the caller deadline while cancellation transport is hung", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancellations = 0;
+      const neverSettles = new Promise<Response>(() => undefined);
+      const fetch = fixtureFetch((rpc) => {
+        if (rpc.method === "initialize") return jsonResponse(rpc.id as number, INITIALIZE_RESULT);
+        if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (rpc.method === "notifications/cancelled") {
+          cancellations += 1;
+          return neverSettles;
+        }
+        if (rpc.method === "tools/call") return neverSettles;
+        return new Response(null, { status: 500 });
+      });
+      const client = new StreamableHttpMcpClient({
+        endpoint: "https://mcp.example/mcp",
+        allowedTools: ["mutate"],
+        fetch,
+      });
+      await client.initialize();
+
+      let outcome: unknown;
+      void client.callTool("mutate", {}, { timeoutMs: 25 }).then(
+        () => { outcome = "resolved"; },
+        (error: unknown) => { outcome = error; }
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(outcome).toMatchObject({ code: "timeout" });
+      expect(cancellations).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("applies deadlines while a custom response body reader is hung", async () => {
@@ -570,6 +1106,173 @@ describe("MCP tool discovery and execution", () => {
       value: { accepted: false, retryAfter: 10 },
     });
     expect(JSON.stringify(result)).not.toContain("providerSecret");
+  });
+
+  it("sends strict gateway-owned identities outside model-controlled arguments", async () => {
+    let toolCall: Record<string, unknown> | null = null;
+    const fetch = initializeThen((rpc) => {
+      if (rpc.method === "tools/call") toolCall = rpc;
+      return jsonResponse(rpc.id as number, {
+        content: [],
+        structuredContent: { ok: true },
+      });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["reserve"],
+      fetch,
+    });
+
+    await client.callTool(
+      "reserve",
+      {
+        slot: "10am",
+        _meta: {
+          "hacc/invocation_id": "attackerattackerattacker",
+          "hacc/idempotency_key": "0".repeat(64),
+          "hacc/provider_tool_call_id": "model-controlled-id",
+        },
+      },
+      {
+        metadata: {
+          "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+          "hacc/idempotency_key": "a".repeat(64),
+        },
+        persistentProviderToolCallId: "provider-call-α-001",
+      }
+    );
+
+    expect(toolCall).not.toBeNull();
+    const params = toolCall!.params as Record<string, unknown>;
+    expect(params._meta).toEqual({
+      "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+      "hacc/idempotency_key": "a".repeat(64),
+      "hacc/provider_tool_call_id": "provider-call-α-001",
+    });
+    expect((params.arguments as Record<string, unknown>)._meta).toEqual({
+      "hacc/invocation_id": "attackerattackerattacker",
+      "hacc/idempotency_key": "0".repeat(64),
+      "hacc/provider_tool_call_id": "model-controlled-id",
+    });
+  });
+
+  it("rejects malformed gateway invocation metadata before network access", () => {
+    const fetch = vi.fn() as unknown as McpFetch;
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+
+    expect(() => client.callTool("reserve", {}, {
+      metadata: {
+        "hacc/invocation_id": "too-short",
+        "hacc/idempotency_key": "a".repeat(64),
+      },
+    })).toThrowError(expect.objectContaining({ code: "invalid_configuration" }));
+
+    for (const persistentProviderToolCallId of ["", "bad\nid", "α".repeat(129)]) {
+      expect(() => client.callTool("reserve", {}, { persistentProviderToolCallId }))
+        .toThrowError(expect.objectContaining({ code: "invalid_configuration" }));
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects accessor, proxy, and hidden trusted metadata without evaluating it", () => {
+    const fetch = vi.fn() as unknown as McpFetch;
+    const client = new StreamableHttpMcpClient({ endpoint: "https://mcp.example/mcp", fetch });
+    let getterCalls = 0;
+    const accessorMetadata = Object.defineProperties({}, {
+      "hacc/invocation_id": {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return "abcdefghijklmnopqrstuvwx";
+        },
+      },
+      "hacc/idempotency_key": {
+        enumerable: true,
+        value: "a".repeat(64),
+      },
+    });
+    expect(() => client.callTool("reserve", {}, { metadata: accessorMetadata as never }))
+      .toThrowError(expect.objectContaining({ code: "invalid_configuration" }));
+    expect(getterCalls).toBe(0);
+
+    let proxyTrapCalls = 0;
+    const proxiedMetadata = new Proxy({
+      "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+      "hacc/idempotency_key": "a".repeat(64),
+    }, {
+      ownKeys() {
+        proxyTrapCalls += 1;
+        throw new Error("secret proxy detail");
+      },
+    });
+    const proxyError = (() => {
+      try {
+        client.callTool("reserve", {}, { metadata: proxiedMetadata });
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(proxyError).toMatchObject({ code: "invalid_configuration" });
+    expect(String(proxyError)).not.toContain("secret proxy detail");
+    expect(proxyTrapCalls).toBe(0);
+
+    const hiddenMetadata = {
+      "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+      "hacc/idempotency_key": "a".repeat(64),
+    } as Record<string | symbol, unknown>;
+    Object.defineProperty(hiddenMetadata, "hidden", { value: "forged" });
+    expect(() => client.callTool("reserve", {}, { metadata: hiddenMetadata as never }))
+      .toThrowError(expect.objectContaining({ code: "invalid_configuration" }));
+
+    const optionAccessor = Object.defineProperty({}, "metadata", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return accessorMetadata;
+      },
+    });
+    expect(() => client.callTool("reserve", {}, optionAccessor as never))
+      .toThrowError(expect.objectContaining({ code: "invalid_configuration" }));
+    expect(getterCalls).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("snapshots trusted metadata before any asynchronous initialization work", async () => {
+    let releaseInitialize!: () => void;
+    let toolCall: Record<string, unknown> | null = null;
+    const fetch = fixtureFetch((rpc) => {
+      if (rpc.method === "initialize") {
+        return new Promise<Response>((resolve) => {
+          releaseInitialize = () => resolve(jsonResponse(rpc.id as number, INITIALIZE_RESULT));
+        });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (rpc.method === "tools/call") {
+        toolCall = rpc;
+        return jsonResponse(rpc.id as number, { content: [] });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = new StreamableHttpMcpClient({
+      endpoint: "https://mcp.example/mcp",
+      allowedTools: ["reserve"],
+      fetch,
+    });
+    const mutableMetadata = {
+      "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+      "hacc/idempotency_key": "a".repeat(64),
+    };
+
+    const call = client.callTool("reserve", {}, { metadata: mutableMetadata });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    mutableMetadata["hacc/invocation_id"] = "zyxwvutsrqponmlkjihgfedc";
+    mutableMetadata["hacc/idempotency_key"] = "b".repeat(64);
+    releaseInitialize();
+    await expect(call).resolves.toMatchObject({ value: null });
+    expect((toolCall!.params as Record<string, unknown>)._meta).toEqual({
+      "hacc/invocation_id": "abcdefghijklmnopqrstuvwx",
+      "hacc/idempotency_key": "a".repeat(64),
+    });
   });
 
   it("does not call guessed names when no explicit allowlist was snapshotted", async () => {

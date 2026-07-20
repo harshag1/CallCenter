@@ -1,12 +1,12 @@
 // Author: Harsha Gundala
-// onboarding.ts — background prep during verification: favicon, domain-tuned demo flow, agent, phone number.
+// onboarding.ts — provider-free background prep: favicon, domain-tuned demo flow, and agent.
 
 import { q, qOne } from "./db";
 import { researchJSON, chatJSON, MODELS } from "./xai";
 import { resolveFavicon } from "./favicon";
-import { purchaseNumber } from "./telephony";
 import { AgentFlowSchema, slimInstructions, TOPIC_ICONS, type AgentFlow } from "./flow";
 import { log } from "./log";
+import { allowsLocalDevelopmentFundedAi } from "./deployment-funded-ai";
 
 const L = log("onboarding");
 
@@ -16,7 +16,7 @@ export type OnboardingState = {
   company?: string;
   persona?: string;
   flow_ready?: boolean;
-  number_status?: "provisioning" | "ready" | "failed";
+  number_status?: "awaiting_operator_provisioning" | "ready" | "failed";
   number?: string;
   error?: string;
 };
@@ -45,6 +45,37 @@ const SPEC_SHAPE = `{"company":"<name>","bot_name":"<short friendly name>","pers
 Exactly 2 topics, each with 2-3 steps, grounded in what the company actually does.`;
 
 async function generateDemoSpec(domain: string | null, email: string): Promise<DemoSpec> {
+  if (!allowsLocalDevelopmentFundedAi()) {
+    const company = domain ?? "Your organization";
+    return {
+      company,
+      bot_name: "Avery",
+      persona: `A concise, reliable receptionist for ${company}. The agent confirms important details and never invents facts.`,
+      voice: "eve",
+      topics: [
+        {
+          id: "general_help",
+          label: "General Help",
+          icon: "life-buoy",
+          context: "Understand the caller's goal. Ask one question at a time. Confirm important details. Use only approved tools and offer a safe handoff when context is missing.",
+          steps: [
+            { id: "understand", label: "Understand", instructions: "Ask what the caller needs. Restate the request. Confirm the desired outcome." },
+            { id: "assist", label: "Assist", instructions: "Use only currently available tools. Explain verified results. Never claim an action succeeded without a receipt." },
+          ],
+        },
+        {
+          id: "message",
+          label: "Take Message",
+          icon: "message-square",
+          context: "Collect a concise message when the request cannot be completed. Confirm the caller's preferred follow-up method. Do not promise a response time without policy context.",
+          steps: [
+            { id: "collect", label: "Collect", instructions: "Collect the caller's name, reason, and safe contact preference. Repeat them for confirmation." },
+            { id: "close", label: "Close", instructions: "Summarize the message. Explain the next safe step. Close politely." },
+          ],
+        },
+      ],
+    };
+  }
   if (domain) {
     return researchJSON<DemoSpec>(
       `Research the company behind "${domain}" on the live web, then design a demo inbound phone agent for it. Reply JSON only:\n${SPEC_SHAPE}`,
@@ -90,25 +121,31 @@ export function assembleFlow(spec: DemoSpec, supportNumber: string | null): Agen
 
 /** Idempotent full prep. Safe to fire-and-forget; progress lands on orgs.onboarding. */
 export async function runOnboardingPrep(orgId: string, email: string): Promise<void> {
-  const org = await qOne<{ domain: string | null; onboarding: OnboardingState }>(
-    "SELECT domain, onboarding FROM orgs WHERE id = $1", [orgId]
+  const claimed = await qOne<{ domain: string | null; onboarding: OnboardingState }>(
+    `UPDATE orgs
+     SET onboarding = (COALESCE(onboarding, '{}'::jsonb) || '{"started":true}'::jsonb) - 'error'
+     WHERE id = $1 AND COALESCE(onboarding->>'started', 'false') <> 'true'
+     RETURNING domain, onboarding`,
+    [orgId]
   );
-  if (!org) return;
-  if (org.onboarding.started) {
-    // Prep already ran — but a failed number purchase is retryable.
-    if (org.onboarding.number_status === "failed" && org.onboarding.agent_id) {
-      await patchState(orgId, { number_status: "provisioning", error: undefined });
-      try {
-        const number = await purchaseNumber();
-        await q("UPDATE agents SET phone_number = $2 WHERE id = $1", [org.onboarding.agent_id, number]);
-        await patchState(orgId, { number_status: "ready", number, error: null as never });
-      } catch (e) {
-        await patchState(orgId, { number_status: "failed", error: (e as Error).message });
-      }
+  if (!claimed) {
+    const org = await qOne<{ domain: string | null; onboarding: OnboardingState }>(
+      "SELECT domain, onboarding FROM orgs WHERE id = $1", [orgId]
+    );
+    if (!org) return;
+    // Onboarding never owns funded provider authority. Normalize legacy failed
+    // or in-progress states to the explicit operator-confirmation boundary.
+    if (org.onboarding.agent_id
+        && org.onboarding.number_status !== "ready"
+        && org.onboarding.number_status !== "awaiting_operator_provisioning") {
+      await patchState(orgId, {
+        number_status: "awaiting_operator_provisioning",
+        error: undefined,
+      });
     }
     return;
   }
-  await patchState(orgId, { started: true });
+  const org = claimed;
 
   try {
     // Favicon + demo spec race in parallel; user phone = default fallback support number.
@@ -141,19 +178,12 @@ export async function runOnboardingPrep(orgId: string, email: string): Promise<v
       company: spec.company,
       persona: spec.persona,
       flow_ready: true,
-      number_status: "provisioning",
+      number_status: "awaiting_operator_provisioning",
     });
-
-    try {
-      const number = await purchaseNumber();
-      await q("UPDATE agents SET phone_number = $2 WHERE id = $1", [agent!.id, number]);
-      await patchState(orgId, { number_status: "ready", number });
-    } catch (e) {
-      L.error("number provisioning failed", { orgId, err: (e as Error).message });
-      await patchState(orgId, { number_status: "failed", error: (e as Error).message });
-    }
   } catch (e) {
     L.error("onboarding prep failed", { orgId, err: (e as Error).message });
-    await patchState(orgId, { error: (e as Error).message, started: false });
+    // Keep the atomic claim closed. An operator may inspect/reset the failure,
+    // but repeated browser requests cannot amplify provider work.
+    await patchState(orgId, { error: (e as Error).message });
   }
 }
