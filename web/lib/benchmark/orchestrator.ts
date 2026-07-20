@@ -101,6 +101,14 @@ import type {
 } from "../realtime/client/types";
 import type { ProviderHardSessionCaps } from "./provider-pricing-proof";
 import { realtimeWireIdentitySha256 } from "../realtime/client/wire-evidence";
+import {
+  createDeterministicCallerWorldScheduler,
+  observeCallerWorld,
+  type CallerSchedulerState,
+  type CallerTurnSelection,
+  type CallerWorldSchedulePlan,
+  type ScheduledCallerOpportunity,
+} from "./caller-world-scheduler";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -425,6 +433,7 @@ export type TrialResult = Readonly<{
   providerReceiptLinkage: ProviderReadOnlyReceiptLinkage | null;
   audibility: TrialAudibilityReport;
   audioDelivery: TrialAudioDeliveryReport;
+  callerSchedule: TrialCallerScheduleReport | null;
   kernelAttestation: BenchmarkKernelFinalAttestation;
   world: ToolWorldState;
   budgetLedger: BudgetLedger;
@@ -454,6 +463,8 @@ export type RunTrialInput = Readonly<{
   audioDeliveryProfile?: TrialAudioDeliveryProfile;
   sleep?: TrialSleep;
   callerTurns: readonly CallerAudioTurn[];
+  /** Omit for the secondary open-loop stress mode. */
+  callerSchedulePlan?: CallerWorldSchedulePlan;
   pairedAudio: PairedAudioManifest;
   /** Frozen hash shared by the baseline/treatment pair and preregistration. */
   pairInvariantsHash: string;
@@ -478,6 +489,19 @@ type PreparedTurn = Readonly<{
   turnId: string;
   scenarioTurn: BenchmarkScenario["caller"]["turns"][number];
   material: AudioMaterial;
+  /** One-based source ordinal in the frozen paired audio library. */
+  pairedOrdinal: number;
+}>;
+
+export type TrialCallerScheduleReport = Readonly<{
+  schema_version: 1;
+  mode: "closed_loop";
+  schedule_sha256: string;
+  status: "complete" | "blocked" | "failed";
+  stage_id: string | null;
+  committed_turn_ids: readonly string[];
+  opportunities: readonly ScheduledCallerOpportunity[];
+  evidence: readonly BenchmarkEventEnvelope[];
 }>;
 
 type QueuedEvent = Readonly<{
@@ -836,7 +860,7 @@ function validateAndPrepareTurns(
     ) {
       throw new Error(`caller audio hash or format mismatch for ${turn.turnId}`);
     }
-    return Object.freeze({ turnId: turn.turnId, scenarioTurn, material });
+    return Object.freeze({ turnId: turn.turnId, scenarioTurn, material, pairedOrdinal: index + 1 });
   });
   if (totalBytes > limits.maxInputAudioBytes) {
     throw new Error(`caller audio exceeds the ${limits.maxInputAudioBytes}-byte input cap`);
@@ -2131,6 +2155,7 @@ function assertCompleteTrialArtifacts(
     kernelAttestation: BenchmarkKernelFinalAttestation;
     kernelTranscript: string;
     kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
+    callerSchedule: TrialCallerScheduleReport | null;
   }>
 ): void {
   const eventVerification = verifyEventChain(artifacts.events);
@@ -2169,6 +2194,7 @@ function assertCompleteTrialArtifacts(
     "audio/delivery.json",
     "audio/pair-manifest.json",
   ];
+  if (expected.callerSchedule) required.push("caller-schedule.json");
   for (const path of required) {
     if (!fileByPath.has(path)) throw new Error(`required trial artifact ${path} is missing`);
   }
@@ -2222,7 +2248,8 @@ function assertCompleteTrialArtifacts(
       throw new Error(`output audio artifact for sent turn ${turn.turnId} is missing`);
     }
     const delivered = expected.audioDelivery.deliveries.filter((entry) => entry.turn === index + 1);
-    const pairedTurn = expected.pair.turns[index];
+    const pairedTurn = expected.pair.turns[turn.pairedOrdinal - 1];
+    if (!pairedTurn) throw new Error(`paired audio source ${turn.pairedOrdinal} is missing for ${turn.turnId}`);
     if (index < expected.turnsSent && delivered.length !== pairedTurn.chunk_hashes.length) {
       throw new Error(`successful turn ${turn.turnId} does not have a complete paced delivery trace`);
     }
@@ -2273,6 +2300,7 @@ function buildArtifacts(input: Readonly<{
   kernelAttestation: BenchmarkKernelFinalAttestation;
   kernelTranscript: string;
   kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
+  callerSchedule: TrialCallerScheduleReport | null;
   pairInvariantsHash: string;
   studyPlanHash: string;
   ledger: BudgetLedger;
@@ -2348,6 +2376,13 @@ function buildArtifacts(input: Readonly<{
     `${canonicalArtifactJson(input.audioDelivery)}\n`,
     "application/json"
   ));
+  if (input.callerSchedule) {
+    files.push(makeArtifactFile(
+      "caller-schedule.json",
+      `${canonicalArtifactJson(artifactJson(input.callerSchedule))}\n`,
+      "application/json",
+    ));
+  }
   files.push(makeArtifactFile(
     "trial-result.json",
     `${canonicalArtifactJson({
@@ -2380,6 +2415,8 @@ function buildArtifacts(input: Readonly<{
       },
       audibility_applicability: input.audibility.applicability,
       audio_delivery_profile_hash: input.audioDelivery.profile_hash,
+      caller_mode: input.callerSchedule ? "closed_loop" : "open_loop",
+      caller_schedule_sha256: input.callerSchedule?.schedule_sha256 ?? null,
       errors: input.errors,
       counters: input.counters,
       budget: budgetSnapshot(input.ledger),
@@ -2457,15 +2494,15 @@ function buildArtifacts(input: Readonly<{
     kernelAttestation: input.kernelAttestation,
     kernelTranscript: input.kernelTranscript,
     kernelAttestationExpectation: input.kernelAttestationExpectation,
+    callerSchedule: input.callerSchedule,
   });
   return artifacts;
 }
 
 /**
- * Run one provider/condition trial. The caller sequence is deliberately open
- * loop: every pre-recorded turn is sent in scenario order, independent of model
- * prose. This is the first reproducible benchmark mode; adaptive caller policy
- * can be layered on later without changing the evidence format.
+ * Run one provider/condition trial. A callerSchedulePlan activates the primary
+ * condition-blind closed-loop mode; omitting it preserves the secondary static
+ * open-loop stress mode for backwards-compatible transport experiments.
  */
 export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResult> {
   requireNonEmpty(input.runId, "runId");
@@ -2497,6 +2534,38 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     input.limits,
     audioDeliveryProfile
   );
+  const callerScheduler = input.callerSchedulePlan
+    ? createDeterministicCallerWorldScheduler(input.callerSchedulePlan)
+    : null;
+  const plannedTurnCount = callerScheduler
+    ? (input.callerSchedulePlan!.stages?.length ?? scenario.caller.turns.length)
+    : planned.length;
+  if (plannedTurnCount > input.limits.maxTurns || plannedTurnCount > scenario.max_turns) {
+    throw new Error("closed-loop caller stage count exceeds the scenario or trial turn cap");
+  }
+  if (callerScheduler) {
+    if (callerScheduler.initialState.run_id !== input.runId) {
+      throw new Error("closed-loop caller plan run_id must equal the trial runId");
+    }
+    if (
+      callerScheduler.scenario.id !== scenario.id
+      || callerScheduler.scenario.version !== scenario.version
+      || canonicalArtifactJson(callerScheduler.scenario) !== canonicalArtifactJson(scenario)
+    ) {
+      throw new Error("closed-loop caller plan uses a different canonical scenario");
+    }
+    for (const reference of Object.values(input.callerSchedulePlan!.audio.turns)) {
+      const prepared = planned.find((turn) => turn.turnId === reference.turn_id);
+      if (!prepared) throw new Error(`closed-loop audio reference ${reference.turn_id} is absent from paired audio`);
+      if (
+        prepared.material.hash !== reference.pcm_sha256
+        || prepared.material.bytes.byteLength !== reference.byte_length
+        || prepared.material.format.sampleRateHz !== reference.sample_rate_hz
+      ) {
+        throw new Error(`closed-loop audio reference ${reference.turn_id} differs from paired PCM`);
+      }
+    }
+  }
   const sleep = input.sleep ?? defaultTrialSleep;
   const clock = input.clock ?? defaultClock();
   const journal = new TrialJournalCoordinator(
@@ -2507,6 +2576,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   const sessionStartedMs = clock.monotonicNowMs();
   if (!Number.isFinite(sessionStartedMs)) throw new Error("clock.monotonicNowMs() must be finite");
   const createdAt = clock.wallTimeIso();
+  let callerSchedulerState: CallerSchedulerState | null = callerScheduler?.initialState ?? null;
+  let callerScheduleStatus: TrialCallerScheduleReport["status"] | null = callerScheduler ? "failed" : null;
+  let callerBlockedStageId: string | null = null;
+  const callerScheduledOpportunities: ScheduledCallerOpportunity[] = [];
+  const deliveredTurns: PreparedTurn[] = [];
   const initialWorld = createToolWorld(scenario);
   const initialSnapshot = assertSnapshotMatches(
     await input.gatewayKernel.initialize(Object.freeze({
@@ -2552,8 +2626,10 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       condition_hash: input.condition.conditionHash,
       initial_prompt_hash: input.condition.initialPromptHash,
       initial_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
-      turns_planned: planned.length,
+      turns_planned: plannedTurnCount,
       input_audio_hashes: planned.map((turn) => turn.material.hash),
+      caller_mode: callerScheduler ? "closed_loop" : "open_loop",
+      caller_schedule_sha256: callerScheduler?.initialState.schedule_sha256 ?? null,
       audio_delivery_profile: audioDeliveryProfile,
       audio_delivery_profile_hash: audioDeliveryProfileHash,
       retry_policy: "none",
@@ -2914,10 +2990,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       session_state: client.state,
     });
 
-    for (const [index, turn] of planned.entries()) {
+    const executePreparedTurn = async (turn: PreparedTurn, index: number): Promise<void> => {
       if (sessionRemainingMs(clock, sessionStartedMs, input.limits.maxSessionMs) <= 0) {
         throw trialError("session_timeout", "session_timeout", "Trial exceeded the monotonic session cap", "session", { fatal: true });
       }
+      deliveredTurns.push(turn);
       runtime.currentTurnIndex = index;
       record("caller.turn_delivery_intent", {
         ordinal: index + 1,
@@ -2974,6 +3051,105 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         turn_id: turn.turnId,
         output_audio_bytes: runtime.outputByTurn[index].reduce((sum, chunk) => sum + chunk.byteLength, 0),
       });
+    };
+
+    if (!callerScheduler) {
+      for (const [index, turn] of planned.entries()) await executePreparedTurn(turn, index);
+    } else {
+      while (true) {
+        if (!callerSchedulerState) throw new Error("closed-loop caller state is missing");
+        const observation = observeCallerWorld(
+          runtime.world,
+          input.callerSchedulePlan!.observable_world_fact_keys,
+        );
+        const selected = callerScheduler.selectNext({
+          state: callerSchedulerState,
+          observation,
+          observed_at: clock.wallTimeIso(),
+        });
+        callerSchedulerState = selected.state;
+        if (selected.status === "complete") {
+          callerScheduleStatus = "complete";
+          record("caller.schedule_completed", {
+            schedule_sha256: callerSchedulerState.schedule_sha256,
+            committed_turn_ids: callerSchedulerState.committed_turn_ids,
+          });
+          break;
+        }
+        if (selected.status === "blocked") {
+          callerScheduleStatus = "blocked";
+          callerBlockedStageId = selected.stage_id;
+          record("caller.schedule_blocked", {
+            schedule_sha256: callerSchedulerState.schedule_sha256,
+            stage_id: selected.stage_id,
+            unmet: selected.unmet,
+          });
+          throw trialError(
+            "protocol_error",
+            "caller_policy_blocked",
+            `Closed-loop caller could not select a unique utterance at stage ${selected.stage_id}`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        callerScheduledOpportunities.push(...selected.opportunities);
+        const source = planned.find((turn) => turn.turnId === selected.selection.audio.turn_id);
+        const scenarioTurn = scenario.caller.turns.find((turn) => turn.id === selected.selection.turn_id);
+        if (!source || !scenarioTurn) {
+          throw trialError(
+            "protocol_error",
+            "caller_selection_not_in_frozen_library",
+            `Closed-loop selection ${selected.selection.turn_id} is not in the frozen scenario/audio library`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        if (source.material.hash !== selected.selection.audio.pcm_sha256) {
+          throw trialError(
+            "protocol_error",
+            "caller_selection_audio_mismatch",
+            `Closed-loop selection ${selected.selection.turn_id} does not match frozen PCM`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        const selectedTurn: PreparedTurn = Object.freeze({
+          turnId: selected.selection.turn_id,
+          scenarioTurn,
+          material: source.material,
+          pairedOrdinal: source.pairedOrdinal,
+        });
+        record("caller.schedule_selected", {
+          schedule_sha256: callerSchedulerState.schedule_sha256,
+          stage_id: selected.selection.stage_id,
+          selection_id: selected.selection.selection_id,
+          turn_id: selected.selection.turn_id,
+          source_audio_turn_id: selected.selection.audio.turn_id,
+          audio_sha256: selected.selection.audio.pcm_sha256,
+          observation_sha256: selected.selection.observation_sha256,
+          opportunities: selected.opportunities,
+        });
+        await executePreparedTurn(selectedTurn, deliveredTurns.length);
+        const committed = callerScheduler.commitTurn({
+          state: callerSchedulerState,
+          selection_id: selected.selection.selection_id,
+          observation: observeCallerWorld(
+            runtime.world,
+            input.callerSchedulePlan!.observable_world_fact_keys,
+          ),
+          observed_at: clock.wallTimeIso(),
+        });
+        callerSchedulerState = committed.state;
+        callerScheduledOpportunities.push(...committed.opportunities);
+        record("caller.schedule_committed", {
+          schedule_sha256: callerSchedulerState.schedule_sha256,
+          stage_id: selected.selection.stage_id,
+          selection_id: selected.selection.selection_id,
+          turn_id: selected.selection.turn_id,
+          caller_world_events: committed.world_events,
+          opportunities: committed.opportunities,
+        });
+      }
     }
   } catch (error) {
     const failure = asTrialRuntimeError(error, runtime.connected ? "turn" : "connect");
@@ -3079,7 +3255,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
 
   const elapsedMs = Math.max(0, clock.monotonicNowMs() - sessionStartedMs);
   const counters: TrialCounters = Object.freeze({
-    turnsPlanned: planned.length,
+    turnsPlanned: plannedTurnCount,
     turnsSent: runtime.turnsSent,
     inputAudioBytes,
     outputAudioBytes: runtime.outputAudioBytes,
@@ -3102,6 +3278,18 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     profile_hash: audioDeliveryProfileHash,
     deliveries: Object.freeze([...runtime.audioDeliveries]),
   });
+  const callerSchedule: TrialCallerScheduleReport | null = callerScheduler && callerSchedulerState
+    ? Object.freeze({
+        schema_version: 1 as const,
+        mode: "closed_loop" as const,
+        schedule_sha256: callerSchedulerState.schedule_sha256,
+        status: callerScheduleStatus ?? "failed",
+        stage_id: callerBlockedStageId,
+        committed_turn_ids: callerSchedulerState.committed_turn_ids,
+        opportunities: Object.freeze(callerScheduledOpportunities),
+        evidence: callerSchedulerState.evidence,
+      })
+    : null;
   // The treatment kernel is the only component that can prove its private
   // final FlowExecutionState. Require that proof for every terminal outcome,
   // including provider/timeout failures, before emitting a complete run.
@@ -3214,7 +3402,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   });
   await journal.flush();
 
-  const providerInputAudio: ProviderPcmEvidence[] = planned
+  const providerInputAudio: ProviderPcmEvidence[] = deliveredTurns
     .slice(0, runtime.turnsSent)
     .map((turn, index) => Object.freeze({
       ordinal: index + 1,
@@ -3266,7 +3454,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     status: runtime.status,
     errors: publicErrors,
     counters,
-    planned,
+    planned: deliveredTurns,
     outputByTurn: runtime.outputByTurn,
     outputFormatByTurn: runtime.outputFormatByTurn,
     usageRecords: runtime.usageRecords,
@@ -3278,6 +3466,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     kernelAttestation,
     kernelTranscript,
     kernelAttestationExpectation: input.kernelAttestationExpectation,
+    callerSchedule,
     pairInvariantsHash: input.pairInvariantsHash,
     studyPlanHash: input.studyPlanHash,
     ledger: budgetLedger,
@@ -3296,13 +3485,14 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     status: runtime.status,
     errors: publicErrors,
     counters,
-    inputAudioHashes: Object.freeze(planned.map((turn) => turn.material.hash)),
+    inputAudioHashes: Object.freeze(deliveredTurns.map((turn) => turn.material.hash)),
     outputAudioHashes: Object.freeze(runtime.outputByTurn.slice(0, runtime.turnsSent).map((chunks) => sha256Hex(concatBytes(chunks)))),
     usage: Object.freeze([...runtime.usage]),
     providerEvidence,
     providerReceiptLinkage,
     audibility,
     audioDelivery,
+    callerSchedule,
     kernelAttestation,
     world: ToolWorldStateSchema.parse(runtime.world),
     budgetLedger,

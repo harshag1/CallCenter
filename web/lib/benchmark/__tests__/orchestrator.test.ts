@@ -1,7 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
-import { verifyEventChain, verifyRunManifest } from "../artifacts";
+import { sha256Hex, verifyEventChain, verifyRunManifest } from "../artifacts";
+import { freezeCallerAudioIndex } from "../caller-world-scheduler";
 import { createBudgetLedger } from "../budget";
 import { createFlowExecutionState } from "../../flow-runtime";
 import {
@@ -780,6 +781,107 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(result.counters.turnsSent).toBe(industrialTurns.length);
     expect(sessions[0].initialPrompt).toBe(condition.initialPrompt);
     expect(sessions[0].instructions).toContain(condition.initialPrompt);
+  });
+
+  it("runs the realtime session from the deterministic closed-loop schedule instead of the full audio library", async () => {
+    const industrialScenario = BenchmarkScenarioSchema.parse(fieldServiceScenarioJson);
+    const suite = compileConditionSuite(industrialFieldServiceCompilerInput(industrialScenario));
+    const condition = suite.conditions["raw-full"];
+    const bytes = Uint8Array.from([1, 0]);
+    const industrialTurns: readonly CallerAudioTurn[] = Object.freeze(
+      industrialScenario.caller.turns.map((turn) => Object.freeze({
+        turnId: turn.id,
+        audio: Object.freeze({
+          encoding: "pcm16" as const,
+          sampleRateHz: 24_000,
+          channels: 1 as const,
+          data: bytes,
+        }),
+      }))
+    );
+    const pair = createPairedAudioManifest({
+      pairId: "industrial-closed-loop",
+      scenario: industrialScenario,
+      callerTurns: industrialTurns,
+    });
+    const manifestHash = sha256Hex("industrial-closed-loop-audio-manifest");
+    const audio = freezeCallerAudioIndex({
+      schema_version: 1,
+      scenario_id: industrialScenario.id,
+      scenario_version: industrialScenario.version,
+      fixture_set_id: "caf_industrial_closed_loop_01",
+      fixture_manifest_sha256: manifestHash,
+      rendition: "pcm16le_mono_24000",
+      turns: Object.fromEntries(industrialScenario.caller.turns.map((turn) => [turn.id, {
+        turn_id: turn.id,
+        fixture_set_id: "caf_industrial_closed_loop_01",
+        fixture_manifest_sha256: manifestHash,
+        source_text_sha256: sha256Hex(turn.utterance),
+        rendition: "pcm16le_mono_24000" as const,
+        pcm_sha256: sha256Hex(bytes),
+        byte_length: bytes.byteLength,
+        sample_rate_hz: 24_000 as const,
+        channels: 1 as const,
+        encoding: "pcm16" as const,
+      }])),
+    });
+    const firstTurn = industrialScenario.caller.turns[0];
+    const runId = "industrial-closed-loop";
+    let responses = 0;
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        responses += 1;
+        fake.emit(event("response.completed", {
+          responseId: `closed-loop-${responses}`,
+          status: "completed",
+        }));
+      },
+    });
+    const trialBudget = budget(runId);
+    const result = await runBenchmarkTrial({
+      runId,
+      model: "fake-realtime-model",
+      scenario: industrialScenario,
+      ...runtimeBindings(client, { condition, kernel: new DirectGatewayKernel() }),
+      callerTurns: industrialTurns,
+      pairedAudio: pair,
+      callerSchedulePlan: {
+        schema_version: 1,
+        run_id: runId,
+        created_at: "2026-07-20T20:00:00.000Z",
+        scenario: industrialScenario,
+        audio,
+        fact_allowlist: [{
+          fact_id: "reported_valve_id",
+          world_fact_key: "caller_reported_valve_id",
+          contract: { type: "string" },
+        }],
+        observable_world_fact_keys: [],
+        stages: [{
+          id: "single-useful-stage",
+          candidates: [{ turn_id: firstTurn.id, audio_turn_id: firstTurn.id, when: [] }],
+        }],
+        opportunities: [],
+      },
+      limits: {
+        ...limits,
+        maxTurns: industrialTurns.length,
+        maxInputAudioBytes: industrialTurns.length * bytes.byteLength,
+        maxToolCalls: 128,
+      },
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsPlanned: 1, turnsSent: 1 });
+    expect(client.turns).toHaveLength(1);
+    expect(result.callerSchedule).toMatchObject({
+      mode: "closed_loop",
+      status: "complete",
+      committed_turn_ids: [firstTurn.id],
+    });
+    expect(result.artifacts.files.map((file) => file.path)).toContain("caller-schedule.json");
+    expect(result.inputAudioHashes).toEqual([sha256Hex(bytes)]);
   });
 
   it("runs a hash-locked true-audio raw trial with batched tools, after-commit timeout, duplicate, and malformed args", async () => {
