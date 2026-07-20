@@ -23,6 +23,8 @@
     "@google/genai": "^2.11.0",
     "@vercel/functions": "^3.7.5",
     "@xyflow/react": "^12.11.1",
+    "acorn": "^8.17.0",
+    "ajv": "^8.20.0",
     "lucide-react": "^1.23.0",
     "mammoth": "^1.12.0",
     "mpg123-decoder": "^1.0.3",
@@ -36,6 +38,9 @@
     "recharts": "^3.9.1",
     "remark-gfm": "^4.0.1",
     "resend": "^6.16.0",
+    "server-only": "^0.0.1",
+    "standardwebhooks": "^1.0.0",
+    "twilio": "^6.0.2",
     "unpdf": "^1.6.2",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
@@ -51,6 +56,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "tailwindcss": "^4",
+    "tsx": "^4.23.0",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }
