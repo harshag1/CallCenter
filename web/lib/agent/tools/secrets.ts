@@ -172,7 +172,12 @@ export const addMcpServer: OperatorTool = {
     type: "object",
     properties: {
       label: { type: "string", minLength: 1, maxLength: 128 },
-      server_url: { type: "string", minLength: 1, maxLength: 2_048, format: "uri" },
+      server_url: {
+        type: "string",
+        minLength: 1,
+        maxLength: 2_048,
+        description: "Absolute HTTPS Streamable HTTP endpoint; validated canonically before persistence.",
+      },
       authentication: {
         type: "string",
         enum: ["none", "authorization_header"],
