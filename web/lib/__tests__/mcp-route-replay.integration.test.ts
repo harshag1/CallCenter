@@ -181,8 +181,6 @@ integration("standalone bridge dropped-response replay through the real MCP rout
       activeCatalogAuthority: {
         catalogDigest: initialAuthority.catalog.catalog_digest,
         capabilityEpoch: initialAuthority.catalog.capability_epoch,
-        runtimeDigest: initialAuthority.catalog.runtime_digest,
-        stateRevision: initialAuthority.catalog.state_revision,
       },
     });
     expect(outcome.isError).toBe(false);

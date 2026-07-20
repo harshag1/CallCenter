@@ -173,6 +173,20 @@ DECLARE
   next_error_bytes bigint;
 BEGIN
   IF TG_OP = 'DELETE' THEN
+    -- A direct receipt deletion must decrement the quota while its call is
+    -- still authoritative. Locking the parent key prevents a concurrent call
+    -- deletion from racing the existence check and quota update. During the
+    -- call's own ON DELETE CASCADE the parent is already absent to this
+    -- command, so leave accounting to the quota row's ON DELETE CASCADE
+    -- instead of updating a child whose foreign key is being removed.
+    PERFORM 1
+    FROM public.calls
+    WHERE id = OLD.call_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RETURN OLD;
+    END IF;
+
     SELECT * INTO quota
     FROM public.flow_action_storage_quotas
     WHERE call_id = OLD.call_id

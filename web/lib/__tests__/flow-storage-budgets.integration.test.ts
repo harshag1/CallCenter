@@ -113,6 +113,42 @@ integration("Flow v2 durable storage budgets", () => {
         [ids.call]
       )).rows[0];
       expect(reapplied.receipt_count).toBe(512);
+
+      // Isolate the storage-accounting DELETE branch from the separate
+      // immutable-ledger guard. A direct receipt deletion decrements exactly
+      // once while its parent call still exists.
+      await client.query(
+        "ALTER TABLE flow_action_receipts DISABLE TRIGGER trg_flow_action_receipt_lifecycle"
+      );
+      await client.query(
+        `DELETE FROM flow_action_receipts
+         WHERE id = (
+           SELECT id FROM flow_action_receipts
+           WHERE call_id=$1
+           ORDER BY id
+           LIMIT 1
+         )`,
+        [ids.call]
+      );
+      await client.query(
+        "ALTER TABLE flow_action_receipts ENABLE TRIGGER trg_flow_action_receipt_lifecycle"
+      );
+      expect((await client.query<{ receipt_count: number }>(
+        "SELECT receipt_count FROM flow_action_storage_quotas WHERE call_id=$1",
+        [ids.call]
+      )).rows[0].receipt_count).toBe(511);
+
+      // Parent retention-root deletion cascades both the immutable receipt
+      // ledger and its quota row without attempting an FK-invalid decrement.
+      await client.query("DELETE FROM calls WHERE id=$1", [ids.call]);
+      expect((await client.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM flow_action_receipts WHERE call_id=$1",
+        [ids.call]
+      )).rows[0].count).toBe(0);
+      expect((await client.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM flow_action_storage_quotas WHERE call_id=$1",
+        [ids.call]
+      )).rows[0].count).toBe(0);
     } finally {
       await client.query("ROLLBACK");
     }

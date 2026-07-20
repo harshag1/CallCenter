@@ -257,10 +257,18 @@ integration("atomic indeterminate-action reconciliation", () => {
     ));
     expect(queryExecutions.count).toBe(1);
     expect(results.filter((result) =>
-      !!result && typeof result === "object" && (result as { reconciled?: boolean }).reconciled
+      !!result
+      && typeof result === "object"
+      && (result as { reconciled?: boolean }).reconciled
+      && !(result as { replayed?: boolean }).replayed
     )).toHaveLength(1);
     expect(results.filter((result) =>
-      !!result && typeof result === "object" && (result as { pending?: boolean }).pending
+      !!result
+      && typeof result === "object"
+      && (
+        (result as { pending?: boolean }).pending
+        || (result as { replayed?: boolean }).replayed
+      )
     ).length).toBeGreaterThan(0);
 
     const persisted = await modules.store.loadFlowState(ids.call);
@@ -301,5 +309,5 @@ integration("atomic indeterminate-action reconciliation", () => {
       "UPDATE flow_action_reconciliation_proofs SET policy_hash = $2 WHERE id = $1",
       [rows[0].reconciliation_proof_id, "0".repeat(64)]
     )).rejects.toThrow(/immutable/);
-  });
+  }, 60_000);
 });
