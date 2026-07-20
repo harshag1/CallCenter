@@ -2,105 +2,80 @@
 provider: anthropic-claude-code
 model: fable
 timestamp: "2026-07-17T01:54:31.107934+00:00"
-question: "# Harsha's Amazing Call Center: hostile pre-canary review\n\n## Exact question\n\nBefore any paid realtime session, what P0/P1 flaws remain in (a) the signed kernel-attestation trust boundary and (b) the causal benchmark design claiming that a provider-neutral voice-agent harness improves long-horizon reliability versus raw provider agents? Challenge the current architecture and propose the shortest falsifying tests.\n\n## User goal and why it matters\n\nThe repository is intended to become a serious open-source starting point for any speech-to-speech agent, not a narrow call-center demo. The user explicitly requires numerical artifacts for every retained decision and permits up to $1000 of experiments, but public claims must be scientifically defensible.\n\n## Current repository state and constraints\n\n- Repo: `/Users/harsha/Desktop/X_Project`\n- Branch: `codex/pre-evening-batch-2026-07-02`\n- HEAD before this working batch: `233b5d23eb70ba9ea4675a27ec24df641457ce2f`\n- Worktree is intentionally dirty across a large, uncommitted benchmark/security hardening batch; unrelated user work must be preserved.\n- Paid provider spend is still exactly $0.00. A first canary is capped at $15 and must not run until stop-ships clear.\n- Providers/models currently targeted: OpenAI `gpt-realtime-2.1`, xAI `grok-voice-think-fast-1.0`, Gemini `gemini-3.1-flash-live-preview`.\n- Provider availability/model names were researched from official sources earlier, but live transport/model identity still requires canary proof.\n\n## Completed work and exact evidence\n\n- Six preregistered headline arms: raw-full, raw-memory, progressive-only, state-only, full-harness, oracle-route.\n- All primary arms expose the same native `capability_gateway`; conditions differ in progressive disclosure, durable state, and enforcement inside the gateway kernel.\n- Strict endpoint binds final ToolWorld state, ordered checkpoints, verified receipts, exactly-once effects, execution-time preconditions, absence of critical breach/false success, and hard limits.\n- Caller worlds are scheduled independently of condition to reduce adaptive-caller confounding.\n- Candidate confirmatory size: 107 held-out templates x 3 providers x 2 primary arms = 642 sessions. This is not frozen. It targets 90% power for a 20 percentage-point paired difference if discordance <= 0.40 and at least 80% if <= 0.50.\n- Deterministic same-intent containment sensitivity, 1000 seeded trials: raw strict pass 245/1000, mission runtime 1000/1000; raw produced 922 unsafe/duplicate effects, runtime blocked/deduplicated 1151 adversarial attempts, saga recovery 153/153, stale resumes accepted raw 199, runtime failures 0. Semantic result hash: `b91d50cf6b1f477713000671f31ea57a6de026ff22e569b98d4a5e7a63a689b2`. This is explicitly C2 engineering evidence, not model-quality evidence.\n- Offline industrial script: full-harness strict success versus raw unsafe duplicate close (`close_count=2`). Again marked engineering sensitivity only.\n- No C4 paired exploratory or C5 confirmatory provider-model superiority evidence exists yet.\n- Flow/ToolWorld tests already cover idempotency, ambiguous receipts, unresolved effects, stale conditions, CAS/concurrency, audible state commit, and 32/64/120-turn scenario families.\n\n## Current signed-attestation design\n\nThe treatment kernel is the only component that can observe its private Flow state. It emits a final Ed25519-signed artifact. The signature covers a canonical attestation hash. Bindings include run ID, compiled condition/source/scenario/flow hashes, scenario ID/version, final ToolWorld scenario hash, pair ID, lease subject, provider, model, execution-plan hash, freeze-lock hash, kernel-build hash, signing key ID, and public-key fingerprint. Heads include exact world/event/receipt counts and digests, exact provider-visible capability catalog/epoch/scope, and full Flow checkpoint/action-receipt ledger digests.\n\nProposed API boundary:\n\n```ts\ngateway = new InMemoryBenchmarkGatewayKernel({ evidenceBinding, signer, ... });\nresult = runBenchmarkTrial({\n  gatewayKernel: gateway,\n  kernelAttestationExpectation: { evidenceBinding, trust },\n  ...\n});\n```\n\nThe verifier expectation/trust is independently supplied by the execution plan; it is never accepted from the gateway. The plan pins Ed25519 public PEM, key ID, and fingerprint. The private-key file is provided separately at run time, and the runner must prove private/public match before credential load, budget reservation, or provider connection. The kernel's final proof is required even on timeout/provider failure.\n\nKnown limitation: a valid signature proves artifact provenance/binding, not that buggy or malicious kernel code represented its own state truthfully. The kernel build hash and frozen source bundle provide reproducibility, while state/event replay is separately verified.\n\n## Known failures under active repair\n\n- The attestation module is mid-merge and does not yet sign/parse/verify every declared field.\n- The normalized event assembler previously overwrote conflicting duplicate tool-call IDs.\n- The orchestrator previously lacked strict active-response/turn binding for delayed events.\n- Gemini previously sent a hard-coded tool schema instead of the compiler-produced provider tool catalog.\n- Session acknowledgement may not prove exact model/voice/instructions/tools/tool-choice; unverifiable fields must remain explicitly unverifiable.\n- Malformed provider call IDs may bypass a cache and later be reused validly.\n- Full repository typecheck currently fails only in these active lanes plus a trivial test inference.\n\n## Options on the table\n\n1. Keep the signed kernel proof plus independent plan trust, replay verification, and frozen build/source hashes; proceed to a <=$15 transport canary once local gates pass.\n2. Run the kernel in a separate process and derive attestation from an append-only external event log, increasing isolation/complexity before canary.\n3. Avoid a kernel-signed truth claim entirely; persist only observable gateway I/O and reconstruct all treatment-state claims from replay, accepting that some private Flow facts may be unobservable.\n4. Add an experimental adaptive-mission arm, but keep it outside the frozen six-arm confirmatory study until exploratory provider evidence exists.\n\n## Current leaning and confidence\n\nLean toward option 1 for the canary, provided the signer/trust implementation, exact catalog binding, response identity, and provider tool-schema paths pass adversarial local tests. Confidence 0.68. Keep option 4 exploratory. Do not claim model superiority until paired provider sessions exist.\n\n## Evidence that would change the decision\n\n- A plausible replay or key-substitution attack that passes verifier checks.\n- A way a wrong model/voice/tool catalog can be recorded as verified when the provider never acknowledged it.\n- A causal-design confound that makes paired full-harness versus raw-full strict success incomparable.\n- Evidence that a separate-process event-log design materially improves falsifiability without making the public framework unusable.\n\n## Next progressive test boundary\n\n1. Finish typecheck and adversarial unit suites.\n2. Generate a no-spend proof packet: plan/freeze/key binding, provider request fixtures, secret scan, public audit, full offline suite.\n3. Run at most one short session per provider under a <=$15 aggregate canary, intended only to validate transport/session identity/tool round trips/artifact capture\u2014not effectiveness.\n4. Only then run a small paired exploratory C4 sample and use discordance/variance to decide a frozen confirmatory design.\n\nPlease prioritize falsifiable P0/P1 findings over broad suggestions. Distinguish what must block the transport canary from what may wait until the C4 effectiveness pilot."
+question: "Hostile pre-canary review of the signed kernel-attestation trust boundary and the causal raw-versus-harness benchmark design."
 context_files: []
 total_cost_usd: 0.6514099999999999
-usage: {"cache_creation": {"ephemeral_1h_input_tokens": 10502, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 10502, "cache_read_input_tokens": 0, "inference_geo": "not_available", "input_tokens": 2, "iterations": [{"cache_creation": {"ephemeral_1h_input_tokens": 10502, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 10502, "cache_read_input_tokens": 0, "input_tokens": 2, "output_tokens": 8731, "type": "message"}], "output_tokens": 8731, "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "service_tier": "standard", "speed": "standard"}
 advisory_only: true
 unverified_peer_review: true
 must_verify_claims: true
+public_summary: true
 ---
 
-> This is unverified peer-review input, not release or production evidence.
+# External benchmark claim-architecture review
+
+> This is a public summary of paid, unverified peer-review input. It is not repository, release, or benchmark evidence. Every retained finding must be verified against source and executable artifacts.
 
 ## Verdict
 
-Option 1 is right for the ≤$15 transport canary, but three things in your own packet are canary stop-ships: the mid-merge attestation module, the tool-call-ID duplicate/malformed-ID bugs, and the Gemini hard-coded tool schema — a canary whose purpose is "tool round trips and artifact capture" cannot run while the artifact and tool paths are known-broken. Separately, the causal design has a P0 that doesn't block the canary but must be resolved before freezing C5: the strict endpoint is partially guaranteed by the harness itself, so the headline comparison risks being tautological unless the endpoint is decomposed into harness-guaranteed safety components and model-dependent completion components.
+The review supported a tightly capped transport canary only after the artifact, identity, tool-call, replay, and wall-clock termination boundaries passed adversarial local tests. It rejected using a transport smoke as model-performance evidence.
 
-## Assumptions
+The strongest scientific objection was that a conjunctive endpoint containing runtime-enforced safety properties can favor the harness by construction. The resulting benchmark therefore separates:
 
-- `InMemoryBenchmarkGatewayKernel` means kernel, runner, and control-arm code share one process, and the Ed25519 private key is readable by that process (implied by "private-key file is provided separately at run time" to the runner).
-- The kernel-build hash is self-reported or runner-computed in-process; the packet doesn't say who measures it.
-- The simulated caller is driven by frozen audio fixtures (commit `0fd05dc`) at least in part; whether callers are adaptive mid-dialogue is unstated.
-- The 1000-trial sensitivity result is deterministic simulation, not provider traffic (packet says so explicitly).
-- "Strict endpoint" is a single pass/fail conjunction of all listed components.
+- task completion;
+- model integrity, including illegal attempts and stale or skipped requirements; and
+- system integrity, including containment of unauthorized, duplicate, or unverified effects.
 
-## Findings
+A containment gain cannot be described as reduced model drift. Model or framework superiority requires paired provider evidence on the model-dependent endpoints.
 
-**P0 — canary blockers (all from your "known failures" list; I'm elevating them to explicit gates):**
+## Findings that governed the canary gate
 
-1. **Attestation module doesn't sign/parse/verify every declared field.** The canary's stated purpose includes artifact capture. Running it now produces artifacts you cannot later trust or reproduce, converting $15 of evidence into $15 of ambiguity. Blocks canary.
-2. **Duplicate/malformed provider call IDs (assembler overwrite + cache bypass with later valid reuse).** This directly undermines the exactly-once claim in the strict endpoint and is precisely the code path the canary exercises. A provider that legally reuses or malforms call IDs would corrupt the artifact silently. Blocks canary.
-3. **Gemini hard-coded tool schema.** This breaks the core invariant "all primary arms expose the same native `capability_gateway`" for one of three providers, and the canary is meant to validate the tool round trip. Blocks canary for Gemini at minimum.
-4. **Requested-vs-acknowledged session identity conflation risk.** The attestation binds `provider, model` as heads, but you state acknowledgement "may not prove exact model/voice/instructions/tools/tool-choice." If the artifact schema doesn't structurally separate *requested* from *provider-acknowledged* fields, a silent provider fallback (e.g., an unrecognized model string like `grok-voice-think-fast-1.0` defaulting) gets recorded as a verified model identity. This is exactly your "wrong model recorded as verified" decision-changing scenario. Blocks canary because model-identity validation is the canary's headline deliverable.
+The review required the release to prove or fail closed on:
 
-**P0 — causal design (does not block canary; blocks C5 freeze):**
+1. complete signing, parsing, and verification of every declared attestation field;
+2. conflicting, reused, and malformed provider tool-call identities;
+3. the exact compiler-produced common gateway schema on every provider;
+4. a structural distinction between requested, provider-acknowledged, mismatched, and unverifiable session settings;
+5. a verifier-chosen per-trial binding that prevents cross-run attestation replay;
+6. deterministic replay of public event, receipt, world, and transcript evidence;
+7. a provider-independent wall-clock kill and a retained failed-run artifact; and
+8. a hard spend reservation before credential access or provider construction.
 
-5. **Endpoint partially guaranteed by treatment.** Several strict-endpoint components — absence of unsafe/duplicate effects, exactly-once, precondition enforcement — are enforced by the kernel in the harness arm. Your own sensitivity run shows it: runtime 1000/1000, raw 245/1000, runtime failures 0. On those components the paired comparison measures "how often raw fails," which is engineering evidence (as you correctly label it), but the confirmatory study inherits the same structure. A hostile reviewer will say the harness wins by construction. The defensible claim requires reporting the model-dependent components (ordered checkpoints reached, task completion, receipts earned) separately from the harness-guaranteed safety components.
+These were falsification requirements, not evidence that the implementation had already met them at the time of review.
 
-**P1:**
+## Trust-boundary conclusion
 
-6. **In-process signing key makes the signature a tamper-evidence seal, not a trust boundary.** Anything in the runner process can produce a validly signed attestation over arbitrary heads, and if the kernel-build hash is self-reported, a modified kernel can report the frozen hash. Your acknowledged limitation covers "buggy kernel"; this extends it to "any in-process code." Acceptable for the canary; the public framing must say the signature proves binding and non-tampering-at-rest, and that *replay verification is the truth mechanism*.
-7. **Replay-freshness: no stated per-trial verifier nonce.** Bindings include run ID and pair ID, but if the runner/kernel generates the run ID, a previously valid attestation could be re-presented for a new trial. The plan-supplied `evidenceBinding` fixes this only if it contains a fresh verifier-chosen challenge per trial that the kernel must echo under signature. Unstated in the packet.
-8. **Replay determinism unproven.** The whole epistemic weight rests on "state/event replay is separately verified," but realtime kernels touch wall clocks, async ordering, and provider timing. If replay isn't bit-deterministic from the recorded event log, verification either fails spuriously or gets loosened until it proves nothing. No packet evidence of a passing deterministic-replay test.
-9. **Missing-attestation attrition rule undefined.** "Final proof required even on timeout/provider failure" — but a kernel crash yields no proof. If crash trials are dropped, attrition correlates with hard scenarios and biases the paired comparison. Needs a preregistered rule before C4.
-10. **Hard budget/time kill for the canary.** Realtime sessions bill by duration; a hung WebSocket can exceed $15 without a client-side hard wall-clock kill independent of provider events. No packet evidence one exists.
-11. **Canonicalization malleability.** The signature covers a canonical hash; JSON canonicalization mismatches (number formatting, unicode, field order) between signer and verifier create either false failures or two artifacts hashing equal. Needs a fuzz test, not an assumption.
-12. **Caller-world stance ambiguous.** Frozen audio fixtures give condition-blindness but produce unnatural dialogues when the agent's speech diverges across arms; adaptive callers restore realism but leak condition through agent verbosity. Either is defensible; the preregistration must pick one and state the confound it accepts.
+An in-process Ed25519 signature proves provenance and detects later mutation or substitution relative to the pinned key and expectation. It does not prove that the in-process kernel described private state honestly. Public claims must therefore distinguish:
 
-**P2:**
+- signed provenance and binding;
+- independently replayable public truth; and
+- private implementation facts that remain tied to the frozen source and tests.
 
-13. Typecheck failures in active lanes — mechanical, gate 1 already covers it.
-14. Hard turn/time limits inside the strict endpoint may mechanically penalize the harness arm (extra gateway hops, progressive-disclosure turns). Verify limits are calibrated arm-neutrally before C4.
-15. Signing-key hygiene: ensure the runtime private key is in the secret scan scope and never the key shipped in the public repo.
+Anything neither replayable nor provider-acknowledged remains labeled `unverifiable`.
 
-## Options
+## Causal-design requirements
 
-- **Option 1 (in-process signed kernel + plan trust + replay):** Cheapest path to canary. Failure mode: overclaiming what the signature proves (finding 6); mitigated by framing replay as the truth mechanism and the signature as binding/tamper-evidence.
-- **Option 2 (separate process + append-only external log):** Genuinely improves the trust boundary (key and log outside the measured process) but buys nothing for a transport canary and adds IPC/ordering complexity that itself needs verification. Right answer *if* replay determinism (finding 8) proves unachievable in-process, or before publishing headline claims — not before.
-- **Option 3 (no kernel truth claim; replay-only from observable I/O):** Epistemically the cleanest and closest to what actually carries the proof burden anyway. Failure mode: private Flow facts become unverifiable, weakening the "proof-carrying" story. Best treated not as an alternative but as the honest framing of option 1.
-- **Option 4 (adaptive-mission arm, exploratory):** Correctly parked. No disagreement.
+Before any confirmatory effectiveness study, the review required:
 
-## Recommended path
+- endpoint decomposition so treatment-enforced containment is not mislabeled model improvement;
+- a preregistered rule that retains and scores disconnects, timeouts, crashes, and missing attestations;
+- an explicit caller policy and the confound it accepts;
+- arm-neutral turn and wall-clock limits;
+- frozen provider/model/voice/audio/world/tool/prompt hashes; and
+- paired, true-audio trials with null and adverse outcomes retained.
 
-Option 1 for the canary, with option 3's framing adopted publicly: the signature proves artifact binding and provenance; deterministic replay proves state truthfulness; anything neither replayable nor provider-acknowledged is labeled unverifiable. Before the canary: clear findings 1–4, add a per-trial verifier nonce (7), prove deterministic replay on one seeded offline trial (8), and confirm a hard client-side kill (10). Defer findings 5, 9, 12, 14 to the C4 design gate — but treat finding 5 as a hard precondition for freezing the confirmatory endpoint, because it determines whether the headline claim is scientific or definitional.
+## Progressive tests recommended by the review
 
-## Strongest objection
+1. Mutate every attestation field and require verification failure.
+2. Re-present an authentic artifact under another run expectation and require failure.
+3. Fuzz canonicalization and strict parsing.
+4. Inject duplicate, conflicting, delayed, and malformed call identities.
+5. Replay one seeded offline trial from its recorded public evidence and compare digests.
+6. Fixture missing and mismatched provider acknowledgements.
+7. Exercise a provider that never responds and prove bounded termination plus retained evidence.
+8. Seal a no-spend proof packet before any provider socket opens.
+9. Run only per-provider capped compatibility canaries.
+10. Run paired exploratory model trials only after the endpoint and attrition rules are frozen.
 
-To my own recommendation: if replay determinism (finding 8) turns out to be hard — and realtime audio pipelines with async provider events make that plausible — then option 1's entire truth story collapses onto an in-process signature that proves nothing about kernel honesty, and you'll have spent the canary budget generating artifacts whose evidentiary status is "trust the process that produced them." That argues for running the deterministic-replay test *first*, before any further attestation engineering, because its failure changes which option is correct.
+## Public claim boundary
 
-## Missing proof
-
-- Any evidence deterministic replay of a seeded trial from the event log reproduces the attested digests.
-- Who computes the kernel-build hash, and from what bytes (loaded module vs. source bundle).
-- Whether `evidenceBinding` contains a verifier-chosen per-trial nonce.
-- Fixture evidence of how each provider acknowledges (or doesn't) model/voice/tools, per provider.
-- Existence of a wall-clock hard kill independent of provider events.
-- The scoring rule for trials with missing attestations or kernel crashes.
-- Whether canary acceptance criteria are written down before connecting (what constitutes "transport validated" per provider).
-
-## Progressive next tests
-
-1. **Attestation mutation suite** (seconds): sign a fixture artifact, flip each declared field one at a time, assert every mutation fails verification; assert a field the module doesn't yet cover *also* fails — this directly measures finding 1's remaining gap.
-2. **Replay/nonce test** (seconds): re-present a valid attestation under a new trial's expectation; must fail. If it passes, add the nonce before anything else.
-3. **Canonicalization fuzz** (minutes): property-test signer/verifier agreement over adversarial JSON (unicode, −0, large ints, key order).
-4. **Duplicate/malformed call-ID adversarial tests** (minutes): provider fixture emits reused, conflicting, and malformed call IDs; assert no overwrite, no cache bypass, exactly-once holds.
-5. **Deterministic replay of one seeded offline trial** (minutes): run twice, byte-compare digests; then replay from the recorded event log with kernel private state withheld and confirm digest match. This is the pivotal test per the objection above.
-6. **Requested-vs-acknowledged schema test** (minutes): fixture acks with missing and with mismatched model strings; artifact must mark unverifiable and fail respectively.
-7. **Hang/kill dry run** (minutes): mock provider that never responds; hard kill fires, kernel still emits final proof, budget reservation released.
-8. **No-spend proof packet** as you planned.
-9. **$15 canary**, per-provider sub-caps (~$5), acceptance criteria frozen beforehand; reject any session where acknowledged identity mismatches requested.
-10. **C4 pilot** only after the endpoint is decomposed (finding 5) and the attrition rule (9) and caller stance (12) are preregistered.
-
-## Questions for Harsha
-
-1. Is the kernel-build hash measured by the runner over the loaded artifact bytes, or self-reported by the kernel?
-2. Does `evidenceBinding` include a fresh verifier-generated nonce per trial?
-3. Are caller worlds fully frozen audio, or adaptive after the first turn? Which confound are you accepting?
-4. How is a trial scored when the kernel crashes and no attestation exists?
-5. Do the strict endpoint's hard turn/time limits differ between arms, and were they calibrated so progressive disclosure's extra turns don't mechanically fail the harness arm?
-6. Is there a client-side wall-clock kill that terminates the WebSocket independent of provider event flow?
-
-## Confidence
-
-0.8 that the four canary blockers and the endpoint-decomposition finding are correct and material — they follow directly from facts in your packet. 0.55 on the replay-determinism and nonce concerns, since I can't see the code and either may already be handled; test 5 and test 2 resolve them in minutes either way. I'd hold the canary until tests 1–7 pass, and I'd hold any public reliability claim until finding 5 is designed out.
+A successful canary can establish that a pinned provider transport accepted input audio, returned output audio, completed the common gateway round trip, and produced a verifiable artifact under the recorded conditions. It cannot establish that the framework makes a model more reliable, safer, less forgetful, or less prone to drift.

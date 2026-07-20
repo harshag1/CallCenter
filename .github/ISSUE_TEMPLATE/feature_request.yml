@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a horizontal capability, provider, tool, or reliability improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Builder problem
+      description: What real voice-agent workflow is difficult or unsafe today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability
+      description: Describe the smallest provider-neutral primitive or extension.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority and failure boundary
+      description: What can mutate, spend, contact a person, or become indeterminate? How should retries and reconciliation work?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Falsifiable acceptance test
+      description: What executable test or numerical artifact would show this works?
+    validations:
+      required: true
+  - type: checkboxes
+    id: claims
+    attributes:
+      label: Claim boundary
+      options:
+        - label: I will not describe synthetic or transport evidence as model-performance evidence.
+          required: true

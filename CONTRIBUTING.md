@@ -19,3 +19,5 @@ Tool contributions must enforce authorization in code rather than model instruct
 Flow v1 is legacy compatibility, not the security baseline. Preserve its safe routing/read behavior where practical, but do not widen it to new remote, generated, extension, or mutating actions. Those capabilities require Flow v2 gateway authority. A fail-closed migration is preferable to silently restoring an unsafe legacy path.
 
 By contributing, you agree that your contribution is licensed under the MIT License.
+
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Use the [support guide](SUPPORT.md) for reproducible questions and [SECURITY.md](SECURITY.md) for private vulnerability reports.

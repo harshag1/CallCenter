@@ -3,7 +3,7 @@ provider: anthropic-claude-code
 model: fable
 timestamp: "2026-07-17T03:38:30.849119+00:00"
 question: "# Question\n\nHostile-review the proposed public-release auth and credential boundary for Harsha's Amazing Call Center. What P0/P1 flaw remains in its transaction semantics, tenant binding, credential replay/AAD design, or migration upgrade/reapply behavior? Prefer a concrete counterexample and the smallest progressive test that would prove or falsify it."
-context_files: ["/private/tmp/fable-hacc-security-context.md"]
+context_files: []
 total_cost_usd: 0.45849874999999995
 usage: {"cache_creation": {"ephemeral_1h_input_tokens": 9357, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 9357, "cache_read_input_tokens": 4545, "inference_geo": "not_available", "input_tokens": 2, "iterations": [], "output_tokens": 15613, "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "service_tier": "standard", "speed": "standard"}
 advisory_only: true

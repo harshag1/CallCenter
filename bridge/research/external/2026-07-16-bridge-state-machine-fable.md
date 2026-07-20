@@ -3,7 +3,7 @@ provider: anthropic-claude-code
 model: fable
 timestamp: "2026-07-17T02:33:48.779364+00:00"
 question: "Hostile architecture review: what P0/P1 correctness or security gaps remain in the proposed provider-neutral Twilio Media Streams bridge state machine, especially around authentication, provider protocol provenance, tool side-effect authorization, played-audio truth during barge-in, bounded backpressure, and idempotent shutdown? Recommend the smallest progressive tests that would disprove the design before release."
-context_files: ["/private/tmp/fable-bridge-context.md"]
+context_files: []
 total_cost_usd: 0.72951
 usage: {"cache_creation": {"ephemeral_1h_input_tokens": 12172, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 12172, "cache_read_input_tokens": 0, "inference_geo": "not_available", "input_tokens": 2, "iterations": [{"cache_creation": {"ephemeral_1h_input_tokens": 12172, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 12172, "cache_read_input_tokens": 0, "input_tokens": 2, "output_tokens": 9600, "type": "message"}], "output_tokens": 9600, "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "service_tier": "standard", "speed": "standard"}
 advisory_only: true

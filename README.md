@@ -216,4 +216,4 @@ This is an ambitious starting point, not a hosted compliance product. Gemini Liv
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Licensed under the [MIT License](LICENSE).
+Issues and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [support boundaries](SUPPORT.md), and [SECURITY.md](SECURITY.md). Licensed under the [MIT License](LICENSE).

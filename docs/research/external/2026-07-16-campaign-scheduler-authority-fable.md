@@ -3,7 +3,7 @@ provider: anthropic-claude-code
 model: fable
 timestamp: "2026-07-17T03:29:15.482810+00:00"
 question: "Challenge the current outbound campaign scheduler and private recipient-approval architecture as a hostile peer reviewer. Identify any remaining P0/P1 correctness, exactly-once, cancellation, tenant-isolation, privacy, or usability failure. Recommend the smallest progressive tests that could falsify the design before open-source release."
-context_files: ["/private/tmp/fable-campaign-context.md"]
+context_files: []
 total_cost_usd: 0.752466
 usage: {"cache_creation": {"ephemeral_1h_input_tokens": 13400, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 13400, "cache_read_input_tokens": 0, "inference_geo": "not_available", "input_tokens": 2, "iterations": [{"cache_creation": {"ephemeral_1h_input_tokens": 13400, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 13400, "cache_read_input_tokens": 0, "input_tokens": 2, "output_tokens": 9548, "type": "message"}], "output_tokens": 9548, "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "service_tier": "standard", "speed": "standard"}
 advisory_only: true
