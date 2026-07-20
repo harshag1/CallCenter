@@ -15,12 +15,41 @@ export type VoiceProviderConfig = {
   settings: Record<string, unknown>;
 };
 
+/** Public, token-free pointer to the server-authored catalog shown to the model. */
+export type ActiveCatalogAuthorityRef = Readonly<{
+  catalogDigest: string;
+  capabilityEpoch: number;
+  runtimeDigest: string;
+  stateRevision: number;
+}>;
+
+/** Browser-only renewal authority; never serialized into a provider session. */
+export type ToolProxyRotation = Readonly<{
+  endpoint: "/api/voice/capabilities/rotate";
+  callId: string;
+  rotation: number;
+  renewalToken: string;
+  refreshAfter: string;
+  expiresAt: string;
+}>;
+
+export type ExperimentalProviderNativeResumption = Readonly<{
+  enabled: true;
+  phase: "exploratory";
+  provider: VoiceProviderId;
+  planSha256: string;
+}>;
+
 export type VoiceSessionSpec = VoiceProviderConfig & {
   instructions: string;
   mcpServers: RemoteMcpServer[];
   /** Browser-side providers without remote MCP call this scoped proxy for tool list/call. */
   toolProxyUrl: string;
   toolProxyToken: string;
+  toolProxyRotation?: ToolProxyRotation;
+  activeCatalogAuthority: ActiveCatalogAuthorityRef;
+  /** Server-authored from a verified exploratory plan; never hydrate this from provider settings. */
+  experimentalProviderNativeResumption?: ExperimentalProviderNativeResumption;
 };
 
 type ConnectionBase = {
@@ -36,6 +65,11 @@ export type XaiBrowserConnection = ConnectionBase & {
   token: string;
   protocols: string[];
   sessionUpdate: Record<string, unknown>;
+  /** Same-origin local authority; never serialized into the provider session. */
+  toolProxyUrl: string;
+  toolProxyToken: string;
+  toolProxyRotation: ToolProxyRotation;
+  activeCatalogAuthority: ActiveCatalogAuthorityRef;
 };
 
 export type OpenAIBrowserConnection = ConnectionBase & {
@@ -43,6 +77,11 @@ export type OpenAIBrowserConnection = ConnectionBase & {
   transport: "webrtc";
   endpoint: string;
   token: string;
+  /** Same-origin local authority; never serialized into the provider session. */
+  toolProxyUrl: string;
+  toolProxyToken: string;
+  toolProxyRotation: ToolProxyRotation;
+  activeCatalogAuthority: ActiveCatalogAuthorityRef;
 };
 
 export type GeminiBrowserConnection = ConnectionBase & {
@@ -53,6 +92,8 @@ export type GeminiBrowserConnection = ConnectionBase & {
   setup: Record<string, unknown>;
   toolProxyUrl: string;
   toolProxyToken: string;
+  toolProxyRotation: ToolProxyRotation;
+  activeCatalogAuthority: ActiveCatalogAuthorityRef;
 };
 
 export type BrowserRealtimeConnection =
@@ -72,7 +113,10 @@ export type ProviderCapabilities = {
   telephony: "native-pcmu" | "requires-transcoding";
   remoteMcp: boolean;
   clientFunctions: boolean;
-  sessionResumption: boolean;
+  sessionResumption: Readonly<{
+    supported: boolean;
+    enabledByDefault: boolean;
+  }>;
   notes: string[];
 };
 
