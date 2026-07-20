@@ -3,6 +3,7 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import { runActiveCatalogEfficiencyBenchmark } from "../active-catalog-efficiency";
 
 const EVIDENCE_HASH_DOMAIN = "harshas-amazing-call-center/active-catalog-efficiency-evidence/v1\n";
+const TOOLCHAIN_MANIFEST_HASH_DOMAIN = "harshas-amazing-call-center/active-catalog-efficiency-toolchain/v1\n";
 const REPORT = runActiveCatalogEfficiencyBenchmark();
 
 describe("active capability catalog efficiency evidence", () => {
@@ -15,7 +16,7 @@ describe("active capability catalog efficiency evidence", () => {
     expect(report.provenance.build_manifest_sha256)
       .toBe("d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455");
     expect(report.provenance.toolchain_manifest_sha256)
-      .toBe("207bff47be651c3b6633761dc79a074a7134087f91ead2ea6aa93e01bcf15fa6");
+      .toMatch(/^[a-f0-9]{64}$/);
     expect(report.corpus).toMatchObject({
       raw_source_file_bytes: 13_497,
       raw_source_file_sha256: "67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b",
@@ -143,6 +144,9 @@ describe("active capability catalog efficiency evidence", () => {
     expect(report.provenance.toolchain_manifest.observed_runtime.node).toBe(process.version);
     expect(report.provenance.toolchain_manifest.observed_packages)
       .toEqual(report.provenance.toolchain_manifest.locked_packages);
+    expect(report.provenance.toolchain_manifest_sha256).toBe(sha256Hex(
+      `${TOOLCHAIN_MANIFEST_HASH_DOMAIN}${canonicalJson(report.provenance.toolchain_manifest)}`
+    ));
     expect(report.provenance.toolchain_manifest.declared_node_engine)
       .toBe("^20.19.0 || ^22.13.0 || >=24.0.0");
     expect(report.provenance.toolchain_manifest.declared_commands).toEqual({
