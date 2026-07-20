@@ -111,7 +111,9 @@ function safeHistoryRepoPath(
   if (parts.some((part) => part.length === 0 || part === "." || part === "..")) return false;
   if (value === allowlistPath || safeReportedPath(value) !== value) return false;
   const pathClasses = sensitivePathClasses(value);
-  if (pathClasses.includes("customer_or_runtime_data")) return false;
+  if (pathClasses.some((pathClass) => pathClass !== "recording_or_transcript_data")) {
+    return false;
+  }
   if (!pathClasses.includes("recording_or_transcript_data")) return true;
   // Public benchmark fixtures are intentionally classified as recording-like
   // data even when they contain only deterministic non-speech calibration
@@ -166,7 +168,7 @@ function loadHistoryAllowlist(repoRoot: string, relativePath: string): LoadedHis
 
   const validClasses = new Set<string>([
     ...PUBLIC_RELEASE_SECRET_PATTERNS.map((rule) => rule.patternClass),
-    ...PUBLIC_RELEASE_SENSITIVE_PATH_CLASSES,
+    "recording_or_transcript_data",
   ]);
   const ids = new Set<string>();
   const grants = new Set<string>();
@@ -285,7 +287,7 @@ type HistoryAllowlistEntry = Readonly<{
 
 type PublicHistoryAllowlistableClass =
   | PublicReleaseSecretPatternClass
-  | typeof PUBLIC_RELEASE_SENSITIVE_PATH_CLASSES[number];
+  | "recording_or_transcript_data";
 
 type LoadedHistoryAllowlist = Readonly<{
   path: string;

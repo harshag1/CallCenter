@@ -196,6 +196,18 @@ describe("path-only public history audit", () => {
       pattern_class: "provider_secret_assignment",
     }]);
     expect(() => auditReachableGitHistory(repo)).toThrow(/invalid path/);
+
+    for (const disallowed of [
+      { path: ".env.production", pattern_class: "private_environment_file" },
+      { path: "secrets/private.pem", pattern_class: "private_key_material" },
+      {
+        path: "benchmarks/voice-long-horizon/results/raw.json",
+        pattern_class: "raw_benchmark_evidence",
+      },
+    ]) {
+      writeHistoryAllowlist(repo, [{ ...exactGrant, ...disallowed }]);
+      expect(() => auditReachableGitHistory(repo)).toThrow(/invalid (path|pattern class)/);
+    }
   });
 
   it("detects common encodings without returning either encoded or decoded values", () => {
