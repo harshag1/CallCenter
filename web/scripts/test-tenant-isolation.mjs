@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -336,7 +336,10 @@ async function main() {
   const socket = join(root, "socket");
   const log = join(root, "postgres.log");
   const port = await unusedPort();
-  const owner = process.env.USER || process.env.LOGNAME;
+  // Gate 0 deliberately removes ambient identity variables. `initdb` assigns
+  // the cluster superuser to the effective operating-system account, so read
+  // that account from the OS rather than trusting optional shell state.
+  const owner = userInfo().username;
   invariant(owner, "local operating-system user is unavailable");
   const initdb = binary("initdb");
   const pgCtl = binary("pg_ctl");
