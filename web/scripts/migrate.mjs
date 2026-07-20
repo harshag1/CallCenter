@@ -9,8 +9,18 @@ import pg from "pg";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "migrations");
-const url = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
-if (!url) throw new Error("DATABASE_URL or SUPABASE_DB_URL not set");
+const runtimeUrl = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
+const migrationUrl = process.env.MIGRATION_DATABASE_URL;
+const leastPrivilegeRequired = process.env.NODE_ENV === "production"
+  || process.env.DATABASE_ENFORCE_LEAST_PRIVILEGE === "true";
+if (leastPrivilegeRequired && !migrationUrl) {
+  throw new Error("MIGRATION_DATABASE_URL is required for production/least-privilege migrations");
+}
+const url = migrationUrl ?? runtimeUrl;
+if (!url) throw new Error("MIGRATION_DATABASE_URL is not set (local development may fall back to DATABASE_URL or SUPABASE_DB_URL)");
+if (leastPrivilegeRequired && runtimeUrl && url === runtimeUrl) {
+  throw new Error("MIGRATION_DATABASE_URL must not reuse the application runtime connection string");
+}
 
 const sslMode = process.env.DATABASE_SSL ?? (process.env.SUPABASE_DB_URL ? "verify-full" : "disable");
 const caPath = join(root, "certs", "supabase-ca.crt");
@@ -24,6 +34,32 @@ const ssl = sslMode === "disable"
     };
 const client = new pg.Client({ connectionString: url, ssl });
 await client.connect();
+const identity = (await client.query(
+  `SELECT current_user,
+          (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
+          (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypassrls,
+          EXISTS (
+            SELECT 1 FROM pg_auth_members membership
+            JOIN pg_roles member ON member.oid = membership.member
+            JOIN pg_roles granted ON granted.oid = membership.roleid
+            WHERE member.rolname = current_user AND granted.rolname = 'hacc_backend'
+          ) AS backend_member,
+          EXISTS (
+            SELECT 1 FROM pg_auth_members membership
+            JOIN pg_roles member ON member.oid = membership.member
+            JOIN pg_roles granted ON granted.oid = membership.roleid
+            WHERE member.rolname = current_user AND granted.rolname = 'hacc_worker'
+          ) AS worker_member`
+)).rows[0];
+if (
+  identity.current_user === "hacc_runtime"
+  || identity.current_user === "hacc_worker_runtime"
+  || identity.backend_member
+  || identity.worker_member
+) {
+  await client.end();
+  throw new Error("migration connection must be a separate DDL owner, never an application or scheduler runtime role");
+}
 await client.query("CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz DEFAULT now())");
 const applied = new Set((await client.query("SELECT name FROM _migrations")).rows.map((r) => r.name));
 
