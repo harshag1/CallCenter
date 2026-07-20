@@ -332,3 +332,41 @@ This is C1 engineering evidence only. T4 is `ceil(bytes / 4)`, not provider-repo
 
 - Voice-provider spend delta/cumulative: **$0.00 / $0.00**
 - Paid canary gate: **closed**
+
+## 2026-07-20 — First live provider admission exposed two xAI protocol gaps
+
+The clean Gate 0 packet at commit `12b14dab386412126364fb7b900580c0a478883e`
+passed all 18 recorded checks and authorized sequential $5 C3 transport
+reservations. The first OpenAI run and first xAI run did not complete a
+voice-to-voice interaction, so neither is a model-quality observation and no
+headline provider bar may be populated from them.
+
+The xAI investigation produced two actionable transport findings without
+opening a second audio trial:
+
+- the budget ledger's credential scanner confused an ordinary
+  `c3-xai-...-reservation` identifier with an `xai-...` API key and rejected it
+  before credential resolution or provider access;
+- after using a neutral reservation identifier, the provider WebSocket opened,
+  but xAI emitted a documented-wire keepalive `ping` before `session.updated`;
+  the client incorrectly classified it as pre-ready application traffic.
+
+Commit `84461f4` narrows the xAI secret heuristic, admits xAI pre-readiness
+keepalives as control-plane traffic, requests manual turn detection using the
+current `{ "type": null }` shape, and normalizes the provider's empty-object
+manual-turn acknowledgement. The focused realtime and budget suites pass
+**106/106**, root typecheck passes, and a zero-audio live diagnostic now reaches
+`session.updated` instead of failing on `ping`.
+
+The remaining live xAI blocker is evidence, not connectivity: the current
+`session.updated` response omits the requested voice, input-transcription null,
+and function name/schema/description. The strict paid gate therefore correctly
+refuses to claim configuration parity. A future provider-specific evidence
+policy must bind the outbound request and later exact tool behavior without
+pretending omitted fields were echoed.
+
+- Completed provider voice-to-voice benchmark interactions: **0**
+- Provider-result bars supported: **0 / 3**
+- Conservative filesystem-ledger liability settled: **$10.00**
+- Provider-reconciled billed amount: **unavailable**
+- Paid canary gate: **closed**
