@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CallRuntimeSnapshotSchema, callRuntimeDigest } from "../call-runtime-snapshot";
 import { AgentFlowSchema } from "../flow";
-import { deriveFlowActionInvocationId, enterFlowStep, selectFlowTopic } from "../flow-runtime";
+import {
+  completeFlowStep,
+  deriveFlowActionInvocationId,
+  enterFlowStep,
+  selectFlowTopic,
+} from "../flow-runtime";
 import type { AtomicActionReservation } from "../flow-state-store";
 
 vi.mock("server-only", () => ({}));
@@ -29,11 +34,24 @@ integration("atomic Flow v2 action persistence", () => {
           id: "execute",
           label: "Execute",
           instructions: "Execute once.",
+          entry: true,
+          tools: ["commit_operation"],
+          transitions: [{ to: "operations.finalize" }],
+          action_policies: [{
+            tool: "commit_operation",
+            max_calls: 1,
+            idempotency: "per_call_arguments",
+          }],
+        }, {
+          id: "finalize",
+          label: "Finalize",
+          instructions: "Reuse the exact committed result; never dispatch it twice.",
+          entry: false,
           tools: ["commit_operation"],
           action_policies: [{
             tool: "commit_operation",
             max_calls: 1,
-            idempotency: "per_arguments",
+            idempotency: "per_call_arguments",
           }],
         }],
       },
@@ -205,6 +223,52 @@ integration("atomic Flow v2 action persistence", () => {
     expect(noop.state.revision).toBe(beforeNoop.revision);
     expect(noop.value).toBe(beforeNoop.revision);
   }, 20_000);
+
+  it("rehydrates an exact replay from the immutable ledger after hot-state compaction", async () => {
+    await modules.store.withLockedFlowState(ids.call, (state) => {
+      const completed = completeFlowStep(flow, state, { outputs: {} });
+      if ("error" in completed) throw new Error(completed.error);
+      return { state: completed.state, value: null };
+    });
+    await modules.store.withLockedFlowState(ids.call, (state) => {
+      const entered = enterFlowStep(flow, state, "operations.finalize");
+      if ("error" in entered) throw new Error(entered.error);
+      return { state: entered.state, value: null };
+    });
+    const compacted = await modules.store.loadFlowState(ids.call);
+    expect(compacted.actionReceipts[0]).toMatchObject({
+      status: "succeeded",
+      argumentsCompacted: true,
+      resultCompacted: true,
+    });
+    expect(compacted.actionReceipts[0]).not.toHaveProperty("arguments");
+    expect(compacted.actionReceipts[0]).not.toHaveProperty("result");
+
+    const replay = await modules.store.reserveFlowActionAtomic(ids.call, flow, {
+      receiptId: randomUUID(),
+      invocationId: deriveFlowActionInvocationId(`${ids.call}:operation-1-replay`),
+      ownerToken: randomUUID(),
+      runtimeDigest,
+      tool: "commit_operation",
+      arguments: { amount: 42, operation_id: "operation-1" },
+      capabilityEpoch: compacted.capabilityEpoch,
+    });
+    if ("error" in replay) throw new Error(replay.error);
+    expect(replay).toMatchObject({
+      execute: false,
+      replayed: true,
+      receipt: {
+        status: "succeeded",
+        result: { operation_id: "operation-1", committed: true },
+      },
+    });
+    expect(replay.receipt).not.toHaveProperty("resultCompacted");
+
+    const stillCompacted = await modules.store.loadFlowState(ids.call);
+    expect(stillCompacted.actionReceipts[0]).not.toHaveProperty("result");
+    expect(stillCompacted.actionReceipts[0]).toMatchObject({ resultCompacted: true });
+    expect(stillCompacted.revision).toBe(compacted.revision);
+  });
 
   it("revokes scoped tool authority as soon as the call is no longer active", async () => {
     const scope = { callId: ids.call, agentId: ids.agent, orgId: ids.org };

@@ -14,6 +14,11 @@ import {
 } from "./flow";
 
 const FLOW_ACTION_INVOCATION_ID = /^[A-Za-z0-9_-]{24}$/;
+export const MAX_FLOW_ACTION_RECEIPTS_PER_CALL = 512;
+export const MAX_FLOW_ACTION_ARGUMENT_BYTES = 32 * 1024;
+export const MAX_FLOW_ACTION_RESULT_BYTES = 64 * 1024;
+export const MAX_FLOW_ACTION_ERROR_BYTES = 16 * 1024;
+export const MAX_FLOW_HOT_STATE_BYTES = 8 * 1024 * 1024;
 
 /**
  * Derives the opaque, provider-neutral identity forwarded to an integration.
@@ -38,7 +43,9 @@ export const FlowActionReceiptSchema = z.object({
   step: z.string().min(1),
   tool: z.string().min(1),
   capabilityEpoch: z.number().int().nonnegative(),
-  arguments: z.record(z.string(), z.unknown()),
+  arguments: z.record(z.string(), z.unknown()).optional(),
+  argumentsBytes: z.number().int().nonnegative().optional(),
+  argumentsCompacted: z.literal(true).optional(),
   argumentsHash: z.string().regex(/^[a-f0-9]{64}$/),
   /** Server-generated identity propagated to integrations; the provider cannot choose it. */
   invocationId: z.string().regex(FLOW_ACTION_INVOCATION_ID).optional(),
@@ -49,6 +56,8 @@ export const FlowActionReceiptSchema = z.object({
   reconciliationProofId: z.string().min(1).optional(),
   status: z.enum(["reserved", "succeeded", "failed", "indeterminate"]),
   result: z.unknown().optional(),
+  resultBytes: z.number().int().nonnegative().optional(),
+  resultCompacted: z.literal(true).optional(),
   resultHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   error: z.string().optional(),
   reservedAt: z.iso.datetime(),
@@ -131,20 +140,40 @@ export const FlowExecutionStateSchema = z.object({
       }
       providerInvocationIds.add(receipt.providerInvocationId);
     }
-    try {
-      if (hashFlowValue(receipt.arguments) !== receipt.argumentsHash) {
-        ctx.addIssue({ code: "custom", path: [...path, "argumentsHash"], message: "action argument evidence hash is invalid" });
+    if (receipt.arguments === undefined) {
+      if (!receipt.argumentsCompacted || receipt.argumentsBytes === undefined ||
+          receipt.status === "reserved" || receipt.status === "indeterminate") {
+        ctx.addIssue({ code: "custom", path: [...path, "arguments"], message: "unsettled action arguments cannot be compacted" });
       }
-    } catch (error) {
-      ctx.addIssue({ code: "custom", path: [...path, "arguments"], message: (error as Error).message });
+    } else {
+      try {
+        const bytes = flowJsonBytes(receipt.arguments);
+        if (hashFlowValue(receipt.arguments) !== receipt.argumentsHash) {
+          ctx.addIssue({ code: "custom", path: [...path, "argumentsHash"], message: "action argument evidence hash is invalid" });
+        }
+        if (receipt.argumentsBytes !== undefined && receipt.argumentsBytes !== bytes) {
+          ctx.addIssue({ code: "custom", path: [...path, "argumentsBytes"], message: "action argument byte evidence is invalid" });
+        }
+      } catch (error) {
+        ctx.addIssue({ code: "custom", path: [...path, "arguments"], message: (error as Error).message });
+      }
+      if (receipt.argumentsCompacted) {
+        ctx.addIssue({ code: "custom", path: [...path, "argumentsCompacted"], message: "action arguments cannot be both present and compacted" });
+      }
     }
     const hasResult = Object.prototype.hasOwnProperty.call(receipt, "result");
-    if (hasResult !== (receipt.resultHash !== undefined)) {
+    if (receipt.resultCompacted && (hasResult || !receipt.resultHash || receipt.status !== "succeeded")) {
+      ctx.addIssue({ code: "custom", path: [...path, "resultCompacted"], message: "compacted result evidence is invalid" });
+    } else if (!receipt.resultCompacted && hasResult !== (receipt.resultHash !== undefined)) {
       ctx.addIssue({ code: "custom", path: [...path, "resultHash"], message: "action result and its evidence hash must be present together" });
     } else if (hasResult) {
       try {
+        const bytes = flowJsonBytes(receipt.result);
         if (hashFlowValue(receipt.result) !== receipt.resultHash) {
           ctx.addIssue({ code: "custom", path: [...path, "resultHash"], message: "action result evidence hash is invalid" });
+        }
+        if (receipt.resultBytes !== undefined && receipt.resultBytes !== bytes) {
+          ctx.addIssue({ code: "custom", path: [...path, "resultBytes"], message: "action result byte evidence is invalid" });
         }
       } catch (error) {
         ctx.addIssue({ code: "custom", path: [...path, "result"], message: (error as Error).message });
@@ -182,6 +211,53 @@ export const FlowExecutionStateSchema = z.object({
 export type FlowExecutionState = z.infer<typeof FlowExecutionStateSchema>;
 
 export type RuntimeError = { error: string; code: string; allowed?: string[] };
+
+export function flowJsonBytes(value: unknown): number {
+  return Buffer.byteLength(canonicalJson(value), "utf8");
+}
+
+export function flowStateStorageBytes(state: FlowExecutionState): number {
+  return flowJsonBytes(state);
+}
+
+function flowStateBudgetError(state: FlowExecutionState): RuntimeError | null {
+  if (state.actionReceipts.length > MAX_FLOW_ACTION_RECEIPTS_PER_CALL) {
+    return {
+      error: `flow reached its ${MAX_FLOW_ACTION_RECEIPTS_PER_CALL}-receipt durable storage limit`,
+      code: "flow_receipt_quota_exceeded",
+    };
+  }
+  if (flowStateStorageBytes(state) > MAX_FLOW_HOT_STATE_BYTES) {
+    return {
+      error: `flow state exceeded its ${MAX_FLOW_HOT_STATE_BYTES}-byte durable storage limit`,
+      code: "flow_state_storage_quota_exceeded",
+    };
+  }
+  return null;
+}
+
+/** Removes replay payloads only after a step is durably complete; hashes and identities remain. */
+function compactCompletedStepReceipts(
+  receipts: readonly FlowActionReceipt[],
+  completedStep: string
+): FlowActionReceipt[] {
+  return receipts.map((receipt) => {
+    if (receipt.step !== completedStep ||
+        (receipt.status !== "succeeded" && receipt.status !== "failed")) return receipt;
+    const compacted: FlowActionReceipt = {
+      ...receipt,
+      ...(receipt.arguments !== undefined
+        ? { argumentsBytes: receipt.argumentsBytes ?? flowJsonBytes(receipt.arguments), argumentsCompacted: true as const }
+        : {}),
+      ...(receipt.result !== undefined
+        ? { resultBytes: receipt.resultBytes ?? flowJsonBytes(receipt.result), resultCompacted: true as const }
+        : {}),
+    };
+    delete compacted.arguments;
+    delete compacted.result;
+    return compacted;
+  });
+}
 
 export function flowCapabilityScope(state: FlowExecutionState): { step: string; attempt: number } {
   if (state.currentStep && !state.completedSteps.includes(state.currentStep)) {
@@ -537,10 +613,18 @@ export function reserveFlowAction(
   }
 
   let argumentsHash: string;
+  let argumentsBytes: number;
   try {
     argumentsHash = hashFlowValue(args.arguments);
+    argumentsBytes = flowJsonBytes(args.arguments);
   } catch (error) {
     return { error: (error as Error).message, code: "invalid_arguments" };
+  }
+  if (argumentsBytes > MAX_FLOW_ACTION_ARGUMENT_BYTES) {
+    return {
+      error: `action arguments exceed the ${MAX_FLOW_ACTION_ARGUMENT_BYTES}-byte durable storage limit`,
+      code: "action_arguments_too_large",
+    };
   }
   const semanticIdentityMatches = (receipt: FlowActionReceipt): boolean =>
     receipt.tool === args.tool &&
@@ -637,6 +721,12 @@ export function reserveFlowAction(
       code: "action_call_limit",
     };
   }
+  if (state.actionReceipts.length >= MAX_FLOW_ACTION_RECEIPTS_PER_CALL) {
+    return {
+      error: `flow reached its ${MAX_FLOW_ACTION_RECEIPTS_PER_CALL}-receipt durable storage limit`,
+      code: "flow_receipt_quota_exceeded",
+    };
+  }
 
   const receipt: FlowActionReceipt = {
     id: args.receiptId,
@@ -645,14 +735,18 @@ export function reserveFlowAction(
     tool: args.tool,
     capabilityEpoch: state.capabilityEpoch,
     arguments: structuredClone(args.arguments),
+    argumentsBytes,
     argumentsHash,
     invocationId: args.invocationId,
     ...(args.providerInvocationId ? { providerInvocationId: args.providerInvocationId } : {}),
     status: "reserved",
     reservedAt: nowIso(now),
   };
+  const nextState = updateState(state, { actionReceipts: [...state.actionReceipts, receipt] }, now);
+  const budgetError = flowStateBudgetError(nextState);
+  if (budgetError) return budgetError;
   return {
-    state: updateState(state, { actionReceipts: [...state.actionReceipts, receipt] }, now),
+    state: nextState,
     receipt,
     execute: true,
     replayed: false,
@@ -699,11 +793,25 @@ export function settleFlowAction(
   if (index < 0) return { error: `unknown action receipt "${args.receiptId}"`, code: "unknown_receipt" };
   const current = state.actionReceipts[index];
   let resultHash: string | undefined;
+  let resultBytes: number | undefined;
+  if (args.error !== undefined && flowJsonBytes({ message: args.error }) > MAX_FLOW_ACTION_ERROR_BYTES) {
+    return {
+      error: `action error exceeds the ${MAX_FLOW_ACTION_ERROR_BYTES}-byte durable storage limit`,
+      code: "action_error_too_large",
+    };
+  }
   if (args.result !== undefined) {
     try {
       resultHash = hashFlowValue(args.result);
+      resultBytes = flowJsonBytes(args.result);
     } catch (error) {
       return { error: (error as Error).message, code: "invalid_result" };
+    }
+    if (resultBytes > MAX_FLOW_ACTION_RESULT_BYTES) {
+      return {
+        error: `action result exceeds the ${MAX_FLOW_ACTION_RESULT_BYTES}-byte durable storage limit`,
+        code: "action_result_too_large",
+      };
     }
   }
   if (current.status !== "reserved") {
@@ -726,13 +834,15 @@ export function settleFlowAction(
   const receipt: FlowActionReceipt = {
     ...current,
     status: args.status,
-    ...(args.result !== undefined ? { result: structuredClone(args.result), resultHash } : {}),
+    ...(args.result !== undefined ? { result: structuredClone(args.result), resultHash, resultBytes } : {}),
     ...(args.error ? { error: args.error } : {}),
     settledAt: nowIso(now),
   };
   const actionReceipts = [...state.actionReceipts];
   actionReceipts[index] = receipt;
-  return { state: updateState(state, { actionReceipts }, now), receipt };
+  const nextState = updateState(state, { actionReceipts }, now);
+  const budgetError = flowStateBudgetError(nextState);
+  return budgetError ?? { state: nextState, receipt };
 }
 
 /** The only legal promotion for an ambiguous action: exact, persisted read-back proof. */
@@ -751,22 +861,33 @@ export function promoteIndeterminateFlowAction(
     return { error: "indeterminate action is missing its dispatch boundary", code: "receipt_dispatch_boundary_missing" };
   }
   let resultHash: string;
+  let resultBytes: number;
   try {
     resultHash = hashFlowValue(args.result);
+    resultBytes = flowJsonBytes(args.result);
   } catch (error) {
     return { error: (error as Error).message, code: "invalid_result" };
+  }
+  if (resultBytes > MAX_FLOW_ACTION_RESULT_BYTES) {
+    return {
+      error: `action result exceeds the ${MAX_FLOW_ACTION_RESULT_BYTES}-byte durable storage limit`,
+      code: "action_result_too_large",
+    };
   }
   const receipt: FlowActionReceipt = {
     ...current,
     status: "succeeded",
     result: structuredClone(args.result),
     resultHash,
+    resultBytes,
     reconciliationProofId: args.proofId,
     settledAt: nowIso(now),
   };
   const actionReceipts = [...state.actionReceipts];
   actionReceipts[index] = receipt;
-  return { state: updateState(state, { actionReceipts }, now), receipt };
+  const nextState = updateState(state, { actionReceipts }, now);
+  const budgetError = flowStateBudgetError(nextState);
+  return budgetError ?? { state: nextState, receipt };
 }
 
 /**
@@ -962,15 +1083,18 @@ export function completeFlowStep(
     completedSteps,
     outputs: { ...state.outputs, [path]: outputs },
     checkpoints,
+    actionReceipts: compactCompletedStepReceipts(state.actionReceipts, path),
   };
   const nextSteps = allowedStepPaths(flow, candidate);
   const nextState = updateCapabilities(state, {
     completedSteps,
     outputs: candidate.outputs,
     checkpoints,
+    actionReceipts: candidate.actionReceipts,
     ...(nextSteps.length ? {} : { status: "completed" as const, currentStep: null }),
   }, now);
-  return { state: nextState, nextSteps };
+  const budgetError = flowStateBudgetError(nextState);
+  return budgetError ?? { state: nextState, nextSteps };
 }
 
 export function flowStateSummary(flow: AgentFlow, state: FlowExecutionState) {

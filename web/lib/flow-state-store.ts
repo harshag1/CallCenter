@@ -229,6 +229,14 @@ export async function reserveFlowActionAtomic(
       };
     }
     if (!reserved.execute) return { value: reserved };
+    if (reserved.receipt.arguments === undefined) {
+      return {
+        value: {
+          error: "new action reservation lost its bounded arguments",
+          code: "receipt_state_mismatch",
+        },
+      };
+    }
     const attempt = state.attempts[reserved.receipt.step] ?? 0;
     await client.query(
       `INSERT INTO flow_action_receipts
@@ -258,7 +266,35 @@ export async function reserveFlowActionAtomic(
     );
     return { state: reserved.state, value: { ...reserved, ownerToken: args.ownerToken } };
   });
-  return locked.value;
+  const value = locked.value;
+  if (
+    !("error" in value) &&
+    !value.execute &&
+    value.receipt.status === "succeeded" &&
+    value.receipt.resultCompacted &&
+    value.receipt.resultHash
+  ) {
+    const persisted = await qOne<{ result: unknown; result_hash: string | null }>(
+      `SELECT result, result_hash
+       FROM flow_action_receipts
+       WHERE id = $1 AND call_id = $2 AND status = 'succeeded'`,
+      [value.receipt.id, callId]
+    );
+    if (!persisted || persisted.result_hash !== value.receipt.resultHash ||
+        hashFlowValue(persisted.result) !== value.receipt.resultHash) {
+      return {
+        error: "compacted replay result does not match its durable receipt",
+        code: "receipt_state_mismatch",
+      };
+    }
+    const { resultCompacted: _compacted, ...receiptEvidence } = value.receipt;
+    void _compacted;
+    return {
+      ...value,
+      receipt: { ...receiptEvidence, result: persisted.result },
+    };
+  }
+  return value;
 }
 
 /** One-shot permit: after this commits, a crash is always recovered as indeterminate. */
