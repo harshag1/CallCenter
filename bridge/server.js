@@ -1,137 +1,233 @@
 // Author: Harsha Gundala
-// server.js — Twilio Media Streams ↔ xAI/OpenAI realtime bridge. μ-law passthrough, no transcoding.
-// Env: APP_ORIGIN, plus XAI_API_KEY and/or OPENAI_API_KEY, PORT (default 8080).
+// Authenticated Twilio Media Streams ↔ provider-neutral realtime bridge.
 
 import http from "node:http";
-import { WebSocketServer, WebSocket } from "ws";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { WebSocketServer } from "ws";
 
-const PORT = Number(process.env.PORT ?? 8080);
-const APP = process.env.APP_ORIGIN;
+import { verifyTwilioSignature } from "./lib/auth.js";
+import { loadBridgeConfig } from "./lib/config.js";
+import { createLogger } from "./lib/logger.js";
+import { BridgeSession } from "./lib/session.js";
 
-if (!APP) {
-  console.error("APP_ORIGIN is required");
-  process.exit(1);
+function loopbackAddress(address) {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
-const server = http.createServer((req, res) => {
-  res.writeHead(req.url === "/health" ? 200 : 404).end(req.url === "/health" ? "ok" : "");
-});
-const wss = new WebSocketServer({ server, path: "/stream" });
-
-wss.on("connection", (twilio) => new BridgeSession(twilio));
-server.listen(PORT, () => console.log(`bridge listening :${PORT}`));
-
-class BridgeSession {
-  constructor(twilio) {
-    this.twilio = twilio;
-    this.providerSocket = null;
-    this.streamSid = null;
-    this.scope = null;
-    this.pending = [];
-    this.flusher = setInterval(() => this.flush(), 1500);
-
-    twilio.on("message", (raw) => this.onTwilio(JSON.parse(raw)));
-    twilio.on("close", () => this.teardown());
-    twilio.on("error", () => this.teardown());
+function rejectUpgrade(socket, statusCode, statusText) {
+  try {
+    socket.write(
+      `HTTP/1.1 ${statusCode} ${statusText}\r\n`
+      + "Connection: close\r\n"
+      + "Cache-Control: no-store\r\n"
+      + "Content-Length: 0\r\n\r\n",
+    );
+  } finally {
+    socket.destroy();
   }
+}
 
-  async onTwilio(msg) {
-    switch (msg.event) {
-      case "start": {
-        this.streamSid = msg.start.streamSid;
-        const params = msg.start.customParameters ?? {};
-        this.scope = params.scope;
-        try {
-          await this.connectProvider(params.scope);
-        } catch (e) {
-          console.error("realtime provider connect failed:", e.message);
-          this.twilio.close();
-        }
-        break;
+function jsonResponse(res, status, body) {
+  const data = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(data),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  res.end(data);
+}
+
+function settleBeforeDeadline(pending, ms) {
+  let timer;
+  const deadline = new Promise((resolvePromise) => {
+    timer = setTimeout(() => resolvePromise("deadline"), ms);
+  });
+  return Promise.race([pending, deadline]).finally(() => clearTimeout(timer));
+}
+
+export function createBridgeServer({
+  config = loadBridgeConfig(),
+  logger = createLogger({ base: { component: "realtime_bridge", instance_id: config.instanceId } }),
+  sessionDependencies = {},
+  createSession = (options) => new BridgeSession(options),
+} = {}) {
+  let listening = false;
+  let draining = false;
+  let startPromise = null;
+  let stopPromise = null;
+  const sessions = new Set();
+
+  const server = http.createServer({
+    maxHeaderSize: 16 * 1024,
+    requestTimeout: 10_000,
+    headersTimeout: 10_000,
+    keepAliveTimeout: 5_000,
+  }, (req, res) => {
+    if (req.method !== "GET") return jsonResponse(res, 405, { ok: false });
+    if (req.url === "/health/live" || req.url === "/health") {
+      return jsonResponse(res, 200, { ok: true, status: "live" });
+    }
+    if (req.url === "/health/ready") {
+      const ready = listening && !draining && Boolean(config.providerKeys.openai || config.providerKeys.xai);
+      return jsonResponse(res, ready ? 200 : 503, {
+        ok: ready,
+        status: ready ? "ready" : "not_ready",
+        active_sessions: sessions.size,
+      });
+    }
+    return jsonResponse(res, 404, { ok: false });
+  });
+
+  const wss = new WebSocketServer({
+    noServer: true,
+    clientTracking: false,
+    maxPayload: config.limits.twilioMessageBytes,
+    perMessageDeflate: false,
+  });
+
+  server.on("upgrade", (request, socket, head) => {
+    if (draining) return rejectUpgrade(socket, 503, "Service Unavailable");
+    if (request.method !== "GET" || request.url !== "/stream") {
+      return rejectUpgrade(socket, 404, "Not Found");
+    }
+    if (sessions.size >= config.limits.maximumConcurrentSessions) {
+      return rejectUpgrade(socket, 503, "Service Unavailable");
+    }
+
+    const signature = request.headers["x-twilio-signature"];
+    const authenticated = config.allowInsecureLocalTests
+      ? loopbackAddress(request.socket.remoteAddress)
+      : verifyTwilioSignature({
+        authToken: config.twilioAuthToken,
+        configuredUrl: config.publicStreamUrl,
+        signatureHeader: typeof signature === "string" ? signature : undefined,
+      });
+    if (!authenticated) {
+      logger.warn("bridge_upgrade_rejected", { code: "twilio_signature_invalid" });
+      return rejectUpgrade(socket, 401, "Unauthorized");
+    }
+
+    wss.handleUpgrade(request, socket, head, (twilioSocket) => {
+      let session;
+      try {
+        session = createSession({
+          ...sessionDependencies,
+          twilioSocket,
+          config,
+          logger: logger.child({ transport: "twilio_media_stream" }),
+          onClosed: (closedSession) => {
+            sessions.delete(closedSession);
+            try { sessionDependencies.onClosed?.(closedSession); } catch {}
+          },
+        });
+        sessions.add(session);
+        logger.info("bridge_upgrade_accepted", { active_sessions: sessions.size });
+      } catch (error) {
+        logger.error("bridge_session_constructor_failed", {
+          error_code: typeof error?.code === "string" ? error.code : "constructor_failed",
+        });
+        try { twilioSocket.close(1011, "bridge initialization failed"); }
+        catch { twilioSocket.terminate?.(); }
       }
-      case "media":
-        // Twilio sends 8kHz μ-law base64 — xAI and OpenAI accept it verbatim.
-        if (this.providerSocket?.readyState === WebSocket.OPEN) {
-          this.providerSocket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: msg.media.payload }));
+    });
+  });
+
+  server.on("clientError", (_error, socket) => socket.destroy());
+  server.on("error", (error) => logger.error("bridge_http_error", { code: error.code ?? "http_error" }));
+
+  function start({
+    port = config.port,
+    host = config.allowInsecureLocalTests ? "127.0.0.1" : "0.0.0.0",
+  } = {}) {
+    if (listening) return Promise.resolve(server.address());
+    if (startPromise) return startPromise;
+    if (draining) return Promise.reject(new Error("bridge is draining"));
+    startPromise = new Promise((resolvePromise, rejectPromise) => {
+      const onError = (error) => {
+        server.off("listening", onListening);
+        startPromise = null;
+        rejectPromise(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        listening = true;
+        const address = server.address();
+        logger.info("bridge_listening", {
+          host: typeof address === "object" && address ? address.address : host,
+          port: typeof address === "object" && address ? address.port : port,
+          insecure_local_tests: config.allowInsecureLocalTests,
+        });
+        resolvePromise(address);
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(port, host);
+    });
+    return startPromise;
+  }
+
+  function stop(reason = "server_shutdown") {
+    if (stopPromise) return stopPromise;
+    draining = true;
+    stopPromise = (async () => {
+      wss.close();
+      server.closeIdleConnections?.();
+      const serverClosed = listening
+        ? new Promise((resolvePromise) => server.close(() => resolvePromise("closed")))
+        : Promise.resolve("not_listening");
+      const sessionShutdowns = [...sessions].map((session) => session.shutdown(reason));
+      const result = await settleBeforeDeadline(
+        Promise.allSettled([serverClosed, ...sessionShutdowns]).then(() => "drained"),
+        config.limits.shutdownMs,
+      );
+      if (result === "deadline") {
+        for (const session of sessions) {
+          try { session.twilioSocket?.terminate?.(); } catch {}
+          try { session.providerSocket?.terminate?.(); } catch {}
         }
-        break;
-      case "stop":
-        this.teardown();
-        break;
-    }
+        server.closeAllConnections?.();
+      }
+      listening = false;
+      logger.info("bridge_stopped", { result, active_sessions: sessions.size });
+      return Object.freeze({ result, activeSessions: sessions.size });
+    })();
+    return stopPromise;
   }
 
-  async connectProvider(scope) {
-    const res = await fetch(`${APP}/api/telephony/session?scope=${encodeURIComponent(scope)}`);
-    if (!res.ok) throw new Error(`session fetch ${res.status}`);
-    const { sessionUpdate, provider, wsUrl, model } = await res.json();
-    const key = provider === "openai" ? process.env.OPENAI_API_KEY : process.env.XAI_API_KEY;
-    if (!key) throw new Error(`${provider === "openai" ? "OPENAI_API_KEY" : "XAI_API_KEY"} is required by this call`);
+  return Object.freeze({
+    server,
+    wss,
+    sessions,
+    config,
+    start,
+    stop,
+    get ready() { return listening && !draining; },
+  });
+}
 
-    this.providerSocket = new WebSocket(wsUrl, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    this.providerSocket.on("open", () => {
-      this.providerSocket.send(JSON.stringify(sessionUpdate));
-      this.providerSocket.send(JSON.stringify({ type: "response.create" }));
-      this.queue("state", { state: "bridged", provider, model });
-    });
-    this.providerSocket.on("message", (raw) => this.onProviderEvent(JSON.parse(raw)));
-    this.providerSocket.on("close", () => this.teardown());
-    this.providerSocket.on("error", (e) => {
-      console.error("realtime provider ws error:", e.message);
-      this.teardown();
-    });
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  let bridge;
+  try {
+    bridge = createBridgeServer();
+    await bridge.start();
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      event: "bridge_start_failed",
+      code: typeof error?.code === "string" ? error.code : "invalid_configuration",
+    }));
+    process.exitCode = 1;
   }
-
-  onProviderEvent(ev) {
-    switch (ev.type) {
-      case "response.output_audio.delta":
-      case "response.audio.delta":
-        this.send({ event: "media", streamSid: this.streamSid, media: { payload: ev.delta } });
-        break;
-      case "input_audio_buffer.speech_started":
-        // Barge-in: drop Twilio's queued playback immediately.
-        this.send({ event: "clear", streamSid: this.streamSid });
-        break;
-      case "conversation.item.input_audio_transcription.completed":
-        this.queue("user_said", { text: ev.transcript });
-        break;
-      case "response.output_audio_transcript.done":
-      case "response.audio_transcript.done":
-        this.queue("agent_said", { text: ev.transcript });
-        break;
-      case "error":
-        console.error("realtime provider event error:", JSON.stringify(ev).slice(0, 300));
-        this.queue("error", ev);
-        break;
-    }
-  }
-
-  send(obj) {
-    if (this.twilio.readyState === WebSocket.OPEN) this.twilio.send(JSON.stringify(obj));
-  }
-
-  queue(type, payload) {
-    this.pending.push({ type, payload });
-  }
-
-  async flush(complete = false) {
-    if (!this.scope || (!this.pending.length && !complete)) return;
-    const events = this.pending.splice(0, 50);
-    await fetch(`${APP}/api/telephony/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope: this.scope, events, complete }),
-    }).catch((e) => console.error("event flush failed:", e.message));
-  }
-
-  teardown() {
-    if (this.done) return;
-    this.done = true;
-    clearInterval(this.flusher);
-    void this.flush(true);
-    try { this.providerSocket?.close(); } catch {}
-    try { this.twilio.close(); } catch {}
+  if (bridge) {
+    const shutdown = async (signal) => {
+      await bridge.stop(signal.toLowerCase());
+    };
+    process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
+    process.once("SIGINT", () => { void shutdown("SIGINT"); });
   }
 }
+
+export const serverInternals = Object.freeze({ loopbackAddress, rejectUpgrade });

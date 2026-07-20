@@ -1,13 +1,16 @@
 {
-  "name": "callcenter-bridge",
+  "name": "harshas-amazing-call-center-bridge",
   "private": true,
   "type": "module",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "engines": { "node": ">=20.9.0" },
   "description": "Twilio Media Streams <-> provider-neutral realtime audio bridge",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js && for file in lib/*.js; do node --check \"$file\"; done",
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
