@@ -1,4 +1,5 @@
-import { appendFile, chmod, link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, link, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, renameSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,9 +38,12 @@ async function ledgerPath(): Promise<string> {
 
 function envelope(maximumUsd: number): BudgetCostEnvelope {
   return Object.freeze({
+    schema_version: 1,
+    kind: "hacc_provider_gate1_cost_envelope",
     pricing_snapshot_sha256: H,
-    limits_sha256: "b".repeat(64),
-    formula_sha256: "c".repeat(64),
+    provider_hard_session_caps_sha256: "b".repeat(64),
+    runner_config_sha256: "c".repeat(64),
+    formula_sha256: "d".repeat(64),
     components: Object.freeze([Object.freeze({
       name: "pessimistic-provider-charge",
       upper_bound_micro_usd: maximumUsd * 1_000_000,
@@ -271,6 +275,194 @@ describe("append-only filesystem budget ledger", () => {
     expect(snapshot.reservations.map((entry) => entry.reservation_id)).toEqual([
       "reservation-lineage-valid",
     ]);
+  });
+
+  it("rejects the reproduced paused-zero ABA because a plan binds the exact post-resume head", async () => {
+    const path = await ledgerPath();
+    const initialized = await initializeFilesystemBudgetLedger({
+      ledgerPath: path,
+      ledgerId: "hacc-budget-aba",
+      operationId: "initialize-aba",
+      operationalCeilingUsd: "5",
+      initiallyPaused: true,
+      now: () => new Date("2026-07-10T12:00:00.000Z"),
+    });
+    const pausedTriplet = await Promise.all([
+      readFile(path),
+      readFile(`${path}.head.json`),
+      readFile(`${path}.signing-key.pem`),
+    ]);
+    const firstResume = await setFilesystemBudgetPaused({
+      ledgerPath: path,
+      operationId: "resume-first",
+      paused: false,
+      reasonCode: "gate1-approved",
+      evidenceSha256: H,
+      expectedHeadSha256: initialized.snapshot.head_sha256,
+      now: () => new Date("2026-07-10T12:00:01.000Z"),
+    });
+    await Promise.all([
+      writeFile(path, pausedTriplet[0], { mode: 0o600 }),
+      writeFile(`${path}.head.json`, pausedTriplet[1], { mode: 0o600 }),
+      writeFile(`${path}.signing-key.pem`, pausedTriplet[2], { mode: 0o600 }),
+    ]);
+    const secondResume = await setFilesystemBudgetPaused({
+      ledgerPath: path,
+      operationId: "resume-second",
+      paused: false,
+      reasonCode: "gate1-approved",
+      evidenceSha256: H,
+      expectedHeadSha256: initialized.snapshot.head_sha256,
+      now: () => new Date("2026-07-10T12:00:02.000Z"),
+    });
+    expect(secondResume.snapshot.head_sha256).not.toBe(firstResume.snapshot.head_sha256);
+    await expectCode(reserveFilesystemBudget({
+      ...reservation(path, "stale-plan", 5),
+      expectedLedgerId: initialized.snapshot.ledger_id,
+      requiredAncestorHeadSha256: initialized.snapshot.head_sha256,
+      requiredCurrentHeadSha256: firstResume.snapshot.head_sha256,
+      planConsumption: {
+        consumptionId: "stale-plan-consumption",
+        planSha256: "1".repeat(64),
+        maximumMicroUsd: 5_000_000,
+      },
+    }), "integrity_failure");
+    expect((await inspectFilesystemBudgetLedger({ ledgerPath: path })).reservations).toEqual([]);
+  });
+
+  it("one-shot head authority survives exact open-triplet rollback and blocks same or different plans", async () => {
+    const path = await ledgerPath();
+    const initialized = await initializeFilesystemBudgetLedger({
+      ledgerPath: path,
+      ledgerId: "hacc-budget-open-replay",
+      operationId: "initialize-open-replay",
+      operationalCeilingUsd: "5",
+      initiallyPaused: true,
+      now: () => new Date("2026-07-10T12:00:00.000Z"),
+    });
+    const resumed = await setFilesystemBudgetPaused({
+      ledgerPath: path,
+      operationId: "resume-open-replay",
+      paused: false,
+      reasonCode: "gate1-approved",
+      evidenceSha256: H,
+      expectedHeadSha256: initialized.snapshot.head_sha256,
+      now: () => new Date("2026-07-10T12:00:01.000Z"),
+    });
+    const openTriplet = await Promise.all([
+      readFile(path),
+      readFile(`${path}.head.json`),
+      readFile(`${path}.signing-key.pem`),
+    ]);
+    const authority = {
+      expectedLedgerId: initialized.snapshot.ledger_id,
+      requiredAncestorHeadSha256: initialized.snapshot.head_sha256,
+      requiredCurrentHeadSha256: resumed.snapshot.head_sha256,
+    };
+    await reserveFilesystemBudget({
+      ...reservation(path, "first-plan", 5),
+      ...authority,
+      planConsumption: {
+        consumptionId: "first-plan-consumption",
+        planSha256: "1".repeat(64),
+        maximumMicroUsd: 5_000_000,
+      },
+    });
+    await Promise.all([
+      writeFile(path, openTriplet[0], { mode: 0o600 }),
+      writeFile(`${path}.head.json`, openTriplet[1], { mode: 0o600 }),
+      writeFile(`${path}.signing-key.pem`, openTriplet[2], { mode: 0o600 }),
+    ]);
+    await expectCode(reserveFilesystemBudget({
+      ...reservation(path, "first-plan", 5),
+      ...authority,
+      planConsumption: {
+        consumptionId: "first-plan-consumption",
+        planSha256: "1".repeat(64),
+        maximumMicroUsd: 5_000_000,
+      },
+    }), "plan_consumed");
+    await expectCode(reserveFilesystemBudget({
+      ...reservation(path, "different-plan", 5),
+      ...authority,
+      planConsumption: {
+        consumptionId: "different-plan-consumption",
+        planSha256: "2".repeat(64),
+        maximumMicroUsd: 5_000_000,
+      },
+    }), "plan_consumed");
+    const snapshot = await inspectFilesystemBudgetLedger({ ledgerPath: path });
+    expect(snapshot.sequence).toBe(2);
+    expect(snapshot.reservations).toEqual([]);
+    const anchorDirectory = `${path}.plan-consumptions`;
+    const anchors = await readdir(anchorDirectory);
+    expect(anchors).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(anchorDirectory, anchors[0]!), "utf8"))).toMatchObject({
+      kind: "hacc_paid_plan_consumption",
+      ledger_id: initialized.snapshot.ledger_id,
+      ledger_open_head_sha256: resumed.snapshot.head_sha256,
+      consumption_id: "first-plan-consumption",
+      plan_sha256: "1".repeat(64),
+      maximum_micro_usd: 5_000_000,
+      run_id: "run-first-plan",
+      reservation_id: "reservation-first-plan",
+      operation_id: "reserve-first-plan",
+    });
+  });
+
+  it("refuses reservation if the plan-anchor directory is replaced before ledger commit", async () => {
+    const path = await ledgerPath();
+    const initialized = await initializeFilesystemBudgetLedger({
+      ledgerPath: path,
+      ledgerId: "hacc-budget-anchor-race",
+      operationId: "initialize-anchor-race",
+      operationalCeilingUsd: "5",
+      initiallyPaused: true,
+      now: () => new Date("2026-07-10T12:00:00.000Z"),
+    });
+    const resumed = await setFilesystemBudgetPaused({
+      ledgerPath: path,
+      operationId: "resume-anchor-race",
+      paused: false,
+      reasonCode: "gate1-approved",
+      evidenceSha256: H,
+      expectedHeadSha256: initialized.snapshot.head_sha256,
+      now: () => new Date("2026-07-10T12:00:01.000Z"),
+    });
+    const anchorDirectory = `${path}.plan-consumptions`;
+    const detachedDirectory = `${anchorDirectory}.detached`;
+    let randomIdCalls = 0;
+
+    await expectCode(reserveFilesystemBudget({
+      ...reservation(path, "anchor-race", 5),
+      expectedLedgerId: initialized.snapshot.ledger_id,
+      requiredAncestorHeadSha256: initialized.snapshot.head_sha256,
+      requiredCurrentHeadSha256: resumed.snapshot.head_sha256,
+      planConsumption: {
+        consumptionId: "anchor-race-consumption",
+        planSha256: "3".repeat(64),
+        maximumMicroUsd: 5_000_000,
+      },
+      randomId: () => {
+        randomIdCalls += 1;
+        // First call owns the cooperative ledger lock. The second occurs only
+        // after the exclusive anchor is written, immediately before mutation
+        // commit; replace the directory at that precise boundary.
+        if (randomIdCalls === 2) {
+          renameSync(anchorDirectory, detachedDirectory);
+          mkdirSync(anchorDirectory, { mode: 0o700 });
+        }
+        return `anchor-race-id-${randomIdCalls}`;
+      },
+    }), "unsafe_filesystem");
+
+    expect(randomIdCalls).toBe(2);
+    expect(await readdir(anchorDirectory)).toEqual([]);
+    expect(await readdir(detachedDirectory)).toHaveLength(1);
+    const after = await inspectFilesystemBudgetLedger({ ledgerPath: path });
+    expect(after.sequence).toBe(resumed.snapshot.sequence);
+    expect(after.head_sha256).toBe(resumed.snapshot.head_sha256);
+    expect(after.reservations).toEqual([]);
   });
 
   it("fails closed on a stale signed head and recovers only the exact verified append-only log", async () => {

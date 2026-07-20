@@ -256,7 +256,7 @@ describe("long-horizon scenario suite", () => {
       expect(duplicate.receipt.duplicate_of_receipt_id, family).toBeDefined();
       expect(evaluateScenarioWorld(source.scenario, duplicate.state).task_success, family).toBe(false);
     }
-  });
+  }, 30_000);
 
   it("binds home-health faults to the first admitted intent so delaying cannot select an easier world", () => {
     const source = template("home-health-coordination", 32);

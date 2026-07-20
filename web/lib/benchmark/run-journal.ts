@@ -255,7 +255,8 @@ async function preparePaths(options: RunJournalOptions): Promise<JournalPaths> {
 export class CrashDurableRunJournal {
   readonly paths: JournalPaths;
   readonly #runId: string;
-  readonly #knownSecrets: readonly string[];
+  readonly #knownSecrets: string[];
+  readonly #canonicalPlanText: string;
   readonly #now: () => Date;
   #sequence = 0;
   #head = "0".repeat(64);
@@ -265,7 +266,10 @@ export class CrashDurableRunJournal {
   private constructor(paths: JournalPaths, options: RunJournalOptions) {
     this.paths = paths;
     this.#runId = options.runId;
-    this.#knownSecrets = Object.freeze([...(options.knownSecrets ?? [])]);
+    this.#knownSecrets = [...(options.knownSecrets ?? [])];
+    this.#canonicalPlanText = typeof options.canonicalPlan === "string"
+      ? options.canonicalPlan
+      : Buffer.from(options.canonicalPlan).toString("utf8");
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -297,6 +301,29 @@ export class CrashDurableRunJournal {
       durability: "fsync_each_record",
     });
     return journal;
+  }
+
+  /**
+   * Adds redaction values after a durable partial exists but before any
+   * provider-facing operation. The update is serialized behind prior journal
+   * appends and does not persist, hash, or otherwise expose the secret.
+   */
+  registerKnownSecrets(secrets: readonly string[]): Promise<void> {
+    if (this.#closed) return Promise.reject(new RunJournalError("closed", "run journal is closed"));
+    const operation = async () => {
+      for (const secret of secrets) {
+        if (typeof secret !== "string" || secret.length === 0) {
+          fail("invalid_input", "run journal secret redaction values must be non-empty strings");
+        }
+        if (secret.length >= 8 && this.#canonicalPlanText.includes(secret)) {
+          fail("invalid_input", "canonical plan contains credential material");
+        }
+        if (!this.#knownSecrets.includes(secret)) this.#knownSecrets.push(secret);
+      }
+    };
+    const next = this.#tail.then(operation);
+    this.#tail = next.catch(() => undefined);
+    return next;
   }
 
   append(eventType: string, payload: unknown): Promise<void> {

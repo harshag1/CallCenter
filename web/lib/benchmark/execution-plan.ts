@@ -16,6 +16,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const PLAN_DOMAIN = "hacc/benchmark-plan/v1\n";
 const FREEZE_DOMAIN = "hacc/benchmark-freeze-lock/v1\n";
 const PAIR_INVARIANTS_DOMAIN = "hacc/benchmark-pair-invariants/v1\n";
+const RUNNER_CONFIG_DOMAIN = "hacc/benchmark-runner-config/v1\n";
 
 /** Parsed plans are immutable trust inputs even when Zod infers mutable arrays. */
 type DeepReadonly<Value> = Value extends (...args: never[]) => unknown
@@ -96,7 +97,7 @@ const ProviderPinSchema = z.object({
   session_settings_sha256: HashSchema,
   pricing_snapshot_sha256: HashSchema,
   pricing_formula_sha256: HashSchema,
-  hard_limits_sha256: HashSchema,
+  provider_hard_session_caps_sha256: HashSchema,
 }).strict();
 
 const RegistrationSchema = z.discriminatedUnion("status", [
@@ -153,8 +154,11 @@ export const BenchmarkFreezeLockSchema = z.object({
 export type BenchmarkFreezeLock = DeepReadonly<z.infer<typeof BenchmarkFreezeLockSchema>>;
 
 const CostEnvelopeSchema = z.object({
+  schema_version: z.literal(1),
+  kind: z.literal("hacc_provider_gate1_cost_envelope"),
   pricing_snapshot_sha256: HashSchema,
-  limits_sha256: HashSchema,
+  provider_hard_session_caps_sha256: HashSchema,
+  runner_config_sha256: HashSchema,
   formula_sha256: HashSchema,
   components: z.array(z.object({
     name: IdentifierSchema,
@@ -172,6 +176,23 @@ const TrialLimitsSchema = z.object({
   sessionReadyTimeoutMs: z.number().int().min(1).max(5 * 60 * 1_000),
   responseTimeoutMs: z.number().int().min(1).max(30 * 60 * 1_000),
 }).strict();
+
+const AudioDeliverySchema = z.object({
+  schemaVersion: z.literal(1),
+  chunkMs: z.number().int().min(20).max(100),
+  pace: z.literal("realtime"),
+  profile_sha256: HashSchema,
+}).strict();
+
+export function benchmarkRunnerConfigSha256(input: Readonly<{
+  limits: z.infer<typeof TrialLimitsSchema>;
+  audio_delivery: z.infer<typeof AudioDeliverySchema>;
+}>): string {
+  return sha256Hex(`${RUNNER_CONFIG_DOMAIN}${canonicalJson({
+    limits: TrialLimitsSchema.parse(input.limits),
+    audio_delivery: AudioDeliverySchema.parse(input.audio_delivery),
+  })}`);
+}
 
 const SessionContinuitySchema = z.object({
   schema_version: z.literal(1),
@@ -298,16 +319,17 @@ const PlanBodySchema = z.object({
   /** Null for non-long-horizon sources; otherwise derived from exact frozen PCM. */
   long_horizon_authorization: LongHorizonExecutionAuthorizationSchema.nullable(),
   limits: TrialLimitsSchema,
-  audio_delivery: z.object({
-    schemaVersion: z.literal(1),
-    chunkMs: z.number().int().min(20).max(100),
-    pace: z.literal("realtime"),
-    profile_sha256: HashSchema,
-  }).strict(),
+  audio_delivery: AudioDeliverySchema,
   cost_envelope: CostEnvelopeSchema,
   maximum_micro_usd: MicroUsdSchema.min(1),
   reservation_expires_at: TimestampSchema,
   ledger_id: IdentifierSchema,
+  reservation_authority: z.object({
+    /** Exact signed open head observed after the operator's explicit resume. */
+    ledger_open_head_sha256: HashSchema,
+    /** One-shot local consumption identity, independently persisted before reservation. */
+    consumption_id: IdentifierSchema,
+  }).strict(),
   output_root: RelativePathSchema,
   artifact_schema_sha256: HashSchema,
 }).strict().superRefine((plan, context) => {
@@ -337,11 +359,20 @@ const PlanBodySchema = z.object({
       !== plan.release_gate.pricing_snapshot_sha256
     || plan.cost_envelope.formula_sha256
       !== plan.release_gate.pricing_formula_sha256
+    || plan.cost_envelope.provider_hard_session_caps_sha256
+      !== plan.release_gate.provider_hard_session_caps_sha256
   ) {
     context.addIssue({
       code: "custom",
       path: ["release_gate"],
       message: "paid cost envelope differs from the Gate 1 provider pricing proof",
+    });
+  }
+  if (plan.cost_envelope.runner_config_sha256 !== benchmarkRunnerConfigSha256(plan)) {
+    context.addIssue({
+      code: "custom",
+      path: ["cost_envelope", "runner_config_sha256"],
+      message: "paid cost envelope runner configuration hash differs from the exact plan limits and audio delivery",
     });
   }
   const expectedPairInvariants = benchmarkPairInvariantsSha256(plan);
@@ -477,8 +508,13 @@ export function verifyExecutionPlanAgainstFreeze(input: Readonly<{
   if (pin.pricing_formula_sha256 !== plan.cost_envelope.formula_sha256) {
     throw new BenchmarkPlanError("freeze_mismatch", "execution plan pricing formula differs from its provider pin");
   }
-  if (pin.hard_limits_sha256 !== plan.cost_envelope.limits_sha256) {
-    throw new BenchmarkPlanError("freeze_mismatch", "execution plan hard-limit binding differs from its provider pin");
+  if (
+    pin.provider_hard_session_caps_sha256
+      !== plan.release_gate.provider_hard_session_caps_sha256
+    || pin.provider_hard_session_caps_sha256
+      !== plan.cost_envelope.provider_hard_session_caps_sha256
+  ) {
+    throw new BenchmarkPlanError("freeze_mismatch", "execution plan provider hard-session caps differ from its provider pin");
   }
   if (plan.mode !== "offline" && plan.mode !== freeze.evidence_class) {
     throw new BenchmarkPlanError("freeze_mismatch", "execution plan mode differs from the freeze evidence class");

@@ -11,9 +11,9 @@ An independent red-team review rejected the first draft because it omitted the t
 - Portable semantic result hash: `8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1`
 - Source-manifest hash: `fd84bb08347983e660bc77f672901620b26e8748f62463354312a6359ba2918a`
 - Deterministic-build manifest hash: `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`
-- Observed-toolchain manifest hash: `7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212`
-- Source/build/toolchain-bound evidence hash: `aaa7f173833121ff5ca6152ad7f687ad052ec0d1c186a2e53b0bd1a2b0241c67`
-- Pretty JSON artifact in the recorded environment: 37,400 bytes; SHA-256 `f5c26fbcfe4102bcf9927d4f7bb430429c1affdd0fbbe8611b04eab695aabd99`
+- Observed-toolchain manifest hash: `207bff47be651c3b6633761dc79a074a7134087f91ead2ea6aa93e01bcf15fa6`
+- Source/build/toolchain-bound evidence hash: `5a95cdf1abc629c26c9e94a1b80b8490c7e940268fa5985df6804b60bc9291c1`
+- Pretty JSON artifact in the recorded environment: 37,400 bytes; SHA-256 `b621aa77912cd143c26cd5b3b4c5079e83857fc64dbeea9f446f6ec52497e6da`
 - Raw corpus file: 13,497 bytes; SHA-256 `67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b`
 - Parsed canonical corpus JSON: 11,932 bytes; SHA-256 `89452f09d62f3588e6b37acdd914aaa1c3b612c7ed89cb9b1a7ca3beeabc72c7`
 - Corpus: 8 sequential phases × 8 unique tools = 64 tools; 32 read and 32 write

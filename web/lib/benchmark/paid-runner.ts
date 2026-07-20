@@ -1,6 +1,10 @@
 import { createHmac, createPublicKey, verify as verifyBytes } from "node:crypto";
 import { canonicalJson, sha256Hex } from "./artifacts";
-import { readFrozenFixtureFileNoFollow } from "./audio-fixtures";
+import {
+  assertCallerAudioFixtureManifestSemantics,
+  hashCallerAudioSequence,
+  readFrozenFixtureFileNoFollow,
+} from "./audio-fixtures";
 import { createBudgetLedger, microUsdToDecimal } from "./budget";
 import type { PaidBenchmarkRunInput, PaidBenchmarkRunResult } from "./benchmark-cli";
 import {
@@ -44,7 +48,10 @@ import {
   type ProviderTransportPacketSubject,
 } from "./provider-transport-packet-signature";
 import {
+  parseCanonicalBenchmarkExecutionPlan,
+  parseCanonicalBenchmarkFreezeLock,
   serializeBenchmarkExecutionPlan,
+  serializeBenchmarkFreezeLock,
   benchmarkFreezeLockSha256,
   verifyExecutionPlanAgainstFreeze,
 } from "./execution-plan";
@@ -77,11 +84,13 @@ import type { NormalizedRealtimeClient, NormalizedRealtimeUsage } from "../realt
 import type { RealtimeWireObservation } from "../realtime/client/types";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 import { GEMINI_PROVIDER_TRANSCRIPTION_POLICY } from "../realtime/gemini-policy";
-import { verifyPaidReleaseGate } from "./pre-canary-proof";
+import { verifyPaidReleaseGate, verifyPreCanaryProofPacket } from "./pre-canary-proof";
 import {
   GATE_1_PROVIDER_RESERVATION_MICRO_USD,
+  parseCanonicalProviderPricingProof,
   providerHardSessionCapsSha256,
   providerPricingProofCostEnvelope,
+  serializeProviderPricingProof,
 } from "./provider-pricing-proof";
 
 const SESSION_SETTINGS_DOMAIN = "harshas-amazing-call-center/benchmark-session-settings/v1\n";
@@ -289,20 +298,123 @@ export function createProviderClient(
       });
 }
 
-function fixtureCallerTurns(
+function isSafeFixtureDescriptorPath(path: unknown): path is string {
+  if (
+    typeof path !== "string"
+    || path.length === 0
+    || path.length > 1_024
+    || path.startsWith("/")
+    || path.includes("\\")
+    || path.includes("\0")
+  ) {
+    return false;
+  }
+  return path.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+/**
+ * Resolve every byte of paid caller audio while execution is still entirely
+ * synchronous. A VerifiedFrozenCallerAudio is an integrity statement made by
+ * the loader, but direct TypeScript callers can forge the structural type or
+ * mutate readPcm after this async function reaches its first await. Recheck the
+ * exact plan/manifest/registry binding here and retain only detached bytes.
+ */
+function snapshotFixtureCallerTurnsBeforeAwait(
   input: PaidBenchmarkRunInput,
   source: RegisteredScenarioSource
 ): readonly LongHorizonPcmTurn[] {
-  const sampleRateHz = input.fixtureRendition === "pcm16le_mono_16000" ? 16_000 : 24_000;
-  return Object.freeze(source.scenario.caller.turns.map((turn) => Object.freeze({
-    turnId: turn.id,
-    audio: Object.freeze({
-      encoding: "pcm16" as const,
-      sampleRateHz,
-      channels: 1 as const,
-      data: input.fixture.readPcm(turn.id, input.fixtureRendition),
-    }),
+  const rendition = input.fixtureRendition;
+  const sampleRateHz = rendition === "pcm16le_mono_16000" ? 16_000 : 24_000;
+  if (rendition !== input.plan.fixture.rendition) {
+    throw new Error("paid caller fixture rendition differs from the execution plan");
+  }
+
+  // Clone the complete manifest before invoking caller-controlled readPcm.
+  // This prevents the reader itself from changing a descriptor between lookup
+  // and verification.
+  const expectedTurns = Object.freeze(source.scenario.caller.turns.map((turn) => Object.freeze({
+    id: turn.id,
+    text: turn.utterance,
+    pause_after_ms: 0,
   })));
+  const manifest = assertCallerAudioFixtureManifestSemantics({
+    manifest: JSON.parse(canonicalJson(input.fixture.manifest)),
+    expectedScenario: {
+      id: source.scenarioId,
+      version: source.scenarioVersion,
+      canonical_sha256: source.scenarioContentHash,
+    },
+    expectedTurns,
+    expectedManifestSha256: input.plan.fixture.manifest_sha256,
+  });
+  if (
+    manifest.manifest_sha256 !== input.plan.fixture.manifest_sha256
+    || manifest.manifest_sha256 !== input.freeze.fixture_manifest_sha256
+    || manifest.caller_sequence_sha256 !== input.plan.fixture.caller_sequence_sha256
+    || manifest.caller_sequence_sha256 !== input.freeze.caller_sequence_sha256
+    || hashCallerAudioSequence(expectedTurns)
+      !== input.plan.fixture.caller_sequence_sha256
+  ) {
+    throw new Error("paid caller fixture differs from the execution plan, freeze, or registered caller sequence");
+  }
+  if (manifest.turns.length !== source.scenario.caller.turns.length) {
+    throw new Error("paid caller fixture turn count differs from the registered caller sequence");
+  }
+
+  const readPcm = input.fixture.readPcm;
+  if (typeof readPcm !== "function") {
+    throw new Error("paid caller fixture has no synchronous PCM reader");
+  }
+  const descriptorPaths = new Set<string>();
+  const callerTurns = source.scenario.caller.turns.map((turn, index) => {
+    const manifestTurn = manifest.turns[index];
+    if (
+      !manifestTurn
+      || manifestTurn.ordinal !== index
+      || manifestTurn.caller_turn_id !== turn.id
+    ) {
+      throw new Error(`paid caller fixture turn ${index} differs from the registered caller sequence`);
+    }
+    const descriptor = manifestTurn.renditions[rendition];
+    if (
+      !descriptor
+      || !isSafeFixtureDescriptorPath(descriptor.path)
+      || descriptorPaths.has(descriptor.path)
+      || descriptor.sample_rate_hz !== sampleRateHz
+      || descriptor.channels !== 1
+      || descriptor.sample_format !== "s16le"
+      || !Number.isSafeInteger(descriptor.byte_length)
+      || descriptor.byte_length <= 0
+      || descriptor.byte_length % 2 !== 0
+      || !Number.isSafeInteger(descriptor.sample_count)
+      || descriptor.sample_count * 2 !== descriptor.byte_length
+    ) {
+      throw new Error(`paid caller fixture PCM descriptor is invalid for turn ${turn.id}`);
+    }
+    descriptorPaths.add(descriptor.path);
+
+    const supplied = readPcm.call(input.fixture, turn.id, rendition);
+    if (!(supplied instanceof Uint8Array)) {
+      throw new Error(`paid caller fixture PCM reader returned invalid bytes for ${descriptor.path}`);
+    }
+    const detached = Uint8Array.from(supplied);
+    if (
+      detached.byteLength !== descriptor.byte_length
+      || sha256Hex(detached) !== descriptor.sha256
+    ) {
+      throw new Error(`paid caller fixture PCM bytes differ from frozen descriptor ${descriptor.path}`);
+    }
+    return Object.freeze({
+      turnId: turn.id,
+      audio: Object.freeze({
+        encoding: "pcm16" as const,
+        sampleRateHz,
+        channels: 1 as const,
+        data: detached,
+      }),
+    });
+  });
+  return Object.freeze(callerTurns);
 }
 
 type TrustedPaidSource = Readonly<{
@@ -342,7 +454,7 @@ async function verifyPaidReleaseBeforeSpend(
     canonicalJson(input.plan.cost_envelope)
     !== canonicalJson(providerPricingProofCostEnvelope(
       proof,
-      input.plan.cost_envelope.limits_sha256,
+      input.plan.cost_envelope.runner_config_sha256,
     ))
   ) {
     throw new Error("paid cost envelope is not the exact Gate 0 pricing proof decomposition");
@@ -371,6 +483,8 @@ async function verifyPaidReleaseBeforeSpend(
       !== proof.derived.pricing_snapshot_sha256
     || input.plan.cost_envelope.formula_sha256
       !== proof.derived.formula_sha256
+    || input.plan.cost_envelope.provider_hard_session_caps_sha256
+      !== proof.derived.hard_session_caps_sha256
     || proof.caps.max_session_ms !== input.plan.limits.maxSessionMs
     || proof.caps.max_input_audio_bytes !== input.plan.limits.maxInputAudioBytes
     || proof.caps.max_output_audio_bytes !== input.plan.limits.maxOutputAudioBytes
@@ -554,19 +668,77 @@ function reservationStatus(
   return reservations.find((reservation) => reservation.reservation_id === reservationId)?.status ?? "missing";
 }
 
+function verifyHumanConfirmationBeforeSpend(input: PaidBenchmarkRunInput): void {
+  const exactMaximum = microUsdToDecimal(input.plan.maximum_micro_usd);
+  if (
+    !input.humanConfirmation
+    || input.humanConfirmation.plan_sha256 !== input.plan.plan_sha256
+  ) {
+    throw new Error("paid executor requires the exact human-confirmed plan SHA-256");
+  }
+  if (
+    input.plan.maximum_micro_usd !== GATE_1_PROVIDER_RESERVATION_MICRO_USD
+    || input.humanConfirmation.maximum_usd !== exactMaximum
+    || input.humanConfirmation.maximum_usd !== "5"
+  ) {
+    throw new Error("paid executor requires the exact human-confirmed $5 maximum");
+  }
+}
+
+function verifyCredentialAuthorityBeforeSpend(input: PaidBenchmarkRunInput): void {
+  const hasResolvedEnvironment = input.environment !== undefined;
+  const hasLazyResolver = input.resolveCredentialEnvironment !== undefined;
+  if (hasResolvedEnvironment === hasLazyResolver) {
+    throw new Error("paid executor requires exactly one credential environment authority");
+  }
+  if (
+    hasLazyResolver
+    && typeof input.resolveCredentialEnvironment !== "function"
+  ) {
+    throw new Error("paid executor credential environment resolver is invalid");
+  }
+}
+
 /**
  * Paid execution boundary. Every network-capable client is constructed only
  * inside the orchestrator after: atomic filesystem reservation, partial WAL,
  * frozen input audio persistence, and durable connection intent.
  */
 export async function executePaidBenchmarkRun(
-  input: PaidBenchmarkRunInput,
+  untrustedInput: PaidBenchmarkRunInput,
   dependencies: PaidRunnerDependencies = {}
 ): Promise<PaidBenchmarkRunResult> {
+  // Snapshot every caller-controlled authority object synchronously before the
+  // first await. Zod/canonical parsers create detached validated object graphs,
+  // so a direct caller cannot mutate nested plan/proof/freeze fields after
+  // confirmation but before reservation.
+  const packetVerification = verifyPreCanaryProofPacket(
+    JSON.parse(canonicalJson(untrustedInput.preCanaryPacket)),
+  );
+  if (!packetVerification.valid || !packetVerification.packet) {
+    throw new Error("paid executor requires a canonical verified Gate 0 packet");
+  }
+  const input: PaidBenchmarkRunInput = Object.freeze({
+    ...untrustedInput,
+    plan: parseCanonicalBenchmarkExecutionPlan(
+      serializeBenchmarkExecutionPlan(untrustedInput.plan),
+    ),
+    freeze: parseCanonicalBenchmarkFreezeLock(
+      serializeBenchmarkFreezeLock(untrustedInput.freeze),
+    ),
+    providerPricingProof: parseCanonicalProviderPricingProof(
+      serializeProviderPricingProof(untrustedInput.providerPricingProof),
+    ),
+    preCanaryPacket: packetVerification.packet,
+    humanConfirmation: Object.freeze({ ...untrustedInput.humanConfirmation }),
+  });
+  verifyHumanConfirmationBeforeSpend(input);
+  verifyCredentialAuthorityBeforeSpend(input);
+  const trusted = verifyPaidSourceBeforeSpend(input);
+  const callerTurns = snapshotFixtureCallerTurnsBeforeAwait(input, trusted.source);
   const now = (dependencies.now ?? (() => new Date()))();
   await verifyPaidReleaseBeforeSpend(input, now);
   const attestation = verifyPaidAttestationBeforeSpend(input, now);
-  const trusted = verifyPaidSourceBeforeSpend(input);
   const trustedInput: PaidBenchmarkRunInput = Object.freeze({
     ...input,
     scenario: trusted.source.scenario,
@@ -576,13 +748,6 @@ export async function executePaidBenchmarkRun(
     suiteScenarioHash: trusted.suite.scenarioHash,
     suiteSourceHash: trusted.suite.sourceHash,
   });
-  if (
-    input.fixture.manifest.manifest_sha256 !== input.plan.fixture.manifest_sha256
-    || input.fixture.manifest.caller_sequence_sha256 !== input.plan.fixture.caller_sequence_sha256
-  ) {
-    throw new Error("paid caller fixture differs from the execution plan");
-  }
-  const callerTurns = fixtureCallerTurns(trustedInput, trusted.source);
   assertLongHorizonExecutionAuthorization(input.plan.long_horizon_authorization, {
     scenario: trusted.source.scenario,
     callerPcm: callerTurns,
@@ -590,7 +755,7 @@ export async function executePaidBenchmarkRun(
     maxSessionMs: input.plan.limits.maxSessionMs,
     preregistrationSha256: input.freeze.preregistration_sha256,
     conditionSuiteSha256: trusted.suite.suiteHash,
-    runnerConfigSha256: input.plan.cost_envelope.limits_sha256,
+    runnerConfigSha256: input.plan.cost_envelope.runner_config_sha256,
   });
   const pairedAudio = createPairedAudioManifest({
     pairId: input.plan.cell.pair_id,
@@ -639,17 +804,21 @@ export async function executePaidBenchmarkRun(
     costEnvelope: input.plan.cost_envelope,
     expectedLedgerId: input.plan.ledger_id,
     requiredAncestorHeadSha256,
+    requiredCurrentHeadSha256: input.plan.reservation_authority.ledger_open_head_sha256,
+    planConsumption: {
+      consumptionId: input.plan.reservation_authority.consumption_id,
+      planSha256: input.plan.plan_sha256,
+      maximumMicroUsd: input.plan.maximum_micro_usd,
+    },
   });
-  const apiKey = input.environment.require(credentialName);
-
   let journal: CrashDurableRunJournal | null = null;
+  let credentialBoundaryReady = false;
   try {
     journal = await CrashDurableRunJournal.create({
       outputRoot: input.outputRoot,
       planSha256: input.plan.plan_sha256,
       runId: input.plan.cell.run_id,
       canonicalPlan: serializeBenchmarkExecutionPlan(input.plan),
-      knownSecrets: [apiKey],
     });
     await journal.append("budget.reservation_durable", {
       ledger_id: reserved.snapshot.ledger_id,
@@ -658,15 +827,30 @@ export async function executePaidBenchmarkRun(
       maximum_micro_usd: input.plan.maximum_micro_usd,
       reservation_status: reservationStatus(reserved.snapshot.reservations, input.plan.cell.reservation_id),
     });
+    // Credential discovery happens only after both the one-shot reservation
+    // and its private crash-durable partial exist. Resolver/require failures
+    // therefore retain pessimistic reserved liability plus the inspectable
+    // partial without making any provider client reachable.
+    const environment = input.resolveCredentialEnvironment
+      ? await input.resolveCredentialEnvironment()
+      : input.environment!;
+    let apiKey: string;
+    try {
+      apiKey = environment.require(credentialName);
+    } catch {
+      throw new Error(`required ${credentialName} credential is unavailable`);
+    }
+    await journal.registerKnownSecrets([apiKey]);
+    credentialBoundaryReady = true;
 
     for (const turn of callerTurns) {
       const audio = turn.audio as { data: Uint8Array };
       await journal.writeBlob(`frozen-input/${turn.turnId}.pcm`, audio.data);
     }
     await journal.append("fixture.frozen_bytes_loaded", {
-      manifest_sha256: input.fixture.manifest.manifest_sha256,
-      caller_sequence_sha256: input.fixture.manifest.caller_sequence_sha256,
-      rendition: input.fixtureRendition,
+      manifest_sha256: input.plan.fixture.manifest_sha256,
+      caller_sequence_sha256: input.plan.fixture.caller_sequence_sha256,
+      rendition: input.plan.fixture.rendition,
       turns: callerTurns.length,
     });
 
@@ -1181,7 +1365,14 @@ export async function executePaidBenchmarkRun(
       budgetHeadSha256: settled.snapshot.head_sha256,
     });
   } catch {
-    const head = await preserveFinalLiability({ lifecycle, maximumUsd }).catch(() => reserved.snapshot.head_sha256);
+    // Before credential authority is successfully registered, no provider
+    // client can have been constructed. Keep the reservation active and
+    // pessimistic for explicit operator recovery instead of silently releasing
+    // the consumed one-shot authority. Later failures use the ordinary
+    // terminal/cancel/settle lifecycle.
+    const head = credentialBoundaryReady
+      ? await preserveFinalLiability({ lifecycle, maximumUsd }).catch(() => reserved.snapshot.head_sha256)
+      : reserved.snapshot.head_sha256;
     if (journal) {
       await journal.preservePartial("paid-run-failed", {
         budget_head_sha256: head,

@@ -11,6 +11,7 @@ import {
   stat,
   statfs,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -35,13 +36,18 @@ const EVENT_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/event
 const STATE_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/state/v1\n";
 const OPERATION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/operation/v1\n";
 const HEAD_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/head/v1\n";
+const PLAN_CONSUMPTION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/plan-consumption/v1\n";
 const EMPTY_HASH = "0".repeat(64);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
 const MAX_LEDGER_BYTES = 128 * 1024 * 1024;
 const MAX_EVENT_BYTES = 1024 * 1024;
+const PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD = 5_000_000;
 const LOCK_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const BIGINT_ZERO = BigInt(0);
+const BIGINT_ONE = BigInt(1);
+const BIGINT_PRIVATE_MASK = BigInt(0o077);
 const NETWORK_FILESYSTEM_TYPES = new Set([
   0x6969, // Linux NFS
   0x517b, // SMB
@@ -64,8 +70,11 @@ export type BudgetJournalStatus =
 export type BudgetJournalTerminalOutcome = "completed" | "failed" | "cancelled";
 
 export type BudgetCostEnvelope = Readonly<{
+  schema_version: 1;
+  kind: "hacc_provider_gate1_cost_envelope";
   pricing_snapshot_sha256: string;
-  limits_sha256: string;
+  provider_hard_session_caps_sha256: string;
+  runner_config_sha256: string;
   formula_sha256: string;
   components: readonly Readonly<{
     name: string;
@@ -131,6 +140,12 @@ type InitializedPayload = Readonly<{
   authorization_ceiling_micro_usd: number;
   scheduling_stop_micro_usd: number;
   operational_ceiling_micro_usd: number;
+  /**
+   * Added compatibly in schema v1: historical events omit this field and
+   * therefore replay as open. Operator-created paid-canary ledgers set it to
+   * true so there is never an initialized-but-not-yet-paused crash window.
+   */
+  paused?: boolean;
 }>;
 
 type ReservationCreatedPayload = Readonly<{
@@ -268,7 +283,8 @@ export class FilesystemBudgetLedgerError extends Error {
     | "duplicate_reservation"
     | "duplicate_run"
     | "budget_refused"
-    | "paused";
+    | "paused"
+    | "plan_consumed";
 
   constructor(code: FilesystemBudgetLedgerError["code"], message: string) {
     super(message);
@@ -283,6 +299,11 @@ type StorePaths = Readonly<{
   key: string;
   lock: string;
   parent: string;
+}>;
+
+type LockedMutationCommitGuard = Readonly<{
+  assertDurablyBound(): Promise<void>;
+  close(): Promise<void>;
 }>;
 
 type LockOwner = Readonly<{
@@ -392,14 +413,20 @@ function assertNoCredentialMaterial(value: unknown, path = "payload"): void {
 function normalizeEnvelope(envelope: BudgetCostEnvelope): Readonly<{ envelope: BudgetCostEnvelope; maximum: number }> {
   if (!isRecord(envelope)) fail("invalid_input", "cost envelope is required");
   exactKeys(envelope as unknown as Record<string, unknown>, [
+    "schema_version",
+    "kind",
     "pricing_snapshot_sha256",
-    "limits_sha256",
+    "provider_hard_session_caps_sha256",
+    "runner_config_sha256",
     "formula_sha256",
     "components",
     "safety_margin_micro_usd",
   ], "cost envelope");
+  if (envelope.schema_version !== 1) fail("invalid_input", "cost envelope schema version is unsupported");
+  if (envelope.kind !== "hacc_provider_gate1_cost_envelope") fail("invalid_input", "cost envelope kind is unsupported");
   assertHash(envelope.pricing_snapshot_sha256, "pricing_snapshot_sha256");
-  assertHash(envelope.limits_sha256, "limits_sha256");
+  assertHash(envelope.provider_hard_session_caps_sha256, "provider_hard_session_caps_sha256");
+  assertHash(envelope.runner_config_sha256, "runner_config_sha256");
   assertHash(envelope.formula_sha256, "formula_sha256");
   assertMicroUsd(envelope.safety_margin_micro_usd, "safety_margin_micro_usd");
   if (!Array.isArray(envelope.components) || envelope.components.length === 0 || envelope.components.length > 128) {
@@ -422,8 +449,11 @@ function normalizeEnvelope(envelope: BudgetCostEnvelope): Readonly<{ envelope: B
   if (maximum <= 0) fail("invalid_input", "cost envelope maximum must be positive");
   return Object.freeze({
     envelope: Object.freeze({
+      schema_version: 1,
+      kind: "hacc_provider_gate1_cost_envelope",
       pricing_snapshot_sha256: envelope.pricing_snapshot_sha256,
-      limits_sha256: envelope.limits_sha256,
+      provider_hard_session_caps_sha256: envelope.provider_hard_session_caps_sha256,
+      runner_config_sha256: envelope.runner_config_sha256,
       formula_sha256: envelope.formula_sha256,
       components: Object.freeze(components),
       safety_margin_micro_usd: envelope.safety_margin_micro_usd,
@@ -595,6 +625,9 @@ function applyPayload(state: MutableState, eventType: BudgetJournalEventType, pa
     if (value.operational_ceiling_micro_usd > value.scheduling_stop_micro_usd) {
       fail("integrity_failure", "operational ceiling cannot exceed the $900 scheduling stop");
     }
+    if (value.paused !== undefined && typeof value.paused !== "boolean") {
+      fail("integrity_failure", "budget ledger initial pause state must be boolean");
+    }
     const publicKey = Buffer.from(value.public_key_spki_base64, "base64");
     if (sha256Hex(publicKey) !== value.public_key_fingerprint_sha256) {
       fail("integrity_failure", "public key fingerprint mismatch");
@@ -605,6 +638,7 @@ function applyPayload(state: MutableState, eventType: BudgetJournalEventType, pa
     state.authorizationCeiling = value.authorization_ceiling_micro_usd;
     state.schedulingStop = value.scheduling_stop_micro_usd;
     state.operationalCeiling = value.operational_ceiling_micro_usd;
+    state.paused = value.paused ?? false;
     return;
   }
   if (state.sequence === 0) fail("integrity_failure", "ledger must be initialized before other events");
@@ -1219,41 +1253,55 @@ async function mutate(
   lockedPrecondition?: (
     state: MutableState,
     events: readonly BudgetJournalEvent[],
-  ) => void,
+    paths: StorePaths,
+    occurredAt: string,
+  ) => void | LockedMutationCommitGuard | Promise<void | LockedMutationCommitGuard>,
 ): Promise<BudgetLedgerMutationResult> {
   return withLock(options, async (paths) => {
     const loaded = await loadVerified(paths);
-    lockedPrecondition?.(loaded.state, loaded.events);
     const occurredAt = (options.now?.() ?? new Date()).toISOString();
-    const payload = payloadFactory(loaded.state, occurredAt);
-    assertNoCredentialMaterial(payload);
-    const opHash = operationHash(eventType, payload);
-    const priorOperation = loaded.state.operations.get(operationId);
-    if (priorOperation) {
-      if (priorOperation.operationHash !== opHash) fail("operation_conflict", "operation ID was already used for different content");
-      const event = loaded.events[priorOperation.sequence - 1];
-      return Object.freeze({ snapshot: snapshot(loaded.state), event, idempotent_replay: true });
+    const guard = await lockedPrecondition?.(loaded.state, loaded.events, paths, occurredAt);
+    try {
+      const payload = payloadFactory(loaded.state, occurredAt);
+      assertNoCredentialMaterial(payload);
+      const opHash = operationHash(eventType, payload);
+      const priorOperation = loaded.state.operations.get(operationId);
+      if (priorOperation) {
+        if (priorOperation.operationHash !== opHash) fail("operation_conflict", "operation ID was already used for different content");
+        const event = loaded.events[priorOperation.sequence - 1];
+        return Object.freeze({ snapshot: snapshot(loaded.state), event, idempotent_replay: true });
+      }
+      const privateKey = await loadSigningKey(paths, loaded.state);
+      const built = buildEvent({
+        state: loaded.state,
+        ledgerId: loaded.state.ledgerId,
+        operationId,
+        eventType,
+        payload,
+        occurredAt,
+        writer: Object.freeze({ hostname: options.hostname ?? hostname(), pid: options.pid ?? process.pid }),
+        privateKey,
+        eventId: (options.randomId ?? randomUUID)(),
+      });
+      if (replayStateHash(built.nextState) !== built.event.state_sha256_after) {
+        fail("integrity_failure", "internal budget state hash invariant failed");
+      }
+      const line = Buffer.from(`${canonicalJson(built.event)}\n`, "utf8");
+      if (line.byteLength > MAX_EVENT_BYTES) fail("invalid_input", "budget event exceeds the per-event size limit");
+      // The exclusive plan-consumption marker stays open and is revalidated
+      // immediately before the append that commits spend authority. This
+      // closes the lstat/open pathname gap without pretending Node exposes
+      // portable openat(2) primitives.
+      await guard?.assertDurablyBound();
+      const byteLength = await appendFully(paths.ledger, line);
+      await writeHead(paths, built.nextState, byteLength, privateKey);
+      // Do not report success if a concurrent same-user rename detached the
+      // marker during the ledger/head commit window.
+      await guard?.assertDurablyBound();
+      return Object.freeze({ snapshot: snapshot(built.nextState), event: built.event, idempotent_replay: false });
+    } finally {
+      await guard?.close();
     }
-    const privateKey = await loadSigningKey(paths, loaded.state);
-    const built = buildEvent({
-      state: loaded.state,
-      ledgerId: loaded.state.ledgerId,
-      operationId,
-      eventType,
-      payload,
-      occurredAt,
-      writer: Object.freeze({ hostname: options.hostname ?? hostname(), pid: options.pid ?? process.pid }),
-      privateKey,
-      eventId: (options.randomId ?? randomUUID)(),
-    });
-    if (replayStateHash(built.nextState) !== built.event.state_sha256_after) {
-      fail("integrity_failure", "internal budget state hash invariant failed");
-    }
-    const line = Buffer.from(`${canonicalJson(built.event)}\n`, "utf8");
-    if (line.byteLength > MAX_EVENT_BYTES) fail("invalid_input", "budget event exceeds the per-event size limit");
-    const byteLength = await appendFully(paths.ledger, line);
-    await writeHead(paths, built.nextState, byteLength, privateKey);
-    return Object.freeze({ snapshot: snapshot(built.nextState), event: built.event, idempotent_replay: false });
   });
 }
 
@@ -1261,6 +1309,7 @@ export async function initializeFilesystemBudgetLedger(input: BudgetLedgerStoreO
   ledgerId?: string;
   operationId: string;
   operationalCeilingUsd?: UsdInput;
+  initiallyPaused?: boolean;
 }>): Promise<BudgetLedgerMutationResult> {
   return withLock(input, async (paths) => {
     for (const path of [paths.ledger, paths.head, paths.key]) {
@@ -1293,6 +1342,7 @@ export async function initializeFilesystemBudgetLedger(input: BudgetLedgerStoreO
       authorization_ceiling_micro_usd: MAX_AUTHORIZED_BUDGET_MICRO_USD,
       scheduling_stop_micro_usd: MAX_SCHEDULING_STOP_MICRO_USD,
       operational_ceiling_micro_usd: operational,
+      paused: input.initiallyPaused ?? false,
     });
     const built = buildEvent({
       state: emptyState(),
@@ -1334,6 +1384,190 @@ export async function filesystemBudgetLedgerContainsHead(
   });
 }
 
+type HeldDirectoryBinding = Readonly<{
+  path: string;
+  handle: FileHandle;
+  dev: bigint;
+  ino: bigint;
+  privateDirectory: boolean;
+}>;
+
+type HeldFileBinding = Readonly<{
+  path: string;
+  handle: FileHandle;
+  dev: bigint;
+  ino: bigint;
+}>;
+
+function sameFilesystemIdentity(
+  left: Readonly<{ dev: bigint; ino: bigint }>,
+  right: Readonly<{ dev: bigint; ino: bigint }>,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function openHeldDirectory(
+  path: string,
+  label: string,
+  privateDirectory: boolean,
+): Promise<HeldDirectoryBinding> {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  ).catch(() => null);
+  if (!handle) fail("unsafe_filesystem", `${label} must be a local non-symlink directory`);
+  try {
+    const info = await handle.stat({ bigint: true });
+    const held = Object.freeze({
+      path,
+      handle,
+      dev: info.dev,
+      ino: info.ino,
+      privateDirectory,
+    });
+    await assertHeldDirectoryBound(held, label);
+    return held;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function assertHeldDirectoryBound(
+  held: HeldDirectoryBinding,
+  label: string,
+): Promise<void> {
+  const [descriptorInfo, pathInfo, canonicalPath] = await Promise.all([
+    held.handle.stat({ bigint: true }).catch(() => null),
+    lstat(held.path, { bigint: true }).catch(() => null),
+    realpath(held.path).catch(() => null),
+  ]);
+  if (
+    !descriptorInfo
+    || !pathInfo
+    || !descriptorInfo.isDirectory()
+    || !pathInfo.isDirectory()
+    || pathInfo.isSymbolicLink()
+    || !sameFilesystemIdentity(descriptorInfo, held)
+    || !sameFilesystemIdentity(pathInfo, held)
+    || canonicalPath !== held.path
+    || (held.privateDirectory && (
+      (descriptorInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+      || (pathInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+    ))
+  ) {
+    fail("unsafe_filesystem", `${label} changed or is no longer safely reachable`);
+  }
+}
+
+async function assertHeldFileBound(
+  held: HeldFileBinding,
+  label: string,
+): Promise<void> {
+  const [descriptorInfo, pathInfo] = await Promise.all([
+    held.handle.stat({ bigint: true }).catch(() => null),
+    lstat(held.path, { bigint: true }).catch(() => null),
+  ]);
+  if (
+    !descriptorInfo
+    || !pathInfo
+    || !descriptorInfo.isFile()
+    || !pathInfo.isFile()
+    || pathInfo.isSymbolicLink()
+    || descriptorInfo.nlink !== BIGINT_ONE
+    || pathInfo.nlink !== BIGINT_ONE
+    || (descriptorInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+    || (pathInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+    || !sameFilesystemIdentity(descriptorInfo, held)
+    || !sameFilesystemIdentity(pathInfo, held)
+  ) {
+    fail("unsafe_filesystem", `${label} changed or is no longer safely reachable`);
+  }
+}
+
+async function createPlanConsumptionCommitGuard(input: Readonly<{
+  paths: StorePaths;
+  identity: string;
+  body: Readonly<Record<string, unknown>>;
+}>): Promise<LockedMutationCommitGuard> {
+  const directoryPath = `${input.paths.ledger}.plan-consumptions`;
+  let parent: HeldDirectoryBinding | null = null;
+  let directory: HeldDirectoryBinding | null = null;
+  let anchor: HeldFileBinding | null = null;
+  try {
+    parent = await openHeldDirectory(input.paths.parent, "budget ledger parent", false);
+    try {
+      await mkdir(directoryPath, { mode: LOCK_MODE });
+      await parent.handle.sync();
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "EEXIST") throw error;
+    }
+    directory = await openHeldDirectory(
+      directoryPath,
+      "plan-consumption anchor directory",
+      true,
+    );
+    await assertHeldDirectoryBound(parent, "budget ledger parent");
+    const anchorPath = join(directoryPath, `${input.identity}.json`);
+    let handle: FileHandle;
+    try {
+      handle = await open(
+        anchorPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        PRIVATE_FILE_MODE,
+      );
+    } catch (error) {
+      if (isRecord(error) && error.code === "EEXIST") {
+        fail("plan_consumed", "paid plan authority was already consumed");
+      }
+      throw error;
+    }
+    const anchorInfo = await handle.stat({ bigint: true });
+    anchor = Object.freeze({
+      path: anchorPath,
+      handle,
+      dev: anchorInfo.dev,
+      ino: anchorInfo.ino,
+    });
+    await assertHeldDirectoryBound(directory, "plan-consumption anchor directory");
+    await assertHeldFileBound(anchor, "plan-consumption anchor");
+    await handle.writeFile(`${canonicalJson(input.body)}\n`, "utf8");
+    await handle.sync();
+
+    const assertDurablyBound = async (): Promise<void> => {
+      await assertHeldDirectoryBound(parent!, "budget ledger parent");
+      await assertHeldDirectoryBound(directory!, "plan-consumption anchor directory");
+      await assertHeldFileBound(anchor!, "plan-consumption anchor");
+      // Sync the already-verified descriptors, never a freshly reopened
+      // pathname, then repeat identity checks to catch replacement during
+      // durability operations.
+      await directory!.handle.sync();
+      await parent!.handle.sync();
+      await assertHeldDirectoryBound(parent!, "budget ledger parent");
+      await assertHeldDirectoryBound(directory!, "plan-consumption anchor directory");
+      await assertHeldFileBound(anchor!, "plan-consumption anchor");
+    };
+    await assertDurablyBound();
+    return Object.freeze({
+      assertDurablyBound,
+      close: async () => {
+        await Promise.all([
+          anchor!.handle.close(),
+          directory!.handle.close(),
+          parent!.handle.close(),
+        ]);
+      },
+    });
+  } catch (error) {
+    await Promise.all([
+      anchor?.handle.close().catch(() => undefined),
+      directory?.handle.close().catch(() => undefined),
+      parent?.handle.close().catch(() => undefined),
+    ]);
+    throw error;
+  }
+}
+
 export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & Readonly<{
   operationId: string;
   reservationId: string;
@@ -1345,6 +1579,12 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
   costEnvelope: BudgetCostEnvelope;
   expectedLedgerId?: string;
   requiredAncestorHeadSha256?: string;
+  requiredCurrentHeadSha256?: string;
+  planConsumption?: Readonly<{
+    consumptionId: string;
+    planSha256: string;
+    maximumMicroUsd: number;
+  }>;
 }>): Promise<BudgetLedgerMutationResult> {
   const normalized = normalizeEnvelope(input.costEnvelope);
   if (input.expectedLedgerId !== undefined) {
@@ -1352,6 +1592,23 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
   }
   if (input.requiredAncestorHeadSha256 !== undefined) {
     assertHash(input.requiredAncestorHeadSha256, "requiredAncestorHeadSha256");
+  }
+  if ((input.requiredCurrentHeadSha256 === undefined) !== (input.planConsumption === undefined)) {
+    fail("invalid_input", "exact current head and one-shot plan consumption must be supplied together");
+  }
+  if (input.requiredCurrentHeadSha256 !== undefined) {
+    assertHash(input.requiredCurrentHeadSha256, "requiredCurrentHeadSha256");
+  }
+  if (input.planConsumption !== undefined) {
+    assertIdentifier(input.planConsumption.consumptionId, "planConsumption.consumptionId");
+    assertHash(input.planConsumption.planSha256, "planConsumption.planSha256");
+    assertMicroUsd(input.planConsumption.maximumMicroUsd, "planConsumption.maximumMicroUsd", true);
+    if (input.planConsumption.maximumMicroUsd !== normalized.maximum) {
+      fail("invalid_input", "plan consumption maximum differs from the cost envelope");
+    }
+    if (input.planConsumption.maximumMicroUsd !== PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD) {
+      fail("invalid_input", "paid plan consumption must bind the exact $5 maximum");
+    }
   }
   return mutate(input, input.operationId, "reservation.created", () => Object.freeze({
     reservation_id: input.reservationId,
@@ -1362,7 +1619,7 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
     expires_at: input.expiresAt,
     maximum_micro_usd: normalized.maximum,
     envelope: normalized.envelope,
-  }), (state, events) => {
+  }), async (state, events, paths, occurredAt) => {
     if (
       input.expectedLedgerId !== undefined
       && state.ledgerId !== input.expectedLedgerId
@@ -1375,6 +1632,40 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
     ) {
       fail("integrity_failure", "budget ledger does not descend from the required release-gate head");
     }
+    if (
+      input.requiredCurrentHeadSha256 !== undefined
+      && state.headHash !== input.requiredCurrentHeadSha256
+    ) {
+      fail("integrity_failure", "budget ledger head differs from the exact plan-bound open head");
+    }
+    if (input.planConsumption !== undefined && input.requiredCurrentHeadSha256 !== undefined) {
+      // This anchor deliberately lives outside the signed ledger/head/key
+      // triplet: restoring a previously valid triplet cannot re-arm the same
+      // signed open head. Creation precedes reservation and is never rolled
+      // back automatically, so a crash can strand authority but cannot release
+      // it. An owner able to delete or roll back the entire local directory can
+      // still remove both stores; closing that threat requires external
+      // monotonic or WORM authority.
+      const body = Object.freeze({
+        schema_version: 1,
+        kind: "hacc_paid_plan_consumption",
+        ledger_id: state.ledgerId,
+        ledger_open_head_sha256: input.requiredCurrentHeadSha256,
+        consumption_id: input.planConsumption.consumptionId,
+        plan_sha256: input.planConsumption.planSha256,
+        maximum_micro_usd: input.planConsumption.maximumMicroUsd,
+        run_id: input.runId,
+        reservation_id: input.reservationId,
+        operation_id: input.operationId,
+        consumed_at: occurredAt,
+      });
+      const identity = sha256Hex(`${PLAN_CONSUMPTION_DOMAIN}${canonicalJson({
+        ledger_id: body.ledger_id,
+        ledger_open_head_sha256: body.ledger_open_head_sha256,
+      })}`);
+      return await createPlanConsumptionCommitGuard({ paths, identity, body });
+    }
+    return undefined;
   });
 }
 
@@ -1475,13 +1766,31 @@ export async function setFilesystemBudgetPaused(input: BudgetLedgerStoreOptions 
   paused: boolean;
   reasonCode: string;
   evidenceSha256: string;
+  expectedLedgerId?: string;
+  expectedHeadSha256?: string;
 }>): Promise<BudgetLedgerMutationResult> {
   assertIdentifier(input.reasonCode, "reasonCode");
   assertHash(input.evidenceSha256, "evidenceSha256");
+  if (input.expectedLedgerId !== undefined) assertIdentifier(input.expectedLedgerId, "expectedLedgerId");
+  if (input.expectedHeadSha256 !== undefined) assertHash(input.expectedHeadSha256, "expectedHeadSha256");
   return mutate(input, input.operationId, input.paused ? "ledger.paused" : "ledger.resumed", () => Object.freeze({
     reason_code: input.reasonCode,
     evidence_sha256: input.evidenceSha256,
-  }));
+  }), (state) => {
+    if (input.expectedLedgerId !== undefined && state.ledgerId !== input.expectedLedgerId) {
+      fail("integrity_failure", "budget ledger ID differs from the operator-confirmed ledger");
+    }
+    // A confirmed retry of the same operation ID remains idempotent after the
+    // first append changed the head. A new operation must compare-and-append
+    // against the exact head the operator inspected.
+    if (
+      input.expectedHeadSha256 !== undefined
+      && !state.operations.has(input.operationId)
+      && state.headHash !== input.expectedHeadSha256
+    ) {
+      fail("integrity_failure", "budget ledger head changed after operator inspection");
+    }
+  });
 }
 
 /**

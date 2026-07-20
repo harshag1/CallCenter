@@ -7,12 +7,21 @@ import { runBenchmarkCli } from "../benchmark-cli";
 import {
   createBenchmarkExecutionPlan,
   benchmarkPairInvariantsSha256,
+  benchmarkRunnerConfigSha256,
   serializeBenchmarkExecutionPlan,
   serializeBenchmarkFreezeLock,
   type BenchmarkExecutionPlanBody,
   type BenchmarkFreezeLock,
 } from "../execution-plan";
 import { benchmarkKernelAttestationPublicKeyFingerprint } from "../kernel-attestation";
+import {
+  initializeFilesystemBudgetLedger,
+  inspectFilesystemBudgetLedger,
+} from "../filesystem-budget-ledger";
+import {
+  DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+  trialAudioDeliveryProfileHash,
+} from "../orchestrator";
 import {
   SCENARIO_SOURCE_REGISTRY_HASH,
   listScenarioSources,
@@ -72,6 +81,21 @@ function capturedIo() {
 }
 
 function paidPlan() {
+  const limits = {
+    maxTurns: 24,
+    maxSessionMs: 600_000,
+    maxInputAudioBytes: 1_000_000,
+    maxOutputAudioBytes: 2_000_000,
+    maxToolCalls: 100,
+    sessionReadyTimeoutMs: 15_000,
+    responseTimeoutMs: 60_000,
+  };
+  const audioDelivery = {
+    schemaVersion: 1 as const,
+    chunkMs: 20,
+    pace: "realtime" as const,
+    profile_sha256: H("1"),
+  };
   const body: BenchmarkExecutionPlanBody = {
     schema_version: 1,
     plan_id: "paid-confirmation-test",
@@ -124,24 +148,17 @@ function paidPlan() {
       provider_native_resumption: "disabled",
     },
     long_horizon_authorization: null,
-    limits: {
-      maxTurns: 24,
-      maxSessionMs: 600_000,
-      maxInputAudioBytes: 1_000_000,
-      maxOutputAudioBytes: 2_000_000,
-      maxToolCalls: 100,
-      sessionReadyTimeoutMs: 15_000,
-      responseTimeoutMs: 60_000,
-    },
-    audio_delivery: {
-      schemaVersion: 1,
-      chunkMs: 20,
-      pace: "realtime",
-      profile_sha256: H("1"),
-    },
+    limits,
+    audio_delivery: audioDelivery,
     cost_envelope: {
+      schema_version: 1,
+      kind: "hacc_provider_gate1_cost_envelope",
       pricing_snapshot_sha256: H("2"),
-      limits_sha256: H("3"),
+      provider_hard_session_caps_sha256: H("c"),
+      runner_config_sha256: benchmarkRunnerConfigSha256({
+        limits,
+        audio_delivery: audioDelivery,
+      }),
       formula_sha256: H("4"),
       components: [{ name: "pessimistic-cost", upper_bound_micro_usd: 4_900_000 }],
       safety_margin_micro_usd: 100_000,
@@ -149,6 +166,10 @@ function paidPlan() {
     maximum_micro_usd: 5_000_000,
     reservation_expires_at: "2026-07-10T12:15:00.000Z",
     ledger_id: "hacc-budget",
+    reservation_authority: {
+      ledger_open_head_sha256: H("6"),
+      consumption_id: "plan-consumption-cli-test",
+    },
     output_root: "benchmarks/voice-long-horizon/results",
     artifact_schema_sha256: H("5"),
   };
@@ -190,7 +211,7 @@ function planningFreeze(
       session_settings_sha256: H("e"),
       pricing_snapshot_sha256: H("f"),
       pricing_formula_sha256: H("4"),
-      hard_limits_sha256: H("3"),
+      provider_hard_session_caps_sha256: H("3"),
     }],
     registration: evidenceClass === "confirmatory"
       ? {
@@ -348,6 +369,51 @@ describe("voice benchmark CLI", () => {
     }
   });
 
+  it("refuses a tampered Gate 0 packet without writing a cost envelope or reading credentials", async () => {
+    const repository = await root();
+    const source = listScenarioSources().find((entry) => (
+      !entry.heldOut
+      && entry.studyRole === "development"
+    ))!;
+    const freezePath = join(repository, "freeze.json");
+    const scenarioPath = join(repository, "scenario.json");
+    const gate0Path = join(repository, "tampered-gate0.json");
+    const outputPath = join(repository, "cost-envelope.json");
+    const lock = {
+      ...planningFreeze("pilot"),
+      audio_delivery_profile_sha256: trialAudioDeliveryProfileHash(
+        DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      ),
+    };
+    await writeFile(freezePath, serializeBenchmarkFreezeLock(lock), { mode: 0o600 });
+    await writeFile(
+      scenarioPath,
+      materializeScenarioSource(source.registryKey).canonicalScenarioJson,
+      { mode: 0o600 },
+    );
+    await writeFile(gate0Path, "{}\n", { mode: 0o600 });
+    const output = capturedIo();
+    const exit = await runBenchmarkCli([
+      "cost-envelope",
+      "--gate0-packet", gate0Path,
+      "--freeze-lock", freezePath,
+      "--scenario", scenarioPath,
+      "--provider", "openai",
+      "--model", "gpt-realtime-2.1",
+      "--voice", "marin",
+      "--ledger", join(repository, "missing-ledger.jsonl"),
+      "--out", outputPath,
+      "--json",
+    ], {
+      repositoryRoot: repository,
+      cwd: repository,
+      io: output.io,
+    });
+    expect(exit).toBe(5);
+    expect(output.stderr()).toContain("pre_canary_packet_invalid");
+    await expect(readFile(outputPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects a mismatched full paid hash before freeze, fixture, ledger, credentials, or executor", async () => {
     const repository = await root();
     const path = join(repository, "plan.json");
@@ -375,6 +441,65 @@ describe("voice benchmark CLI", () => {
     expect(exit).toBe(4);
     expect(paidExecutions).toBe(0);
     expect(output.stderr()).toContain("paid_hash_confirmation_mismatch");
+  });
+
+  it("rejects a stale plan-bound open head before private key, environment, credential, executor, or reservation", async () => {
+    const repository = await root();
+    const planPath = join(repository, "plan.json");
+    const ledgerPath = join(repository, "budget.jsonl");
+    const plan = paidPlan();
+    await writeFile(planPath, serializeBenchmarkExecutionPlan(plan), { mode: 0o600 });
+    await initializeFilesystemBudgetLedger({
+      ledgerPath,
+      ledgerId: plan.ledger_id,
+      operationId: "initialize-stale-head-cli-test",
+      operationalCeilingUsd: "15",
+      now: () => new Date("2026-07-10T12:00:00.000Z"),
+    });
+    let privateKeyReads = 0;
+    let environmentResolutions = 0;
+    let credentialReads = 0;
+    let executorCalls = 0;
+    const output = capturedIo();
+    const exit = await runBenchmarkCli([
+      "run", "paid",
+      "--plan", planPath,
+      "--ledger", ledgerPath,
+      "--confirm-paid-sha256", plan.plan_sha256,
+      "--confirm-max-usd", "5",
+      "--freeze-lock", join(repository, "must-not-read-freeze.json"),
+      "--gate0-packet", join(repository, "must-not-read-gate0.json"),
+      "--fixture-root", join(repository, "must-not-read-fixture"),
+      "--kernel-attestation-private-key", join(repository, "must-not-read-private.pem"),
+    ], {
+      repositoryRoot: repository,
+      cwd: repository,
+      io: output.io,
+      readPrivateAttestationKey: async () => {
+        privateKeyReads += 1;
+        throw new Error("private key must remain unreachable");
+      },
+      resolveEnvironment: async () => {
+        environmentResolutions += 1;
+        return {
+          require() {
+            credentialReads += 1;
+            return "must-not-read";
+          },
+        } as never;
+      },
+      executePaid: async () => {
+        executorCalls += 1;
+        throw new Error("executor must remain unreachable");
+      },
+    });
+    expect(exit).toBe(5);
+    expect(output.stderr()).toContain("ledger_open_head_mismatch");
+    expect(privateKeyReads).toBe(0);
+    expect(environmentResolutions).toBe(0);
+    expect(credentialReads).toBe(0);
+    expect(executorCalls).toBe(0);
+    expect((await inspectFilesystemBudgetLedger({ ledgerPath })).reservations).toEqual([]);
   });
 
   it("categorically blocks paid execution when no crash-durable executor is installed", async () => {

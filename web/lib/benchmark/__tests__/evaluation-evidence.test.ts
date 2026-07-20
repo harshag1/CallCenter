@@ -375,7 +375,7 @@ const freezeLock = BenchmarkFreezeLockSchema.parse({
     session_settings_sha256: "4".repeat(64),
     pricing_snapshot_sha256: "5".repeat(64),
     pricing_formula_sha256: "6".repeat(64),
-    hard_limits_sha256: "7".repeat(64),
+    provider_hard_session_caps_sha256: "7".repeat(64),
   }],
   registration: { status: "exploratory" },
 });

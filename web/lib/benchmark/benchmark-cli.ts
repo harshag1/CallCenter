@@ -27,6 +27,7 @@ import {
 import {
   benchmarkFreezeLockSha256,
   benchmarkPairInvariantsSha256,
+  benchmarkRunnerConfigSha256,
   createBenchmarkExecutionPlan,
   parseCanonicalBenchmarkExecutionPlan,
   parseCanonicalBenchmarkFreezeLock,
@@ -116,8 +117,11 @@ const PROVIDER_ENV = Object.freeze({
   gemini: "GEMINI_API_KEY",
 } satisfies Record<ServerRealtimeProvider, string>);
 const COST_ENVELOPE_SCHEMA = z.object({
+  schema_version: z.literal(1),
+  kind: z.literal("hacc_provider_gate1_cost_envelope"),
   pricing_snapshot_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  limits_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  provider_hard_session_caps_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  runner_config_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   formula_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   components: z.array(z.object({
     name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/),
@@ -155,9 +159,19 @@ export type PaidBenchmarkRunInput = Readonly<{
   kernelAttestationSigner: BenchmarkKernelAttestationSigner;
   ledgerPath: string;
   outputRoot: string;
-  environment: ResolvedBenchmarkEnvironment;
+  /**
+   * Direct/in-process callers may supply an already-resolved environment.
+   * The public CLI uses the lazy resolver so no credential-bearing source is
+   * read until the runner has durably consumed the one-shot budget authority.
+   */
+  environment?: ResolvedBenchmarkEnvironment;
+  resolveCredentialEnvironment?: () => Promise<ResolvedBenchmarkEnvironment>;
   preCanaryPacket: PreCanaryProofPacket;
   providerPricingProof: ProviderPricingProof;
+  humanConfirmation: Readonly<{
+    plan_sha256: string;
+    maximum_usd: string;
+  }>;
 }>;
 
 export type PaidBenchmarkRunResult = Readonly<{
@@ -175,6 +189,10 @@ export type BenchmarkCliDependencies = Readonly<{
   io?: BenchmarkCliIo;
   inspectGit?: (repositoryRoot: string) => Promise<GitCheckout>;
   executePaid?: (input: PaidBenchmarkRunInput) => Promise<PaidBenchmarkRunResult>;
+  /** Test seam; production uses the strict private-key file reader. */
+  readPrivateAttestationKey?: (path: string) => Promise<string>;
+  /** Test seam; production uses the benchmark environment resolver. */
+  resolveEnvironment?: typeof resolveBenchmarkEnvironment;
 }>;
 
 export class BenchmarkCliError extends Error {
@@ -455,6 +473,21 @@ function assertProviderCapsMatchPlan(
   }
 }
 
+function trialLimitsFromProviderCaps(
+  caps: ProviderHardSessionCaps,
+  maxTurns: number,
+): TrialLimits {
+  return Object.freeze({
+    maxTurns,
+    maxSessionMs: caps.max_session_ms,
+    maxInputAudioBytes: caps.max_input_audio_bytes,
+    maxOutputAudioBytes: caps.max_output_audio_bytes,
+    maxToolCalls: caps.max_tool_calls,
+    sessionReadyTimeoutMs: Math.min(15_000, caps.max_session_ms),
+    responseTimeoutMs: Math.min(60_000, caps.max_session_ms),
+  });
+}
+
 async function verifyFreezeCheckout(input: Readonly<{
   freeze: BenchmarkFreezeLock;
   repositoryRoot: string;
@@ -709,6 +742,134 @@ async function commandScenariosMaterialize(
   return EXIT.ok;
 }
 
+async function commandCostEnvelope(
+  args: ParsedArguments,
+  dependencies: Required<Pick<
+    BenchmarkCliDependencies,
+    "repositoryRoot" | "cwd" | "now" | "io"
+  >> & BenchmarkCliDependencies,
+): Promise<number> {
+  rejectUnknown(args, [
+    "json", "gate0-packet", "freeze-lock", "scenario", "provider", "model",
+    "voice", "ledger", "out",
+  ]);
+  if (args.positionals.length !== 1) {
+    cliFail(
+      EXIT.usage,
+      "usage",
+      "usage: voice-benchmark cost-envelope --gate0-packet FILE --freeze-lock FILE --scenario FILE --provider NAME --model ID --voice ID --ledger FILE --out FILE",
+    );
+  }
+  const freeze = await loadFreeze(absolutePath(requiredOption(args, "freeze-lock"), dependencies.cwd));
+  if (freeze.scenario_source_registry_sha256 !== SCENARIO_SOURCE_REGISTRY_HASH) {
+    cliFail(EXIT.integrity, "scenario_registry_catalog_mismatch", "freeze lock differs from the live scenario source registry");
+  }
+  const provider = asProvider(requiredOption(args, "provider"));
+  const model = requiredOption(args, "model");
+  const voice = requiredOption(args, "voice");
+  const pin = freeze.provider_pins.find((candidate) =>
+    candidate.provider === provider
+    && candidate.model === model
+    && candidate.voice === voice
+  );
+  if (!pin) {
+    cliFail(EXIT.protocol, "provider_not_frozen", "provider/model/voice is not present in the freeze lock");
+  }
+  const loaded = await loadScenario(absolutePath(requiredOption(args, "scenario"), dependencies.cwd));
+  const audioDelivery = Object.freeze({
+    ...DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+    profile_sha256: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
+  });
+  if (audioDelivery.profile_sha256 !== freeze.audio_delivery_profile_sha256) {
+    cliFail(EXIT.integrity, "audio_delivery_hash_mismatch", "default audio delivery profile differs from the freeze lock");
+  }
+  const preCanaryPacket = await loadPreCanaryPacket(
+    absolutePath(requiredOption(args, "gate0-packet"), dependencies.cwd),
+  );
+  const ledgerPath = absolutePath(requiredOption(args, "ledger"), dependencies.cwd);
+  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath });
+  if (ledger.state !== "paused") {
+    cliFail(
+      EXIT.budget,
+      "cost_envelope_requires_paused_ledger",
+      "cost-envelope materialization requires the Gate 0 ledger to remain paused",
+    );
+  }
+  if (
+    !preCanaryPacket.budget.ledger_head_sha256
+    || !await filesystemBudgetLedgerContainsHead({
+      ledgerPath,
+      ancestorHeadSha256: preCanaryPacket.budget.ledger_head_sha256,
+    })
+  ) {
+    cliFail(
+      EXIT.integrity,
+      "gate0_ledger_lineage_mismatch",
+      "current budget ledger does not descend from the exact Gate 0 paused-zero head",
+    );
+  }
+  const release = verifyPaidReleaseGate(preCanaryPacket, {
+    provider,
+    model,
+    evidenceClass: freeze.evidence_class,
+    sourceCommit: freeze.source_commit,
+    sourceTree: freeze.source_tree,
+    freezeLockSha256: benchmarkFreezeLockSha256(freeze),
+    ledgerId: ledger.ledger_id,
+    now: dependencies.now(),
+  });
+  if (!release.valid || !release.value) {
+    cliFail(
+      EXIT.integrity,
+      "paid_release_gate_invalid",
+      `paid release gate failed closed: ${release.errors.join(",")}`,
+    );
+  }
+  const proof = release.value.providerPricingProof;
+  if (
+    proof.derived.pricing_snapshot_sha256 !== pin.pricing_snapshot_sha256
+    || proof.derived.formula_sha256 !== pin.pricing_formula_sha256
+    || proof.derived.hard_session_caps_sha256
+      !== pin.provider_hard_session_caps_sha256
+  ) {
+    cliFail(
+      EXIT.integrity,
+      "provider_pricing_pin_mismatch",
+      "Gate 0 selected pricing proof differs from the frozen provider pin",
+    );
+  }
+  const limits = trialLimitsFromProviderCaps(proof.caps, loaded.scenario.max_turns);
+  const runnerConfigSha256 = benchmarkRunnerConfigSha256({
+    limits,
+    audio_delivery: audioDelivery,
+  });
+  const envelope = providerPricingProofCostEnvelope(proof, runnerConfigSha256);
+  if (costEnvelopeMaximumMicroUsd(envelope) !== GATE_1_PROVIDER_RESERVATION_MICRO_USD) {
+    cliFail(EXIT.budget, "gate1_reservation_not_exact", "Gate 1 cost envelope must reserve exactly $5");
+  }
+  const out = absolutePath(requiredOption(args, "out"), dependencies.cwd);
+  try {
+    await writeExclusive(out, `${canonicalJson(envelope)}\n`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      cliFail(EXIT.integrity, "cost_envelope_output_exists", "refusing to replace an existing cost-envelope file");
+    }
+    throw error;
+  }
+  emit(dependencies.io, flag(args, "json"), {
+    command: "cost-envelope",
+    output_path: out,
+    provider,
+    model,
+    provider_hard_session_caps_sha256: envelope.provider_hard_session_caps_sha256,
+    runner_config_sha256: envelope.runner_config_sha256,
+    maximum_micro_usd: GATE_1_PROVIDER_RESERVATION_MICRO_USD,
+    network_calls: 0,
+    spend_usd: "0",
+  });
+  return EXIT.ok;
+}
+
 async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<BenchmarkCliDependencies, "repositoryRoot" | "cwd" | "now" | "randomId" | "io">> & BenchmarkCliDependencies): Promise<number> {
   rejectUnknown(args, [
     "json", "freeze-lock", "scenario", "fixture-root", "provider", "model", "voice", "condition", "mode",
@@ -781,19 +942,19 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
   if (!pin) cliFail(EXIT.protocol, "provider_not_frozen", "provider/model/voice is not present in the freeze lock");
   if (pin.pricing_snapshot_sha256 !== costEnvelope.pricing_snapshot_sha256) cliFail(EXIT.integrity, "pricing_hash_mismatch", "cost envelope pricing snapshot differs from the provider pin");
   if (pin.pricing_formula_sha256 !== costEnvelope.formula_sha256) cliFail(EXIT.integrity, "pricing_formula_hash_mismatch", "cost envelope pricing formula differs from the provider pin");
-  if (pin.hard_limits_sha256 !== costEnvelope.limits_sha256) cliFail(EXIT.integrity, "pricing_limits_hash_mismatch", "cost envelope hard-limit binding differs from the provider pin");
+  if (
+    pin.provider_hard_session_caps_sha256
+      !== costEnvelope.provider_hard_session_caps_sha256
+  ) {
+    cliFail(
+      EXIT.integrity,
+      "provider_caps_hash_mismatch",
+      "cost envelope provider hard-session caps differ from the provider pin",
+    );
+  }
   const createdAt = dependencies.now();
   const expiresAt = new Date(createdAt.getTime() + 24 * 60 * 60 * 1_000);
   const reservationExpiresAt = new Date(createdAt.getTime() + 15 * 60 * 1_000);
-  const limits: TrialLimits = Object.freeze({
-    maxTurns: loaded.scenario.max_turns,
-    maxSessionMs: 15 * 60 * 1_000,
-    maxInputAudioBytes: fixture.manifest.turns.reduce((sum, turn) => sum + turn.renditions[rendition].byte_length, 0),
-    maxOutputAudioBytes: 64 * 1024 * 1024,
-    maxToolCalls: 128,
-    sessionReadyTimeoutMs: 15_000,
-    responseTimeoutMs: 60_000,
-  });
   const audioDelivery = Object.freeze({
     ...DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
     profile_sha256: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
@@ -801,35 +962,6 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
   if (audioDelivery.profile_sha256 !== freeze.audio_delivery_profile_sha256) {
     cliFail(EXIT.integrity, "audio_delivery_hash_mismatch", "default audio delivery profile differs from the freeze lock");
   }
-  if (sha256Hex(canonicalJson({ limits, audio_delivery: audioDelivery })) !== costEnvelope.limits_sha256) {
-    cliFail(EXIT.integrity, "limits_hash_mismatch", "cost envelope was not derived from the exact planned hard limits and audio delivery profile");
-  }
-  const sessionContinuity = Object.freeze({
-    schema_version: 1 as const,
-    application_reconnect: "disabled" as const,
-    provider_native_resumption: "disabled" as const,
-  });
-  let longHorizonAuthorization: BenchmarkExecutionPlan["long_horizon_authorization"];
-  try {
-    longHorizonAuthorization = deriveLongHorizonExecutionAuthorization({
-      scenario: loaded.scenario,
-      callerPcm: frozenFixtureCallerPcm(loaded.scenario, fixture, rendition),
-      mode: mode as "canary" | "pilot" | "confirmatory",
-      maxSessionMs: limits.maxSessionMs,
-      preregistrationSha256: freeze.preregistration_sha256,
-      conditionSuiteSha256: compiled.suite.suiteHash,
-      runnerConfigSha256: costEnvelope.limits_sha256,
-    });
-  } catch (error) {
-    cliFail(
-      EXIT.protocol,
-      "long_horizon_execution_ineligible",
-      error instanceof Error ? error.message : "long-horizon execution eligibility could not be proven"
-    );
-  }
-  // Eligibility is computed from exact frozen PCM before even reading the
-  // budget ledger. Offline-only stress fixtures therefore cannot progress to
-  // a credential, reservation, or provider-capable boundary.
   const ledgerPath = absolutePath(requiredOption(args, "ledger"), dependencies.cwd);
   const ledger = await inspectFilesystemBudgetLedger({ ledgerPath });
   if (ledger.state !== "open") cliFail(EXIT.budget, "ledger_not_open", `budget ledger is ${ledger.state}`);
@@ -880,6 +1012,10 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
   if (
     providerPricingProof.derived.pricing_snapshot_sha256 !== costEnvelope.pricing_snapshot_sha256
     || providerPricingProof.derived.formula_sha256 !== costEnvelope.formula_sha256
+    || providerPricingProof.derived.hard_session_caps_sha256
+      !== costEnvelope.provider_hard_session_caps_sha256
+    || providerPricingProof.derived.hard_session_caps_sha256
+      !== pin.provider_hard_session_caps_sha256
     || providerPricingProof.derived.reservation_micro_usd !== maximum
   ) {
     cliFail(
@@ -892,7 +1028,7 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
     canonicalJson(costEnvelope)
     !== canonicalJson(providerPricingProofCostEnvelope(
       providerPricingProof,
-      costEnvelope.limits_sha256,
+      costEnvelope.runner_config_sha256,
     ))
   ) {
     cliFail(
@@ -901,7 +1037,56 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
       "cost envelope is not the exact selected pricing proof line-item decomposition",
     );
   }
+  const frozenInputAudioBytes = fixture.manifest.turns.reduce(
+    (sum, turn) => sum + turn.renditions[rendition].byte_length,
+    0,
+  );
+  if (frozenInputAudioBytes > providerPricingProof.caps.max_input_audio_bytes) {
+    cliFail(
+      EXIT.protocol,
+      "fixture_exceeds_provider_input_cap",
+      "frozen caller audio exceeds the Gate 0 provider hard-session input cap",
+    );
+  }
+  const limits = trialLimitsFromProviderCaps(
+    providerPricingProof.caps,
+    loaded.scenario.max_turns,
+  );
   assertProviderCapsMatchPlan(providerPricingProof.caps, limits);
+  const runnerConfigSha256 = benchmarkRunnerConfigSha256({
+    limits,
+    audio_delivery: audioDelivery,
+  });
+  if (runnerConfigSha256 !== costEnvelope.runner_config_sha256) {
+    cliFail(
+      EXIT.integrity,
+      "runner_config_hash_mismatch",
+      "cost envelope runner configuration differs from the Gate 0 cap-derived limits and frozen audio delivery",
+    );
+  }
+  const sessionContinuity = Object.freeze({
+    schema_version: 1 as const,
+    application_reconnect: "disabled" as const,
+    provider_native_resumption: "disabled" as const,
+  });
+  let longHorizonAuthorization: BenchmarkExecutionPlan["long_horizon_authorization"];
+  try {
+    longHorizonAuthorization = deriveLongHorizonExecutionAuthorization({
+      scenario: loaded.scenario,
+      callerPcm: frozenFixtureCallerPcm(loaded.scenario, fixture, rendition),
+      mode: mode as "canary" | "pilot" | "confirmatory",
+      maxSessionMs: limits.maxSessionMs,
+      preregistrationSha256: freeze.preregistration_sha256,
+      conditionSuiteSha256: compiled.suite.suiteHash,
+      runnerConfigSha256,
+    });
+  } catch (error) {
+    cliFail(
+      EXIT.protocol,
+      "long_horizon_execution_ineligible",
+      error instanceof Error ? error.message : "long-horizon execution eligibility could not be proven"
+    );
+  }
   const suffix = dependencies.randomId();
   const planFreezeLockSha256 = freezeLockSha256;
   const releaseGate = Object.freeze({
@@ -981,6 +1166,10 @@ async function commandPlan(args: ParsedArguments, dependencies: Required<Pick<Be
     maximum_micro_usd: maximum,
     reservation_expires_at: reservationExpiresAt.toISOString(),
     ledger_id: ledger.ledger_id,
+    reservation_authority: {
+      ledger_open_head_sha256: ledger.head_sha256,
+      consumption_id: `plan-consumption-${suffix}`,
+    },
     output_root: option(args, "output-root") ?? "benchmarks/voice-long-horizon/results",
     artifact_schema_sha256: freeze.artifact_schema_sha256,
   });
@@ -1280,6 +1469,22 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
   if (requiredOption(args, "confirm-max-usd") !== exactMaximum) {
     cliFail(EXIT.confirmation, "paid_max_confirmation_mismatch", `exact maximum confirmation must be ${exactMaximum}`);
   }
+  const ledgerPath = absolutePath(requiredOption(args, "ledger"), dependencies.cwd);
+  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath });
+  if (ledger.ledger_id !== plan.ledger_id) cliFail(EXIT.integrity, "ledger_id_mismatch", "paid plan binds a different budget ledger");
+  if (ledger.head_sha256 !== plan.reservation_authority.ledger_open_head_sha256) {
+    cliFail(
+      EXIT.integrity,
+      "ledger_open_head_mismatch",
+      "budget ledger head differs from the exact post-resume head bound by the paid plan",
+    );
+  }
+  if (ledger.state !== "open" || plan.maximum_micro_usd > ledger.operational_remaining_micro_usd) {
+    cliFail(EXIT.budget, "budget_gate_refused", "budget ledger is closed or lacks the planned operational exposure");
+  }
+  if (plan.maximum_micro_usd !== GATE_1_PROVIDER_RESERVATION_MICRO_USD) {
+    cliFail(EXIT.budget, "gate1_reservation_not_exact", "a Gate 1 paid run must reserve exactly $5");
+  }
   const freeze = await loadFreeze(absolutePath(requiredOption(args, "freeze-lock"), dependencies.cwd));
   const preCanaryPacket = await loadPreCanaryPacket(
     absolutePath(requiredOption(args, "gate0-packet"), dependencies.cwd),
@@ -1318,7 +1523,7 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
       maxSessionMs: plan.limits.maxSessionMs,
       preregistrationSha256: freeze.preregistration_sha256,
       conditionSuiteSha256: compiled.suite.suiteHash,
-      runnerConfigSha256: plan.cost_envelope.limits_sha256,
+      runnerConfigSha256: plan.cost_envelope.runner_config_sha256,
     });
   } catch (error) {
     cliFail(
@@ -1326,15 +1531,6 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
       "long_horizon_execution_ineligible",
       error instanceof Error ? error.message : "long-horizon execution authorization could not be reverified"
     );
-  }
-  const ledgerPath = absolutePath(requiredOption(args, "ledger"), dependencies.cwd);
-  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath });
-  if (ledger.ledger_id !== plan.ledger_id) cliFail(EXIT.integrity, "ledger_id_mismatch", "paid plan binds a different budget ledger");
-  if (ledger.state !== "open" || plan.maximum_micro_usd > ledger.operational_remaining_micro_usd) {
-    cliFail(EXIT.budget, "budget_gate_refused", "budget ledger is closed or lacks the planned operational exposure");
-  }
-  if (plan.maximum_micro_usd !== GATE_1_PROVIDER_RESERVATION_MICRO_USD) {
-    cliFail(EXIT.budget, "gate1_reservation_not_exact", "a Gate 1 paid run must reserve exactly $5");
   }
   const releaseVerification = verifyPaidReleaseGate(preCanaryPacket, {
     provider: plan.cell.provider,
@@ -1384,6 +1580,8 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
       !== providerPricingProof.derived.pricing_snapshot_sha256
     || plan.cost_envelope.formula_sha256
       !== providerPricingProof.derived.formula_sha256
+    || plan.cost_envelope.provider_hard_session_caps_sha256
+      !== providerPricingProof.derived.hard_session_caps_sha256
   ) {
     cliFail(
       EXIT.integrity,
@@ -1395,7 +1593,7 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
     canonicalJson(plan.cost_envelope)
     !== canonicalJson(providerPricingProofCostEnvelope(
       providerPricingProof,
-      plan.cost_envelope.limits_sha256,
+      plan.cost_envelope.runner_config_sha256,
     ))
   ) {
     cliFail(
@@ -1407,7 +1605,7 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
   assertProviderCapsMatchPlan(providerPricingProof.caps, plan.limits);
   // Load private signing material only after every public/frozen input and the
   // read-only budget gate have passed, but still before provider credentials.
-  const privateKeyPem = await readPrivateAttestationKey(absolutePath(
+  const privateKeyPem = await (dependencies.readPrivateAttestationKey ?? readPrivateAttestationKey)(absolutePath(
     requiredOption(args, "kernel-attestation-private-key"),
     dependencies.cwd
   ));
@@ -1429,18 +1627,15 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
     );
   }
   const envFile = option(args, "env-file");
-  const environment = await resolveBenchmarkEnvironment({
-    names: [PROVIDER_ENV[plan.cell.provider]],
-    explicitEnvFiles: envFile ? [absolutePath(envFile, dependencies.cwd)] : [],
-    repositoryRoot: dependencies.repositoryRoot,
-    gpuHubRoot: flag(args, "include-gpu-hub-env") ? undefined : null,
-    cwd: dependencies.cwd,
-  });
-  try {
-    environment.require(PROVIDER_ENV[plan.cell.provider]);
-  } catch {
-    cliFail(EXIT.configuration, "provider_credential_missing", `required ${PROVIDER_ENV[plan.cell.provider]} credential is unavailable`);
-  }
+  const resolveCredentialEnvironment = async (): Promise<ResolvedBenchmarkEnvironment> => (
+    (dependencies.resolveEnvironment ?? resolveBenchmarkEnvironment)({
+      names: [PROVIDER_ENV[plan.cell.provider]],
+      explicitEnvFiles: envFile ? [absolutePath(envFile, dependencies.cwd)] : [],
+      repositoryRoot: dependencies.repositoryRoot,
+      gpuHubRoot: flag(args, "include-gpu-hub-env") ? undefined : null,
+      cwd: dependencies.cwd,
+    })
+  );
   const outputRoot = absolutePath(option(args, "output-root") ?? plan.output_root, dependencies.repositoryRoot);
   let result: PaidBenchmarkRunResult;
   try {
@@ -1458,9 +1653,13 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
       kernelAttestationSigner,
       ledgerPath,
       outputRoot,
-      environment,
+      resolveCredentialEnvironment,
       preCanaryPacket,
       providerPricingProof,
+      humanConfirmation: {
+        plan_sha256: confirmation,
+        maximum_usd: exactMaximum,
+      },
     });
   } catch {
     cliFail(EXIT.partial, "paid_partial_preserved", "paid execution did not finalize; inspect the durable partial and budget ledger before any retry");
@@ -1486,6 +1685,7 @@ function usage(): string {
     "  fixtures verify --root DIR --scenario FILE [--expected-manifest-sha256 HASH]",
     "  scenarios list [--json]",
     "  scenarios materialize --registry-key KEY --out FILE [--json]",
+    "  cost-envelope --gate0-packet FILE --freeze-lock FILE --scenario FILE --provider NAME --model ID --voice ID --ledger FILE --out FILE",
     "  plan --gate0-packet FILE --freeze-lock FILE --scenario FILE --fixture-root DIR --provider NAME --model ID --voice ID --condition ID --mode MODE --ledger FILE --cost-envelope FILE --kernel-attestation-key-id ID --kernel-attestation-public-key FILE --out FILE",
     "  run offline --scenario FILE --condition ID [--output-root DIR]",
     "  run paid --gate0-packet FILE --plan FILE --freeze-lock FILE --fixture-root DIR --ledger FILE --kernel-attestation-private-key FILE --confirm-paid-sha256 HASH --confirm-max-usd EXACT",
@@ -1510,6 +1710,7 @@ export async function runBenchmarkCli(argv: readonly string[], input: BenchmarkC
     }
     if (args.positionals[0] === "doctor") return await commandDoctor(args, dependencies);
     if (args.positionals[0] === "validate") return await commandValidate(args, dependencies);
+    if (args.positionals[0] === "cost-envelope") return await commandCostEnvelope(args, dependencies);
     if (args.positionals[0] === "plan") return await commandPlan(args, dependencies);
     if (command === "fixtures verify") return await commandFixturesVerify(args, dependencies);
     if (command === "scenarios list") return await commandScenariosList(args, dependencies);

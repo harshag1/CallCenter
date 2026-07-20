@@ -15,7 +15,7 @@ describe("active capability catalog efficiency evidence", () => {
     expect(report.provenance.build_manifest_sha256)
       .toBe("d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455");
     expect(report.provenance.toolchain_manifest_sha256)
-      .toBe("7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212");
+      .toBe("207bff47be651c3b6633761dc79a074a7134087f91ead2ea6aa93e01bcf15fa6");
     expect(report.corpus).toMatchObject({
       raw_source_file_bytes: 13_497,
       raw_source_file_sha256: "67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b",

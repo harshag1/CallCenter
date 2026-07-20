@@ -31,10 +31,11 @@ describe("registered C3 transport smoke", () => {
       executionScope: "c3-transport-smoke-only",
       heldOut: false,
       scenarioId: "transport-smoke-v1",
-      scenarioVersion: "1.0.0",
+      scenarioVersion: "1.1.0",
     });
     expect(source.scenario.max_turns).toBe(1);
     expect(source.scenario.caller.turns).toHaveLength(1);
+    expect(source.scenario.caller.turns[0].utterance).toBe("Beep. Beep. Beep.");
     expect(source.scenario.tools).toHaveLength(1);
     expect(source.scenario.tools[0]).toMatchObject({
       name: TRANSPORT_SMOKE_LEAF_TOOL,

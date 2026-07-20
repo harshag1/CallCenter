@@ -290,6 +290,21 @@ A fourth Fable/Claude Code review cost **$0.458499** (rounded from the provider 
 - Total recorded program cash spend: **$2.624932**
 - Paid canary gate: **closed**
 
+## 2026-07-16 — Pre-canary release-gate review
+
+A fifth Fable/Claude Code review cost **$0.687619** and is preserved as
+[unverified pre-canary release-gate advice](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md).
+It required a network-free production-runner emulator, predeclared
+provider-specific smoke artifacts, enumerated database skips, and a strict
+no-retry interpretation before any paid transport session. The review remains
+advisory input and does not establish C1–C5 evidence or provider compatibility.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
+- Auxiliary review spend delta: **$0.687619**
+- Cumulative auxiliary review spend: **$3.312551**
+- Total recorded program cash spend: **$3.312551**
+- Paid canary gate: **closed**
+
 ## 2026-07-16 — Active-catalog artifact corrected after independent red-team
 
 The first draft of this C1 artifact was withdrawn after review found that it omitted the two JSON array brackets, conflated logical-entry bytes with the provider instruction surface, and described a preselected linear census as “reachability.” The corrected deterministic benchmark exercises a public 64-tool corpus through one sequential eight-phase Flow-v2 route and 18 real runtime snapshots while reporting three separate byte surfaces.
@@ -306,8 +321,8 @@ Evidence:
 - portable semantic result: `8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1`;
 - source manifest: `fd84bb08347983e660bc77f672901620b26e8748f62463354312a6359ba2918a`;
 - deterministic build manifest: `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`;
-- observed toolchain manifest: `7c65a5ed69e12182be11574cb5374cd1b8050bdab8ece090071683bc27529212`;
-- source/build/toolchain-bound evidence: `aaa7f173833121ff5ca6152ad7f687ad052ec0d1c186a2e53b0bd1a2b0241c67`;
+- observed toolchain manifest: `207bff47be651c3b6633761dc79a074a7134087f91ead2ea6aa93e01bcf15fa6`;
+- source/build/toolchain-bound evidence: `5a95cdf1abc629c26c9e94a1b80b8490c7e940268fa5985df6804b60bc9291c1`;
 - raw corpus file: 13,497 bytes, `67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b`;
 - parsed canonical corpus: 11,932 bytes, `89452f09d62f3588e6b37acdd914aaa1c3b612c7ed89cb9b1a7ca3beeabc72c7`;
 - corrected focused freeze: 5/5 tests passed;

@@ -5,7 +5,7 @@ import type { CanonicalConditionCompilerInput } from "./condition-compiler";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "./scenario-schema";
 
 export const TRANSPORT_SMOKE_SCENARIO_ID = "transport-smoke-v1" as const;
-export const TRANSPORT_SMOKE_SCENARIO_VERSION = "1.0.0" as const;
+export const TRANSPORT_SMOKE_SCENARIO_VERSION = "1.1.0" as const;
 export const TRANSPORT_SMOKE_GATEWAY_TOOL = "capability_gateway" as const;
 export const TRANSPORT_SMOKE_LEAF_TOOL = "read_service_status" as const;
 export const TRANSPORT_SMOKE_SERVICE_ID = "SVC-DEMO-001" as const;
@@ -69,7 +69,8 @@ export const TRANSPORT_SMOKE_FLOW: AgentFlow = {
 };
 
 export const TRANSPORT_SMOKE_BASE_INSTRUCTIONS = [
-  "You are running a one-turn development-only realtime transport smoke.",
+  "You are running a one-turn development-only realtime transport compatibility smoke.",
+  "The caller input is a registered non-speech three-beep PCM calibration signal; do not treat this cell as speech-recognition or task-effectiveness evidence.",
   "Make exactly one harmless read_service_status call through capability_gateway for SVC-DEMO-001.",
   "Then give one short audible answer grounded in the returned status and stop.",
 ].join(" ");

@@ -5,6 +5,7 @@ import {
   BenchmarkPlanError,
   benchmarkFreezeLockSha256,
   benchmarkPairInvariantsSha256,
+  benchmarkRunnerConfigSha256,
   createBenchmarkExecutionPlan,
   parseCanonicalBenchmarkExecutionPlan,
   parseCanonicalBenchmarkFreezeLock,
@@ -57,7 +58,7 @@ function freeze(overrides: Partial<BenchmarkFreezeLock> = {}): BenchmarkFreezeLo
       session_settings_sha256: H("8"),
       pricing_snapshot_sha256: H("9"),
       pricing_formula_sha256: H("f"),
-      hard_limits_sha256: H("e"),
+      provider_hard_session_caps_sha256: H("e"),
     }],
     registration: { status: "exploratory" },
     ...overrides,
@@ -65,6 +66,21 @@ function freeze(overrides: Partial<BenchmarkFreezeLock> = {}): BenchmarkFreezeLo
 }
 
 function body(lock: BenchmarkFreezeLock, overrides: Partial<BenchmarkExecutionPlanBody> = {}): BenchmarkExecutionPlanBody {
+  const limits = {
+    maxTurns: 24,
+    maxSessionMs: 600_000,
+    maxInputAudioBytes: 10_000_000,
+    maxOutputAudioBytes: 20_000_000,
+    maxToolCalls: 64,
+    sessionReadyTimeoutMs: 15_000,
+    responseTimeoutMs: 30_000,
+  };
+  const audioDelivery = {
+    schemaVersion: 1 as const,
+    chunkMs: 20,
+    pace: "realtime" as const,
+    profile_sha256: H("1"),
+  };
   const base: BenchmarkExecutionPlanBody = {
     schema_version: 1,
     plan_id: "canary-openai-full-harness-001",
@@ -76,7 +92,7 @@ function body(lock: BenchmarkFreezeLock, overrides: Partial<BenchmarkExecutionPl
     release_gate: {
       pre_canary_packet_sha256: H("a"),
       provider_pricing_proof_sha256: H("b"),
-      provider_hard_session_caps_sha256: H("c"),
+      provider_hard_session_caps_sha256: H("e"),
       pricing_snapshot_sha256: H("9"),
       pricing_formula_sha256: H("f"),
       reservation_micro_usd: 5_000_000,
@@ -117,24 +133,17 @@ function body(lock: BenchmarkFreezeLock, overrides: Partial<BenchmarkExecutionPl
       provider_native_resumption: "disabled",
     },
     long_horizon_authorization: null,
-    limits: {
-      maxTurns: 24,
-      maxSessionMs: 600_000,
-      maxInputAudioBytes: 10_000_000,
-      maxOutputAudioBytes: 20_000_000,
-      maxToolCalls: 64,
-      sessionReadyTimeoutMs: 15_000,
-      responseTimeoutMs: 30_000,
-    },
-    audio_delivery: {
-      schemaVersion: 1,
-      chunkMs: 20,
-      pace: "realtime",
-      profile_sha256: H("1"),
-    },
+    limits,
+    audio_delivery: audioDelivery,
     cost_envelope: {
+      schema_version: 1,
+      kind: "hacc_provider_gate1_cost_envelope",
       pricing_snapshot_sha256: H("9"),
-      limits_sha256: H("e"),
+      provider_hard_session_caps_sha256: H("e"),
+      runner_config_sha256: benchmarkRunnerConfigSha256({
+        limits,
+        audio_delivery: audioDelivery,
+      }),
       formula_sha256: H("f"),
       components: [{ name: "pessimistic-charge", upper_bound_micro_usd: 4_900_000 }],
       safety_margin_micro_usd: 100_000,
@@ -142,6 +151,10 @@ function body(lock: BenchmarkFreezeLock, overrides: Partial<BenchmarkExecutionPl
     maximum_micro_usd: 5_000_000,
     reservation_expires_at: "2026-07-10T12:20:00.000Z",
     ledger_id: "hacc-public-benchmark-budget",
+    reservation_authority: {
+      ledger_open_head_sha256: H("7"),
+      consumption_id: "plan-consumption-test",
+    },
     output_root: "benchmarks/voice-long-horizon/results",
     artifact_schema_sha256: H("0"),
   };
@@ -213,6 +226,27 @@ describe("benchmark freeze lock and paid execution plan", () => {
     expect(() => verifyExecutionPlanAgainstFreeze({ plan, freeze: wrongFixture })).toThrowError(/does not bind|fixture/);
   });
 
+  it("keeps provider caps and runner configuration as separate fail-closed commitments", () => {
+    const lock = freeze();
+    const baseline = body(lock);
+    expect(() => createBenchmarkExecutionPlan({
+      ...baseline,
+      limits: { ...baseline.limits, maxToolCalls: baseline.limits.maxToolCalls + 1 },
+    })).toThrowError(/runner configuration hash/);
+
+    const wrongCapsLock = freeze({
+      provider_pins: [{
+        ...lock.provider_pins[0],
+        provider_hard_session_caps_sha256: H("d"),
+      }],
+    });
+    const plan = createBenchmarkExecutionPlan(body(wrongCapsLock));
+    expect(() => verifyExecutionPlanAgainstFreeze({
+      plan,
+      freeze: wrongCapsLock,
+    })).toThrowError(/hard-session caps/);
+  });
+
   it("freezes the attestation trust root and rejects incompatible key IDs", () => {
     const wrongLock = freeze({
       kernel_attestation: { ...ATTESTATION_PIN, key_id: "different-kernel-key" },
@@ -279,7 +313,7 @@ describe("benchmark freeze lock and paid execution plan", () => {
         session_settings_sha256: H("8"),
         pricing_snapshot_sha256: H("9"),
         pricing_formula_sha256: H("f"),
-        hard_limits_sha256: H("e"),
+        provider_hard_session_caps_sha256: H("e"),
       }],
     })).toThrowError(/mutable latest aliases/);
   });

@@ -4,7 +4,7 @@
 
 This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. It compares the same model against itself: the raw agent receives the entire workflow and action catalog up front, while the harness progressively discloses the current objective and routes actions through durable, runtime-enforced state.
 
-**Current status: draft protocol and infrastructure work, with $0.00 in paid voice-provider session spend. No superiority result exists yet.** Four separately tracked unverified architecture/security reviews cost **$2.624932** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
+**Current status: draft protocol and infrastructure work, with $0.00 in paid voice-provider session spend. No superiority result exists yet.** Five separately tracked unverified architecture/security reviews cost **$3.312551** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
 
 The benchmark is designed to answer six questions:
 
@@ -92,3 +92,4 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 - [External Fable database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
+- [External Fable pre-canary release-gate review](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md): paid, unverified peer-review input; not repository or benchmark evidence

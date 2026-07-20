@@ -184,6 +184,10 @@ describe("executable provider pricing proofs", () => {
       })),
     );
     expect(envelope).toMatchObject({
+      schema_version: 1,
+      kind: "hacc_provider_gate1_cost_envelope",
+      provider_hard_session_caps_sha256: proof.derived.hard_session_caps_sha256,
+      runner_config_sha256: "a".repeat(64),
       safety_margin_micro_usd: proof.safety_margin_micro_usd,
       components: expect.arrayContaining([{
         name: "reservation.headroom",

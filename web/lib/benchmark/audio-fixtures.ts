@@ -20,6 +20,8 @@ const AUDIO_SET_HASH_DOMAIN = "harshas-amazing-call-center/audio-set/v1\n";
 const FIXTURE_SET_HASH_DOMAIN = "harshas-amazing-call-center/audio-fixture-set/v1\n";
 const MANIFEST_HASH_DOMAIN = "harshas-amazing-call-center/audio-fixture-manifest/v1\n";
 const TEXT_HASH_DOMAIN = "harshas-amazing-call-center/caller-text/v1\n";
+const DETERMINISTIC_SIGNAL_SPEC_HASH_DOMAIN =
+  "harshas-amazing-call-center/deterministic-signal-spec/v1\n";
 const MAX_MANIFEST_BYTES = 1_000_000;
 const MAX_FIXTURE_SET_BYTES = 512 * 1024 * 1024;
 const SIGNAL_FRAME_DURATION_MS = 20;
@@ -63,7 +65,12 @@ const PcmDescriptorSchema = z.object({
   signal: PcmSignalSchema,
 }).strict();
 
-const TurnManifestSchema = z.object({
+const RenditionsSchema = z.object({
+  pcm16le_mono_16000: PcmDescriptorSchema,
+  pcm16le_mono_24000: PcmDescriptorSchema,
+}).strict();
+
+const MacosTurnManifestSchema = z.object({
   ordinal: SafeIntegerSchema,
   caller_turn_id: z.string().min(1).max(256),
   pause_after_ms: SafeIntegerSchema,
@@ -71,10 +78,18 @@ const TurnManifestSchema = z.object({
   source_text_utf8_byte_length: SafeIntegerSchema,
   source_text_word_count: SafeIntegerSchema,
   source_aiff_sha256: Sha256Schema,
-  renditions: z.object({
-    pcm16le_mono_16000: PcmDescriptorSchema,
-    pcm16le_mono_24000: PcmDescriptorSchema,
-  }).strict(),
+  renditions: RenditionsSchema,
+}).strict();
+
+const DeterministicTurnManifestSchema = z.object({
+  ordinal: SafeIntegerSchema,
+  caller_turn_id: z.string().min(1).max(256),
+  pause_after_ms: SafeIntegerSchema,
+  source_text_utf8_sha256: Sha256Schema,
+  source_text_utf8_byte_length: SafeIntegerSchema,
+  source_text_word_count: SafeIntegerSchema,
+  source_signal_spec_sha256: Sha256Schema,
+  renditions: RenditionsSchema,
 }).strict();
 
 const ToolchainSchema = z.object({
@@ -125,12 +140,21 @@ const TimestampSchema = z.string()
   .regex(UTC_TIMESTAMP_PATTERN)
   .refine(isExactUtcTimestamp, "must be an exact valid UTC calendar timestamp");
 
-const ManifestSchema = z.object({
-  schema_version: z.literal(1),
+const ManifestCommonSchema = z.object({
   fixture_set_id: z.string().regex(/^caf_[a-f0-9]{24}$/),
   generated_at: TimestampSchema,
   scenario: ScenarioIdentitySchema,
   caller_sequence_sha256: Sha256Schema,
+  audio_sequence_sha256_by_rendition: z.object({
+    pcm16le_mono_16000: Sha256Schema,
+    pcm16le_mono_24000: Sha256Schema,
+  }).strict(),
+  audio_set_sha256: Sha256Schema,
+  manifest_sha256: Sha256Schema,
+});
+
+const MacosManifestSchema = ManifestCommonSchema.extend({
+  schema_version: z.literal(1),
   synthesis: z.object({
     engine: z.literal("macos-say"),
     voice: z.string().min(1).max(128),
@@ -149,20 +173,66 @@ const ManifestSchema = z.object({
     silence_trimming: z.literal(false),
   }).strict(),
   toolchain: ToolchainSchema,
-  audio_sequence_sha256_by_rendition: z.object({
-    pcm16le_mono_16000: Sha256Schema,
-    pcm16le_mono_24000: Sha256Schema,
-  }).strict(),
-  audio_set_sha256: Sha256Schema,
-  turns: z.array(TurnManifestSchema).min(1),
-  manifest_sha256: Sha256Schema,
+  turns: z.array(MacosTurnManifestSchema).min(1),
 }).strict();
+
+const ToneSegmentSchema = z.object({
+  silence_before_ms: z.number().int().min(0).max(30_000),
+  tone_ms: z.number().int().min(20).max(30_000),
+  silence_after_ms: z.number().int().min(0).max(30_000),
+  frequency_hz: z.number().int().min(20).max(8_000),
+}).strict();
+
+const DeterministicManifestSchema = ManifestCommonSchema.extend({
+  schema_version: z.literal(2),
+  synthesis: z.object({
+    engine: z.literal("hacc-integer-tone-sequence"),
+    signal_version: z.literal("ascending-three-beep-v1"),
+    semantic_content: z.literal("non-speech-transport-calibration"),
+    source_text_interpretation: z.literal("literal-audible-label"),
+    rate_wpm: z.literal(180),
+    amplitude_peak: z.literal(8_000),
+    ramp_ms: z.literal(20),
+    sequence: z.tuple([
+      ToneSegmentSchema,
+      ToneSegmentSchema,
+      ToneSegmentSchema,
+    ]),
+    redistribution_status: z.literal("redistributable"),
+    license_spdx: z.literal("MIT"),
+  }).strict(),
+  normalization: z.object({
+    sample_format: z.literal("s16le"),
+    channels: z.literal(1),
+    resampler: z.literal("none-native-rate-generation"),
+    precision_bits: z.literal(16),
+    dither: z.literal("none"),
+    loudness_normalization: z.literal(false),
+    silence_trimming: z.literal(false),
+  }).strict(),
+  toolchain: z.object({
+    implementation: z.literal("ecmascript-integer-arithmetic"),
+    algorithm: z.literal("integer-triangle-wave-v1"),
+    generator_path: z.literal("generate.ts"),
+    generator_sha256: Sha256Schema,
+    integer_sample_arithmetic: z.literal(true),
+  }).strict(),
+  turns: z.array(DeterministicTurnManifestSchema).length(1),
+}).strict();
+
+const ManifestSchema = z.discriminatedUnion("schema_version", [
+  MacosManifestSchema,
+  DeterministicManifestSchema,
+]);
 
 export type CallerAudioScenarioIdentity = z.infer<typeof ScenarioIdentitySchema>;
 export type CallerPcmDescriptor = z.infer<typeof PcmDescriptorSchema>;
-export type CallerAudioTurnManifest = z.infer<typeof TurnManifestSchema>;
+export type CallerAudioTurnManifest = z.infer<typeof MacosTurnManifestSchema>;
+export type DeterministicCallerAudioTurnManifest = z.infer<typeof DeterministicTurnManifestSchema>;
 export type CallerAudioToolchain = z.infer<typeof ToolchainSchema>;
 export type CallerAudioFixtureManifest = z.infer<typeof ManifestSchema>;
+export type MacosCallerAudioFixtureManifest = z.infer<typeof MacosManifestSchema>;
+export type DeterministicCallerAudioFixtureManifest = z.infer<typeof DeterministicManifestSchema>;
 
 export type CallerAudioTurn = Readonly<{
   id: string;
@@ -173,6 +243,11 @@ export type CallerAudioTurn = Readonly<{
 export type GeneratedCallerAudioTurn = Readonly<{
   caller_turn_id: string;
   source_aiff_sha256: string;
+  renditions: Readonly<Record<CallerAudioRendition, CallerPcmDescriptor>>;
+}>;
+
+export type GeneratedDeterministicCallerAudioTurn = Readonly<{
+  caller_turn_id: string;
   renditions: Readonly<Record<CallerAudioRendition, CallerPcmDescriptor>>;
 }>;
 
@@ -477,7 +552,7 @@ function semanticPcmDescriptor(descriptor: CallerPcmDescriptor): Omit<CallerPcmD
 }
 
 function audioSequenceHash(
-  turns: readonly CallerAudioTurnManifest[],
+  turns: readonly (CallerAudioTurnManifest | DeterministicCallerAudioTurnManifest)[],
   rendition: CallerAudioRendition
 ): string {
   return domainHash(AUDIO_SEQUENCE_HASH_DOMAIN, turns.map((turn) => ({
@@ -491,16 +566,12 @@ function audioSequenceHash(
   })));
 }
 
-function manifestBody(manifest: Omit<CallerAudioFixtureManifest, "manifest_sha256">): Omit<CallerAudioFixtureManifest, "manifest_sha256"> {
-  return manifest;
-}
-
 function expectedFixtureSetId(input: {
   scenario: CallerAudioScenarioIdentity;
   caller_sequence_sha256: string;
   synthesis: CallerAudioFixtureManifest["synthesis"];
   normalization: CallerAudioFixtureManifest["normalization"];
-  toolchain: CallerAudioToolchain;
+  toolchain: CallerAudioFixtureManifest["toolchain"];
   audio_set_sha256: string;
 }): string {
   return `caf_${domainHash(FIXTURE_SET_HASH_DOMAIN, input).slice(0, 24)}`;
@@ -534,7 +605,7 @@ export function createCallerAudioFixtureManifest(input: {
   rateWpm: number;
   toolchain: CallerAudioToolchain;
   generatedTurns: readonly GeneratedCallerAudioTurn[];
-}): CallerAudioFixtureManifest {
+}): MacosCallerAudioFixtureManifest {
   const normalizedTurns = normalizeTurns(input.turns);
   if (normalizedTurns.length !== input.generatedTurns.length) {
     throw new Error("Generated caller audio turn count does not match the caller sequence");
@@ -546,7 +617,7 @@ export function createCallerAudioFixtureManifest(input: {
     if (generated.caller_turn_id !== turn.caller_turn_id) {
       throw new Error(`Generated caller audio order mismatch at ordinal ${index}`);
     }
-    const parsed = TurnManifestSchema.parse({
+    const parsed = MacosTurnManifestSchema.parse({
       ...turn,
       source_aiff_sha256: generated.source_aiff_sha256,
       renditions: generated.renditions,
@@ -603,7 +674,7 @@ export function createCallerAudioFixtureManifest(input: {
     toolchain: input.toolchain,
     audio_set_sha256: audioSetSha256,
   });
-  const body = ManifestSchema.omit({ manifest_sha256: true }).parse({
+  const body = MacosManifestSchema.omit({ manifest_sha256: true }).parse({
     schema_version: 1,
     fixture_set_id: fixtureSetId,
     generated_at: input.generatedAt,
@@ -616,9 +687,224 @@ export function createCallerAudioFixtureManifest(input: {
     audio_set_sha256: audioSetSha256,
     turns,
   });
-  return deepFreeze(ManifestSchema.parse({
+  return deepFreeze(MacosManifestSchema.parse({
     ...body,
-    manifest_sha256: domainHash(MANIFEST_HASH_DOMAIN, manifestBody(body)),
+    manifest_sha256: domainHash(MANIFEST_HASH_DOMAIN, body),
+  }));
+}
+
+export function deterministicTransportSmokeSynthesis(): DeterministicCallerAudioFixtureManifest["synthesis"] {
+  return {
+    engine: "hacc-integer-tone-sequence",
+    signal_version: "ascending-three-beep-v1",
+    semantic_content: "non-speech-transport-calibration",
+    source_text_interpretation: "literal-audible-label",
+    rate_wpm: 180,
+    amplitude_peak: 8_000,
+    ramp_ms: 20,
+    sequence: [
+      { silence_before_ms: 200, tone_ms: 400, silence_after_ms: 200, frequency_hz: 400 },
+      { silence_before_ms: 200, tone_ms: 400, silence_after_ms: 200, frequency_hz: 500 },
+      { silence_before_ms: 200, tone_ms: 400, silence_after_ms: 200, frequency_hz: 1_000 },
+    ],
+    redistribution_status: "redistributable",
+    license_spdx: "MIT",
+  };
+}
+
+function deterministicSignalSpecSha256(
+  synthesis: DeterministicCallerAudioFixtureManifest["synthesis"]
+): string {
+  return domainHash(DETERMINISTIC_SIGNAL_SPEC_HASH_DOMAIN, {
+    engine: synthesis.engine,
+    signal_version: synthesis.signal_version,
+    amplitude_peak: synthesis.amplitude_peak,
+    ramp_ms: synthesis.ramp_ms,
+    sequence: synthesis.sequence,
+  });
+}
+
+function deterministicToneDurationMs(
+  synthesis: DeterministicCallerAudioFixtureManifest["synthesis"]
+): number {
+  return synthesis.sequence.reduce(
+    (sum, segment) =>
+      sum + segment.silence_before_ms + segment.tone_ms + segment.silence_after_ms,
+    0
+  );
+}
+
+function exactSignalSamples(sampleRateHz: number, durationMs: number): number {
+  const numerator = sampleRateHz * durationMs;
+  if (numerator % 1_000 !== 0) {
+    throw new Error(`deterministic signal duration ${durationMs}ms is not sample-exact at ${sampleRateHz}Hz`);
+  }
+  return numerator / 1_000;
+}
+
+function integerTriangleSample(
+  phase: number,
+  period: number,
+  amplitude: number
+): number {
+  const quarter = period / 4;
+  if (!Number.isInteger(quarter)) {
+    throw new Error(`deterministic tone period ${period} is not divisible into exact quarter cycles`);
+  }
+  if (phase < quarter) return Math.trunc((phase * amplitude) / quarter);
+  if (phase < 3 * quarter) {
+    return amplitude
+      - Math.trunc(((phase - quarter) * 2 * amplitude) / (2 * quarter));
+  }
+  return -amplitude
+    + Math.trunc(((phase - 3 * quarter) * amplitude) / quarter);
+}
+
+/** Re-render exact claimed bytes so a self-consistent descriptor substitution still fails. */
+export function renderDeterministicTransportSignalPcm(
+  synthesis: DeterministicCallerAudioFixtureManifest["synthesis"],
+  sampleRateHz: 16_000 | 24_000
+): Uint8Array {
+  const durationMs = deterministicToneDurationMs(synthesis);
+  const sampleCount = exactSignalSamples(sampleRateHz, durationMs);
+  const rampSamples = exactSignalSamples(sampleRateHz, synthesis.ramp_ms);
+  if (rampSamples < 1) throw new Error("deterministic signal ramp must contain at least one sample");
+  const bytes = Buffer.alloc(sampleCount * 2);
+  let cursor = 0;
+
+  for (const segment of synthesis.sequence) {
+    cursor += exactSignalSamples(sampleRateHz, segment.silence_before_ms);
+    const toneSamples = exactSignalSamples(sampleRateHz, segment.tone_ms);
+    const period = sampleRateHz / segment.frequency_hz;
+    if (!Number.isInteger(period)) {
+      throw new Error(`deterministic frequency ${segment.frequency_hz}Hz has no exact period at ${sampleRateHz}Hz`);
+    }
+    for (let local = 0; local < toneSamples; local += 1) {
+      const attack = Math.min(rampSamples, local + 1);
+      const release = Math.min(rampSamples, toneSamples - local);
+      const envelope = Math.min(attack, release);
+      const raw = integerTriangleSample(
+        local % period,
+        period,
+        synthesis.amplitude_peak
+      );
+      const sample = Math.trunc((raw * envelope) / rampSamples);
+      bytes.writeInt16LE(sample, (cursor + local) * 2);
+    }
+    cursor += toneSamples
+      + exactSignalSamples(sampleRateHz, segment.silence_after_ms);
+  }
+  if (cursor !== sampleCount) {
+    throw new Error(`deterministic signal rendered ${cursor} samples, expected ${sampleCount}`);
+  }
+  return bytes;
+}
+
+/**
+ * Create the redistributable C3 transport-smoke fixture manifest.
+ *
+ * The waveform is deliberately non-speech. It proves provider PCM input,
+ * native tool, and audio output transport only; it cannot be cited as ASR or
+ * task-effectiveness evidence.
+ */
+export function createDeterministicTransportSmokeFixtureManifest(input: {
+  generatedAt: string;
+  scenario: CallerAudioScenarioIdentity;
+  turns: readonly CallerAudioTurn[];
+  generatorSha256: string;
+  generatedTurn: GeneratedDeterministicCallerAudioTurn;
+}): DeterministicCallerAudioFixtureManifest {
+  if (!SHA256_PATTERN.test(input.generatorSha256)) {
+    throw new Error("Deterministic fixture generator SHA-256 is invalid");
+  }
+  const normalizedTurns = normalizeTurns(input.turns);
+  if (normalizedTurns.length !== 1 || input.generatedTurn.caller_turn_id !== normalizedTurns[0].caller_turn_id) {
+    throw new Error("Deterministic transport fixture requires its one exact caller turn");
+  }
+  const synthesis = DeterministicManifestSchema.shape.synthesis.parse(
+    deterministicTransportSmokeSynthesis()
+  );
+  const sourceSignalSpecSha256 = deterministicSignalSpecSha256(synthesis);
+  const generatedPaths = new Set<string>();
+  const turn = DeterministicTurnManifestSchema.parse({
+    ...normalizedTurns[0],
+    source_signal_spec_sha256: sourceSignalSpecSha256,
+    renditions: input.generatedTurn.renditions,
+  });
+  const errors = [
+    ...descriptorErrors(turn.renditions.pcm16le_mono_16000, 16_000),
+    ...descriptorErrors(turn.renditions.pcm16le_mono_24000, 24_000),
+  ];
+  for (const descriptor of Object.values(turn.renditions)) {
+    if (generatedPaths.has(descriptor.path)) errors.push(`duplicate PCM path ${descriptor.path}`);
+    generatedPaths.add(descriptor.path);
+  }
+  const expectedDurationMs = deterministicToneDurationMs(synthesis);
+  for (const rendition of CALLER_AUDIO_RENDITIONS) {
+    const descriptor = turn.renditions[rendition];
+    const durationMs = descriptor.sample_count * 1_000 / descriptor.sample_rate_hz;
+    if (durationMs !== expectedDurationMs) {
+      errors.push(`${descriptor.path} duration differs from the deterministic signal specification`);
+    }
+  }
+  if (expectedDurationMs > 30_000) {
+    errors.push("deterministic transport fixture exceeds the 30 second C3 limit");
+  }
+  const minimumTextDuration = minimumPlausibleTextDurationSeconds(turn, synthesis.rate_wpm);
+  if (
+    turn.renditions.pcm16le_mono_16000.sample_count / 16_000 < minimumTextDuration
+    || turn.renditions.pcm16le_mono_24000.sample_count / 24_000 < minimumTextDuration
+  ) {
+    errors.push("deterministic transport fixture is implausibly short for its audible label");
+  }
+  if (errors.length > 0) throw new Error(errors.join("; "));
+
+  const callerSequenceSha256 = domainHash(CALLER_SEQUENCE_HASH_DOMAIN, normalizedTurns);
+  const turns = [turn];
+  const audioSequenceSha256ByRendition = {
+    pcm16le_mono_16000: audioSequenceHash(turns, "pcm16le_mono_16000"),
+    pcm16le_mono_24000: audioSequenceHash(turns, "pcm16le_mono_24000"),
+  } as const;
+  const audioSetSha256 = domainHash(AUDIO_SET_HASH_DOMAIN, audioSequenceSha256ByRendition);
+  const normalization = {
+    sample_format: "s16le" as const,
+    channels: 1 as const,
+    resampler: "none-native-rate-generation" as const,
+    precision_bits: 16 as const,
+    dither: "none" as const,
+    loudness_normalization: false as const,
+    silence_trimming: false as const,
+  };
+  const toolchain = {
+    implementation: "ecmascript-integer-arithmetic" as const,
+    algorithm: "integer-triangle-wave-v1" as const,
+    generator_path: "generate.ts" as const,
+    generator_sha256: input.generatorSha256,
+    integer_sample_arithmetic: true as const,
+  };
+  const body = DeterministicManifestSchema.omit({ manifest_sha256: true }).parse({
+    schema_version: 2,
+    fixture_set_id: expectedFixtureSetId({
+      scenario: input.scenario,
+      caller_sequence_sha256: callerSequenceSha256,
+      synthesis,
+      normalization,
+      toolchain,
+      audio_set_sha256: audioSetSha256,
+    }),
+    generated_at: input.generatedAt,
+    scenario: input.scenario,
+    caller_sequence_sha256: callerSequenceSha256,
+    synthesis,
+    normalization,
+    toolchain,
+    audio_sequence_sha256_by_rendition: audioSequenceSha256ByRendition,
+    audio_set_sha256: audioSetSha256,
+    turns,
+  });
+  return deepFreeze(DeterministicManifestSchema.parse({
+    ...body,
+    manifest_sha256: domainHash(MANIFEST_HASH_DOMAIN, body),
   }));
 }
 
@@ -658,7 +944,9 @@ function semanticManifestErrors(
   const errors: string[] = [];
   const normalizedTurns = normalizeTurns(expectedTurns);
   const { manifest_sha256: recordedManifestHash, ...manifestWithoutHash } = manifest;
-  const body = ManifestSchema.omit({ manifest_sha256: true }).parse(manifestWithoutHash);
+  const body = manifest.schema_version === 1
+    ? MacosManifestSchema.omit({ manifest_sha256: true }).parse(manifestWithoutHash)
+    : DeterministicManifestSchema.omit({ manifest_sha256: true }).parse(manifestWithoutHash);
   const manifestHash = domainHash(MANIFEST_HASH_DOMAIN, body);
   if (recordedManifestHash !== manifestHash) errors.push("manifest_sha256 mismatch");
   if (expectedManifestSha256 && manifest.manifest_sha256 !== expectedManifestSha256) {
@@ -713,6 +1001,26 @@ function semanticManifestErrors(
     }
   }
 
+  if (manifest.schema_version === 2) {
+    const expectedSignalHash = deterministicSignalSpecSha256(manifest.synthesis);
+    const expectedDurationMs = deterministicToneDurationMs(manifest.synthesis);
+    if (expectedDurationMs > 30_000) {
+      errors.push("deterministic transport fixture exceeds the 30 second C3 limit");
+    }
+    for (const turn of manifest.turns) {
+      if (turn.source_signal_spec_sha256 !== expectedSignalHash) {
+        errors.push(`turn ${turn.ordinal} deterministic signal specification hash mismatch`);
+      }
+      for (const rendition of CALLER_AUDIO_RENDITIONS) {
+        const descriptor = turn.renditions[rendition];
+        const durationMs = descriptor.sample_count * 1_000 / descriptor.sample_rate_hz;
+        if (durationMs !== expectedDurationMs) {
+          errors.push(`${descriptor.path} duration differs from the deterministic signal specification`);
+        }
+      }
+    }
+  }
+
   const expectedAudioSequences = {
     pcm16le_mono_16000: audioSequenceHash(manifest.turns, "pcm16le_mono_16000"),
     pcm16le_mono_24000: audioSequenceHash(manifest.turns, "pcm16le_mono_24000"),
@@ -734,6 +1042,34 @@ function semanticManifestErrors(
   });
   if (manifest.fixture_set_id !== fixtureSetId) errors.push("fixture_set_id mismatch");
   return errors;
+}
+
+/**
+ * Synchronously re-establish the complete semantic and self-hash authority of
+ * an in-memory manifest. Paid boundaries must call this even when the value is
+ * typed as VerifiedFrozenCallerAudio: TypeScript's structural type can be
+ * forged by a direct JavaScript caller and does not survive trust boundaries.
+ */
+export function assertCallerAudioFixtureManifestSemantics(input: Readonly<{
+  manifest: unknown;
+  expectedScenario: CallerAudioScenarioIdentity;
+  expectedTurns: readonly CallerAudioTurn[];
+  expectedManifestSha256: string;
+}>): CallerAudioFixtureManifest {
+  const parsed = ManifestSchema.safeParse(input.manifest);
+  if (!parsed.success) {
+    throw new Error("frozen caller audio manifest does not match its strict schema");
+  }
+  const errors = semanticManifestErrors(
+    parsed.data,
+    input.expectedScenario,
+    input.expectedTurns,
+    input.expectedManifestSha256,
+  );
+  if (errors.length > 0) {
+    throw new Error(`Frozen caller audio manifest verification failed: ${errors.join("; ")}`);
+  }
+  return deepFreeze(parsed.data);
 }
 
 function pathInside(root: string, candidate: string): boolean {
@@ -858,6 +1194,33 @@ async function loadAndVerifyCallerAudioFixture(
     };
   }
 
+  if (manifest.schema_version === 2) {
+    try {
+      const generatorBytes = customReader
+        ? await customReader(options.rootDirectory, manifest.toolchain.generator_path)
+        : await readFrozenFixtureFileNoFollow(
+          options.rootDirectory,
+          manifest.toolchain.generator_path,
+          256 * 1024
+        );
+      if (sha256Hex(generatorBytes) !== manifest.toolchain.generator_sha256) {
+        errors.push("deterministic fixture generator sha256 mismatch");
+      }
+    } catch (error) {
+      const message = safeFixtureFailure(
+        error,
+        "deterministic fixture generator is missing, unreadable, or unsafe"
+      );
+      errors.push(`deterministic fixture generator could not be verified: ${message}`);
+    }
+  }
+  if (errors.length > 0) {
+    return {
+      verification: Object.freeze({ valid: false, manifest, errors: Object.freeze(errors) }),
+      bytes: bytesByPath,
+    };
+  }
+
   let declaredFixtureBytes = 0;
   for (const turn of manifest.turns) {
     for (const rendition of CALLER_AUDIO_RENDITIONS) {
@@ -894,6 +1257,15 @@ async function loadAndVerifyCallerAudioFixture(
         if (bytes.byteLength / 2 !== descriptor.sample_count) fileErrors.push(`${descriptor.path} sample_count mismatch`);
         if (canonicalJson(analyzePcmSignal(bytes, descriptor.sample_rate_hz)) !== canonicalJson(descriptor.signal)) {
           fileErrors.push(`${descriptor.path} signal analysis mismatch`);
+        }
+        if (manifest.schema_version === 2) {
+          const expectedBytes = renderDeterministicTransportSignalPcm(
+            manifest.synthesis,
+            descriptor.sample_rate_hz
+          );
+          if (!Buffer.from(bytes).equals(Buffer.from(expectedBytes))) {
+            fileErrors.push(`${descriptor.path} bytes do not match the deterministic signal specification`);
+          }
         }
         errors.push(...fileErrors);
         if (fileErrors.length === 0) {

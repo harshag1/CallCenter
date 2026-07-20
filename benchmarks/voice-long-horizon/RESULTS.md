@@ -4,7 +4,7 @@
 
 - Status: **no paid benchmark outcomes collected**
 - Cumulative paid provider spend: **$0.00**
-- Auxiliary architecture/security-review spend: **$2.624932** ([claim review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md), [database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md), [campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md), and [authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md); all unverified advisory input, not provider sessions or results)
+- Auxiliary architecture/security-review spend: **$3.312551** ([claim review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md), [database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md), [campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md), [authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md), and [pre-canary release-gate review](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md); all unverified advisory input, not provider sessions or results)
 - Confirmatory protocol frozen: **no**
 
 There are currently no canary, pilot, or confirmatory performance results. Implementation tests and committed bug fixes are not evidence that the harness outperforms a raw realtime model.

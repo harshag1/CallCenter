@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import { compileConditionSuite } from "../condition-compiler";
 import {
   benchmarkFreezeLockSha256,
   benchmarkPairInvariantsSha256,
+  benchmarkRunnerConfigSha256,
   createBenchmarkExecutionPlan,
   type BenchmarkExecutionPlanBody,
   type BenchmarkFreezeLock,
@@ -34,7 +35,12 @@ import { BenchmarkScenarioSchema } from "../scenario-schema";
 import { deriveLongHorizonExecutionAuthorization } from "../long-horizon-execution";
 import { LONG_HORIZON_SCENARIO_SUITE } from "../long-horizon-scenario-suite";
 import { ResolvedBenchmarkEnvironment } from "../environment";
-import type { VerifiedFrozenCallerAudio } from "../audio-fixtures";
+import {
+  createCallerAudioFixtureManifest,
+  createCallerPcmDescriptor,
+  type CallerAudioFixtureManifest,
+  type VerifiedFrozenCallerAudio,
+} from "../audio-fixtures";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
   createBenchmarkKernelAttestationSigner,
@@ -63,6 +69,12 @@ import {
 } from "../paid-preflight-emulator-manifest";
 
 const roots: string[] = [];
+const fixtureCache = new Map<string, Readonly<{
+  fixtureTurns: readonly Readonly<{ id: string; text: string; pause_after_ms: number }>[];
+  pcm16: ReadonlyMap<string, Uint8Array>;
+  pcm24: ReadonlyMap<string, Uint8Array>;
+  manifest: CallerAudioFixtureManifest;
+}>>();
 const H = (character: string) => character.repeat(64);
 const ATTESTATION_KEYS = generateKeyPairSync("ed25519");
 const ATTESTATION_PUBLIC_KEY_PEM = ATTESTATION_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -90,6 +102,24 @@ function fastFakeTrialRuntime() {
       wallTimeIso: () => "2026-07-10T12:02:00.000Z",
     }),
   });
+}
+
+function renderTestPcm(sampleRateHz: 16_000 | 24_000, durationMs: number, phaseOffset: number): Uint8Array {
+  const sampleCount = sampleRateHz * durationMs / 1_000;
+  if (!Number.isSafeInteger(sampleCount)) throw new Error("test PCM duration must be sample exact");
+  const period = sampleRateHz / 400;
+  const quarter = period / 4;
+  const bytes = Buffer.alloc(sampleCount * 2);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const phase = (index + phaseOffset) % period;
+    const sample = phase < quarter
+      ? Math.trunc(phase * 8_000 / quarter)
+      : phase < 3 * quarter
+        ? 8_000 - Math.trunc((phase - quarter) * 16_000 / (2 * quarter))
+        : -8_000 + Math.trunc((phase - 3 * quarter) * 8_000 / quarter);
+    bytes.writeInt16LE(sample, index * 2);
+  }
+  return bytes;
 }
 
 afterEach(async () => {
@@ -335,7 +365,7 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     evidenceSha256: H("f"),
     now: () => new Date("2026-07-10T12:00:01.000Z"),
   });
-  await setFilesystemBudgetPaused({
+  const resumedLedger = await setFilesystemBudgetPaused({
     ledgerPath,
     operationId: "resume-after-gate0",
     paused: false,
@@ -350,12 +380,87 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
   const scenarioSource = resolveScenarioSource(scenario);
   const suite = compileConditionSuite(scenarioSource.compilerInput);
   const condition = suite.conditions["raw-full"];
-  const profile = { schemaVersion: 1 as const, chunkMs: 20, pace: "realtime" as const };
+  // Large chunks keep descriptor-realistic multi-second PCM fixtures from
+  // turning boundary tests into thousands of fsync-backed chunk events.
+  const profile = { schemaVersion: 1 as const, chunkMs: 100, pace: "realtime" as const };
   const profileHash = trialAudioDeliveryProfileHash(profile);
-  const pcm = new Map(scenario.caller.turns.map((turn, index) => [
-    turn.id,
-    Uint8Array.from({ length: 640 }, (_, byte) => (index + byte) & 0xff),
-  ]));
+  let cachedFixture = fixtureCache.get(scenarioSource.scenarioContentHash);
+  if (!cachedFixture) {
+    const fixtureTurns = Object.freeze(scenario.caller.turns.map((turn) => Object.freeze({
+      id: turn.id,
+      text: turn.utterance,
+      pause_after_ms: 0,
+    })));
+    const pcm16 = new Map<string, Uint8Array>();
+    const pcm24 = new Map<string, Uint8Array>();
+    for (const [index, turn] of fixtureTurns.entries()) {
+      const minimumSeconds = Math.max(
+        0.25,
+        Buffer.byteLength(turn.text, "utf8") / 100,
+        turn.text.trim().split(/\s+/u).length * 60 / 500 * 0.25,
+      );
+      const durationMs = Math.ceil(minimumSeconds * 1_000) + 1;
+      pcm16.set(turn.id, renderTestPcm(16_000, durationMs, index));
+      pcm24.set(turn.id, renderTestPcm(24_000, durationMs, index));
+    }
+    const manifest = createCallerAudioFixtureManifest({
+      generatedAt: "2026-07-10T12:00:00.000Z",
+      scenario: {
+        id: scenario.id,
+        version: scenario.version,
+        canonical_sha256: scenarioSource.scenarioContentHash,
+      },
+      turns: fixtureTurns,
+      voice: "Paid Runner Test Voice",
+      rateWpm: 500,
+      toolchain: {
+        macos: { product_version: "test", build_version: "test" },
+        say: {
+          implementation: "macos-say",
+          binary_sha256: H("1"),
+          version_source: "macos-bundle",
+          voice_inventory_sha256: H("2"),
+          selected_voice_metadata_sha256: H("3"),
+          voice_asset_fingerprint_kind: "inventory-metadata-only",
+        },
+        ffmpeg: {
+          version: "test",
+          binary_sha256: H("4"),
+          build_configuration_sha256: H("5"),
+          libsoxr_enabled: true,
+          libsoxr_library_name: "libsoxr",
+          libsoxr_version: "test",
+          libsoxr_binary_sha256: H("6"),
+          conversion_profile: "pcm16le-mono-libsoxr-v1",
+          argv_by_rendition: {
+            pcm16le_mono_16000: ["ffmpeg", "16000"],
+            pcm16le_mono_24000: ["ffmpeg", "24000"],
+          },
+        },
+      },
+      generatedTurns: fixtureTurns.map((turn) => ({
+        caller_turn_id: turn.id,
+        source_aiff_sha256: sha256Hex(`test-aiff:${turn.id}`),
+        renditions: {
+          pcm16le_mono_16000: createCallerPcmDescriptor({
+            path: `pcm16le_mono_16000/${turn.id}.pcm`,
+            bytes: pcm16.get(turn.id)!,
+            sampleRateHz: 16_000,
+          }),
+          pcm16le_mono_24000: createCallerPcmDescriptor({
+            path: `pcm16le_mono_24000/${turn.id}.pcm`,
+            bytes: pcm24.get(turn.id)!,
+            sampleRateHz: 24_000,
+          }),
+        },
+      })),
+    });
+    cachedFixture = Object.freeze({ fixtureTurns, pcm16, pcm24, manifest });
+    fixtureCache.set(scenarioSource.scenarioContentHash, cachedFixture);
+  }
+  const pcm = cachedFixture.pcm24;
+  const fixtureManifest = cachedFixture.manifest;
+  const callerSequenceSha256 = fixtureManifest.caller_sequence_sha256;
   const callerPcm = Object.freeze(scenario.caller.turns.map((turn) => Object.freeze({
     turnId: turn.id,
     audio: Object.freeze({
@@ -365,21 +470,15 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
       data: Uint8Array.from(pcm.get(turn.id)!),
     }),
   })));
-  const longHorizonAuthorization = deriveLongHorizonExecutionAuthorization({
-    scenario,
-    callerPcm,
-    mode: "pilot",
-    maxSessionMs: 60_000,
-    preregistrationSha256: H("3"),
-    conditionSuiteSha256: suite.suiteHash,
-    runnerConfigSha256: H("e"),
-  });
   const hardCapsCommon = {
     schema_version: 1 as const,
-    max_session_ms: 60_000,
+    max_session_ms: Math.max(
+      60_000,
+      [...pcm.values()].reduce((total, bytes) => total + bytes.byteLength / 48, 0) + 60_000,
+    ),
     forced_close_lead_ms: 1_000,
     meter_poll_interval_ms: 250,
-    max_input_audio_bytes: scenario.caller.turns.length * 640,
+    max_input_audio_bytes: [...pcm.values()].reduce((total, bytes) => total + bytes.byteLength, 0),
     max_output_audio_bytes: 1_000_000,
     max_tool_calls: 128,
     max_response_generations: Math.max(4, scenario.max_turns * 2),
@@ -396,7 +495,30 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     gemini: pricingProof("gemini", hardCapsCommon),
   });
   const openaiProof = proofs.openai;
-  const costEnvelope = providerPricingProofCostEnvelope(openaiProof, H("e"));
+  const limits = {
+    maxTurns: scenario.max_turns,
+    maxSessionMs: hardCapsCommon.max_session_ms,
+    maxInputAudioBytes: hardCapsCommon.max_input_audio_bytes,
+    maxOutputAudioBytes: hardCapsCommon.max_output_audio_bytes,
+    maxToolCalls: hardCapsCommon.max_tool_calls,
+    sessionReadyTimeoutMs: 1_000,
+    responseTimeoutMs: 1_000,
+  };
+  const audioDelivery = { ...profile, profile_sha256: profileHash };
+  const runnerConfigSha256 = benchmarkRunnerConfigSha256({
+    limits,
+    audio_delivery: audioDelivery,
+  });
+  const longHorizonAuthorization = deriveLongHorizonExecutionAuthorization({
+    scenario,
+    callerPcm,
+    mode: "pilot",
+    maxSessionMs: limits.maxSessionMs,
+    preregistrationSha256: H("3"),
+    conditionSuiteSha256: suite.suiteHash,
+    runnerConfigSha256,
+  });
+  const costEnvelope = providerPricingProofCostEnvelope(openaiProof, runnerConfigSha256);
   const provisionalBody: BenchmarkExecutionPlanBody = {
     schema_version: 1,
     plan_id: `paid-test-plan-${id}`,
@@ -424,8 +546,8 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
       registry_catalog_sha256: SCENARIO_SOURCE_REGISTRY_HASH,
     },
     fixture: {
-      manifest_sha256: H("b"),
-      caller_sequence_sha256: H("c"),
+      manifest_sha256: fixtureManifest.manifest_sha256,
+      caller_sequence_sha256: callerSequenceSha256,
       rendition: "pcm16le_mono_24000",
     },
     cell: {
@@ -449,20 +571,16 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
       provider_native_resumption: "disabled",
     },
     long_horizon_authorization: longHorizonAuthorization,
-    limits: {
-      maxTurns: scenario.max_turns,
-      maxSessionMs: 60_000,
-      maxInputAudioBytes: scenario.caller.turns.length * 640,
-      maxOutputAudioBytes: 1_000_000,
-      maxToolCalls: 128,
-      sessionReadyTimeoutMs: 1_000,
-      responseTimeoutMs: 1_000,
-    },
-    audio_delivery: { ...profile, profile_sha256: profileHash },
+    limits,
+    audio_delivery: audioDelivery,
     cost_envelope: costEnvelope,
     maximum_micro_usd: 5_000_000,
     reservation_expires_at: "2030-07-11T12:16:00.000Z",
     ledger_id: "hacc-paid-test-ledger",
+    reservation_authority: {
+      ledger_open_head_sha256: resumedLedger.snapshot.head_sha256,
+      consumption_id: `plan-consumption-${id}`,
+    },
     output_root: "results",
     artifact_schema_sha256: H("0"),
   };
@@ -500,8 +618,8 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     artifact_schema_sha256: H("0"),
     audio_delivery_profile_sha256: profileHash,
     scenario_source_registry_sha256: SCENARIO_SOURCE_REGISTRY_HASH,
-    fixture_manifest_sha256: H("b"),
-    caller_sequence_sha256: H("c"),
+    fixture_manifest_sha256: fixtureManifest.manifest_sha256,
+    caller_sequence_sha256: callerSequenceSha256,
     randomization_sha256: H("7"),
     kernel_attestation: ATTESTATION_PIN,
     bundle: [{ path: "benchmarks/voice-long-horizon/PROTOCOL.md", sha256: H("8") }],
@@ -513,7 +631,7 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
       session_settings_sha256: settingsHash,
       pricing_snapshot_sha256: openaiProof.derived.pricing_snapshot_sha256,
       pricing_formula_sha256: openaiProof.derived.formula_sha256,
-      hard_limits_sha256: H("e"),
+      provider_hard_session_caps_sha256: openaiProof.derived.hard_session_caps_sha256,
     }],
     registration: { status: "exploratory" },
   };
@@ -536,11 +654,7 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     pair_invariants_sha256: benchmarkPairInvariantsSha256(finalBody),
   });
   const fixture = {
-    manifest: {
-      manifest_sha256: H("b"),
-      caller_sequence_sha256: H("c"),
-      turns: scenario.caller.turns.map((turn) => ({ caller_turn_id: turn.id })),
-    },
+    manifest: fixtureManifest,
     readPcm(turnId: string) {
       const bytes = pcm.get(turnId);
       if (!bytes) throw new Error("unknown test turn");
@@ -572,6 +686,10 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
       environment,
       preCanaryPacket,
       providerPricingProof: openaiProof,
+      humanConfirmation: {
+        plan_sha256: plan.plan_sha256,
+        maximum_usd: "5",
+      },
     }),
   });
 }
@@ -610,6 +728,139 @@ async function expectRefusedBeforeSpend(
 }
 
 describe("paid benchmark execution boundary", () => {
+  it("requires exact plan and $5 human confirmation at the direct executor boundary before spend", async () => {
+    const prepared = await setup("direct-confirmation-boundary");
+    const { humanConfirmation: _confirmation, ...withoutConfirmation } = prepared.input;
+    void _confirmation;
+    await expectRefusedBeforeSpend(
+      prepared,
+      withoutConfirmation as PaidBenchmarkRunInput,
+      /exact human-confirmed plan SHA-256/,
+    );
+    await expectRefusedBeforeSpend(prepared, Object.freeze({
+      ...prepared.input,
+      humanConfirmation: {
+        ...prepared.input.humanConfirmation,
+        plan_sha256: H("0"),
+      },
+    }), /exact human-confirmed plan SHA-256/);
+    await expectRefusedBeforeSpend(prepared, Object.freeze({
+      ...prepared.input,
+      humanConfirmation: {
+        ...prepared.input.humanConfirmation,
+        maximum_usd: "5.0",
+      },
+    }), /exact human-confirmed \$5 maximum/);
+  });
+
+  it("detaches the validated plan before the first await so caller mutation cannot retarget reservation", async () => {
+    const prepared = await setup("detached-plan-snapshot");
+    const originalRunId = prepared.input.plan.cell.run_id;
+    const pending = executePaidBenchmarkRun(prepared.input, {
+      ...fastFakeTrialRuntime(),
+      createClient: async (_input, _configuration, apiKey) => {
+        expect(apiKey).toBe(prepared.secret);
+        return new ScriptedFakeRealtimeClient({
+          script: createNoToolFakeScript({
+            turnIds: prepared.input.scenario.caller.turns.map((turn) => turn.id),
+          }),
+        });
+      },
+    });
+    (prepared.input.plan.cell as { run_id: string }).run_id = "mutated-after-call";
+    const result = await pending;
+    expect(result.runId).toBe(originalRunId);
+    expect((await inspectFilesystemBudgetLedger({
+      ledgerPath: prepared.ledgerPath,
+    })).reservations[0]?.run_id).toBe(originalRunId);
+  }, 30_000);
+
+  it("detaches descriptor-verified PCM before the first await so readPcm mutation cannot substitute paid audio", async () => {
+    const prepared = await setup("detached-pcm-snapshot");
+    const expected = new Map(prepared.input.scenario.caller.turns.map((turn) => [
+      turn.id,
+      prepared.input.fixture.readPcm(turn.id, prepared.input.fixtureRendition),
+    ]));
+    let substitute = false;
+    let reads = 0;
+    const mutableFixture = {
+      manifest: prepared.input.fixture.manifest,
+      readPcm(turnId: string, rendition: "pcm16le_mono_16000" | "pcm16le_mono_24000") {
+        reads += 1;
+        const original = prepared.input.fixture.readPcm(turnId, rendition);
+        if (!substitute) return original;
+        const malicious = Uint8Array.from(original);
+        malicious[0] ^= 0xff;
+        return malicious;
+      },
+    } as unknown as VerifiedFrozenCallerAudio;
+    const pending = executePaidBenchmarkRun(Object.freeze({
+      ...prepared.input,
+      fixture: mutableFixture,
+    }), {
+      ...fastFakeTrialRuntime(),
+      createClient: async () => new ScriptedFakeRealtimeClient({
+        script: createNoToolFakeScript({
+          turnIds: prepared.input.scenario.caller.turns.map((turn) => turn.id),
+        }),
+      }),
+    });
+
+    // An async function executes synchronously until its first await. If the
+    // runner retained readPcm by reference, every later read would now return
+    // attacker-selected bytes.
+    substitute = true;
+    const result = await pending;
+    expect(reads).toBe(prepared.input.scenario.caller.turns.length);
+    for (const [turnId, bytes] of expected) {
+      expect(
+        new Uint8Array(await readFile(join(result.artifactPath, "frozen-input", `${turnId}.pcm`)))
+      ).toEqual(bytes);
+    }
+  }, 30_000);
+
+  it("refuses initially substituted PCM before credentials, reservation, or client creation", async () => {
+    const prepared = await setup("initial-pcm-substitution");
+    const maliciousFixture = {
+      manifest: prepared.input.fixture.manifest,
+      readPcm(turnId: string, rendition: "pcm16le_mono_16000" | "pcm16le_mono_24000") {
+        const bytes = prepared.input.fixture.readPcm(turnId, rendition);
+        const malicious = Uint8Array.from(bytes);
+        malicious[0] ^= 0xff;
+        return malicious;
+      },
+    } as unknown as VerifiedFrozenCallerAudio;
+    await expectRefusedBeforeSpend(prepared, Object.freeze({
+      ...prepared.input,
+      fixture: maliciousFixture,
+    }), /PCM bytes differ from frozen descriptor/);
+  });
+
+  it("refuses forged descriptor and matching substituted PCM when the recorded manifest self-hash is stale", async () => {
+    const prepared = await setup("stale-manifest-self-hash");
+    const forgedManifest = JSON.parse(canonicalJson(prepared.input.fixture.manifest));
+    const firstTurn = prepared.input.scenario.caller.turns[0]!;
+    const original = prepared.input.fixture.readPcm(firstTurn.id, prepared.input.fixtureRendition);
+    const malicious = Uint8Array.from(original);
+    malicious[0] ^= 0xff;
+    forgedManifest.turns[0].renditions[prepared.input.fixtureRendition].sha256 = sha256Hex(malicious);
+    let pcmReads = 0;
+    const maliciousFixture = {
+      manifest: forgedManifest,
+      readPcm(turnId: string, rendition: "pcm16le_mono_16000" | "pcm16le_mono_24000") {
+        pcmReads += 1;
+        return turnId === firstTurn.id
+          ? Uint8Array.from(malicious)
+          : prepared.input.fixture.readPcm(turnId, rendition);
+      },
+    } as unknown as VerifiedFrozenCallerAudio;
+    await expectRefusedBeforeSpend(prepared, Object.freeze({
+      ...prepared.input,
+      fixture: maliciousFixture,
+    }), /manifest verification failed: manifest_sha256 mismatch/);
+    expect(pcmReads, "PCM reads before manifest self-hash refusal").toBe(0);
+  });
+
   it("constructs all three real pinned provider adapters offline with the same canonical gateway", async () => {
     const prepared = await setup("real-client-construction");
     const variants = Object.freeze([
@@ -642,7 +893,11 @@ describe("paid benchmark execution boundary", () => {
           sampleRateHz: variant.sampleRateHz,
           channels: 1 as const,
         }),
-        audioDeliveryProfile: Object.freeze({ schemaVersion: 1, chunkMs: 20, pace: "realtime" as const }),
+        audioDeliveryProfile: Object.freeze({
+          schemaVersion: 1,
+          chunkMs: prepared.input.plan.audio_delivery.chunkMs,
+          pace: "realtime" as const,
+        }),
         audioDeliveryProfileHash: prepared.input.plan.audio_delivery.profile_sha256,
       });
       const sessionSettingsSha256 = benchmarkPaidSessionSettingsSha256(plan, configuration);
@@ -660,7 +915,7 @@ describe("paid benchmark execution boundary", () => {
             session_settings_sha256: sessionSettingsSha256,
             pricing_snapshot_sha256: H("d"),
             pricing_formula_sha256: H("f"),
-            hard_limits_sha256: H("e"),
+            provider_hard_session_caps_sha256: H("e"),
           })]),
         }),
       });
@@ -680,8 +935,47 @@ describe("paid benchmark execution boundary", () => {
 
   it("orders reserve -> partial -> intent -> client -> opened -> audio -> settlement -> atomic finalize", async () => {
     const prepared = await setup("success");
+    const { environment: resolvedEnvironment, ...lazyInputBody } = prepared.input;
+    if (!resolvedEnvironment) throw new Error("test setup did not provide a resolved environment");
+    const openTriplet = await Promise.all([
+      readFile(prepared.ledgerPath),
+      readFile(`${prepared.ledgerPath}.head.json`),
+      readFile(`${prepared.ledgerPath}.signing-key.pem`),
+    ]);
+    let environmentResolutions = 0;
+    let credentialReads = 0;
     let clientCreations = 0;
-    const result = await executePaidBenchmarkRun(prepared.input, {
+    const lazyInput: PaidBenchmarkRunInput = Object.freeze({
+      ...lazyInputBody,
+      resolveCredentialEnvironment: async () => {
+        environmentResolutions += 1;
+        const partialJournal = join(
+          prepared.input.outputRoot,
+          prepared.input.plan.plan_sha256,
+          `${prepared.input.plan.cell.run_id}.partial`,
+          "journal.jsonl",
+        );
+        expect(
+          await readFile(partialJournal, "utf8"),
+          "durable partial before environment resolution",
+        ).toContain("budget.reservation_durable");
+        expect(
+          await readdir(`${prepared.ledgerPath}.plan-consumptions`),
+          "one-shot anchor before environment resolution",
+        ).toHaveLength(1);
+        expect(
+          (await inspectFilesystemBudgetLedger({ ledgerPath: prepared.ledgerPath })).reservations,
+          "budget reservation before environment resolution",
+        ).toHaveLength(1);
+        return {
+          require(name: string) {
+            credentialReads += 1;
+            return resolvedEnvironment.require(name);
+          },
+        } as unknown as ResolvedBenchmarkEnvironment;
+      },
+    });
+    const result = await executePaidBenchmarkRun(lazyInput, {
       ...fastFakeTrialRuntime(),
       createClient: async (_input, configuration, apiKey) => {
         clientCreations += 1;
@@ -695,6 +989,8 @@ describe("paid benchmark execution boundary", () => {
       },
     });
 
+    expect(environmentResolutions).toBe(1);
+    expect(credentialReads).toBe(1);
     expect(clientCreations).toBe(1);
     expect(result).toMatchObject({ status: "completed", runId: "paid-test-run-success" });
     const budget = await inspectFilesystemBudgetLedger({ ledgerPath: prepared.ledgerPath });
@@ -751,6 +1047,37 @@ describe("paid benchmark execution boundary", () => {
         claim_boundary: "transport_compatibility_only",
       },
     });
+    await Promise.all([
+      writeFile(prepared.ledgerPath, openTriplet[0], { mode: 0o600 }),
+      writeFile(`${prepared.ledgerPath}.head.json`, openTriplet[1], { mode: 0o600 }),
+      writeFile(`${prepared.ledgerPath}.signing-key.pem`, openTriplet[2], { mode: 0o600 }),
+    ]);
+    const { environment: _replayEnvironment, ...replayInputBody } = prepared.input;
+    void _replayEnvironment;
+    let replayEnvironmentResolutions = 0;
+    let replayCredentialReads = 0;
+    let replayClientCreations = 0;
+    await expect(executePaidBenchmarkRun(Object.freeze({
+      ...replayInputBody,
+      resolveCredentialEnvironment: async () => {
+        replayEnvironmentResolutions += 1;
+        return {
+          require() {
+            replayCredentialReads += 1;
+            return prepared.secret;
+          },
+        } as unknown as ResolvedBenchmarkEnvironment;
+      },
+    }), {
+      ...fastFakeTrialRuntime(),
+      createClient: async () => {
+        replayClientCreations += 1;
+        throw new Error("provider client must remain unreachable on plan replay");
+      },
+    })).rejects.toThrow(/already consumed/);
+    expect(replayEnvironmentResolutions).toBe(0);
+    expect(replayCredentialReads).toBe(0);
+    expect(replayClientCreations).toBe(0);
     const kernelAttestation = JSON.parse(await readFile(
       join(result.artifactPath, "final", "kernel-attestation.json"),
       "utf8"
@@ -864,6 +1191,10 @@ describe("paid benchmark execution boundary", () => {
       plan,
       freeze,
       preCanaryPacket,
+      humanConfirmation: {
+        plan_sha256: plan.plan_sha256,
+        maximum_usd: "5",
+      },
     }, {
       ...fastFakeTrialRuntime(),
       now: () => new Date("2026-07-19T00:00:00.000Z"),
@@ -897,6 +1228,51 @@ describe("paid benchmark execution boundary", () => {
     expect(journal).toContain("run.partial_preserved");
   });
 
+  it("preserves a durable partial and full liability when lazy credential resolution fails", async () => {
+    const prepared = await setup("credential-resolution-failure");
+    const { environment: resolvedEnvironment, ...lazyInputBody } = prepared.input;
+    if (!resolvedEnvironment) throw new Error("test setup did not provide a resolved environment");
+    let environmentResolutions = 0;
+    let clientCreations = 0;
+    const partial = join(
+      prepared.input.outputRoot,
+      prepared.input.plan.plan_sha256,
+      `${prepared.input.plan.cell.run_id}.partial`,
+    );
+
+    await expect(executePaidBenchmarkRun(Object.freeze({
+      ...lazyInputBody,
+      resolveCredentialEnvironment: async () => {
+        environmentResolutions += 1;
+        const journalBeforeFailure = await readFile(join(partial, "journal.jsonl"), "utf8");
+        expect(journalBeforeFailure).toContain("run.partial_opened");
+        expect(journalBeforeFailure).toContain("budget.reservation_durable");
+        throw new Error(`credential store failed near ${prepared.secret}`);
+      },
+    }), {
+      createClient: () => {
+        clientCreations += 1;
+        throw new Error("provider client must remain unreachable");
+      },
+    })).rejects.toThrowError(/durable partial and budget liability were preserved/);
+
+    expect(environmentResolutions).toBe(1);
+    expect(clientCreations).toBe(0);
+    const budget = await inspectFilesystemBudgetLedger({ ledgerPath: prepared.ledgerPath });
+    expect(budget.reservations[0]).toMatchObject({
+      status: "reserved",
+      terminal_outcome: null,
+      maximum_micro_usd: 5_000_000,
+    });
+    expect(budget.active_reservations_micro_usd).toBe(5_000_000);
+    expect(budget.scheduling_exposure_micro_usd).toBe(5_000_000);
+    const journal = await readFile(join(partial, "journal.jsonl"), "utf8");
+    expect(journal).not.toContain(prepared.secret);
+    expect(journal).toContain("run.partial_opened");
+    expect(journal).toContain("budget.reservation_durable");
+    expect(journal).toContain("run.partial_preserved");
+  });
+
   it("rejects an execution-plan body mutation with a stale self-hash before spend", async () => {
     const prepared = await setup("stale-plan-self-hash");
     const forged = Object.freeze({
@@ -915,7 +1291,7 @@ describe("paid benchmark execution boundary", () => {
         ...prepared.input,
         preCanaryPacket: undefined,
       } as unknown as PaidBenchmarkRunInput,
-      /paid release gate is invalid: .*pre_canary_packet_invalid/,
+      /not JSON-serializable|canonical verified Gate 0 packet/,
     );
   });
 
@@ -934,7 +1310,7 @@ describe("paid benchmark execution boundary", () => {
         ...prepared.input,
         preCanaryPacket: tampered,
       } as PaidBenchmarkRunInput,
-      /pre_canary_packet_invalid|packet_hash_mismatch/,
+      /canonical verified Gate 0 packet|packet_hash_mismatch/,
     );
   });
 
@@ -976,7 +1352,7 @@ describe("paid benchmark execution boundary", () => {
         ...missing.input,
         providerPricingProof: undefined,
       } as unknown as PaidBenchmarkRunInput,
-      /paid execution inputs differ/,
+      /Invalid input|paid execution inputs differ/,
     );
 
     const tampered = await setup("tampered-selected-pricing-proof");
@@ -989,7 +1365,7 @@ describe("paid benchmark execution boundary", () => {
           proof_sha256: H("0"),
         },
       } as PaidBenchmarkRunInput,
-      /paid execution inputs differ/,
+      /hash is invalid|hash mismatch|paid execution inputs differ/,
     );
   });
 
@@ -1015,6 +1391,10 @@ describe("paid benchmark execution boundary", () => {
     await expectRefusedBeforeSpend(prepared, Object.freeze({
       ...prepared.input,
       plan: tamperedPlan,
+      humanConfirmation: {
+        plan_sha256: tamperedPlan.plan_sha256,
+        maximum_usd: "5",
+      },
     }), /paid cost envelope is not the exact Gate 0 pricing proof decomposition/);
   });
 
@@ -1038,6 +1418,10 @@ describe("paid benchmark execution boundary", () => {
     await expectRefusedBeforeSpend(prepared, Object.freeze({
       ...prepared.input,
       plan: tamperedPlan,
+      humanConfirmation: {
+        plan_sha256: tamperedPlan.plan_sha256,
+        maximum_usd: "5",
+      },
     }), /paid execution inputs differ|provider pricing proof mismatch/);
   });
 
@@ -1087,6 +1471,47 @@ describe("paid benchmark execution boundary", () => {
     }), /paid release gate is invalid: freeze_mismatch/);
   });
 
+  it("rejects internally rehashed runner limits that differ from the exact frozen provider caps before spend", async () => {
+    const prepared = await setup("provider-caps-runner-limits-substitution");
+    expect(prepared.input.plan.limits).toMatchObject({
+      maxSessionMs: prepared.input.providerPricingProof.caps.max_session_ms,
+      maxInputAudioBytes: prepared.input.providerPricingProof.caps.max_input_audio_bytes,
+      maxOutputAudioBytes: prepared.input.providerPricingProof.caps.max_output_audio_bytes,
+      maxToolCalls: prepared.input.providerPricingProof.caps.max_tool_calls,
+    });
+    const { plan_sha256: _planSha, ...body } = prepared.input.plan;
+    void _planSha;
+    const limits = {
+      ...body.limits,
+      maxToolCalls: body.limits.maxToolCalls - 1,
+    };
+    const runnerConfigSha256 = benchmarkRunnerConfigSha256({
+      limits,
+      audio_delivery: body.audio_delivery,
+    });
+    const tamperedBody: BenchmarkExecutionPlanBody = {
+      ...body,
+      limits,
+      cost_envelope: providerPricingProofCostEnvelope(
+        prepared.input.providerPricingProof,
+        runnerConfigSha256,
+      ),
+      pair_invariants_sha256: H("0"),
+    };
+    const tamperedPlan = createBenchmarkExecutionPlan({
+      ...tamperedBody,
+      pair_invariants_sha256: benchmarkPairInvariantsSha256(tamperedBody),
+    });
+    await expectRefusedBeforeSpend(prepared, Object.freeze({
+      ...prepared.input,
+      plan: tamperedPlan,
+      humanConfirmation: {
+        plan_sha256: tamperedPlan.plan_sha256,
+        maximum_usd: "5",
+      },
+    }), /plan-bound Gate 0 pricing proof/);
+  });
+
   it("recomputes the plan-pinned long-horizon PCM authorization before credentials or budget", async () => {
     const source = LONG_HORIZON_SCENARIO_SUITE.find((candidate) =>
       candidate.family === "travel-disruption" && candidate.turnCount === 32
@@ -1111,6 +1536,10 @@ describe("paid benchmark execution boundary", () => {
     await expectRefusedBeforeSpend(prepared, Object.freeze({
       ...prepared.input,
       plan: tamperedPlan,
+      humanConfirmation: {
+        plan_sha256: tamperedPlan.plan_sha256,
+        maximum_usd: "5",
+      },
     }), /long-horizon execution authorization differs/);
   });
 

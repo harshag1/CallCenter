@@ -250,8 +250,11 @@ export type ProviderHardSessionCaps = z.infer<typeof ProviderHardSessionCapsSche
 export type ProviderPricingProof = z.infer<typeof ProviderPricingProofSchema>;
 
 export type ProviderPricingCostEnvelope = Readonly<{
+  schema_version: 1;
+  kind: "hacc_provider_gate1_cost_envelope";
   pricing_snapshot_sha256: string;
-  limits_sha256: string;
+  provider_hard_session_caps_sha256: string;
+  runner_config_sha256: string;
   formula_sha256: string;
   components: readonly Readonly<{
     name: string;
@@ -571,11 +574,11 @@ export function verifyProviderPricingProofStructure(input: Readonly<{
  */
 export function providerPricingProofCostEnvelope(
   input: ProviderPricingProof,
-  limitsSha256: string,
+  runnerConfigSha256: string,
 ): ProviderPricingCostEnvelope {
   const proof = ProviderPricingProofSchema.parse(input);
-  if (!HASH.test(limitsSha256)) {
-    throw new ProviderPricingProofError("limits_hash_invalid", "paid limits hash is invalid");
+  if (!HASH.test(runnerConfigSha256)) {
+    throw new ProviderPricingProofError("runner_config_hash_invalid", "paid runner configuration hash is invalid");
   }
   const components: Array<Readonly<{
     name: string;
@@ -593,8 +596,11 @@ export function providerPricingProofCostEnvelope(
     }));
   }
   return Object.freeze({
+    schema_version: 1,
+    kind: "hacc_provider_gate1_cost_envelope",
     pricing_snapshot_sha256: proof.derived.pricing_snapshot_sha256,
-    limits_sha256: limitsSha256,
+    provider_hard_session_caps_sha256: proof.derived.hard_session_caps_sha256,
+    runner_config_sha256: runnerConfigSha256,
     formula_sha256: proof.derived.formula_sha256,
     components: Object.freeze(components),
     safety_margin_micro_usd: proof.safety_margin_micro_usd,

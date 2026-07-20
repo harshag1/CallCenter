@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -391,6 +392,68 @@ describe("public working-tree secret audit", () => {
     expect(wrongClass.pass).toBe(false);
     expect(wrongClass.finding_count).toBe(1);
     expect(wrongClass.allowlist.unused_entry_ids).toEqual(["wrong-class-does-not-authorize"]);
+  });
+
+  it("allows only the two exact synthetic transport PCM grants, never changed, moved, or extra audio", () => {
+    const repo = temporaryRepo();
+    const fixtureDirectory =
+      "benchmarks/voice-long-horizon/fixtures/transport-smoke-v1";
+    mkdirSync(join(repo, fixtureDirectory), { recursive: true });
+    const firstPath = `${fixtureDirectory}/turn_01.pcm16le-mono-16000.pcm`;
+    const secondPath = `${fixtureDirectory}/turn_01.pcm16le-mono-24000.pcm`;
+    const firstBytes = Buffer.from([0, 0, 1, 0, 2, 0, 1, 0]);
+    const secondBytes = Buffer.from([0, 0, 2, 0, 4, 0, 2, 0]);
+    writeFileSync(join(repo, firstPath), firstBytes);
+    writeFileSync(join(repo, secondPath), secondBytes);
+    writeAllowlist(repo, [
+      {
+        id: "synthetic-transport-smoke-pcm16-16000",
+        path: firstPath,
+        sha256: sha256(firstBytes),
+        pattern_classes: ["recording_or_transcript_data"],
+        reason: "Exact deterministic non-speech transport calibration fixture.",
+      },
+      {
+        id: "synthetic-transport-smoke-pcm16-24000",
+        path: secondPath,
+        sha256: sha256(secondBytes),
+        pattern_classes: ["recording_or_transcript_data"],
+        reason: "Exact deterministic non-speech transport calibration fixture.",
+      },
+    ]);
+
+    expect(auditPublishableWorkingTree(repo)).toMatchObject({
+      pass: true,
+      finding_count: 0,
+      allowed_finding_count: 2,
+      allowlist: {
+        applied_entry_count: 2,
+        unused_entry_ids: [],
+      },
+    });
+
+    writeFileSync(join(repo, firstPath), Buffer.concat([firstBytes, Buffer.from([9, 0])]));
+    const changed = auditPublishableWorkingTree(repo);
+    expect(changed.pass).toBe(false);
+    expect(changed.finding_count).toBe(1);
+    expect(changed.allowlist.unused_entry_ids)
+      .toContain("synthetic-transport-smoke-pcm16-16000");
+
+    writeFileSync(join(repo, firstPath), firstBytes);
+    const movedPath = `${fixtureDirectory}/renamed.pcm`;
+    renameSync(join(repo, secondPath), join(repo, movedPath));
+    const moved = auditPublishableWorkingTree(repo);
+    expect(moved.pass).toBe(false);
+    expect(moved.finding_count).toBe(1);
+    expect(moved.allowlist.unused_entry_ids)
+      .toContain("synthetic-transport-smoke-pcm16-24000");
+
+    renameSync(join(repo, movedPath), join(repo, secondPath));
+    writeFileSync(join(repo, `${fixtureDirectory}/extra.pcm`), Buffer.from([1, 0, 1, 0]));
+    const extra = auditPublishableWorkingTree(repo);
+    expect(extra.pass).toBe(false);
+    expect(extra.finding_count).toBe(1);
+    expect(extra.allowlist.unused_entry_ids).toEqual([]);
   });
 
   it("binds a deterministic manifest to path, source, size, and current bytes", () => {

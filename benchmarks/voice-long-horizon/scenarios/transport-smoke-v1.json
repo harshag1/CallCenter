@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "id": "transport-smoke-v1",
-  "version": "1.0.0",
-  "title": "Deterministic read-only realtime transport smoke",
+  "version": "1.1.0",
+  "title": "Deterministic true-audio read-only realtime transport smoke",
   "domain": "transport-smoke",
-  "description": "A development-only C3 cell that requires one harmless read-only gateway lookup followed by a short audible terminal response.",
+  "description": "A development-only C3 compatibility cell that sends a redistributable non-speech PCM calibration signal, requires one harmless read-only gateway lookup, and captures a short audible terminal response. It does not test speech recognition or task effectiveness.",
   "seed": 310031,
   "objective": "Read the registered demo service status exactly once through capability_gateway, then state the result in a nonempty audible response and stop.",
   "max_turns": 1,
@@ -20,10 +20,10 @@
       {
         "id": "turn_01",
         "phase": "task",
-        "utterance": "Please check service S V C demo zero zero one and tell me whether it is operational.",
+        "utterance": "Beep. Beep. Beep.",
         "tags": ["task"],
         "expected_behavior": [
-          "Invoke capability_gateway exactly once for read_service_status with service_id SVC-DEMO-001.",
+          "Treat receipt of the registered three-beep calibration signal as the transport trigger and invoke capability_gateway exactly once for read_service_status with service_id SVC-DEMO-001.",
           "After the read result, produce a nonempty audible final answer stating that the service is operational.",
           "Do not invoke any mutation or begin another caller turn."
         ]

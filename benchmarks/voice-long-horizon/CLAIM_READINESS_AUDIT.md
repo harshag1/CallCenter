@@ -320,29 +320,11 @@ All items are required:
 
 **Current Gate 1 decision: NO-GO until the packet records every item as passing at one commit.**
 
-The no-database test environment currently conditionally skips 14 integration suites containing 37 tests. They are not silently counted as Gate 0 passes:
+The no-database test environment currently conditionally skips **18 integration suites containing 54 tests**. They are not silently counted as Gate 0 passes. The machine-readable [Gate 0 skip inventory](GATE0_SKIP_INVENTORY.json), rather than a duplicated prose table, is the source of truth for the exact paths, test counts, conditions, and `must_run` dispositions.
 
-| Conditional integration suite | Skipped tests |
-|---|---:|
-| `auth-verification.integration.test.ts` | 5 |
-| `credential-vault.integration.test.ts` | 8 |
-| `call-bound-runtime-authority.integration.test.ts` | 2 |
-| `mcp-invocation-store.integration.test.ts` | 3 |
-| `security-migration-upgrade.integration.test.ts` | 3 |
-| `flow-action-ledger-security.integration.test.ts` | 1 |
-| `tool-authority-revocation.integration.test.ts` | 1 |
-| `tool-invocation-revision.integration.test.ts` | 1 |
-| `remote-mcp-revision.integration.test.ts` | 1 |
-| `action-migration-reapply.integration.test.ts` | 4 |
-| `generated-tool-cleanup.integration.test.ts` | 4 |
-| `flow-state-store.integration.test.ts` | 2 |
-| `mcp-route-replay.integration.test.ts` | 1 |
-| `action-reconciliation.integration.test.ts` | 1 |
-| **Total** | **37** |
+Gate 0 requires a recorded database-backed run of all 18 suites/54 tests, or an explicit source-commit-scoped exclusion rationale showing why a suite cannot affect the transport packet. The benchmark/provider focused suites use no explicit `skip`/`todo`, but that does not convert these conditional database skips into coverage.
 
-Gate 0 requires a recorded database-backed run of these suites, or an explicit source-commit-scoped exclusion rationale showing why a suite cannot affect the transport packet. The benchmark/provider focused suites use no explicit `skip`/`todo`, but that does not convert these conditional database skips into coverage.
-
-The tracked inventory binds its exact policy and enumerated test-source bytes with canonical source-manifest SHA-256 `e4315dd0d89d2cd03bcd5ed4227a3e98a5384f78c0b7c9d9f317e10a44124823`. It deliberately does not embed `source_commit == HEAD`: a tracked file cannot self-reference the commit that contains itself. The external Gate 0 proof packet must bind the actual clean commit/tree, the inventory file SHA-256, this source-manifest hash, and the test-run result.
+The tracked inventory binds its exact policy and enumerated test-source bytes with a canonical source-manifest SHA-256 recorded inside that machine-readable file; this audit deliberately does not duplicate the mutable digest. The inventory also does not embed `source_commit == HEAD`: a tracked file cannot self-reference the commit that contains itself. The external Gate 0 proof packet must bind the actual clean commit/tree, the inventory file SHA-256, the inventory's source-manifest hash, and the test-run result.
 
 ### Gate 1 to Gate 2: permit a C4 exploratory paired pilot
 
@@ -401,9 +383,9 @@ Gate 1 should answer only: “Can this adapter complete one bounded real audio/t
 
   Each content-addressed `provider-pass.json` must bind at least: source commit/tree/dirty-patch identity; plan/freeze/adapter/settings/pricing hashes; provider/model/voice; `session-identity.json`; the direction-tagged provider-wire chain head; input/output audio manifests; gateway-roundtrip proof; usage/absence-rule artifact; raw/normalized terminal event; run-manifest root; kernel attestation/transcript; independent replay result; budget reservation/reconciliation; and secret/public-history scan result. The pre-canary verifier must reopen and validate those referenced artifacts. Supplying a non-null hash or an `all_provider_proofs_verified` Boolean is not proof.
 
-  The present code does not satisfy this profile. Local inspection found that the orchestrator collapses structured `session.ready.configuration` to a Boolean and omits session identity from the required artifact set; the fake paid client emits readiness without configuration; provider wire capture is inbound-only; normalized events have no mechanically verified raw-event pointer; and required artifact checks permit empty wire/usage and zero-byte output. The current paid-runner success fixture also makes no gateway call. No dedicated registered `transport-smoke-v1` exists, and the executable pre-canary gate does not yet enforce exactly one sequential, no-retry smoke per provider. Separately, the current Gemini setup enables input and output transcription. Its pre-socket cost proof must either include enforceable transcript-token caps or the Gate 1 setup must disable those billed features; the transport smoke cannot proceed on an unpriced assumption.
+  At the July 16 audit snapshot, the code did not satisfy this profile: readiness and identity evidence were incomplete, wire/event linkage and output/usage requirements were permissive, the paid success fixture made no gateway call, and no registered transport-smoke fixture existed. Those are historical findings, not a description of the current candidate. The current Gate 1 work adds the registered, source-bound fixture below plus stricter paid-plan, provider-evidence, budget, and artifact checks. The decision nevertheless remains **NO-GO** until a clean-commit Gate 0 packet and the network-free pre-spend emulator record every checklist item above as passing; implementation and unit tests alone are not C3 provider evidence.
 
-- One new `transport-smoke-v1` development fixture, approximately three caller turns and no more than 90 seconds.
+- One registered `transport-smoke-v1` development fixture: one 2.4-second caller turn containing a deterministic three-beep, non-speech PCM calibration signal at native 16 kHz and 24 kHz rates.
 - Full-harness condition only. No paired efficacy arm and no optional retry.
 - Real frozen mono PCM input; audio output required.
 - Exactly one harmless read-only `capability_gateway` round trip using the canonical `{tool_name, arguments}` model envelope.

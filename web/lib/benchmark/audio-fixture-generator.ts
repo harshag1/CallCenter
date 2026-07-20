@@ -16,7 +16,7 @@ import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   CALLER_AUDIO_MANIFEST_FILE,
-  CallerAudioFixtureManifest,
+  MacosCallerAudioFixtureManifest,
   CallerAudioRendition,
   CallerAudioScenarioIdentity,
   CallerAudioToolchain,
@@ -445,7 +445,7 @@ function renditionDetails(rendition: CallerAudioRendition): Readonly<{
  */
 export async function prepareCallerAudioFixture(
   options: PrepareCallerAudioFixtureOptions
-): Promise<CallerAudioFixtureManifest> {
+): Promise<MacosCallerAudioFixtureManifest> {
   if ((options as { phase?: string }).phase !== "fixture-preparation") {
     throw new Error("Caller audio synthesis is allowed only during fixture preparation, never a paid trial");
   }

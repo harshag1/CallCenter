@@ -4,7 +4,7 @@ import {
 } from "../../filesystem-budget-ledger";
 
 async function main(): Promise<void> {
-  const [ledgerPath, workerId] = process.argv.slice(2);
+  const [ledgerPath, workerId, expectedHeadSha256, expectedLedgerId] = process.argv.slice(2);
   if (!ledgerPath || !workerId) throw new Error("worker requires ledger path and ID");
   try {
     await reserveFilesystemBudget({
@@ -24,16 +24,36 @@ async function main(): Promise<void> {
       expiresAt: "2026-07-10T13:00:00.000Z",
       now: () => new Date("2026-07-10T12:00:00.000Z"),
       costEnvelope: {
+        schema_version: 1,
+        kind: "hacc_provider_gate1_cost_envelope",
         pricing_snapshot_sha256: "a".repeat(64),
-        limits_sha256: "b".repeat(64),
-        formula_sha256: "c".repeat(64),
-        components: [{ name: "process-race", upper_bound_micro_usd: 1_000_000 }],
+        provider_hard_session_caps_sha256: "b".repeat(64),
+        runner_config_sha256: "c".repeat(64),
+        formula_sha256: "d".repeat(64),
+        components: [{
+          name: "process-race",
+          upper_bound_micro_usd: expectedHeadSha256 ? 5_000_000 : 1_000_000,
+        }],
         safety_margin_micro_usd: 0,
       },
+      ...(expectedHeadSha256 && expectedLedgerId
+        ? {
+            expectedLedgerId,
+            requiredCurrentHeadSha256: expectedHeadSha256,
+            planConsumption: {
+              consumptionId: `process-plan-consumption-${workerId}`,
+              planSha256: workerId.padStart(64, "0"),
+              maximumMicroUsd: 5_000_000,
+            },
+          }
+        : {}),
     });
     process.stdout.write("admitted\n");
   } catch (error) {
-    if (error instanceof FilesystemBudgetLedgerError && error.code === "budget_refused") {
+    if (
+      error instanceof FilesystemBudgetLedgerError
+      && ["budget_refused", "integrity_failure", "plan_consumed"].includes(error.code)
+    ) {
       process.stdout.write("refused\n");
       return;
     }
