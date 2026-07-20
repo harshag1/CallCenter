@@ -9,11 +9,11 @@ Status: **C1 engineering evidence**, `$0` provider spend. This benchmark measure
 An independent red-team review rejected the first draft because it omitted the two JSON array brackets, conflated logical-entry bytes with provider instructions, and called a fixed linear census “reachability.” The result below supersedes that withdrawn draft.
 
 - Portable semantic result hash: `8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1`
-- Source-manifest hash: `62f2fce868981cb1488802e3e06a38e2e2b270f5f05250c1a67b4d57fcf4bf1b`
+- Source-manifest hash: `bfdacb8cc341c668ec48b8d4ffd8471804fa66832f8f3c8fdb901e8693e43813`
 - Deterministic-build manifest hash: `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`
 - Observed-toolchain manifest hash: `7beaf4d8ae665b1834ddb1f2a2f6dfa14c06955ee9a7fdc74e25166a67a0c076`
-- Source/build/toolchain-bound evidence hash: `e5e6b71493bb5988a891ec1b7be7a492bd374359ddb18b76d943cbf0b1afe509`
-- Pretty JSON artifact in the recorded environment: 37,186 bytes; SHA-256 `a9b92487971eddb66312df71cdd6e6ddb11f1e009ea11006176f74d2269a881a`
+- Source/build/toolchain-bound evidence hash: `db1594f76dd0270cebf92abc5dc5595057d792ca081a5c63d033a0f9b8e9aac6`
+- Pretty JSON artifact in the recorded environment: 37,186 bytes; SHA-256 `031fca457c88bcb75fe51db62b53361d599927be42ec7e4b2175a80fbc2931c8`
 - Raw corpus file: 13,497 bytes; SHA-256 `67f1153d90ab578916fb31ce6b543aa74d382374453a1718ab5675bc8ae1df1b`
 - Parsed canonical corpus JSON: 11,932 bytes; SHA-256 `89452f09d62f3588e6b37acdd914aaa1c3b612c7ed89cb9b1a7ca3beeabc72c7`
 - Corpus: 8 sequential phases × 8 unique tools = 64 tools; 32 read and 32 write
