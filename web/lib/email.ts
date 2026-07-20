@@ -6,6 +6,14 @@ import { PRODUCT_NAME } from "./product";
 
 let resend: Resend | null = null;
 
+const EMAIL_IDEMPOTENCY_KEY_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+
+function requireEmailIdempotencyKey(value: string): void {
+  if (!EMAIL_IDEMPOTENCY_KEY_PATTERN.test(value)) {
+    throw new Error("invalid email idempotency key");
+  }
+}
+
 function getResend(): Resend {
   if (!process.env.RESEND_API_KEY) throw new Error("RESEND_API_KEY is not configured");
   return resend ?? (resend = new Resend(process.env.RESEND_API_KEY));
@@ -29,7 +37,10 @@ export async function sendAgentEmail(opts: {
   subject: string;
   message: string;
   brand?: string | null;
+  /** Opaque durable execution identity for provider-side replay suppression. */
+  idempotencyKey?: string;
 }): Promise<void> {
+  if (opts.idempotencyKey !== undefined) requireEmailIdempotencyKey(opts.idempotencyKey);
   const brand = escapeHtml(opts.brand ?? PRODUCT_NAME);
   const subject = escapeHtml(opts.subject);
   const body = escapeHtml(opts.message);
@@ -48,14 +59,23 @@ export async function sendAgentEmail(opts: {
       </div>
       <p style="color: #7b8795; font-size: 13px; margin: 0;">Sent by ${brand}'s voice assistant.</p>
     </div>`,
-  });
+  }, opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined);
   if (error) throw new Error(`resend: ${error.message}`);
 }
 
-export async function sendLoginCode(to: string, code: string): Promise<void> {
-  if (!process.env.RESEND_API_KEY && process.env.NODE_ENV !== "production") {
-    console.log(`[dev auth] ${to}: ${code}`);
-    return;
+export async function sendLoginCode(
+  to: string,
+  code: string,
+  /** Durable auth_codes.id; reused verbatim if this delivery is retried. */
+  deliveryId: string
+): Promise<void> {
+  requireEmailIdempotencyKey(deliveryId);
+  if (!process.env.RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "production" && process.env.ALLOW_DEV_OTP_STDOUT === "true") {
+      console.log(`[explicit dev auth] ${to}: ${code}`);
+      return;
+    }
+    throw new Error("RESEND_API_KEY is not configured");
   }
   const { error } = await getResend().emails.send({
     from: fromAddress(),
@@ -66,6 +86,6 @@ export async function sendLoginCode(to: string, code: string): Promise<void> {
       <p style="font-size:32px;font-weight:700;letter-spacing:6px;margin:0">${code}</p>
       <p style="font-size:13px;color:#999;margin:16px 0 0">Expires in 10 minutes.</p>
     </div>`,
-  });
+  }, { idempotencyKey: deliveryId });
   if (error) throw new Error(`resend: ${error.message}`);
 }

@@ -4,6 +4,7 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolveDatabaseSslMode } from "./database-ssl.mjs";
 
 const SAFE_ROLE = /^[a-z][a-z0-9_]{0,62}$/;
 
@@ -63,7 +64,11 @@ function enforceLeastPrivilegeDatabaseRole(): boolean {
 function makePool(): Pool {
   const connectionString = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
   if (!connectionString) throw new Error("DATABASE_URL or SUPABASE_DB_URL is required");
-  const sslMode = process.env.DATABASE_SSL ?? (process.env.SUPABASE_DB_URL ? "verify-full" : "disable");
+  const sslMode = resolveDatabaseSslMode({
+    connectionString,
+    configuredMode: process.env.DATABASE_SSL,
+    nodeEnv: process.env.NODE_ENV,
+  });
   const defaultCaPath = join(process.cwd(), "certs", "supabase-ca.crt");
   const ssl = sslMode === "disable"
     ? false

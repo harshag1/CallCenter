@@ -6,6 +6,7 @@ import { join, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { resolveDatabaseSslMode } from "../lib/database-ssl.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "migrations");
@@ -22,7 +23,11 @@ if (leastPrivilegeRequired && runtimeUrl && url === runtimeUrl) {
   throw new Error("MIGRATION_DATABASE_URL must not reuse the application runtime connection string");
 }
 
-const sslMode = process.env.DATABASE_SSL ?? (process.env.SUPABASE_DB_URL ? "verify-full" : "disable");
+const sslMode = resolveDatabaseSslMode({
+  connectionString: url,
+  configuredMode: process.env.DATABASE_SSL,
+  nodeEnv: process.env.NODE_ENV,
+});
 const caPath = join(root, "certs", "supabase-ca.crt");
 const ssl = sslMode === "disable"
   ? false

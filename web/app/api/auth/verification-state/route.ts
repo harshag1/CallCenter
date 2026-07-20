@@ -2,12 +2,17 @@
 // verification-state — recovers staged onboarding state after email verification.
 
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { AUTH_NO_STORE_HEADERS, getSession } from "@/lib/auth";
 import { qOne } from "@/lib/db";
 
 export async function GET() {
   const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!session) {
+    return NextResponse.json({ error: "unauthorized" }, {
+      status: 401,
+      headers: AUTH_NO_STORE_HEADERS,
+    });
+  }
   const hasAgents = await qOne("SELECT id FROM agents WHERE org_id = $1 LIMIT 1", [session.orgId]);
   return NextResponse.json({
     email: session.email,
@@ -15,5 +20,5 @@ export async function GET() {
     emailVerified: true,
     phoneVerified: Boolean(session.phoneVerifiedAt),
     next: hasAgents ? "/workspace" : "/onboarding",
-  });
+  }, { headers: AUTH_NO_STORE_HEADERS });
 }
