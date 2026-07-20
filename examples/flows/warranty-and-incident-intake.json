@@ -1,0 +1,484 @@
+{
+  "schema_version": 2,
+  "tool_exposure": "gateway",
+  "max_step_entries": 60,
+  "always_tools": ["contact_support", "request_recall", "end_call"],
+  "always_action_policies": [
+    {
+      "tool": "contact_support",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    },
+    {
+      "tool": "request_recall",
+      "max_calls": 3,
+      "idempotency": "per_call_arguments",
+      "effect": "write"
+    },
+    {
+      "tool": "end_call",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "entry",
+      "label": "Incoming call",
+      "kind": "incoming_call"
+    },
+    {
+      "id": "product_help",
+      "label": "Warranty or product incident",
+      "kind": "topic",
+      "context": "Handle product support intake without making legal, medical, safety-certification, reimbursement, or warranty-approval claims.",
+      "steps": [
+        {
+          "id": "route",
+          "label": "Classify the request",
+          "instructions": "Ask whether the caller needs a warranty review or wants to report a product incident. Do not collect detailed evidence before choosing the path.",
+          "entry": true,
+          "tools": ["classify_product_request"],
+          "required_outputs": ["request_kind"],
+          "output_bindings": [
+            {
+              "output": "request_kind",
+              "tool": "classify_product_request",
+              "result_path": "request_kind",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "classify_product_request",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "transitions": [
+            {
+              "to": "product_help.warranty",
+              "label": "Warranty review",
+              "condition": {
+                "output": "request_kind",
+                "operator": "equals",
+                "value": "warranty"
+              }
+            },
+            {
+              "to": "product_help.incident",
+              "label": "Product incident",
+              "condition": {
+                "output": "request_kind",
+                "operator": "equals",
+                "value": "incident"
+              }
+            }
+          ],
+          "on_failure": "product_help.human_handoff"
+        },
+        {
+          "id": "warranty",
+          "label": "Warranty review",
+          "instructions": "Verify the product and purchase using the caller's reference. Never state that coverage is approved before the policy tool returns a decision.",
+          "entry": false,
+          "tools": ["lookup_product_purchase"],
+          "required_outputs": ["product_id", "purchase_id"],
+          "output_bindings": [
+            {
+              "output": "product_id",
+              "tool": "lookup_product_purchase",
+              "result_path": "product_id",
+              "value_type": "string"
+            },
+            {
+              "output": "purchase_id",
+              "tool": "lookup_product_purchase",
+              "result_path": "purchase_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "lookup_product_purchase",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "product_help.human_handoff",
+          "steps": [
+            {
+              "id": "eligibility",
+              "label": "Evaluate written policy",
+              "instructions": "Evaluate the verified purchase against the configured written policy. Describe the result as an eligibility result, not a final reimbursement promise.",
+              "tools": ["evaluate_warranty_policy"],
+              "required_outputs": ["eligible", "policy_reason"],
+              "output_bindings": [
+                {
+                  "output": "eligible",
+                  "tool": "evaluate_warranty_policy",
+                  "result_path": "eligible",
+                  "value_type": "boolean"
+                },
+                {
+                  "output": "policy_reason",
+                  "tool": "evaluate_warranty_policy",
+                  "result_path": "reason",
+                  "value_type": "string"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "evaluate_warranty_policy",
+                  "max_calls": 2,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "transitions": [
+                {
+                  "to": "product_help.evidence",
+                  "label": "Eligible for intake",
+                  "condition": {
+                    "output": "eligible",
+                    "operator": "equals",
+                    "value": true
+                  }
+                },
+                {
+                  "to": "product_help.not_eligible",
+                  "label": "Not eligible",
+                  "condition": {
+                    "output": "eligible",
+                    "operator": "equals",
+                    "value": false
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "evidence",
+          "label": "Collect warranty evidence",
+          "instructions": "Collect a concise description and request only evidence allowed by the operator's retention policy. A submission acceptance is not proof that a file was retained, reviewed, or valid.",
+          "entry": false,
+          "tools": ["capture_issue_description"],
+          "required_outputs": ["issue_record_id"],
+          "output_bindings": [
+            {
+              "output": "issue_record_id",
+              "tool": "capture_issue_description",
+              "result_path": "issue_record_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "capture_issue_description",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "write"
+            }
+          ],
+          "checkpoint": true,
+          "steps": [
+            {
+              "id": "attachments",
+              "label": "Submit permitted attachments",
+              "instructions": "Submit permitted evidence references. Say only that the intake accepted the submission when accepted is true.",
+              "tools": ["submit_warranty_evidence"],
+              "required_outputs": ["evidence_submission_accepted"],
+              "output_bindings": [
+                {
+                  "output": "evidence_submission_accepted",
+                  "tool": "submit_warranty_evidence",
+                  "result_path": "accepted",
+                  "value_type": "boolean"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "submit_warranty_evidence",
+                  "max_calls": 4,
+                  "idempotency": "per_arguments",
+                  "effect": "write"
+                }
+              ],
+              "steps": [
+                {
+                  "id": "preference",
+                  "label": "Choose resolution preference",
+                  "instructions": "Offer only configured intake preferences, such as repair review or replacement review. Do not promise the outcome.",
+                  "tools": ["capture_resolution_preference"],
+                  "required_outputs": ["resolution_preference"],
+                  "output_bindings": [
+                    {
+                      "output": "resolution_preference",
+                      "tool": "capture_resolution_preference",
+                      "result_path": "preference",
+                      "value_type": "string"
+                    }
+                  ],
+                  "action_policies": [
+                    {
+                      "tool": "capture_resolution_preference",
+                      "max_calls": 2,
+                      "idempotency": "per_arguments",
+                      "effect": "read"
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "id": "consent",
+                      "label": "Confirm intake consent",
+                      "instructions": "Read back the verified facts, retention notice, and selected preference. Capture explicit consent to submit the case.",
+                      "tools": ["capture_case_consent"],
+                      "required_outputs": ["consent_granted"],
+                      "output_bindings": [
+                        {
+                          "output": "consent_granted",
+                          "tool": "capture_case_consent",
+                          "result_path": "granted",
+                          "value_type": "boolean"
+                        }
+                      ],
+                      "action_policies": [
+                        {
+                          "tool": "capture_case_consent",
+                          "max_calls": 2,
+                          "idempotency": "per_arguments",
+                          "effect": "read"
+                        }
+                      ],
+                      "transitions": [
+                        {
+                          "to": "product_help.submit",
+                          "condition": {
+                            "output": "consent_granted",
+                            "operator": "equals",
+                            "value": true
+                          }
+                        },
+                        {
+                          "to": "product_help.no_submission",
+                          "condition": {
+                            "output": "consent_granted",
+                            "operator": "equals",
+                            "value": false
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "submit",
+          "label": "Submit warranty case",
+          "instructions": "Create the case exactly once from the verified purchase, evidence, preference, and captured consent. If dispatch becomes indeterminate, reconcile the original invocation before continuing or retrying.",
+          "entry": false,
+          "tools": ["submit_warranty_case"],
+          "required_outputs": ["case_id", "case_status"],
+          "output_bindings": [
+            {
+              "output": "case_id",
+              "tool": "submit_warranty_case",
+              "result_path": "case_id",
+              "value_type": "string"
+            },
+            {
+              "output": "case_status",
+              "tool": "submit_warranty_case",
+              "result_path": "status",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "submit_warranty_case",
+              "max_calls": 1,
+              "idempotency": "per_step",
+              "effect": "write",
+              "reconciliation": {
+                "queryTool": "lookup_warranty_case_invocation",
+                "queryArguments": {
+                  "invocation_id": {
+                    "source": "invocation_id"
+                  },
+                  "purchase_id": {
+                    "source": "action_argument",
+                    "path": "purchase_id"
+                  }
+                },
+                "committedWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "committed"
+                    }
+                  }
+                ],
+                "absentWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "absent"
+                    }
+                  }
+                ],
+                "authoritativeResultPath": "result",
+                "maxProofAttempts": 3
+              }
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "product_help.human_handoff"
+        },
+        {
+          "id": "incident",
+          "label": "Product incident intake",
+          "instructions": "Ask whether an immediate active hazard is present. Do not diagnose, investigate blame, or make legal conclusions.",
+          "entry": false,
+          "tools": ["classify_active_product_hazard"],
+          "required_outputs": ["active_hazard"],
+          "output_bindings": [
+            {
+              "output": "active_hazard",
+              "tool": "classify_active_product_hazard",
+              "result_path": "active_hazard",
+              "value_type": "boolean"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "classify_active_product_hazard",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "transitions": [
+            {
+              "to": "product_help.urgent_handoff",
+              "label": "Immediate human escalation",
+              "condition": {
+                "output": "active_hazard",
+                "operator": "equals",
+                "value": true
+              }
+            },
+            {
+              "to": "product_help.incident_record",
+              "label": "Standard incident intake",
+              "condition": {
+                "output": "active_hazard",
+                "operator": "equals",
+                "value": false
+              }
+            }
+          ],
+          "on_failure": "product_help.urgent_handoff"
+        },
+        {
+          "id": "incident_record",
+          "label": "Record non-active incident",
+          "instructions": "Record the caller's description, product identifiers, timing, and contact preference as reported facts. Do not infer causation.",
+          "entry": false,
+          "tools": ["submit_product_incident"],
+          "required_outputs": ["incident_id", "intake_accepted"],
+          "output_bindings": [
+            {
+              "output": "incident_id",
+              "tool": "submit_product_incident",
+              "result_path": "incident_id",
+              "value_type": "string"
+            },
+            {
+              "output": "intake_accepted",
+              "tool": "submit_product_incident",
+              "result_path": "accepted",
+              "value_type": "boolean"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "submit_product_incident",
+              "max_calls": 1,
+              "idempotency": "per_call_arguments",
+              "effect": "write"
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "product_help.human_handoff"
+        },
+        {
+          "id": "urgent_handoff",
+          "label": "Immediate safe handoff",
+          "instructions": "Do not continue the routine intake or make safety claims. Encourage the caller to move away from an active hazard when safe to do so, then offer immediate human support. Follow the operator's reviewed emergency script if one is configured.",
+          "entry": false
+        },
+        {
+          "id": "not_eligible",
+          "label": "Not eligible under configured policy",
+          "instructions": "Explain the exact policy reason returned by the tool without legal interpretation. Offer human review or a callback.",
+          "entry": false
+        },
+        {
+          "id": "no_submission",
+          "label": "Consent not granted",
+          "instructions": "Confirm that no warranty case was submitted. Offer human support if the caller wants another channel.",
+          "entry": false
+        },
+        {
+          "id": "human_handoff",
+          "label": "Human support",
+          "instructions": "Summarize only verified facts and unresolved questions, then offer contact_support or request_recall.",
+          "entry": false
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Something else",
+      "kind": "fallback",
+      "context": "The request is outside configured product workflows. Do not improvise.",
+      "support_number": "+15550000000"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "product_help",
+      "label": "Product support"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "label": "Other"
+    }
+  ]
+}

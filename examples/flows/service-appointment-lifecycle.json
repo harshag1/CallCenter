@@ -1,0 +1,601 @@
+{
+  "schema_version": 2,
+  "tool_exposure": "gateway",
+  "max_step_entries": 80,
+  "always_tools": ["contact_support", "request_recall", "end_call"],
+  "always_action_policies": [
+    {
+      "tool": "contact_support",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    },
+    {
+      "tool": "request_recall",
+      "max_calls": 3,
+      "idempotency": "per_call_arguments",
+      "effect": "write"
+    },
+    {
+      "tool": "end_call",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "entry",
+      "label": "Incoming call",
+      "kind": "incoming_call"
+    },
+    {
+      "id": "appointment",
+      "label": "Service appointment",
+      "kind": "topic",
+      "context": "Book or change a non-emergency service appointment. A provider acceptance is not proof that a message was delivered.",
+      "steps": [
+        {
+          "id": "route",
+          "label": "Verify and classify",
+          "instructions": "Collect the account reference and one approved verification factor. Look up only the minimum caller record needed for this request.",
+          "entry": true,
+          "tools": ["lookup_service_customer"],
+          "required_outputs": ["customer_id"],
+          "output_bindings": [
+            {
+              "output": "customer_id",
+              "tool": "lookup_service_customer",
+              "result_path": "customer_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "lookup_service_customer",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "appointment.human_handoff",
+          "steps": [
+            {
+              "id": "intent",
+              "label": "Classify appointment intent",
+              "instructions": "Ask one short clarifying question when necessary, then classify the request as book, change, or cancel. Do not perform any mutation here.",
+              "tools": ["classify_appointment_intent"],
+              "required_outputs": ["intent"],
+              "output_bindings": [
+                {
+                  "output": "intent",
+                  "tool": "classify_appointment_intent",
+                  "result_path": "intent",
+                  "value_type": "string"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "classify_appointment_intent",
+                  "max_calls": 2,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "transitions": [
+                {
+                  "to": "appointment.schedule",
+                  "label": "Book",
+                  "when": "the verified request is to book a new service appointment",
+                  "condition": {
+                    "output": "intent",
+                    "operator": "equals",
+                    "value": "book"
+                  }
+                },
+                {
+                  "to": "appointment.change",
+                  "label": "Change",
+                  "when": "the verified request is to reschedule an existing appointment",
+                  "condition": {
+                    "output": "intent",
+                    "operator": "equals",
+                    "value": "change"
+                  }
+                },
+                {
+                  "to": "appointment.cancel",
+                  "label": "Cancel",
+                  "when": "the verified request is to cancel an existing appointment",
+                  "condition": {
+                    "output": "intent",
+                    "operator": "equals",
+                    "value": "cancel"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "schedule",
+          "label": "Choose an appointment slot",
+          "instructions": "Plan either a new booking or a replacement for the verified existing appointment. Ask for service category, location, and timing constraints. For a reschedule, the downstream integration must atomically replace the exact verified appointment_id rather than create an unrelated second booking.",
+          "entry": false,
+          "tools": ["capture_service_preferences"],
+          "required_outputs": ["preference_set_id"],
+          "output_bindings": [
+            {
+              "output": "preference_set_id",
+              "tool": "capture_service_preferences",
+              "result_path": "preference_set_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "capture_service_preferences",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "appointment.human_handoff",
+          "steps": [
+            {
+              "id": "search",
+              "label": "Search availability",
+              "instructions": "Search using the durable preference set. Offer at most three exact slots; never invent availability.",
+              "tools": ["search_service_slots"],
+              "required_outputs": ["slot_search_id"],
+              "output_bindings": [
+                {
+                  "output": "slot_search_id",
+                  "tool": "search_service_slots",
+                  "result_path": "search_id",
+                  "value_type": "string"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "search_service_slots",
+                  "max_calls": 3,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "steps": [
+                {
+                  "id": "select",
+                  "label": "Select an offered slot",
+                  "instructions": "Confirm the caller selected one exact slot returned by the search. Record the opaque slot token, not a model-created timestamp.",
+                  "tools": ["select_service_slot"],
+                  "required_outputs": ["slot_token"],
+                  "output_bindings": [
+                    {
+                      "output": "slot_token",
+                      "tool": "select_service_slot",
+                      "result_path": "slot_token",
+                      "value_type": "string"
+                    }
+                  ],
+                  "action_policies": [
+                    {
+                      "tool": "select_service_slot",
+                      "max_calls": 3,
+                      "idempotency": "per_arguments",
+                      "effect": "read"
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "id": "review",
+                      "label": "Review selected slot",
+                      "instructions": "Read back the exact selected slot and ask whether the caller wants to keep it or search again. This is not booking consent and cannot authorize a mutation.",
+                      "tools": ["capture_slot_review"],
+                      "required_outputs": ["slot_accepted"],
+                      "output_bindings": [
+                        {
+                          "output": "slot_accepted",
+                          "tool": "capture_slot_review",
+                          "result_path": "accepted",
+                          "value_type": "boolean"
+                        }
+                      ],
+                      "action_policies": [
+                        {
+                          "tool": "capture_slot_review",
+                          "max_calls": 2,
+                          "idempotency": "per_arguments",
+                          "effect": "read"
+                        }
+                      ],
+                      "transitions": [
+                        {
+                          "to": "appointment.consent",
+                          "label": "Keep selected slot",
+                          "when": "the caller accepts the selected slot for final terms and consent",
+                          "condition": {
+                            "output": "slot_accepted",
+                            "operator": "equals",
+                            "value": true
+                          }
+                        },
+                        {
+                          "to": "appointment.schedule",
+                          "label": "Search again",
+                          "when": "the caller asks to choose another slot",
+                          "condition": {
+                            "output": "slot_accepted",
+                            "operator": "equals",
+                            "value": false
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "consent",
+          "label": "Confirm terms and consent",
+          "instructions": "Read back the selected slot, service window, operation type, existing appointment when rescheduling, and any quoted fee. Capture explicit consent. Do not treat silence or an ambiguous response as consent.",
+          "entry": false,
+          "tools": ["capture_booking_consent"],
+          "required_outputs": ["consent_granted"],
+          "output_bindings": [
+            {
+              "output": "consent_granted",
+              "tool": "capture_booking_consent",
+              "result_path": "granted",
+              "value_type": "boolean"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "capture_booking_consent",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "transitions": [
+            {
+              "to": "appointment.commit",
+              "label": "Consent confirmed",
+              "when": "the caller gave explicit consent",
+              "condition": {
+                "output": "consent_granted",
+                "operator": "equals",
+                "value": true
+              }
+            },
+            {
+              "to": "appointment.no_change",
+              "label": "No consent",
+              "when": "the caller did not consent",
+              "condition": {
+                "output": "consent_granted",
+                "operator": "equals",
+                "value": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "commit",
+          "label": "Commit appointment",
+          "instructions": "Create or atomically reschedule the appointment exactly once with the selected slot token, verified operation context, and captured consent evidence. If the response is lost after dispatch, do not retry; reconcile the original invocation.",
+          "entry": false,
+          "tools": ["commit_service_appointment_operation"],
+          "required_outputs": ["appointment_id", "scheduled_at"],
+          "output_bindings": [
+            {
+              "output": "appointment_id",
+              "tool": "commit_service_appointment_operation",
+              "result_path": "appointment_id",
+              "value_type": "string"
+            },
+            {
+              "output": "scheduled_at",
+              "tool": "commit_service_appointment_operation",
+              "result_path": "scheduled_at",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "commit_service_appointment_operation",
+              "max_calls": 1,
+              "idempotency": "per_step",
+              "effect": "write",
+              "reconciliation": {
+                "queryTool": "lookup_appointment_invocation",
+                "queryArguments": {
+                  "invocation_id": {
+                    "source": "invocation_id"
+                  },
+                  "customer_id": {
+                    "source": "action_argument",
+                    "path": "customer_id"
+                  }
+                },
+                "committedWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "committed"
+                    }
+                  }
+                ],
+                "absentWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "absent"
+                    }
+                  }
+                ],
+                "authoritativeResultPath": "result",
+                "maxProofAttempts": 3
+              }
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "appointment.human_handoff",
+          "steps": [
+            {
+              "id": "followup",
+              "label": "Confirm committed appointment",
+              "instructions": "Confirm the committed appointment and submit the requested notification. A notification acceptance may be reported only as accepted for sending. Further changes require a new verified operation rather than replaying this commit.",
+              "tools": ["submit_appointment_notification"],
+              "required_outputs": ["notification_accepted"],
+              "output_bindings": [
+                {
+                  "output": "notification_accepted",
+                  "tool": "submit_appointment_notification",
+                  "result_path": "accepted",
+                  "value_type": "boolean"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "submit_appointment_notification",
+                  "max_calls": 1,
+                  "idempotency": "per_arguments",
+                  "effect": "write"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "change",
+          "label": "Reschedule service",
+          "instructions": "Locate the existing appointment by verified customer identity. Read the current slot before asking for a replacement.",
+          "entry": false,
+          "tools": ["lookup_existing_appointment"],
+          "required_outputs": ["appointment_id"],
+          "output_bindings": [
+            {
+              "output": "appointment_id",
+              "tool": "lookup_existing_appointment",
+              "result_path": "appointment_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "lookup_existing_appointment",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "transitions": [
+            {
+              "to": "appointment.schedule",
+              "label": "Choose replacement",
+              "when": "the existing appointment was located"
+            }
+          ],
+          "on_failure": "appointment.human_handoff"
+        },
+        {
+          "id": "cancel",
+          "label": "Cancel service",
+          "instructions": "Locate the appointment by verified customer identity and disclose only the exact cancellation terms returned by the lookup.",
+          "entry": false,
+          "tools": ["lookup_existing_appointment"],
+          "required_outputs": ["appointment_id"],
+          "output_bindings": [
+            {
+              "output": "appointment_id",
+              "tool": "lookup_existing_appointment",
+              "result_path": "appointment_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "lookup_existing_appointment",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "appointment.human_handoff",
+          "steps": [
+            {
+              "id": "consent",
+              "label": "Confirm cancellation consent",
+              "instructions": "Read back the exact appointment and cancellation terms. Capture explicit consent; silence or ambiguity is not consent.",
+              "tools": ["capture_cancellation_consent"],
+              "required_outputs": ["consent_granted"],
+              "output_bindings": [
+                {
+                  "output": "consent_granted",
+                  "tool": "capture_cancellation_consent",
+                  "result_path": "granted",
+                  "value_type": "boolean"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "capture_cancellation_consent",
+                  "max_calls": 2,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "transitions": [
+                {
+                  "to": "appointment.cancel_commit",
+                  "label": "Cancel",
+                  "condition": {
+                    "output": "consent_granted",
+                    "operator": "equals",
+                    "value": true
+                  }
+                },
+                {
+                  "to": "appointment.no_change",
+                  "label": "Keep appointment",
+                  "condition": {
+                    "output": "consent_granted",
+                    "operator": "equals",
+                    "value": false
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "cancel_commit",
+          "label": "Commit cancellation",
+          "instructions": "Cancel the exact verified appointment at most once using the captured consent evidence. If the result is lost after dispatch, reconcile the original invocation before continuing.",
+          "entry": false,
+          "tools": ["commit_service_cancellation"],
+          "required_outputs": ["cancellation_id"],
+          "output_bindings": [
+            {
+              "output": "cancellation_id",
+              "tool": "commit_service_cancellation",
+              "result_path": "cancellation_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "commit_service_cancellation",
+              "max_calls": 1,
+              "idempotency": "per_call_arguments",
+              "effect": "write",
+              "reconciliation": {
+                "queryTool": "lookup_cancellation_invocation",
+                "queryArguments": {
+                  "invocation_id": {
+                    "source": "invocation_id"
+                  },
+                  "appointment_id": {
+                    "source": "action_argument",
+                    "path": "appointment_id"
+                  }
+                },
+                "committedWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "committed"
+                    }
+                  }
+                ],
+                "absentWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "absent"
+                    }
+                  }
+                ],
+                "authoritativeResultPath": "result",
+                "maxProofAttempts": 3
+              }
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "appointment.human_handoff"
+        },
+        {
+          "id": "no_change",
+          "label": "No mutation requested",
+          "instructions": "Confirm that no appointment was created or changed. Offer human support or a callback if useful.",
+          "entry": false
+        },
+        {
+          "id": "human_handoff",
+          "label": "Safe human handoff",
+          "instructions": "Do not improvise availability or account details. Summarize only verified facts, then offer contact_support or request_recall.",
+          "entry": false
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Something else",
+      "kind": "fallback",
+      "context": "The request is outside configured service workflows. Do not improvise policy.",
+      "support_number": "+15550000000"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "appointment",
+      "label": "Appointments"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "label": "Other"
+    }
+  ]
+}

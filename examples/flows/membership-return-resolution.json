@@ -1,0 +1,481 @@
+{
+  "schema_version": 2,
+  "tool_exposure": "gateway",
+  "max_step_entries": 100,
+  "always_tools": ["contact_support", "request_recall", "end_call"],
+  "always_action_policies": [
+    {
+      "tool": "contact_support",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    },
+    {
+      "tool": "request_recall",
+      "max_calls": 3,
+      "idempotency": "per_call_arguments",
+      "effect": "write"
+    },
+    {
+      "tool": "end_call",
+      "max_calls": 1,
+      "idempotency": "per_call",
+      "effect": "write"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "entry",
+      "label": "Incoming call",
+      "kind": "incoming_call"
+    },
+    {
+      "id": "membership_return",
+      "label": "Membership and returns",
+      "kind": "topic",
+      "context": "Resolve a verified membership question, return one eligible line item, or do both without widening mutation authority.",
+      "steps": [
+        {
+          "id": "route",
+          "label": "Verify caller and route goals",
+          "instructions": "Verify the caller using one approved factor and record whether the call needs membership help, return help, or both.",
+          "entry": true,
+          "tools": ["verify_member_and_classify_goals"],
+          "required_outputs": ["member_id", "goals"],
+          "output_bindings": [
+            {
+              "output": "member_id",
+              "tool": "verify_member_and_classify_goals",
+              "result_path": "member_id",
+              "value_type": "string"
+            },
+            {
+              "output": "goals",
+              "tool": "verify_member_and_classify_goals",
+              "result_path": "goals",
+              "value_type": "array"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "verify_member_and_classify_goals",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "membership_return.human_handoff",
+          "transitions": [
+            {
+              "to": "membership_return.membership",
+              "label": "Membership only",
+              "condition": {
+                "output": "goals",
+                "operator": "equals",
+                "value": ["membership"]
+              }
+            },
+            {
+              "to": "membership_return.return_items",
+              "label": "Return only",
+              "condition": {
+                "output": "goals",
+                "operator": "equals",
+                "value": ["return"]
+              }
+            },
+            {
+              "to": "membership_return.membership",
+              "label": "Membership then return",
+              "condition": {
+                "output": "goals",
+                "operator": "equals",
+                "value": ["membership", "return"]
+              }
+            }
+          ]
+        },
+        {
+          "id": "membership",
+          "label": "Membership resolution",
+          "instructions": "Load the verified membership summary. Disclose only facts needed for this call and do not mutate the account.",
+          "entry": false,
+          "tools": ["read_membership_summary"],
+          "required_outputs": ["membership_status", "membership_goal_complete"],
+          "output_bindings": [
+            {
+              "output": "membership_status",
+              "tool": "read_membership_summary",
+              "result_path": "status",
+              "value_type": "string"
+            },
+            {
+              "output": "membership_goal_complete",
+              "tool": "read_membership_summary",
+              "result_path": "goal_complete",
+              "value_type": "boolean"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "read_membership_summary",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "steps": [
+            {
+              "id": "next_goal",
+              "label": "Resume remaining goal",
+              "instructions": "Ask whether a return goal remains from this call. Do not infer it from conversation memory; use the verified goal list.",
+              "tools": ["select_remaining_goal"],
+              "required_outputs": ["next_goal"],
+              "output_bindings": [
+                {
+                  "output": "next_goal",
+                  "tool": "select_remaining_goal",
+                  "result_path": "next_goal",
+                  "value_type": "string"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "select_remaining_goal",
+                  "max_calls": 1,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "transitions": [
+                {
+                  "to": "membership_return.return_items",
+                  "label": "Continue to returns",
+                  "condition": {
+                    "output": "next_goal",
+                    "operator": "equals",
+                    "value": "return"
+                  }
+                },
+                {
+                  "to": "membership_return.done",
+                  "label": "Membership goal complete",
+                  "condition": {
+                    "output": "next_goal",
+                    "operator": "equals",
+                    "value": "done"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "return_items",
+          "label": "Return line items",
+          "instructions": "Locate the verified order and choose exactly one line item. A second item requires a new bounded Flow operation or a reviewed mission workflow; do not reuse this item evidence.",
+          "entry": false,
+          "tools": ["locate_return_order"],
+          "required_outputs": ["order_id"],
+          "output_bindings": [
+            {
+              "output": "order_id",
+              "tool": "locate_return_order",
+              "result_path": "order_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "locate_return_order",
+              "max_calls": 3,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "checkpoint": true,
+          "max_attempts": 3,
+          "on_failure": "membership_return.human_handoff",
+          "steps": [
+            {
+              "id": "select_item",
+              "label": "Select one item",
+              "instructions": "Select one opaque line-item id returned by the order lookup. Do not combine multiple items into one unreviewed action.",
+              "tools": ["select_return_item"],
+              "required_outputs": ["line_item_id"],
+              "output_bindings": [
+                {
+                  "output": "line_item_id",
+                  "tool": "select_return_item",
+                  "result_path": "line_item_id",
+                  "value_type": "string"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "select_return_item",
+                  "max_calls": 3,
+                  "idempotency": "per_arguments",
+                  "effect": "read"
+                }
+              ],
+              "steps": [
+                {
+                  "id": "item_details",
+                  "label": "Capture item details",
+                  "instructions": "Capture the caller-reported item condition and reason using the configured bounded categories. Do not infer damage, blame, or eligibility.",
+                  "tools": ["capture_return_item_details"],
+                  "required_outputs": ["item_details_id"],
+                  "output_bindings": [
+                    {
+                      "output": "item_details_id",
+                      "tool": "capture_return_item_details",
+                      "result_path": "item_details_id",
+                      "value_type": "string"
+                    }
+                  ],
+                  "action_policies": [
+                    {
+                      "tool": "capture_return_item_details",
+                      "max_calls": 2,
+                      "idempotency": "per_arguments",
+                      "effect": "read"
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "id": "eligibility",
+                      "label": "Evaluate return policy",
+                      "instructions": "Evaluate the exact line item and captured details against the configured return policy. Do not promise a refund.",
+                      "tools": ["evaluate_return_item"],
+                      "required_outputs": ["eligible", "eligibility_reason"],
+                      "output_bindings": [
+                        {
+                          "output": "eligible",
+                          "tool": "evaluate_return_item",
+                          "result_path": "eligible",
+                          "value_type": "boolean"
+                        },
+                        {
+                          "output": "eligibility_reason",
+                          "tool": "evaluate_return_item",
+                          "result_path": "reason",
+                          "value_type": "string"
+                        }
+                      ],
+                      "action_policies": [
+                        {
+                          "tool": "evaluate_return_item",
+                          "max_calls": 2,
+                          "idempotency": "per_arguments",
+                          "effect": "read"
+                        }
+                      ],
+                      "transitions": [
+                        {
+                          "to": "membership_return.return_consent",
+                          "label": "Eligible",
+                          "condition": {
+                            "output": "eligible",
+                            "operator": "equals",
+                            "value": true
+                          }
+                        },
+                        {
+                          "to": "membership_return.item_not_eligible",
+                          "label": "Not eligible",
+                          "condition": {
+                            "output": "eligible",
+                            "operator": "equals",
+                            "value": false
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "return_consent",
+          "label": "Confirm return method",
+          "instructions": "Read the exact selected item, eligibility result, return method, and any quoted fee, then capture explicit consent. Silence is not consent.",
+          "entry": false,
+          "tools": ["capture_return_consent"],
+          "required_outputs": ["consent_granted"],
+          "output_bindings": [
+            {
+              "output": "consent_granted",
+              "tool": "capture_return_consent",
+              "result_path": "granted",
+              "value_type": "boolean"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "capture_return_consent",
+              "max_calls": 2,
+              "idempotency": "per_arguments",
+              "effect": "read"
+            }
+          ],
+          "transitions": [
+            {
+              "to": "membership_return.create_return",
+              "condition": {
+                "output": "consent_granted",
+                "operator": "equals",
+                "value": true
+              }
+            },
+            {
+              "to": "membership_return.done",
+              "condition": {
+                "output": "consent_granted",
+                "operator": "equals",
+                "value": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "create_return",
+          "label": "Create one return",
+          "instructions": "Create the return exactly once from the verified order, selected line item, eligibility result, and captured consent. If the provider response is lost after dispatch, reconcile the original invocation instead of creating another return.",
+          "entry": false,
+          "tools": ["create_return_item"],
+          "required_outputs": ["return_id"],
+          "output_bindings": [
+            {
+              "output": "return_id",
+              "tool": "create_return_item",
+              "result_path": "return_id",
+              "value_type": "string"
+            }
+          ],
+          "action_policies": [
+            {
+              "tool": "create_return_item",
+              "max_calls": 1,
+              "idempotency": "per_step",
+              "effect": "write",
+              "reconciliation": {
+                "queryTool": "lookup_return_invocation",
+                "queryArguments": {
+                  "invocation_id": {
+                    "source": "invocation_id"
+                  },
+                  "line_item_id": {
+                    "source": "action_argument",
+                    "path": "line_item_id"
+                  }
+                },
+                "committedWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "committed"
+                    }
+                  }
+                ],
+                "absentWhen": [
+                  {
+                    "resultPath": "invocation_id",
+                    "equals": {
+                      "source": "invocation_id"
+                    }
+                  },
+                  {
+                    "resultPath": "terminal",
+                    "equals": {
+                      "source": "literal",
+                      "value": "absent"
+                    }
+                  }
+                ],
+                "authoritativeResultPath": "result",
+                "maxProofAttempts": 3
+              }
+            }
+          ],
+          "checkpoint": true,
+          "on_failure": "membership_return.human_handoff",
+          "steps": [
+            {
+              "id": "notify",
+              "label": "Submit label notification",
+              "instructions": "Submit the return-label notification. If accepted is true, say accepted for sending, not delivered. Do not claim a refund or process another item under this completed item evidence.",
+              "tools": ["submit_return_label_notification"],
+              "required_outputs": ["notification_accepted"],
+              "output_bindings": [
+                {
+                  "output": "notification_accepted",
+                  "tool": "submit_return_label_notification",
+                  "result_path": "accepted",
+                  "value_type": "boolean"
+                }
+              ],
+              "action_policies": [
+                {
+                  "tool": "submit_return_label_notification",
+                  "max_calls": 1,
+                  "idempotency": "per_arguments",
+                  "effect": "write"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "item_not_eligible",
+          "label": "Item is not eligible",
+          "instructions": "Explain the exact policy reason returned by the tool. Do not create a return. Offer human review.",
+          "entry": false
+        },
+        {
+          "id": "done",
+          "label": "Confirm completed work",
+          "instructions": "Summarize only durable completed actions and accepted notification submissions. Do not claim a refund, delivery, or review outcome that is not in authoritative results.",
+          "entry": false
+        },
+        {
+          "id": "human_handoff",
+          "label": "Safe human handoff",
+          "instructions": "Do not disclose unverified membership or order data. Summarize only verified facts, then offer contact_support or request_recall.",
+          "entry": false
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Something else",
+      "kind": "fallback",
+      "context": "The request is outside configured membership and returns workflows.",
+      "support_number": "+15550000000"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "membership_return",
+      "label": "Membership and returns"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "label": "Other"
+    }
+  ]
+}
