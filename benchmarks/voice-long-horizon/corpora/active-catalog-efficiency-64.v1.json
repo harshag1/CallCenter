@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "corpus_id": "active-catalog-efficiency-64.v1",
+  "description": "A deterministic horizontal voice-agent corpus: eight sequential workflow phases with eight unique tools each.",
+  "groups": [
+    {
+      "id": "identity",
+      "label": "Identity and consent",
+      "context": "Establish identity and consent before disclosing or changing protected account state.",
+      "tools": [
+        { "logical_name": "lookup_customer_profile", "description": "Look up the customer profile by a caller-supplied reference.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "list_verification_methods", "description": "List verification methods allowed for this customer and channel.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "check_identity_match", "description": "Check whether supplied verification evidence matches the customer record.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "inspect_consent_status", "description": "Inspect the caller's current consent status for the requested operation.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "record_verification", "description": "Record a completed identity-verification decision with caller confirmation.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "update_contact_details", "description": "Update verified contact details after explicit caller confirmation.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "lock_customer_profile", "description": "Lock a customer profile when identity compromise is suspected.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "create_identity_review", "description": "Create a human identity-review case and deliver its reference.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "membership",
+      "label": "Membership",
+      "context": "Explain and modify membership only after the identity phase has completed.",
+      "tools": [
+        { "logical_name": "lookup_membership", "description": "Look up the caller's current membership record.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "list_membership_plans", "description": "List membership plans available to the verified caller.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "check_membership_benefits", "description": "Check benefits and restrictions for a selected membership plan.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "quote_membership_renewal", "description": "Quote the exact renewal price and term without changing membership.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "renew_membership", "description": "Renew the verified membership after explicit price and term confirmation.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "pause_membership", "description": "Pause the verified membership for the confirmed period.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "change_membership_plan", "description": "Change the verified membership to the confirmed replacement plan.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_membership_receipt", "description": "Deliver the membership-change receipt to a verified destination.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "billing",
+      "label": "Billing",
+      "context": "Explain charges before collecting money or changing a payment arrangement.",
+      "tools": [
+        { "logical_name": "lookup_invoice", "description": "Look up a specific invoice for the verified account.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "list_recent_charges", "description": "List recent charges within a caller-selected time window.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "explain_charge", "description": "Retrieve authoritative line-item evidence for a disputed charge.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "quote_payment_plan", "description": "Quote eligible payment-plan terms without enrolling the caller.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "update_payment_method", "description": "Replace the account payment method after explicit confirmation.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "collect_payment", "description": "Collect the explicitly confirmed payment amount exactly once.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "create_payment_plan", "description": "Create the selected payment plan after confirming all terms.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_billing_receipt", "description": "Deliver a billing receipt to a verified destination.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "orders",
+      "label": "Orders and fulfillment",
+      "context": "Locate and explain the order before making fulfillment changes.",
+      "tools": [
+        { "logical_name": "locate_order", "description": "Locate an order associated with the verified caller.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "list_order_items", "description": "List items and quantities on the selected order.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "check_fulfillment_status", "description": "Check authoritative warehouse and carrier fulfillment status.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "quote_delivery_window", "description": "Quote the current expected delivery window without changing routing.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "update_shipping_address", "description": "Update the shipping address when fulfillment policy allows it.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "reroute_shipment", "description": "Reroute the selected shipment after confirming destination and cost.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "cancel_order", "description": "Cancel an eligible order after explicit irreversible-action confirmation.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_tracking_update", "description": "Deliver the latest tracking information to a verified destination.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "returns",
+      "label": "Returns and refunds",
+      "context": "Evaluate return eligibility before creating a return or promising a refund.",
+      "tools": [
+        { "logical_name": "lookup_return_policy", "description": "Look up the return policy pinned to the selected order and item.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "check_return_eligibility", "description": "Check item, timing, and condition evidence for return eligibility.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "list_return_methods", "description": "List return methods allowed for this eligible item.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "estimate_refund", "description": "Estimate refund amount and timing without creating a return.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "create_return", "description": "Create the confirmed return exactly once for an eligible item.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "issue_return_label", "description": "Issue the return label for the already-created return.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "schedule_return_pickup", "description": "Schedule the confirmed carrier pickup window for the return.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_return_confirmation", "description": "Deliver the return confirmation and receipt to a verified destination.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "scheduling",
+      "label": "Scheduling",
+      "context": "Check availability and constraints before changing an appointment.",
+      "tools": [
+        { "logical_name": "list_appointments", "description": "List appointments belonging to the verified caller.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "check_availability", "description": "List appointment times matching the requested window and service.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "inspect_provider_constraints", "description": "Check provider, location, and service constraints for a proposed time.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "quote_appointment_options", "description": "Quote appointment options and fees without reserving a slot.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "book_appointment", "description": "Book the explicitly confirmed appointment slot exactly once.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "reschedule_appointment", "description": "Move an appointment to the explicitly confirmed replacement slot.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "cancel_appointment", "description": "Cancel the selected appointment after confirming any consequences.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_appointment_reminder", "description": "Deliver appointment details to a verified destination.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "communications",
+      "label": "Communications",
+      "context": "Use only verified channels and preserve the caller's language and timing preferences.",
+      "tools": [
+        { "logical_name": "verify_contact_channel", "description": "Verify whether the selected contact channel may receive this message.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "inspect_delivery_status", "description": "Inspect delivery status for a previously sent communication.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "list_supported_languages", "description": "List languages supported for the selected communication channel.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "check_callback_window", "description": "Check callback windows allowed by policy and caller preferences.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "send_email", "description": "Send the confirmed message to a verified email destination.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "send_sms", "description": "Send the confirmed message to a verified SMS destination.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "schedule_callback", "description": "Schedule a callback in the confirmed policy-compliant window.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "transfer_call", "description": "Transfer the live call to the confirmed queue or specialist.", "effect": "write", "schema_template": "delivery" }
+      ]
+    },
+    {
+      "id": "escalation",
+      "label": "Support and escalation",
+      "context": "Gather current evidence before creating or escalating a support case.",
+      "tools": [
+        { "logical_name": "search_knowledge", "description": "Search approved support knowledge for the caller's issue.", "effect": "read", "schema_template": "subject_lookup" },
+        { "logical_name": "inspect_case_history", "description": "Inspect the verified caller's relevant prior support cases.", "effect": "read", "schema_template": "filtered_list" },
+        { "logical_name": "check_service_health", "description": "Check current service health for the affected product or region.", "effect": "read", "schema_template": "evidence_check" },
+        { "logical_name": "list_escalation_queues", "description": "List eligible escalation queues and current service expectations.", "effect": "read", "schema_template": "quote" },
+        { "logical_name": "create_support_case", "description": "Create a support case containing the confirmed issue summary.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "add_case_note", "description": "Add a confirmed structured note to the active support case.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "page_on_call_specialist", "description": "Page the on-call specialist after the escalation criteria are met.", "effect": "write", "schema_template": "mutation" },
+        { "logical_name": "handoff_to_human", "description": "Hand off the caller and durable context to the selected human queue.", "effect": "write", "schema_template": "delivery" }
+      ]
+    }
+  ]
+}
