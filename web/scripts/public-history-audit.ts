@@ -25,6 +25,7 @@ export const PUBLIC_HISTORY_SECRET_PATTERNS = PUBLIC_RELEASE_SECRET_PATTERNS;
 
 const DEFAULT_HISTORY_ALLOWLIST_PATH = ".security/public-history-secret-audit-allowlist.json";
 const MAX_HISTORY_ALLOWLIST_BYTES = 64 * 1024;
+const SYNTHETIC_BENCHMARK_FIXTURE_ROOT = "benchmarks/voice-long-horizon/fixtures/";
 
 export const DEFAULT_PUBLIC_HISTORY_LIMITS = Object.freeze({
   maxReachableCommits: 10_000,
@@ -99,15 +100,26 @@ function exactObjectKeys(value: Record<string, unknown>, expected: readonly stri
     && actual.every((key, index) => key === orderedExpected[index]);
 }
 
-function safeHistoryRepoPath(value: unknown, allowlistPath: string): value is string {
+function safeHistoryRepoPath(
+  value: unknown,
+  allowlistPath: string,
+  patternClass: unknown,
+): value is string {
   if (typeof value !== "string" || value.length < 1 || value.length > 512) return false;
   if (isAbsolute(value) || value.includes("\0") || value.includes("\\")) return false;
   const parts = value.split("/");
   if (parts.some((part) => part.length === 0 || part === "." || part === "..")) return false;
   if (value === allowlistPath || safeReportedPath(value) !== value) return false;
   const pathClasses = sensitivePathClasses(value);
-  return !pathClasses.includes("recording_or_transcript_data")
-    && !pathClasses.includes("customer_or_runtime_data");
+  if (pathClasses.includes("customer_or_runtime_data")) return false;
+  if (!pathClasses.includes("recording_or_transcript_data")) return true;
+  // Public benchmark fixtures are intentionally classified as recording-like
+  // data even when they contain only deterministic non-speech calibration
+  // bytes. Permit only an exact blob/path/class grant inside the dedicated
+  // synthetic fixture root; all other recording/customer paths remain
+  // ineligible for history allowlisting and path-redacted in reports.
+  return patternClass === "recording_or_transcript_data"
+    && value.startsWith(SYNTHETIC_BENCHMARK_FIXTURE_ROOT);
 }
 
 function loadHistoryAllowlist(repoRoot: string, relativePath: string): LoadedHistoryAllowlist {
@@ -152,9 +164,10 @@ function loadHistoryAllowlist(repoRoot: string, relativePath: string): LoadedHis
     throw new Error("public history audit allowlist is malformed");
   }
 
-  const validClasses = new Set<string>(
-    PUBLIC_RELEASE_SECRET_PATTERNS.map((rule) => rule.patternClass)
-  );
+  const validClasses = new Set<string>([
+    ...PUBLIC_RELEASE_SECRET_PATTERNS.map((rule) => rule.patternClass),
+    ...PUBLIC_RELEASE_SENSITIVE_PATH_CLASSES,
+  ]);
   const ids = new Set<string>();
   const grants = new Set<string>();
   const entries: HistoryAllowlistEntry[] = [];
@@ -179,7 +192,7 @@ function loadHistoryAllowlist(repoRoot: string, relativePath: string): LoadedHis
     ) {
       throw new Error("public history audit allowlist has an invalid blob oid");
     }
-    if (!safeHistoryRepoPath(entry.path, relativePath)) {
+    if (!safeHistoryRepoPath(entry.path, relativePath, entry.pattern_class)) {
       throw new Error("public history audit allowlist has an invalid path");
     }
     if (typeof entry.pattern_class !== "string" || !validClasses.has(entry.pattern_class)) {
@@ -203,7 +216,7 @@ function loadHistoryAllowlist(repoRoot: string, relativePath: string): LoadedHis
       id: entry.id,
       blob_oid: entry.blob_oid,
       path: entry.path,
-      pattern_class: entry.pattern_class as PublicReleaseSecretPatternClass,
+      pattern_class: entry.pattern_class as PublicHistoryAllowlistableClass,
       reason: entry.reason,
     }));
   }
@@ -266,9 +279,13 @@ type HistoryAllowlistEntry = Readonly<{
   id: string;
   blob_oid: string;
   path: string;
-  pattern_class: PublicReleaseSecretPatternClass;
+  pattern_class: PublicHistoryAllowlistableClass;
   reason: string;
 }>;
+
+type PublicHistoryAllowlistableClass =
+  | PublicReleaseSecretPatternClass
+  | typeof PUBLIC_RELEASE_SENSITIVE_PATH_CLASSES[number];
 
 type LoadedHistoryAllowlist = Readonly<{
   path: string;
@@ -643,7 +660,11 @@ export function auditReachableGitHistory(
       if (!match) throw new Error("public history audit received malformed tree metadata");
       const [, mode, type, oid, sizeText, path] = match;
       const pathFindings = [...sensitivePathClasses(path), ...secretPatternClasses(path)];
-      for (const pathClass of pathFindings) addFinding(treeRoot, path, pathClass);
+      const allowlistableBlobOid =
+        type === "blob" && mode !== "120000" && sizeText !== "-" ? oid : null;
+      for (const pathClass of pathFindings) {
+        addFinding(treeRoot, path, pathClass, allowlistableBlobOid);
+      }
       if (mode === "120000") {
         complete = false;
         addFinding(treeRoot, path, "historical_symlink_not_publishable");

@@ -143,6 +143,61 @@ describe("path-only public history audit", () => {
     expect(() => auditReachableGitHistory(repo)).toThrow(/allowlist is malformed/);
   });
 
+  it("allows only exact recording-class grants under the synthetic benchmark fixture root", () => {
+    const repo = temporaryRepo();
+    const fixturePath =
+      "benchmarks/voice-long-horizon/fixtures/transport-smoke-v1/turn_01.pcm16le-mono-16000.pcm";
+    mkdirSync(join(repo, "benchmarks/voice-long-horizon/fixtures/transport-smoke-v1"), {
+      recursive: true,
+    });
+    writeFileSync(join(repo, fixturePath), Buffer.from([0, 0, 1, 0, 255, 255, 0, 0]));
+    execFileSync("git", ["add", fixturePath], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "add deterministic transport fixture"], { cwd: repo });
+    const blobOid = execFileSync("git", ["rev-parse", `HEAD:${fixturePath}`], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    const exactGrant = {
+      id: "synthetic-transport-smoke-pcm",
+      blob_oid: blobOid,
+      path: fixturePath,
+      pattern_class: "recording_or_transcript_data",
+      reason: "Deterministic non-speech transport calibration bytes with an exact content-addressed grant.",
+    };
+
+    writeHistoryAllowlist(repo, [exactGrant]);
+    const allowed = auditReachableGitHistory(repo);
+    expect(allowed).toMatchObject({
+      complete: true,
+      pass: true,
+      finding_count: 0,
+      allowed_finding_count: 1,
+      allowlist: {
+        applied_grant_count: 1,
+        unused_grant_ids: [],
+      },
+    });
+    expect(allowed.allowed_findings[0]).toMatchObject({
+      pattern_class: "recording_or_transcript_data",
+      blob_oid: blobOid,
+      allowlist_id: exactGrant.id,
+    });
+    expect(allowed.allowed_findings[0]?.path).toMatch(/^\[REDACTED_PATH:[0-9a-f]{16}\]$/);
+    expect(JSON.stringify(allowed)).not.toContain(fixturePath);
+
+    writeHistoryAllowlist(repo, [{
+      ...exactGrant,
+      path: "recordings/turn_01.pcm",
+    }]);
+    expect(() => auditReachableGitHistory(repo)).toThrow(/invalid path/);
+
+    writeHistoryAllowlist(repo, [{
+      ...exactGrant,
+      pattern_class: "provider_secret_assignment",
+    }]);
+    expect(() => auditReachableGitHistory(repo)).toThrow(/invalid path/);
+  });
+
   it("detects common encodings without returning either encoded or decoded values", () => {
     const repo = temporaryRepo();
     const decoded = syntheticOpenAiToken("B");
