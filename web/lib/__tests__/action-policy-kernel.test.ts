@@ -115,4 +115,30 @@ describe("action policy kernel", () => {
       facts: [{ ...input().facts[0], observed_at: "2026-07-21T12:00:01.000Z" }],
     })).toMatchObject({ decision: "deny", reason: "required_evidence_missing" });
   });
+
+  it("enforces numeric business limits without model interpretation", () => {
+    const limitPolicy = {
+      schema_version: 1,
+      id: "refund.policy",
+      version: "1",
+      default_decision: "deny",
+      actions: [{
+        action: "issue_refund",
+        effect: "write",
+        require_all: [
+          { kind: "argument", path: "amount", operator: "greater_than", value: 0 },
+          { kind: "argument", path: "amount", operator: "less_than_or_equal", value: 250 },
+        ],
+        deny_if_any: [],
+        postconditions: [],
+        provider_visible_result_fields: [],
+      }],
+    } as const;
+    const base = { ...input(), policy: limitPolicy, action: "issue_refund", prior_call_count: 0 };
+    expect(evaluatePreDispatch({ ...base, arguments: { amount: 250 } })).toMatchObject({ decision: "allow" });
+    expect(evaluatePreDispatch({ ...base, arguments: { amount: 250.01 } })).toMatchObject({
+      decision: "deny", reason: "required_evidence_missing",
+    });
+    expect(evaluatePreDispatch({ ...base, arguments: { amount: "250" } })).toMatchObject({ decision: "deny" });
+  });
 });

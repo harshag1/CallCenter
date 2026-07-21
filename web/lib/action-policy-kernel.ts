@@ -14,7 +14,11 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export type PolicyAuthority = "caller" | "tool" | "policy" | "operator" | "system";
 
 function validateComparison(
-  predicate: Readonly<{ operator: "exists" | "equals" | "not_equals" | "in"; value?: Json }>,
+  predicate: Readonly<{
+    operator: "exists" | "equals" | "not_equals" | "in" |
+      "less_than" | "less_than_or_equal" | "greater_than" | "greater_than_or_equal";
+    value?: Json;
+  }>,
   ctx: z.RefinementCtx,
 ): void {
   if (predicate.operator !== "exists" && predicate.value === undefined) {
@@ -23,12 +27,21 @@ function validateComparison(
   if (predicate.operator === "in" && !Array.isArray(predicate.value)) {
     ctx.addIssue({ code: "custom", path: ["value"], message: "in requires an array" });
   }
+  if (["less_than", "less_than_or_equal", "greater_than", "greater_than_or_equal"].includes(predicate.operator) &&
+      typeof predicate.value !== "number") {
+    ctx.addIssue({ code: "custom", path: ["value"], message: "ordered comparison requires a finite number" });
+  }
 }
+
+const ComparisonOperatorSchema = z.enum([
+  "exists", "equals", "not_equals", "in",
+  "less_than", "less_than_or_equal", "greater_than", "greater_than_or_equal",
+]);
 
 const FactPredicateSchema = z.object({
   kind: z.literal("fact"),
   fact_id: z.string().regex(SAFE_ID),
-  operator: z.enum(["exists", "equals", "not_equals", "in"]),
+  operator: ComparisonOperatorSchema,
   value: JsonSchema.optional(),
   authorities: z.array(z.enum(["caller", "tool", "policy", "operator", "system"]))
     .min(1).max(5).optional(),
@@ -38,7 +51,7 @@ const FactPredicateSchema = z.object({
 const ArgumentPredicateSchema = z.object({
   kind: z.literal("argument"),
   path: z.string().regex(/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){0,7}$/),
-  operator: z.enum(["exists", "equals", "not_equals", "in"]),
+  operator: ComparisonOperatorSchema,
   value: JsonSchema.optional(),
 }).strict().superRefine(validateComparison);
 
@@ -172,13 +185,19 @@ function valueAtPath(root: unknown, path: string): unknown {
   return value;
 }
 
-function compare(actual: unknown, operator: "exists" | "equals" | "not_equals" | "in", expected?: Json): boolean {
+function compare(actual: unknown, operator: z.infer<typeof ComparisonOperatorSchema>, expected?: Json): boolean {
   if (operator === "exists") return actual !== undefined;
   const same = actual !== undefined && canonicalJson(actual) === canonicalJson(expected);
   if (operator === "equals") return same;
   if (operator === "not_equals") return actual !== undefined && !same;
-  return Array.isArray(expected) && expected.some((candidate) =>
+  if (operator === "in") return Array.isArray(expected) && expected.some((candidate) =>
     actual !== undefined && canonicalJson(actual) === canonicalJson(candidate));
+  if (typeof actual !== "number" || typeof expected !== "number" ||
+      !Number.isFinite(actual) || !Number.isFinite(expected)) return false;
+  if (operator === "less_than") return actual < expected;
+  if (operator === "less_than_or_equal") return actual <= expected;
+  if (operator === "greater_than") return actual > expected;
+  return actual >= expected;
 }
 
 function evaluatePredicate(
