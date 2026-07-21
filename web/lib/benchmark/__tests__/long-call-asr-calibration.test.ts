@@ -49,6 +49,8 @@ describe("long-call ASR calibration", () => {
       .toEqual(normalizeLongCallAsrText("A seventy-one, C H E M three eighteen, H Y D fourteen"));
     expect(normalizeLongCallAsrText("one hundred fifty minutes"))
       .toEqual(normalizeLongCallAsrText("150 minutes"));
+    expect(normalizeLongCallAsrText("fifty-two percent"))
+      .toEqual(normalizeLongCallAsrText("52%"));
     expect(normalizeLongCallAsrText("M L R two zero four eight"))
       .toEqual(normalizeLongCallAsrText("MLR-2048"));
     expect(wordErrorCounts(["a", "b", "c"], ["a", "x", "c", "d"]))

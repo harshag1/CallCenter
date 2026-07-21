@@ -70,15 +70,16 @@ type SemanticSlot = Readonly<{
   family: LongCallFamily;
   kind: "corrected_identifier" | "numeric_limit";
   canonicalText: string;
+  aliases?: readonly string[];
 }>;
 
 export const LONG_CALL_ASR_SEMANTIC_SLOTS: readonly SemanticSlot[] = Object.freeze([
   Object.freeze({ id: "museum.corrected_crate", family: "museum", kind: "corrected_identifier", canonicalText: "A 71" }),
-  Object.freeze({ id: "museum.humidity_limit", family: "museum", kind: "numeric_limit", canonicalText: "52 percent" }),
+  Object.freeze({ id: "museum.humidity_limit", family: "museum", kind: "numeric_limit", canonicalText: "52 percent", aliases: Object.freeze(["52%"])}),
   Object.freeze({ id: "campus.corrected_assessment", family: "campus", kind: "corrected_identifier", canonicalText: "CHEM 318 practical" }),
   Object.freeze({ id: "campus.duration_limit", family: "campus", kind: "numeric_limit", canonicalText: "150 minutes" }),
   Object.freeze({ id: "water.corrected_site", family: "water", kind: "corrected_identifier", canonicalText: "HYD 14 daycare" }),
-  Object.freeze({ id: "water.threshold_limit", family: "water", kind: "numeric_limit", canonicalText: "10 parts per billion" }),
+  Object.freeze({ id: "water.threshold_limit", family: "water", kind: "numeric_limit", canonicalText: "10 parts per billion", aliases: Object.freeze(["10 ppb"]) }),
 ]);
 
 const ONES: Readonly<Record<string, number>> = Object.freeze({
@@ -146,6 +147,7 @@ export function normalizeLongCallAsrText(input: string): readonly string[] {
     .replace(/\p{Mark}/gu, "")
     .toLowerCase()
     .replace(/&/gu, " and ")
+    .replace(/%/gu, " percent ")
     .replace(/[’']/gu, "")
     .replace(/[-‐‑‒–—]/gu, " ")
     .replace(/([a-z])([0-9])/giu, "$1 $2")
@@ -276,9 +278,9 @@ export function scoreLongCallAsrCalibration(input: Readonly<{
     const hypothesisTokens = normalizeLongCallAsrText(transcript?.transcript ?? "");
     const wordErrors = wordErrorCounts(referenceTokens, hypothesisTokens);
     const slots = LONG_CALL_ASR_SEMANTIC_SLOTS.filter((slot) => slot.family === fixture.family).map((slot) => {
-      const tokens = normalizeLongCallAsrText(slot.canonicalText);
-      const expected = containsSequence(referenceTokens, tokens);
-      const detected = containsSequence(hypothesisTokens, tokens);
+      const representations = [slot.canonicalText, ...(slot.aliases ?? [])].map(normalizeLongCallAsrText);
+      const expected = representations.some((tokens) => containsSequence(referenceTokens, tokens));
+      const detected = representations.some((tokens) => containsSequence(hypothesisTokens, tokens));
       return Object.freeze({ slotId: slot.id, kind: slot.kind, expected, detected });
     });
     return Object.freeze({
