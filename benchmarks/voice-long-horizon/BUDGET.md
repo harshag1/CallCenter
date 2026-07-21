@@ -5,10 +5,11 @@
 - Authorized absolute ceiling: **$1,000.00 USD**
 - Maximum automatically schedulable spend: **$900.00 USD**
 - Protected contingency reserve: **$100.00 USD**
-- Current operational ceiling: **$15.00 USD**
-- Recorded paid voice-provider spend: **$0.00 USD**
+- Current operational ceiling: **$270.00 USD**
+- Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
+- Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$3.807615 USD**
-- Recorded total program cash spend: **$3.807615 USD**
+- Recorded total program cash spend: **unreconciled**
 
 The authorization is a ceiling, not a target. No new provider session may be scheduled once cumulative provider spend plus active reservations reaches $900. The final $100 is protected against metering lag, in-flight overrun, reconciliation, or an explicitly approved and documented contingency; the runner must never consume it automatically. Auxiliary spend is excluded from provider/model evidence accounting but still counts toward the user's $1,000 total cash authorization when reserve use is considered.
 
@@ -83,10 +84,13 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 | Date (PT) | Run/group | Provider | Condition | Reserved | Estimated final | Status | Evidence |
 |---|---|---|---|---:|---:|---|---|
 | 2026-07-10 | Research setup and documentation | none | offline | $0.00 | $0.00 | complete | Protocol, provider, and prior-art audit |
+| 2026-07-21 | Prior usefulness canaries v1-v14 | mixed | mixed | unavailable | $6.878733 | retained runner estimates; billing unreconciled | [Historical estimate audit](HISTORICAL_ESTIMATED_SPEND_AUDIT.json) |
+| 2026-07-21 | HACC-LC3-v1 frozen schedule | OpenAI, Gemini, xAI | paired native-memory / HACC | $270.00 maximum | pending | operational ceiling released; no HACC-LC3 socket opened at entry time | [Protocol](HACC_LC3_PROTOCOL.md) |
 
-- **Cumulative paid provider spend: $0.00**
+- **Retained estimated provider cost before HACC-LC3: $6.878733**
+- **Provider-billed cost: unreconciled**
 - **Active reservations: $0.00**
-- **Remaining under current operational ceiling: $15.00**
+- **Remaining HACC-LC3 reservation authority under current operational ceiling: $270.00 before sockets**
 - **Remaining automatically schedulable: $900.00**
 - **Protected reserve: $100.00**
 
