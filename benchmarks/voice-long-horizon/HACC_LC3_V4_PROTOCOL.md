@@ -1,8 +1,8 @@
 # HACC-LC3-v4 admissibility-frontier mechanism validation
 
-Status: **design amendment in implementation; no HACC-LC3-v4 provider socket
-may open until this document is marked frozen against a clean source commit and
-immutable experiment-plan hash.**
+Status: **frozen before HACC-LC3-v4 outcome access. The next clean commit that
+contains this document is the source boundary for one newly prepared immutable
+experiment plan. No paid episode may open without the gates below.**
 
 ## Why v4 exists
 
@@ -90,9 +90,13 @@ sent, an episode is never selectively retried. A replacement run after a
 pre-audio external qualification failure receives a new run ID and preserves
 the failed qualification receipt.
 
-Before the plan can be frozen, every provider must pass a fresh no-audio
-qualification proving authentication, quota, exact model/session acceptance,
-voice, codec, turn control, and the single provider-visible gateway function.
+After the plan is frozen and before paid execution, all 18 exact session
+configurations must pass a fresh no-audio setup qualification. It catches
+setup-time authentication, quota/access, model, and configuration failures;
+binds the credential set, plan, source commit, and configuration matrix; and
+records whether configuration evidence is an exact echo (OpenAI), a partial
+echo (xAI), or setup acceptance without field echo (Gemini). It does not claim
+to prove response-time quota or unacknowledged provider fields.
 
 ## Endpoints
 
