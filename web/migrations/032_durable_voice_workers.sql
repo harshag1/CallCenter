@@ -372,15 +372,37 @@ BEGIN
      )
      OR authority - ARRAY[
        'v','conversationId','organizationId','agentId','agentVersion','source',
-       'sourceCallId','sourceWorkerId','capabilityManifestSha256'
+       'sourceCallId','sourceWorkerId','conversationHeadSha256','conversationRevision',
+       'goalId','policyEpoch','factDependencies','capabilityManifestSha256'
      ]::text[] <> '{}'::jsonb
-     OR authority->>'v' <> '1'
-     OR authority->>'conversationId' <> conversation.id::text
-     OR authority->>'organizationId' <> conversation.org_id::text
-     OR authority->>'agentId' <> conversation.agent_id::text
+     OR COALESCE(authority->>'v','') <> '1'
+     OR COALESCE(authority->>'conversationId','') <> conversation.id::text
+     OR COALESCE(authority->>'organizationId','') <> conversation.org_id::text
+     OR COALESCE(authority->>'agentId','') <> conversation.agent_id::text
      OR (authority->>'agentVersion')::integer <> conversation.agent_version
-     OR authority->>'capabilityManifestSha256' <> manifest_sha256
-     OR manifest->>'mode' <> 'read_only' THEN
+     OR COALESCE(authority->>'conversationHeadSha256','') !~ '^[a-f0-9]{64}$'
+     OR COALESCE(jsonb_typeof(authority->'conversationRevision'),'') <> 'number'
+     OR (authority->>'conversationRevision')::numeric < 0
+     OR (authority->>'conversationRevision')::numeric <> trunc((authority->>'conversationRevision')::numeric)
+     OR COALESCE(authority->>'goalId','') !~ '^[a-z][a-z0-9_.:-]{1,127}$'
+     OR COALESCE(jsonb_typeof(authority->'policyEpoch'),'') <> 'number'
+     OR (authority->>'policyEpoch')::numeric < 0
+     OR (authority->>'policyEpoch')::numeric <> trunc((authority->>'policyEpoch')::numeric)
+     OR COALESCE(jsonb_typeof(authority->'factDependencies'),'') <> 'array'
+     OR jsonb_array_length(authority->'factDependencies') > 64
+     OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements(authority->'factDependencies') dependency
+       WHERE jsonb_typeof(dependency) <> 'object'
+          OR dependency - ARRAY['key','revision']::text[] <> '{}'::jsonb
+          OR COALESCE(dependency->>'key','') !~ '^[a-z][a-z0-9_.:-]{1,127}$'
+          OR COALESCE(jsonb_typeof(dependency->'revision'),'') <> 'number'
+          OR (dependency->>'revision')::numeric < 1
+          OR (dependency->>'revision')::numeric <> trunc((dependency->>'revision')::numeric)
+     )
+     OR (SELECT count(*) FROM jsonb_array_elements(authority->'factDependencies')) <>
+        (SELECT count(DISTINCT dependency->>'key') FROM jsonb_array_elements(authority->'factDependencies') dependency)
+     OR COALESCE(authority->>'capabilityManifestSha256','') <> manifest_sha256
+     OR COALESCE(manifest->>'mode','') <> 'read_only' THEN
     RAISE EXCEPTION USING ERRCODE='P0001', MESSAGE='voice_worker_spawn_authority_mismatch';
   END IF;
   IF authority->>'source' NOT IN ('voice_call','conversation','worker')

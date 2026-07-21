@@ -8,6 +8,7 @@ export const MAX_VOICE_WORKER_EVENT_BYTES = 32 * 1024;
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const CAPABILITY = /^[a-z][a-z0-9_.-]{1,63}$/;
+const STATE_KEY = /^[a-z][a-z0-9_.:-]{1,127}$/;
 
 function normalizeJson(value: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -92,6 +93,11 @@ export const VoiceWorkerInputSchema = z.object({
   deadlineAt: z.iso.datetime().optional(),
 }).strict();
 
+export const VoiceWorkerFactDependencySchema = z.object({
+  key: z.string().regex(STATE_KEY),
+  revision: z.number().int().positive(),
+}).strict();
+
 export const VoiceWorkerSpawnAuthoritySchema = z.object({
   v: z.literal(1),
   conversationId: z.uuid(),
@@ -101,6 +107,11 @@ export const VoiceWorkerSpawnAuthoritySchema = z.object({
   source: z.enum(["voice_call", "conversation", "worker"]),
   sourceCallId: z.uuid().optional(),
   sourceWorkerId: z.uuid().optional(),
+  conversationHeadSha256: z.string().regex(SHA256),
+  conversationRevision: z.number().int().nonnegative(),
+  goalId: z.string().regex(STATE_KEY),
+  policyEpoch: z.number().int().nonnegative(),
+  factDependencies: z.array(VoiceWorkerFactDependencySchema).max(64),
   capabilityManifestSha256: z.string().regex(SHA256),
 }).strict().superRefine((authority, context) => {
   const sourceMatches =
@@ -110,10 +121,13 @@ export const VoiceWorkerSpawnAuthoritySchema = z.object({
   if (!sourceMatches) {
     context.addIssue({ code: "custom", message: "spawn source must have exactly its corresponding source identity" });
   }
+  if (new Set(authority.factDependencies.map(({ key }) => key)).size !== authority.factDependencies.length) {
+    context.addIssue({ code: "custom", path: ["factDependencies"], message: "fact dependencies must be unique" });
+  }
 });
 
 const VoiceWorkerFactSchema = z.object({
-  key: z.string().trim().min(1).max(128),
+  key: z.string().regex(STATE_KEY),
   value: z.json(),
   confidence: z.number().min(0).max(1),
   citationIds: z.array(z.string().trim().min(1).max(128)).max(32).default([]),

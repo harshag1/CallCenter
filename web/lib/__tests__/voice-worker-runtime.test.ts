@@ -12,6 +12,17 @@ import {
   prepareVoiceWorkerResult,
   prepareVoiceWorkerSpawn,
 } from "../voice-workers/schema";
+import {
+  workerResultConversationPayload,
+  workerSpawnedConversationPayload,
+} from "../voice-workers/conversation-adapter";
+import {
+  appendConversationEvent,
+  createConversationLog,
+  foldConversation,
+  type ConversationEventDraft,
+  type ConversationLog,
+} from "../conversation-kernel";
 
 const conversationId = "8916eb0a-5332-4f4c-a330-746c516e83b9";
 const organizationId = "8916eb0a-5332-4f4c-a330-746c516e83ba";
@@ -34,6 +45,11 @@ function authority(capabilityManifestSha256 = hashVoiceWorkerValue(manifest)) {
     agentVersion: 7,
     source: "voice_call" as const,
     sourceCallId: callId,
+    conversationHeadSha256: "a".repeat(64),
+    conversationRevision: 7,
+    goalId: "membership_renewal",
+    policyEpoch: 3,
+    factDependencies: [{ key: "membership_tier", revision: 1 }],
     capabilityManifestSha256,
   };
 }
@@ -87,6 +103,22 @@ describe("durable read-only voice worker schemas", () => {
     })).toThrow(/does not match/);
   });
 
+  it("binds goal, policy, and dependency revisions in host-authored spawn authority", () => {
+    const prepared = prepareVoiceWorkerSpawn({ authority: authority(), workerInput, capabilityManifest: manifest });
+    expect(prepared.authority).toMatchObject({
+      conversationHeadSha256: "a".repeat(64), conversationRevision: 7,
+      goalId: "membership_renewal", policyEpoch: 3,
+      factDependencies: [{ key: "membership_tier", revision: 1 }],
+    });
+    expect(() => prepareVoiceWorkerSpawn({
+      authority: { ...authority(), factDependencies: [
+        { key: "membership_tier", revision: 1 }, { key: "membership_tier", revision: 1 },
+      ] },
+      workerInput,
+      capabilityManifest: manifest,
+    })).toThrow(/unique/);
+  });
+
   it("rejects ambiguous spawn sources and non-origin network URLs", () => {
     expect(() => prepareVoiceWorkerSpawn({
       authority: { ...authority(), sourceWorkerId: agentId },
@@ -130,6 +162,74 @@ describe("durable read-only voice worker schemas", () => {
   });
 });
 
+describe("durable worker to conversation-log adapter", () => {
+  const append = (log: ConversationLog, eventId: string, payload: ConversationEventDraft["payload"]) =>
+    appendConversationEvent(log, { eventId, occurredAtMs: log.events.length + 1, payload });
+
+  it("admits current cited facts but never promotes a proposed action", () => {
+    const preparedResult = prepareVoiceWorkerResult(result);
+    const worker = {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83bd",
+      conversationId,
+      authority: authority(),
+      input: workerInput,
+      resultSha256: preparedResult.resultSha256,
+    };
+    let log = createConversationLog(conversationId);
+    log = append(log, "policy-1", { type: "policy.advanced", epoch: 1, invariants: [] });
+    log = append(log, "policy-2", { type: "policy.advanced", epoch: 2, invariants: [] });
+    log = append(log, "policy-3", { type: "policy.advanced", epoch: 3, invariants: [] });
+    log = append(log, "fact-1", {
+      type: "fact.asserted", key: "membership_tier", value: "gold", revision: 1,
+      authority: { kind: "system_of_record", issuer: "crm", evidenceId: "membership-row", issuedAtMs: 1 },
+    });
+    log = append(log, "goal-1", {
+      type: "goal.activated", goalId: "membership_renewal", description: "Renew the membership.",
+    });
+    log = append(log, "worker-1", workerSpawnedConversationPayload(worker));
+    const delivery = workerResultConversationPayload(worker, {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83be",
+      conversationId, workerId: worker.id, result: preparedResult.result,
+      resultSha256: preparedResult.resultSha256,
+    });
+    expect(delivery).not.toHaveProperty("proposedActions");
+    log = append(log, "delivery-1", delivery);
+    expect(foldConversation(log)).toMatchObject({
+      deliveries: [{ status: "accepted" }],
+      acceptedWorkerFacts: [{ key: "renewal_date", value: "2027-01-02" }],
+    });
+  });
+
+  it("lets the kernel defer a correctly signed result after a dependency correction", () => {
+    const preparedResult = prepareVoiceWorkerResult(result);
+    const worker = {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83bd", conversationId,
+      authority: authority(), input: workerInput, resultSha256: preparedResult.resultSha256,
+    };
+    let log = createConversationLog(conversationId);
+    for (let epoch = 1; epoch <= 3; epoch += 1) {
+      log = append(log, `policy-${epoch}`, { type: "policy.advanced", epoch, invariants: [] });
+    }
+    log = append(log, "fact-1", {
+      type: "fact.asserted", key: "membership_tier", value: "gold", revision: 1,
+      authority: { kind: "system_of_record", issuer: "crm", evidenceId: "membership-row-1", issuedAtMs: 1 },
+    });
+    log = append(log, "goal-1", { type: "goal.activated", goalId: "membership_renewal", description: "Renew." });
+    log = append(log, "worker-1", workerSpawnedConversationPayload(worker));
+    log = append(log, "fact-2", {
+      type: "fact.corrected", key: "membership_tier", value: "platinum", expectedRevision: 1, revision: 2,
+      authority: { kind: "system_of_record", issuer: "crm", evidenceId: "membership-row-2", issuedAtMs: 2 },
+    });
+    log = append(log, "delivery-1", workerResultConversationPayload(worker, {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83be", conversationId, workerId: worker.id,
+      result: preparedResult.result, resultSha256: preparedResult.resultSha256,
+    }));
+    expect(foldConversation(log).deliveries.at(-1)).toMatchObject({
+      status: "deferred", reason: "an authoritative dependency fact changed while worker was running",
+    });
+  });
+});
+
 describe("032 durable voice worker migration contract", () => {
   const sql = readFileSync(resolve(process.cwd(), "migrations/032_durable_voice_workers.sql"), "utf8");
 
@@ -147,6 +247,10 @@ describe("032 durable voice worker migration contract", () => {
     expect(sql).toMatch(/capability_manifest->>'mode' = 'read_only'/);
     expect(sql).toMatch(/voice worker spawn authority and input are immutable/);
     expect(sql).toMatch(/authority,authority_sha256,[\s\S]*input_text::jsonb,input_sha256/);
+    for (const field of ["conversationHeadSha256", "conversationRevision", "goalId", "policyEpoch", "factDependencies"]) {
+      expect(sql).toContain(`'${field}'`);
+    }
+    expect(sql).toMatch(/count\(DISTINCT dependency->>'key'\)/);
   });
 
   it("uses atomic leases, pre-dispatch reclaim, and post-dispatch quarantine", () => {
