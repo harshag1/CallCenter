@@ -2,7 +2,7 @@
 
 An open, provider-neutral starting point designed to make long, tool-driven speech-to-speech workflows recoverable and enforceable.
 
-Harsha's Amazing Call Center combines a visual builder, a high-authority builder agent, realtime browser calling, durable call records, extensible tools, datasets, knowledge retrieval, a deterministic Flow v2 runtime, and an experimental multi-goal mission runtime. It is designed for support, sales, intake, scheduling, education, field operations, personal assistants, and other realtime voice experiences—not only call centers.
+Harsha's Amazing Call Center combines a visual builder, a high-authority builder agent, realtime browser calling, durable call records, extensible tools, datasets, knowledge retrieval, a deterministic Flow v2 runtime, and an event-sourced long-conversation kernel. It is designed for support, sales, intake, scheduling, education, field operations, personal assistants, and other realtime voice experiences—not only call centers.
 
 ## Why this exists
 
@@ -23,6 +23,9 @@ The result is a repeatable state machine that still leaves the realtime model fr
 
 - Deep, recursive voice flows with machine-enforced output conditions, cross-topic transitions, failure paths, retries, receipt-bound outputs, checkpoints, and circuit breakers.
 - An experimental [mission runtime](docs/mission-runtime.md) for multi-goal calls, safe detours, proof-carrying obligations, adaptive authority, saga compensation, and state-bound cross-channel continuation when one fixed flow is the wrong abstraction.
+- A provider-neutral [durable conversation kernel](docs/durable-conversation-runtime.md): hash-chained events, authority-stamped fact corrections, suspended/resumable goals, open commitments, policy epochs, stale-worker rejection, and deterministic byte-bounded packets that fail closed on mandatory-state overflow.
+- A deterministic action-policy firewall with argument/fact/receipt predicates, proposal/readback-bound confirmation, revision/epoch invalidation, postcondition quarantine, and provider-visible result projection.
+- A durable read-only worker substrate with immutable capability manifests, exclusive leases, heartbeats, cancellation epochs, crash recovery, structured cited results, append-only evidence, and at-least-once delivery with exactly-once application. It is an integration primitive; the legacy `launch_task` path has not yet been migrated to it.
 - Atomic reserve-before-dispatch action receipts, step/call/argument idempotency policies, stale-call rejection, and explicit indeterminate-outcome recovery.
 - Provider adapters for xAI Voice, OpenAI Realtime, and Gemini Live.
 - Browser calling over WebSocket or WebRTC, plus a bounded, authenticated Twilio Media Streams transport bridge for xAI/OpenAI. The bridge remains development/non-production until release-commit provider, PSTN, load, and crash-loss artifacts exist.
@@ -49,6 +52,7 @@ The repository includes a [long-horizon reliability benchmark](benchmarks/voice-
 - **C1:** in a frozen 18-snapshot census, a representative 64-tool flow exposed eight relevant business tools per active phase, reduced the corresponding canonical business-entry array by a median 87.5094%, rejected flat disclosure above the configured budget, and leaked no tested private authority fields. This measures serialization and containment—not provider token billing, reachability, or model behavior.
 - **C2:** across 1,000 deterministic seeded fault schedules, the intentionally unenforced controller passed 245 while the mission runtime passed 1,000; a separate fixed ToolWorld suite contained 160/160 unsafe schedules. These are synthetic/offline engineering comparisons, not raw voice-model experiments.
 - **C3:** the latest clean useful-task canary recorded 18 scheduled cells and 104 completed voice-to-voice turns. Gemini tied at 2/3 raw and 2/3 harness; xAI tied at 3/3 and 3/3; OpenAI rejected all sessions for quota. This is a null development result with independent audio-semantic scoring still unavailable. See the [sanitized aggregate evidence](benchmarks/voice-long-horizon/evidence/usefulness-live-canary-v14.aggregate.json); raw provider events and utterances are deliberately excluded from the public tree.
+- **Context-substrate evidence:** across 1,000 seeded 500–2,000-turn schedules, a 2,048-byte kernel packet retained 13,000/13,000 registered policy, goal, fact, correction, and commitment units. An equally byte-bounded recent-turn window retained 83/13,000; unbounded history averaged 116,110 bytes. At 1,024 bytes the kernel failed closed on all 1,000 schedules instead of silently dropping control state. This is a deterministic retention comparison, not an STS model result. See [method and limits](benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md).
 - **C4/C5:** unavailable. This repository does not claim that models remember better, drift less, or that the framework outperforms raw OpenAI, xAI, Gemini, or voice agents generally.
 
 See [claim readiness](benchmarks/voice-long-horizon/CLAIM_READINESS_AUDIT.md) and the machine-readable [offline validation artifact](benchmarks/voice-long-horizon/OFFLINE_NUMERICAL_VALIDATION.json) for exact hashes, methods, and limitations.
@@ -58,15 +62,16 @@ See [claim readiness](benchmarks/voice-long-horizon/CLAIM_READINESS_AUDIT.md) an
 ```mermaid
 flowchart LR
   Builder["Builder chat"] --> Versions["Versioned agent definitions"]
-  Versions --> Runtime["Flow v2 or mission runtime"]
+  Versions --> Runtime["Flow v2 and conversation kernel"]
+  Runtime --> Heads["Goals, facts, policy, workers"]
   Runtime --> MCP["Scoped MCP and action gateway"]
   MCP --> Tools["Built-ins, extensions, minted tools"]
   Browser["Browser mic"] --> BrowserAdapter["xAI / OpenAI / Gemini adapter"] --> Runtime
   Twilio["Twilio PSTN"] -. "development transport" .-> Bridge["Authenticated xAI / OpenAI PCMU bridge"] --> MCP
-  Runtime --> DB["Postgres: checkpoints, calls, datasets"]
+  Runtime --> DB["Postgres: checkpoints, calls, workers, evidence"]
 ```
 
-- `web/` — Next.js app, API routes, builder, flow runtime, providers, MCP, data layer, and 31 ordered migrations (`001`–`031`).
+- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 32 ordered migrations (`001`–`032`).
 - `bridge/` — optional standalone Twilio Media Streams bridge. The legacy in-app `/api/bridge` compatibility route is disabled by default and cannot be enabled in production.
 - `examples/` — the tested [deep Flow v2 example pack](examples/flows/README.md) and a multi-goal mission example.
 - `docs/` — architecture, provider, flow, and extension guides.
@@ -191,6 +196,7 @@ Reproduce the checked-in `$0` benchmark claims without opening a provider sessio
 
 ```bash
 npm run benchmark:claims:verify
+npm run benchmark:context-kernel -- --schedules 1000 --seed 1212236611
 npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out ../benchmarks/voice-long-horizon/.local/mission-runtime-local.json
 npm run benchmark:active-catalog -- --out ../benchmarks/voice-long-horizon/.local/active-catalog-local.json
 ```
@@ -212,7 +218,7 @@ The example database URL uses plaintext only for local loopback Docker. Producti
 
 ## Project status
 
-This is an ambitious starting point, not a hosted compliance product. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN is not implemented and requires a tested transcoding bridge. Provider-native resumption is not treated as workflow authority; durable checkpoint recovery is application-owned. The included Twilio bridge is development/non-production for the evidence gaps above. Recording persistence is implemented for browser calls only—neither Twilio bridge path records PSTN audio. Operators must add admission policy, rate limiting, retention, consent, audit, incident response, and jurisdiction-specific controls before a public or consequential deployment.
+This is an ambitious starting point, not a hosted compliance product. The conversation kernel, action-policy kernel, and worker store are implemented and locally tested primitives, but they are not yet one transactionally unified live-call path: Flow v2 remains the production action authority, the old `launch_task` implementation remains live, and worker-result delivery is not yet projected into provider context. Do not describe the architecture target as production integration. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN is not implemented and requires a tested transcoding bridge. Provider-native resumption is not treated as workflow authority; durable checkpoint recovery is application-owned. The included Twilio bridge is development/non-production for the evidence gaps above. Recording persistence is implemented for browser calls only—neither Twilio bridge path records PSTN audio. Operators must add admission policy, rate limiting, retention, consent, audit, incident response, and jurisdiction-specific controls before a public or consequential deployment.
 
 ## Contributing
 

@@ -2,6 +2,18 @@
 
 Status: architecture target, not a production or superiority claim.
 
+## Implementation snapshot
+
+As of July 21, 2026, three independently testable slices exist in the repository:
+
+- `web/lib/conversation-kernel.ts` implements the pure hash-chained log, authority-stamped revisions, suspend/resume goals, commitments, worker-result admission, deterministic projection, and typed `context_overflow` behavior.
+- `web/lib/action-policy-kernel.ts` implements pure revision-bound pre/post action decisions and readback-bound confirmation evidence.
+- migration `032` plus `web/lib/voice-workers/*` implements the production-shaped durable read-only worker queue, leases, crash states, cited results, and inbox application boundary.
+
+They are not yet one production authority. Flow v2 still owns the live action path; the legacy xAI-based `launch_task` remains wired; the pure conversation log has no production store/Flow adapter; and worker inbox delivery is not yet compiled into provider context. The next shared-state gate is to add that one-log adapter and delivery-time policy transaction, then shadow it before replacing any proven Flow behavior.
+
+The checked-in [context retention result](../benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md) measures the pure projector only. HACC-VMR-v1 has no provider effectiveness result.
+
 This document defines the provider-neutral runtime Harsha's Amazing Call Center is building toward for conversations that last longer than one model context, cross provider connections, interleave several goals, enforce consequential-action policy in real time, and launch work that may finish after the caller has moved on or disconnected.
 
 The central design choice is simple: **the provider session is a replaceable speech interface, not the source of truth for the conversation**. One application-owned event log is the write authority. Every useful view of the conversation is a deterministic projection of that log, and every external effect crosses a policy and receipt boundary that the model cannot mint for itself.

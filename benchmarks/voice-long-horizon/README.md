@@ -67,6 +67,7 @@ From `web/`, these commands verify the checked-in numerical claims and regenerat
 
 ```bash
 npm run benchmark:claims:verify
+npm run benchmark:context-kernel -- --schedules 1000 --seed 1212236611
 npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out ../benchmarks/voice-long-horizon/.local/mission-runtime-local.json
 npm run benchmark:active-catalog -- --out ../benchmarks/voice-long-horizon/.local/active-catalog-local.json
 ```
@@ -76,6 +77,7 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 ## Research documents
 
 - [PROTOCOL.md](PROTOCOL.md): scenarios, conditions, endpoints, metrics, and analysis plan
+- [VMR_180_PROTOCOL.md](VMR_180_PROTOCOL.md): prospective three-session, 180-opportunity protocol for corrections, async work, reconnects, and guarded effects; no effectiveness data yet
 - [PREREGISTRATION.md](PREREGISTRATION.md): fields that must be frozen before confirmatory runs
 - [PROVIDERS.md](PROVIDERS.md): July 2026 model, protocol, session, and pricing constraints
 - [PRIOR_ART.md](PRIOR_ART.md): closest systems, benchmarks, and exact claim boundaries
@@ -89,6 +91,7 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 - [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result
 - [DECISION_EVIDENCE.md](DECISION_EVIDENCE.md): claim-by-claim evidence level and the next numerical gate for every retained framework decision
 - [KERNEL_TRANSCRIPT_REPLAY.md](KERNEL_TRANSCRIPT_REPLAY.md): reproducible $0 signed public-transcript and durable-memory replay sensitivity
+- [CONTEXT_KERNEL_RETENTION_V1.md](CONTEXT_KERNEL_RETENTION_V1.md): 1,000-schedule fixed-byte context-substrate retention result and explicit non-model claim boundary
 - [External Fable claim-architecture review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
