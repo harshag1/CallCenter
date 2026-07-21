@@ -50,7 +50,7 @@ The checked JSON artifact is `tool-world-causal-containment.v1.json` (file SHA-2
 
 ## Source and Git provenance
 
-`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `5a54c8534eb1bb74440ee6085d1a19393db22a6c3539a31bf3dd1b6237d8b37d`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `8bdcfdf9b54bc6b8a2b7523b9e457c081c2fef14daa10398fd083985d0f090b9`.
+`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `bb16e69ba3b6185a3fc0c33004be4bd2d6a038ddfc89bff5242014ff7bd02a9e`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `129b912feb6e784b89846f7ae7456207c03dd2fe611f81ef82201126b0cc71a7`.
 
 The provenance capture started from clean commit `c965fb7d04fd580db8034d745bbd4bb34aebfa6f` and tree `8a560886d2d044b35b706e048585fdfbc1dd7576`. All four bound source files match their base blobs exactly; current per-file SHA-256 values and byte lengths bind the tested implementation.
 
