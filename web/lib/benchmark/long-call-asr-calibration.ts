@@ -213,7 +213,7 @@ function containsSequence(haystack: readonly string[], needle: readonly string[]
 }
 
 export function createLongCallAsrCalibrationPlan(plan: FrozenLongCallExperimentPlan): LongCallAsrCalibrationPlan {
-  if (plan.protocolId !== LONG_CALL_PROTOCOL_ID) throw new Error("ASR calibration requires an HACC-LC3-v1 experiment plan");
+  if (plan.protocolId !== LONG_CALL_PROTOCOL_ID) throw new Error("ASR calibration requires an HACC-LC3-v2 experiment plan");
   if (sha256Hex(canonicalJson(plan.fixtures)) !== plan.fixtureManifestSha256) {
     throw new Error("frozen fixture manifest hash mismatch");
   }

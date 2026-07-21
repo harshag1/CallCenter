@@ -170,7 +170,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   const fixtureManifestSha256 = "6".repeat(64);
   const experimentPlanSha256 = "8".repeat(64);
   await writeFile(resolve(root, "experiment-plan.json"), `${canonicalJson({
-    protocolId: "HACC-LC3-v1",
+    protocolId: "HACC-LC3-v2",
     planSha256: experimentPlanSha256,
     fixtureManifestSha256,
   })}\n`);
@@ -221,7 +221,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
       run_id: runId,
       created_at: "2026-07-21T19:00:00.000Z",
       artifacts: descriptors,
-      metadata: { protocol: "HACC-LC3-v1" },
+      metadata: { protocol: "HACC-LC3-v2" },
     });
     const manifestJson = `${canonicalJson(manifest)}\n`;
     await writeFile(resolve(artifactsRoot, "runner-manifest.json"), manifestJson);
@@ -229,7 +229,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   }
   const summary: LongCallSummary = Object.freeze({
     schemaVersion: 1,
-    protocolId: "HACC-LC3-v1",
+    protocolId: "HACC-LC3-v2",
     runId,
     pairId: "lc3-openai-museum-samantha",
     provider: "openai",

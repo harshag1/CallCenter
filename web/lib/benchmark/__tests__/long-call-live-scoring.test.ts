@@ -9,7 +9,7 @@ import {
 function pair(pairId = "pair-1", provider = "openai"): ScheduledLongCallPair {
   const schedule: ScheduledLongCallPair = {
     schema_version: 1,
-    protocol_id: "HACC-LC3-v1",
+    protocol_id: "HACC-LC3-v2",
     pair_id: pairId,
     provider,
     model: `${provider}-realtime-test`,
@@ -49,7 +49,7 @@ function cleanSummary(episodeId: string): NormalizedLongCallRunSummary {
   ];
   const summary: NormalizedLongCallRunSummary = {
     schema_version: 1,
-    protocol_id: "HACC-LC3-v1",
+    protocol_id: "HACC-LC3-v2",
     episode_id: episodeId,
     transport_terminal: true,
     transport_evidence_status: "verified",
@@ -82,7 +82,7 @@ function replaceAssertion(
   };
 }
 
-describe("HACC-LC3-v1 arm-blind live scorer", () => {
+describe("HACC-LC3-v2 arm-blind live scorer", () => {
   it("passes a complete 20-turn control and freezes every component denominator", () => {
     const schedule = pair();
     const score = scoreLongCallEpisode(schedule, schedule.raw_memory_episode_id, cleanSummary(schedule.raw_memory_episode_id));

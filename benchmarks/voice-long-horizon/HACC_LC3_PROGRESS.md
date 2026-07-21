@@ -31,3 +31,14 @@ critical corrected-identifier/numeric-limit false negatives, and zero semantic
 false positives. Every completed run must bind all 20 output PCM files to 20
 ASR receipts and pass the preregistered spoken-semantic rules before it can be
 counted as strict success.
+
+## 2026-07-21 — v1 qualification invalidated; v2 frozen
+
+The first six paid qualification cells were retained but excluded from outcome
+analysis after they exposed a stale Flow-completion acceptance bug and a
+transport/model failure-classification bug. Four cells also demonstrated that
+the clearance-token audio wording was consistently fused with the adjacent
+subject identifier. No v1 cell will be retried or rewritten. The fixes and the
+unchanged design commitments are preregistered in
+`HACC_LC3_V2_AMENDMENT.md`; all v2 provider outcomes remain unavailable at the
+time of that freeze.

@@ -1,7 +1,7 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
 import { exactMcNemarTwoSided } from "./usefulness-scoring";
 
-const RESULT_DOMAIN = "harshas-amazing-call-center/HACC-LC3-v1/result\n";
+const RESULT_DOMAIN = "harshas-amazing-call-center/HACC-LC3-v2/result\n";
 export const LONG_CALL_EXPECTED_TURNS = 20 as const;
 
 export type LongCallCondition = "raw-memory-v1" | "full-harness-v1";
@@ -13,7 +13,7 @@ export type EvidenceStatus = "verified" | "missing" | "unverifiable";
  */
 export type ScheduledLongCallPair = Readonly<{
   schema_version: 1;
-  protocol_id: "HACC-LC3-v1";
+  protocol_id: "HACC-LC3-v2";
   pair_id: string;
   provider: string;
   model: string;
@@ -61,7 +61,7 @@ export type LongCallToolAttempt = Readonly<{
  */
 export type NormalizedLongCallRunSummary = Readonly<{
   schema_version: 1;
-  protocol_id: "HACC-LC3-v1";
+  protocol_id: "HACC-LC3-v2";
   episode_id: string;
   transport_terminal: boolean;
   transport_evidence_status: EvidenceStatus;
@@ -131,7 +131,7 @@ export type ProviderLongCallEffect = Readonly<{
 
 export type LongCallLiveBenchmarkResult = Readonly<{
   schema_version: 1;
-  protocol_id: "HACC-LC3-v1";
+  protocol_id: "HACC-LC3-v2";
   scheduled_pairs: number;
   scheduled_episodes: number;
   observed_episodes: number;
@@ -160,8 +160,8 @@ function assertNonEmptyUnique(values: readonly string[], label: string, allowEmp
 }
 
 function validateSchedule(pair: ScheduledLongCallPair): void {
-  if (pair.schema_version !== 1 || pair.protocol_id !== "HACC-LC3-v1") {
-    throw new Error(`pair ${pair.pair_id} is not HACC-LC3-v1`);
+  if (pair.schema_version !== 1 || pair.protocol_id !== "HACC-LC3-v2") {
+    throw new Error(`pair ${pair.pair_id} is not HACC-LC3-v2`);
   }
   if (!pair.pair_id || !pair.provider || !pair.model) throw new Error("pair identity fields must not be empty");
   if (!pair.raw_memory_episode_id || !pair.full_harness_episode_id) throw new Error(`pair ${pair.pair_id} has an empty episode id`);
@@ -308,7 +308,7 @@ export function scoreLongCallEpisode(
 ): LongCallEpisodeScore {
   validateSchedule(pair);
   if (!summary) return failureScore(pair, episodeId, "missing_observation");
-  if (summary.schema_version !== 1 || summary.protocol_id !== "HACC-LC3-v1") throw new Error(`episode ${episodeId} has the wrong protocol`);
+  if (summary.schema_version !== 1 || summary.protocol_id !== "HACC-LC3-v2") throw new Error(`episode ${episodeId} has the wrong protocol`);
   if (summary.episode_id !== episodeId) throw new Error(`summary episode ${summary.episode_id} does not match ${episodeId}`);
 
   const byAssertion = assertionIndex(summary);
@@ -449,7 +449,7 @@ export function scoreLongCallLiveBenchmark(input: Readonly<{
 
   const body = Object.freeze({
     schema_version: 1 as const,
-    protocol_id: "HACC-LC3-v1" as const,
+    protocol_id: "HACC-LC3-v2" as const,
     scheduled_pairs: input.scheduled_pairs.length,
     scheduled_episodes: episodes.size,
     observed_episodes: summaries.size,

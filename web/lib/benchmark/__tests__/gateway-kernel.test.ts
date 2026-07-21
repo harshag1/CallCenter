@@ -206,6 +206,12 @@ describe("six-arm benchmark gateway kernel", () => {
     expectOk(lookup);
     expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    const staleCompletion = invoke(harness, "flow.complete_step", {
+      path: "field_service.locate_work_order",
+      outputs: {},
+    });
+    expect(staleCompletion.result).toMatchObject({ ok: false, code: "not_active_step" });
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
     const attestation = harness.kernel.attestFinal({
       runId: "run-auto-linear",
       condition: harness.condition,

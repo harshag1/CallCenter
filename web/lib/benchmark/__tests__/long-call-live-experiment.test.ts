@@ -10,6 +10,8 @@ import {
   createLongCallCells,
   createLongCallPairs,
   evaluateLongCallModelIntegrity,
+  evaluateLongCallSystemIntegrity,
+  evaluateLongCallTransportIntegrity,
   isStrictLongCallPass,
   longCallScheduleArtifact,
   longUsefulnessTask,
@@ -17,7 +19,7 @@ import {
   type LongCallSummary,
 } from "../long-call-live-experiment";
 
-describe("HACC-LC3-v1 long-call live experiment", () => {
+describe("HACC-LC3-v2 long-call live experiment", () => {
   it("freezes 27 paired strata, 54 episodes, and 1,080 caller turns", () => {
     const pairs = createLongCallPairs();
     const cells = createLongCallCells();
@@ -79,6 +81,51 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
     expect(classifyLongCallFailure({ ...pass, systemIntegrityPass: false })).toBe("system");
     expect(classifyLongCallFailure({ ...pass, worldOutcomePass: false })).toBe("world");
     expect(classifyLongCallFailure({ ...pass, audioSemanticPass: false })).toBe("audio");
+  });
+
+  it("classifies a caller-policy stop as model evidence rather than a transport failure", () => {
+    expect(evaluateLongCallTransportIntegrity({
+      status: "protocol_error",
+      callerScheduleStatus: "blocked",
+      errors: [{ code: "caller_policy_blocked", fatal: true }],
+    })).toBe(true);
+    expect(evaluateLongCallTransportIntegrity({
+      status: "protocol_error",
+      callerScheduleStatus: "blocked",
+      errors: [{ code: "provider_disconnected", fatal: true }],
+    })).toBe(false);
+  });
+
+  it("scores runtime containment independently from required task completion", () => {
+    const world = (overrides: Record<string, unknown> = {}) => ({
+      receipts: [{
+        receipt_id: "receipt-1",
+        committed: true,
+        prerequisite_evidence: [{ passed: true }],
+        effect_ids: ["effect-1"],
+      }],
+      effects: [{
+        effect_id: "effect-1",
+        receipt_id: "receipt-1",
+      }],
+      ...overrides,
+    }) as unknown as Parameters<typeof evaluateLongCallSystemIntegrity>[0];
+    expect(evaluateLongCallSystemIntegrity(world())).toBe(true);
+    expect(evaluateLongCallSystemIntegrity(world({
+      receipts: [{
+        receipt_id: "receipt-1",
+        committed: true,
+        prerequisite_evidence: [{ passed: false }],
+        effect_ids: ["effect-1"],
+      }],
+    }))).toBe(false);
+    expect(evaluateLongCallSystemIntegrity(world({
+      effects: [{
+        effect_id: "effect-1",
+        receipt_id: "receipt-1",
+        duplicate_of_effect_id: "effect-0",
+      }],
+    }))).toBe(false);
   });
 
   it("fails model integrity for rejected prerequisites and blocked gateway calls", () => {

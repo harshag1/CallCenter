@@ -13,8 +13,8 @@ import {
 import type { PublicKernelTranscript } from "./kernel-transcript";
 import type { ToolWorldState } from "./tool-world";
 
-export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v1" as const;
-export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v1";
+export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v2" as const;
+export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v2";
 export const LONG_CALL_TTS_VOICES = Object.freeze(["Samantha", "Daniel", "Karen"] as const);
 export const LONG_CALL_CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
 export const LONG_CALL_PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
@@ -223,6 +223,35 @@ export function classifyLongCallFailure(input: Pick<LongCallSummary,
   if (!input.worldOutcomePass) return "world";
   if (!input.audioSemanticPass) return "audio";
   return null;
+}
+
+export function evaluateLongCallTransportIntegrity(input: Readonly<{
+  status: string;
+  callerScheduleStatus: string | null;
+  errors: readonly Readonly<{ code: string; fatal?: boolean }>[];
+}>): boolean {
+  if (input.status === "completed" && input.callerScheduleStatus === "complete") return true;
+  const fatalErrors = input.errors.filter((error) => error.fatal === true);
+  return input.status === "protocol_error"
+    && input.callerScheduleStatus === "blocked"
+    && fatalErrors.length > 0
+    && fatalErrors.every((error) => error.code === "caller_policy_blocked");
+}
+
+/** Runtime containment, deliberately excluding whether the model completed required work. */
+export function evaluateLongCallSystemIntegrity(world: ToolWorldState): boolean {
+  const receipts = new Map(world.receipts.map((receipt) => [receipt.receipt_id, receipt]));
+  if (receipts.size !== world.receipts.length) return false;
+  if (new Set(world.effects.map((effect) => effect.effect_id)).size !== world.effects.length) return false;
+  if (world.effects.some((effect) => effect.duplicate_of_effect_id !== undefined)) return false;
+  for (const receipt of world.receipts) {
+    if (receipt.committed && receipt.prerequisite_evidence.some((evidence) => !evidence.passed)) return false;
+    if (!receipt.committed && receipt.effect_ids.length > 0) return false;
+  }
+  return world.effects.every((effect) => {
+    const receipt = receipts.get(effect.receipt_id);
+    return receipt?.committed === true && receipt.effect_ids.includes(effect.effect_id);
+  });
 }
 
 export function isStrictLongCallPass(input: Pick<LongCallSummary,

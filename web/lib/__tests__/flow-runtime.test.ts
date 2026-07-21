@@ -280,6 +280,22 @@ describe("flow v2 execution", () => {
     expect(repeated.state.outputs["returns.verify"]).toEqual({ order_id: "order_123" });
   });
 
+  it("rejects completion of an older step after its successor is active", () => {
+    const selected = selectFlowTopic(deepFlow, createFlowExecutionState(), "returns");
+    if ("error" in selected) throw new Error(selected.error);
+    const verify = enterFlowStep(deepFlow, selected, "returns.verify");
+    if ("error" in verify) throw new Error(verify.error);
+    const verified = completeFlowStep(deepFlow, verify.state, { outputs: { order_id: "order_123" } });
+    if ("error" in verified) throw new Error(verified.error);
+    const eligibility = enterFlowStep(deepFlow, verified.state, "returns.verify.eligibility");
+    if ("error" in eligibility) throw new Error(eligibility.error);
+
+    expect(completeFlowStep(deepFlow, eligibility.state, {
+      path: "returns.verify",
+      outputs: {},
+    })).toMatchObject({ code: "not_active_step" });
+  });
+
   it("supports guarded transitions across topic boundaries", () => {
     const selected = selectFlowTopic(crossTopicFlow, createFlowExecutionState(), "intake");
     if ("error" in selected) throw new Error(selected.error);

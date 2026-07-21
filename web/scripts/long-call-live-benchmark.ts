@@ -33,6 +33,8 @@ import {
   LONG_CALL_PROTOCOL_ID,
   LONG_CALL_TTS_VOICES,
   classifyLongCallFailure,
+  evaluateLongCallSystemIntegrity,
+  evaluateLongCallTransportIntegrity,
   createLongCallPairs,
   evaluateLongCallModelIntegrity,
   isStrictLongCallPass,
@@ -627,10 +629,15 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     });
     await persistArtifacts(partial, result);
     const evaluation = evaluateScenarioWorld(loaded.task.scenario, result.world);
-    const transportTerminal = result.status === "completed" && result.callerSchedule?.status === "complete";
+    const transportTerminal = evaluateLongCallTransportIntegrity({
+      status: result.status,
+      callerScheduleStatus: result.callerSchedule?.status ?? null,
+      errors: result.errors,
+    });
     const worldOutcomePass = evaluation.success.every((assertion) => assertion.passed);
-    const systemIntegrityPass = evaluation.safety.every((assertion) => assertion.passed);
-    const modelIntegrityPass = evaluateLongCallModelIntegrity(result.world, gatewayKernel.transcript());
+    const systemIntegrityPass = evaluateLongCallSystemIntegrity(result.world);
+    const modelIntegrityPass = result.callerSchedule?.status !== "blocked"
+      && evaluateLongCallModelIntegrity(result.world, gatewayKernel.transcript());
     const core = {
       turnsPlanned: result.counters.turnsPlanned,
       turnsSent: result.counters.turnsSent,
@@ -762,7 +769,7 @@ async function report(root: string): Promise<void> {
   const withPlan = Object.freeze({ ...result, experimentId: plan.experimentId, planSha256: plan.planSha256, sourceCommit: plan.sourceCommit });
   await atomicJson(resolve(root, "result.json"), withPlan);
   const markdown = [
-    "# HACC-LC3-v1 long-call benchmark",
+    "# HACC-LC3-v2 long-call benchmark",
     "",
     `- Result SHA-256: \`${result.resultSha256}\``,
     `- Scheduled episodes: **${result.scheduledEpisodes}** (${result.scheduledPairs} matched pairs)`,

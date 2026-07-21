@@ -1039,10 +1039,10 @@ export function completeFlowStep(
   now?: string
 ): { state: FlowExecutionState; nextSteps: string[] } | RuntimeError {
   const path = args.path ?? state.currentStep;
-  if (path && state.completedSteps.includes(path)) {
+  if (!path || path !== state.currentStep) return { error: "complete_step must target the active step", code: "not_active_step" };
+  if (state.completedSteps.includes(path)) {
     return { state, nextSteps: allowedStepPaths(flow, state) };
   }
-  if (!path || path !== state.currentStep) return { error: "complete_step must target the active step", code: "not_active_step" };
   const ref = findStep(flow, path);
   if (!ref) return { error: `unknown step "${path}"`, code: "unknown_step" };
   const pending = state.actionReceipts.filter((receipt) =>
