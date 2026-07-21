@@ -220,6 +220,14 @@ describe("governed worker transition store", () => {
           worker_job: workerRow(params),
         });
       }
+      if (!durableLog.events.some(({ hash }) => hash === params[8])) {
+        const unsigned = JSON.parse(String(params[7])) as {
+          eventId: string; occurredAtMs: number; payload: Parameters<typeof appendConversationEvent>[1]["payload"];
+        };
+        durableLog = appendConversationEvent(durableLog, {
+          eventId: unsigned.eventId, occurredAtMs: unsigned.occurredAtMs, payload: unsigned.payload,
+        });
+      }
       return Promise.resolve({
         conversation_event: eventRow(String(params[7]), String(params[8]), String(params[2]), String(params[6])),
         inbox_message: {
@@ -263,15 +271,18 @@ describe("governed worker transition store", () => {
       appliedAt: null,
       acknowledgedAt: null,
     };
-    const applied = await applyGovernedDurableConversationInboxMessage({
-      expectedHead: head(durableLog),
+    const resultExpectedHead = head(durableLog);
+    const applicationRequest: Parameters<typeof applyGovernedDurableConversationInboxMessage>[0] = {
+      expectedHead: resultExpectedHead,
       conversationEvent: { idempotencyKey: "result:event:v1", eventId: "worker-result-1", occurredAtMs: 1_800_000_000_001 },
       organizationId: ids.organization,
       deliveryToken: ids.delivery,
       applicationId: ids.application,
       worker: settledWorker,
       message,
-    });
+    };
+    const applied = await applyGovernedDurableConversationInboxMessage(applicationRequest);
+    const replay = await applyGovernedDurableConversationInboxMessage(applicationRequest);
 
     expect(applied.event.payload).toEqual({
       type: "worker.result_delivered",
@@ -285,6 +296,7 @@ describe("governed worker transition store", () => {
     });
     expect(applied.message).toMatchObject({ applicationId: ids.application, acknowledgedAt: expect.any(String) });
     expect(applied.decision.status).toBe("accepted");
+    expect(replay).toEqual(applied);
     expect(mocks.qOne.mock.calls.some(([sql]) => String(sql).includes("apply_governed_voice_worker_result"))).toBe(true);
   });
 
