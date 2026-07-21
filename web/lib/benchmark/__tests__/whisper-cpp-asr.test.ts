@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { sha256Hex } from "../artifacts";
 import {
+  finalizeWhisperCppAsrToolchain,
+  prepareWhisperCppAsrToolchain,
+  runPreparedWhisperCppAsr,
   runWhisperCppAsr,
   type WhisperCppAsrConfig,
   type WhisperCppAsrSource,
@@ -185,5 +188,81 @@ require("node:fs").writeFileSync(process.argv[prefixIndex + 1] + ".txt", Buffer.
       source: setup.source,
       temporaryRoot: setup.root,
     })).rejects.toThrow("whisper.cpp inference timed out");
+  });
+
+  it("prepares once, runs a receipt-bound batch, and finalizes a sorted inventory", async () => {
+    const setup = await fixture();
+    const toolchain = await prepareWhisperCppAsrToolchain({
+      batchId: "lc3-openai-hacc-001",
+      config: setup.config,
+    });
+    const second = await runPreparedWhisperCppAsr({
+      toolchain,
+      source: Object.freeze({ ...setup.source, invocationId: "invocation-002" }),
+      temporaryRoot: setup.root,
+    });
+    const first = await runPreparedWhisperCppAsr({
+      toolchain,
+      source: Object.freeze({ ...setup.source, invocationId: "invocation-001" }),
+      temporaryRoot: setup.root,
+    });
+    const finalization = await finalizeWhisperCppAsrToolchain(toolchain);
+
+    expect(toolchain).toMatchObject({
+      batchId: "lc3-openai-hacc-001",
+      configSha256: first.receipt.config_sha256,
+    });
+    expect(Object.isFrozen(toolchain)).toBe(true);
+    expect(first.receipt.toolchain_verification).toEqual({
+      mode: "prepared_batch",
+      batch_id: "lc3-openai-hacc-001",
+    });
+    expect(second.receipt.toolchain_verification).toEqual(first.receipt.toolchain_verification);
+    expect(finalization).toMatchObject({
+      batch_id: "lc3-openai-hacc-001",
+      config_sha256: toolchain.configSha256,
+      invocation_count: 2,
+      invocation_receipts: [
+        { invocation_id: "invocation-001", receipt_sha256: first.receipt.receipt_sha256 },
+        { invocation_id: "invocation-002", receipt_sha256: second.receipt.receipt_sha256 },
+      ],
+      toolchain: {
+        whisper_cli_sha256: setup.config.whisperCliSha256,
+        model_sha256: setup.config.modelSha256,
+        ffmpeg_sha256: setup.config.ffmpegSha256,
+      },
+    });
+    expect(finalization.finalization_sha256).toMatch(/^[a-f0-9]{64}$/);
+    await expect(runPreparedWhisperCppAsr({
+      toolchain,
+      source: Object.freeze({ ...setup.source, invocationId: "invocation-003" }),
+      temporaryRoot: setup.root,
+    })).rejects.toThrow("no longer active");
+    await expect(finalizeWhisperCppAsrToolchain(toolchain)).rejects.toThrow("no longer active");
+  });
+
+  it("rejects pin identity changes on each prepared turn without running inference", async () => {
+    const setup = await fixture();
+    const toolchain = await prepareWhisperCppAsrToolchain({ batchId: "lc3-stat-change", config: setup.config });
+    await writeFile(setup.config.modelPath, "changed weights with a different length", { mode: 0o600 });
+
+    await expect(runPreparedWhisperCppAsr({
+      toolchain,
+      source: setup.source,
+      temporaryRoot: setup.root,
+    })).rejects.toThrow("model identity changed during prepared ASR batch");
+  });
+
+  it("detects content corruption at final re-hash and invalidates the batch", async () => {
+    const setup = await fixture();
+    const toolchain = await prepareWhisperCppAsrToolchain({ batchId: "lc3-final-hash", config: setup.config });
+    const original = await readFile(setup.config.modelPath);
+    const corrupted = Buffer.from(original);
+    corrupted[0] ^= 0xff;
+    await writeFile(setup.config.modelPath, corrupted, { mode: 0o600 });
+
+    await expect(finalizeWhisperCppAsrToolchain(toolchain)).rejects.toThrow("model changed during ASR execution");
+    await writeFile(setup.config.modelPath, original, { mode: 0o600 });
+    await expect(finalizeWhisperCppAsrToolchain(toolchain)).rejects.toThrow("no longer active");
   });
 });

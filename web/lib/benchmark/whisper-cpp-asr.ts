@@ -8,7 +8,6 @@ import {
   readFile,
   realpath,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -26,6 +25,8 @@ const CONFIG_DOMAIN = "hacc/whisper-cpp-asr-config/v1\n";
 const ARGV_DOMAIN = "hacc/local-process-argv/v1\n";
 const RESULT_DOMAIN = "hacc/whisper-cpp-asr-result/v1\n";
 const RECEIPT_DOMAIN = "hacc/whisper-cpp-asr-receipt/v1\n";
+const BATCH_FINALIZATION_DOMAIN = "hacc/whisper-cpp-asr-batch-finalization/v1\n";
+const BATCH_INVENTORY_DOMAIN = "hacc/whisper-cpp-asr-batch-inventory/v1\n";
 const RESAMPLING_PROFILE = "ffmpeg-pcm16le-24khz-mono-to-wav-pcm16le-16khz-mono-bitexact-v1";
 
 export type LocalAsrProcessRequest = Readonly<{
@@ -104,6 +105,13 @@ export type WhisperCppAsrReceipt = Readonly<{
   source_played_audio_sha256: string;
   source_chunk_sequence_sha256: string;
   config_sha256: string;
+  toolchain_verification: Readonly<{
+    mode: "per_invocation_full_hash";
+    batch_id: null;
+  }> | Readonly<{
+    mode: "prepared_batch";
+    batch_id: string;
+  }>;
   input: Readonly<{
     encoding: "pcm16";
     endianness: "little";
@@ -148,6 +156,32 @@ export type WhisperCppAsrReceipt = Readonly<{
 export type WhisperCppAsrRun = Readonly<{
   receipt: WhisperCppAsrReceipt;
   canonicalReceiptJson: string;
+}>;
+
+const PREPARED_TOOLCHAIN = Symbol("prepared-whisper-cpp-asr-toolchain");
+export type PreparedWhisperCppAsrToolchain = Readonly<{
+  [PREPARED_TOOLCHAIN]: true;
+  batchId: string;
+  configSha256: string;
+}>;
+
+export type WhisperCppAsrBatchFinalization = Readonly<{
+  schema_version: 1;
+  receipt_type: "hacc_whisper_cpp_asr_batch_finalization";
+  batch_id: string;
+  config_sha256: string;
+  invocation_count: number;
+  invocation_receipts: readonly Readonly<{
+    invocation_id: string;
+    receipt_sha256: string;
+  }>[];
+  invocation_inventory_sha256: string;
+  toolchain: Readonly<{
+    whisper_cli_sha256: string;
+    model_sha256: string;
+    ffmpeg_sha256: string;
+  }>;
+  finalization_sha256: string;
 }>;
 
 function safeId(value: unknown, label: string): string {
@@ -216,14 +250,27 @@ async function verifyPinnedFile(
 }
 
 async function verifyPinnedFileUnchanged(file: PinnedFile, label: string): Promise<void> {
-  const metadata = await stat(file.path).catch(() => null);
+  const metadata = await lstat(file.path).catch(() => null);
   if (!metadata?.isFile()
+    || metadata.isSymbolicLink()
     || metadata.size !== file.size
     || metadata.dev !== file.device
     || metadata.ino !== file.inode
     || metadata.mtimeMs !== file.modifiedMs
     || await hashFile(file.path) !== file.sha256) {
     throw new Error(`${label} changed during ASR execution`);
+  }
+}
+
+async function verifyPinnedFileMetadataUnchanged(file: PinnedFile, label: string): Promise<void> {
+  const metadata = await lstat(file.path).catch(() => null);
+  if (!metadata?.isFile()
+    || metadata.isSymbolicLink()
+    || metadata.size !== file.size
+    || metadata.dev !== file.device
+    || metadata.ino !== file.inode
+    || metadata.mtimeMs !== file.modifiedMs) {
+    throw new Error(`${label} identity changed during prepared ASR batch`);
   }
 }
 
@@ -331,6 +378,100 @@ function decodingConfig(config: WhisperCppAsrConfig) {
   });
 }
 
+type VerifiedWhisperCppToolchain = Readonly<{
+  config: WhisperCppAsrConfig;
+  whisperCli: PinnedFile;
+  model: PinnedFile;
+  ffmpeg: PinnedFile;
+  whisperCppVersion: string;
+  modelId: string;
+  timeoutMs: number;
+  decoding: ReturnType<typeof decodingConfig>;
+  configSha256: string;
+}>;
+
+type PreparedToolchainState = {
+  status: "active" | "finalizing" | "finalized";
+  activeRuns: number;
+  batchId: string;
+  toolchain: VerifiedWhisperCppToolchain;
+  reservedInvocationIds: Set<string>;
+  invocationReceipts: Map<string, string>;
+};
+
+const preparedToolchainStates = new WeakMap<object, PreparedToolchainState>();
+
+async function verifyWhisperCppToolchain(configInput: WhisperCppAsrConfig): Promise<VerifiedWhisperCppToolchain> {
+  const config = Object.freeze({ ...configInput });
+  const whisperCli = await verifyPinnedFile(config.whisperCliPath, config.whisperCliSha256, "whisper.cpp CLI", true);
+  const model = await verifyPinnedFile(config.modelPath, config.modelSha256, "whisper.cpp model", false);
+  const ffmpeg = await verifyPinnedFile(config.ffmpegPath, config.ffmpegSha256, "ffmpeg", true);
+  if (!REVISION.test(config.whisperCppSourceRevision)) throw new Error("whisper.cpp source revision is invalid");
+  if (!REVISION.test(config.modelRevision)) throw new Error("whisper.cpp model revision is invalid");
+  const whisperCppVersion = safeId(config.whisperCppVersion, "whisper.cpp version");
+  const modelId = safeId(config.modelId, "whisper.cpp model ID");
+  const timeoutMs = positiveInteger(config.timeoutMs, "ASR timeout", 3_600_000);
+  const decoding = decodingConfig(config);
+  const configSha256 = sha256Hex(`${CONFIG_DOMAIN}${canonicalJson({
+    schema_version: 1,
+    engine: {
+      implementation: "whisper.cpp",
+      version: whisperCppVersion,
+      source_revision: config.whisperCppSourceRevision,
+      executable_sha256: whisperCli.sha256,
+      model_id: modelId,
+      model_revision: config.modelRevision,
+      weights_sha256: model.sha256,
+    },
+    decoding,
+    ffmpeg_sha256: ffmpeg.sha256,
+    resampling_profile: RESAMPLING_PROFILE,
+    timeout_ms: timeoutMs,
+  })}`);
+  return Object.freeze({
+    config,
+    whisperCli,
+    model,
+    ffmpeg,
+    whisperCppVersion,
+    modelId,
+    timeoutMs,
+    decoding,
+    configSha256,
+  });
+}
+
+async function verifyPreparedMetadata(toolchain: VerifiedWhisperCppToolchain): Promise<void> {
+  await Promise.all([
+    verifyPinnedFileMetadataUnchanged(toolchain.whisperCli, "whisper.cpp CLI"),
+    verifyPinnedFileMetadataUnchanged(toolchain.model, "whisper.cpp model"),
+    verifyPinnedFileMetadataUnchanged(toolchain.ffmpeg, "ffmpeg"),
+  ]);
+}
+
+/** Hash and pin a local ASR toolchain once for a many-invocation benchmark batch. */
+export async function prepareWhisperCppAsrToolchain(input: Readonly<{
+  batchId: string;
+  config: WhisperCppAsrConfig;
+}>): Promise<PreparedWhisperCppAsrToolchain> {
+  const batchId = safeId(input.batchId, "ASR batch ID");
+  const toolchain = await verifyWhisperCppToolchain(input.config);
+  const handle = Object.freeze({
+    [PREPARED_TOOLCHAIN]: true as const,
+    batchId,
+    configSha256: toolchain.configSha256,
+  });
+  preparedToolchainStates.set(handle, {
+    status: "active",
+    activeRuns: 0,
+    batchId,
+    toolchain,
+    reservedInvocationIds: new Set<string>(),
+    invocationReceipts: new Map<string, string>(),
+  });
+  return handle;
+}
+
 function normalizeTranscript(bytes: Buffer): string {
   if (bytes.byteLength > MAX_TRANSCRIPT_BYTES) throw new Error("ASR transcript exceeds 1 MiB");
   let decoded: string;
@@ -356,11 +497,14 @@ function stderrHash(result: LocalAsrProcessResult): string {
  * No executable discovery, network request, provider API, or model download is
  * performed. Every artifact needed for replay is hash-bound into the receipt.
  */
-export async function runWhisperCppAsr(input: Readonly<{
+async function executeWhisperCppAsr(input: Readonly<{
   config: WhisperCppAsrConfig;
   source: WhisperCppAsrSource;
   processRunner?: LocalAsrProcessRunner;
   temporaryRoot?: string;
+}>, prepared?: Readonly<{
+  batchId: string;
+  toolchain: VerifiedWhisperCppToolchain;
 }>): Promise<WhisperCppAsrRun> {
   const source = input.source;
   const runId = safeId(source.runId, "ASR run ID");
@@ -375,34 +519,21 @@ export async function runWhisperCppAsr(input: Readonly<{
     throw new Error("ASR input must be non-empty, even-length PCM16 audio within 256 MiB");
   }
 
-  const config = input.config;
-  const whisperCli = await verifyPinnedFile(config.whisperCliPath, config.whisperCliSha256, "whisper.cpp CLI", true);
-  const model = await verifyPinnedFile(config.modelPath, config.modelSha256, "whisper.cpp model", false);
-  const ffmpeg = await verifyPinnedFile(config.ffmpegPath, config.ffmpegSha256, "ffmpeg", true);
-  if (!REVISION.test(config.whisperCppSourceRevision)) throw new Error("whisper.cpp source revision is invalid");
-  if (!REVISION.test(config.modelRevision)) throw new Error("whisper.cpp model revision is invalid");
-  const whisperCppVersion = safeId(config.whisperCppVersion, "whisper.cpp version");
-  const modelId = safeId(config.modelId, "whisper.cpp model ID");
-  const timeoutMs = positiveInteger(config.timeoutMs, "ASR timeout", 3_600_000);
-  const decoding = decodingConfig(config);
+  const verifiedToolchain = prepared?.toolchain ?? await verifyWhisperCppToolchain(input.config);
+  if (prepared) await verifyPreparedMetadata(verifiedToolchain);
+  const {
+    config,
+    whisperCli,
+    model,
+    ffmpeg,
+    whisperCppVersion,
+    modelId,
+    timeoutMs,
+    decoding,
+    configSha256,
+  } = verifiedToolchain;
   const sourcePcm = Buffer.from(source.pcm16Mono24khz);
   const sourcePlayedAudioSha256 = sha256Hex(sourcePcm);
-  const configSha256 = sha256Hex(`${CONFIG_DOMAIN}${canonicalJson({
-    schema_version: 1,
-    engine: {
-      implementation: "whisper.cpp",
-      version: whisperCppVersion,
-      source_revision: config.whisperCppSourceRevision,
-      executable_sha256: whisperCli.sha256,
-      model_id: modelId,
-      model_revision: config.modelRevision,
-      weights_sha256: model.sha256,
-    },
-    decoding,
-    ffmpeg_sha256: ffmpeg.sha256,
-    resampling_profile: RESAMPLING_PROFILE,
-    timeout_ms: timeoutMs,
-  })}`);
 
   const root = input.temporaryRoot === undefined
     ? tmpdir()
@@ -489,11 +620,15 @@ export async function runWhisperCppAsr(input: Readonly<{
     });
     const normalizedResultSha256 = sha256Hex(`${RESULT_DOMAIN}${canonicalJson(result)}`);
 
-    await Promise.all([
-      verifyPinnedFileUnchanged(whisperCli, "whisper.cpp CLI"),
-      verifyPinnedFileUnchanged(model, "whisper.cpp model"),
-      verifyPinnedFileUnchanged(ffmpeg, "ffmpeg"),
-    ]);
+    if (prepared) {
+      await verifyPreparedMetadata(verifiedToolchain);
+    } else {
+      await Promise.all([
+        verifyPinnedFileUnchanged(whisperCli, "whisper.cpp CLI"),
+        verifyPinnedFileUnchanged(model, "whisper.cpp model"),
+        verifyPinnedFileUnchanged(ffmpeg, "ffmpeg"),
+      ]);
+    }
     if (await hashFile(pcmPath) !== sourcePlayedAudioSha256) throw new Error("ASR PCM evidence changed during execution");
 
     const receiptBody = Object.freeze({
@@ -506,6 +641,9 @@ export async function runWhisperCppAsr(input: Readonly<{
       source_played_audio_sha256: sourcePlayedAudioSha256,
       source_chunk_sequence_sha256: sourceChunkSequenceSha256,
       config_sha256: configSha256,
+      toolchain_verification: prepared
+        ? Object.freeze({ mode: "prepared_batch" as const, batch_id: prepared.batchId })
+        : Object.freeze({ mode: "per_invocation_full_hash" as const, batch_id: null }),
       input: Object.freeze({
         encoding: "pcm16" as const,
         endianness: "little" as const,
@@ -555,5 +693,107 @@ export async function runWhisperCppAsr(input: Readonly<{
     });
   } finally {
     await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+/** Backward-compatible one-shot API: fully hashes every pin before and after the invocation. */
+export async function runWhisperCppAsr(input: Readonly<{
+  config: WhisperCppAsrConfig;
+  source: WhisperCppAsrSource;
+  processRunner?: LocalAsrProcessRunner;
+  temporaryRoot?: string;
+}>): Promise<WhisperCppAsrRun> {
+  return executeWhisperCppAsr(input);
+}
+
+function preparedState(handle: PreparedWhisperCppAsrToolchain): PreparedToolchainState {
+  const state = preparedToolchainStates.get(handle);
+  if (handle?.[PREPARED_TOOLCHAIN] !== true || !state) {
+    throw new Error("prepared ASR toolchain handle is not authentic");
+  }
+  return state;
+}
+
+/**
+ * Run one ASR invocation using a prepared toolchain. This performs only cheap
+ * stat/inode identity checks; the batch finalizer performs the closing hashes.
+ */
+export async function runPreparedWhisperCppAsr(input: Readonly<{
+  toolchain: PreparedWhisperCppAsrToolchain;
+  source: WhisperCppAsrSource;
+  processRunner?: LocalAsrProcessRunner;
+  temporaryRoot?: string;
+}>): Promise<WhisperCppAsrRun> {
+  const state = preparedState(input.toolchain);
+  if (state.status !== "active") throw new Error("prepared ASR toolchain is no longer active");
+  const invocationId = safeId(input.source.invocationId, "ASR invocation ID");
+  if (state.reservedInvocationIds.has(invocationId)) {
+    throw new Error("prepared ASR batch invocation ID is duplicated");
+  }
+  state.reservedInvocationIds.add(invocationId);
+  state.activeRuns += 1;
+  try {
+    const run = await executeWhisperCppAsr({
+      config: state.toolchain.config,
+      source: input.source,
+      processRunner: input.processRunner,
+      temporaryRoot: input.temporaryRoot,
+    }, { batchId: state.batchId, toolchain: state.toolchain });
+    state.invocationReceipts.set(invocationId, run.receipt.receipt_sha256);
+    return run;
+  } catch (error) {
+    state.reservedInvocationIds.delete(invocationId);
+    throw error;
+  } finally {
+    state.activeRuns -= 1;
+  }
+}
+
+/**
+ * Close a prepared batch, re-hash every pinned artifact exactly once, bind the
+ * complete invocation inventory, and permanently invalidate the handle.
+ */
+export async function finalizeWhisperCppAsrToolchain(
+  handle: PreparedWhisperCppAsrToolchain
+): Promise<WhisperCppAsrBatchFinalization> {
+  const state = preparedState(handle);
+  if (state.status !== "active") throw new Error("prepared ASR toolchain is no longer active");
+  if (state.activeRuns !== 0) throw new Error("prepared ASR toolchain has active invocations");
+  state.status = "finalizing";
+  try {
+    await Promise.all([
+      verifyPinnedFileUnchanged(state.toolchain.whisperCli, "whisper.cpp CLI"),
+      verifyPinnedFileUnchanged(state.toolchain.model, "whisper.cpp model"),
+      verifyPinnedFileUnchanged(state.toolchain.ffmpeg, "ffmpeg"),
+    ]);
+    const invocationReceipts = Object.freeze(
+      [...state.invocationReceipts.entries()]
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([invocationId, receiptSha256]) => Object.freeze({
+          invocation_id: invocationId,
+          receipt_sha256: receiptSha256,
+        }))
+    );
+    const inventorySha256 = sha256Hex(`${BATCH_INVENTORY_DOMAIN}${canonicalJson(invocationReceipts)}`);
+    const body = Object.freeze({
+      schema_version: 1 as const,
+      receipt_type: "hacc_whisper_cpp_asr_batch_finalization" as const,
+      batch_id: state.batchId,
+      config_sha256: state.toolchain.configSha256,
+      invocation_count: invocationReceipts.length,
+      invocation_receipts: invocationReceipts,
+      invocation_inventory_sha256: inventorySha256,
+      toolchain: Object.freeze({
+        whisper_cli_sha256: state.toolchain.whisperCli.sha256,
+        model_sha256: state.toolchain.model.sha256,
+        ffmpeg_sha256: state.toolchain.ffmpeg.sha256,
+      }),
+    });
+    return Object.freeze({
+      ...body,
+      finalization_sha256: sha256Hex(`${BATCH_FINALIZATION_DOMAIN}${canonicalJson(body)}`),
+    });
+  } finally {
+    state.status = "finalized";
   }
 }

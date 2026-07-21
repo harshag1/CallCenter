@@ -18,6 +18,12 @@ The canonical JSON receipt binds:
 
 The normalized `result` deliberately follows the completed independent-ASR result shape. This lane supplies provenance; it does not by itself make a benchmark claim. A held-out ASR calibration and the signed audible-evidence verifier remain required before transcript-derived scores become claim-eligible.
 
+## Prepared batches
+
+Long-call experiments must use `prepareWhisperCppAsrToolchain`, `runPreparedWhisperCppAsr`, and `finalizeWhisperCppAsrToolchain`. Preparation hashes and verifies the executable, model, and ffmpeg once. Every ASR invocation re-checks file type, device, inode, size, and modification time before and after execution without rereading the 488 MB model. Finalization performs one closing SHA-256 pass over all three pins, binds the sorted inventory of successful invocation receipts, and permanently invalidates the opaque handle even when the closing verification fails.
+
+Prepared invocation receipts identify their batch and are provisional until paired with its successful finalization receipt. The one-shot `runWhisperCppAsr` API remains available and retains its stricter per-invocation before/after full hashes for isolated uses.
+
 ## Recommended pin for the first English benchmark
 
 - whisper.cpp release `v1.8.6`, commit `23ee03506a91ac3d3f0071b40e66a430eebdfa1d`.
