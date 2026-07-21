@@ -2,9 +2,18 @@
 
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, q, qOne } from "./db";
 import type { AgentFlow } from "./flow";
+import {
+  evaluatePreDispatch,
+  type ConfirmationEvidence,
+  type Json,
+  type PolicyFact,
+  type PolicyReceipt,
+  type PreDispatchDecision,
+} from "./action-policy-kernel";
 import {
   createFlowExecutionState,
   FlowExecutionStateSchema,
@@ -122,6 +131,44 @@ export async function withLockedFlowState<T>(
 
 export type AtomicActionReservation = FlowActionReservation & { ownerToken?: string };
 
+export type FlowActionReservationArgs = {
+  receiptId: string;
+  invocationId: string;
+  ownerToken: string;
+  runtimeDigest: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  capabilityEpoch: number;
+  providerInvocationId?: string;
+};
+
+/** Public result intentionally omits the fact/receipt/confirmation evidence hashes. */
+export type GovernedFlowActionDecision = Readonly<{
+  decision: PreDispatchDecision["decision"];
+  reason: string;
+  action: string;
+  effect: PreDispatchDecision["effect"];
+  proposalDigest: string;
+  challengeDigest: string | null;
+  decisionDigest: string;
+  stateRevision: number;
+  capabilityEpoch: number;
+}>;
+
+export type GovernedFlowActionResult = Readonly<{
+  policy: GovernedFlowActionDecision;
+  reservation?: AtomicActionReservation;
+  reservationError?: RuntimeError;
+}>;
+
+export type GovernedFlowActionArgs = FlowActionReservationArgs & {
+  policy: unknown;
+  arguments: Record<string, Json>;
+  facts: readonly PolicyFact[];
+  receipts: readonly PolicyReceipt[];
+  confirmation?: ConfirmationEvidence;
+};
+
 const DISPATCH_OWNER_LEASE_MS = 60_000;
 
 async function lockActiveCall(
@@ -145,128 +192,108 @@ async function lockActiveCall(
   return null;
 }
 
-/** Atomically reserves an action before any network or database side effect is dispatched. */
-export async function reserveFlowActionAtomic(
-  callId: string,
-  flow: AgentFlow,
-  args: {
-    receiptId: string;
-    invocationId: string;
-    ownerToken: string;
-    runtimeDigest: string;
-    tool: string;
-    arguments: Record<string, unknown>;
-    capabilityEpoch: number;
-    providerInvocationId?: string;
-  }
-): Promise<AtomicActionReservation | RuntimeError> {
+function actionReservationInputError(args: FlowActionReservationArgs): RuntimeError | null {
   if (!UUID.test(args.receiptId) || !UUID.test(args.ownerToken)) {
     return { error: "receipt and owner identities must be UUIDs", code: "invalid_action_identity" };
   }
   if (!SHA256.test(args.runtimeDigest)) {
     return { error: "runtime digest must be a SHA-256 value", code: "invalid_runtime_digest" };
   }
-  const locked = await withLockedFlowState<AtomicActionReservation | RuntimeError>(callId, async (state, client) => {
-    const inactive = await lockActiveCall(client, callId, args.runtimeDigest);
-    if (inactive) return { value: inactive };
-    const reserved = reserveFlowAction(flow, state, args);
-    if ("error" in reserved) return { value: reserved };
-    if (!reserved.execute && reserved.receipt.status === "reserved") {
-      const ledger = await client.query<{
-        owner_token: string;
-        dispatch_started_at: Date | null;
-        lease_expired: boolean;
-        db_now: Date;
-      }>(
-        `SELECT owner_token, dispatch_started_at,
-                dispatch_lease_expires_at <= now() AS lease_expired,
-                now() AS db_now
-         FROM flow_action_receipts
-         WHERE id = $1 AND call_id = $2
-         FOR UPDATE`,
-        [reserved.receipt.id, callId]
-      );
-      const persisted = ledger.rows[0];
-      if (!persisted) {
-        return { value: { error: "embedded action receipt has no durable ledger row", code: "receipt_ledger_missing" } };
-      }
-      if (!persisted.lease_expired) return { value: reserved };
-      if (persisted.dispatch_started_at) {
-        const settled = settleFlowAction(state, {
-          receiptId: reserved.receipt.id,
-          status: "indeterminate",
-          error: "dispatch owner expired after the action crossed the durable dispatch boundary",
-        }, persisted.db_now.toISOString());
-        if ("error" in settled) return { value: settled };
-        await client.query(
-          `UPDATE flow_action_receipts
-           SET status = 'indeterminate', delivery_state = 'unknown',
-               error = $3, settled_at = $4
-           WHERE id = $1 AND call_id = $2 AND status = 'reserved'`,
-          [
-            reserved.receipt.id,
-            callId,
-            JSON.stringify({ message: "dispatch owner expired after the durable boundary" }),
-            settled.receipt.settledAt,
-          ]
-        );
-        return {
-          state: settled.state,
-          value: { ...reserved, state: settled.state, receipt: settled.receipt, execute: false, replayed: false },
-        };
-      }
-      const reclaimed = await client.query(
-        `UPDATE flow_action_receipts
-         SET owner_token = $3, dispatch_lease_expires_at = now() + ($4 * interval '1 millisecond'),
-             owner_heartbeat_at = now()
-         WHERE id = $1 AND call_id = $2 AND status = 'reserved'
-           AND dispatch_started_at IS NULL AND dispatch_lease_expires_at <= now()`,
-        [reserved.receipt.id, callId, args.ownerToken, DISPATCH_OWNER_LEASE_MS]
-      );
-      if (reclaimed.rowCount !== 1) return { value: reserved };
-      return {
-        value: { ...reserved, execute: true, replayed: false, ownerToken: args.ownerToken },
-      };
-    }
-    if (!reserved.execute) return { value: reserved };
-    if (reserved.receipt.arguments === undefined) {
-      return {
-        value: {
-          error: "new action reservation lost its bounded arguments",
-          code: "receipt_state_mismatch",
-        },
-      };
-    }
-    const attempt = state.attempts[reserved.receipt.step] ?? 0;
-    await client.query(
-      `INSERT INTO flow_action_receipts
-        (id, call_id, runtime_digest, capability_epoch, step_path, step_attempt, tool,
-         invocation_id, provider_invocation_id,
-         arguments, arguments_hash, idempotency_key, status, owner_token,
-         dispatch_lease_expires_at, owner_heartbeat_at, reserved_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'reserved',$13,
-               now() + ($14 * interval '1 millisecond'),now(),$15)`,
-      [
-        reserved.receipt.id,
-        callId,
-        args.runtimeDigest,
-        reserved.receipt.capabilityEpoch,
-        reserved.receipt.step,
-        attempt,
-        reserved.receipt.tool,
-        reserved.receipt.invocationId,
-        reserved.receipt.providerInvocationId ?? null,
-        JSON.stringify(reserved.receipt.arguments),
-        reserved.receipt.argumentsHash,
-        reserved.receipt.idempotencyKey,
-        args.ownerToken,
-        DISPATCH_OWNER_LEASE_MS,
-        reserved.receipt.reservedAt,
-      ]
+  return null;
+}
+
+async function reserveFlowActionLocked(
+  client: PoolClient,
+  callId: string,
+  flow: AgentFlow,
+  state: FlowExecutionState,
+  args: FlowActionReservationArgs,
+): Promise<LockedFlowMutation<AtomicActionReservation | RuntimeError>> {
+  const reserved = reserveFlowAction(flow, state, args);
+  if ("error" in reserved) return { value: reserved };
+  if (!reserved.execute && reserved.receipt.status === "reserved") {
+    const ledger = await client.query<{
+      owner_token: string;
+      dispatch_started_at: Date | null;
+      lease_expired: boolean;
+      db_now: Date;
+    }>(
+      `SELECT owner_token, dispatch_started_at,
+              dispatch_lease_expires_at <= now() AS lease_expired,
+              now() AS db_now
+       FROM flow_action_receipts
+       WHERE id = $1 AND call_id = $2
+       FOR UPDATE`,
+      [reserved.receipt.id, callId]
     );
-    return { state: reserved.state, value: { ...reserved, ownerToken: args.ownerToken } };
-  });
-  const value = locked.value;
+    const persisted = ledger.rows[0];
+    if (!persisted) {
+      return { value: { error: "embedded action receipt has no durable ledger row", code: "receipt_ledger_missing" } };
+    }
+    if (!persisted.lease_expired) return { value: reserved };
+    if (persisted.dispatch_started_at) {
+      const settled = settleFlowAction(state, {
+        receiptId: reserved.receipt.id,
+        status: "indeterminate",
+        error: "dispatch owner expired after the action crossed the durable dispatch boundary",
+      }, persisted.db_now.toISOString());
+      if ("error" in settled) return { value: settled };
+      await client.query(
+        `UPDATE flow_action_receipts
+         SET status = 'indeterminate', delivery_state = 'unknown',
+             error = $3, settled_at = $4
+         WHERE id = $1 AND call_id = $2 AND status = 'reserved'`,
+        [
+          reserved.receipt.id,
+          callId,
+          JSON.stringify({ message: "dispatch owner expired after the durable boundary" }),
+          settled.receipt.settledAt,
+        ]
+      );
+      return {
+        state: settled.state,
+        value: { ...reserved, state: settled.state, receipt: settled.receipt, execute: false, replayed: false },
+      };
+    }
+    const reclaimed = await client.query(
+      `UPDATE flow_action_receipts
+       SET owner_token = $3, dispatch_lease_expires_at = now() + ($4 * interval '1 millisecond'),
+           owner_heartbeat_at = now()
+       WHERE id = $1 AND call_id = $2 AND status = 'reserved'
+         AND dispatch_started_at IS NULL AND dispatch_lease_expires_at <= now()`,
+      [reserved.receipt.id, callId, args.ownerToken, DISPATCH_OWNER_LEASE_MS]
+    );
+    if (reclaimed.rowCount !== 1) return { value: reserved };
+    return { value: { ...reserved, execute: true, replayed: false, ownerToken: args.ownerToken } };
+  }
+  if (!reserved.execute) return { value: reserved };
+  if (reserved.receipt.arguments === undefined) {
+    return { value: { error: "new action reservation lost its bounded arguments", code: "receipt_state_mismatch" } };
+  }
+  const attempt = state.attempts[reserved.receipt.step] ?? 0;
+  await client.query(
+    `INSERT INTO flow_action_receipts
+      (id, call_id, runtime_digest, capability_epoch, step_path, step_attempt, tool,
+       invocation_id, provider_invocation_id,
+       arguments, arguments_hash, idempotency_key, status, owner_token,
+       dispatch_lease_expires_at, owner_heartbeat_at, reserved_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'reserved',$13,
+             now() + ($14 * interval '1 millisecond'),now(),$15)`,
+    [
+      reserved.receipt.id, callId, args.runtimeDigest, reserved.receipt.capabilityEpoch,
+      reserved.receipt.step, attempt, reserved.receipt.tool, reserved.receipt.invocationId,
+      reserved.receipt.providerInvocationId ?? null, JSON.stringify(reserved.receipt.arguments),
+      reserved.receipt.argumentsHash, reserved.receipt.idempotencyKey, args.ownerToken,
+      DISPATCH_OWNER_LEASE_MS, reserved.receipt.reservedAt,
+    ]
+  );
+  return { state: reserved.state, value: { ...reserved, ownerToken: args.ownerToken } };
+}
+
+async function rehydrateCompactedReplay(
+  callId: string,
+  value: AtomicActionReservation | RuntimeError,
+): Promise<AtomicActionReservation | RuntimeError> {
   if (
     !("error" in value) &&
     !value.execute &&
@@ -295,6 +322,136 @@ export async function reserveFlowActionAtomic(
     };
   }
   return value;
+}
+
+/** Atomically reserves an action before any network or database side effect is dispatched. */
+export async function reserveFlowActionAtomic(
+  callId: string,
+  flow: AgentFlow,
+  args: FlowActionReservationArgs,
+): Promise<AtomicActionReservation | RuntimeError> {
+  const invalid = actionReservationInputError(args);
+  if (invalid) return invalid;
+  const locked = await withLockedFlowState<AtomicActionReservation | RuntimeError>(callId, async (state, client) => {
+    const inactive = await lockActiveCall(client, callId, args.runtimeDigest);
+    if (inactive) return { value: inactive };
+    return reserveFlowActionLocked(client, callId, flow, state, args);
+  });
+  return rehydrateCompactedReplay(callId, locked.value);
+}
+
+function publicPolicyDecision(decision: PreDispatchDecision): GovernedFlowActionDecision {
+  return Object.freeze({
+    decision: decision.decision,
+    reason: decision.reason,
+    action: decision.action,
+    effect: decision.effect,
+    proposalDigest: decision.proposal_digest,
+    challengeDigest: decision.challenge_digest,
+    decisionDigest: decision.decision_digest,
+    stateRevision: decision.state_revision,
+    capabilityEpoch: decision.capability_epoch,
+  });
+}
+
+/**
+ * Evaluates host-authored policy against the exact locked Flow authority and
+ * database clock, appends immutable evidence, and only then commits an allowed
+ * reservation in that same transaction.
+ */
+export async function reserveGovernedFlowActionAtomic(
+  callId: string,
+  flow: AgentFlow,
+  args: GovernedFlowActionArgs,
+): Promise<GovernedFlowActionResult | RuntimeError> {
+  const invalid = actionReservationInputError(args);
+  if (invalid) return invalid;
+  const locked = await withLockedFlowState<GovernedFlowActionResult | RuntimeError>(
+    callId,
+    async (state, client) => {
+      const inactive = await lockActiveCall(client, callId, args.runtimeDigest);
+      if (inactive) return { value: inactive };
+      const authority = await client.query<{ evaluated_at: Date; prior_call_count: string }>(
+        `SELECT clock_timestamp() AS evaluated_at,
+                count(*) FILTER (WHERE dispatch_started_at IS NOT NULL)::text AS prior_call_count
+         FROM flow_action_receipts
+         WHERE call_id = $1 AND tool = $2`,
+        [callId, args.tool]
+      );
+      const evaluatedAt = authority.rows[0]?.evaluated_at;
+      const priorCallCount = Number(authority.rows[0]?.prior_call_count);
+      if (!evaluatedAt || !Number.isSafeInteger(priorCallCount) || priorCallCount < 0) {
+        return { value: { error: "policy authority could not be established", code: "policy_authority_missing" } };
+      }
+
+      let decision: PreDispatchDecision;
+      try {
+        decision = evaluatePreDispatch({
+          policy: args.policy,
+          action: args.tool,
+          arguments: args.arguments,
+          state_head_sha256: hashFlowValue(state),
+          state_revision: state.revision,
+          capability_epoch: state.capabilityEpoch,
+          facts: args.facts,
+          receipts: args.receipts,
+          prior_call_count: priorCallCount,
+          ...(args.confirmation ? { confirmation: args.confirmation } : {}),
+          now: evaluatedAt.toISOString(),
+        });
+      } catch {
+        return { value: { error: "action policy input is invalid; reservation stopped fail-closed", code: "policy_evaluation_failed" } };
+      }
+
+      let mutation: LockedFlowMutation<AtomicActionReservation | RuntimeError> = {
+        value: { error: `action policy ${decision.decision}: ${decision.reason}`, code: `policy_${decision.decision}` },
+      };
+      if (decision.decision === "allow") {
+        mutation = await reserveFlowActionLocked(client, callId, flow, state, args);
+      }
+      const reservation = "error" in mutation.value ? undefined : mutation.value;
+      const authorityBundleDigest = hashFlowValue({
+        stateHeadSha256: decision.state_head_sha256,
+        stateRevision: decision.state_revision,
+        capabilityEpoch: decision.capability_epoch,
+        argumentsSha256: decision.arguments_sha256,
+        factsSha256: hashFlowValue(args.facts),
+        receiptsSha256: hashFlowValue(args.receipts),
+        confirmationSha256: args.confirmation ? hashFlowValue(args.confirmation) : null,
+        priorCallCount,
+        evaluatedAt: evaluatedAt.toISOString(),
+      });
+      await client.query(
+        `SELECT public.append_flow_action_policy_decision(
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
+        )`,
+        [
+          randomUUID(), callId, reservation?.receipt.id ?? null, decision.action,
+          decision.decision, decision.reason, decision.effect, decision.policy_digest,
+          decision.state_head_sha256, decision.state_revision, decision.capability_epoch,
+          decision.arguments_sha256, decision.proposal_digest, decision.challenge_digest,
+          JSON.stringify(decision.evidence_sha256), hashFlowValue(args.facts),
+          hashFlowValue(args.receipts), args.confirmation ? hashFlowValue(args.confirmation) : null,
+          priorCallCount, authorityBundleDigest, decision.decision_digest, evaluatedAt,
+        ]
+      );
+      const result: GovernedFlowActionResult = {
+        policy: publicPolicyDecision(decision),
+        ...(reservation ? { reservation } : {}),
+        ...("error" in mutation.value && decision.decision === "allow" ? { reservationError: mutation.value } : {}),
+      };
+      return { ...(mutation.state ? { state: mutation.state } : {}), value: result };
+    }
+  );
+  if ("error" in locked.value || !locked.value.reservation) return locked.value;
+  const reservation = await rehydrateCompactedReplay(callId, locked.value.reservation);
+  if ("error" in reservation) {
+    return { ...locked.value, reservation: undefined, reservationError: reservation };
+  }
+  return {
+    ...locked.value,
+    reservation,
+  };
 }
 
 /** One-shot permit: after this commits, a crash is always recovered as indeterminate. */
