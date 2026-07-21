@@ -388,3 +388,24 @@ Evidence:
 - fixture manifest SHA-256: `1ecfe632e8ee39169e20b4f1343e45c543cbdc7e52c71d6ae7b598e48aeefb49`.
 
 This is exploratory API-model evidence with synthetic caller speech, not a consumer ChatGPT Voice benchmark or confirmatory result. Provider billing reconciliation remains pending; the frozen batch admitted at most 32 local $5 reservations for a $160 ceiling.
+
+## 2026-07-21 — Durable authority foundation implemented
+
+The repository now contains an application-owned runtime foundation rather than only a design proposal:
+
+- migration `033` persists one organization-scoped, SHA-256-chained conversation log with atomic 1–64 event compare-and-append, exact replay, and conflict rejection;
+- the runtime validates semantic transitions before persistence, replans on compare-and-append conflicts, and compiles a byte-bounded packet from verified durable state;
+- Flow checkpoints bind runtime digest, Flow revision, capability epoch, unresolved receipts, and state digest into that log;
+- migration `034` makes worker spawn and accepted result application atomic with corresponding conversation events;
+- migration `035` makes pre-dispatch policy decisions append-only and transactionally couples an `allow` decision to its Flow action receipt using the database clock and durable prior-call count.
+
+Fresh PostgreSQL migrations `001`–`035` and a `035` reapply completed locally. The runtime role had no direct `SELECT` privilege on policy evidence and retained only function execution; a real deny decision append inserted one row. The focused action-policy/admission slice passed 11/11 tests. The conversation-store integration test exercises 32 writers racing one head and requires exactly one commit plus 31 serialization conflicts; the governed worker database test exercises one spawn event/job and one result event/inbox application with exact replay.
+
+The checked-in context-substrate result remains the only positive long-horizon number: at a 2,048-byte budget the authority packet retained 13,000/13,000 registered control-state units across 1,000 seeded 500–2,000-turn schedules, versus 83/13,000 for an equally bounded recent-turn window. That is deterministic application-memory evidence, not proof that OpenAI, Gemini, or xAI models perform better with the harness.
+
+The live MCP gateway still uses the legacy Flow reservation and `launch_task` routes, provider sessions do not yet consume durable packets, and spoken-output guardrails remain out of scope. No provider-superiority bar is supported.
+
+- Voice-provider spend delta/cumulative: **$0.00 / $0.00**
+- Auxiliary review spend delta: **$0.495064**
+- Cumulative auxiliary review spend: **$3.807615**
+- Total recorded program cash spend: **$3.807615**

@@ -1,0 +1,70 @@
+# Durable conversation runtime API
+
+This is the current provider-neutral integration surface for long conversations. The provider remains responsible for speech transport; the application owns conversation authority.
+
+## Build a runtime
+
+`defineConversationRuntime` accepts any event store implementing `load` and compare-and-append `append`. PostgreSQL deployments can adapt the checked-in verified store functions directly:
+
+```ts
+import {
+  ConversationHeadConflictError,
+  appendPersistedConversationEvents,
+  loadPersistedConversationLog,
+} from "@/lib/conversation-store";
+import { defineConversationRuntime } from "@/lib/conversation-runtime";
+
+export const runtime = defineConversationRuntime({
+  store: {
+    load: loadPersistedConversationLog,
+    append: appendPersistedConversationEvents,
+  },
+  isConflict: (error) => error instanceof ConversationHeadConflictError,
+  maximumAttempts: 8,
+});
+```
+
+`runtime.transact` loads and verifies the current log, folds its state, asks the caller to plan 1–64 idempotent events, validates the candidate semantic transitions, and compare-and-appends them. A competing writer causes a bounded reload and replan. An exact retry returns the original event instead of appending twice.
+
+## Compile realtime context
+
+```ts
+const packet = await runtime.compilePacket({
+  scope: { conversationId, organizationId },
+  capabilityCatalogDigest,
+  capabilityEpoch,
+  capabilities,
+  recentAudibleTurns,
+  byteBudget: 8_192,
+});
+```
+
+The compiler preserves mandatory policy, corrected facts, goals, commitments, the current Flow checkpoint, worker status, and host-derived capabilities before trimming recent caller-heard turns. If mandatory state cannot fit, it returns typed `context_overflow`; it never silently removes a blocker.
+
+## Bind an existing Flow
+
+Use `createFlowCheckpointEvent` and `flowCheckpointIdempotencyKey` from `@/lib/flow-conversation-adapter` inside `runtime.transact`. The conversation fold rejects checkpoint events that change runtime identity, move revision or capability epoch backward, target the wrong goal, or reopen a terminal Flow.
+
+## Admit an action
+
+Use `reserveGovernedFlowActionAtomic` from `@/lib/flow-state-store`. It locks the active call and Flow state, evaluates the supplied policy against the exact state digest/revision/epoch, database time, durable prior dispatch count, arguments, facts, receipts, and readback confirmation, then persists append-only evidence. Only an `allow` decision can reserve an action receipt, and both records commit in one database transaction.
+
+The returned public policy object exposes decision and binding digests, not the underlying evidence hashes. Callers should still use the existing dispatch-start and settlement APIs; post-dispatch policy evaluation is currently a pure kernel and has not yet replaced the live MCP settlement path.
+
+## Spawn durable work
+
+Use `spawnGovernedDurableVoiceWorker` and `applyGovernedDurableConversationInboxMessage` from `@/lib/voice-workers/store`. Spawn atomically appends `worker.spawned` and creates the job bound to the resulting conversation head. Result application first folds the current conversation state; a stale, superseded, or conflicting result is deferred/rejected without touching the database transition. An accepted result event and inbox acknowledgement commit together.
+
+Worker executors use the lower-level claim, heartbeat, checkpoint, settle, and cancellation functions. Capabilities are immutable manifests; executors do not receive arbitrary conversation authority.
+
+## Current release boundary
+
+These APIs and migrations `033`–`035` are implemented and tested. They are not yet the default MCP/provider call path. Before enabling them for live traffic, add a shadow adapter that:
+
+1. mirrors Flow checkpoints into the conversation log;
+2. compiles and injects the bounded packet on every authority change and reconnect;
+3. routes live action reservations through governed admission;
+4. replaces `launch_task` with registered worker recipes; and
+5. records playback evidence before claiming spoken-output guardrails.
+
+Provider adapters should depend on this surface. None of these primitives should depend on provider-owned conversation history.

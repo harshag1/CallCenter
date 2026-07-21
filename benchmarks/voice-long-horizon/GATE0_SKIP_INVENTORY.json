@@ -4,8 +4,8 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "43a41e0cf65f4acb638db1e0c0e4912635241d97c7aeef8b1638461ad2690d64",
-    "source_manifest_file_count": 184,
+    "source_manifest_sha256": "de3855ee0eb4a027e0c9cee635c4621a4b8b39a5da20a38bd5405a236369e55a",
+    "source_manifest_file_count": 190,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
       "web/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs}",
@@ -58,6 +58,14 @@
       "test_count": 2,
       "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
       "reason_category": "missing_postgresql_admin_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/conversation-store.test.ts",
+      "content_sha256": "ddbfdb1e7f41546bc8c2686b7e76df634b7da201b81f9ed1e84874c7556c2a3a",
+      "test_count": 12,
+      "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
       "gate0_disposition": "must_run"
     },
     {
@@ -165,6 +173,6 @@
       "gate0_disposition": "must_run"
     }
   ],
-  "total_skipped_suites_when_unconfigured": 18,
-  "total_skipped_tests_when_unconfigured": 54
+  "total_skipped_suites_when_unconfigured": 19,
+  "total_skipped_tests_when_unconfigured": 66
 }

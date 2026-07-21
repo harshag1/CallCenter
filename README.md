@@ -23,9 +23,9 @@ The result is a repeatable state machine that still leaves the realtime model fr
 
 - Deep, recursive voice flows with machine-enforced output conditions, cross-topic transitions, failure paths, retries, receipt-bound outputs, checkpoints, and circuit breakers.
 - An experimental [mission runtime](docs/mission-runtime.md) for multi-goal calls, safe detours, proof-carrying obligations, adaptive authority, saga compensation, and state-bound cross-channel continuation when one fixed flow is the wrong abstraction.
-- A provider-neutral [durable conversation kernel](docs/durable-conversation-runtime.md): hash-chained events, authority-stamped fact corrections, suspended/resumable goals, open commitments, policy epochs, stale-worker rejection, and deterministic byte-bounded packets that fail closed on mandatory-state overflow.
-- A deterministic action-policy firewall with argument/fact/receipt predicates, proposal/readback-bound confirmation, revision/epoch invalidation, postcondition quarantine, and provider-visible result projection.
-- A durable read-only worker substrate with immutable capability manifests, exclusive leases, heartbeats, cancellation epochs, crash recovery, structured cited results, append-only evidence, and at-least-once delivery with exactly-once application. It is an integration primitive; the legacy `launch_task` path has not yet been migrated to it.
+- A provider-neutral [durable conversation runtime](docs/durable-conversation-runtime.md): one PostgreSQL-backed hash-chained event authority, conflict-safe transactions, Flow checkpoint bindings, authority-stamped corrections, suspended/resumable goals, commitments, and deterministic byte-bounded realtime packets that fail closed on mandatory-state overflow.
+- A deterministic action-policy firewall with argument/fact/receipt predicates, numeric limits, proposal/readback-bound confirmation, revision/epoch invalidation, postcondition quarantine, and provider-visible result projection. The governed reservation API locks Flow state, evaluates against database time and durable call count, and appends bounded decision evidence in the same transaction as an allowed receipt.
+- A durable read-only worker substrate with immutable capability manifests, exclusive leases, heartbeats, cancellation epochs, crash recovery, cited results, and at-least-once delivery with exactly-once application. Governed spawn and result delivery are atomic with the conversation log. It is an integration primitive; the live `launch_task` MCP path has not yet been migrated to it.
 - Atomic reserve-before-dispatch action receipts, step/call/argument idempotency policies, stale-call rejection, and explicit indeterminate-outcome recovery.
 - Provider adapters for xAI Voice, OpenAI Realtime, and Gemini Live.
 - Browser calling over WebSocket or WebRTC, plus a bounded, authenticated Twilio Media Streams transport bridge for xAI/OpenAI. The bridge remains development/non-production until release-commit provider, PSTN, load, and crash-loss artifacts exist.
@@ -71,7 +71,7 @@ flowchart LR
   Runtime --> DB["Postgres: checkpoints, calls, workers, evidence"]
 ```
 
-- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 32 ordered migrations (`001`–`032`).
+- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 35 ordered migrations (`001`–`035`). See the [runtime API guide](docs/conversation-runtime-api.md).
 - `bridge/` — optional standalone Twilio Media Streams bridge. The legacy in-app `/api/bridge` compatibility route is disabled by default and cannot be enabled in production.
 - `examples/` — the tested [deep Flow v2 example pack](examples/flows/README.md) and a multi-goal mission example.
 - `docs/` — architecture, provider, flow, and extension guides.

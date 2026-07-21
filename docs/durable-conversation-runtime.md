@@ -1,16 +1,19 @@
 # Durable conversation runtime
 
-Status: architecture target, not a production or superiority claim.
+Status: implemented shared-state foundation, not yet the default live-call path or a provider-superiority claim.
 
 ## Implementation snapshot
 
-As of July 21, 2026, three independently testable slices exist in the repository:
+As of July 21, 2026, the repository contains these independently testable and partially integrated slices:
 
 - `web/lib/conversation-kernel.ts` implements the pure hash-chained log, authority-stamped revisions, suspend/resume goals, commitments, worker-result admission, deterministic projection, and typed `context_overflow` behavior.
 - `web/lib/action-policy-kernel.ts` implements pure revision-bound pre/post action decisions and readback-bound confirmation evidence.
-- migration `032` plus `web/lib/voice-workers/*` implements the production-shaped durable read-only worker queue, leases, crash states, cited results, and inbox application boundary.
+- migration `033` plus `web/lib/conversation-store.ts` persists the one-log authority with organization-scoped reads, 1–64 event compare-and-append transactions, exact replay, and conflict rejection. `web/lib/conversation-runtime.ts` adds semantic pre-validation and bounded conflict/replan behavior.
+- `web/lib/flow-conversation-adapter.ts` binds Flow revision, capability epoch, runtime digest, unresolved receipts, and full-state digest into the conversation log. `web/lib/realtime-context-packet.ts` compiles policy, current facts and corrections, goals, commitments, Flow checkpoint, worker status, host-derived capabilities, and recent caller-heard turns under one byte budget.
+- migrations `032` and `034` plus `web/lib/voice-workers/*` implement the durable read-only worker queue and atomically couple governed spawn/result delivery to the conversation event log.
+- migration `035` plus `reserveGovernedFlowActionAtomic` locks current Flow/call authority, evaluates the policy kernel using database time and durable dispatch count, and persists an immutable bounded decision record in the same transaction as an allowed reservation.
 
-They are not yet one production authority. Flow v2 still owns the live action path; the legacy xAI-based `launch_task` remains wired; the pure conversation log has no production store/Flow adapter; and worker inbox delivery is not yet compiled into provider context. The next shared-state gate is to add that one-log adapter and delivery-time policy transaction, then shadow it before replacing any proven Flow behavior.
+The important remaining boundary is wiring, not an omitted authority design: the current MCP gateway still calls the legacy Flow reservation and xAI-based `launch_task` paths, provider sessions do not yet receive packets from the durable compiler, and spoken-output safety has not been implemented. Therefore this foundation must be shadowed on live calls before it replaces the current route. Do not describe it as production-complete or as a general realtime guardrail.
 
 The checked-in [context retention result](../benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md) measures the pure projector only. HACC-VMR-v1 has no provider effectiveness result.
 
@@ -248,9 +251,9 @@ Provider transcripts are not proof of what a caller heard. A spoken-output claim
 
 Until that layer exists, say “tool-effect policy firewall,” not “all realtime guardrails.” The model may still speak an unsafe sentence even when the gateway blocks the related tool call.
 
-## Proposed public API primitives
+## Public API direction
 
-The public interface should expose small provider-neutral primitives instead of a monolithic agent object:
+The checked-in runtime already exposes the one-log transaction and packet compiler through `defineConversationRuntime`, PostgreSQL persistence functions, Flow checkpoint construction, governed action admission, and governed worker transitions. The [runtime API guide](conversation-runtime-api.md) shows the exact imports and current wiring boundary. The intended surface remains small provider-neutral primitives instead of a monolithic agent object:
 
 ```ts
 defineConversationRuntime({ eventStore, policy, projector, workers, gateway })
@@ -304,6 +307,6 @@ The first falsifiable milestone is not a UI demo. It is D1–D3: prove that a bo
 
 ## Evidence and advisory boundary
 
-The saved [Fable review](research/external/2026-07-21-durable-voice-runtime-fable.md) is unverified advisory input, not repository evidence. Its strongest useful challenges are reflected here: one event-log authority rather than independently persisted heads; delivery-time policy re-evaluation; at-least-once worker delivery with exactly-once application; fresh-session-plus-packet as the reconnect default; projector recall as a measured property; and explicit exclusion of spoken-output safety from the first slice. Those choices still require implementation and tests before they become claims.
+The saved [Fable review](research/external/2026-07-21-durable-voice-runtime-fable.md) is unverified advisory input, not repository evidence. Its strongest useful challenges shaped this implementation: one event-log authority rather than independently persisted heads; delivery-time policy re-evaluation; at-least-once worker delivery with exactly-once application; fresh-session-plus-packet as the reconnect default; projector recall as a measured property; and explicit exclusion of spoken-output safety from the first slice. Only the behaviors covered by checked-in tests and artifacts are evidence.
 
 Likewise, the existing mission-runtime tests and prior benchmark artifacts support narrower deterministic invariants only. They do not establish hour-scale provider reliability or an advantage over native OpenAI, Gemini, or xAI agents.
