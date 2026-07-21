@@ -44,6 +44,7 @@ import {
   CapabilityGatewayResultSchema,
   ProviderCapabilitySnapshotSchema,
   bindCapabilityGatewayCall,
+  renderCompactProviderCapabilitySnapshot,
   renderProviderCapabilitySnapshot,
   type AuthorizedCapabilityGatewayCall,
   type CapabilityGatewayResult,
@@ -1477,6 +1478,22 @@ function gatewayFailure(code: string, message: string, action?: string): Capabil
   });
 }
 
+function compactDisclosure(template: CompiledDisclosure): JsonValue {
+  const retainedFields = ["label", "instructions", "context", "required_outputs", "success_criteria"] as const;
+  return JsonValueSchema.parse({
+    target: template.target,
+    information: template.information.map((unit) => {
+      const payload = jsonRecord(unit.payload);
+      if (!payload) return { id: unit.id, kind: unit.kind, payload: unit.payload };
+      const compactPayload: Record<string, JsonValue> = {};
+      for (const field of retainedFields) {
+        if (Object.hasOwn(payload, field)) compactPayload[field] = payload[field];
+      }
+      return { id: unit.id, kind: unit.kind, payload: compactPayload };
+    }),
+  });
+}
+
 async function dispatchToolCall(input: Readonly<{
   call: RealtimeToolCall;
   condition: CompiledBenchmarkCondition;
@@ -1630,11 +1647,15 @@ async function dispatchToolCall(input: Readonly<{
       `disclosure ${template.target}`
     );
     runtime.currentCapabilitySnapshot = snapshot;
-    const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
+    const renderedSnapshot = condition.behavior.progressiveDisclosure
+      ? renderCompactProviderCapabilitySnapshot(snapshot)
+      : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: template.target, prompt: template.prompt, renderedSnapshot });
     providerOutput = {
       gateway_result: visibleOutput,
-      progressive_disclosure: template.prompt,
+      progressive_disclosure: condition.behavior.progressiveDisclosure
+        ? compactDisclosure(template)
+        : template.prompt,
       capability_snapshot: renderedSnapshot,
     };
   } else if (outcome.capabilitySnapshot) {
@@ -1644,7 +1665,9 @@ async function dispatchToolCall(input: Readonly<{
       "rotated"
     );
     runtime.currentCapabilitySnapshot = snapshot;
-    const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
+    const renderedSnapshot = condition.behavior.progressiveDisclosure
+      ? renderCompactProviderCapabilitySnapshot(snapshot)
+      : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: "$grant-rotation", prompt: "", renderedSnapshot });
     providerOutput = {
       gateway_result: visibleOutput,

@@ -37,7 +37,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v12");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v13");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "canary-plan.json";
 const CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
@@ -68,7 +68,7 @@ type FixtureEntry = Readonly<{
 type CanaryPlan = Readonly<{
   schemaVersion: 1;
   protocolId: "HACC-VTR-v1";
-  experimentId: "usefulness-live-canary-v12";
+  experimentId: string;
   createdAt: string;
   sourceCommit: string;
   sourceTree: string;
@@ -199,6 +199,10 @@ async function generateFixtures(root: string): Promise<readonly FixtureEntry[]> 
 
 async function prepare(root: string): Promise<void> {
   const source = await sourceState();
+  const experimentId = root.split(sep).at(-1);
+  if (!experimentId || !/^usefulness-live-canary-v[1-9][0-9]*$/.test(experimentId)) {
+    throw new Error("canary root basename must be usefulness-live-canary-vN");
+  }
   try {
     await stat(root);
     throw new Error(`canary root already exists: ${root}`);
@@ -211,14 +215,14 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   const publicKeyPem = keys.publicKey.export({ format: "pem", type: "spki" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "usefulness-canary-v12",
+    keyId: `${experimentId}-operator`,
     privateKeyPem,
     publicKeyPem,
   });
   const body = Object.freeze({
     schemaVersion: 1 as const,
     protocolId: "HACC-VTR-v1" as const,
-    experimentId: "usefulness-live-canary-v12" as const,
+    experimentId,
     createdAt: new Date().toISOString(),
     sourceCommit: source.commit,
     sourceTree: source.tree,
@@ -244,6 +248,8 @@ async function prepare(root: string): Promise<void> {
 
 async function loadPlan(root: string): Promise<CanaryPlan> {
   const plan = JSON.parse(await readFile(resolve(root, PLAN_FILE), "utf8")) as CanaryPlan;
+  if (!/^usefulness-live-canary-v[1-9][0-9]*$/.test(plan.experimentId)) throw new Error("invalid canary experimentId");
+  if (root.split(sep).at(-1) !== plan.experimentId) throw new Error("canary root basename differs from frozen experimentId");
   const { planSha256, ...body } = plan;
   if (sha256Hex(canonicalJson(body)) !== planSha256) throw new Error("canary plan hash mismatch");
   if (plan.suiteSha256 !== USEFULNESS_DEVELOPMENT_SUITE_SHA256) throw new Error("usefulness suite changed after prepare");

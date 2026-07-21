@@ -6,6 +6,7 @@ import {
   CapabilityGatewayResultSchema,
   ProviderCapabilitySnapshotSchema,
   bindCapabilityGatewayCall,
+  renderCompactProviderCapabilitySnapshot,
   renderProviderCapabilitySnapshot,
 } from "../capability-gateway";
 
@@ -146,5 +147,17 @@ describe("provider-visible capability gateway contract", () => {
       ...snapshot,
       actions: [snapshot.actions[0], snapshot.actions[0]],
     })).toThrow(/duplicate action/);
+  });
+
+  it("renders a smaller speech-model catalog without removing callable contracts", () => {
+    const snapshot = capabilitySnapshot();
+    const full = renderProviderCapabilitySnapshot(snapshot);
+    const compact = renderCompactProviderCapabilitySnapshot(snapshot);
+
+    expect(compact.length).toBeLessThan(full.length);
+    expect(compact).not.toContain("semantic_hash");
+    expect(compact).not.toContain("capability_grant");
+    expect(compact).toContain('"name":"close_work_order"');
+    expect(compact).toContain('"input_schema":{"type":"object"}');
   });
 });

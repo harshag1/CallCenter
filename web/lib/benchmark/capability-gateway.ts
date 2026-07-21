@@ -143,3 +143,30 @@ export function renderProviderCapabilitySnapshot(input: unknown): string {
     "</capability_snapshot>",
   ].join("\n");
 }
+
+/**
+ * Speech models pay a steep working-memory cost when every tool result repeats
+ * compiler hashes and the full disclosure catalog. This representation keeps
+ * the exact callable contract while omitting fields that are useful only to
+ * the host-side attestation ledger.
+ */
+export function renderCompactProviderCapabilitySnapshot(input: unknown): string {
+  const snapshot = ProviderCapabilitySnapshotSchema.parse(input);
+  const actions = [...snapshot.actions]
+    .map((action) => ({
+      name: action.name,
+      description: action.description,
+      input_schema: action.input_schema,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  return [
+    "<capability_snapshot>",
+    canonicalJson({
+      gateway_version: CAPABILITY_GATEWAY_VERSION,
+      scope: snapshot.scope,
+      capability_epoch: snapshot.capability_epoch,
+      actions,
+    }),
+    "</capability_snapshot>",
+  ].join("\n");
+}

@@ -1333,7 +1333,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       onToolResults(fake, results) {
         expect(results[0].output).toMatchObject({
           gateway_result: { ok: true, action: "lookup_value" },
-          progressive_disclosure: "COMPILED COMMIT STAGE DISCLOSURE",
+          progressive_disclosure: { target: "topic:commit", information: [] },
         });
         expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
           .not.toContain("capability_grant");
