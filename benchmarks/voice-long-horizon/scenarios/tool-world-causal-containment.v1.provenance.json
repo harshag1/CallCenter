@@ -10,9 +10,9 @@
     "result_hash": "f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab"
   },
   "tracked_base": {
-    "commit_oid": "6f1024ce27042a014dcf023655fee1848bae17df",
-    "tree_oid": "3b48520a9236aa35c2182f1a0e32ee70d4ac7790",
-    "capture_worktree_dirty": true,
+    "commit_oid": "c965fb7d04fd580db8034d745bbd4bb34aebfa6f",
+    "tree_oid": "8a560886d2d044b35b706e048585fdfbc1dd7576",
+    "capture_worktree_dirty": false,
     "claim": "tracked base before the selected worktree bytes; not a clean-build claim"
   },
   "binding_scope": {
@@ -54,5 +54,5 @@
       "base_content_sha256": "10362dbbaf3a1c871664b7dbd39de3eeb8ea0fee89ff8babc4c27ae2129e6abd"
     }
   ],
-  "binding_sha256": "babd2807e4a6c7ff1666e6f139d4dca8e75b157359273dff658a0b6353bbbce8"
+  "binding_sha256": "8bdcfdf9b54bc6b8a2b7523b9e457c081c2fef14daa10398fd083985d0f090b9"
 }

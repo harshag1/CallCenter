@@ -58,13 +58,15 @@ describe("ToolWorld deterministic causal containment", () => {
     expect(() => runToolWorldCausalContainment({ seed_start: 0xffff_ffff, seeds_per_case: 2 })).toThrow(/unsigned 32-bit/);
   });
 
-  it("binds the artifact to exact dirty-worktree source bytes and rejects substitution", () => {
+  it("binds the artifact to exact clean-base source bytes and rejects substitution", () => {
     const verified = verifyToolWorldCausalProvenanceManifest(REPO_ROOT, provenance);
     expect(verified).toEqual({ valid: true, errors: [] });
     expect(provenance.tracked_base).toMatchObject({
-      capture_worktree_dirty: true,
+      capture_worktree_dirty: false,
       claim: "tracked base before the selected worktree bytes; not a clean-build claim",
     });
+    expect(provenance.sources.every((source) => source.relation_to_tracked_base === "matches-base"))
+      .toBe(true);
 
     for (const source of provenance.sources) {
       const substitutedPath = resolve(REPO_ROOT, source.path);

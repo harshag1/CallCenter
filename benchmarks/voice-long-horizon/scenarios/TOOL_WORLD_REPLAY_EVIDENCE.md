@@ -60,10 +60,10 @@ Bindings:
 | Trial set | `d1ac1e90e5701109e0eece6a98256baa7068c642d5b718293f3ac9ff5be0e09d` |
 | Result | `f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab` |
 | Experiment implementation | `8564f3708014fd5b87170b03b575b597dc569c8dd2eff4cbda312c8031242ee3` |
-| Source/Git provenance manifest | `9de2e2530ba9728c76815fa8b0fb664d727a3317af97e182d138f0d16d6a50ea` |
-| Provenance binding | `babd2807e4a6c7ff1666e6f139d4dca8e75b157359273dff658a0b6353bbbce8` |
+| Source/Git provenance manifest | `5a54c8534eb1bb74440ee6085d1a19393db22a6c3539a31bf3dd1b6237d8b37d` |
+| Provenance binding | `8bdcfdf9b54bc6b8a2b7523b9e457c081c2fef14daa10398fd083985d0f090b9` |
 
-The focused test regenerates the report twice and requires semantic equality with the checked artifact. An independent 25-run reproducibility check produced one byte-identical JSON SHA-256 across all 25 generations. It also verifies the dirty-worktree-safe provenance envelope against base commit `a78630e83371b595e56bd8601ecced50b106c5e2` and tree `bbfd17d5d8d8937eb626d4e81e337ca27747a8d9`, then demonstrates that byte substitution in each of the four bound source paths fails verification. The full protocol and interpretation boundary are in `TOOL_WORLD_CAUSAL_CONTAINMENT_PROTOCOL.md`.
+The focused test regenerates the report twice and requires semantic equality with the checked artifact. An independent 25-run reproducibility check produced one byte-identical JSON SHA-256 across all 25 generations. It also verifies the clean provenance envelope against base commit `c965fb7d04fd580db8034d745bbd4bb34aebfa6f` and tree `8a560886d2d044b35b706e048585fdfbc1dd7576`, then demonstrates that byte substitution in each of the four bound source paths fails verification. The full protocol and interpretation boundary are in `TOOL_WORLD_CAUSAL_CONTAINMENT_PROTOCOL.md`.
 
 ## Interpretation limits
 
