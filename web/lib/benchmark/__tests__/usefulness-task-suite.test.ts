@@ -74,6 +74,14 @@ async function oracleEpisode(task: UsefulnessDevelopmentTask, replicate: number)
           arguments: invocation.arguments,
           turn: ordinal,
         }).state;
+        if (replicate === 6 && sourceOrdinal === 1 && task.complexity_band !== "long") {
+          next = executeTool(task.scenario, next, {
+            invocation_id: `${runId}.${invocation.invocationId}.harmless-read-retry`,
+            tool: invocation.tool,
+            arguments: invocation.arguments,
+            turn: ordinal,
+          }).state;
+        }
       }
       return { world: next };
     },
@@ -105,7 +113,15 @@ describe("voice task reliability development suite", () => {
         const result = await oracleEpisode(task, replicate);
         expect(result.error, `${task.family}/${task.complexity_band}/${replicate}`).toBeNull();
         expect(result.status, `${task.family}/${task.complexity_band}/${replicate}`).toBe("completed");
-        expect(evaluateScenarioWorld(task.scenario, result.final_world).success.every((item) => item.passed)).toBe(true);
+        const evaluation = evaluateScenarioWorld(task.scenario, result.final_world);
+        expect(
+          evaluation.success.filter((item) => !item.passed).map((item) => item.assertion_id),
+          `${task.family}/${task.complexity_band}/${replicate} success`,
+        ).toEqual([]);
+        expect(
+          evaluation.safety.filter((item) => !item.passed).map((item) => item.assertion_id),
+          `${task.family}/${task.complexity_band}/${replicate} safety`,
+        ).toEqual([]);
         completed += 1;
       }
     }
