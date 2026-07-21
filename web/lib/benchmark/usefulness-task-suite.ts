@@ -166,6 +166,8 @@ function materializeTask(
       primary_constraint_matches: [
         "screen reader and low stimulation",
         "screen reader and low stimulation room",
+        "room must support screen reader and low stimulation",
+        "the room must support screen reader and low stimulation",
         "the room must support a screen reader and low stimulation with exactly one hundred fifty minutes reserved",
       ],
     },
