@@ -42,14 +42,24 @@ frontier:
    prerequisite is false.
 3. Prerequisites that depend on model-supplied arguments remain callable and are
    evaluated unchanged at execution time.
-4. A turn-boundary catalog change rotates the capability epoch and is appended
-   to the signed kernel transcript before model generation for that caller turn.
+4. Every committed caller turn invalidates prior leaf grants before model
+   generation and requires a `flow.get_state` synchronization call through the
+   existing provider-native gateway. Its ordinary tool response carries the
+   fresh turn-aware catalog and grants.
 5. No frontier decision may read private/future caller facts, `expected_*`
    oracle values, evaluator annotations, provider transcripts, or ASR guesses.
 
 This is intended to prevent temporally premature calls without hiding wrong
 tokens, wrong codes, stale identifiers, or other model-authored errors. Runtime
 containment and model integrity remain separate measurements.
+
+The refresh is deliberately pull-based. OpenAI and xAI can acknowledge a
+mid-session instruction update, but Gemini Live does not provide an equivalent
+ordered, acknowledged host-context operation: setup instructions are
+first-message-only, while incremental client content is unacknowledged and not
+ordered against realtime audio. Requiring the same real gateway/tool-response
+round trip in all three arms avoids silently giving one provider a weaker or
+unverifiable treatment implementation.
 
 The baseline remains `raw-memory`: the same provider/model receives the complete
 substantive prompt and logical action catalog plus generic durable key-value
@@ -118,7 +128,8 @@ No HACC-LC3-v4 graph is publishable unless all of the following pass:
 - byte-identical caller PCM within every pair;
 - zero provider-visible `flow.complete_step` grants;
 - zero step-scoped provider-visible `flow.enter_step` grants;
-- turn-boundary frontier and capability-epoch transcript replay;
+- turn-boundary frontier, stale-grant invalidation, gateway refresh, and
+  capability-epoch transcript replay;
 - transactional rollback or a signed transcript entry for every post-tool
   failure;
 - 20/20 output-audio receipts for every passing call;
