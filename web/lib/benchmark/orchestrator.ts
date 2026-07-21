@@ -106,7 +106,6 @@ import {
   createDeterministicCallerWorldScheduler,
   observeCallerWorld,
   type CallerSchedulerState,
-  type CallerTurnSelection,
   type CallerWorldSchedulePlan,
   type ScheduledCallerOpportunity,
 } from "./caller-world-scheduler";
