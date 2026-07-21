@@ -190,7 +190,7 @@ npm run build
 
 `npm run check` runs Vitest, ESLint, and TypeScript. Run it from a clean checkout before deployment; focused tests passing in one subsystem are not a substitute for this repository-wide gate.
 
-The default command intentionally skips 18 PostgreSQL integration suites (54 tests) unless their disposable-database environments are supplied: `FLOW_INTEGRATION_DATABASE_URL`, `AUTH_SECURITY_INTEGRATION_DATABASE_URL`, `CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL`, and `SECURITY_MIGRATION_INTEGRATION_DATABASE_URL`. Release verification must run those suites and the separate `npm run db:test-isolation` proof; see [database tenancy](docs/database-tenancy.md).
+The default command intentionally skips 19 PostgreSQL integration suites (56 tests) unless their disposable-database environments are supplied: `FLOW_INTEGRATION_DATABASE_URL`, `AUTH_SECURITY_INTEGRATION_DATABASE_URL`, `CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL`, and `SECURITY_MIGRATION_INTEGRATION_DATABASE_URL`. Release verification must run those suites and the separate `npm run db:test-isolation` proof; see [database tenancy](docs/database-tenancy.md).
 
 Reproduce the checked-in `$0` benchmark claims without opening a provider session:
 

@@ -72,7 +72,7 @@ npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out ../bench
 npm run benchmark:active-catalog -- --out ../benchmarks/voice-long-horizon/.local/active-catalog-local.json
 ```
 
-They do not load provider credentials, open realtime sessions, or create C3–C5 evidence. The default `npm run check` also does not execute the 18 conditional PostgreSQL suites unless their four integration database environments are supplied; see the root [verification instructions](../../README.md#verification).
+They do not load provider credentials, open realtime sessions, or create C3–C5 evidence. The default `npm run check` also does not execute the 19 conditional PostgreSQL suites unless their four integration database environments are supplied; see the root [verification instructions](../../README.md#verification).
 
 ## Research documents
 
