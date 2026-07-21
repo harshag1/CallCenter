@@ -134,12 +134,17 @@ function materializeTask(
       primary_constraint_matches: [
         "custody chain must remain climate stable",
         "the custody chain must remain climate stable",
+        "the custody chain must remain climate stable and relative humidity may not exceed fifty two percent at any handoff",
       ],
     },
     campus: {
       corrected_subject_used: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
       subject_matches_correction: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
-      primary_constraint_matches: ["screen reader and low stimulation", "screen reader and low stimulation room"],
+      primary_constraint_matches: [
+        "screen reader and low stimulation",
+        "screen reader and low stimulation room",
+        "the room must support a screen reader and low stimulation with exactly one hundred fifty minutes reserved",
+      ],
     },
     water: {
       corrected_subject_used: ["HYD14 daycare", "daycare"],
@@ -147,6 +152,7 @@ function materializeTask(
       primary_constraint_matches: [
         "chain of custody with childcare priority",
         "chain of custody and childcare priority",
+        "use chain of custody with childcare priority and keep the drill threshold at exactly ten parts per billion",
       ],
     },
   };
