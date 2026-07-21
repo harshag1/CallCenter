@@ -103,6 +103,7 @@ export type PolicyReceipt = Readonly<{
 
 export type ConfirmationEvidence = Readonly<{
   proposal_digest: string;
+  challenge_digest: string;
   authority: "caller" | "operator";
   confirmed_at: string;
   evidence_sha256: string;
@@ -197,8 +198,12 @@ function evaluatePredicate(
   if (!fact || (predicate.authorities && !predicate.authorities.includes(fact.authority))) {
     return { passed: false, evidence: [] };
   }
-  if (predicate.max_age_seconds !== undefined &&
-      nowMs - Date.parse(fact.observed_at) > predicate.max_age_seconds * 1_000) {
+  const observedAtMs = Date.parse(fact.observed_at);
+  const observedAtIsValid = Number.isFinite(observedAtMs)
+    && new Date(observedAtMs).toISOString() === fact.observed_at
+    && observedAtMs <= nowMs;
+  if (!observedAtIsValid || (predicate.max_age_seconds !== undefined &&
+      nowMs - observedAtMs > predicate.max_age_seconds * 1_000)) {
     return { passed: false, evidence: [fact.evidence_sha256] };
   }
   return {
@@ -208,10 +213,13 @@ function evaluatePredicate(
 }
 
 function finishDecision(body: Omit<PreDispatchDecision, "decision_digest">): PreDispatchDecision {
-  return Object.freeze({
+  const normalized = {
     ...body,
     evidence_sha256: Object.freeze([...new Set(body.evidence_sha256)].sort()),
-    decision_digest: sha256("hacc/action-policy-decision/v1", body),
+  };
+  return Object.freeze({
+    ...normalized,
+    decision_digest: sha256("hacc/action-policy-decision/v1", normalized),
   });
 }
 
@@ -267,9 +275,13 @@ export function evaluatePreDispatch(input: PreDispatchInput): PreDispatchDecisio
         [path, valueAtPath(input.arguments, path) ?? null])),
     });
     const confirmation = input.confirmation;
-    const fresh = confirmation && Number.isFinite(Date.parse(confirmation.confirmed_at)) &&
-      nowMs - Date.parse(confirmation.confirmed_at) <= item.confirmation.max_age_seconds * 1_000;
+    const confirmedAtMs = confirmation ? Date.parse(confirmation.confirmed_at) : Number.NaN;
+    const fresh = confirmation && Number.isFinite(confirmedAtMs) &&
+      new Date(confirmedAtMs).toISOString() === confirmation.confirmed_at &&
+      confirmedAtMs <= nowMs &&
+      nowMs - confirmedAtMs <= item.confirmation.max_age_seconds * 1_000;
     const valid = confirmation && fresh && confirmation.proposal_digest === proposalDigest &&
+      confirmation.challenge_digest === challengeDigest &&
       confirmation.state_revision === input.state_revision &&
       confirmation.capability_epoch === input.capability_epoch &&
       item.confirmation.authorities.includes(confirmation.authority) &&
@@ -300,6 +312,7 @@ export function evaluatePostDispatch(input: Readonly<{
   result: Readonly<Record<string, Json>>;
 }>): PostDispatchDecision {
   const policy = parsePolicy(input.policy);
+  const policyDigest = sha256("hacc/action-policy-set/v1", policy);
   const item = policy.actions.find((candidate) => candidate.action === input.pre_dispatch.action);
   const rawHash = sha256("hacc/action-policy-result/v1", input.result);
   const finish = (
@@ -316,6 +329,9 @@ export function evaluatePostDispatch(input: Readonly<{
     }),
   });
   if (!item || input.pre_dispatch.decision !== "allow") return finish("quarantine", "dispatch_was_not_allowed", null);
+  if (input.pre_dispatch.policy_digest !== policyDigest) {
+    return finish("quarantine", "policy_changed_after_decision", null);
+  }
   if (input.current_state_head_sha256 !== input.pre_dispatch.state_head_sha256 ||
       input.current_state_revision !== input.pre_dispatch.state_revision ||
       input.current_capability_epoch !== input.pre_dispatch.capability_epoch) {

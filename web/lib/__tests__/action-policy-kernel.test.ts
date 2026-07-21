@@ -57,6 +57,7 @@ describe("action policy kernel", () => {
     expect(challenge.decision).toBe("require_confirmation");
     const confirmation = {
       proposal_digest: challenge.proposal_digest,
+      challenge_digest: challenge.challenge_digest!,
       authority: "caller" as const,
       confirmed_at: "2026-07-21T11:59:30.000Z",
       evidence_sha256: H("c"),
@@ -64,6 +65,12 @@ describe("action policy kernel", () => {
       capability_epoch: 3,
     };
     expect(evaluatePreDispatch({ ...input(), confirmation })).toMatchObject({ decision: "allow" });
+    expect(evaluatePreDispatch({ ...input(), confirmation: {
+      ...confirmation, challenge_digest: H("d"),
+    } })).toMatchObject({ decision: "require_confirmation" });
+    expect(evaluatePreDispatch({ ...input(), confirmation: {
+      ...confirmation, confirmed_at: "2026-07-21T12:00:01.000Z",
+    } })).toMatchObject({ decision: "require_confirmation" });
     expect(evaluatePreDispatch({ ...input(), state_revision: 8, confirmation })).toMatchObject({
       decision: "require_confirmation",
     });
@@ -75,7 +82,8 @@ describe("action policy kernel", () => {
   it("rechecks authority after execution and never treats uncertain writes as rejected", () => {
     const challenge = evaluatePreDispatch(input());
     const allowed = evaluatePreDispatch({ ...input(), confirmation: {
-      proposal_digest: challenge.proposal_digest, authority: "caller", confirmed_at: "2026-07-21T11:59:30.000Z",
+      proposal_digest: challenge.proposal_digest, challenge_digest: challenge.challenge_digest!,
+      authority: "caller", confirmed_at: "2026-07-21T11:59:30.000Z",
       evidence_sha256: H("c"), state_revision: 7, capability_epoch: 3,
     } });
     expect(evaluatePostDispatch({
@@ -94,5 +102,17 @@ describe("action policy kernel", () => {
       decision: "accept",
       provider_result: { status: "renewed", expires_at: "2027-07-21" },
     });
+    expect(evaluatePostDispatch({
+      policy: { ...policy, version: "2" }, pre_dispatch: allowed,
+      current_state_head_sha256: H("a"), current_state_revision: 7,
+      current_capability_epoch: 3, result: { status: "renewed" },
+    })).toMatchObject({ decision: "quarantine", reason: "policy_changed_after_decision" });
+  });
+
+  it("rejects future-dated authoritative facts", () => {
+    expect(evaluatePreDispatch({
+      ...input(),
+      facts: [{ ...input().facts[0], observed_at: "2026-07-21T12:00:01.000Z" }],
+    })).toMatchObject({ decision: "deny", reason: "required_evidence_missing" });
   });
 });
