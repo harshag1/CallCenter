@@ -296,8 +296,8 @@ function deepEqual(left: JsonValue | undefined, right: JsonValue | undefined): b
 }
 
 function canonicalSpokenIdentifier(value: JsonValue | undefined): string | null {
-  if (typeof value !== "string" || !/^[A-Za-z0-9 _-]+$/.test(value)) return null;
-  const canonical = value.toUpperCase().replace(/[ _-]+/g, "");
+  if (typeof value !== "string" || !/^[A-Za-z0-9 ._-]+$/.test(value)) return null;
+  const canonical = value.toUpperCase().replace(/[ ._-]+/g, "");
   return canonical.length > 0 ? canonical : null;
 }
 

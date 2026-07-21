@@ -223,4 +223,74 @@ describe("voice task reliability development suite", () => {
     });
     expect(rejected.receipt.status).toBe("rejected");
   });
+
+  it("accepts only the campus-scoped spoken clearance alias", () => {
+    const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+      candidate.family === "campus" && candidate.complexity_band === "medium"
+    )!;
+    const calls = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "campus")!.oracleInvocations;
+    let world = createToolWorld(task.scenario);
+    for (const invocation of calls.filter((candidate) => candidate.turn < 14)) {
+      world = executeTool(task.scenario, world, {
+        invocation_id: `campus-alias-prerequisite-${invocation.invocationId}`,
+        tool: invocation.tool,
+        arguments: invocation.arguments,
+        turn: invocation.turn,
+      }).state;
+    }
+    const clearance = calls.find((invocation) => invocation.turn === 14)!;
+    const accepted = executeTool(task.scenario, world, {
+      invocation_id: "campus-clearance-spoken-alias-accepted",
+      tool: clearance.tool,
+      arguments: { case_id: "AEX-775", clearance_token: "FAC accommodation 993" },
+      turn: 14,
+    });
+    expect(accepted.receipt.status).toBe("succeeded");
+
+    const rejected = executeTool(task.scenario, world, {
+      invocation_id: "campus-clearance-spoken-alias-rejected",
+      tool: clearance.tool,
+      arguments: { case_id: "AEX-775", clearance_token: "FAC accommodation 992" },
+      turn: 14,
+    });
+    expect(rejected.receipt.status).toBe("rejected");
+
+    for (const family of ["museum", "water"] as const) {
+      const otherTask = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+        candidate.family === family && candidate.complexity_band === "medium"
+      )!;
+      const otherClearance = otherTask.scenario.tools.find((tool) =>
+        tool.prerequisites.some((prerequisite) => prerequisite.id === "clearance_token_matches")
+      )!.prerequisites.find((prerequisite) => prerequisite.id === "clearance_token_matches")!;
+      expect(otherClearance.operator, family).toBe("identifier_equals");
+      expect(otherClearance.aliases, family).toBeUndefined();
+    }
+  });
+
+  it("treats only ASCII periods as spoken identifier separators", () => {
+    const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+      candidate.family === "water" && candidate.complexity_band === "short"
+    )!;
+    const calls = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "water")!.oracleInvocations;
+    const lookup = calls.find((invocation) => invocation.turn === 1)!;
+    const verifiedBase = executeTool(task.scenario, createToolWorld(task.scenario), {
+      invocation_id: "period-separator-lookup",
+      tool: lookup.tool,
+      arguments: lookup.arguments,
+      turn: 1,
+    }).state;
+    const verify = calls.find((invocation) => invocation.turn === 2)!;
+    const verifyWith = (actorId: string, invocationId: string) => executeTool(task.scenario, verifiedBase, {
+      invocation_id: invocationId,
+      tool: verify.tool,
+      arguments: { case_id: "WQR-6112", actor_id: actorId, verification_pin: "5208" },
+      turn: 2,
+    }).receipt.status;
+
+    expect(verifyWith("OPS.73", "period-separator-accepted")).toBe("succeeded");
+    expect(verifyWith("OPS.74", "period-separator-digit-change")).toBe("rejected");
+    expect(verifyWith("OPT.73", "period-separator-letter-change")).toBe("rejected");
+    expect(verifyWith("\u039fPS.73", "period-separator-greek-confusable")).toBe("rejected");
+    expect(verifyWith("OPS\uFF0E73", "period-separator-fullwidth-confusable")).toBe("rejected");
+  });
 });

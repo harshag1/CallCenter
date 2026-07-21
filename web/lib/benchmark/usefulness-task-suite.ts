@@ -174,6 +174,7 @@ function materializeTask(
     },
     campus: {
       corrected_subject_used: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
+      clearance_token_matches: ["FAC accommodation 993"],
       subject_matches_correction: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
     },
     water: {
