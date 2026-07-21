@@ -11,7 +11,7 @@
 
 ## Current gate
 
-**Paid effectiveness testing remains closed.** The closed-loop runner and scheduled-episode scorer now exist, but the first production canary correctly failed the transport-readiness gate. No comparative effectiveness result can be calculated yet.
+**Paid scaling remains closed.** Short production development canaries may run for transport and evaluator calibration, but medium/long or held-out volume remains blocked until each surviving provider arm reaches the preregistered 90% transport-terminal gate. No public superiority claim is authorized.
 
 ## 2026-07-20: production canary v1 retained as a null run
 
@@ -35,11 +35,15 @@
 - The first v8 probe failed the evidence gate after a valid leaf mutation because opportunistic auto-completion threw when it could not yet prove the step complete. That left a world change without a transcript append, and final verification correctly rejected it. Auto-advance is now non-throwing and receipt-conservative: any incomplete or ambiguous completion leaves the current step active while the leaf invocation is journaled normally. Runner exceptions also retain the public kernel transcript when available for postmortem replay.
 - Canary v9 Gemini campus harness passed the old routing bottleneck and reached 9/10 turns with successful lookup, verification, and corrected-assessment receipts. It stopped only because the model supplied “Room must support screen reader and low stimulation” for the caller's guardrail field; that exact caller-grounded phrase is now an arm-shared explicit alias. This is still development-set calibration and cannot be confirmation evidence.
 - Canary v10 again reached 9/10 campus turns but exposed a spacing-only alias mismatch (`CHEM318 practical` versus preregistered `CHEM 318 practical`). Explicit voice aliases now compare case-insensitively after removing non-alphanumeric separators, while still requiring the entire preregistered alphanumeric sequence. This accepts spacing and punctuation loss but continues to reject changed identifiers or wording.
+- Canary v11 retained all 18 scheduled cells and produced result `32a7818db54316003c21cc2c83fb184986ce3761ebb476e7674426bb9fefffcb` over 85 completed voice-to-voice turns. Strict world/transport/integrity passes were: OpenAI raw 0/3 and harness 0/3 (all sessions rejected for quota); Gemini raw 0/3 and harness 2/3; xAI raw 1/3 and harness 1/3. Estimated retained provider cost was `$1.045248`.
+- v11 is not a clean comparative benchmark. The host process ended after scheduling Gemini water raw and both xAI museum arms; the no-retry policy records all three as runner-exception failures in the ITT denominator. Gemini's two harness-only outcomes therefore include one pair whose baseline never reached the provider. The result is engineering evidence, not a launch statistic.
+- Retained wire evidence found a second evaluator confound. xAI supplied the semantically correct campus requirement as “The room must support a screen reader and low stimulation,” but an exact hand-written alias rejected the harmless article. Museum's rejected paraphrase genuinely omitted chain-of-custody, showing why blindly broad fuzzy matching would also be wrong.
+- Replaced free-text guardrail equality with a typed semantic-to-symbol boundary shared by both arms: the caller speaks naturally, while the tool exposes three canonical constraint codes (one correct, two decoys), and the authoritative world accepts only the exact selected code plus the independent numeric limit. This is the production pattern builders should use for consequential state—free speech at the edge, closed vocabulary at the action boundary.
+- The live report now computes strict task pass, pair outcomes, paired risk difference, and exact two-sided McNemar p-values directly from all scheduled summaries. A `finalize-interrupted` command can seal only scheduled-only partials as failures; it refuses partials containing richer evidence so a crash cannot erase or simplify an observed provider outcome.
 
 ## Next executable milestones
 
-1. Diagnose one frozen Gemini cell with retained redacted errors.
-2. Re-run one xAI cell after common spoken-identifier normalization.
-3. Run the remaining v2 cells only after both transport probes pass.
-4. Add independent audio transcription/semantic scoring before calling any world-state completion an end-to-end voice success.
-5. Keep OpenAI cells as scheduled failures until a funded credential is available; do not substitute a different model or omit the provider.
+1. Freeze and run one clean v12 short replication after the typed-constraint change; do not replay any failed v12 cell.
+2. Add independent audio transcription/semantic scoring before calling any world-state completion an end-to-end voice success.
+3. Keep OpenAI cells as scheduled failures until a funded credential is available; do not substitute a different model or omit the provider.
+4. Stop rather than scale if either arm remains below 90% transport-terminal completion on a surviving provider.

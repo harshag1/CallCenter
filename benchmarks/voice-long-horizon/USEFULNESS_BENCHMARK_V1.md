@@ -42,6 +42,8 @@ The harness receives the same substantive facts, policies, actions, memory capac
 
 Neither arm's visible catalog, grant, prompt, or private telemetry defines whether an attempted semantic action is legal or whether the task succeeded.
 
+Consequential free-text requirements cross a typed semantic-to-symbol boundary before execution. The caller speaks naturally; the shared tool schema presents a small closed vocabulary containing the correct code and plausible decoys; and the world oracle checks the selected code plus independently typed values such as limits and identifiers. This prevents punctuation or filler words from becoming evaluator failures without delegating ground truth to an LLM similarity judge. Both arms receive the same codebook whenever the corresponding action is visible under their condition.
+
 ## Primary task suite
 
 The minimum suite contains three task families and three complexity bands. Development and held-out instances are disjoint.
