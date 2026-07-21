@@ -24,6 +24,7 @@
 - Estimated xAI cost: `$0.273028`. OpenAI/Gemini recorded no usage cost. This is engineering evidence only, not a model or harness score.
 - Added a conservative spoken-identifier comparator that ignores only ASCII case, spaces, underscores, and hyphens. It is common to both benchmark arms and rejects any alphanumeric-content change.
 - Production failures now retain a secret-redacted diagnostic message as well as its hash. A frozen plan can run one selected cell for transport diagnosis without changing the scheduled denominator.
+- Canary v2 isolated one Gemini cell and identified the exact post-session failure: normalized usage objects retained optional counters with JavaScript `undefined`, which the canonical artifact writer correctly rejected as non-JSON. The adapter now omits absent counters and has a regression test; v2 remains a one-cell diagnostic artifact and will not be scored.
 
 ## Next executable milestones
 

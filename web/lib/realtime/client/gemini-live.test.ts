@@ -22,6 +22,7 @@ import {
   GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ,
   GEMINI_PROVIDER_TRANSCRIPTION_POLICY,
   GeminiLiveClient,
+  normalizeGeminiUsage,
 } from "./gemini-live";
 
 type SocketEvent = "open" | "message" | "error" | "close";
@@ -1581,6 +1582,14 @@ describe("GeminiLiveClient", () => {
     test.socket.receive({ sessionResumptionUpdate: { resumable: false } });
     await settle();
     expect(test.client.resumeState).toMatchObject({ handle: undefined, resumable: false });
+  });
+
+  it("omits unavailable usage counters instead of emitting non-JSON undefined values", () => {
+    expect(normalizeGeminiUsage({ promptTokenCount: 12, responseTokenCount: 4 })).toEqual({
+      totalInputTokens: 12,
+      totalOutputTokens: 4,
+      raw: { promptTokenCount: 12, responseTokenCount: 4 },
+    });
   });
 
   it("fails closed when a provider frame cannot be parsed or preserved", async () => {

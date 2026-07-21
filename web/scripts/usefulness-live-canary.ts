@@ -36,7 +36,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v2");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v3");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "canary-plan.json";
 const CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
@@ -67,7 +67,7 @@ type FixtureEntry = Readonly<{
 type CanaryPlan = Readonly<{
   schemaVersion: 1;
   protocolId: "HACC-VTR-v1";
-  experimentId: "usefulness-live-canary-v2";
+  experimentId: "usefulness-live-canary-v3";
   createdAt: string;
   sourceCommit: string;
   sourceTree: string;
@@ -210,14 +210,14 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   const publicKeyPem = keys.publicKey.export({ format: "pem", type: "spki" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "usefulness-canary-v2",
+    keyId: "usefulness-canary-v3",
     privateKeyPem,
     publicKeyPem,
   });
   const body = Object.freeze({
     schemaVersion: 1 as const,
     protocolId: "HACC-VTR-v1" as const,
-    experimentId: "usefulness-live-canary-v2" as const,
+    experimentId: "usefulness-live-canary-v3" as const,
     createdAt: new Date().toISOString(),
     sourceCommit: source.commit,
     sourceTree: source.tree,

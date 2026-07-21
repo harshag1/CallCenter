@@ -265,17 +265,27 @@ export function normalizeGeminiUsage(raw: Record<string, unknown>): NormalizedRe
   const cachedAudioTokens = modalityTokens(raw.cacheTokensDetails, "AUDIO");
   const cachedTextTokens = modalityTokens(raw.cacheTokensDetails, "TEXT");
   const cachedTotal = finiteToken(raw.cachedContentTokenCount);
+  const totalInputTokens = finiteToken(raw.promptTokenCount);
+  const totalOutputTokens = finiteToken(raw.responseTokenCount);
+  const totalTokens = finiteToken(raw.totalTokenCount);
+  const inputAudioTokens = modalityTokens(raw.promptTokensDetails, "AUDIO");
+  const inputTextTokens = modalityTokens(raw.promptTokensDetails, "TEXT");
+  const outputAudioTokens = modalityTokens(raw.responseTokensDetails, "AUDIO");
+  const outputTextTokens = modalityTokens(raw.responseTokensDetails, "TEXT");
+  const uncategorizedCachedTokens = cachedAudioTokens === undefined && cachedTextTokens === undefined
+    ? cachedTotal
+    : undefined;
   return {
-    totalInputTokens: finiteToken(raw.promptTokenCount),
-    cachedInputAudioTokens: cachedAudioTokens,
-    cachedInputTextTokens: cachedTextTokens,
-    cachedInputTokens: cachedAudioTokens === undefined && cachedTextTokens === undefined ? cachedTotal : undefined,
-    totalOutputTokens: finiteToken(raw.responseTokenCount),
-    totalTokens: finiteToken(raw.totalTokenCount),
-    inputAudioTokens: modalityTokens(raw.promptTokensDetails, "AUDIO"),
-    inputTextTokens: modalityTokens(raw.promptTokensDetails, "TEXT"),
-    outputAudioTokens: modalityTokens(raw.responseTokensDetails, "AUDIO"),
-    outputTextTokens: modalityTokens(raw.responseTokensDetails, "TEXT"),
+    ...(totalInputTokens === undefined ? {} : { totalInputTokens }),
+    ...(cachedAudioTokens === undefined ? {} : { cachedInputAudioTokens: cachedAudioTokens }),
+    ...(cachedTextTokens === undefined ? {} : { cachedInputTextTokens: cachedTextTokens }),
+    ...(uncategorizedCachedTokens === undefined ? {} : { cachedInputTokens: uncategorizedCachedTokens }),
+    ...(totalOutputTokens === undefined ? {} : { totalOutputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(inputAudioTokens === undefined ? {} : { inputAudioTokens }),
+    ...(inputTextTokens === undefined ? {} : { inputTextTokens }),
+    ...(outputAudioTokens === undefined ? {} : { outputAudioTokens }),
+    ...(outputTextTokens === undefined ? {} : { outputTextTokens }),
     raw,
   };
 }
