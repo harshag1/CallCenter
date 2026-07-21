@@ -1,5 +1,5 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
-import { createBudgetLedger, reserveBudget, type BudgetLedger } from "./budget";
+import { assertValidBudgetLedger, createBudgetLedger, reserveBudget, type BudgetLedger } from "./budget";
 import { exactMcNemarTwoSided } from "./usefulness-scoring";
 import {
   USEFULNESS_DEVELOPMENT_SUITE_SHA256,
@@ -70,10 +70,12 @@ export type LongCallSummary = Readonly<{
   transportTerminal: boolean;
   worldOutcomePass: boolean;
   systemIntegrityPass: boolean;
+  audioSemanticPass: boolean;
+  asrReceiptsSha256: string | null;
   strictPass: boolean;
   estimatedCostUsd: number | null;
   artifactManifestSha256: string;
-  failureClass: "transport" | "world" | "system" | null;
+  failureClass: "transport" | "world" | "system" | "audio" | null;
 }>;
 
 export function longUsefulnessTask(family: LongCallFamily): UsefulnessDevelopmentTask {
@@ -187,21 +189,45 @@ export function createLongCallBudgetLedger(createdAt: string): BudgetLedger {
   return ledger;
 }
 
+export function assertLongCallBudgetLedgerMatchesSchedule(ledger: BudgetLedger): void {
+  assertValidBudgetLedger(ledger);
+  if (
+    ledger.authorization_ceiling_micro_usd !== 270_000_000
+    || ledger.scheduling_stop_micro_usd !== 270_000_000
+  ) throw new Error("long-call ledger must retain the frozen $270 aggregate cap");
+  const cells = createLongCallCells();
+  if (ledger.reservations.length !== cells.length) throw new Error("long-call ledger must contain exactly 54 reservations");
+  const byId = new Map(ledger.reservations.map((reservation) => [reservation.reservation_id, reservation]));
+  for (const cell of cells) {
+    const reservation = byId.get(`${cell.runId}-aggregate-reservation`);
+    if (
+      !reservation
+      || reservation.provider !== cell.provider
+      || reservation.model !== cell.model
+      || reservation.run_id !== cell.runId
+      || reservation.maximum_micro_usd !== 5_000_000
+      || reservation.status === "released"
+    ) throw new Error(`long-call ledger reservation mismatch for ${cell.runId}`);
+  }
+}
+
 export function classifyLongCallFailure(input: Pick<LongCallSummary,
-  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass"
+  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass"
 >): LongCallSummary["failureClass"] {
   if (!input.transportTerminal) return "transport";
   if (!input.systemIntegrityPass) return "system";
   if (!input.worldOutcomePass) return "world";
+  if (!input.audioSemanticPass) return "audio";
   return null;
 }
 
 export function isStrictLongCallPass(input: Pick<LongCallSummary,
-  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "turnsPlanned" | "turnsSent" | "outputAudioTurns"
+  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass" | "turnsPlanned" | "turnsSent" | "outputAudioTurns"
 >): boolean {
   return input.transportTerminal
     && input.worldOutcomePass
     && input.systemIntegrityPass
+    && input.audioSemanticPass
     && input.turnsPlanned === LONG_CALL_TURNS_PER_EPISODE
     && input.turnsSent === LONG_CALL_TURNS_PER_EPISODE
     && input.outputAudioTurns === LONG_CALL_TURNS_PER_EPISODE;
@@ -250,7 +276,7 @@ export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
     const harnessOnly = providerPairs.filter((pair) => pair.outcome === "harness_only").length;
     const rawOnly = providerPairs.filter((pair) => pair.outcome === "raw_only").length;
     const providerRuns = ordered.filter((run) => run.provider === provider);
-    const count = (condition: LongCallCondition, field: "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass") =>
+    const count = (condition: LongCallCondition, field: "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass") =>
       providerRuns.filter((run) => run.condition === condition && run[field]).length;
     return Object.freeze({
       provider,
@@ -265,6 +291,7 @@ export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
       transport: Object.freeze({ raw: count("raw-memory", "transportTerminal"), harness: count("full-harness", "transportTerminal") }),
       world: Object.freeze({ raw: count("raw-memory", "worldOutcomePass"), harness: count("full-harness", "worldOutcomePass") }),
       system: Object.freeze({ raw: count("raw-memory", "systemIntegrityPass"), harness: count("full-harness", "systemIntegrityPass") }),
+      audio: Object.freeze({ raw: count("raw-memory", "audioSemanticPass"), harness: count("full-harness", "audioSemanticPass") }),
     });
   });
   const body = Object.freeze({

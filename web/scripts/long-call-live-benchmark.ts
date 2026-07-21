@@ -24,6 +24,7 @@ import {
   LONG_CALL_MAXIMUM_USD_PER_EPISODE,
   LONG_CALL_PROTOCOL_ID,
   LONG_CALL_TTS_VOICES,
+  assertLongCallBudgetLedgerMatchesSchedule,
   classifyLongCallFailure,
   createLongCallBudgetLedger,
   createLongCallPairs,
@@ -369,6 +370,13 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const aggregateLedger = JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger;
+  const aggregateReservation = aggregateLedger.reservations.find((reservation) =>
+    reservation.reservation_id === `${cell.runId}-aggregate-reservation`
+  );
+  if (aggregateReservation?.status !== "active") {
+    throw new Error(`aggregate reservation is not active; no-retry policy blocks ${cell.runId}`);
+  }
   await mkdir(partial, { recursive: false, mode: 0o700 });
   await writeFile(resolve(partial, "scheduled.json"), `${canonicalJson({
     schemaVersion: 1,
@@ -377,7 +385,6 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     cell,
     scheduledBeforeSocket: true,
   })}\n`, { flag: "wx", mode: 0o600 });
-
   const loaded = await callerAudio(root, plan, cell);
   const suite = compileConditionSuite(loaded.task.compiler_input);
   const condition = suite.conditions[cell.condition as BenchmarkConditionId];
@@ -559,6 +566,7 @@ async function run(root: string, concurrency: number): Promise<void> {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 9) throw new Error("concurrency must be 1..9 pairs");
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
+  assertLongCallBudgetLedgerMatchesSchedule(JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger);
   const providerCredentials = await credentials();
   await mkdir(resolve(root, "runs"), { recursive: true, mode: 0o700 });
   const selectedPairId = option("pair-id");
@@ -618,6 +626,7 @@ async function inspect(root: string): Promise<void> {
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
   const ledger = JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger;
+  assertLongCallBudgetLedgerMatchesSchedule(ledger);
   const runEntries = await readdir(resolve(root, "runs")).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
     throw error;

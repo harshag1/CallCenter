@@ -4,6 +4,7 @@ import {
   LONG_CALL_PROTOCOL_ID,
   LONG_CALL_SCHEDULED_CALLER_TURNS,
   LONG_CALL_TTS_VOICES,
+  assertLongCallBudgetLedgerMatchesSchedule,
   classifyLongCallFailure,
   createLongCallBudgetLedger,
   createLongCallCells,
@@ -60,16 +61,22 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
     expect(ledger.reservations.every((reservation) =>
       reservation.status === "active" && reservation.maximum_micro_usd === 5_000_000
     )).toBe(true);
+    expect(() => assertLongCallBudgetLedgerMatchesSchedule(ledger)).not.toThrow();
+    expect(() => assertLongCallBudgetLedgerMatchesSchedule({
+      ...ledger,
+      reservations: ledger.reservations.slice(1),
+    })).toThrow("exactly 54 reservations");
   });
 
   it("defines strict pass and transport/world/system failure precedence", () => {
-    const pass = { transportTerminal: true, worldOutcomePass: true, systemIntegrityPass: true, turnsPlanned: 20, turnsSent: 20, outputAudioTurns: 20 };
+    const pass = { transportTerminal: true, worldOutcomePass: true, systemIntegrityPass: true, audioSemanticPass: true, turnsPlanned: 20, turnsSent: 20, outputAudioTurns: 20 };
     expect(isStrictLongCallPass(pass)).toBe(true);
     expect(isStrictLongCallPass({ ...pass, outputAudioTurns: 19 })).toBe(false);
     expect(classifyLongCallFailure(pass)).toBeNull();
     expect(classifyLongCallFailure({ ...pass, transportTerminal: false })).toBe("transport");
     expect(classifyLongCallFailure({ ...pass, systemIntegrityPass: false })).toBe("system");
     expect(classifyLongCallFailure({ ...pass, worldOutcomePass: false })).toBe("world");
+    expect(classifyLongCallFailure({ ...pass, audioSemanticPass: false })).toBe("audio");
   });
 
   it("reports exact paired McNemar results separately by provider", () => {
@@ -79,6 +86,7 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
         transportTerminal: true,
         worldOutcomePass: strict,
         systemIntegrityPass: true,
+        audioSemanticPass: true,
         turnsPlanned: 20,
         turnsSent: 20,
         outputAudioTurns: 20,
@@ -97,6 +105,7 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
         callerScheduleStatus: "complete",
         ...core,
         strictPass: isStrictLongCallPass(core),
+        asrReceiptsSha256: "b".repeat(64),
         estimatedCostUsd: 0.01,
         artifactManifestSha256: "a".repeat(64),
         failureClass: classifyLongCallFailure(core),
