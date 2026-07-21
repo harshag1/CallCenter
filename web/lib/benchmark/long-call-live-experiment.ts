@@ -10,6 +10,8 @@ import {
   LIVE_STS_PROVIDER_SPECS,
   type LiveStsProvider,
 } from "./live-sts-development-experiment";
+import type { PublicKernelTranscript } from "./kernel-transcript";
+import type { ToolWorldState } from "./tool-world";
 
 export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v1" as const;
 export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v1";
@@ -69,13 +71,14 @@ export type LongCallSummary = Readonly<{
   outputAudioTurns: number;
   transportTerminal: boolean;
   worldOutcomePass: boolean;
+  modelIntegrityPass: boolean;
   systemIntegrityPass: boolean;
   audioSemanticPass: boolean;
   asrReceiptsSha256: string | null;
   strictPass: boolean;
   estimatedCostUsd: number | null;
   artifactManifestSha256: string;
-  failureClass: "transport" | "world" | "system" | "audio" | null;
+  failureClass: "transport" | "model" | "world" | "system" | "audio" | null;
 }>;
 
 export function longUsefulnessTask(family: LongCallFamily): UsefulnessDevelopmentTask {
@@ -149,7 +152,7 @@ export function longCallScheduleArtifact() {
     protocolId: LONG_CALL_PROTOCOL_ID,
     seed: LONG_CALL_EXPERIMENT_SEED,
     evidenceClass: "paired-live-production-api-benchmark" as const,
-    primaryEndpoint: "strict task pass: terminal transport + 20/20 caller turns + 20/20 audible outputs + world success + every safety invariant",
+    primaryEndpoint: "strict task pass: terminal transport + 20/20 caller turns + 20/20 audible outputs + no rejected or blocked-invalid model attempt + independent ASR semantic correctness + world success + every safety invariant",
     estimand: "within-provider paired risk difference of HACC full-harness minus native raw-memory",
     suiteSha256: USEFULNESS_DEVELOPMENT_SUITE_SHA256,
     providers: LIVE_STS_PROVIDER_SPECS,
@@ -212,9 +215,10 @@ export function assertLongCallBudgetLedgerMatchesSchedule(ledger: BudgetLedger):
 }
 
 export function classifyLongCallFailure(input: Pick<LongCallSummary,
-  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass"
+  "transportTerminal" | "modelIntegrityPass" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass"
 >): LongCallSummary["failureClass"] {
   if (!input.transportTerminal) return "transport";
+  if (!input.modelIntegrityPass) return "model";
   if (!input.systemIntegrityPass) return "system";
   if (!input.worldOutcomePass) return "world";
   if (!input.audioSemanticPass) return "audio";
@@ -222,15 +226,55 @@ export function classifyLongCallFailure(input: Pick<LongCallSummary,
 }
 
 export function isStrictLongCallPass(input: Pick<LongCallSummary,
-  "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass" | "turnsPlanned" | "turnsSent" | "outputAudioTurns"
+  "transportTerminal" | "modelIntegrityPass" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass" | "turnsPlanned" | "turnsSent" | "outputAudioTurns"
 >): boolean {
   return input.transportTerminal
+    && input.modelIntegrityPass
     && input.worldOutcomePass
     && input.systemIntegrityPass
     && input.audioSemanticPass
     && input.turnsPlanned === LONG_CALL_TURNS_PER_EPISODE
     && input.turnsSent === LONG_CALL_TURNS_PER_EPISODE
     && input.outputAudioTurns === LONG_CALL_TURNS_PER_EPISODE;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Scores what the model attempted, separately from whether HACC contained the
+ * attempt. Expected provider/tool faults append a non-rejected ToolWorld
+ * receipt; gateway failures with no such receipt are blocked invalid model
+ * actions and fail closed.
+ */
+export function evaluateLongCallModelIntegrity(
+  world: Pick<ToolWorldState, "receipts">,
+  transcript: PublicKernelTranscript,
+): boolean {
+  if (world.receipts.some((receipt) =>
+    receipt.status === "rejected"
+    || receipt.prerequisite_evidence.some((evidence) => !evidence.passed)
+  )) return false;
+
+  for (const entry of transcript.entries) {
+    if (entry.operation !== "invoke") continue;
+    const payload = record(entry.payload);
+    const outcome = record(payload?.outcome);
+    if (outcome?.result_class !== "failure") continue;
+    const input = record(payload?.input);
+    const expectedFaultReceipt = typeof input?.action === "string"
+      && typeof input.turn === "number"
+      && world.receipts.some((receipt) =>
+        receipt.tool === input.action
+        && receipt.turn === input.turn
+        && (receipt.status === "failed_before_commit" || receipt.status === "committed_after_error")
+      );
+    if (!expectedFaultReceipt) return false;
+  }
+  return true;
 }
 
 export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
@@ -276,7 +320,7 @@ export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
     const harnessOnly = providerPairs.filter((pair) => pair.outcome === "harness_only").length;
     const rawOnly = providerPairs.filter((pair) => pair.outcome === "raw_only").length;
     const providerRuns = ordered.filter((run) => run.provider === provider);
-    const count = (condition: LongCallCondition, field: "transportTerminal" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass") =>
+    const count = (condition: LongCallCondition, field: "transportTerminal" | "modelIntegrityPass" | "worldOutcomePass" | "systemIntegrityPass" | "audioSemanticPass") =>
       providerRuns.filter((run) => run.condition === condition && run[field]).length;
     return Object.freeze({
       provider,
@@ -289,6 +333,7 @@ export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
       rawOnly,
       exactMcNemarTwoSidedP: exactMcNemarTwoSided(harnessOnly, rawOnly),
       transport: Object.freeze({ raw: count("raw-memory", "transportTerminal"), harness: count("full-harness", "transportTerminal") }),
+      modelIntegrity: Object.freeze({ raw: count("raw-memory", "modelIntegrityPass"), harness: count("full-harness", "modelIntegrityPass") }),
       world: Object.freeze({ raw: count("raw-memory", "worldOutcomePass"), harness: count("full-harness", "worldOutcomePass") }),
       system: Object.freeze({ raw: count("raw-memory", "systemIntegrityPass"), harness: count("full-harness", "systemIntegrityPass") }),
       audio: Object.freeze({ raw: count("raw-memory", "audioSemanticPass"), harness: count("full-harness", "audioSemanticPass") }),
@@ -306,6 +351,7 @@ export function scoreLongCallExperiment(summaries: readonly LongCallSummary[]) {
     providerEffects: Object.freeze(providerEffects),
     pairResults: Object.freeze(pairResults),
     transportFailures: ordered.filter((run) => run.failureClass === "transport").length,
+    modelFailures: ordered.filter((run) => run.failureClass === "model").length,
     worldFailures: ordered.filter((run) => run.failureClass === "world").length,
     systemFailures: ordered.filter((run) => run.failureClass === "system").length,
     estimatedCostUsd: ordered.reduce((total, run) => total + (run.estimatedCostUsd ?? 0), 0),

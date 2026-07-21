@@ -9,6 +9,7 @@ import {
   createLongCallBudgetLedger,
   createLongCallCells,
   createLongCallPairs,
+  evaluateLongCallModelIntegrity,
   isStrictLongCallPass,
   longCallScheduleArtifact,
   longUsefulnessTask,
@@ -69,14 +70,50 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
   });
 
   it("defines strict pass and transport/world/system failure precedence", () => {
-    const pass = { transportTerminal: true, worldOutcomePass: true, systemIntegrityPass: true, audioSemanticPass: true, turnsPlanned: 20, turnsSent: 20, outputAudioTurns: 20 };
+    const pass = { transportTerminal: true, modelIntegrityPass: true, worldOutcomePass: true, systemIntegrityPass: true, audioSemanticPass: true, turnsPlanned: 20, turnsSent: 20, outputAudioTurns: 20 };
     expect(isStrictLongCallPass(pass)).toBe(true);
     expect(isStrictLongCallPass({ ...pass, outputAudioTurns: 19 })).toBe(false);
     expect(classifyLongCallFailure(pass)).toBeNull();
     expect(classifyLongCallFailure({ ...pass, transportTerminal: false })).toBe("transport");
+    expect(classifyLongCallFailure({ ...pass, modelIntegrityPass: false })).toBe("model");
     expect(classifyLongCallFailure({ ...pass, systemIntegrityPass: false })).toBe("system");
     expect(classifyLongCallFailure({ ...pass, worldOutcomePass: false })).toBe("world");
     expect(classifyLongCallFailure({ ...pass, audioSemanticPass: false })).toBe("audio");
+  });
+
+  it("fails model integrity for rejected prerequisites and blocked gateway calls", () => {
+    const transcript = (resultClass: string) => ({
+      view: "public_commitment",
+      entries: [{
+        schema_version: 1,
+        transcript_type: "benchmark_kernel_replay_public_commitment",
+        run_id: "run",
+        sequence: 1,
+        operation: "invoke",
+        payload: {
+          input: { action: "lookup_record", turn: 7 },
+          outcome: { result_class: resultClass },
+          public_world_delta: { receipts_append_hmac_sha256: "c".repeat(64) },
+        },
+        previous_entry_sha256: "a".repeat(64),
+        entry_sha256: "b".repeat(64),
+      }],
+    }) as unknown as Parameters<typeof evaluateLongCallModelIntegrity>[1];
+    const world = (receipts: readonly unknown[]) => ({ receipts }) as unknown as Parameters<typeof evaluateLongCallModelIntegrity>[0];
+
+    expect(evaluateLongCallModelIntegrity(world([]), transcript("success_executed"))).toBe(true);
+    expect(evaluateLongCallModelIntegrity(world([]), transcript("failure"))).toBe(false);
+    expect(evaluateLongCallModelIntegrity(world([{
+      tool: "lookup_record",
+      turn: 7,
+      status: "failed_before_commit",
+      prerequisite_evidence: [],
+    }]), transcript("failure"))).toBe(true);
+    expect(evaluateLongCallModelIntegrity(world([{ status: "rejected", prerequisite_evidence: [] }]), transcript("failure"))).toBe(false);
+    expect(evaluateLongCallModelIntegrity(world([{
+      status: "succeeded",
+      prerequisite_evidence: [{ passed: false }],
+    }]), transcript("success_executed"))).toBe(false);
   });
 
   it("reports exact paired McNemar results separately by provider", () => {
@@ -84,6 +121,7 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
       const strict = cell.condition === "full-harness" || cell.pairOrdinal % 3 === 0;
       const core = {
         transportTerminal: true,
+        modelIntegrityPass: true,
         worldOutcomePass: strict,
         systemIntegrityPass: true,
         audioSemanticPass: true,
@@ -120,6 +158,8 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
       expect(effect.harnessOnly).toBe(6);
       expect(effect.rawOnly).toBe(0);
       expect(effect.exactMcNemarTwoSidedP).toBe(0.03125);
+      expect(effect.modelIntegrity).toEqual({ raw: 9, harness: 9 });
     }
+    expect(result.modelFailures).toBe(0);
   });
 });

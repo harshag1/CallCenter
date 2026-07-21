@@ -3,15 +3,23 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { canonicalJson, sha256Hex } from "../lib/benchmark/artifacts";
 import {
   createBudgetLedger,
-  settleBudgetReservation,
-  type BudgetLedger,
 } from "../lib/benchmark/budget";
+import {
+  initializeFilesystemBudgetLedger,
+  inspectFilesystemBudgetLedger,
+  markBudgetConnectionIntent,
+  markBudgetSessionOpened,
+  recordBudgetTerminal,
+  reserveFilesystemBudget,
+  settleFilesystemBudget,
+  type BudgetCostEnvelope,
+} from "../lib/benchmark/filesystem-budget-ledger";
 import { freezeCallerAudioIndex } from "../lib/benchmark/caller-world-scheduler";
 import { compileConditionSuite, type BenchmarkConditionId } from "../lib/benchmark/condition-compiler";
 import { InMemoryBenchmarkGatewayKernel } from "../lib/benchmark/gateway-kernel";
@@ -24,10 +32,9 @@ import {
   LONG_CALL_MAXIMUM_USD_PER_EPISODE,
   LONG_CALL_PROTOCOL_ID,
   LONG_CALL_TTS_VOICES,
-  assertLongCallBudgetLedgerMatchesSchedule,
   classifyLongCallFailure,
-  createLongCallBudgetLedger,
   createLongCallPairs,
+  evaluateLongCallModelIntegrity,
   isStrictLongCallPass,
   longCallScheduleArtifact,
   longUsefulnessTask,
@@ -48,13 +55,13 @@ import {
 import { evaluateScenarioWorld } from "../lib/benchmark/tool-world";
 import { createUsefulnessCallerSchedulePlan } from "../lib/benchmark/usefulness-task-suite";
 import { AgentFlowSchema } from "../lib/flow";
+import type { NormalizedRealtimeClient } from "../lib/realtime/client/types";
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/hacc-lc3-v1");
-const DEFAULT_PROVIDER_ENV = "/Users/harsha/Desktop/gpu-hub-harness/.secrets/staging-runtime-provider.env";
 const PLAN_FILE = "experiment-plan.json";
-const LEDGER_FILE = "budget-ledger.json";
+const LEDGER_FILE = "budget-ledger.jsonl";
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const SAFE_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
@@ -95,6 +102,15 @@ function option(name: string): string | undefined {
 
 function rootDirectory(): string {
   return resolve(option("root") ?? DEFAULT_ROOT);
+}
+
+function providerEnvironmentFile(): string | undefined {
+  const path = option("env-file");
+  if (path === undefined) return undefined;
+  if (!isAbsolute(path) || resolve(path) !== path) {
+    throw new Error("--env-file must be an absolute normalized path");
+  }
+  return path;
 }
 
 async function git(...args: string[]): Promise<string> {
@@ -168,6 +184,69 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path);
 }
 
+function aggregateLedgerPath(root: string): string {
+  return resolve(root, LEDGER_FILE);
+}
+
+function episodeCostEnvelope(plan: ExperimentPlan, cell: LongCallCell): BudgetCostEnvelope {
+  return Object.freeze({
+    schema_version: 1,
+    kind: "hacc_provider_gate1_cost_envelope",
+    pricing_snapshot_sha256: sha256Hex(`hacc-lc3/pricing-snapshot/v1\n${canonicalJson({
+      provider: cell.provider,
+      model: cell.model,
+      maximumUsd: LONG_CALL_MAXIMUM_USD_PER_EPISODE,
+      estimator: "provider-specific observed realtime usage; fail-closed reserve when unavailable",
+    })}`),
+    provider_hard_session_caps_sha256: sha256Hex(`hacc-lc3/provider-session-cap/v1\n${canonicalJson({
+      provider: cell.provider,
+      model: cell.model,
+      maximumSessionMs: 9 * 60_000,
+      maximumOutputAudioBytes: 64 * 1024 * 1024,
+    })}`),
+    runner_config_sha256: sha256Hex(`hacc-lc3/runner-config/v1\n${canonicalJson({
+      planSha256: plan.planSha256,
+      runId: cell.runId,
+      pairId: cell.pairId,
+      noPaidRetry: true,
+      adjacentPairArms: true,
+    })}`),
+    formula_sha256: sha256Hex("hacc-lc3/estimated-cost-formula/v1\nopenai-token-usage;gemini-audio-minutes;xai-duplex-audio-minutes"),
+    components: Object.freeze([Object.freeze({
+      name: "hard-per-episode-reserve",
+      upper_bound_micro_usd: 5_000_000,
+    })]),
+    safety_margin_micro_usd: 0,
+  });
+}
+
+function assertAggregateLedgerMatchesPlan(
+  plan: ExperimentPlan,
+  ledger: Awaited<ReturnType<typeof inspectFilesystemBudgetLedger>>,
+): void {
+  if (ledger.operational_ceiling_micro_usd !== 270_000_000) {
+    throw new Error("aggregate filesystem budget operational ceiling differs from $270 protocol cap");
+  }
+  if (ledger.reservations.length !== plan.schedule.scheduledEpisodes) {
+    throw new Error("aggregate filesystem budget ledger differs from frozen schedule");
+  }
+  for (const cell of plan.schedule.cells) {
+    const reservation = ledger.reservations.find((candidate) =>
+      candidate.reservation_id === `${cell.runId}-aggregate-reservation`
+    );
+    if (
+      !reservation
+      || reservation.run_id !== cell.runId
+      || reservation.provider !== cell.provider
+      || reservation.model !== cell.model
+      || reservation.condition !== cell.condition
+      || reservation.maximum_micro_usd !== 5_000_000
+    ) {
+      throw new Error(`aggregate filesystem budget reservation differs for ${cell.runId}`);
+    }
+  }
+}
+
 async function prepare(root: string): Promise<void> {
   const source = await sourceState();
   const experimentId = root.split(sep).at(-1);
@@ -210,10 +289,31 @@ async function prepare(root: string): Promise<void> {
     ...body,
     planSha256: sha256Hex(`harshas-amazing-call-center/long-call-plan/v1\n${canonicalJson(body)}`),
   });
-  const ledger = createLongCallBudgetLedger(plan.createdAt);
   await writeFile(resolve(root, PRIVATE_KEY_FILE), privateKeyPem, { flag: "wx", mode: 0o600 });
   await writeFile(resolve(root, PLAN_FILE), `${canonicalJson(plan)}\n`, { flag: "wx", mode: 0o600 });
-  await writeFile(resolve(root, LEDGER_FILE), `${canonicalJson(ledger)}\n`, { flag: "wx", mode: 0o600 });
+  const ledgerPath = aggregateLedgerPath(root);
+  await initializeFilesystemBudgetLedger({
+    ledgerPath,
+    ledgerId: `${experimentId}-aggregate-budget`,
+    operationId: `${experimentId}-initialize-budget`,
+    operationalCeilingUsd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
+  });
+  const expiresAt = new Date(Date.parse(plan.createdAt) + 24 * 60 * 60_000).toISOString();
+  for (const cell of plan.schedule.cells) {
+    await reserveFilesystemBudget({
+      ledgerPath,
+      operationId: `${cell.runId}-reserve`,
+      reservationId: `${cell.runId}-aggregate-reservation`,
+      runId: cell.runId,
+      provider: cell.provider,
+      model: cell.model,
+      condition: cell.condition,
+      expiresAt,
+      costEnvelope: episodeCostEnvelope(plan, cell),
+      lockTimeoutMs: 60_000,
+    });
+  }
+  assertAggregateLedgerMatchesPlan(plan, await inspectFilesystemBudgetLedger({ ledgerPath, lockTimeoutMs: 60_000 }));
   await chmod(root, 0o700);
   process.stdout.write(`${canonicalJson({
     action: "prepared",
@@ -339,19 +439,49 @@ async function persistArtifacts(root: string, result: Awaited<ReturnType<typeof 
   await writeFile(resolve(root, "artifacts/runner-manifest.json"), result.artifacts.manifestJson, { flag: "wx", mode: 0o600 });
 }
 
-let ledgerMutation: Promise<void> = Promise.resolve();
-
-async function settleAggregateLedger(root: string, cell: LongCallCell, estimatedUsd: number | null): Promise<void> {
-  const mutation = ledgerMutation.then(async () => {
-    const path = resolve(root, LEDGER_FILE);
-    const ledger = JSON.parse(await readFile(path, "utf8")) as BudgetLedger;
-    const next = settleBudgetReservation(ledger, `${cell.runId}-aggregate-reservation`, {
-      estimated_usd: (estimatedUsd ?? Number(LONG_CALL_MAXIMUM_USD_PER_EPISODE)).toFixed(6),
-    });
-    await atomicJson(path, next);
+async function recordAggregateTerminal(
+  root: string,
+  cell: LongCallCell,
+  outcome: "completed" | "failed",
+  estimatedUsd: number,
+): Promise<void> {
+  const common = {
+    ledgerPath: aggregateLedgerPath(root),
+    reservationId: `${cell.runId}-aggregate-reservation`,
+    lockTimeoutMs: 60_000,
+  } as const;
+  await recordBudgetTerminal({ ...common, operationId: `${cell.runId}-terminal`, outcome });
+  await settleFilesystemBudget({
+    ...common,
+    operationId: `${cell.runId}-settle`,
+    estimatedUsd: estimatedUsd.toFixed(6),
   });
-  ledgerMutation = mutation.catch(() => undefined);
-  return mutation;
+}
+
+function budgetTrackedClient(
+  root: string,
+  cell: LongCallCell,
+  client: NormalizedRealtimeClient,
+  onOpened: () => void,
+): NormalizedRealtimeClient {
+  return new Proxy(client, {
+    get(target, property) {
+      if (property === "connect") {
+        return async () => {
+          await target.connect();
+          onOpened();
+          await markBudgetSessionOpened({
+            ledgerPath: aggregateLedgerPath(root),
+            operationId: `${cell.runId}-opened`,
+            reservationId: `${cell.runId}-aggregate-reservation`,
+            lockTimeoutMs: 60_000,
+          });
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, apiKey: string): Promise<void> {
@@ -370,12 +500,15 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const aggregateLedger = JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger;
+  const aggregateLedger = await inspectFilesystemBudgetLedger({
+    ledgerPath: aggregateLedgerPath(root),
+    lockTimeoutMs: 60_000,
+  });
   const aggregateReservation = aggregateLedger.reservations.find((reservation) =>
     reservation.reservation_id === `${cell.runId}-aggregate-reservation`
   );
-  if (aggregateReservation?.status !== "active") {
-    throw new Error(`aggregate reservation is not active; no-retry policy blocks ${cell.runId}`);
+  if (aggregateReservation?.status !== "reserved") {
+    throw new Error(`aggregate reservation is not fresh; no-retry policy blocks ${cell.runId}`);
   }
   await mkdir(partial, { recursive: false, mode: 0o700 });
   await writeFile(resolve(partial, "scheduled.json"), `${canonicalJson({
@@ -385,6 +518,12 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     cell,
     scheduledBeforeSocket: true,
   })}\n`, { flag: "wx", mode: 0o600 });
+  await markBudgetConnectionIntent({
+    ledgerPath: aggregateLedgerPath(root),
+    operationId: `${cell.runId}-connection-intent`,
+    reservationId: `${cell.runId}-aggregate-reservation`,
+    lockTimeoutMs: 60_000,
+  });
   const loaded = await callerAudio(root, plan, cell);
   const suite = compileConditionSuite(loaded.task.compiler_input);
   const condition = suite.conditions[cell.condition as BenchmarkConditionId];
@@ -429,11 +568,12 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     evidenceBinding,
     signer,
     capabilitySecret: sha256Hex(`hacc-lc3-capability\n${plan.planSha256}\n${cell.runId}`),
-    leaseTtlSeconds: 10 * 60,
+    leaseTtlSeconds: 12 * 60,
     autoAdvanceLinearFlow: true,
   });
 
   let summary: LongCallSummary;
+  let providerSessionOpened = false;
   try {
     const inputBytes = loaded.callerTurns.reduce((total, turn) => total + (
       Array.isArray(turn.audio)
@@ -445,7 +585,12 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       provider: cell.provider,
       model: cell.model,
       scenario: loaded.task.scenario,
-      createClient: (configuration) => createProductionRealtimeClient(cell.provider, configuration, apiKey),
+      createClient: (configuration) => budgetTrackedClient(
+        root,
+        cell,
+        createProductionRealtimeClient(cell.provider, configuration, apiKey),
+        () => { providerSessionOpened = true; },
+      ),
       condition,
       gatewayKernel,
       kernelAttestationExpectation: {
@@ -465,7 +610,7 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       studyPlanHash: plan.planSha256,
       limits: {
         maxTurns: 20,
-        maxSessionMs: 10 * 60_000,
+        maxSessionMs: 9 * 60_000,
         maxInputAudioBytes: inputBytes,
         maxOutputAudioBytes: 64 * 1024 * 1024,
         maxToolCalls: 128,
@@ -485,13 +630,16 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     const transportTerminal = result.status === "completed" && result.callerSchedule?.status === "complete";
     const worldOutcomePass = evaluation.success.every((assertion) => assertion.passed);
     const systemIntegrityPass = evaluation.safety.every((assertion) => assertion.passed);
+    const modelIntegrityPass = evaluateLongCallModelIntegrity(result.world, gatewayKernel.transcript());
     const core = {
       turnsPlanned: result.counters.turnsPlanned,
       turnsSent: result.counters.turnsSent,
       outputAudioTurns: result.providerEvidence.audio.output.length,
       transportTerminal,
+      modelIntegrityPass,
       worldOutcomePass,
       systemIntegrityPass,
+      audioSemanticPass: false,
     };
     const reservation = result.budgetLedger.reservations.find((candidate) => candidate.reservation_id === `${cell.runId}-cell-reservation`);
     summary = Object.freeze({
@@ -507,7 +655,8 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       status: result.status,
       callerScheduleStatus: result.callerSchedule?.status ?? null,
       ...core,
-      strictPass: isStrictLongCallPass(core),
+      asrReceiptsSha256: null,
+      strictPass: false,
       estimatedCostUsd: reservation?.costs.estimated_micro_usd == null ? null : reservation.costs.estimated_micro_usd / 1_000_000,
       artifactManifestSha256: sha256Hex(result.artifacts.manifestJson),
       failureClass: classifyLongCallFailure(core),
@@ -518,8 +667,10 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       turnsSent: 0,
       outputAudioTurns: 0,
       transportTerminal: false,
+      modelIntegrityPass: false,
       worldOutcomePass: false,
       systemIntegrityPass: false,
+      audioSemanticPass: false,
     };
     summary = Object.freeze({
       schemaVersion: 1,
@@ -534,6 +685,7 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       status: "runner_exception",
       callerScheduleStatus: null,
       ...core,
+      asrReceiptsSha256: null,
       strictPass: false,
       estimatedCostUsd: null,
       artifactManifestSha256: sha256Hex(`runner-exception\n${cell.runId}`),
@@ -552,13 +704,19 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     }
   }
   await writeFile(resolve(partial, "summary.json"), `${canonicalJson(summary)}\n`, { flag: "wx", mode: 0o600 });
-  await settleAggregateLedger(root, cell, summary.estimatedCostUsd);
+  await recordAggregateTerminal(
+    root,
+    cell,
+    summary.status === "completed" ? "completed" : "failed",
+    summary.estimatedCostUsd ?? (providerSessionOpened ? Number(LONG_CALL_MAXIMUM_USD_PER_EPISODE) : 0),
+  );
   await rename(partial, complete);
   process.stdout.write(`${canonicalJson({ action: "episode-retained", pairOrdinal: cell.pairOrdinal, runId: cell.runId, status: summary.status })}\n`);
 }
 
 async function credentials() {
-  if (!process.env.BENCHMARK_PROVIDER_ENV_FILE) process.env.BENCHMARK_PROVIDER_ENV_FILE = DEFAULT_PROVIDER_ENV;
+  const explicit = providerEnvironmentFile();
+  if (explicit) process.env.BENCHMARK_PROVIDER_ENV_FILE = explicit;
   return loadProductionRealtimeCredentials(REPOSITORY_ROOT);
 }
 
@@ -566,14 +724,15 @@ async function run(root: string, concurrency: number): Promise<void> {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 9) throw new Error("concurrency must be 1..9 pairs");
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
-  assertLongCallBudgetLedgerMatchesSchedule(JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger);
-  const providerCredentials = await credentials();
+  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: aggregateLedgerPath(root), lockTimeoutMs: 60_000 });
+  assertAggregateLedgerMatchesPlan(plan, ledger);
   await mkdir(resolve(root, "runs"), { recursive: true, mode: 0o700 });
   const selectedPairId = option("pair-id");
   const selectedPairs = selectedPairId
     ? createLongCallPairs().filter((pair) => pair.pairId === selectedPairId)
     : createLongCallPairs();
   if (selectedPairs.length === 0) throw new Error(`pair-id is not present in the frozen plan: ${selectedPairId}`);
+  const providerCredentials = await credentials();
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(concurrency, selectedPairs.length) }, async () => {
     while (true) {
@@ -591,6 +750,14 @@ async function report(root: string): Promise<void> {
     resolve(root, "runs", `${cell.runId}.complete`, "summary.json"),
     "utf8",
   )) as LongCallSummary));
+  for (const summary of summaries) {
+    if (!/^[a-f0-9]{64}$/.test(summary.asrReceiptsSha256 ?? "")) {
+      throw new Error(`ASR semantic scoring is incomplete for ${summary.runId}; report remains blocked`);
+    }
+    if (summary.strictPass !== isStrictLongCallPass(summary)) {
+      throw new Error(`ASR-aware strictPass is inconsistent for ${summary.runId}`);
+    }
+  }
   const result = scoreLongCallExperiment(summaries);
   const withPlan = Object.freeze({ ...result, experimentId: plan.experimentId, planSha256: plan.planSha256, sourceCommit: plan.sourceCommit });
   await atomicJson(resolve(root, "result.json"), withPlan);
@@ -602,7 +769,7 @@ async function report(root: string): Promise<void> {
     `- Scheduled caller turns: **${result.scheduledCallerTurns}**`,
     `- Completed voice-to-voice interactions: **${result.completedVoiceToVoiceInteractions}**`,
     `- Estimated API cost: **$${result.estimatedCostUsd.toFixed(4)}**`,
-    "- Primary endpoint: terminal transport + 20/20 caller turns + 20/20 audible outputs + final ToolWorld success + every safety invariant.",
+    "- Primary endpoint: terminal transport + 20/20 caller turns + 20/20 audible outputs + no blocked/illegal model attempt + independent ASR semantic correctness + final ToolWorld success + every safety invariant.",
     "- Arms: provider-native raw-memory vs identical realtime model behind HACC full-harness, paired on task and frozen caller PCM.",
     "",
     "| Provider / pinned model | Native | + HACC | Difference | HACC-only | Native-only | Exact McNemar p |",
@@ -611,11 +778,11 @@ async function report(root: string): Promise<void> {
     "",
     "## Outcome decomposition",
     "",
-    "| Provider | Native transport | HACC transport | Native world | HACC world | Native safety | HACC safety |",
-    "|---|---:|---:|---:|---:|---:|---:|",
-    ...result.providerEffects.map((effect) => `| ${effect.provider} | ${effect.transport.raw}/9 | ${effect.transport.harness}/9 | ${effect.world.raw}/9 | ${effect.world.harness}/9 | ${effect.system.raw}/9 | ${effect.system.harness}/9 |`),
+    "| Provider | Native transport | HACC transport | Native valid attempts | HACC valid attempts | Native world | HACC world | Native safety | HACC safety | Native audible semantics | HACC audible semantics |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ...result.providerEffects.map((effect) => `| ${effect.provider} | ${effect.transport.raw}/9 | ${effect.transport.harness}/9 | ${effect.modelIntegrity.raw}/9 | ${effect.modelIntegrity.harness}/9 | ${effect.world.raw}/9 | ${effect.world.harness}/9 | ${effect.system.raw}/9 | ${effect.system.harness}/9 | ${effect.audio.raw}/9 | ${effect.audio.harness}/9 |`),
     "",
-    "Transport failures are reported separately from semantic world failures and system/guardrail failures. Failed or missing episodes are never removed, and paid episodes are never retried.",
+    "Transport failures are reported separately from invalid model attempts, world, system/guardrail, and audible-semantic failures. A blocked illegal attempt fails model integrity even when system containment passes. Failed or missing episodes are never removed, and paid episodes are never retried.",
     "",
   ].join("\n");
   await writeFile(resolve(root, "result.md"), markdown, { mode: 0o600 });
@@ -625,8 +792,8 @@ async function report(root: string): Promise<void> {
 async function inspect(root: string): Promise<void> {
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
-  const ledger = JSON.parse(await readFile(resolve(root, LEDGER_FILE), "utf8")) as BudgetLedger;
-  assertLongCallBudgetLedgerMatchesSchedule(ledger);
+  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: aggregateLedgerPath(root), lockTimeoutMs: 60_000 });
+  assertAggregateLedgerMatchesPlan(plan, ledger);
   const runEntries = await readdir(resolve(root, "runs")).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
     throw error;
@@ -639,6 +806,8 @@ async function inspect(root: string): Promise<void> {
     partialEpisodes: runEntries.filter((entry) => entry.endsWith(".partial")).length,
     reservations: ledger.reservations.length,
     settledReservations: ledger.reservations.filter((reservation) => reservation.status === "settled").length,
+    schedulingExposureUsd: ledger.usd.scheduling_exposure,
+    budgetLedgerHeadSha256: ledger.head_sha256,
   })}\n`);
 }
 
@@ -649,7 +818,7 @@ async function main(): Promise<void> {
   if (command === "run") return run(root, Number(option("concurrency") ?? "3"));
   if (command === "report") return report(root);
   if (command === "inspect") return inspect(root);
-  throw new Error("usage: long-call-live-benchmark <prepare|run|report|inspect> [--root DIR] [--concurrency 1..9] [--pair-id ID]");
+  throw new Error("usage: long-call-live-benchmark <prepare|run|report|inspect> [--root DIR] [--concurrency 1..9] [--pair-id ID] [--env-file ABSOLUTE_PATH]");
 }
 
 main().catch((error) => {
