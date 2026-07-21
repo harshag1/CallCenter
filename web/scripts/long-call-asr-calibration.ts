@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson, sha256Hex } from "../lib/benchmark/artifacts";
 import {
   LONG_CALL_ASR_CALIBRATION_ID,
@@ -268,8 +268,11 @@ async function main(): Promise<void> {
   await writeFile(resolve(stagingDirectory, "receipts-manifest.json"), `${canonicalJson(receiptsManifest)}\n`, { flag: "wx", mode: 0o600 });
   await writeFile(resolve(stagingDirectory, "calibration.json"), `${canonicalJson(artifact)}\n`, { flag: "wx", mode: 0o600 });
   await writeFile(resolve(stagingDirectory, "calibration.md"), calibrationMarkdown(artifact), { flag: "wx", mode: 0o600 });
-  await makeReadOnlyRecursively(stagingDirectory, receiptPaths);
   await rename(stagingDirectory, finalDirectory);
+  const finalReceiptPaths = receiptPaths.map((path) =>
+    resolve(finalDirectory, relative(stagingDirectory, path))
+  );
+  await makeReadOnlyRecursively(finalDirectory, finalReceiptPaths);
   const temporaryFinalFile = resolve(root, `.${OUTPUT_FILE}.${process.pid}.tmp`);
   await writeFile(temporaryFinalFile, `${canonicalJson(artifact)}\n`, { flag: "wx", mode: 0o400 });
   await rename(temporaryFinalFile, finalFile);

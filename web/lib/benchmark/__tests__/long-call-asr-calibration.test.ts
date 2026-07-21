@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LONG_CALL_ASR_CALIBRATION_FIXTURES,
@@ -44,6 +46,17 @@ function frozenPlan(): FrozenLongCallExperimentPlan {
 }
 
 describe("long-call ASR calibration", () => {
+  it("atomically publishes the evidence directory before making it read-only", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "scripts/long-call-asr-calibration.ts"),
+      "utf8"
+    );
+    const publish = source.indexOf("await rename(stagingDirectory, finalDirectory)");
+    const lock = source.indexOf("await makeReadOnlyRecursively(finalDirectory, finalReceiptPaths)");
+    expect(publish).toBeGreaterThan(0);
+    expect(lock).toBeGreaterThan(publish);
+  });
+
   it("normalizes compact/spaced identifiers and numeric renderings equivalently", () => {
     expect(normalizeLongCallAsrText("A71 CHEM318 HYD14"))
       .toEqual(normalizeLongCallAsrText("A seventy-one, C H E M three eighteen, H Y D fourteen"));
