@@ -2,7 +2,7 @@
 
 import { execFile as execFileCallback } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -26,6 +26,7 @@ import {
   loadProductionRealtimeCredentials,
 } from "../lib/benchmark/production-realtime-provider";
 import { evaluateScenarioWorld } from "../lib/benchmark/tool-world";
+import { exactMcNemarTwoSided } from "../lib/benchmark/usefulness-scoring";
 import { AgentFlowSchema } from "../lib/flow";
 import {
   USEFULNESS_DEVELOPMENT_SUITE_SHA256,
@@ -36,7 +37,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v11");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v12");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "canary-plan.json";
 const CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
@@ -67,7 +68,7 @@ type FixtureEntry = Readonly<{
 type CanaryPlan = Readonly<{
   schemaVersion: 1;
   protocolId: "HACC-VTR-v1";
-  experimentId: "usefulness-live-canary-v11";
+  experimentId: "usefulness-live-canary-v12";
   createdAt: string;
   sourceCommit: string;
   sourceTree: string;
@@ -210,14 +211,14 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   const publicKeyPem = keys.publicKey.export({ format: "pem", type: "spki" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "usefulness-canary-v11",
+    keyId: "usefulness-canary-v12",
     privateKeyPem,
     publicKeyPem,
   });
   const body = Object.freeze({
     schemaVersion: 1 as const,
     protocolId: "HACC-VTR-v1" as const,
-    experimentId: "usefulness-live-canary-v11" as const,
+    experimentId: "usefulness-live-canary-v12" as const,
     createdAt: new Date().toISOString(),
     sourceCommit: source.commit,
     sourceTree: source.tree,
@@ -551,6 +552,69 @@ async function run(root: string, concurrency: number): Promise<void> {
   }));
 }
 
+const INTERRUPTION_REASONS = Object.freeze([
+  "host_process_interrupted",
+  "operator_shutdown",
+  "machine_restart",
+] as const);
+
+async function finalizeInterrupted(root: string): Promise<void> {
+  const plan = await loadPlan(root);
+  const runId = option("run-id");
+  const reason = option("reason");
+  if (!runId) throw new Error("finalize-interrupted requires --run-id");
+  if (!reason || !INTERRUPTION_REASONS.includes(reason as typeof INTERRUPTION_REASONS[number])) {
+    throw new Error(`--reason must be one of ${INTERRUPTION_REASONS.join(", ")}`);
+  }
+  const cell = plan.cells.find((candidate) => candidate.runId === runId);
+  if (!cell) throw new Error(`run-id is not present in the frozen plan: ${runId}`);
+  const partial = resolve(root, "runs", `${runId}.partial`);
+  const complete = resolve(root, "runs", `${runId}.complete`);
+  const names = (await readdir(partial)).sort();
+  if (canonicalJson(names) !== canonicalJson(["scheduled.json"])) {
+    throw new Error("interruption finalization only accepts a scheduled-only partial; retain richer partial evidence for manual audit");
+  }
+  const scheduled = JSON.parse(await readFile(resolve(partial, "scheduled.json"), "utf8")) as {
+    planSha256?: string;
+    cell?: CanaryCell;
+  };
+  if (scheduled.planSha256 !== plan.planSha256 || canonicalJson(scheduled.cell) !== canonicalJson(cell)) {
+    throw new Error("partial scheduled record does not match the frozen plan");
+  }
+  const task = shortTask(cell.family);
+  const message = `Scheduled episode retained as failure after ${reason}; no provider result was retained and no retry was attempted.`;
+  const summary: CanarySummary = Object.freeze({
+    runId: cell.runId,
+    pairId: cell.pairId,
+    provider: cell.provider,
+    family: cell.family,
+    condition: cell.condition,
+    status: "runner_exception",
+    callerScheduleStatus: null,
+    turnsPlanned: task.scenario.max_turns,
+    turnsSent: 0,
+    outputAudioTurns: 0,
+    transportTerminal: false,
+    worldOutcomePass: false,
+    systemIntegrityPass: false,
+    estimatedCostUsd: null,
+    artifactSha256: sha256Hex(`runner-exception\n${cell.runId}\n${reason}`),
+  });
+  await writeFile(resolve(partial, "runner-error.json"), `${canonicalJson({
+    errorClass: "ProcessInterruption",
+    reason,
+    message,
+    messageSha256: sha256Hex(message),
+  })}\n`, { flag: "wx", mode: 0o600 });
+  await writeFile(resolve(partial, "summary.json"), `${canonicalJson(summary)}\n`, { flag: "wx", mode: 0o600 });
+  await rename(partial, complete);
+  process.stdout.write(`${canonicalJson({ action: "interruption-retained", runId, reason })}\n`);
+}
+
+function taskPass(summary: CanarySummary): boolean {
+  return summary.transportTerminal && summary.worldOutcomePass && summary.systemIntegrityPass;
+}
+
 async function report(root: string): Promise<void> {
   const plan = await loadPlan(root);
   const summaries = await Promise.all(plan.cells.map(async (cell) => JSON.parse(await readFile(
@@ -566,10 +630,48 @@ async function report(root: string): Promise<void> {
       transportTerminal: values.filter((value) => value.transportTerminal).length,
       worldOutcomePass: values.filter((value) => value.worldOutcomePass).length,
       systemIntegrityPass: values.filter((value) => value.systemIntegrityPass).length,
+      taskPass: values.filter(taskPass).length,
       turnsSent: values.reduce((total, value) => total + value.turnsSent, 0),
       estimatedCostUsd: values.reduce((total, value) => total + (value.estimatedCostUsd ?? 0), 0),
+      statuses: Object.fromEntries([...new Set(values.map((value) => value.status))].sort().map((status) => [
+        status,
+        values.filter((value) => value.status === status).length,
+      ])),
     });
   }));
+  const pairs = [...new Set(plan.cells.map((cell) => cell.pairId))].sort().map((pairId) => {
+    const baseline = summaries.find((summary) => summary.pairId === pairId && summary.condition === "raw-memory");
+    const harness = summaries.find((summary) => summary.pairId === pairId && summary.condition === "full-harness");
+    if (!baseline || !harness) throw new Error(`pair ${pairId} is incomplete`);
+    const baselinePass = taskPass(baseline);
+    const harnessPass = taskPass(harness);
+    return Object.freeze({
+      pairId,
+      provider: baseline.provider,
+      family: baseline.family,
+      baselinePass,
+      harnessPass,
+      outcome: harnessPass === baselinePass ? (harnessPass ? "both_pass" : "neither_pass")
+        : harnessPass ? "harness_only" : "baseline_only",
+    });
+  });
+  const providerEffects = PROVIDERS.map((provider) => {
+    const providerPairs = pairs.filter((pair) => pair.provider === provider);
+    const harnessOnly = providerPairs.filter((pair) => pair.outcome === "harness_only").length;
+    const baselineOnly = providerPairs.filter((pair) => pair.outcome === "baseline_only").length;
+    const baselinePasses = providerPairs.filter((pair) => pair.baselinePass).length;
+    const harnessPasses = providerPairs.filter((pair) => pair.harnessPass).length;
+    return Object.freeze({
+      provider,
+      scheduledPairs: providerPairs.length,
+      baselinePasses,
+      harnessPasses,
+      pairedRiskDifference: (harnessPasses - baselinePasses) / providerPairs.length,
+      harnessOnly,
+      baselineOnly,
+      exactMcNemarTwoSidedP: exactMcNemarTwoSided(harnessOnly, baselineOnly),
+    });
+  });
   const result = Object.freeze({
     schemaVersion: 1,
     protocolId: plan.protocolId,
@@ -580,6 +682,8 @@ async function report(root: string): Promise<void> {
     scheduledEpisodes: plan.cells.length,
     completedVoiceTurns: summaries.reduce((total, summary) => total + Math.min(summary.turnsSent, summary.outputAudioTurns), 0),
     groups,
+    pairs,
+    providerEffects,
     claimBoundary: "development transport and world-outcome canary; audio-semantic criteria remain unverified",
   });
   const withHash = Object.freeze({ ...result, resultSha256: sha256Hex(canonicalJson(result)) });
@@ -592,9 +696,13 @@ async function report(root: string): Promise<void> {
     `- Completed voice-to-voice turns: **${withHash.completedVoiceTurns}**`,
     "- Claim boundary: development transport and world-outcome canary; independent audio-semantic criteria are not yet scored.",
     "",
-    "| Provider | Condition | Terminal sessions | World task passes | System integrity | Estimated cost |",
-    "|---|---|---:|---:|---:|---:|",
-    ...groups.map((group) => `| ${group.provider} | ${group.condition} | ${group.transportTerminal}/${group.scheduled} | ${group.worldOutcomePass}/${group.scheduled} | ${group.systemIntegrityPass}/${group.scheduled} | $${group.estimatedCostUsd.toFixed(4)} |`),
+    "| Provider | Condition | Strict task pass | Terminal | World | Integrity | Estimated cost |",
+    "|---|---|---:|---:|---:|---:|---:|",
+    ...groups.map((group) => `| ${group.provider} | ${group.condition} | ${group.taskPass}/${group.scheduled} | ${group.transportTerminal}/${group.scheduled} | ${group.worldOutcomePass}/${group.scheduled} | ${group.systemIntegrityPass}/${group.scheduled} | $${group.estimatedCostUsd.toFixed(4)} |`),
+    "",
+    "| Provider | Raw passes | Harness passes | Paired difference | Harness-only | Raw-only | Exact p |",
+    "|---|---:|---:|---:|---:|---:|---:|",
+    ...providerEffects.map((effect) => `| ${effect.provider} | ${effect.baselinePasses}/${effect.scheduledPairs} | ${effect.harnessPasses}/${effect.scheduledPairs} | ${(effect.pairedRiskDifference * 100).toFixed(1)} pp | ${effect.harnessOnly} | ${effect.baselineOnly} | ${effect.exactMcNemarTwoSidedP.toFixed(4)} |`),
     "",
   ].join("\n");
   await writeFile(resolve(root, "canary-result.md"), markdown, { mode: 0o600 });
@@ -606,8 +714,9 @@ async function main(): Promise<void> {
   const root = rootDirectory();
   if (command === "prepare") return prepare(root);
   if (command === "run") return run(root, Number(option("concurrency") ?? "3"));
+  if (command === "finalize-interrupted") return finalizeInterrupted(root);
   if (command === "report") return report(root);
-  throw new Error("usage: usefulness-live-canary <prepare|run|report> [--root DIR] [--concurrency 1..6] [--run-id ID]");
+  throw new Error("usage: usefulness-live-canary <prepare|run|finalize-interrupted|report> [--root DIR] [--concurrency 1..6] [--run-id ID] [--reason REASON]");
 }
 
 main().catch((error) => {
