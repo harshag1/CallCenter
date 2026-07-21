@@ -40,7 +40,7 @@ function museum(overrides: Readonly<Record<number, string>> = {}) {
     return transcript(turn, overrides[turn] ?? baseline);
   });
   return scoreLongCallAudioSemantics({
-    runId: "lc3v3-openai-museum-samantha-host-managed-harness",
+    runId: "lc3v4-openai-museum-samantha-host-managed-harness",
     family: "museum",
     sourceArtifactManifestSha256: HASH_A,
     asrReceiptsSha256: HASH_B,
@@ -164,13 +164,13 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   const root = await mkdtemp(join(tmpdir(), "hacc-audio-semantic-test-"));
   roots.push(root);
   const runs = resolve(root, "runs");
-  const runId = "lc3v3-openai-museum-samantha-host-managed-harness";
+  const runId = "lc3v4-openai-museum-samantha-host-managed-harness";
   const runDirectory = resolve(runs, `${runId}.complete`);
   await mkdir(runDirectory, { recursive: true });
   const fixtureManifestSha256 = "6".repeat(64);
   const experimentPlanSha256 = "8".repeat(64);
   await writeFile(resolve(root, "experiment-plan.json"), `${canonicalJson({
-    protocolId: "HACC-LC3-v3",
+    protocolId: "HACC-LC3-v4",
     planSha256: experimentPlanSha256,
     fixtureManifestSha256,
   })}\n`);
@@ -221,7 +221,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
       run_id: runId,
       created_at: "2026-07-21T19:00:00.000Z",
       artifacts: descriptors,
-      metadata: { protocol: "HACC-LC3-v3" },
+      metadata: { protocol: "HACC-LC3-v4" },
     });
     const manifestJson = `${canonicalJson(manifest)}\n`;
     await writeFile(resolve(artifactsRoot, "runner-manifest.json"), manifestJson);
@@ -229,9 +229,9 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   }
   const summary: LongCallSummary = Object.freeze({
     schemaVersion: 1,
-    protocolId: "HACC-LC3-v3",
+    protocolId: "HACC-LC3-v4",
     runId,
-    pairId: "lc3v3-openai-museum-samantha",
+    pairId: "lc3v4-openai-museum-samantha",
     provider: "openai",
     model: "gpt-realtime-2.1",
     family: "museum",

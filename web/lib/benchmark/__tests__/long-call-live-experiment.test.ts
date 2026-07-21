@@ -21,7 +21,7 @@ import {
   type LongCallSummary,
 } from "../long-call-live-experiment";
 
-describe("HACC-LC3-v3 long-call live experiment", () => {
+describe("HACC-LC3-v4 long-call live experiment", () => {
   it("freezes 9 paired strata, 18 episodes, and 360 caller turns", () => {
     const pairs = createLongCallPairs();
     const cells = createLongCallCells();
