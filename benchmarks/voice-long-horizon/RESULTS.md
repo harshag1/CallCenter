@@ -2,12 +2,32 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-- Status: **one exploratory paid development batch collected; no confirmatory result**
+- Status: **multiple exploratory development batches collected; latest useful-task result is null; no confirmatory result**
 - Cumulative paid provider spend: **provider reconciliation pending; frozen batch reservation ceiling was $160**
 - Auxiliary architecture/security-review spend: **$3.312551** ([claim review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md), [database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md), [campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md), [authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md), and [pre-canary release-gate review](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md); all unverified advisory input, not provider sessions or results)
 - Confirmatory protocol frozen: **no**
 
-## 2026-07-20 exploratory live STS batch
+## 2026-07-20 useful-task live canary v14
+
+The latest clean 18-cell development replication used a deterministic adaptive caller, short useful terminals, identical typed tools and ToolWorld truth in both arms, AB/BA condition order, no retries, and a strong raw-memory baseline. It found no harness advantage.
+
+- Source commit: `a9670d85399fc1b50ee3d6643df60a0ec053520c`
+- Plan SHA-256: `e7e4a045c622489322ab4ed340acc5fd017912f3e6cd95c7eba437cee7dad3f4`
+- Result SHA-256: `d8b821053c415ed867a4b2c47a64b2f363d591b5007e47d483ef5a381d7ef692`
+- Scheduled episodes: 18; completed voice-to-voice turns: 104
+- Models: OpenAI `gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, xAI `grok-voice-think-fast-1.0`
+
+| Provider | Raw task pass | Harness task pass | Paired difference | Exact McNemar p |
+|---|---:|---:|---:|---:|
+| OpenAI | 0/3 | 0/3 | 0.0 pp | 1.0000 |
+| Gemini | 2/3 | 2/3 | 0.0 pp | 1.0000 |
+| xAI | 3/3 | 3/3 | 0.0 pp | 1.0000 |
+
+OpenAI rejected all six sessions before turn one for account quota, so those cells are operational ITT failures and contain no OpenAI model comparison. Gemini had one harness-only and one raw-only outcome. xAI completed every cell in both arms. Neither Gemini arm reached the preregistered 90% transport gate, so medium/long and held-out paid scaling stopped.
+
+The machine-readable public artifact is [evidence/usefulness-live-canary-v14.aggregate.json](evidence/usefulness-live-canary-v14.aggregate.json). It contains aggregate counts, paired outcomes, exact statistics, costs, and cryptographic bindings, while deliberately excluding raw provider events and utterances. Independent audio-semantic scoring is still absent; this artifact establishes transport, authoritative world outcome, and system-integrity status only. It is not a consumer ChatGPT Voice test and does not support a superiority, drift-reduction, or long-horizon claim.
+
+## Earlier 2026-07-20 open-loop exploratory STS batch
 
 The first complete development batch produced a null strict result. It does not support a harness-superiority claim.
 

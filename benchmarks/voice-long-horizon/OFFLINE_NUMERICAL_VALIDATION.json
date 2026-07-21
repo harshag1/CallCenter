@@ -47,7 +47,7 @@
     "trial_set_sha256": "d1ac1e90e5701109e0eece6a98256baa7068c642d5b718293f3ac9ff5be0e09d",
     "schedule_set_sha256": "2fd7948bcb01ee2d5a98e9c4fa0519b668f000d7ebe28c42da13560149379fc2",
     "artifact_file_sha256": "d17b59e6bbbbba1645da56ff4068cea689e4d5063e1df5ba2c93f89aae50bac4",
-    "provenance_file_sha256": "f6e3c3383a047b3cf9169a403c2dc2f4266afafaa7d78f90b6eebe460d0ed34b"
+    "provenance_file_sha256": "9de2e2530ba9728c76815fa8b0fb664d727a3317af97e182d138f0d16d6a50ea"
   },
   "paired_power_candidate": {
     "evidence_class": "design_calculation",

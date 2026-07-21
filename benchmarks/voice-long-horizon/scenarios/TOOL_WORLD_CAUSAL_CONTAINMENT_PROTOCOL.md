@@ -50,7 +50,7 @@ The checked JSON artifact is `tool-world-causal-containment.v1.json` (file SHA-2
 
 ## Source and Git provenance
 
-`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `f6e3c3383a047b3cf9169a403c2dc2f4266afafaa7d78f90b6eebe460d0ed34b`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `9115824a6c63e9d143f7f0b989ba06eefa3f435ac83ba9e614887614e781ca0b`.
+`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `9de2e2530ba9728c76815fa8b0fb664d727a3317af97e182d138f0d16d6a50ea`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `babd2807e4a6c7ff1666e6f139d4dca8e75b157359273dff658a0b6353bbbce8`.
 
 The capture was honestly marked dirty. Commit `a78630e83371b595e56bd8601ecced50b106c5e2` and tree `bbfd17d5d8d8937eb626d4e81e337ca27747a8d9` are the tracked base before the selected worktree bytes, not a clean-build claim. The experiment source was untracked at that base; the three core sources were modified from their recorded base blobs. Current per-file SHA-256 and byte lengths are authoritative for the tested implementation, and unrelated worktree changes are explicitly outside the binding scope.
 

@@ -1,0 +1,193 @@
+{
+  "artifactClass": "sanitized aggregate evidence",
+  "claimBoundary": "development transport and world-outcome canary; audio-semantic criteria remain unverified",
+  "completedVoiceTurns": 104,
+  "experimentId": "usefulness-live-canary-v14",
+  "groups": [
+    {
+      "condition": "raw-memory",
+      "estimatedCostUsd": 0,
+      "provider": "openai",
+      "scheduled": 3,
+      "statuses": { "provider_error": 3 },
+      "systemIntegrityPass": 0,
+      "taskPass": 0,
+      "transportTerminal": 0,
+      "turnsSent": 0,
+      "worldOutcomePass": 0
+    },
+    {
+      "condition": "full-harness",
+      "estimatedCostUsd": 0,
+      "provider": "openai",
+      "scheduled": 3,
+      "statuses": { "provider_error": 3 },
+      "systemIntegrityPass": 0,
+      "taskPass": 0,
+      "transportTerminal": 0,
+      "turnsSent": 0,
+      "worldOutcomePass": 0
+    },
+    {
+      "condition": "raw-memory",
+      "estimatedCostUsd": 0.081508,
+      "provider": "gemini",
+      "scheduled": 3,
+      "statuses": { "completed": 2, "protocol_error": 1 },
+      "systemIntegrityPass": 2,
+      "taskPass": 2,
+      "transportTerminal": 2,
+      "turnsSent": 22,
+      "worldOutcomePass": 2
+    },
+    {
+      "condition": "full-harness",
+      "estimatedCostUsd": 0.098608,
+      "provider": "gemini",
+      "scheduled": 3,
+      "statuses": { "completed": 2, "protocol_error": 1 },
+      "systemIntegrityPass": 2,
+      "taskPass": 2,
+      "transportTerminal": 2,
+      "turnsSent": 22,
+      "worldOutcomePass": 2
+    },
+    {
+      "condition": "raw-memory",
+      "estimatedCostUsd": 0.730912,
+      "provider": "xai",
+      "scheduled": 3,
+      "statuses": { "completed": 3 },
+      "systemIntegrityPass": 3,
+      "taskPass": 3,
+      "transportTerminal": 3,
+      "turnsSent": 30,
+      "worldOutcomePass": 3
+    },
+    {
+      "condition": "full-harness",
+      "estimatedCostUsd": 0.733582,
+      "provider": "xai",
+      "scheduled": 3,
+      "statuses": { "completed": 3 },
+      "systemIntegrityPass": 3,
+      "taskPass": 3,
+      "transportTerminal": 3,
+      "turnsSent": 30,
+      "worldOutcomePass": 3
+    }
+  ],
+  "pairs": [
+    {
+      "baselinePass": true,
+      "family": "campus",
+      "harnessPass": true,
+      "outcome": "both_pass",
+      "pairId": "vtr-canary-gemini-campus",
+      "provider": "gemini"
+    },
+    {
+      "baselinePass": false,
+      "family": "museum",
+      "harnessPass": true,
+      "outcome": "harness_only",
+      "pairId": "vtr-canary-gemini-museum",
+      "provider": "gemini"
+    },
+    {
+      "baselinePass": true,
+      "family": "water",
+      "harnessPass": false,
+      "outcome": "baseline_only",
+      "pairId": "vtr-canary-gemini-water",
+      "provider": "gemini"
+    },
+    {
+      "baselinePass": false,
+      "family": "campus",
+      "harnessPass": false,
+      "outcome": "neither_pass",
+      "pairId": "vtr-canary-openai-campus",
+      "provider": "openai"
+    },
+    {
+      "baselinePass": false,
+      "family": "museum",
+      "harnessPass": false,
+      "outcome": "neither_pass",
+      "pairId": "vtr-canary-openai-museum",
+      "provider": "openai"
+    },
+    {
+      "baselinePass": false,
+      "family": "water",
+      "harnessPass": false,
+      "outcome": "neither_pass",
+      "pairId": "vtr-canary-openai-water",
+      "provider": "openai"
+    },
+    {
+      "baselinePass": true,
+      "family": "campus",
+      "harnessPass": true,
+      "outcome": "both_pass",
+      "pairId": "vtr-canary-xai-campus",
+      "provider": "xai"
+    },
+    {
+      "baselinePass": true,
+      "family": "museum",
+      "harnessPass": true,
+      "outcome": "both_pass",
+      "pairId": "vtr-canary-xai-museum",
+      "provider": "xai"
+    },
+    {
+      "baselinePass": true,
+      "family": "water",
+      "harnessPass": true,
+      "outcome": "both_pass",
+      "pairId": "vtr-canary-xai-water",
+      "provider": "xai"
+    }
+  ],
+  "planSha256": "e7e4a045c622489322ab4ed340acc5fd017912f3e6cd95c7eba437cee7dad3f4",
+  "protocolId": "HACC-VTR-v1",
+  "providerEffects": [
+    {
+      "baselineOnly": 0,
+      "baselinePasses": 0,
+      "exactMcNemarTwoSidedP": 1,
+      "harnessOnly": 0,
+      "harnessPasses": 0,
+      "pairedRiskDifference": 0,
+      "provider": "openai",
+      "scheduledPairs": 3
+    },
+    {
+      "baselineOnly": 1,
+      "baselinePasses": 2,
+      "exactMcNemarTwoSidedP": 1,
+      "harnessOnly": 1,
+      "harnessPasses": 2,
+      "pairedRiskDifference": 0,
+      "provider": "gemini",
+      "scheduledPairs": 3
+    },
+    {
+      "baselineOnly": 0,
+      "baselinePasses": 3,
+      "exactMcNemarTwoSidedP": 1,
+      "harnessOnly": 0,
+      "harnessPasses": 3,
+      "pairedRiskDifference": 0,
+      "provider": "xai",
+      "scheduledPairs": 3
+    }
+  ],
+  "resultSha256": "d8b821053c415ed867a4b2c47a64b2f363d591b5007e47d483ef5a381d7ef692",
+  "scheduledEpisodes": 18,
+  "schemaVersion": 1,
+  "sourceCommit": "a9670d85399fc1b50ee3d6643df60a0ec053520c",
+  "suiteSha256": "8aa02d0400a8c5fc341c90e262cab18acd08dc3eac831c0c66bdb9a76fdc3494"
+}
