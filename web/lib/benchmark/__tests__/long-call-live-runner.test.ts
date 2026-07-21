@@ -30,7 +30,10 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).toContain("maxOutputAudioBytes: 64 * 1024 * 1024");
     expect(source).toContain("ASR semantic scoring is incomplete");
     expect(source).toContain("summary.asrReceiptsSha256 ??");
-    expect(source).toContain("evaluateLongCallModelIntegrity(result.world, gatewayKernel.transcript())");
+    expect(source).toContain("evaluateLongCallModelIntegrity(result.world, publicTranscript)");
+    expect(source).toContain("assertHostManagedGrantExposure(publicTranscript)");
+    expect(source).toContain("isLongCallMissionCompletionPass(summary)");
+    expect(source).not.toContain("autoAdvanceLinearFlow:");
   });
 
   it("does not commit a developer-machine credential path", async () => {

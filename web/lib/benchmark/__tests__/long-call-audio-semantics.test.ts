@@ -40,7 +40,7 @@ function museum(overrides: Readonly<Record<number, string>> = {}) {
     return transcript(turn, overrides[turn] ?? baseline);
   });
   return scoreLongCallAudioSemantics({
-    runId: "lc3-openai-museum-samantha-full-harness",
+    runId: "lc3v3-openai-museum-samantha-host-managed-harness",
     family: "museum",
     sourceArtifactManifestSha256: HASH_A,
     asrReceiptsSha256: HASH_B,
@@ -164,13 +164,13 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   const root = await mkdtemp(join(tmpdir(), "hacc-audio-semantic-test-"));
   roots.push(root);
   const runs = resolve(root, "runs");
-  const runId = "lc3-openai-museum-samantha-full-harness";
+  const runId = "lc3v3-openai-museum-samantha-host-managed-harness";
   const runDirectory = resolve(runs, `${runId}.complete`);
   await mkdir(runDirectory, { recursive: true });
   const fixtureManifestSha256 = "6".repeat(64);
   const experimentPlanSha256 = "8".repeat(64);
   await writeFile(resolve(root, "experiment-plan.json"), `${canonicalJson({
-    protocolId: "HACC-LC3-v2",
+    protocolId: "HACC-LC3-v3",
     planSha256: experimentPlanSha256,
     fixtureManifestSha256,
   })}\n`);
@@ -221,7 +221,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
       run_id: runId,
       created_at: "2026-07-21T19:00:00.000Z",
       artifacts: descriptors,
-      metadata: { protocol: "HACC-LC3-v2" },
+      metadata: { protocol: "HACC-LC3-v3" },
     });
     const manifestJson = `${canonicalJson(manifest)}\n`;
     await writeFile(resolve(artifactsRoot, "runner-manifest.json"), manifestJson);
@@ -229,14 +229,14 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
   }
   const summary: LongCallSummary = Object.freeze({
     schemaVersion: 1,
-    protocolId: "HACC-LC3-v2",
+    protocolId: "HACC-LC3-v3",
     runId,
-    pairId: "lc3-openai-museum-samantha",
+    pairId: "lc3v3-openai-museum-samantha",
     provider: "openai",
     model: "gpt-realtime-2.1",
     family: "museum",
     ttsVoice: "Samantha",
-    condition: "full-harness",
+    condition: "host-managed-harness",
     status: withAudio ? "completed" : "runner_exception",
     callerScheduleStatus: withAudio ? "complete" : null,
     turnsPlanned: 20,
@@ -248,6 +248,7 @@ async function runFixture(withAudio: boolean): Promise<Readonly<{
     systemIntegrityPass: withAudio,
     audioSemanticPass: false,
     asrReceiptsSha256: null,
+    missionCompletionPass: false,
     strictPass: false,
     estimatedCostUsd: null,
     artifactManifestSha256,
@@ -291,7 +292,7 @@ describe("HACC-LC3 audio postprocessing artifacts", () => {
     expect(first.audioSemanticPass).toBe(true);
     expect(fake.calls()).toBe(20);
     const updated = JSON.parse(await readFile(resolve(fixture.runDirectory, "summary.json"), "utf8")) as LongCallSummary;
-    expect(updated).toMatchObject({ audioSemanticPass: true, strictPass: true, failureClass: null });
+    expect(updated).toMatchObject({ audioSemanticPass: true, missionCompletionPass: true, strictPass: true, failureClass: null });
     expect(updated.asrReceiptsSha256).toBe(first.asrReceiptsSha256);
 
     const second = await postprocessLongCallAudioRun({ runDirectory: fixture.runDirectory, config, asrRunner: fake.runner });
@@ -309,7 +310,7 @@ describe("HACC-LC3 audio postprocessing artifacts", () => {
     const manifest = JSON.parse(await readFile(resolve(fixture.runDirectory, "asr/manifest.json"), "utf8"));
     expect(manifest).toMatchObject({ status: "unavailable", failureCode: "source_audio_unavailable", entries: [] });
     const updated = JSON.parse(await readFile(resolve(fixture.runDirectory, "summary.json"), "utf8")) as LongCallSummary;
-    expect(updated).toMatchObject({ audioSemanticPass: false, strictPass: false, failureClass: "transport" });
+    expect(updated).toMatchObject({ audioSemanticPass: false, missionCompletionPass: false, strictPass: false, failureClass: "transport" });
     expect(updated.asrReceiptsSha256).toBe(manifest.manifestSha256);
   });
 

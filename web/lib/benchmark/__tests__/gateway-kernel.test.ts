@@ -101,7 +101,7 @@ function publicInvokePayload(
 function createHarness(
   id: keyof typeof suite.conditions,
   runId = `run-${id}`,
-  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits; autoAdvanceLinearFlow?: boolean }> = {}
+  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits }> = {}
 ): Harness {
   const condition = suite.conditions[id];
   const kernel = createInMemoryBenchmarkGatewayKernel({
@@ -115,7 +115,6 @@ function createHarness(
     capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
     clock: FIXED_CLOCK,
     ...(options.transcriptLimits ? { transcriptLimits: options.transcriptLimits } : {}),
-    ...(options.autoAdvanceLinearFlow === undefined ? {} : { autoAdvanceLinearFlow: options.autoAdvanceLinearFlow }),
   });
   const world = createToolWorld(scenario);
   const snapshot = kernel.initialize({ runId, condition, scenario, world });
@@ -194,23 +193,31 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
   expectOk(invoke(harness, "flow.enter_step", { path: next }));
 }
 
-describe("six-arm benchmark gateway kernel", () => {
-  it("can host-advance a linear receipt-backed flow without model-authored transition calls", () => {
-    const harness = createHarness("full-harness", "run-auto-linear", { autoAdvanceLinearFlow: true });
+describe("benchmark gateway kernel", () => {
+  it("derives host-owned linear transitions from the attested condition", () => {
+    const harness = createHarness("host-managed-harness", "run-auto-linear");
+    expect(harness.snapshot.actions.map((action) => action.name).sort()).toEqual([
+      "flow.get_state",
+      "flow.select_topic",
+    ]);
     const selected = invoke(harness, "flow.select_topic", { topic_id: "field_service" });
     expectOk(selected);
     expect(selected.disclosure?.target).toBe("step:field_service.locate_work_order");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("lookup_work_order");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
 
     const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" });
     expectOk(lookup);
     expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
     const staleCompletion = invoke(harness, "flow.complete_step", {
       path: "field_service.locate_work_order",
       outputs: {},
-    });
-    expect(staleCompletion.result).toMatchObject({ ok: false, code: "not_active_step" });
+    }, { grant: "g1.invalid" });
+    expect(staleCompletion.result).toMatchObject({ ok: false, code: "invalid_capability" });
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
     const attestation = harness.kernel.attestFinal({
       runId: "run-auto-linear",
@@ -231,6 +238,93 @@ describe("six-arm benchmark gateway kernel", () => {
         trust: TEST_TRUST,
       },
     })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
+  });
+
+  it("does not let a runtime option override model-authored transition ownership", () => {
+    const condition = suite.conditions["full-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow: INDUSTRIAL_FIELD_SERVICE_FLOW,
+      expectedFlowHash: suite.flowHash,
+      expectedScenarioHash: suite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: suite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+      autoAdvanceLinearFlow: true,
+    });
+    const world = createToolWorld(scenario);
+    let snapshot = kernel.initialize({ runId: "run-option-cannot-override", condition, scenario, world });
+    const providerCall = (action: string, args: Record<string, JsonValue>) => {
+      const capability = snapshot.actions.find((candidate) => candidate.name === action);
+      if (!capability) throw new Error(`missing ${action}`);
+      const outcome = kernel.invoke({
+        providerCallId: `override-${action}`,
+        call: { action, arguments: args, capability_grant: capability.capability_grant },
+        capabilityEpoch: snapshot.capability_epoch,
+        condition,
+        turn: 1,
+        world,
+        executeLeaf: () => { throw new Error("leaf execution is not expected"); },
+      });
+      if (outcome.capabilitySnapshot) snapshot = outcome.capabilitySnapshot;
+      return outcome;
+    };
+    expectOk(providerCall("flow.select_topic", { topic_id: "field_service" }));
+    expect(snapshot.actions.map((action) => action.name)).toContain("flow.enter_step");
+    expect(snapshot.actions.map((action) => action.name)).not.toContain("lookup_work_order");
+  });
+
+  it("cedes only a genuine branch choice to the model, then resumes host ownership", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const locate = topic?.steps?.find((step) => step.id === "locate_work_order");
+    if (!locate) throw new Error("test flow is missing locate_work_order");
+    locate.transitions = [
+      { to: "field_service.verify_technician", label: "Verify first" },
+      { to: "field_service.collect_safety_and_diagnosis", label: "Collect evidence first" },
+    ];
+    const branchedSuite = compileConditionSuite({
+      ...industrialFieldServiceCompilerInput(scenario),
+      flow,
+    });
+    const condition = branchedSuite.conditions["host-managed-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow,
+      expectedFlowHash: branchedSuite.flowHash,
+      expectedScenarioHash: branchedSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: branchedSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    const world = createToolWorld(scenario);
+    const snapshot = kernel.initialize({
+      runId: "run-host-managed-branch",
+      condition,
+      scenario,
+      world,
+    });
+    const harness: Harness = { kernel, condition, world, snapshot, sequence: 0 };
+
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" });
+    expectOk(lookup);
+    expect(lookup.disclosure?.target).toBe("topic:field_service");
+    expect(harness.snapshot.actions.map((action) => action.name).sort()).toEqual([
+      "flow.enter_step",
+      "flow.get_state",
+    ]);
+
+    const entered = invoke(harness, "flow.enter_step", { path: "field_service.verify_technician" });
+    expectOk(entered);
+    expect(entered.disclosure?.target).toBe("step:field_service.verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
   });
 
   it("keeps progressive-only and full-harness grants, scopes, and rotations treatment-blind", () => {

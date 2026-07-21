@@ -105,7 +105,11 @@ export type BenchmarkGatewayKernelOptions = Readonly<{
   transcriptLimits?: KernelTranscriptLimits;
   /** Must cover the declared session cap; defaults to the one-hour signer maximum. */
   leaseTtlSeconds?: number;
-  /** Host-advance deterministic single-successor steps after receipt-backed outputs exist. */
+  /**
+   * @deprecated Transition ownership is an attested condition property. This
+   * compatibility input is ignored and may be removed after older runners
+   * stop supplying it.
+   */
   autoAdvanceLinearFlow?: boolean;
   clock?: Clock;
 }>;
@@ -298,7 +302,6 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
   readonly #evidenceBinding: BenchmarkKernelEvidenceBinding;
   readonly #signer: BenchmarkKernelAttestationSigner;
   readonly #transcriptLimits: KernelTranscriptLimits | undefined;
-  readonly #autoAdvanceLinearFlow: boolean;
   #run: KernelRun | null = null;
 
   constructor(options: BenchmarkGatewayKernelOptions) {
@@ -385,7 +388,6 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     this.#transcriptLimits = options.transcriptLimits
       ? Object.freeze({ ...options.transcriptLimits })
       : undefined;
-    this.#autoAdvanceLinearFlow = options.autoAdvanceLinearFlow ?? false;
   }
 
   initialize(input: Readonly<{
@@ -979,14 +981,16 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     nextSteps: readonly string[],
   ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
     if (
-      !this.#autoAdvanceLinearFlow
+      run.condition.behavior.transitionOwnership !== "host-managed-linear"
       || !run.condition.behavior.progressiveDisclosure
       || !run.flowState
       || nextSteps.length !== 1
     ) return null;
     const path = nextSteps[0];
     const entered = enterFlowStep(this.#flow, run.flowState, path, this.#clock.nowIso());
-    if ("error" in entered) return null;
+    if ("error" in entered) {
+      throw new Error(`host-managed flow entry failed: ${entered.code}: ${entered.error}`);
+    }
     run.flowState = entered.state;
     const target = `step:${path}` as const;
     run.target = target;
@@ -998,16 +1002,33 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     run: KernelRun,
   ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
     if (
-      !this.#autoAdvanceLinearFlow
+      run.condition.behavior.transitionOwnership !== "host-managed-linear"
       || !run.condition.behavior.progressiveDisclosure
       || !run.flowState?.currentStep
     ) return null;
     const completed = completeFlowStep(this.#flow, run.flowState, { outputs: {} }, this.#clock.nowIso());
-    if ("error" in completed) return null;
+    // A multi-action step remains active until all receipt-bound outputs are
+    // present. Every other error after a settled successful receipt indicates
+    // a host/runtime invariant violation and must fail closed rather than
+    // silently falling back to model-authored transition calls that this
+    // condition never grants.
+    if ("error" in completed) {
+      if (completed.code === "missing_outputs") return null;
+      throw new Error(`host-managed flow transition failed: ${completed.code}: ${completed.error}`);
+    }
     run.flowState = completed.state;
     if (completed.state.nodeId) run.target = `topic:${completed.state.nodeId}`;
     const entered = this.#autoEnterSingleStep(run, completed.nextSteps);
-    return entered ?? this.#postCompletionRotation(run);
+    if (entered) return entered;
+    if (completed.nextSteps.length > 1) {
+      // Host ownership stops at a genuine choice. Rotate to the compiled topic
+      // branch catalog and disclose it; only this state can grant enter_step.
+      // Once the model selects a reachable branch, the host resumes ownership
+      // of receipt-bound completion and deterministic single-successor entry.
+      run.catalogMode = "target";
+      return this.#rotation(run, run.target === "$base" ? undefined : run.target);
+    }
+    return this.#postCompletionRotation(run);
   }
 
   #memory(run: KernelRun, callId: string, args: Readonly<Record<string, JsonValue>>): BenchmarkGatewayOutcome {

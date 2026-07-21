@@ -10,6 +10,7 @@ import {
 } from "./artifacts";
 import {
   classifyLongCallFailure,
+  isLongCallMissionCompletionPass,
   isStrictLongCallPass,
   type LongCallFamily,
   type LongCallSummary,
@@ -25,11 +26,11 @@ import {
 const EXPECTED_TURNS = 20;
 const OUTPUT_PATH = /^audio\/output\/(\d{3})-[A-Za-z0-9_.-]+\.pcm$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const RECEIPT_MANIFEST_DOMAIN = "hacc/HACC-LC3-v2/audio-asr-receipt-manifest/v1\n";
-const SEMANTIC_DOMAIN = "hacc/HACC-LC3-v2/audio-semantic/v1\n";
-const TURN_DOMAIN = "hacc/HACC-LC3-v2/audio-semantic-turn/v1\n";
-const REQUEST_DOMAIN = "hacc/HACC-LC3-v2/audio-asr-request/v1\n";
-const CHUNK_DOMAIN = "hacc/HACC-LC3-v2/audio-output-chunk-sequence/v1\n";
+const RECEIPT_MANIFEST_DOMAIN = "hacc/HACC-LC3-v3/audio-asr-receipt-manifest/v1\n";
+const SEMANTIC_DOMAIN = "hacc/HACC-LC3-v3/audio-semantic/v1\n";
+const TURN_DOMAIN = "hacc/HACC-LC3-v3/audio-semantic-turn/v1\n";
+const REQUEST_DOMAIN = "hacc/HACC-LC3-v3/audio-asr-request/v1\n";
+const CHUNK_DOMAIN = "hacc/HACC-LC3-v3/audio-output-chunk-sequence/v1\n";
 const TOOLCHAIN_CONFIG_DOMAIN = "hacc/whisper-cpp-asr-config/v1\n";
 
 type ViolationCode =
@@ -134,7 +135,7 @@ export type LongCallAudioSemanticTurn = Readonly<{
 
 export type LongCallAudioSemanticResult = Readonly<{
   schemaVersion: 1;
-  protocolId: "HACC-LC3-v2";
+  protocolId: "HACC-LC3-v3";
   scorerVersion: "audio-semantics-v1";
   runId: string;
   family: LongCallFamily;
@@ -172,7 +173,7 @@ type CompletedReceiptEntry = Readonly<{
 
 type ReceiptManifest = Readonly<{
   schemaVersion: 1;
-  protocolId: "HACC-LC3-v2";
+  protocolId: "HACC-LC3-v3";
   runId: string;
   sourceArtifactManifestSha256: string;
   status: "completed" | "unavailable";
@@ -233,7 +234,7 @@ async function requirePassedCalibration(
   };
   const calibration = JSON.parse(await readFile(resolve(experimentRoot, "asr-calibration.json"), "utf8")) as unknown;
   if (
-    plan.protocolId !== "HACC-LC3-v2"
+    plan.protocolId !== "HACC-LC3-v3"
     || typeof plan.planSha256 !== "string"
     || !SHA256.test(plan.planSha256)
     || typeof plan.fixtureManifestSha256 !== "string"
@@ -358,7 +359,7 @@ export function scoreLongCallAudioSemantics(input: Readonly<{
   const audioSemanticPass = failureReasons.length === 0;
   const body = Object.freeze({
     schemaVersion: 1 as const,
-    protocolId: "HACC-LC3-v2" as const,
+    protocolId: "HACC-LC3-v3" as const,
     scorerVersion: "audio-semantics-v1" as const,
     runId: input.runId,
     family: input.family,
@@ -430,6 +431,7 @@ function updateSummary(summary: LongCallSummary, semantic: LongCallAudioSemantic
     ...summary,
     audioSemanticPass: semantic.audioSemanticPass,
     asrReceiptsSha256: semantic.asrReceiptsSha256,
+    missionCompletionPass: isLongCallMissionCompletionPass(core),
     strictPass: isStrictLongCallPass(core),
     failureClass: classifyLongCallFailure(core),
   });
@@ -463,7 +465,7 @@ async function verifyExisting(
   const manifest = JSON.parse(await readFile(resolve(asrDirectory, "manifest.json"), "utf8")) as ReceiptManifest;
   if (
     manifest.schemaVersion !== 1
-    || manifest.protocolId !== "HACC-LC3-v2"
+    || manifest.protocolId !== "HACC-LC3-v3"
     || typeof manifest.runId !== "string"
     || !SHA256.test(manifest.sourceArtifactManifestSha256)
   ) throw new Error("existing ASR receipt manifest identity is invalid");
@@ -574,7 +576,7 @@ export async function postprocessLongCallAudioRun(input: Readonly<{
     try {
       const receiptBody = Object.freeze({
         schemaVersion: 1 as const,
-        protocolId: "HACC-LC3-v2" as const,
+        protocolId: "HACC-LC3-v3" as const,
         runId: summary.runId,
         sourceArtifactManifestSha256: summary.artifactManifestSha256,
         status: "unavailable" as const,
@@ -688,7 +690,7 @@ export async function postprocessLongCallAudioRun(input: Readonly<{
       const rawMessage = error instanceof Error ? error.message : String(error);
       const receiptBody = Object.freeze({
         schemaVersion: 1 as const,
-        protocolId: "HACC-LC3-v2" as const,
+        protocolId: "HACC-LC3-v3" as const,
         runId: summary.runId,
         sourceArtifactManifestSha256: summary.artifactManifestSha256,
         status: "unavailable" as const,
@@ -721,7 +723,7 @@ export async function postprocessLongCallAudioRun(input: Readonly<{
     }
     const receiptBody = Object.freeze({
       schemaVersion: 1 as const,
-      protocolId: "HACC-LC3-v2" as const,
+      protocolId: "HACC-LC3-v3" as const,
       runId: summary.runId,
       sourceArtifactManifestSha256: summary.artifactManifestSha256,
       status: "completed" as const,

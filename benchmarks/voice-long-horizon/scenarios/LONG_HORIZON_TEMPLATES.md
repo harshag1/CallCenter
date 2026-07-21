@@ -51,7 +51,7 @@ Caller `fact_updates` mark provisional values, corrections, delayed disclosures,
 ## Required validation before a paid run
 
 1. Parse every materialized scenario with `BenchmarkScenarioSchema`.
-2. Validate every Flow v2 source and compile all six conditions from the same canonical source.
+2. Validate every Flow v2 source and compile all seven conditions from the same canonical source.
 3. Pass the condition-parity audit; all arms must expose the same native capability gateway and semantic leaf tools.
 4. Execute a deterministic tool-world oracle to prove each fixture is internally satisfiable, including scheduled faults and read-back recovery.
 5. Prove unsafe early calls are rejected without effects and semantic duplicate pressure is visible to grading.

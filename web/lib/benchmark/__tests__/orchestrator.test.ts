@@ -251,6 +251,11 @@ function conditionFor(
     flowHash: HASH,
     behavior: Object.freeze({
       toolExposure: "gateway" as const,
+      transitionOwnership: id === "raw-full" || id === "raw-memory"
+        ? "not-applicable" as const
+        : id === "host-managed-harness"
+          ? "host-managed-linear" as const
+          : "model-authored" as const,
       progressiveDisclosure: id === "progressive-only" || id === "full-harness" || id === "oracle-route",
       genericDurableMemory: id === "raw-memory",
       durableFlowState: id === "state-only" || id === "full-harness" || id === "oracle-route",

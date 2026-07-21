@@ -38,7 +38,7 @@ function frozenPlan(): FrozenLongCallExperimentPlan {
   });
   return Object.freeze({
     protocolId: LONG_CALL_PROTOCOL_ID,
-    experimentId: "hacc-lc3-v1",
+    experimentId: "hacc-lc3-v3",
     planSha256: HASH,
     fixtures,
     fixtureManifestSha256: sha256Hex(canonicalJson(fixtures)),
@@ -72,6 +72,9 @@ describe("long-call ASR calibration", () => {
 
   it("selects exactly six 24 kHz turns in each family-by-voice stratum", () => {
     const calibration = createLongCallAsrCalibrationPlan(frozenPlan());
+    expect(LONG_CALL_ASR_CALIBRATION_FIXTURES).toBe(
+      LONG_CALL_FAMILIES.length * LONG_CALL_TTS_VOICES.length * 6
+    );
     expect(calibration.fixtures).toHaveLength(LONG_CALL_ASR_CALIBRATION_FIXTURES);
     for (const family of LONG_CALL_FAMILIES) {
       for (const voice of LONG_CALL_TTS_VOICES) {
@@ -93,7 +96,8 @@ describe("long-call ASR calibration", () => {
     const pass = scoreLongCallAsrCalibration({ plan, transcripts: exact });
     expect(pass.gatePass).toBe(true);
     expect(pass.metrics).toMatchObject({
-      completedFixtures: 54,
+      plannedFixtures: LONG_CALL_ASR_CALIBRATION_FIXTURES,
+      completedFixtures: LONG_CALL_ASR_CALIBRATION_FIXTURES,
       fixtureCoverage: 1,
       wordErrorRate: 0,
       criticalSlotFalseNegatives: 0,
@@ -102,7 +106,7 @@ describe("long-call ASR calibration", () => {
 
     const missing = scoreLongCallAsrCalibration({ plan, transcripts: exact.slice(1) });
     expect(missing.gatePass).toBe(false);
-    expect(missing.metrics.completedFixtures).toBe(53);
+    expect(missing.metrics.completedFixtures).toBe(LONG_CALL_ASR_CALIBRATION_FIXTURES - 1);
 
     const invalidReceipt = scoreLongCallAsrCalibration({
       plan,
@@ -111,7 +115,7 @@ describe("long-call ASR calibration", () => {
         : transcript),
     });
     expect(invalidReceipt.gatePass).toBe(false);
-    expect(invalidReceipt.metrics.completedFixtures).toBe(53);
+    expect(invalidReceipt.metrics.completedFixtures).toBe(LONG_CALL_ASR_CALIBRATION_FIXTURES - 1);
 
     const hallucinated = exact.map((transcript, index) => index === 0
       ? Object.freeze({ ...transcript, transcript: `${transcript.transcript} fifty-two percent` })

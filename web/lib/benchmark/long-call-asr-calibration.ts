@@ -10,7 +10,14 @@ import {
 
 export const LONG_CALL_ASR_CALIBRATION_ID = "HACC-LC3-ASR-CAL-v1" as const;
 export const LONG_CALL_ASR_CALIBRATION_TURN_ORDINALS = Object.freeze([1, 4, 9, 14, 17, 20] as const);
-export const LONG_CALL_ASR_CALIBRATION_FIXTURES = 54 as const;
+/**
+ * The calibration schedule follows the frozen experiment strata. Keeping this
+ * derived prevents a one-voice validation schedule from silently inheriting
+ * the old three-voice fixture count.
+ */
+export const LONG_CALL_ASR_CALIBRATION_FIXTURES = LONG_CALL_FAMILIES.length
+  * LONG_CALL_TTS_VOICES.length
+  * LONG_CALL_ASR_CALIBRATION_TURN_ORDINALS.length;
 export const LONG_CALL_ASR_MAX_WER = 0.15 as const;
 
 const CALIBRATION_PLAN_DOMAIN = "hacc/long-call-asr-calibration-plan/v1\n";
@@ -54,7 +61,7 @@ export type LongCallAsrCalibrationPlan = Readonly<{
   selectionRule: "turn-ordinals-1-4-9-14-17-20-in-every-family-voice-stratum";
   selectedTurnOrdinals: typeof LONG_CALL_ASR_CALIBRATION_TURN_ORDINALS;
   fixtures: readonly LongCallAsrCalibrationFixture[];
-  plannedFixtureCount: typeof LONG_CALL_ASR_CALIBRATION_FIXTURES;
+  plannedFixtureCount: number;
   calibrationPlanSha256: string;
 }>;
 
@@ -213,7 +220,9 @@ function containsSequence(haystack: readonly string[], needle: readonly string[]
 }
 
 export function createLongCallAsrCalibrationPlan(plan: FrozenLongCallExperimentPlan): LongCallAsrCalibrationPlan {
-  if (plan.protocolId !== LONG_CALL_PROTOCOL_ID) throw new Error("ASR calibration requires an HACC-LC3-v2 experiment plan");
+  if (plan.protocolId !== LONG_CALL_PROTOCOL_ID) {
+    throw new Error(`ASR calibration requires a ${LONG_CALL_PROTOCOL_ID} experiment plan`);
+  }
   if (sha256Hex(canonicalJson(plan.fixtures)) !== plan.fixtureManifestSha256) {
     throw new Error("frozen fixture manifest hash mismatch");
   }
@@ -243,7 +252,9 @@ export function createLongCallAsrCalibrationPlan(plan: FrozenLongCallExperimentP
       }
     }
   }
-  if (selected.length !== LONG_CALL_ASR_CALIBRATION_FIXTURES) throw new Error("calibration selection must contain exactly 54 fixtures");
+  if (selected.length !== LONG_CALL_ASR_CALIBRATION_FIXTURES) {
+    throw new Error(`calibration selection must contain exactly ${LONG_CALL_ASR_CALIBRATION_FIXTURES} fixtures`);
+  }
   if (new Set(selected.map((fixture) => fixture.path)).size !== selected.length) throw new Error("calibration fixture paths must be unique");
   const body = Object.freeze({
     schemaVersion: 1 as const,

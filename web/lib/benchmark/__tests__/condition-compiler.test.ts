@@ -76,6 +76,87 @@ describe("canonical benchmark condition compiler", () => {
     expect(progressiveOnly.conditionHash).not.toBe(fullHarness.conditionHash);
   });
 
+  it("compiles an attested host-managed lifecycle with no model-authored step completion", () => {
+    const suite = compile();
+    const managed = suite.conditions["host-managed-harness"];
+
+    expect(managed.behavior).toMatchObject({
+      transitionOwnership: "host-managed-linear",
+      progressiveDisclosure: true,
+      durableFlowState: true,
+      enforceTransitions: true,
+      enforceCapabilityGrants: true,
+      enforceExactlyOnce: true,
+    });
+    expect(managed.visibleCapabilities.map((capability) => capability.name)).toEqual([
+      "flow.get_state",
+      "flow.select_topic",
+    ]);
+    for (const disclosure of managed.disclosures.filter((candidate) => candidate.target.startsWith("step:"))) {
+      const controls = disclosure.visibleCapabilities
+        .filter((capability) => capability.category === "flow-control")
+        .map((capability) => capability.name);
+      expect(controls).toEqual(["flow.get_state"]);
+    }
+    for (const disclosure of managed.disclosures.filter((candidate) => candidate.target.startsWith("topic:"))) {
+      const controls = disclosure.visibleCapabilities
+        .filter((capability) => capability.category === "flow-control")
+        .map((capability) => capability.name);
+      expect(controls).toEqual(["flow.enter_step", "flow.get_state"]);
+    }
+    const controlUnion = new Set([
+      ...managed.visibleCapabilities,
+      ...managed.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
+    ].filter((capability) => capability.category === "flow-control").map((capability) => capability.name));
+    expect(controlUnion).toEqual(new Set(["flow.select_topic", "flow.enter_step", "flow.get_state"]));
+    expect(managed.initialPrompt).toContain("A disclosed capability is permission, not evidence that the action is ready.");
+    expect(managed.initialPrompt).toContain("ask one concise question when something is missing");
+    expect(managed.initialPrompt).toContain("stop unless the current caller utterance already supplies the next step's required inputs");
+    expect(managed.conditionHash).not.toBe(suite.conditions["full-harness"].conditionHash);
+  });
+
+  it("fails host-managed compilation when a required output is not receipt-bound", () => {
+    const input = structuredClone(industrialFieldServiceCompilerInput(fieldServiceScenarioJson));
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service")!;
+    const locate = topic.steps!.find((step) => step.id === "locate_work_order")!;
+    locate.output_bindings = locate.output_bindings!.filter((binding) => binding.output !== "work_order_id");
+
+    expect(() => compileConditionSuite({ ...input, flow })).toThrow(
+      /host-managed step "field_service\.locate_work_order" has required outputs without authoritative receipt bindings: work_order_id/,
+    );
+  });
+
+  it("retains a constrained model branch choice while keeping step lifecycle host-owned", () => {
+    const input = industrialFieldServiceCompilerInput(fieldServiceScenarioJson);
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service")!;
+    topic.steps![1].entry = true;
+
+    const managed = compileConditionSuite({ ...input, flow }).conditions["host-managed-harness"];
+    const topicDisclosure = managed.disclosures.find((candidate) => candidate.target === "topic:field_service")!;
+    expect(topicDisclosure.visibleCapabilities
+      .filter((capability) => capability.category === "flow-control")
+      .map((capability) => capability.name)).toEqual(["flow.enter_step", "flow.get_state"]);
+    expect(managed.disclosures
+      .filter((candidate) => candidate.target.startsWith("step:"))
+      .every((disclosure) => disclosure.visibleCapabilities
+        .filter((capability) => capability.category === "flow-control")
+        .every((capability) => capability.name === "flow.get_state"))).toBe(true);
+  });
+
+  it("detects transition-ownership tampering independently of a stale condition hash", () => {
+    const tampered = structuredClone(compile()) as unknown as {
+      conditions: Record<string, { behavior: { transitionOwnership: string } }>;
+    };
+    tampered.conditions["host-managed-harness"].behavior.transitionOwnership = "model-authored";
+
+    expect(auditConditionParity(tampered as unknown as CompiledConditionSuite).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "condition_behavior", condition: "host-managed-harness" }),
+      expect.objectContaining({ code: "condition_hash", condition: "host-managed-harness" }),
+    ]));
+  });
+
   it("never serializes unallowlisted hidden-world or caller-private facts", () => {
     const suite = compile();
     const providerVisibleText = Object.values(suite.conditions).flatMap((condition) => [
