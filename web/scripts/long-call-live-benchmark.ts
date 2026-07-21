@@ -22,6 +22,7 @@ import {
 } from "../lib/benchmark/filesystem-budget-ledger";
 import { freezeCallerAudioIndex } from "../lib/benchmark/caller-world-scheduler";
 import { compileConditionSuite, type BenchmarkConditionId } from "../lib/benchmark/condition-compiler";
+import { renderProviderCapabilitySnapshot } from "../lib/benchmark/capability-gateway";
 import { InMemoryBenchmarkGatewayKernel } from "../lib/benchmark/gateway-kernel";
 import {
   createBenchmarkKernelAttestationSigner,
@@ -49,13 +50,22 @@ import {
 } from "../lib/benchmark/long-call-live-experiment";
 import {
   createPairedAudioManifest,
+  DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
   runBenchmarkTrial,
+  trialAudioDeliveryProfileHash,
   type CallerAudioTurn,
+  type TrialSessionConfiguration,
 } from "../lib/benchmark/orchestrator";
 import {
   createProductionRealtimeClient,
+  loadProductionRealtimeCredentialCandidates,
   loadProductionRealtimeCredentials,
 } from "../lib/benchmark/production-realtime-provider";
+import {
+  assertRecentPassingProviderQualification,
+  qualifyProviders,
+  type ProviderQualificationTarget,
+} from "../lib/benchmark/provider-qualification";
 import { evaluateScenarioWorld } from "../lib/benchmark/tool-world";
 import { createUsefulnessCallerSchedulePlan } from "../lib/benchmark/usefulness-task-suite";
 import { AgentFlowSchema } from "../lib/flow";
@@ -734,10 +744,91 @@ async function credentials() {
   return loadProductionRealtimeCredentials(REPOSITORY_ROOT);
 }
 
+function qualificationTargets(plan: ExperimentPlan): readonly ProviderQualificationTarget[] {
+  return Object.freeze(plan.schedule.cells.map((cell) => {
+    const task = longUsefulnessTask(cell.family);
+    const suite = compileConditionSuite(task.compiler_input);
+    const condition = suite.conditions[cell.condition as BenchmarkConditionId];
+    const renderedCapabilitySnapshot = renderProviderCapabilitySnapshot({
+      gateway_version: 1,
+      scope: condition.behavior.progressiveDisclosure ? "$base" : "$full-catalog",
+      capability_epoch: 0,
+      actions: condition.visibleCapabilities.map((capability) => ({
+        name: capability.name,
+        description: capability.description,
+        input_schema: capability.inputSchema,
+        semantic_hash: capability.semanticHash,
+        // Rendering strips authority. The placeholder exists only to satisfy the host-only schema.
+        capability_grant: "qualification.placeholder",
+      })),
+    });
+    const configuration: TrialSessionConfiguration = Object.freeze({
+      provider: cell.provider,
+      model: cell.model,
+      conditionId: condition.id,
+      instructions: `${condition.initialPrompt}\n${renderedCapabilitySnapshot}`,
+      initialPrompt: condition.initialPrompt,
+      renderedCapabilitySnapshot,
+      providerTools: condition.providerTools,
+      conditionHash: condition.conditionHash,
+      inputAudioFormat: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: cell.sampleRateHz, channels: 1 as const }),
+      audioDeliveryProfile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      audioDeliveryProfileHash: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
+    });
+    return Object.freeze({ provider: cell.provider, model: cell.model, configuration });
+  }));
+}
+
+async function qualify(root: string): Promise<void> {
+  const explicit = providerEnvironmentFile();
+  if (explicit) process.env.BENCHMARK_PROVIDER_ENV_FILE = explicit;
+  const plan = await loadPlan(root);
+  await verifyFixtures(root, plan);
+  const targets = qualificationTargets(plan);
+  const artifact = await qualifyProviders({
+    root,
+    protocolId: plan.protocolId,
+    planSha256: plan.planSha256,
+    sourceCommit: plan.sourceCommit,
+    targets,
+    credentials: await loadProductionRealtimeCredentialCandidates(REPOSITORY_ROOT),
+    createClient: (target, apiKey) => createProductionRealtimeClient(
+      target.provider,
+      target.configuration,
+      apiKey,
+    ),
+  });
+  process.stdout.write(`${canonicalJson({
+    action: "qualified",
+    qualificationId: artifact.qualificationId,
+    artifactSha256: artifact.artifactSha256,
+    status: artifact.status,
+    configurations: artifact.results.length,
+    providers: Object.fromEntries(["openai", "gemini", "xai"].map((provider) => [
+      provider,
+      artifact.results.filter((result) => result.provider === provider).map((result) => ({
+        model: result.model,
+        status: result.status,
+        code: result.code,
+      })),
+    ])),
+  })}\n`);
+  if (artifact.status !== "passed") throw new Error("provider qualification failed; immutable sanitized artifact retained");
+}
+
 async function run(root: string, concurrency: number): Promise<void> {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 9) throw new Error("concurrency must be 1..9 pairs");
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
+  const providerCredentials = await credentials();
+  await assertRecentPassingProviderQualification({
+    root,
+    protocolId: plan.protocolId,
+    planSha256: plan.planSha256,
+    sourceCommit: plan.sourceCommit,
+    targets: qualificationTargets(plan),
+    credentials: providerCredentials,
+  });
   const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: aggregateLedgerPath(root), lockTimeoutMs: 60_000 });
   assertAggregateLedgerMatchesPlan(plan, ledger);
   await mkdir(resolve(root, "runs"), { recursive: true, mode: 0o700 });
@@ -746,7 +837,6 @@ async function run(root: string, concurrency: number): Promise<void> {
     ? createLongCallPairs().filter((pair) => pair.pairId === selectedPairId)
     : createLongCallPairs();
   if (selectedPairs.length === 0) throw new Error(`pair-id is not present in the frozen plan: ${selectedPairId}`);
-  const providerCredentials = await credentials();
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(concurrency, selectedPairs.length) }, async () => {
     while (true) {
@@ -779,7 +869,7 @@ async function report(root: string): Promise<void> {
   const withPlan = Object.freeze({ ...result, experimentId: plan.experimentId, planSha256: plan.planSha256, sourceCommit: plan.sourceCommit });
   await atomicJson(resolve(root, "result.json"), withPlan);
   const markdown = [
-    "# HACC-LC3-v3 host-managed mechanism validation",
+    "# HACC-LC3-v4 admissibility-frontier mechanism validation",
     "",
     `- Result SHA-256: \`${result.resultSha256}\``,
     `- Scheduled episodes: **${result.scheduledEpisodes}** (${result.scheduledPairs} matched pairs)`,
@@ -834,10 +924,11 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   const root = rootDirectory();
   if (command === "prepare") return prepare(root);
+  if (command === "qualify") return qualify(root);
   if (command === "run") return run(root, Number(option("concurrency") ?? "3"));
   if (command === "report") return report(root);
   if (command === "inspect") return inspect(root);
-  throw new Error("usage: long-call-live-benchmark <prepare|run|report|inspect> [--root DIR] [--concurrency 1..9] [--pair-id ID] [--env-file ABSOLUTE_PATH]");
+  throw new Error("usage: long-call-live-benchmark <prepare|qualify|run|report|inspect> [--root DIR] [--concurrency 1..9] [--pair-id ID] [--env-file ABSOLUTE_PATH]");
 }
 
 main().catch((error) => {

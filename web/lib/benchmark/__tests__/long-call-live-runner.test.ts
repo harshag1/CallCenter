@@ -36,6 +36,16 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).not.toContain("autoAdvanceLinearFlow:");
   });
 
+  it("requires a fresh, plan-bound three-provider qualification before paid execution", async () => {
+    const source = await runnerSource();
+    expect(source).toContain('if (command === "qualify") return qualify(root)');
+    expect(source).toContain("assertRecentPassingProviderQualification({");
+    expect(source.indexOf("assertRecentPassingProviderQualification({")).toBeLessThan(
+      source.indexOf("await mkdir(resolve(root, \"runs\")"),
+    );
+    expect(source).toContain("loadProductionRealtimeCredentialCandidates");
+  });
+
   it("does not commit a developer-machine credential path", async () => {
     const source = await runnerSource();
     expect(source).not.toContain("/Users/");

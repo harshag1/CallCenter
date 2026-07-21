@@ -31,6 +31,17 @@ function parseEnv(text: string): Record<string, string> {
 export async function loadProductionRealtimeCredentials(
   repositoryRoot: string,
 ): Promise<Readonly<Record<LiveStsProvider, string>>> {
+  const required = await loadProductionRealtimeCredentialCandidates(repositoryRoot);
+  for (const [provider, key] of Object.entries(required)) {
+    if (!key || key.length < 12) throw new Error(`missing ${provider} provider credential`);
+  }
+  return Object.freeze(required as Record<LiveStsProvider, string>);
+}
+
+/** Qualification needs to retain one sanitized result per provider, including missing credentials. */
+export async function loadProductionRealtimeCredentialCandidates(
+  repositoryRoot: string,
+): Promise<Readonly<Partial<Record<LiveStsProvider, string>>>> {
   const candidates = [
     resolve(repositoryRoot, "web/.env.local"),
     process.env.BENCHMARK_PROVIDER_ENV_FILE,
@@ -51,10 +62,7 @@ export async function loadProductionRealtimeCredentials(
     gemini: merged.GEMINI_API_KEY,
     xai: merged.XAI_API_KEY,
   };
-  for (const [provider, key] of Object.entries(required)) {
-    if (!key || key.length < 12) throw new Error(`missing ${provider} provider credential`);
-  }
-  return Object.freeze(required as Record<LiveStsProvider, string>);
+  return Object.freeze(required);
 }
 
 export function createProductionRealtimeClient(
@@ -63,6 +71,12 @@ export function createProductionRealtimeClient(
   apiKey: string,
 ): NormalizedRealtimeClient {
   const spec = LIVE_STS_PROVIDER_SPECS[provider];
+  if (configuration.provider !== provider) {
+    throw new Error("realtime provider differs from the qualified session configuration");
+  }
+  if (configuration.model !== spec.model) {
+    throw new Error("realtime model differs from the pinned provider specification");
+  }
   if (provider === "gemini") {
     return new GeminiLiveClient({
       apiKey,
