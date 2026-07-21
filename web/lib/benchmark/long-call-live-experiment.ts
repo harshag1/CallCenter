@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
+import { createBudgetLedger, reserveBudget, type BudgetLedger } from "./budget";
 import { exactMcNemarTwoSided } from "./usefulness-scoring";
 import {
   USEFULNESS_DEVELOPMENT_SUITE_SHA256,
@@ -165,6 +166,25 @@ export function longCallScheduleArtifact() {
     ...body,
     scheduleSha256: sha256Hex(`harshas-amazing-call-center/long-call-schedule/v1\n${canonicalJson(body)}`),
   });
+}
+
+/** Reserve the entire frozen schedule before any provider socket can open. */
+export function createLongCallBudgetLedger(createdAt: string): BudgetLedger {
+  let ledger = createBudgetLedger({
+    authorization_ceiling_usd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
+    scheduling_stop_usd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
+  });
+  for (const cell of createLongCallCells()) {
+    ledger = reserveBudget(ledger, {
+      reservation_id: `${cell.runId}-aggregate-reservation`,
+      provider: cell.provider,
+      model: cell.model,
+      run_id: cell.runId,
+      created_at: createdAt,
+      maximum_usd: LONG_CALL_MAXIMUM_USD_PER_EPISODE,
+    }).ledger;
+  }
+  return ledger;
 }
 
 export function classifyLongCallFailure(input: Pick<LongCallSummary,

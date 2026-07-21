@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 import { canonicalJson, sha256Hex } from "../lib/benchmark/artifacts";
 import {
   createBudgetLedger,
-  reserveBudget,
   settleBudgetReservation,
   type BudgetLedger,
 } from "../lib/benchmark/budget";
@@ -26,6 +25,7 @@ import {
   LONG_CALL_PROTOCOL_ID,
   LONG_CALL_TTS_VOICES,
   classifyLongCallFailure,
+  createLongCallBudgetLedger,
   createLongCallPairs,
   isStrictLongCallPass,
   longCallScheduleArtifact,
@@ -209,20 +209,7 @@ async function prepare(root: string): Promise<void> {
     ...body,
     planSha256: sha256Hex(`harshas-amazing-call-center/long-call-plan/v1\n${canonicalJson(body)}`),
   });
-  let ledger = createBudgetLedger({
-    authorization_ceiling_usd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
-    scheduling_stop_usd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
-  });
-  for (const cell of plan.schedule.cells) {
-    ledger = reserveBudget(ledger, {
-      reservation_id: `${cell.runId}-aggregate-reservation`,
-      provider: cell.provider,
-      model: cell.model,
-      run_id: cell.runId,
-      created_at: plan.createdAt,
-      maximum_usd: LONG_CALL_MAXIMUM_USD_PER_EPISODE,
-    }).ledger;
-  }
+  const ledger = createLongCallBudgetLedger(plan.createdAt);
   await writeFile(resolve(root, PRIVATE_KEY_FILE), privateKeyPem, { flag: "wx", mode: 0o600 });
   await writeFile(resolve(root, PLAN_FILE), `${canonicalJson(plan)}\n`, { flag: "wx", mode: 0o600 });
   await writeFile(resolve(root, LEDGER_FILE), `${canonicalJson(ledger)}\n`, { flag: "wx", mode: 0o600 });

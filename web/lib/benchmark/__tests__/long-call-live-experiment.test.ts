@@ -5,6 +5,7 @@ import {
   LONG_CALL_SCHEDULED_CALLER_TURNS,
   LONG_CALL_TTS_VOICES,
   classifyLongCallFailure,
+  createLongCallBudgetLedger,
   createLongCallCells,
   createLongCallPairs,
   isStrictLongCallPass,
@@ -52,6 +53,13 @@ describe("HACC-LC3-v1 long-call live experiment", () => {
       xai: { model: "grok-voice-think-fast-1.0", voice: "ara", sampleRateHz: 24_000 },
     });
     expect(schedule.scheduleSha256).toMatch(/^[a-f0-9]{64}$/);
+    const ledger = createLongCallBudgetLedger("2026-07-21T19:00:00.000Z");
+    expect(ledger.authorization_ceiling_micro_usd).toBe(270_000_000);
+    expect(ledger.scheduling_stop_micro_usd).toBe(270_000_000);
+    expect(ledger.reservations).toHaveLength(54);
+    expect(ledger.reservations.every((reservation) =>
+      reservation.status === "active" && reservation.maximum_micro_usd === 5_000_000
+    )).toBe(true);
   });
 
   it("defines strict pass and transport/world/system failure precedence", () => {
