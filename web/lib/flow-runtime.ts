@@ -299,6 +299,19 @@ function updateCapabilities(
   return updateState(state, { ...patch, capabilityEpoch: state.capabilityEpoch + 1 }, now);
 }
 
+/**
+ * Rotate grants when a host-owned policy changes the visible catalog without
+ * changing the active Flow node. The normal transition helpers already call
+ * updateCapabilities; this explicit boundary is for independently attested
+ * policy changes such as turn-aware action readiness.
+ */
+export function rotateFlowCapabilityEpoch(
+  state: FlowExecutionState,
+  now?: string
+): FlowExecutionState {
+  return updateCapabilities(state, {}, now);
+}
+
 function canonicalJson(value: unknown, seen = new Set<object>()): string {
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);

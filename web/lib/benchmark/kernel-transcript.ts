@@ -40,6 +40,11 @@ import {
   parseBoundToolWorldState,
   type ToolWorldState,
 } from "./tool-world";
+import {
+  computeAdmissibilityFrontier,
+  verifyAdmissibilityFrontierEvidence,
+  type AdmissibilityFrontierEvidence,
+} from "./admissibility-frontier";
 
 const TRANSCRIPT_TYPE = "benchmark_kernel_replay_public_commitment" as const;
 const RESTRICTED_TRANSCRIPT_TYPE = "benchmark_kernel_replay_restricted_exact" as const;
@@ -225,7 +230,27 @@ export type KernelTranscriptInvokeEntry = KernelTranscriptEntryBase & Readonly<{
   payload: KernelTranscriptInvokePayload;
 }>;
 
-export type KernelTranscriptEntry = KernelTranscriptInitializeEntry | KernelTranscriptInvokeEntry;
+export type KernelTranscriptCallerTurnPayload = Readonly<{
+  input: Readonly<{
+    turn: number;
+    turn_id: string;
+    condition_hash: string;
+  }>;
+  pre_state: KernelTranscriptStateHeads;
+  post_state: KernelTranscriptStateHeads;
+  frontier_evidence: AdmissibilityFrontierEvidence;
+  capability_snapshot: KernelTranscriptCapabilitySnapshot;
+}>;
+
+export type KernelTranscriptCallerTurnEntry = KernelTranscriptEntryBase & Readonly<{
+  operation: "caller_turn";
+  payload: KernelTranscriptCallerTurnPayload;
+}>;
+
+export type KernelTranscriptEntry =
+  | KernelTranscriptInitializeEntry
+  | KernelTranscriptInvokeEntry
+  | KernelTranscriptCallerTurnEntry;
 
 export type KernelTranscript = Readonly<{
   /** Restricted in-memory recorder. Serialize only through encodeKernelTranscript(). */
@@ -256,7 +281,7 @@ export type PublicKernelTranscriptEntry = Readonly<{
   transcript_type: typeof TRANSCRIPT_TYPE;
   run_id: string;
   sequence: number;
-  operation: "initialize" | "invoke";
+  operation: "initialize" | "invoke" | "caller_turn";
   payload: JsonValue;
   previous_entry_sha256: string | null;
   entry_sha256: string;
@@ -365,6 +390,10 @@ const INVOKE_INPUT_KEYS = Object.freeze([
   "provider_call_id",
   "turn",
 ].sort());
+const CALLER_TURN_PAYLOAD_KEYS = Object.freeze([
+  "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state",
+].sort());
+const CALLER_TURN_INPUT_KEYS = Object.freeze(["condition_hash", "turn", "turn_id"].sort());
 const STATE_HEAD_KEYS = Object.freeze([
   "capability_head", "durable_memory_head", "flow_state_sha256", "world_head",
 ].sort());
@@ -1046,6 +1075,29 @@ function publicInvokeEntry(
   return Object.freeze({ entry, afterShadow, afterDurableMemory });
 }
 
+function publicCallerTurnEntry(
+  restricted: KernelTranscriptCallerTurnEntry,
+  shadow: JsonValue,
+  durableMemory: PublicKernelTranscriptDurableMemoryState | null,
+  previousPublicHash: string
+): PublicKernelTranscriptEntry {
+  return createPublicEntry({
+    schema_version: 1,
+    transcript_type: TRANSCRIPT_TYPE,
+    run_id: restricted.run_id,
+    sequence: restricted.sequence,
+    operation: "caller_turn",
+    payload: immutableJson({
+      input: restricted.payload.input,
+      pre_state: publicStateHeads(restricted.payload.pre_state, shadow, durableMemory),
+      post_state: publicStateHeads(restricted.payload.post_state, shadow, durableMemory),
+      frontier_evidence: restricted.payload.frontier_evidence,
+      capability_snapshot: publicSnapshot(restricted.payload.capability_snapshot),
+    }) as JsonValue,
+    previous_entry_sha256: previousPublicHash,
+  });
+}
+
 function flowStateHead(state: FlowExecutionState | null): string | null {
   return state === null ? null : domainHash(FLOW_STATE_DOMAIN, state);
 }
@@ -1080,6 +1132,7 @@ function validateCapabilityHead(
     target: input.target,
     catalogMode: input.catalog_mode,
     internalFlowScope: input.internal_flow_scope,
+    visibleCatalog: input.catalog,
   });
   if (canonicalJson(expected) !== canonicalJson(input)) {
     throw new Error("capability head differs from the compiled condition target");
@@ -1479,6 +1532,137 @@ export function appendKernelTranscriptInvocation(
   return next;
 }
 
+export function appendKernelTranscriptCallerTurn(
+  transcript: KernelTranscript,
+  input: Readonly<{
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+    preFlowState: FlowExecutionState | null;
+    postFlowState: FlowExecutionState | null;
+    preCapabilityHead: BenchmarkKernelCapabilityHead;
+    postCapabilityHead: BenchmarkKernelCapabilityHead;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    durableMemoryState?: ReadonlyMap<string, JsonValue> | null;
+  }>
+): KernelTranscript {
+  const entries = transcript.entries;
+  const privateState = TRANSCRIPT_PRIVATE.get(transcript);
+  if (!privateState) throw new Error("kernel transcript recorder private state is unavailable");
+  const prior = entries.at(-1);
+  const initialize = entries[0];
+  if (!prior || initialize?.operation !== "initialize") throw new Error("kernel transcript has no initialization entry");
+  if (input.condition.conditionHash !== initialize.payload.input.condition.conditionHash) {
+    throw new Error("caller-turn condition differs from initialized transcript condition");
+  }
+  if (input.condition.behavior.transitionOwnership !== "host-managed-linear") {
+    throw new Error("caller-turn readiness entries require a host-managed condition");
+  }
+  assertPositiveInteger(input.turn, "caller-turn ordinal");
+  assertSafeId(input.turnId, "caller-turn ID");
+  const priorTurns = entries.filter((entry): entry is KernelTranscriptCallerTurnEntry =>
+    entry.operation === "caller_turn"
+  );
+  if (input.turn !== priorTurns.length + 1 || priorTurns.some((entry) => entry.payload.input.turn_id === input.turnId)) {
+    throw new Error("caller-turn transcript entries must be contiguous and unique");
+  }
+  const scenario = BenchmarkScenarioSchema.parse(input.scenario);
+  const world = parseBoundToolWorldState(scenario, input.world);
+  const durableMemory = canonicalDurableMemoryState(
+    input.durableMemoryState,
+    input.condition.behavior.genericDurableMemory,
+    "caller-turn durable memory"
+  );
+  if (canonicalJson(durableMemory) !== canonicalJson(privateState.durableMemoryState)) {
+    throw new Error("caller-turn durable memory differs from prior transcript state");
+  }
+  const pre = stateHeads({
+    condition: input.condition,
+    world,
+    flowState: input.preFlowState,
+    capabilityHead: input.preCapabilityHead,
+    durableMemoryState: durableMemory,
+    durableMemoryRevision: privateState.durableMemoryRevision,
+  });
+  const post = stateHeads({
+    condition: input.condition,
+    world,
+    flowState: input.postFlowState,
+    capabilityHead: input.postCapabilityHead,
+    durableMemoryState: durableMemory,
+    durableMemoryRevision: privateState.durableMemoryRevision,
+  });
+  if (canonicalJson(pre) !== canonicalJson(prior.payload.post_state)) {
+    throw new Error("caller-turn pre-state does not continue the prior transcript state");
+  }
+  if (post.capability_head.catalog_mode !== "refresh_required") {
+    throw new Error("caller-turn boundary must enter refresh-required capability mode");
+  }
+  const frontierMode = input.preCapabilityHead.target.startsWith("step:")
+    ? "target"
+    : input.preCapabilityHead.catalog_mode === "terminal"
+      ? "terminal"
+      : input.preCapabilityHead.catalog_mode === "post_step_transition"
+        ? "post_step_transition"
+        : "target";
+  const expectedFrontier = computeAdmissibilityFrontier({
+    condition: input.condition,
+    scenario,
+    world,
+    turn: input.turn,
+    target: input.preCapabilityHead.target,
+    catalogMode: frontierMode,
+  }).evidence;
+  if (canonicalJson(expectedFrontier) !== canonicalJson(input.frontierEvidence)) {
+    throw new Error("caller-turn admissibility evidence is not derived from authoritative state");
+  }
+  const snapshot = sanitizeSnapshot(input.capabilitySnapshot);
+  assertSnapshotMatchesHead(snapshot, post.capability_head, "caller-turn refresh-required snapshot");
+  const entry = appendEntry<KernelTranscriptCallerTurnEntry>({
+    schema_version: 1,
+    transcript_type: RESTRICTED_TRANSCRIPT_TYPE,
+    run_id: initialize.run_id,
+    sequence: entries.length,
+    operation: "caller_turn",
+    payload: {
+      input: {
+        turn: input.turn,
+        turn_id: input.turnId,
+        condition_hash: input.condition.conditionHash,
+      },
+      pre_state: pre,
+      post_state: post,
+      frontier_evidence: input.frontierEvidence,
+      capability_snapshot: snapshot,
+    },
+    previous_entry_sha256: prior.entry_sha256,
+  });
+  const previousPublic = privateState.publicEntries.at(-1);
+  if (!previousPublic) throw new Error("kernel transcript public chain is unavailable");
+  const publicEntry = publicCallerTurnEntry(
+    entry,
+    privateState.publicWorldShadow,
+    privateState.publicDurableMemoryState,
+    previousPublic.entry_sha256
+  );
+  const publicByteLength = livePublicEntryBytes(
+    publicEntry,
+    privateState.limits,
+    privateState.publicByteLength,
+    entries.length + 1
+  );
+  const next = Object.freeze({ entries: Object.freeze([...entries, entry]) });
+  TRANSCRIPT_PRIVATE.set(next, Object.freeze({
+    ...privateState,
+    publicEntries: Object.freeze([...privateState.publicEntries, publicEntry]),
+    publicByteLength,
+  }));
+  return next;
+}
+
 export function encodeKernelTranscript(transcript: KernelTranscript): string {
   const publicTranscript = publicKernelTranscript(transcript);
   return `${publicTranscript.entries.map((entry) => canonicalJson(entry)).join("\n")}\n`;
@@ -1580,7 +1764,12 @@ function parseCapabilityHead(input: unknown, label: string): BenchmarkKernelCapa
   assertNonNegativeInteger(input.epoch, `${label}.epoch`);
   assertNonNegativeInteger(input.action_count, `${label}.action_count`);
   if (typeof input.target !== "string" || !input.target) throw new Error(`${label}.target is invalid`);
-  if (input.catalog_mode !== "target" && input.catalog_mode !== "post_step_transition" && input.catalog_mode !== "terminal") {
+  if (
+    input.catalog_mode !== "target"
+    && input.catalog_mode !== "post_step_transition"
+    && input.catalog_mode !== "terminal"
+    && input.catalog_mode !== "refresh_required"
+  ) {
     throw new Error(`${label}.catalog_mode is invalid`);
   }
   if (typeof input.provider_grant_scope !== "string" || !input.provider_grant_scope) {
@@ -1755,6 +1944,26 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
       ),
     });
     return immutableJson({ ...input, operation: "initialize", payload }) as unknown as KernelTranscriptInitializeEntry;
+  }
+  if (input.operation === "caller_turn") {
+    if (index === 0) throw new Error("caller_turn cannot initialize a transcript");
+    exactKeys(input.payload, CALLER_TURN_PAYLOAD_KEYS, `entry[${index}] caller_turn payload`);
+    exactKeys(input.payload.input, CALLER_TURN_INPUT_KEYS, `entry[${index}] caller_turn input`);
+    assertPositiveInteger(input.payload.input.turn, `entry[${index}] caller turn`);
+    assertSafeId(input.payload.input.turn_id, `entry[${index}] caller turn_id`);
+    assertSha(input.payload.input.condition_hash, `entry[${index}] caller condition_hash`);
+    const payload: KernelTranscriptCallerTurnPayload = Object.freeze({
+      input: Object.freeze({
+        turn: input.payload.input.turn,
+        turn_id: input.payload.input.turn_id,
+        condition_hash: input.payload.input.condition_hash,
+      }),
+      pre_state: parseStateHeads(input.payload.pre_state, `entry[${index}] caller pre_state`),
+      post_state: parseStateHeads(input.payload.post_state, `entry[${index}] caller post_state`),
+      frontier_evidence: immutableJson(JsonValueSchema.parse(input.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence,
+      capability_snapshot: parseSnapshot(input.payload.capability_snapshot, `entry[${index}] caller capability_snapshot`),
+    });
+    return immutableJson({ ...input, operation: "caller_turn", payload }) as unknown as KernelTranscriptCallerTurnEntry;
   }
   if (input.operation !== "invoke" || index === 0) throw new Error(`entry[${index}].operation is invalid`);
   exactKeys(input.payload, INVOKE_PAYLOAD_KEYS, `entry[${index}] payload`);
@@ -1940,6 +2149,8 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
     errors.push(error instanceof Error ? error.message : "initialize replay failed");
   }
   const callFingerprints = new Map<string, string>();
+  let committedTurn = 0;
+  const committedTurnIds = new Set<string>();
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== runId) errors.push(`entry ${index} changed run_id`);
@@ -1947,8 +2158,63 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, entryBody(entry)) !== entry.entry_sha256) {
       errors.push(`entry ${index} hash mismatch`);
     }
+    if (entry.operation === "caller_turn") {
+      try {
+        if (entry.payload.input.condition_hash !== condition.conditionHash) {
+          errors.push(`entry ${index} caller condition hash mismatch`);
+        }
+        if (
+          entry.payload.input.turn !== committedTurn + 1
+          || committedTurnIds.has(entry.payload.input.turn_id)
+        ) errors.push(`entry ${index} caller turn is non-contiguous or repeated`);
+        compare(`entry ${index} caller pre-state`, entry.payload.pre_state, heads, errors);
+        const mode = heads.capability_head.target.startsWith("step:")
+          ? "target"
+          : heads.capability_head.catalog_mode === "terminal"
+            ? "terminal"
+            : heads.capability_head.catalog_mode === "post_step_transition"
+              ? "post_step_transition"
+              : "target";
+        const expectedFrontier = computeAdmissibilityFrontier({
+          condition,
+          scenario,
+          world,
+          turn: entry.payload.input.turn,
+          target: heads.capability_head.target,
+          catalogMode: mode,
+        }).evidence;
+        compare(`entry ${index} caller frontier evidence`, entry.payload.frontier_evidence, expectedFrontier, errors);
+        compare(`entry ${index} caller world head`, entry.payload.post_state.world_head, heads.world_head, errors);
+        compare(
+          `entry ${index} caller durable memory head`,
+          entry.payload.post_state.durable_memory_head,
+          heads.durable_memory_head,
+          errors
+        );
+        if (
+          entry.payload.post_state.capability_head.catalog_mode !== "refresh_required"
+          || entry.payload.post_state.capability_head.epoch !== heads.capability_head.epoch + 1
+        ) errors.push(`entry ${index} caller refresh-required epoch mismatch`);
+        assertSnapshotMatchesHead(
+          entry.payload.capability_snapshot,
+          entry.payload.post_state.capability_head,
+          `entry ${index} caller capability snapshot`
+        );
+        committedTurn = entry.payload.input.turn;
+        committedTurnIds.add(entry.payload.input.turn_id);
+        heads = entry.payload.post_state;
+      } catch (error) {
+        errors.push(error instanceof Error ? `entry ${index}: ${error.message}` : `entry ${index} caller replay failed`);
+      }
+      continue;
+    }
     if (entry.operation !== "invoke") continue;
     try {
+      if (
+        condition.behavior.transitionOwnership === "host-managed-linear"
+        && committedTurn > 0
+        && entry.payload.input.turn !== committedTurn
+      ) errors.push(`entry ${index} invocation is not bound to the committed caller turn`);
       if (entry.payload.input.condition_hash !== condition.conditionHash) {
         errors.push(`entry ${index} condition hash mismatch`);
       }
@@ -1991,6 +2257,24 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
       );
       const nextCapability = validateCapabilityHead(condition, entry.payload.post_state.capability_head);
       compare(`entry ${index} post capability head`, entry.payload.post_state.capability_head, nextCapability, errors);
+      if (
+        condition.behavior.transitionOwnership === "host-managed-linear"
+        && nextCapability.target.startsWith("step:")
+        && nextCapability.catalog_mode === "target"
+      ) {
+        const expected = computeAdmissibilityFrontier({
+          condition,
+          scenario,
+          world: nextWorld,
+          turn: committedTurn,
+          target: nextCapability.target,
+          catalogMode: "target",
+        }).capabilities.map((capability) => ({
+          name: capability.name,
+          semantic_hash: capability.semanticHash,
+        })).sort((left, right) => left.name.localeCompare(right.name));
+        compare(`entry ${index} admissibility catalog`, nextCapability.catalog, expected, errors);
+      }
       if (entry.payload.outcome.capability_snapshot) {
         assertSnapshotMatchesHead(
           entry.payload.outcome.capability_snapshot,
@@ -2308,7 +2592,11 @@ function parsePublicEntry(input: unknown, index: number): PublicKernelTranscript
   if (input.previous_entry_sha256 !== null) assertSha(input.previous_entry_sha256, `public entry[${index}].previous_entry_sha256`);
   assertSha(input.entry_sha256, `public entry[${index}].entry_sha256`);
   if ((index === 0) !== (input.operation === "initialize")) throw new Error(`public entry[${index}] has an invalid operation`);
-  if (input.operation !== "initialize" && input.operation !== "invoke") throw new Error(`public entry[${index}] has an invalid operation`);
+  if (
+    input.operation !== "initialize"
+    && input.operation !== "invoke"
+    && input.operation !== "caller_turn"
+  ) throw new Error(`public entry[${index}] has an invalid operation`);
   const payload = JsonValueSchema.parse(input.payload);
   return immutableJson({ ...input, payload }) as unknown as PublicKernelTranscriptEntry;
 }
@@ -2467,11 +2755,60 @@ export function verifyKernelTranscript(input: Readonly<{
   ) errors.push("public initialize durable memory applicability mismatch");
   try { assertPublicSnapshotMatchesHead(initialSnapshot, heads.capability_head, "public initialize snapshot"); } catch (error) { errors.push((error as Error).message); }
   const callFingerprints = new Map<string, string>();
+  let committedTurn = 0;
+  const committedTurnIds = new Set<string>();
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== initialize.run_id) errors.push(`public entry ${index} changed run_id`);
     if (entry.previous_entry_sha256 !== expectedPrevious) errors.push(`public entry ${index} previous hash mismatch`);
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, publicEntryBody(entry)) !== entry.entry_sha256) errors.push(`public entry ${index} hash mismatch`);
+    if (entry.operation === "caller_turn") {
+      try {
+        exactKeys(entry.payload, CALLER_TURN_PAYLOAD_KEYS, `public entry ${index} caller payload`);
+        exactKeys(entry.payload.input, CALLER_TURN_INPUT_KEYS, `public entry ${index} caller input`);
+        assertPositiveInteger(entry.payload.input.turn, `public entry ${index} caller turn`);
+        assertSafeId(entry.payload.input.turn_id, `public entry ${index} caller turn_id`);
+        assertSha(entry.payload.input.condition_hash, `public entry ${index} caller condition_hash`);
+        if (entry.payload.input.condition_hash !== bindings.condition_hash) {
+          errors.push(`public entry ${index} caller condition binding mismatch`);
+        }
+        if (
+          entry.payload.input.turn !== committedTurn + 1
+          || committedTurnIds.has(entry.payload.input.turn_id as string)
+        ) errors.push(`public entry ${index} caller turn is non-contiguous or repeated`);
+        const pre = parsePublicStateHeads(entry.payload.pre_state, `public entry ${index} caller pre_state`);
+        const post = parsePublicStateHeads(entry.payload.post_state, `public entry ${index} caller post_state`);
+        compare(`public entry ${index} caller pre-state`, pre, heads, errors);
+        compare(`public entry ${index} caller world head`, post.authoritative_world_head, pre.authoritative_world_head, errors);
+        compare(`public entry ${index} caller shadow head`, post.public_shadow_world_sha256, pre.public_shadow_world_sha256, errors);
+        compare(`public entry ${index} caller memory head`, post.durable_memory_head, pre.durable_memory_head, errors);
+        if (
+          post.capability_head.catalog_mode !== "refresh_required"
+          || post.capability_head.epoch !== pre.capability_head.epoch + 1
+        ) errors.push(`public entry ${index} caller refresh-required epoch mismatch`);
+        const evidence = immutableJson(JsonValueSchema.parse(entry.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence;
+        if (!verifyAdmissibilityFrontierEvidence(evidence)) {
+          errors.push(`public entry ${index} caller frontier evidence hash mismatch`);
+        }
+        if (
+          evidence.condition_hash !== bindings.condition_hash
+          || evidence.scenario_hash !== bindings.scenario_hash
+          || evidence.turn !== entry.payload.input.turn
+          || evidence.target !== pre.capability_head.target
+        ) errors.push(`public entry ${index} caller frontier binding mismatch`);
+        const snapshot = parsePublicSnapshot(
+          entry.payload.capability_snapshot,
+          `public entry ${index} caller capability snapshot`
+        );
+        assertPublicSnapshotMatchesHead(snapshot, post.capability_head, `public entry ${index} caller capability snapshot`);
+        committedTurn = entry.payload.input.turn as number;
+        committedTurnIds.add(entry.payload.input.turn_id as string);
+        heads = post;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : `public entry ${index} caller replay failed`);
+      }
+      continue;
+    }
     if (entry.operation !== "invoke") continue;
     try {
       exactKeys(entry.payload, PUBLIC_INVOKE_PAYLOAD_KEYS, `public entry ${index} payload`);
@@ -2484,6 +2821,9 @@ export function verifyKernelTranscript(input: Readonly<{
       assertSha(call.capability_grant_commitment, `public entry ${index} grant commitment`);
       assertSha(call.provider_call_fingerprint_hmac_sha256, `public entry ${index} call fingerprint`);
       if (call.condition_hash !== bindings.condition_hash) errors.push(`public entry ${index} condition binding mismatch`);
+      if (bindings.condition_id === "host-managed-harness" && committedTurn > 0 && call.turn !== committedTurn) {
+        errors.push(`public entry ${index} invocation is not bound to the committed caller turn`);
+      }
       const pre = parsePublicStateHeads(entry.payload.pre_state, `public entry ${index} pre_state`);
       compare(`public entry ${index} pre-state`, pre, heads, errors);
       const delta = entry.payload.public_world_delta as JsonValue;

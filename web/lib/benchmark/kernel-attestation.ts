@@ -146,7 +146,7 @@ export type BenchmarkKernelCapabilityAction = Readonly<{
 export type BenchmarkKernelCapabilityHead = Readonly<{
   epoch: number;
   target: string;
-  catalog_mode: "target" | "post_step_transition" | "terminal";
+  catalog_mode: "target" | "post_step_transition" | "terminal" | "refresh_required";
   /** Exact scope string shown in the latest provider capability snapshot. */
   provider_grant_scope: string;
   /** Production Flow v2 authorization scope; null in unenforced arms. */
@@ -505,7 +505,12 @@ function validateCapabilityHead(input: unknown): BenchmarkKernelCapabilityHead {
   exactKeys(input, CAPABILITY_HEAD_KEYS, "capability_head");
   nonNegativeInteger(input.epoch, "capability_head.epoch");
   nonEmpty(input.target, "capability_head.target");
-  if (input.catalog_mode !== "target" && input.catalog_mode !== "post_step_transition" && input.catalog_mode !== "terminal") {
+  if (
+    input.catalog_mode !== "target"
+    && input.catalog_mode !== "post_step_transition"
+    && input.catalog_mode !== "terminal"
+    && input.catalog_mode !== "refresh_required"
+  ) {
     throw new Error("capability_head.catalog_mode is invalid");
   }
   nonEmpty(input.provider_grant_scope, "capability_head.provider_grant_scope");
@@ -543,6 +548,12 @@ function compiledCatalog(condition: CompiledBenchmarkCondition, target: string, 
       throw new Error("non-progressive conditions must attest the full-catalog target");
     }
     capabilities = condition.visibleCapabilities;
+  } else if (mode === "refresh_required") {
+    if (condition.behavior.transitionOwnership !== "host-managed-linear") {
+      throw new Error("refresh-required catalogs are exclusive to host-managed conditions");
+    }
+    const recovery = union.get("flow.get_state");
+    capabilities = recovery ? [recovery] : [];
   } else if (target === "$base") {
     if (mode !== "target") throw new Error("base capability catalog must use target mode");
     capabilities = condition.visibleCapabilities;
@@ -576,9 +587,42 @@ export function createBenchmarkKernelCapabilityHead(input: Readonly<{
   target: string;
   catalogMode: BenchmarkKernelCapabilityHead["catalog_mode"];
   internalFlowScope: string | null;
+  /** Exact emitted subset after a host-managed active-step readiness filter. */
+  visibleCatalog?: readonly BenchmarkKernelCapabilityAction[];
 }>): BenchmarkKernelCapabilityHead {
   assertCompiledConditionIntegrity(input.condition);
-  const catalog = compiledCatalog(input.condition, input.target, input.catalogMode);
+  const compiled = compiledCatalog(input.condition, input.target, input.catalogMode);
+  const catalog = input.visibleCatalog
+    ? Object.freeze([...input.visibleCatalog]
+      .map((action) => Object.freeze({ ...action }))
+      .sort((left, right) => left.name.localeCompare(right.name)))
+    : compiled;
+  if (input.visibleCatalog) {
+    const compiledByName = new Map(compiled.map((action) => [action.name, action]));
+    const compiledCapabilities = new Map(
+      [...input.condition.visibleCapabilities, ...input.condition.disclosures.flatMap((item) => item.visibleCapabilities)]
+        .map((capability) => [capability.name, capability])
+    );
+    const mayFilter = input.condition.behavior.transitionOwnership === "host-managed-linear"
+      && input.target.startsWith("step:")
+      && input.catalogMode === "target";
+    if (!mayFilter && canonicalJson(catalog) !== canonicalJson(compiled)) {
+      throw new Error("capability subset is allowed only for a host-managed active step");
+    }
+    for (const action of catalog) {
+      if (canonicalJson(action) !== canonicalJson(compiledByName.get(action.name))) {
+        throw new Error(`capability subset contains noncompiled action ${action.name}`);
+      }
+    }
+    const requiredControls = compiled.filter((action) =>
+      compiledCapabilities.get(action.name)?.category !== "leaf"
+    );
+    if (requiredControls.some((required) =>
+      !catalog.some((action) => canonicalJson(action) === canonicalJson(required))
+    )) {
+      throw new Error("host-managed readiness filtering cannot remove flow controls");
+    }
+  }
   return validateCapabilityHead({
     epoch: input.epoch,
     target: input.target,
@@ -596,9 +640,18 @@ function assertCapabilityRelation(
   head: BenchmarkKernelCapabilityHead
 ): void {
   const expectedCatalog = compiledCatalog(condition, head.target, head.catalog_mode);
-  if (canonicalJson(head.catalog) !== canonicalJson(expectedCatalog)) {
-    throw new Error("capability catalog differs from the compiled condition target");
-  }
+  createBenchmarkKernelCapabilityHead({
+    condition,
+    epoch: head.epoch,
+    target: head.target,
+    catalogMode: head.catalog_mode,
+    internalFlowScope: head.internal_flow_scope,
+    visibleCatalog: head.catalog,
+  });
+  if (
+    condition.behavior.transitionOwnership !== "host-managed-linear"
+    && canonicalJson(head.catalog) !== canonicalJson(expectedCatalog)
+  ) throw new Error("capability catalog differs from the compiled condition target");
   const expectedProviderScope = condition.behavior.progressiveDisclosure ? head.target : "$full-catalog";
   if (head.provider_grant_scope !== expectedProviderScope) {
     throw new Error("provider grant scope differs from the canonical condition target relation");
@@ -611,6 +664,15 @@ function assertFlowCapabilityRelation(
   state: FlowExecutionState
 ): void {
   if (!condition.behavior.progressiveDisclosure) return;
+  if (head.catalog_mode === "refresh_required") {
+    const target = state.currentStep !== null
+      ? `step:${state.currentStep}`
+      : state.nodeId !== null ? `topic:${state.nodeId}` : "$base";
+    if (head.target !== target) {
+      throw new Error("refresh-required capability target differs from Flow state");
+    }
+    return;
+  }
   if (state.status === "completed" || state.status === "failed") {
     const target = state.nodeId ? `topic:${state.nodeId}` : null;
     if (target === null || head.target !== target || head.catalog_mode !== "terminal") {

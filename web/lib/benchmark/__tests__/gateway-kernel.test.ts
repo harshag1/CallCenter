@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
+import { AgentFlowSchema } from "../../flow";
 import { deriveFlowActionInvocationId } from "../../flow-runtime";
 import { compileConditionSuite, type CompiledBenchmarkCondition } from "../condition-compiler";
 import { createInMemoryBenchmarkGatewayKernel, type InMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
@@ -18,6 +19,7 @@ import {
   INDUSTRIAL_FIELD_SERVICE_FLOW,
   industrialFieldServiceCompilerInput,
 } from "../industrial-field-service-source";
+import { longUsefulnessTask } from "../long-call-live-experiment";
 import { BenchmarkScenarioSchema, type JsonValue } from "../scenario-schema";
 import { createToolWorld, executeTool, type ToolWorldState } from "../tool-world";
 import type { BenchmarkGatewayOutcome } from "../orchestrator";
@@ -101,7 +103,10 @@ function publicInvokePayload(
 function createHarness(
   id: keyof typeof suite.conditions,
   runId = `run-${id}`,
-  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits }> = {}
+  options: Readonly<{
+    transcriptLimits?: KernelTranscriptLimits;
+    clock?: Readonly<{ nowMs(): number; nowIso(): string }>;
+  }> = {}
 ): Harness {
   const condition = suite.conditions[id];
   const kernel = createInMemoryBenchmarkGatewayKernel({
@@ -113,7 +118,7 @@ function createHarness(
     leaseSubjectId: "pair-industrial-test",
     ...TEST_ATTESTATION_OPTIONS,
     capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
-    clock: FIXED_CLOCK,
+    clock: options.clock ?? FIXED_CLOCK,
     ...(options.transcriptLimits ? { transcriptLimits: options.transcriptLimits } : {}),
   });
   const world = createToolWorld(scenario);
@@ -135,6 +140,7 @@ function invoke(
 ): BenchmarkGatewayOutcome {
   harness.sequence += 1;
   const providerCallId = options.providerCallId ?? `provider-call-${harness.sequence}`;
+  let acceptedWorld: ToolWorldState | null = null;
   const outcome = harness.kernel.invoke({
     providerCallId,
     call: {
@@ -159,10 +165,11 @@ function invoke(
         turn: Math.min(harness.sequence, scenario.max_turns),
         ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
       });
-      harness.world = execution.state;
+      acceptedWorld = execution.state;
       return execution;
     },
   });
+  if (acceptedWorld) harness.world = acceptedWorld;
   if (outcome.capabilitySnapshot && !options.preserveSnapshot) {
     harness.snapshot = outcome.capabilitySnapshot;
   }
@@ -238,6 +245,179 @@ describe("benchmark gateway kernel", () => {
         trust: TEST_TRUST,
       },
     })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
+  });
+
+  it("journals the first receipt in a real two-action long-call step before host auto-advance", () => {
+    const task = longUsefulnessTask("museum");
+    const longScenario = task.scenario;
+    const longFlow = AgentFlowSchema.parse(task.compiler_input.flow);
+    const longSuite = compileConditionSuite(task.compiler_input);
+    const condition = longSuite.conditions["host-managed-harness"];
+    const runId = "run-long-two-action-checkpoint";
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow: longFlow,
+      expectedFlowHash: longSuite.flowHash,
+      expectedScenarioHash: longSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: longSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    let world = createToolWorld(longScenario);
+    let visible = kernel.initialize({ runId, condition, scenario: longScenario, world });
+    let sequence = 0;
+    const invokeLong = (
+      action: string,
+      args: Record<string, JsonValue>,
+      turn: number,
+      capabilityGrant?: string
+    ) => {
+      const capability = visible.actions.find((candidate) => candidate.name === action);
+      if (!capability && !capabilityGrant) throw new Error(`long-call snapshot does not expose ${action}`);
+      let acceptedWorld: ToolWorldState | null = null;
+      const outcome = kernel.invoke({
+        providerCallId: `long-provider-call-${++sequence}`,
+        call: { action, arguments: args, capability_grant: capabilityGrant ?? capability!.capability_grant },
+        capabilityEpoch: visible.capability_epoch,
+        condition,
+        turn,
+        world: structuredClone(world),
+        executeLeaf: (request) => {
+          const execution = executeTool(longScenario, world, {
+            invocation_id: `long-world-invocation-${sequence}`,
+            tool: request.action,
+            arguments: structuredClone(request.arguments),
+            turn,
+            ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
+          });
+          acceptedWorld = execution.state;
+          return execution;
+        },
+      });
+      if (acceptedWorld) world = acceptedWorld;
+      if (outcome.capabilitySnapshot) visible = outcome.capabilitySnapshot;
+      return outcome;
+    };
+    let committedTurn = 0;
+    const advanceToTurn = (target: number) => {
+      while (committedTurn < target) {
+        committedTurn += 1;
+        const update = kernel.advanceCallerTurn({
+          runId,
+          condition,
+          scenario: longScenario,
+          turn: committedTurn,
+          turnId: longScenario.caller.turns[committedTurn - 1].id,
+          world,
+        });
+        if (update.capabilitySnapshot) visible = update.capabilitySnapshot;
+        expectOk(invokeLong("flow.get_state", {}, committedTurn));
+      }
+    };
+    const verifyCurrentHead = () => {
+      const attestation = kernel.attestFinal({ runId, condition, scenario: longScenario, world });
+      expect(verifyKernelTranscript({
+        transcript: kernel.encodedTranscript(),
+        finalAttestation: attestation,
+        attestationExpectation: {
+          runId,
+          condition,
+          scenario: longScenario,
+          world,
+          transcriptReference: kernel.transcriptReference(),
+          evidenceBinding: TEST_EVIDENCE_BINDING,
+          trust: TEST_TRUST,
+        },
+      })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified", errors: [] });
+    };
+
+    advanceToTurn(1);
+    expectOk(invokeLong("flow.select_topic", { topic_id: "museum_case" }, 1));
+    expectOk(invokeLong("lookup_loan_case", { case_id: "MLR-2048" }, 1));
+    advanceToTurn(2);
+    expectOk(invokeLong("verify_museum_registrar", {
+      case_id: "MLR-2048",
+      actor_id: "REG-44",
+      verification_pin: "7316",
+    }, 2));
+
+    advanceToTurn(4);
+    const beforeCorrectionEntries = kernel.transcriptReference().transcript_entry_count;
+    const correction = invokeLong("record_corrected_crate", {
+      case_id: "MLR-2048",
+      subject: "CRATE-A71",
+    }, 4);
+    expectOk(correction);
+    expect(correction.disclosure).toBeUndefined();
+    expect(visible.actions.map((action) => action.name)).toContain("record_corrected_crate");
+    expect(visible.actions.map((action) => action.name)).not.toContain("record_conservation_limits");
+    expect(kernel.transcriptReference().transcript_entry_count).toBe(beforeCorrectionEntries + 1);
+    verifyCurrentHead();
+
+    advanceToTurn(9);
+    const priorTurnGrant = visible.actions.find(
+      (action) => action.name === "record_conservation_limits"
+    )?.capability_grant;
+    expect(priorTurnGrant).toBeTruthy();
+    const guardrails = invokeLong("record_conservation_limits", {
+      case_id: "MLR-2048",
+      primary_constraint: "climate_stable_chain_of_custody",
+      numeric_limit: 52,
+    }, 9);
+    expectOk(guardrails);
+    expect(guardrails.disclosure?.target).toBe("step:museum_case.recover_reversible_action_and_clearance");
+    expect(visible.actions.map((action) => action.name)).not.toContain("hold_bonded_courier");
+    advanceToTurn(10);
+    expect(visible.actions.map((action) => action.name)).toContain("hold_bonded_courier");
+    const stalePriorTurnCall = invokeLong("record_conservation_limits", {
+      case_id: "MLR-2048",
+      primary_constraint: "climate_stable_chain_of_custody",
+      numeric_limit: 52,
+    }, 10, priorTurnGrant);
+    expect(stalePriorTurnCall.result).toMatchObject({ ok: false, code: "capability_scope_mismatch" });
+    verifyCurrentHead();
+  });
+
+  it("rolls back every kernel head when host auto-advance throws after leaf execution", () => {
+    let armed = false;
+    let armedCalls = 0;
+    const clock = {
+      nowMs: FIXED_CLOCK.nowMs,
+      nowIso: () => {
+        if (armed && ++armedCalls === 4) throw new Error("injected post-leaf transition failure");
+        return FIXED_CLOCK.nowIso();
+      },
+    };
+    const harness = createHarness("host-managed-harness", "run-host-transaction-rollback", { clock });
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    const beforeWorld = structuredClone(harness.world);
+    const beforeTranscript = harness.kernel.encodedTranscript();
+    const beforeReference = harness.kernel.transcriptReference();
+    const providerCallId = "provider-rollback-leaf";
+
+    armed = true;
+    expect(() => invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId,
+    })).toThrow("injected post-leaf transition failure");
+    armed = false;
+
+    expect(harness.world).toEqual(beforeWorld);
+    expect(harness.kernel.encodedTranscript()).toBe(beforeTranscript);
+    expect(harness.kernel.transcriptReference()).toEqual(beforeReference);
+    expect(() => harness.kernel.attestFinal({
+      runId: "run-host-transaction-rollback",
+      condition: harness.condition,
+      scenario,
+      world: beforeWorld,
+    })).not.toThrow();
+
+    const retried = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId,
+    });
+    expect(retried.result).toMatchObject({ ok: true, disposition: "executed" });
+    expect(retried.disclosure?.target).toBe("step:field_service.verify_technician");
   });
 
   it("does not let a runtime option override model-authored transition ownership", () => {

@@ -109,6 +109,7 @@ import {
   type CallerWorldSchedulePlan,
   type ScheduledCallerOpportunity,
 } from "./caller-world-scheduler";
+import type { AdmissibilityFrontierEvidence } from "./admissibility-frontier";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -160,6 +161,25 @@ export interface BenchmarkGatewayKernel {
     world: ToolWorldState;
   }>): ProviderCapabilitySnapshot | Promise<ProviderCapabilitySnapshot>;
   invoke(input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome | Promise<BenchmarkGatewayOutcome>;
+  /**
+   * Commit one response-eligible caller turn and invalidate the prior logical
+   * grants. Host-managed arms return a recovery-only snapshot; the model must
+   * pull the turn-aware catalog through flow.get_state.
+   */
+  advanceCallerTurn?(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+  }> | Promise<Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+  }>>;
   /**
    * Read-only final-state proof. Implementations must bind their exact internal
    * treatment state to the supplied authoritative world without rotating
@@ -1581,6 +1601,7 @@ async function dispatchToolCall(input: Readonly<{
   }
 
   let execution: ToolExecution | null = null;
+  let acceptedWorld: ToolWorldState | null = null;
   const executeLeaf: GatewayLeafExecutor = (request) => {
     if (execution) throw new Error("gateway kernel attempted more than one leaf execution for one model call");
     const argumentsRecord = jsonRecord(request.arguments);
@@ -1592,7 +1613,7 @@ async function dispatchToolCall(input: Readonly<{
       turn,
       ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
     });
-    runtime.world = execution.state;
+    acceptedWorld = execution.state;
     return execution;
   };
 
@@ -1610,6 +1631,9 @@ async function dispatchToolCall(input: Readonly<{
   } catch (error) {
     throw trialError("tool_error", "gateway_kernel_failed", errorMessage(error), "tool", { fatal: true });
   }
+  // The kernel may still reject a post-leaf transition or evidence append.
+  // Publish ToolWorld only after the invocation and its transcript commit.
+  if (acceptedWorld) runtime.world = acceptedWorld;
   const result = CapabilityGatewayResultSchema.parse(outcome?.result);
   const visibleOutput = outcome.providerVisibleOutput === undefined
     ? result
@@ -1706,6 +1730,7 @@ async function deliverCallerAudio(input: Readonly<{
   runtime: MutableRuntime;
   journal: TrialJournalCoordinator;
   record(type: string, payload: unknown): void;
+  afterCommitBeforeResponse?: () => void | Promise<void>;
 }>): Promise<void> {
   const delivery = deliveryPlan(input.turn.material, input.profile);
   if (input.runtime.inputAudioBytes + input.turn.material.bytes.byteLength > input.limits.maxInputAudioBytes) {
@@ -1786,6 +1811,7 @@ async function deliverCallerAudio(input: Readonly<{
   await input.journal.flush();
   try {
     input.client.commitInputAudio();
+    await input.afterCommitBeforeResponse?.();
     // Open the response window only after caller audio is durably committed,
     // but before createResponse because test and provider adapters may emit
     // normalized response events synchronously from that call.
@@ -3038,6 +3064,53 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         runtime,
         journal,
         record,
+        afterCommitBeforeResponse: input.condition.behavior.transitionOwnership === "host-managed-linear"
+          ? async () => {
+              if (!input.gatewayKernel.advanceCallerTurn) {
+                throw trialError(
+                  "protocol_error",
+                  "caller_turn_frontier_unavailable",
+                  "Host-managed condition requires a turn-boundary admissibility kernel",
+                  "turn",
+                  { fatal: true }
+                );
+              }
+              const advanced = await input.gatewayKernel.advanceCallerTurn({
+                runId: input.runId,
+                condition: input.condition,
+                scenario,
+                turn: index + 1,
+                turnId: turn.turnId,
+                world: ToolWorldStateSchema.parse(structuredClone(runtime.world)),
+              });
+              const snapshot = assertSnapshotSubset(
+                advanced.capabilitySnapshot,
+                input.condition,
+                "caller-turn refresh-required"
+              );
+              if (
+                snapshot.actions.length !== 1
+                || snapshot.actions[0]?.name !== "flow.get_state"
+              ) {
+                throw trialError(
+                  "protocol_error",
+                  "caller_turn_frontier_not_refresh_only",
+                  "Caller-turn boundary must expose only flow.get_state until refresh",
+                  "turn",
+                  { fatal: true }
+                );
+              }
+              runtime.currentCapabilitySnapshot = snapshot;
+              record("caller.capability_refresh_required", {
+                turn: index + 1,
+                turn_id: turn.turnId,
+                capability_epoch: snapshot.capability_epoch,
+                scope: snapshot.scope,
+                frontier_evidence_sha256: advanced.frontierEvidence.evidence_sha256,
+              });
+              await journal.flush();
+            }
+          : undefined,
       });
       runtime.turnsSent += 1;
       record("caller.turn_sent", {

@@ -59,7 +59,7 @@ export type AssertionEvaluation = {
   expected?: JsonValue;
 };
 
-type EvaluationContext = {
+export type ToolWorldPredicateContext = {
   world: Record<string, JsonValue>;
   arguments: Record<string, JsonValue>;
   runtime: Record<string, JsonValue>;
@@ -286,7 +286,7 @@ function setResultValueAtPath(root: Record<string, JsonValue>, path: string, val
   }
 }
 
-function resolveValue(source: ValueSource, context: EvaluationContext): ResolvedJson {
+function resolveValue(source: ValueSource, context: ToolWorldPredicateContext): ResolvedJson {
   if ("literal" in source) return { present: true, value: source.literal };
   return lookupValueAtPath(context[source.source], source.path);
 }
@@ -312,7 +312,15 @@ function ownRecordValue<T>(record: Readonly<Record<string, T>>, key: string): T 
   return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
-function evaluatePredicate(predicate: Predicate, context: EvaluationContext): PrerequisiteEvidence {
+/**
+ * The single ToolWorld predicate evaluator. Admission, replay, assertions, and
+ * host-side action readiness must all call this function so the frontier can
+ * never drift into a weaker shadow implementation.
+ */
+export function evaluateToolWorldPredicate(
+  predicate: Predicate,
+  context: ToolWorldPredicateContext
+): PrerequisiteEvidence {
   const left = resolveValue(predicate.left, context);
   const right = predicate.right ? resolveValue(predicate.right, context) : undefined;
   let passed = false;
@@ -735,14 +743,14 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       ) {
         throw new ToolWorldDefinitionError(`admission "${admission.admission_id}" has invalid arguments or semantic identity`);
       }
-      const computedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+      const computedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
         world: replayedFacts,
         arguments: receipt.arguments,
         runtime,
       }));
       const expectedFaultOrdinals: Record<string, number> = {};
       for (const fault of tool.faults) {
-        if (!fault.when.every((predicate) => evaluatePredicate(predicate, {
+        if (!fault.when.every((predicate) => evaluateToolWorldPredicate(predicate, {
           world: replayedFacts,
           arguments: receipt.arguments,
           runtime,
@@ -815,7 +823,7 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       if (effect.duplicate_of_effect_id !== expectedPriorEffectId) {
         throw new ToolWorldDefinitionError(`effect "${effect.effect_id}" has forged or missing duplicate lineage`);
       }
-      const context: EvaluationContext = {
+      const context: ToolWorldPredicateContext = {
         world: replayedFacts,
         arguments: receipt.arguments,
         runtime: admissionRuntime(admission, receipt),
@@ -1020,7 +1028,7 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
         } else if (argumentIssues.length > 0) {
           expectedVisible = errorResult("invalid_arguments", argumentIssues.join("; "));
         } else {
-          expectedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+          expectedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
             world: replayedFacts,
             arguments: receipt.arguments,
             runtime: rejectionRuntime,
@@ -1218,7 +1226,7 @@ function validateArguments(tool: ToolDefinition, args: Record<string, JsonValue>
   return issues;
 }
 
-function semanticKey(tool: ToolDefinition, invocation: ToolInvocation, context: EvaluationContext): string {
+function semanticKey(tool: ToolDefinition, invocation: ToolInvocation, context: ToolWorldPredicateContext): string {
   const resolved = tool.semantic_key.length > 0
     ? tool.semantic_key.map((source) => resolveValue(source, context))
     : [{ present: true as const, value: invocation.arguments }];
@@ -1236,7 +1244,7 @@ function errorResult(code: string, message: string, retriable = false): VisibleT
   return { ok: false, error: { code, message, retriable } };
 }
 
-function materializeResult(tool: ToolDefinition, context: EvaluationContext): JsonValue {
+function materializeResult(tool: ToolDefinition, context: ToolWorldPredicateContext): JsonValue {
   const result: Record<string, JsonValue> = {};
   for (const field of tool.result.fields) {
     const value = resolveValue(field.value, context);
@@ -1412,7 +1420,7 @@ export function executeTool(
     ...(invocation.idempotency_key ? { idempotency_key: invocation.idempotency_key } : {}),
     ...(invocation.semantic_opportunity_id ? { semantic_opportunity_id: invocation.semantic_opportunity_id } : {}),
   };
-  const preliminaryContext: EvaluationContext = {
+  const preliminaryContext: ToolWorldPredicateContext = {
     world: state.facts,
     arguments: invocation.arguments,
     runtime: preliminaryRuntime,
@@ -1478,9 +1486,9 @@ export function executeTool(
     ...(invocation.idempotency_key ? { idempotency_key: invocation.idempotency_key } : {}),
     ...(invocation.semantic_opportunity_id ? { semantic_opportunity_id: invocation.semantic_opportunity_id } : {}),
   };
-  const context: EvaluationContext = { world: state.facts, arguments: invocation.arguments, runtime };
+  const context: ToolWorldPredicateContext = { world: state.facts, arguments: invocation.arguments, runtime };
 
-  const evidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, context));
+  const evidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, context));
   for (const item of evidence) {
     appendEvent(state, scenario, invocation.turn, {
       type: "tool.prerequisite_evaluated",
@@ -1509,7 +1517,7 @@ export function executeTool(
   }
 
   const faultMatchOrdinals = Object.fromEntries(tool.faults
-    .filter((candidate) => candidate.when.every((predicate) => evaluatePredicate(predicate, context).passed))
+    .filter((candidate) => candidate.when.every((predicate) => evaluateToolWorldPredicate(predicate, context).passed))
     .map((candidate) => [
       candidate.id,
       state.admissions.filter((prior) =>
@@ -1587,7 +1595,7 @@ export function executeTool(
   }
 
   const nextFacts = structuredClone(state.facts);
-  const effectContext: EvaluationContext = { ...context, world: nextFacts };
+  const effectContext: ToolWorldPredicateContext = { ...context, world: nextFacts };
   const stagedEffects: Array<Omit<WorldEffect, "event_sequence">> = [];
   for (const [index, effectSpec] of tool.effects.entries()) {
     const before = lookupValueAtPath(nextFacts, effectSpec.path);
@@ -1803,7 +1811,7 @@ function auditCommittedPrerequisites(
       violations.push(`${receipt.receipt_id}: admission world hash does not match replayed authoritative state`);
       continue;
     }
-    const computedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+    const computedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
       world: replay.facts!,
       arguments: receipt.arguments,
       runtime: admissionRuntime(admission, receipt),
@@ -1846,7 +1854,7 @@ function evaluateBoundWorldAssertion(
   let actual: JsonValue = null;
   let expected: JsonValue | undefined;
   if (assertion.kind === "fact") {
-    const evidence = evaluatePredicate(assertion.predicate, { world: state.facts, arguments: {}, runtime: {} });
+    const evidence = evaluateToolWorldPredicate(assertion.predicate, { world: state.facts, arguments: {}, runtime: {} });
     passed = evidence.passed;
     actual = {
       present: evidence.actual_present,

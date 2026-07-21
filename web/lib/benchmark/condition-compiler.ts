@@ -398,6 +398,7 @@ const GATEWAY_CONTROL = [
 const HOST_MANAGED_GATEWAY_CONTROL = [
   SHARED_VOICE_RULES,
   `All logical actions are invoked through ${CAPABILITY_GATEWAY_NAME}. Use only the latest disclosed tool catalog; send exactly tool_name and arguments. The host binds the current capability grant and epoch outside model-authored arguments.`,
+  "At the start of every caller turn, call flow.get_state before any other action. That refresh is mandatory even when you believe nothing changed; its result carries the only current turn-bound capability catalog.",
   "A disclosed capability is permission, not evidence that the action is ready. Do not invoke it until the caller has supplied every required semantic input and every declared tool prerequisite is satisfied; ask one concise question when something is missing.",
   "The host completes a step only from authoritative receipt-bound outputs and automatically enters its sole successor. Do not invent routine entry or completion calls. If the latest catalog exposes flow.enter_step, choose one currently reachable branch; use flow.get_state after uncertainty or reconnect.",
   "After a successful business action and automatic transition, stop unless the current caller utterance already supplies the next step's required inputs.",

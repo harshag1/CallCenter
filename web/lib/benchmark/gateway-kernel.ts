@@ -6,6 +6,7 @@ import {
   flowStateSummary,
   markFlowActionDispatchStarted,
   reserveFlowAction,
+  rotateFlowCapabilityEpoch,
   selectFlowTopic,
   settleFlowAction,
   completeFlowStep,
@@ -43,6 +44,7 @@ import {
   type BenchmarkKernelFinalAttestation,
 } from "./kernel-attestation";
 import {
+  appendKernelTranscriptCallerTurn,
   appendKernelTranscriptInvocation,
   assertKernelTranscriptDurableMemoryState,
   assertKernelTranscriptContainsNoRawGrants,
@@ -55,6 +57,10 @@ import {
   type KernelTranscriptReference,
   type PublicKernelTranscript,
 } from "./kernel-transcript";
+import {
+  computeAdmissibilityFrontier,
+  type AdmissibilityFrontierEvidence,
+} from "./admissibility-frontier";
 import { JsonValueSchema, type BenchmarkScenario, type JsonValue } from "./scenario-schema";
 import type {
   BenchmarkGatewayInvocation,
@@ -150,12 +156,72 @@ type KernelRun = {
     expiresAtMs: number;
   }>>;
   target: CapabilityTarget;
-  catalogMode: "target" | "post_step_transition" | "terminal";
+  catalogMode: "target" | "post_step_transition" | "terminal" | "refresh_required";
+  refreshResumeMode: "target" | "post_step_transition" | "terminal";
   /** Exact latest catalog and scope emitted to the provider, without private grants. */
   lastSnapshot: ProviderCapabilitySnapshot | null;
   transcript: KernelTranscript | null;
   transcriptSecret: string;
+  committedTurn: number;
+  committedTurnIds: Set<string>;
 };
+
+type KernelRunMutationCheckpoint = Readonly<{
+  world: ToolWorldState;
+  worldHeadHash: string;
+  flowState: FlowExecutionState | null;
+  loose: LooseState;
+  memory: Map<string, JsonValue>;
+  providerCalls: KernelRun["providerCalls"];
+  grants: KernelRun["grants"];
+  target: CapabilityTarget;
+  catalogMode: KernelRun["catalogMode"];
+  refreshResumeMode: KernelRun["refreshResumeMode"];
+  lastSnapshot: ProviderCapabilitySnapshot | null;
+  transcript: KernelTranscript | null;
+  committedTurn: number;
+  committedTurnIds: Set<string>;
+}>;
+
+function mutationCheckpoint(run: KernelRun): KernelRunMutationCheckpoint {
+  return {
+    world: run.world,
+    worldHeadHash: run.worldHeadHash,
+    flowState: run.flowState,
+    loose: {
+      ...run.loose,
+      completedSteps: new Set(run.loose.completedSteps),
+      outputs: structuredClone(run.loose.outputs),
+    },
+    memory: cloneDurableMemory(run.memory),
+    providerCalls: new Map(run.providerCalls),
+    grants: new Map(run.grants),
+    target: run.target,
+    catalogMode: run.catalogMode,
+    refreshResumeMode: run.refreshResumeMode,
+    lastSnapshot: run.lastSnapshot,
+    transcript: run.transcript,
+    committedTurn: run.committedTurn,
+    committedTurnIds: new Set(run.committedTurnIds),
+  };
+}
+
+function restoreMutationCheckpoint(run: KernelRun, checkpoint: KernelRunMutationCheckpoint): void {
+  run.world = checkpoint.world;
+  run.worldHeadHash = checkpoint.worldHeadHash;
+  run.flowState = checkpoint.flowState;
+  run.loose = checkpoint.loose;
+  run.memory = checkpoint.memory;
+  run.providerCalls = checkpoint.providerCalls;
+  run.grants = checkpoint.grants;
+  run.target = checkpoint.target;
+  run.catalogMode = checkpoint.catalogMode;
+  run.refreshResumeMode = checkpoint.refreshResumeMode;
+  run.lastSnapshot = checkpoint.lastSnapshot;
+  run.transcript = checkpoint.transcript;
+  run.committedTurn = checkpoint.committedTurn;
+  run.committedTurnIds = checkpoint.committedTurnIds;
+}
 
 function defaultClock(): Clock {
   return Object.freeze({
@@ -450,6 +516,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       grants: new Map(),
       target: "$base",
       catalogMode: "target",
+      refreshResumeMode: "target",
       lastSnapshot: null,
       transcript: null,
       transcriptSecret: createHmac("sha256", this.#secret)
@@ -461,6 +528,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           lease_subject_id: this.#leaseSubjectId,
         }))
         .digest("hex"),
+      committedTurn: 0,
+      committedTurnIds: new Set(),
     };
     const snapshot = this.#snapshot(run, pinnedCondition.visibleCapabilities);
     run.transcript = createKernelTranscript({
@@ -478,6 +547,83 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     });
     this.#run = run;
     return snapshot;
+  }
+
+  advanceCallerTurn(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+  }> {
+    const run = this.#requireRun(input.condition);
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") {
+      throw new Error("caller-turn readiness updates are exclusive to host-managed conditions");
+    }
+    if (input.runId !== run.runId || canonicalJson(input.scenario) !== canonicalJson(run.scenario)) {
+      throw new Error("caller-turn readiness update differs from the initialized run or scenario");
+    }
+    if (!Number.isSafeInteger(input.turn) || input.turn !== run.committedTurn + 1) {
+      throw new Error("caller-turn readiness updates must be contiguous and exactly once");
+    }
+    if (!SAFE_OPAQUE_ID.test(input.turnId) || run.committedTurnIds.has(input.turnId)) {
+      throw new Error("caller-turn readiness update has an invalid or repeated turnId");
+    }
+    if (!run.scenario.caller.turns.some((turn) => turn.id === input.turnId)) {
+      throw new Error("caller-turn readiness update references a turn outside the frozen scenario");
+    }
+    const world = parseBoundToolWorldState(run.scenario, input.world);
+    if (worldStateHash(world) !== run.worldHeadHash || canonicalJson(world) !== canonicalJson(run.world)) {
+      throw new Error("caller-turn readiness update world differs from the authoritative kernel head");
+    }
+    const checkpoint = mutationCheckpoint(run);
+    try {
+      const preFlowState = run.flowState ? structuredClone(run.flowState) : null;
+      const preCapabilityHead = this.#capabilityHead(run);
+      run.committedTurn = input.turn;
+      run.committedTurnIds.add(input.turnId);
+      const frontier = computeAdmissibilityFrontier({
+        condition: run.condition,
+        scenario: run.scenario,
+        world: run.world,
+        turn: run.committedTurn,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode === "refresh_required" ? run.refreshResumeMode : run.catalogMode,
+      });
+      if (!run.flowState) throw new Error("host-managed readiness rotation requires durable Flow state");
+      run.flowState = rotateFlowCapabilityEpoch(run.flowState, this.#clock.nowIso());
+      run.refreshResumeMode = run.catalogMode === "refresh_required" ? run.refreshResumeMode : run.catalogMode;
+      run.catalogMode = "refresh_required";
+      const recovery = allCapabilities(run.condition)
+        .filter((capability) => capability.name === "flow.get_state");
+      const capabilitySnapshot = this.#snapshot(run, recovery);
+      if (!run.transcript) throw new Error("benchmark gateway transcript was not initialized");
+      run.transcript = appendKernelTranscriptCallerTurn(run.transcript, {
+        condition: run.condition,
+        scenario: run.scenario,
+        turn: input.turn,
+        turnId: input.turnId,
+        world: run.world,
+        preFlowState,
+        postFlowState: run.flowState,
+        preCapabilityHead,
+        postCapabilityHead: this.#capabilityHead(run),
+        frontierEvidence: frontier.evidence,
+        capabilitySnapshot,
+        durableMemoryState: run.condition.behavior.genericDurableMemory ? run.memory : null,
+      });
+      return Object.freeze({
+        capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+      });
+    } catch (error) {
+      restoreMutationCheckpoint(run, checkpoint);
+      throw error;
+    }
   }
 
   /** Deeply immutable, grant-free replay material for artifact persistence. */
@@ -583,6 +729,10 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       target,
       catalogMode: run.catalogMode,
       internalFlowScope: run.flowState ? flowCapabilityScope(run.flowState).step : null,
+      visibleCatalog: snapshot.actions.map((action) => ({
+        name: action.name,
+        semantic_hash: action.semantic_hash,
+      })),
     });
     const visibleCatalog = snapshot.actions
       .map((action) => ({ name: action.name, semantic_hash: action.semantic_hash }))
@@ -617,6 +767,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       ? cloneDurableMemory(run.memory)
       : null;
     const preCapabilityHead = this.#capabilityHead(run);
+    const checkpoint = mutationCheckpoint(run);
     const boundInput: BenchmarkGatewayInvocation = Object.freeze({
       ...input,
       world: inputWorld,
@@ -635,18 +786,60 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         return { ...execution, state: nextWorld };
       },
     });
-    const { action } = input.call;
-    const fingerprint = sha256Hex(canonicalJson({
-      action,
-      arguments: input.call.arguments,
-    }));
-    const priorCall = run.providerCalls.get(input.providerCallId);
-    if (priorCall) {
-      if (priorCall.fingerprint !== fingerprint) {
+    try {
+      const { action } = input.call;
+      const fingerprint = sha256Hex(canonicalJson({
+        action,
+        arguments: input.call.arguments,
+      }));
+      const priorCall = run.providerCalls.get(input.providerCallId);
+      if (priorCall) {
+        if (priorCall.fingerprint !== fingerprint) {
+          const outcome: BenchmarkGatewayOutcome = {
+            result: failure(
+              "provider_call_id_conflict",
+              "Provider call ID was reused with different action content",
+              action,
+              false,
+              this.#epoch(run)
+            ),
+          };
+          this.#recordInvocation(
+            run,
+            input,
+            inputWorld,
+            preFlowState,
+            preDurableMemoryState,
+            preCapabilityHead,
+            outcome
+          );
+          return outcome;
+        }
+        const replayedResult = priorCall.outcome.result.ok
+          ? { ...priorCall.outcome.result, disposition: "replayed" as const }
+          : priorCall.outcome.result;
+        const outcome: BenchmarkGatewayOutcome = {
+          result: replayedResult,
+          ...(priorCall.outcome.providerVisibleOutput === undefined
+            ? {}
+            : { providerVisibleOutput: priorCall.outcome.providerVisibleOutput }),
+        };
+        this.#recordInvocation(
+          run,
+          input,
+          inputWorld,
+          preFlowState,
+          preDurableMemoryState,
+          preCapabilityHead,
+          outcome
+        );
+        return outcome;
+      }
+      if (input.capabilityEpoch !== this.#epoch(run)) {
         const outcome: BenchmarkGatewayOutcome = {
           result: failure(
-            "provider_call_id_conflict",
-            "Provider call ID was reused with different action content",
+            "capability_epoch_mismatch",
+            "Host-bound capability epoch is stale",
             action,
             false,
             this.#epoch(run)
@@ -661,65 +854,23 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           preCapabilityHead,
           outcome
         );
+        run.providerCalls.set(input.providerCallId, Object.freeze({
+          fingerprint,
+          outcome: Object.freeze(structuredClone(outcome)),
+        }));
         return outcome;
       }
-      const replayedResult = priorCall.outcome.result.ok
-        ? { ...priorCall.outcome.result, disposition: "replayed" as const }
-        : priorCall.outcome.result;
-      const outcome: BenchmarkGatewayOutcome = {
-        result: replayedResult,
-        ...(priorCall.outcome.providerVisibleOutput === undefined
-          ? {}
-          : { providerVisibleOutput: priorCall.outcome.providerVisibleOutput }),
-      };
-      this.#recordInvocation(
-        run,
-        input,
-        inputWorld,
-        preFlowState,
-        preDurableMemoryState,
-        preCapabilityHead,
-        outcome
-      );
-      return outcome;
-    }
-    if (input.capabilityEpoch !== this.#epoch(run)) {
-      const outcome: BenchmarkGatewayOutcome = {
-        result: failure(
-          "capability_epoch_mismatch",
-          "Host-bound capability epoch is stale",
-          action,
-          false,
-          this.#epoch(run)
-        ),
-      };
-      this.#recordInvocation(
-        run,
-        input,
-        inputWorld,
-        preFlowState,
-        preDurableMemoryState,
-        preCapabilityHead,
-        outcome
-      );
-      run.providerCalls.set(input.providerCallId, Object.freeze({
-        fingerprint,
-        outcome: Object.freeze(structuredClone(outcome)),
-      }));
-      return outcome;
-    }
-    const condition = run.condition;
-    const knownLeaf = condition.semanticLeafTools.some((tool) => tool.name === action);
-    const knownControl = FLOW_CONTROL_ACTIONS.has(action);
-    const knownMemory = action === DURABLE_MEMORY_ACTION && condition.behavior.genericDurableMemory;
-    let outcome: BenchmarkGatewayOutcome | undefined;
-    if (!knownLeaf && !knownControl && !knownMemory) {
-      outcome = { result: failure("unknown_action", `Unknown logical action ${action}`, action, false, this.#epoch(run)) };
-    } else if (condition.behavior.enforceCapabilityGrants) {
-      const verified = this.#verifyGrant(run, action, input.call.capability_grant);
-      if (verified) outcome = { result: verified };
-    }
-    try {
+      const condition = run.condition;
+      const knownLeaf = condition.semanticLeafTools.some((tool) => tool.name === action);
+      const knownControl = FLOW_CONTROL_ACTIONS.has(action);
+      const knownMemory = action === DURABLE_MEMORY_ACTION && condition.behavior.genericDurableMemory;
+      let outcome: BenchmarkGatewayOutcome | undefined;
+      if (!knownLeaf && !knownControl && !knownMemory) {
+        outcome = { result: failure("unknown_action", `Unknown logical action ${action}`, action, false, this.#epoch(run)) };
+      } else if (condition.behavior.enforceCapabilityGrants) {
+        const verified = this.#verifyGrant(run, action, input.call.capability_grant);
+        if (verified) outcome = { result: verified };
+      }
       if (!outcome) {
         outcome = knownMemory
           ? this.#memory(run, input.providerCallId, input.call.arguments)
@@ -746,17 +897,14 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         outcome
       );
       run.providerCalls.set(input.providerCallId, providerCallRecord);
+      return outcome;
     } catch (error) {
-      // Durable memory is fully kernel-local, so a failed evidence append must
-      // roll it back. Otherwise the next call or final signature could rely on
-      // state that has no transcript entry. Provider-call replay state is not
-      // published until after the append succeeds.
-      if (knownMemory && preDurableMemoryState) {
-        run.memory = cloneDurableMemory(preDurableMemoryState);
-      }
+      // No authoritative head may advance without its matching transcript
+      // entry. This covers leaf world/receipt writes, flow transitions,
+      // capability rotations, memory, grants, and provider-call replay state.
+      restoreMutationCheckpoint(run, checkpoint);
       throw error;
     }
-    return outcome;
   }
 
   #recordInvocation(
@@ -937,6 +1085,10 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
 
   #capabilitiesForTarget(run: KernelRun): readonly CompiledCapability[] {
     if (!run.condition.behavior.progressiveDisclosure) return run.condition.visibleCapabilities;
+    if (run.catalogMode === "refresh_required") {
+      return allCapabilities(run.condition)
+        .filter((capability) => capability.name === "flow.get_state");
+    }
     if (run.catalogMode === "terminal") {
       return allCapabilities(run.condition)
         .filter((capability) => capability.name === "flow.get_state");
@@ -944,7 +1096,14 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     if (run.target === "$base") return run.condition.visibleCapabilities;
     const disclosure = run.condition.disclosures.find((candidate) => candidate.target === run.target);
     if (!disclosure) throw new Error(`compiled condition has no disclosure for ${run.target}`);
-    return disclosure.visibleCapabilities;
+    return computeAdmissibilityFrontier({
+      condition: run.condition,
+      scenario: run.scenario,
+      world: run.world,
+      turn: run.committedTurn,
+      target: run.target,
+      catalogMode: run.catalogMode,
+    }).capabilities;
   }
 
   #rotation(run: KernelRun, target?: CompiledDisclosure["target"]): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> {
@@ -1013,7 +1172,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     // silently falling back to model-authored transition calls that this
     // condition never grants.
     if ("error" in completed) {
-      if (completed.code === "missing_outputs") return null;
+      if (completed.code === "missing_action_evidence" || completed.code === "missing_outputs") return null;
       throw new Error(`host-managed flow transition failed: ${completed.code}: ${completed.error}`);
     }
     run.flowState = completed.state;
@@ -1221,6 +1380,9 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         state: flowStateSummary(this.#flow, completed.state),
       }));
       return { result, ...this.#postCompletionRotation(run) };
+    }
+    if (run.catalogMode === "refresh_required") {
+      run.catalogMode = run.refreshResumeMode;
     }
     const result = success(action, `control:${callId}`, asJson(flowStateSummary(this.#flow, run.flowState)), "verified");
     const target = run.condition.behavior.progressiveDisclosure

@@ -47,6 +47,7 @@ import {
   type KernelTranscript,
 } from "../kernel-transcript";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
+import { createToolWorld } from "../tool-world";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -733,6 +734,54 @@ function rawE2eClient(): FakeRealtimeClient {
 }
 
 describe("provider-neutral benchmark trial orchestrator", () => {
+  it("does not publish a ToolWorld result when the kernel rejects after leaf execution", async () => {
+    const condition = conditionFor("raw-full");
+    const direct = new DirectGatewayKernel();
+    const throwingKernel: BenchmarkGatewayKernel = {
+      initialize: (input) => direct.initialize(input),
+      attestFinal: (input) => direct.attestFinal(input),
+      encodedTranscript: () => direct.encodedTranscript(),
+      transcriptReference: () => direct.transcriptReference(),
+      invoke(invocation) {
+        invocation.executeLeaf({
+          action: invocation.call.action,
+          arguments: invocation.call.arguments,
+        });
+        throw new Error("injected post-leaf kernel failure");
+      },
+    };
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("tool.calls", {
+          responseId: "post-leaf-failure",
+          calls: [gatewayCall("post-leaf-failure-call", "lookup_value", { key: "primary" })],
+        }));
+      },
+      onToolResults() {
+        throw new Error("a rejected kernel invocation must not reach the provider");
+      },
+    });
+    const trialBudget = budget("post-leaf-kernel-rollback");
+    const result = await runBenchmarkTrial({
+      runId: "post-leaf-kernel-rollback",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client, { condition, kernel: throwingKernel }),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("tool_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      code: "gateway_kernel_failed",
+      message: "injected post-leaf kernel failure",
+    }));
+    expect(result.world).toEqual(createToolWorld(scenario));
+    expect(result.kernelAttestation.transcript_reference.transcript_entry_count).toBe(1);
+  });
+
   it("accepts the real compiled industrial prompt and binds it into the provider session", async () => {
     const industrialScenario = BenchmarkScenarioSchema.parse(fieldServiceScenarioJson);
     const suite = compileConditionSuite(industrialFieldServiceCompilerInput(industrialScenario));
