@@ -756,6 +756,7 @@ export interface ContextProjection {
     "nodeId" | "currentStep" | "completedStepCount" | "unresolvedActionIds" | "stateDigest"
   > | null;
   readonly openCommitments: readonly Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
+  readonly currentGoalWorkers: readonly Pick<WorkerRecord, "workerId" | "purpose" | "status">[];
   readonly acceptedWorkerFacts: readonly Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
   readonly recentAdvisoryEpisodes: readonly Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
 }
@@ -800,6 +801,7 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     currentGoal: Pick<ConversationGoal, "goalId" | "description"> | null;
     currentFlowCheckpoint: ContextProjection["currentFlowCheckpoint"];
     openCommitments: Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
+    currentGoalWorkers: Pick<WorkerRecord, "workerId" | "purpose" | "status">[];
     acceptedWorkerFacts: Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
     recentAdvisoryEpisodes: Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
   } = {
@@ -810,6 +812,7 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     currentGoal: null,
     currentFlowCheckpoint: null,
     openCommitments: [],
+    currentGoalWorkers: [],
     acceptedWorkerFacts: [],
     recentAdvisoryEpisodes: [],
   };
@@ -844,6 +847,11 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     .map((commitment) => ({
       commitmentId: commitment.commitmentId, goalId: commitment.goalId, description: commitment.description,
     })));
+  if (state.currentGoal) {
+    projection.currentGoalWorkers.push(...state.workers
+      .filter(({ goalId }) => goalId === state.currentGoal?.goalId)
+      .map(({ workerId, purpose, status }) => ({ workerId, purpose, status })));
+  }
   const requiredControlBytes = projectionBytes(projection);
   if (requiredControlBytes > byteBudget) {
     throw new ContextProjectionOverflowError(byteBudget, requiredControlBytes);
