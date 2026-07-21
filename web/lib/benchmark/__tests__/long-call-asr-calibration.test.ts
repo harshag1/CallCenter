@@ -91,6 +91,15 @@ describe("long-call ASR calibration", () => {
     expect(missing.gatePass).toBe(false);
     expect(missing.metrics.completedFixtures).toBe(53);
 
+    const invalidReceipt = scoreLongCallAsrCalibration({
+      plan,
+      transcripts: exact.map((transcript, index) => index === 0
+        ? Object.freeze({ ...transcript, receiptSha256: "not-a-receipt" })
+        : transcript),
+    });
+    expect(invalidReceipt.gatePass).toBe(false);
+    expect(invalidReceipt.metrics.completedFixtures).toBe(53);
+
     const hallucinated = exact.map((transcript, index) => index === 0
       ? Object.freeze({ ...transcript, transcript: `${transcript.transcript} fifty-two percent` })
       : transcript);

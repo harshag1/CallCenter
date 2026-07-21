@@ -272,6 +272,9 @@ export function scoreLongCallAsrCalibration(input: Readonly<{
     if (byUnit.has(transcript.calibrationUnitId)) throw new Error(`duplicate ASR transcript ${transcript.calibrationUnitId}`);
     byUnit.set(transcript.calibrationUnitId, transcript);
   }
+  const plannedUnits = new Set(input.plan.fixtures.map((fixture) => fixture.calibrationUnitId));
+  const unexpectedUnits = [...byUnit.keys()].filter((unitId) => !plannedUnits.has(unitId));
+  if (unexpectedUnits.length > 0) throw new Error(`unexpected ASR calibration transcript ${unexpectedUnits.sort()[0]}`);
   const fixtureResults = input.plan.fixtures.map((fixture) => {
     const transcript = byUnit.get(fixture.calibrationUnitId);
     const referenceTokens = normalizeLongCallAsrText(fixture.sourceText);
@@ -292,7 +295,8 @@ export function scoreLongCallAsrCalibration(input: Readonly<{
       fixtureSha256: fixture.sha256,
       receiptSha256: transcript?.receiptSha256 ?? null,
       playedAudioSha256: transcript?.playedAudioSha256 ?? null,
-      evidenceComplete: transcript?.playedAudioSha256 === fixture.sha256,
+      evidenceComplete: transcript?.playedAudioSha256 === fixture.sha256
+        && /^[a-f0-9]{64}$/u.test(transcript.receiptSha256),
       referenceNormalized: referenceTokens.join(" "),
       hypothesisNormalized: hypothesisTokens.join(" "),
       wordErrors: wordErrors.errors,
