@@ -986,7 +986,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     ) return null;
     const path = nextSteps[0];
     const entered = enterFlowStep(this.#flow, run.flowState, path, this.#clock.nowIso());
-    if ("error" in entered) throw new Error(`automatic flow entry failed: ${entered.error}`);
+    if ("error" in entered) return null;
     run.flowState = entered.state;
     const target = `step:${path}` as const;
     run.target = target;
@@ -1003,10 +1003,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       || !run.flowState?.currentStep
     ) return null;
     const completed = completeFlowStep(this.#flow, run.flowState, { outputs: {} }, this.#clock.nowIso());
-    if ("error" in completed) {
-      if (completed.code === "missing_outputs") return null;
-      throw new Error(`automatic flow completion failed: ${completed.error}`);
-    }
+    if ("error" in completed) return null;
     run.flowState = completed.state;
     if (completed.state.nodeId) run.target = `topic:${completed.state.nodeId}`;
     const entered = this.#autoEnterSingleStep(run, completed.nextSteps);

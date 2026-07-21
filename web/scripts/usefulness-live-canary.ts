@@ -36,7 +36,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v8");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v9");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "canary-plan.json";
 const CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
@@ -67,7 +67,7 @@ type FixtureEntry = Readonly<{
 type CanaryPlan = Readonly<{
   schemaVersion: 1;
   protocolId: "HACC-VTR-v1";
-  experimentId: "usefulness-live-canary-v8";
+  experimentId: "usefulness-live-canary-v9";
   createdAt: string;
   sourceCommit: string;
   sourceTree: string;
@@ -210,14 +210,14 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   const publicKeyPem = keys.publicKey.export({ format: "pem", type: "spki" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "usefulness-canary-v8",
+    keyId: "usefulness-canary-v9",
     privateKeyPem,
     publicKeyPem,
   });
   const body = Object.freeze({
     schemaVersion: 1 as const,
     protocolId: "HACC-VTR-v1" as const,
-    experimentId: "usefulness-live-canary-v8" as const,
+    experimentId: "usefulness-live-canary-v9" as const,
     createdAt: new Date().toISOString(),
     sourceCommit: source.commit,
     sourceTree: source.tree,
@@ -513,6 +513,16 @@ async function runCell(root: string, plan: CanaryPlan, cell: CanaryCell, apiKey:
       message: safeMessage,
       messageSha256: sha256Hex(rawMessage),
     })}\n`, { flag: "wx", mode: 0o600 });
+    try {
+      await writeFile(
+        resolve(partial, "kernel-transcript-on-error.jsonl"),
+        gatewayKernel.encodedTranscript(),
+        { flag: "wx", mode: 0o600 },
+      );
+    } catch {
+      // The original retained error remains authoritative if initialization
+      // failed before a public transcript existed.
+    }
   }
   await writeFile(resolve(partial, "summary.json"), `${canonicalJson(summary)}\n`, { flag: "wx", mode: 0o600 });
   await rename(partial, complete);

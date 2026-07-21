@@ -206,12 +206,25 @@ describe("six-arm benchmark gateway kernel", () => {
     expectOk(lookup);
     expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
-    expect(() => harness.kernel.attestFinal({
+    const attestation = harness.kernel.attestFinal({
       runId: "run-auto-linear",
       condition: harness.condition,
       scenario,
       world: harness.world,
-    })).not.toThrow();
+    });
+    expect(verifyKernelTranscript({
+      transcript: harness.kernel.encodedTranscript(),
+      finalAttestation: attestation,
+      attestationExpectation: {
+        runId: "run-auto-linear",
+        condition: harness.condition,
+        scenario,
+        world: harness.world,
+        transcriptReference: harness.kernel.transcriptReference(),
+        evidenceBinding: TEST_EVIDENCE_BINDING,
+        trust: TEST_TRUST,
+      },
+    })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
   });
 
   it("keeps progressive-only and full-harness grants, scopes, and rotations treatment-blind", () => {
