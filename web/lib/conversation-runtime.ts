@@ -98,11 +98,16 @@ export function defineConversationRuntime(input: Readonly<{
     throw new Error("conversation runtime maximum attempts must be 1 to 32");
   }
 
+  const load = async (scope: ConversationRuntimeScope): Promise<Readonly<{
+    log: ConversationLog;
+    state: ConversationState;
+  }>> => {
+    const log = await input.store.load(scope);
+    return Object.freeze({ log, state: foldConversation(log) });
+  };
+
   return Object.freeze({
-    async load(scope: ConversationRuntimeScope): Promise<Readonly<{ log: ConversationLog; state: ConversationState }>> {
-      const log = await input.store.load(scope);
-      return Object.freeze({ log, state: foldConversation(log) });
-    },
+    load,
 
     async transact<T>(options: Readonly<{
       scope: ConversationRuntimeScope;
@@ -160,7 +165,7 @@ export function defineConversationRuntime(input: Readonly<{
       recentAudibleTurns: readonly AudibleTurn[];
       byteBudget: number;
     }>): Promise<CompiledRealtimeContextPacket> {
-      const { state } = await this.load(options.scope);
+      const { state } = await load(options.scope);
       return compileRealtimeContextPacket({ ...options, state });
     },
   });

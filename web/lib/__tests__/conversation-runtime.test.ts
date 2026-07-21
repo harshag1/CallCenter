@@ -120,7 +120,8 @@ describe("conversation runtime", () => {
     ]);
     const memory = memoryStore(initial);
     const runtime = defineConversationRuntime({ store: memory.store, isConflict: (error) => error instanceof Conflict });
-    const packet = await runtime.compilePacket({
+    const compilePacket = runtime.compilePacket;
+    const packet = await compilePacket({
       scope, capabilityCatalogDigest: "a".repeat(64), capabilityEpoch: 1,
       capabilities: [{ name: "lookup", description: "Look up account" }],
       recentAudibleTurns: [], byteBudget: 1_024,
