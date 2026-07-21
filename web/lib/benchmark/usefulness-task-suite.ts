@@ -141,6 +141,23 @@ function materializeTask(
   const selectedTurns = band === "long" ? turns : [...turns, finalTurn(template, band)];
   const originalPolicy = template.scenario.execution_policy;
   const voiceSafeTemplate = structuredClone(template.scenario);
+  const primaryConstraintChoices: Readonly<Record<PilotV2Family, readonly string[]>> = {
+    museum: [
+      "climate_stable_chain_of_custody",
+      "expedited_courier_override",
+      "standard_ambient_handoff",
+    ],
+    campus: [
+      "screen_reader_and_low_stimulation_room",
+      "standard_room_without_access_features",
+      "remote_assessment_only",
+    ],
+    water: [
+      "chain_of_custody_and_childcare_priority",
+      "skip_lab_confirmation",
+      "citywide_emergency_broadcast",
+    ],
+  };
   const spokenIdentifierPredicates = new Set([
     "case_matches",
     "actor_matches",
@@ -154,35 +171,28 @@ function materializeTask(
     museum: {
       corrected_subject_used: ["A71", "crate A71"],
       subject_matches_correction: ["A71", "crate A71"],
-      primary_constraint_matches: [
-        "custody chain must remain climate stable",
-        "the custody chain must remain climate stable",
-        "the custody chain must remain climate stable and relative humidity may not exceed fifty two percent at any handoff",
-      ],
     },
     campus: {
       corrected_subject_used: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
       subject_matches_correction: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
-      primary_constraint_matches: [
-        "screen reader and low stimulation",
-        "screen reader and low stimulation room",
-        "room must support screen reader and low stimulation",
-        "the room must support screen reader and low stimulation",
-        "the room must support a screen reader and low stimulation with exactly one hundred fifty minutes reserved",
-      ],
     },
     water: {
       corrected_subject_used: ["HYD14 daycare", "daycare"],
       subject_matches_correction: ["HYD14 daycare", "daycare"],
-      primary_constraint_matches: [
-        "chain of custody with childcare priority",
-        "chain of custody and childcare priority",
-        "use chain of custody with childcare priority and keep the drill threshold at exactly ten parts per billion",
-      ],
     },
   };
   for (const tool of voiceSafeTemplate.tools) {
+    const primaryConstraint = tool.arguments.find((argument) => argument.name === "primary_constraint");
+    if (primaryConstraint) {
+      primaryConstraint.enum = [...primaryConstraintChoices[template.family as PilotV2Family]];
+      primaryConstraint.description = "Select the canonical constraint code whose meaning matches the caller's spoken requirement.";
+    }
     for (const prerequisite of tool.prerequisites) {
+      if (prerequisite.id === "primary_constraint_matches") {
+        prerequisite.operator = "equals";
+        delete prerequisite.aliases;
+        continue;
+      }
       const aliases = scopedAliases[template.family as PilotV2Family][prerequisite.id];
       if (aliases) {
         prerequisite.operator = "alias_equals";

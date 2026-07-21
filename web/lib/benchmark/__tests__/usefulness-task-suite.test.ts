@@ -106,6 +106,22 @@ describe("voice task reliability development suite", () => {
     }
   });
 
+  it("maps fuzzy spoken constraints onto closed machine codes instead of scoring hand-written paraphrase aliases", () => {
+    for (const task of USEFULNESS_DEVELOPMENT_TASKS) {
+      const guardrailTool = task.scenario.tools.find((tool) =>
+        tool.arguments.some((argument) => argument.name === "primary_constraint")
+      );
+      expect(guardrailTool, `${task.family}/${task.complexity_band}`).toBeDefined();
+      const argument = guardrailTool!.arguments.find((candidate) => candidate.name === "primary_constraint")!;
+      const prerequisite = guardrailTool!.prerequisites.find((candidate) => candidate.id === "primary_constraint_matches")!;
+      const expected = task.scenario.initial_facts.expected_primary_constraint;
+      expect(argument.enum, `${task.family}/${task.complexity_band}`).toHaveLength(3);
+      expect(argument.enum, `${task.family}/${task.complexity_band}`).toContain(expected);
+      expect(prerequisite.operator, `${task.family}/${task.complexity_band}`).toBe("equals");
+      expect(prerequisite.aliases, `${task.family}/${task.complexity_band}`).toBeUndefined();
+    }
+  });
+
   it("completes 54 deterministic closed-loop oracle episodes with exact world success", async () => {
     let completed = 0;
     for (let replicate = 1; replicate <= 6; replicate += 1) {
