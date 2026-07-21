@@ -295,6 +295,12 @@ function deepEqual(left: JsonValue | undefined, right: JsonValue | undefined): b
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function canonicalSpokenIdentifier(value: JsonValue | undefined): string | null {
+  if (typeof value !== "string" || !/^[A-Za-z0-9 _-]+$/.test(value)) return null;
+  const canonical = value.toUpperCase().replace(/[ _-]+/g, "");
+  return canonical.length > 0 ? canonical : null;
+}
+
 function ownRecordValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
 }
@@ -307,6 +313,15 @@ function evaluatePredicate(predicate: Predicate, context: EvaluationContext): Pr
     case "equals":
       passed = left.present && right?.present === true && deepEqual(left.value, right.value);
       break;
+    case "identifier_equals": {
+      if (left.present && right?.present === true) {
+        const leftIdentifier = canonicalSpokenIdentifier(left.value);
+        const rightIdentifier = canonicalSpokenIdentifier(right.value);
+        passed = leftIdentifier !== null && rightIdentifier !== null
+          && leftIdentifier === rightIdentifier;
+      }
+      break;
+    }
     case "not_equals":
       passed = left.present && right?.present === true && !deepEqual(left.value, right.value);
       break;

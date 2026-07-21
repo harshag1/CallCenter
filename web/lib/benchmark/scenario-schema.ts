@@ -76,6 +76,7 @@ export const PredicateSchema = z.object({
   left: ValueSourceSchema,
   operator: z.enum([
     "equals",
+    "identifier_equals",
     "not_equals",
     "exists",
     "not_exists",

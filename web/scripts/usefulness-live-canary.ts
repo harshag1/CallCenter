@@ -36,7 +36,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v1");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v2");
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const PLAN_FILE = "canary-plan.json";
 const CONDITIONS = Object.freeze(["raw-memory", "full-harness"] as const);
@@ -67,7 +67,7 @@ type FixtureEntry = Readonly<{
 type CanaryPlan = Readonly<{
   schemaVersion: 1;
   protocolId: "HACC-VTR-v1";
-  experimentId: "usefulness-live-canary-v1";
+  experimentId: "usefulness-live-canary-v2";
   createdAt: string;
   sourceCommit: string;
   sourceTree: string;
@@ -210,14 +210,14 @@ async function prepare(root: string): Promise<void> {
   const privateKeyPem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   const publicKeyPem = keys.publicKey.export({ format: "pem", type: "spki" }).toString();
   const signer = createBenchmarkKernelAttestationSigner({
-    keyId: "usefulness-canary-v1",
+    keyId: "usefulness-canary-v2",
     privateKeyPem,
     publicKeyPem,
   });
   const body = Object.freeze({
     schemaVersion: 1 as const,
     protocolId: "HACC-VTR-v1" as const,
-    experimentId: "usefulness-live-canary-v1" as const,
+    experimentId: "usefulness-live-canary-v2" as const,
     createdAt: new Date().toISOString(),
     sourceCommit: source.commit,
     sourceTree: source.tree,
@@ -505,9 +505,12 @@ async function runCell(root: string, plan: CanaryPlan, cell: CanaryCell, apiKey:
       estimatedCostUsd: null,
       artifactSha256: sha256Hex(`runner-exception\n${cell.runId}`),
     });
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const safeMessage = rawMessage.replaceAll(apiKey, "[REDACTED]").slice(0, 2_000);
     await writeFile(resolve(partial, "runner-error.json"), `${canonicalJson({
       errorClass: error instanceof Error ? error.name : "NonErrorThrow",
-      messageSha256: sha256Hex(error instanceof Error ? error.message : String(error)),
+      message: safeMessage,
+      messageSha256: sha256Hex(rawMessage),
     })}\n`, { flag: "wx", mode: 0o600 });
   }
   await writeFile(resolve(partial, "summary.json"), `${canonicalJson(summary)}\n`, { flag: "wx", mode: 0o600 });
@@ -521,12 +524,17 @@ async function run(root: string, concurrency: number): Promise<void> {
   await verifyFixtures(root, plan);
   const credentials = await loadProductionRealtimeCredentials(REPOSITORY_ROOT);
   await mkdir(resolve(root, "runs"), { recursive: true, mode: 0o700 });
+  const selectedRunId = option("run-id");
+  const selectedCells = selectedRunId
+    ? plan.cells.filter((cell) => cell.runId === selectedRunId)
+    : plan.cells;
+  if (selectedCells.length === 0) throw new Error(`run-id is not present in the frozen plan: ${selectedRunId}`);
   let cursor = 0;
   await Promise.all(Array.from({ length: concurrency }, async () => {
     while (true) {
       const index = cursor++;
-      if (index >= plan.cells.length) return;
-      const cell = plan.cells[index];
+      if (index >= selectedCells.length) return;
+      const cell = selectedCells[index];
       await runCell(root, plan, cell, credentials[cell.provider]);
     }
   }));
@@ -588,7 +596,7 @@ async function main(): Promise<void> {
   if (command === "prepare") return prepare(root);
   if (command === "run") return run(root, Number(option("concurrency") ?? "3"));
   if (command === "report") return report(root);
-  throw new Error("usage: usefulness-live-canary <prepare|run|report> [--root DIR] [--concurrency 1..6]");
+  throw new Error("usage: usefulness-live-canary <prepare|run|report> [--root DIR] [--concurrency 1..6] [--run-id ID]");
 }
 
 main().catch((error) => {

@@ -143,4 +143,27 @@ describe("voice task reliability development suite", () => {
     expect(result.status).toBe("caller_blocked");
     expect(result.turns).toHaveLength(2);
   });
+
+  it("accepts punctuation loss in spoken identifiers without accepting different identifiers", () => {
+    const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+      candidate.family === "museum" && candidate.complexity_band === "short"
+    )!;
+    const lookup = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "museum")!
+      .oracleInvocations.find((invocation) => invocation.turn === 1)!;
+    const accepted = executeTool(task.scenario, createToolWorld(task.scenario), {
+      invocation_id: "spoken-id-accepted",
+      tool: lookup.tool,
+      arguments: { case_id: "mlr2048" },
+      turn: 1,
+    });
+    expect(accepted.receipt.status).toBe("succeeded");
+
+    const rejected = executeTool(task.scenario, createToolWorld(task.scenario), {
+      invocation_id: "spoken-id-rejected",
+      tool: lookup.tool,
+      arguments: { case_id: "MLR-2049" },
+      turn: 1,
+    });
+    expect(rejected.receipt.status).toBe("rejected");
+  });
 });

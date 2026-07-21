@@ -117,8 +117,16 @@ function materializeTask(
   if (turns.length !== end) throw new Error(`${template.family}/${band} is missing canonical caller turns`);
   const selectedTurns = band === "long" ? turns : [...turns, finalTurn(template, band)];
   const originalPolicy = template.scenario.execution_policy;
+  const voiceSafeTemplate = structuredClone(template.scenario);
+  for (const tool of voiceSafeTemplate.tools) {
+    for (const prerequisite of tool.prerequisites) {
+      if (prerequisite.id === "case_matches" || prerequisite.id === "actor_matches") {
+        prerequisite.operator = "identifier_equals";
+      }
+    }
+  }
   const scenario = BenchmarkScenarioSchema.parse({
-    ...structuredClone(template.scenario),
+    ...voiceSafeTemplate,
     id: `usefulness.${template.family}.${band}.development.v1`,
     version: "1.0.0-development",
     title: `${template.scenario.title} (${band} usefulness task)`,

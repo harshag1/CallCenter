@@ -35,13 +35,16 @@ export async function loadProductionRealtimeCredentials(
     resolve(repositoryRoot, "web/.env.local"),
     process.env.BENCHMARK_PROVIDER_ENV_FILE,
   ].filter((path): path is string => Boolean(path));
-  const merged: Record<string, string> = { ...process.env } as Record<string, string>;
+  const merged: Record<string, string> = {};
   for (const path of candidates) {
     try {
       Object.assign(merged, parseEnv(await readFile(path, "utf8")));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+  }
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined) merged[name] = value;
   }
   const required = {
     openai: merged.OPENAI_API_KEY,
