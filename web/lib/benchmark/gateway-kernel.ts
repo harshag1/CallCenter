@@ -105,6 +105,8 @@ export type BenchmarkGatewayKernelOptions = Readonly<{
   transcriptLimits?: KernelTranscriptLimits;
   /** Must cover the declared session cap; defaults to the one-hour signer maximum. */
   leaseTtlSeconds?: number;
+  /** Host-advance deterministic single-successor steps after receipt-backed outputs exist. */
+  autoAdvanceLinearFlow?: boolean;
   clock?: Clock;
 }>;
 
@@ -296,6 +298,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
   readonly #evidenceBinding: BenchmarkKernelEvidenceBinding;
   readonly #signer: BenchmarkKernelAttestationSigner;
   readonly #transcriptLimits: KernelTranscriptLimits | undefined;
+  readonly #autoAdvanceLinearFlow: boolean;
   #run: KernelRun | null = null;
 
   constructor(options: BenchmarkGatewayKernelOptions) {
@@ -382,6 +385,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     this.#transcriptLimits = options.transcriptLimits
       ? Object.freeze({ ...options.transcriptLimits })
       : undefined;
+    this.#autoAdvanceLinearFlow = options.autoAdvanceLinearFlow ?? false;
   }
 
   initialize(input: Readonly<{
@@ -970,6 +974,45 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     return { capabilitySnapshot: this.#snapshot(run, this.#capabilitiesForTarget(run)) };
   }
 
+  #autoEnterSingleStep(
+    run: KernelRun,
+    nextSteps: readonly string[],
+  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
+    if (
+      !this.#autoAdvanceLinearFlow
+      || !run.condition.behavior.progressiveDisclosure
+      || !run.flowState
+      || nextSteps.length !== 1
+    ) return null;
+    const path = nextSteps[0];
+    const entered = enterFlowStep(this.#flow, run.flowState, path, this.#clock.nowIso());
+    if ("error" in entered) throw new Error(`automatic flow entry failed: ${entered.error}`);
+    run.flowState = entered.state;
+    const target = `step:${path}` as const;
+    run.target = target;
+    run.catalogMode = "target";
+    return this.#rotation(run, target);
+  }
+
+  #autoAdvanceCompletedStep(
+    run: KernelRun,
+  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
+    if (
+      !this.#autoAdvanceLinearFlow
+      || !run.condition.behavior.progressiveDisclosure
+      || !run.flowState?.currentStep
+    ) return null;
+    const completed = completeFlowStep(this.#flow, run.flowState, { outputs: {} }, this.#clock.nowIso());
+    if ("error" in completed) {
+      if (completed.code === "missing_outputs") return null;
+      throw new Error(`automatic flow completion failed: ${completed.error}`);
+    }
+    run.flowState = completed.state;
+    if (completed.state.nodeId) run.target = `topic:${completed.state.nodeId}`;
+    const entered = this.#autoEnterSingleStep(run, completed.nextSteps);
+    return entered ?? this.#postCompletionRotation(run);
+  }
+
   #memory(run: KernelRun, callId: string, args: Readonly<Record<string, JsonValue>>): BenchmarkGatewayOutcome {
     const operation = args.operation;
     const key = args.key;
@@ -1127,7 +1170,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       run.catalogMode = "target";
       const nextSteps = topicEntryStepPaths(this.#flow, args.topic_id);
       const result = success(action, `control:${callId}`, asJson({ topic_id: args.topic_id, next_steps: nextSteps, capability_epoch: selected.capabilityEpoch }));
-      return { result, ...this.#rotation(run, run.condition.behavior.progressiveDisclosure ? target : undefined) };
+      const entered = this.#autoEnterSingleStep(run, nextSteps);
+      return { result, ...(entered ?? this.#rotation(run, run.condition.behavior.progressiveDisclosure ? target : undefined)) };
     }
     if (action === "flow.enter_step") {
       if (typeof args.path !== "string") return { result: failure("invalid_arguments", "path is required", action) };
@@ -1254,9 +1298,14 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       asJson(authoritative),
       execution.disposition === "deduplicated" ? "deduplicated" : "executed"
     );
+    const advanced = this.#autoAdvanceCompletedStep(run);
     return committedAfterVisibleError
-      ? { result, providerVisibleOutput: visibleError(execution, input.call.action, run.flowState.capabilityEpoch) as unknown as JsonValue }
-      : { result };
+      ? {
+          result,
+          providerVisibleOutput: visibleError(execution, input.call.action, run.flowState.capabilityEpoch) as unknown as JsonValue,
+          ...(advanced ?? {}),
+        }
+      : { result, ...(advanced ?? {}) };
   }
 
   #toolExecutionOutcome(run: KernelRun, action: string, execution: ToolExecution): BenchmarkGatewayOutcome {

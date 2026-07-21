@@ -101,7 +101,7 @@ function publicInvokePayload(
 function createHarness(
   id: keyof typeof suite.conditions,
   runId = `run-${id}`,
-  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits }> = {}
+  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits; autoAdvanceLinearFlow?: boolean }> = {}
 ): Harness {
   const condition = suite.conditions[id];
   const kernel = createInMemoryBenchmarkGatewayKernel({
@@ -115,6 +115,7 @@ function createHarness(
     capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
     clock: FIXED_CLOCK,
     ...(options.transcriptLimits ? { transcriptLimits: options.transcriptLimits } : {}),
+    ...(options.autoAdvanceLinearFlow === undefined ? {} : { autoAdvanceLinearFlow: options.autoAdvanceLinearFlow }),
   });
   const world = createToolWorld(scenario);
   const snapshot = kernel.initialize({ runId, condition, scenario, world });
@@ -194,6 +195,25 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
 }
 
 describe("six-arm benchmark gateway kernel", () => {
+  it("can host-advance a linear receipt-backed flow without model-authored transition calls", () => {
+    const harness = createHarness("full-harness", "run-auto-linear", { autoAdvanceLinearFlow: true });
+    const selected = invoke(harness, "flow.select_topic", { topic_id: "field_service" });
+    expectOk(selected);
+    expect(selected.disclosure?.target).toBe("step:field_service.locate_work_order");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("lookup_work_order");
+
+    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" });
+    expectOk(lookup);
+    expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(() => harness.kernel.attestFinal({
+      runId: "run-auto-linear",
+      condition: harness.condition,
+      scenario,
+      world: harness.world,
+    })).not.toThrow();
+  });
+
   it("keeps progressive-only and full-harness grants, scopes, and rotations treatment-blind", () => {
     const progressive = createHarness("progressive-only");
     const harness = createHarness("full-harness");

@@ -38,7 +38,7 @@ The baseline has no step-conditioned disclosures, transition grants, workflow ch
 
 ### `full-harness-v1`
 
-The harness receives the same substantive facts, policies, actions, memory capacity, and authoritative world over a complete path, but discloses the relevant subset as durable workflow state advances. The runtime enforces current revision, preconditions, grants, receipts, and exactly-once effects.
+The harness receives the same substantive facts, policies, actions, memory capacity, and authoritative world over a complete path, but discloses the relevant subset as durable workflow state advances. The runtime enforces current revision, preconditions, grants, receipts, and exactly-once effects. For a linear flow, the host automatically enters the sole reachable step and advances only after receipt-backed required outputs exist; the model does not spend conversation turns micromanaging deterministic transitions. Branch selection remains explicit and model-driven.
 
 Neither arm's visible catalog, grant, prompt, or private telemetry defines whether an attempted semantic action is legal or whether the task succeeded.
 
