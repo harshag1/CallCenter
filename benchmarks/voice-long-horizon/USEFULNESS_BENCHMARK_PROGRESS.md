@@ -25,6 +25,7 @@
 - Added a conservative spoken-identifier comparator that ignores only ASCII case, spaces, underscores, and hyphens. It is common to both benchmark arms and rejects any alphanumeric-content change.
 - Production failures now retain a secret-redacted diagnostic message as well as its hash. A frozen plan can run one selected cell for transport diagnosis without changing the scheduled denominator.
 - Canary v2 isolated one Gemini cell and identified the exact post-session failure: normalized usage objects retained optional counters with JavaScript `undefined`, which the canonical artifact writer correctly rejected as non-JSON. The adapter now omits absent counters and has a regression test; v2 remains a one-cell diagnostic artifact and will not be scored.
+- Canary v3 proved the Gemini adapter fix: one cell completed four input turns, three audible output turns, and four tool calls before a response timeout, with canonical artifacts retained. It then exposed the same voice-boundary issue beyond case IDs (`CRATE-A71` was transcribed as `crate A71`). The common comparator now covers all explicitly typed case, actor, subject, action-code, clearance-token, and authorization-code predicates while continuing to reject changed alphanumeric content.
 
 ## Next executable milestones
 

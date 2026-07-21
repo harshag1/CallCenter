@@ -118,9 +118,18 @@ function materializeTask(
   const selectedTurns = band === "long" ? turns : [...turns, finalTurn(template, band)];
   const originalPolicy = template.scenario.execution_policy;
   const voiceSafeTemplate = structuredClone(template.scenario);
+  const spokenIdentifierPredicates = new Set([
+    "case_matches",
+    "actor_matches",
+    "corrected_subject_used",
+    "action_code_matches",
+    "clearance_token_matches",
+    "subject_matches_correction",
+    "authorization_code_matches",
+  ]);
   for (const tool of voiceSafeTemplate.tools) {
     for (const prerequisite of tool.prerequisites) {
-      if (prerequisite.id === "case_matches" || prerequisite.id === "actor_matches") {
+      if (spokenIdentifierPredicates.has(prerequisite.id)) {
         prerequisite.operator = "identifier_equals";
       }
     }

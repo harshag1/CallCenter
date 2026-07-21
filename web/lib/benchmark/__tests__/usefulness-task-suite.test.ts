@@ -150,13 +150,30 @@ describe("voice task reliability development suite", () => {
     )!;
     const lookup = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "museum")!
       .oracleInvocations.find((invocation) => invocation.turn === 1)!;
-    const accepted = executeTool(task.scenario, createToolWorld(task.scenario), {
+    let acceptedWorld = executeTool(task.scenario, createToolWorld(task.scenario), {
       invocation_id: "spoken-id-accepted",
       tool: lookup.tool,
       arguments: { case_id: "mlr2048" },
       turn: 1,
     });
-    expect(accepted.receipt.status).toBe("succeeded");
+    expect(acceptedWorld.receipt.status).toBe("succeeded");
+    const calls = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "museum")!.oracleInvocations;
+    const verify = calls.find((invocation) => invocation.turn === 2)!;
+    acceptedWorld = executeTool(task.scenario, acceptedWorld.state, {
+      invocation_id: "spoken-actor-accepted",
+      tool: verify.tool,
+      arguments: { case_id: "mlr2048", actor_id: "reg44", verification_pin: "7316" },
+      turn: 2,
+    });
+    expect(acceptedWorld.receipt.status).toBe("succeeded");
+    const correction = calls.find((invocation) => invocation.turn === 8)!;
+    acceptedWorld = executeTool(task.scenario, acceptedWorld.state, {
+      invocation_id: "spoken-subject-accepted",
+      tool: correction.tool,
+      arguments: { case_id: "MLR2048", subject: "crate A71" },
+      turn: 8,
+    });
+    expect(acceptedWorld.receipt.status).toBe("succeeded");
 
     const rejected = executeTool(task.scenario, createToolWorld(task.scenario), {
       invocation_id: "spoken-id-rejected",
