@@ -127,9 +127,36 @@ function materializeTask(
     "subject_matches_correction",
     "authorization_code_matches",
   ]);
+  const scopedAliases: Readonly<Record<PilotV2Family, Readonly<Record<string, readonly string[]>>>> = {
+    museum: {
+      corrected_subject_used: ["A71", "crate A71"],
+      subject_matches_correction: ["A71", "crate A71"],
+      primary_constraint_matches: [
+        "custody chain must remain climate stable",
+        "the custody chain must remain climate stable",
+      ],
+    },
+    campus: {
+      corrected_subject_used: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
+      subject_matches_correction: ["CHEM318", "CHEM 318 practical", "chemistry practical"],
+      primary_constraint_matches: ["screen reader and low stimulation", "screen reader and low stimulation room"],
+    },
+    water: {
+      corrected_subject_used: ["HYD14 daycare", "daycare"],
+      subject_matches_correction: ["HYD14 daycare", "daycare"],
+      primary_constraint_matches: [
+        "chain of custody with childcare priority",
+        "chain of custody and childcare priority",
+      ],
+    },
+  };
   for (const tool of voiceSafeTemplate.tools) {
     for (const prerequisite of tool.prerequisites) {
-      if (spokenIdentifierPredicates.has(prerequisite.id)) {
+      const aliases = scopedAliases[template.family as PilotV2Family][prerequisite.id];
+      if (aliases) {
+        prerequisite.operator = "alias_equals";
+        prerequisite.aliases = [...aliases];
+      } else if (spokenIdentifierPredicates.has(prerequisite.id)) {
         prerequisite.operator = "identifier_equals";
       }
     }

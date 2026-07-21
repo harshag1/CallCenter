@@ -167,10 +167,18 @@ describe("voice task reliability development suite", () => {
     });
     expect(acceptedWorld.receipt.status).toBe("succeeded");
     const correction = calls.find((invocation) => invocation.turn === 8)!;
-    acceptedWorld = executeTool(task.scenario, acceptedWorld.state, {
+    const nearMiss = executeTool(task.scenario, acceptedWorld.state, {
+      invocation_id: "spoken-subject-near-miss",
+      tool: correction.tool,
+      arguments: { case_id: "MLR2048", subject: "A72" },
+      turn: 8,
+    });
+    expect(nearMiss.receipt.status).toBe("rejected");
+
+    acceptedWorld = executeTool(task.scenario, nearMiss.state, {
       invocation_id: "spoken-subject-accepted",
       tool: correction.tool,
-      arguments: { case_id: "MLR2048", subject: "crate A71" },
+      arguments: { case_id: "MLR2048", subject: "A71" },
       turn: 8,
     });
     expect(acceptedWorld.receipt.status).toBe("succeeded");

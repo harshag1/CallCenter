@@ -77,6 +77,7 @@ export const PredicateSchema = z.object({
   operator: z.enum([
     "equals",
     "identifier_equals",
+    "alias_equals",
     "not_equals",
     "exists",
     "not_exists",
@@ -86,12 +87,19 @@ export const PredicateSchema = z.object({
     "contains",
   ]),
   right: ValueSourceSchema.optional(),
+  aliases: z.array(z.string().min(1).max(256)).max(32).optional(),
 }).strict().superRefine((predicate, ctx) => {
   if (!["exists", "not_exists"].includes(predicate.operator) && !predicate.right) {
     ctx.addIssue({ code: "custom", path: ["right"], message: `${predicate.operator} requires a right operand` });
   }
   if (["exists", "not_exists"].includes(predicate.operator) && predicate.right) {
     ctx.addIssue({ code: "custom", path: ["right"], message: `${predicate.operator} does not accept a right operand` });
+  }
+  if (predicate.operator === "alias_equals" && (!predicate.aliases || predicate.aliases.length === 0)) {
+    ctx.addIssue({ code: "custom", path: ["aliases"], message: "alias_equals requires at least one explicit alias" });
+  }
+  if (predicate.operator !== "alias_equals" && predicate.aliases) {
+    ctx.addIssue({ code: "custom", path: ["aliases"], message: `${predicate.operator} does not accept aliases` });
   }
 });
 

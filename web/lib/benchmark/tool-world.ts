@@ -301,6 +301,16 @@ function canonicalSpokenIdentifier(value: JsonValue | undefined): string | null 
   return canonical.length > 0 ? canonical : null;
 }
 
+function canonicalSpokenAlias(value: JsonValue | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const canonical = value.normalize("NFKC").toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9 ]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return canonical.length > 0 ? canonical : null;
+}
+
 function ownRecordValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
 }
@@ -319,6 +329,15 @@ function evaluatePredicate(predicate: Predicate, context: EvaluationContext): Pr
         const rightIdentifier = canonicalSpokenIdentifier(right.value);
         passed = leftIdentifier !== null && rightIdentifier !== null
           && leftIdentifier === rightIdentifier;
+      }
+      break;
+    }
+    case "alias_equals": {
+      if (left.present && right?.present === true) {
+        const actual = canonicalSpokenAlias(left.value);
+        const accepted = [right.value, ...(predicate.aliases ?? [])]
+          .map((value) => canonicalSpokenAlias(value));
+        passed = actual !== null && accepted.includes(actual);
       }
       break;
     }
