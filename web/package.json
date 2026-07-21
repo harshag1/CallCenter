@@ -35,7 +35,8 @@
     "benchmark:fixture:transport-smoke:check": "tsx ../benchmarks/voice-long-horizon/fixtures/transport-smoke-v1/generate.ts --check",
     "benchmark:mission-runtime": "tsx scripts/mission-runtime-sensitivity.ts",
     "benchmark:active-catalog": "tsx scripts/active-catalog-efficiency.ts",
-    "benchmark:live-sts": "tsx scripts/live-sts-development-experiment.ts"
+    "benchmark:live-sts": "tsx scripts/live-sts-development-experiment.ts",
+    "benchmark:usefulness:canary": "tsx scripts/usefulness-live-canary.ts"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",
