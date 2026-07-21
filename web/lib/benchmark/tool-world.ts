@@ -304,10 +304,7 @@ function canonicalSpokenIdentifier(value: JsonValue | undefined): string | null 
 function canonicalSpokenAlias(value: JsonValue | undefined): string | null {
   if (typeof value !== "string") return null;
   const canonical = value.normalize("NFKC").toLowerCase()
-    .replace(/[_-]+/g, " ")
-    .replace(/[^a-z0-9 ]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/[^a-z0-9]+/g, "");
   return canonical.length > 0 ? canonical : null;
 }
 
