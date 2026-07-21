@@ -38,7 +38,9 @@
     "benchmark:active-catalog": "tsx scripts/active-catalog-efficiency.ts",
     "benchmark:live-sts": "tsx scripts/live-sts-development-experiment.ts",
     "benchmark:usefulness:canary": "tsx scripts/usefulness-live-canary.ts",
-    "benchmark:long-call": "tsx scripts/long-call-live-benchmark.ts"
+    "benchmark:long-call": "tsx scripts/long-call-live-benchmark.ts",
+    "benchmark:long-call:calibrate": "tsx scripts/long-call-asr-calibration.ts",
+    "benchmark:long-call:audio": "tsx scripts/long-call-audio-postprocess.ts"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

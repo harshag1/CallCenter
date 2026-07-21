@@ -13,9 +13,21 @@
 
 Next gates:
 
-1. implement and test the frozen runner and scorer;
-2. pin and calibrate independent output-audio ASR;
-3. freeze fixtures, schedule, source tree, signer, and aggregate budget ledger;
-4. run one true-audio diagnostic pair per provider;
-5. if transport/evidence gates pass, execute the remaining schedule once;
-6. replay aggregates and create the graph only from completed immutable artifacts.
+1. ~~implement and test the frozen runner and scorer;~~ completed at `bd310e1`;
+2. ~~pin the independent output-audio ASR and implement its calibration gate;~~ completed at `986e5a0`;
+3. ~~implement fail-closed per-turn audible-semantic postprocessing;~~ completed at `104ab86`;
+4. freeze fixtures, schedule, source tree, signer, and aggregate budget ledger;
+5. run the 54-fixture ASR calibration without changing its frozen thresholds;
+6. run one primary true-audio pair per provider, without retries;
+7. if transport/evidence gates pass, execute the remaining schedule once;
+8. replay aggregates and create the graph only from completed immutable artifacts.
+
+The pinned evidence toolchain is whisper.cpp `1.9.1` at source revision
+`f049fff95a089aa9969deb009cdd4892b3e74916`, the official
+`ggml-small.en` weights at revision
+`c521a4b02f422512d734391fdf08bb08c0862f68`, and FFmpeg `7.1.3`.
+Calibration requires all 54 balanced fixtures, micro-WER at or below 15%, zero
+critical corrected-identifier/numeric-limit false negatives, and zero semantic
+false positives. Every completed run must bind all 20 output PCM files to 20
+ASR receipts and pass the preregistered spoken-semantic rules before it can be
+counted as strict success.
