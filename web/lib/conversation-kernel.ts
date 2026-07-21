@@ -19,6 +19,7 @@ const MAX_TEXT_LENGTH = 4_096;
 const MAX_FACTS_PER_DELIVERY = 32;
 const MAX_ADVISORIES_PER_DELIVERY = 16;
 const MAX_DEPENDENCIES_PER_WORKER = 64;
+const MAX_UNRESOLVED_FLOW_ACTIONS = 64;
 const MAX_INVARIANTS = 64;
 const MIN_CONTEXT_BYTES = 256;
 const MAX_CONTEXT_BYTES = 65_536;
@@ -161,6 +162,33 @@ const PolicyAdvancedSchema = z.object({
   }
 });
 
+const FlowCheckpointRecordedSchema = z.object({
+  type: z.literal("flow.checkpoint_recorded"),
+  goalId: IdSchema,
+  runtimeDigest: HashSchema,
+  flowRevision: NonNegativeIntegerSchema,
+  capabilityEpoch: NonNegativeIntegerSchema,
+  status: z.enum(["routing", "active", "completed", "failed"]),
+  nodeId: TextSchema.nullable(),
+  currentStep: TextSchema.nullable(),
+  completedStepCount: NonNegativeIntegerSchema,
+  unresolvedActionIds: z.array(IdSchema).max(MAX_UNRESOLVED_FLOW_ACTIONS),
+  stateDigest: HashSchema,
+}).strict().superRefine((checkpoint, ctx) => {
+  if (new Set(checkpoint.unresolvedActionIds).size !== checkpoint.unresolvedActionIds.length) {
+    ctx.addIssue({ code: "custom", message: "unresolved flow action ids must be unique" });
+  }
+  if (checkpoint.status === "routing" && (checkpoint.nodeId !== null || checkpoint.currentStep !== null)) {
+    ctx.addIssue({ code: "custom", message: "routing flow checkpoint cannot retain a node or step" });
+  }
+  if (checkpoint.status === "active" && checkpoint.nodeId === null) {
+    ctx.addIssue({ code: "custom", message: "active flow checkpoint requires a node" });
+  }
+  if ((checkpoint.status === "completed" || checkpoint.status === "failed") && checkpoint.currentStep !== null) {
+    ctx.addIssue({ code: "custom", message: "terminal flow checkpoint cannot retain an active step" });
+  }
+});
+
 const FactDependencySchema = z.object({
   key: IdSchema,
   revision: PositiveIntegerSchema,
@@ -233,6 +261,7 @@ export const ConversationEventPayloadSchema = z.discriminatedUnion("type", [
   CommitmentOpenedSchema,
   CommitmentResolvedSchema,
   PolicyAdvancedSchema,
+  FlowCheckpointRecordedSchema,
   WorkerSpawnedSchema,
   WorkerCancelledSchema,
   WorkerResultDeliveredSchema,
@@ -328,12 +357,28 @@ export interface AdvisoryEpisode {
   readonly sequence: number;
 }
 
+export interface FlowCheckpointRecord {
+  readonly goalId: string;
+  readonly runtimeDigest: string;
+  readonly flowRevision: number;
+  readonly capabilityEpoch: number;
+  readonly status: "routing" | "active" | "completed" | "failed";
+  readonly nodeId: string | null;
+  readonly currentStep: string | null;
+  readonly completedStepCount: number;
+  readonly unresolvedActionIds: readonly string[];
+  readonly stateDigest: string;
+  readonly sequence: number;
+}
+
 export interface ConversationState {
   readonly facts: readonly AuthoritativeFact[];
   readonly goals: readonly ConversationGoal[];
   readonly currentGoal: ConversationGoal | null;
   readonly commitments: readonly ConversationCommitment[];
   readonly policy: { readonly epoch: number; readonly invariants: readonly z.infer<typeof InvariantSchema>[] };
+  readonly flowCheckpoints: readonly FlowCheckpointRecord[];
+  readonly currentFlowCheckpoint: FlowCheckpointRecord | null;
   readonly workers: readonly WorkerRecord[];
   readonly deliveries: readonly WorkerDeliveryRecord[];
   readonly acceptedWorkerFacts: readonly AcceptedWorkerFact[];
@@ -355,6 +400,7 @@ interface MutableState {
   currentGoalId: string | null;
   commitments: Map<string, MutableCommitment>;
   policy: { epoch: number; invariants: z.infer<typeof InvariantSchema>[] };
+  flowCheckpoints: Map<string, FlowCheckpointRecord>;
   workers: Map<string, MutableWorker>;
   deliveries: WorkerDeliveryRecord[];
   logicalDeliveries: Map<string, { hash: string; status: "accepted" | "deferred" | "rejected" }>;
@@ -369,6 +415,7 @@ function emptyMutableState(): MutableState {
     currentGoalId: null,
     commitments: new Map(),
     policy: { epoch: 0, invariants: [] },
+    flowCheckpoints: new Map(),
     workers: new Map(),
     deliveries: [],
     logicalDeliveries: new Map(),
@@ -542,6 +589,40 @@ function applyEvent(state: MutableState, event: ConversationEvent): void {
       state.policy = { epoch: payload.epoch, invariants: payload.invariants };
       return;
     }
+    case "flow.checkpoint_recorded": {
+      if (payload.goalId !== state.currentGoalId) {
+        throw new Error("flow checkpoint must bind to the current goal");
+      }
+      const prior = state.flowCheckpoints.get(payload.goalId);
+      if (prior) {
+        if (prior.status === "completed" || prior.status === "failed") {
+          throw new Error("terminal flow checkpoint cannot advance");
+        }
+        if (payload.runtimeDigest !== prior.runtimeDigest) {
+          throw new Error("flow runtime digest cannot change within a goal");
+        }
+        if (payload.flowRevision <= prior.flowRevision) {
+          throw new Error("flow revision must advance monotonically");
+        }
+        if (payload.capabilityEpoch < prior.capabilityEpoch) {
+          throw new Error("flow capability epoch cannot move backwards");
+        }
+      }
+      state.flowCheckpoints.set(payload.goalId, {
+        goalId: payload.goalId,
+        runtimeDigest: payload.runtimeDigest,
+        flowRevision: payload.flowRevision,
+        capabilityEpoch: payload.capabilityEpoch,
+        status: payload.status,
+        nodeId: payload.nodeId,
+        currentStep: payload.currentStep,
+        completedStepCount: payload.completedStepCount,
+        unresolvedActionIds: Object.freeze([...payload.unresolvedActionIds]),
+        stateDigest: payload.stateDigest,
+        sequence: event.sequence,
+      });
+      return;
+    }
     case "worker.spawned": {
       if (state.workers.has(payload.workerId)) throw new Error(`worker ${payload.workerId} already exists`);
       if (state.currentGoalId !== payload.goalId) throw new Error("worker must bind to the current goal");
@@ -644,12 +725,17 @@ export function foldConversation(log: ConversationLog): ConversationState {
   for (const event of log.events) applyEvent(state, event);
   const sortById = <T>(getId: (value: T) => string) => (left: T, right: T) => compareCodeUnits(getId(left), getId(right));
   const goals = [...state.goals.values()].sort(sortById(({ goalId }) => goalId));
+  const flowCheckpoints = [...state.flowCheckpoints.values()].sort(sortById(({ goalId }) => goalId));
   return Object.freeze({
     facts: Object.freeze([...state.facts.values()].sort(sortById(({ key }) => key))),
     goals: Object.freeze(goals),
     currentGoal: state.currentGoalId ? goals.find(({ goalId }) => goalId === state.currentGoalId) ?? null : null,
     commitments: Object.freeze([...state.commitments.values()].sort(sortById(({ commitmentId }) => commitmentId))),
     policy: Object.freeze({ epoch: state.policy.epoch, invariants: Object.freeze([...state.policy.invariants]) }),
+    flowCheckpoints: Object.freeze(flowCheckpoints),
+    currentFlowCheckpoint: state.currentGoalId
+      ? flowCheckpoints.find(({ goalId }) => goalId === state.currentGoalId) ?? null
+      : null,
     workers: Object.freeze([...state.workers.values()].sort(sortById(({ workerId }) => workerId))),
     deliveries: Object.freeze([...state.deliveries]),
     acceptedWorkerFacts: Object.freeze([...state.acceptedWorkerFacts]),
@@ -665,6 +751,10 @@ export interface ContextProjection {
   readonly invariants: readonly z.infer<typeof InvariantSchema>[];
   readonly authoritativeFacts: readonly Pick<AuthoritativeFact, "key" | "value" | "revision">[];
   readonly currentGoal: Pick<ConversationGoal, "goalId" | "description"> | null;
+  readonly currentFlowCheckpoint: Pick<FlowCheckpointRecord,
+    "goalId" | "runtimeDigest" | "flowRevision" | "capabilityEpoch" | "status" |
+    "nodeId" | "currentStep" | "completedStepCount" | "unresolvedActionIds" | "stateDigest"
+  > | null;
   readonly openCommitments: readonly Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
   readonly acceptedWorkerFacts: readonly Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
   readonly recentAdvisoryEpisodes: readonly Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
@@ -708,6 +798,7 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     invariants: z.infer<typeof InvariantSchema>[];
     authoritativeFacts: Pick<AuthoritativeFact, "key" | "value" | "revision">[];
     currentGoal: Pick<ConversationGoal, "goalId" | "description"> | null;
+    currentFlowCheckpoint: ContextProjection["currentFlowCheckpoint"];
     openCommitments: Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
     acceptedWorkerFacts: Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
     recentAdvisoryEpisodes: Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
@@ -717,6 +808,7 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     invariants: [],
     authoritativeFacts: [],
     currentGoal: null,
+    currentFlowCheckpoint: null,
     openCommitments: [],
     acceptedWorkerFacts: [],
     recentAdvisoryEpisodes: [],
@@ -730,6 +822,21 @@ export function projectConversationContext(state: ConversationState, byteBudget:
   })));
   if (state.currentGoal) {
     projection.currentGoal = { goalId: state.currentGoal.goalId, description: state.currentGoal.description };
+  }
+  if (state.currentFlowCheckpoint) {
+    const checkpoint = state.currentFlowCheckpoint;
+    projection.currentFlowCheckpoint = {
+      goalId: checkpoint.goalId,
+      runtimeDigest: checkpoint.runtimeDigest,
+      flowRevision: checkpoint.flowRevision,
+      capabilityEpoch: checkpoint.capabilityEpoch,
+      status: checkpoint.status,
+      nodeId: checkpoint.nodeId,
+      currentStep: checkpoint.currentStep,
+      completedStepCount: checkpoint.completedStepCount,
+      unresolvedActionIds: checkpoint.unresolvedActionIds,
+      stateDigest: checkpoint.stateDigest,
+    };
   }
   projection.openCommitments.push(...state.commitments
     .filter(({ resolution }) => resolution === null)
