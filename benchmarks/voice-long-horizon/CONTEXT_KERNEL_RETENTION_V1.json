@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "benchmark": "hacc-context-retention-v1",
+  "interpretation": "Deterministic context-substrate retention only; this is not an STS model or provider superiority result.",
+  "comparator": "Most-recent whole transcript turns under the identical UTF-8 byte budget.",
+  "seed": 1212236611,
+  "schedules": 1000,
+  "conversation_turns": {
+    "minimum": 500,
+    "maximum": 2000
+  },
+  "durable_units_per_schedule": 13,
+  "budgets": {
+    "1024": {
+      "opportunities": 13000,
+      "kernel": {
+        "recalled": 0,
+        "recall_rate": 0,
+        "overflow_schedules": 1000,
+        "mean_packet_bytes": null,
+        "p95_packet_bytes": 0
+      },
+      "recent_transcript_window": {
+        "recalled": 9,
+        "recall_rate": 0.0006923076923076923
+      },
+      "unbounded_full_history": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "mean_bytes": 116110.392,
+        "p95_bytes": 179233
+      }
+    },
+    "2048": {
+      "opportunities": 13000,
+      "kernel": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "overflow_schedules": 0,
+        "mean_packet_bytes": 1945.264,
+        "p95_packet_bytes": 1950
+      },
+      "recent_transcript_window": {
+        "recalled": 83,
+        "recall_rate": 0.006384615384615384
+      },
+      "unbounded_full_history": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "mean_bytes": 116110.392,
+        "p95_bytes": 179233
+      }
+    },
+    "4096": {
+      "opportunities": 13000,
+      "kernel": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "overflow_schedules": 0,
+        "mean_packet_bytes": 4075.272,
+        "p95_packet_bytes": 4095
+      },
+      "recent_transcript_window": {
+        "recalled": 253,
+        "recall_rate": 0.01946153846153846
+      },
+      "unbounded_full_history": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "mean_bytes": 116110.392,
+        "p95_bytes": 179233
+      }
+    },
+    "8192": {
+      "opportunities": 13000,
+      "kernel": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "overflow_schedules": 0,
+        "mean_packet_bytes": 8125.223,
+        "p95_packet_bytes": 8185
+      },
+      "recent_transcript_window": {
+        "recalled": 622,
+        "recall_rate": 0.047846153846153844
+      },
+      "unbounded_full_history": {
+        "recalled": 13000,
+        "recall_rate": 1,
+        "mean_bytes": 116110.392,
+        "p95_bytes": 179233
+      }
+    }
+  }
+}
