@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentFlowSchema } from "../../flow";
 import { createFlowExecutionState, type FlowExecutionState } from "../../flow-runtime";
 import { canonicalJson, sha256Hex } from "../artifacts";
@@ -12,6 +12,7 @@ import {
   createLc4HaccRotationStatePacket,
   createLc4StrongNativeContinuityPacket,
   type Lc4NativeContinuityFactInput,
+  type Lc4ListenerEvidenceHandoff,
   type Lc4RealtimeEpisodeManifest,
   type Lc4RotationContext,
   type Lc4StrongNativeContinuityPacket,
@@ -22,6 +23,7 @@ import {
 } from "../lc4-development-gateway-bridge";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
+import { Lc4DevFailureEvidenceError } from "../lc4-development-failure-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
@@ -484,8 +486,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     });
   }
 
-  private emit(event: NormalizedRealtimeEvent) { for (const listener of this.#listeners) listener(event); }
-  private wire(wireType: string, projection: Record<string, unknown>) {
+  protected emit(event: NormalizedRealtimeEvent) { for (const listener of this.#listeners) listener(event); }
+  protected wire(wireType: string, projection: Record<string, unknown>) {
     this.#wireSequence += 1;
     const observation = {
       schemaVersion: 1 as const,
@@ -508,6 +510,177 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   }
 }
 
+class ProviderFatalRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => this.emit({
+      type: "error",
+      provider: this.provider,
+      receivedAtMs: 2,
+      wireType: "error",
+      message: "sk-provider-secret-plaintext-SENTINEL",
+      code: "raw-secret-provider-code-SENTINEL",
+      fatal: true,
+      details: { credential: "sk-provider-secret-plaintext-SENTINEL" },
+    }));
+  }
+}
+
+class GatewayParseRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => {
+      const responseId = "raw-provider-response-SENTINEL";
+      this.emit({
+        type: "response.started",
+        provider: this.provider,
+        receivedAtMs: 1,
+        wireType: "response.created",
+        responseId,
+      });
+      this.emit({
+        type: "tool.dispatch",
+        provider: this.provider,
+        receivedAtMs: 2,
+        wireType: "response.function_call_arguments.done",
+        responseId,
+        gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        dispatches: [{
+          callId: "raw-provider-call-SENTINEL",
+          provenance: {
+            schemaVersion: 1,
+            provider: "openai",
+            nativeCallId: "raw-provider-call-SENTINEL",
+            nativeResponseId: responseId,
+            terminalWireType: "response.function_call_arguments.done",
+          },
+          request: {
+            method: "tools/call",
+            params: {
+              name: "unsafe.direct_tool",
+              arguments: { credential: "sk-secret-SENTINEL" },
+              _meta: {
+                [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "raw-provider-call-SENTINEL",
+                [PROVIDER_PROVENANCE_META_KEY]: {
+                  schemaVersion: 1,
+                  provider: "openai",
+                  nativeCallId: "raw-provider-call-SENTINEL",
+                  nativeResponseId: responseId,
+                  terminalWireType: "response.function_call_arguments.done",
+                },
+              },
+            },
+          },
+        }],
+      });
+      this.emit({
+        type: "response.completed",
+        provider: this.provider,
+        receivedAtMs: 3,
+        wireType: "response.done",
+        responseId,
+        status: "completed",
+      });
+    });
+  }
+}
+
+class HangingRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+  }
+}
+
+class AudioAppendFailureRealtimeClient extends FakeRealtimeClient {
+  override appendInputAudio() {
+    this.events.push("append");
+    throw new Error("raw audio transport failure sk-secret-SENTINEL");
+  }
+}
+
+async function openDevFailureFixture(input: Readonly<{
+  client: FakeRealtimeClient;
+  listener?: Lc4ListenerEvidenceHandoff["accept"];
+}>) {
+  const base = manifest("hacc", "openai");
+  const corpus = createLc4PublicDevelopmentCorpus();
+  const episode: Lc4DevLiveEpisodePlan = Object.freeze({
+    episode_id: "lc4-dev-openai-hacc-failure-fixture",
+    pair_id: "lc4-dev-openai-failure-fixture",
+    pair_position: 2,
+    provider: "openai",
+    arm: "hacc",
+    model: base.episode_shape.provider_profile.model,
+    voice: base.episode_shape.provider_profile.voice,
+    maximum_micro_usd: 1_000,
+    opportunity_binding_set_sha256: HASH,
+  });
+  const devManifest: Lc4RealtimeEpisodeManifest = Object.freeze({
+    protocol_id: "HACC-LC4-DEV-v1",
+    run_id: episode.episode_id,
+    episode_shape: Object.freeze({
+      provider: episode.provider,
+      arm: episode.arm,
+      provider_profile: base.episode_shape.provider_profile,
+    }),
+    opportunities: Object.freeze(corpus.opportunities.map((opportunity, index) => {
+      const pcm = new Uint8Array([index + 1, 7, 11, 13]);
+      return Object.freeze({
+        ordinal: index + 1,
+        opportunity_id: opportunity.id,
+        segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+        caller_pcm_sha256: sha256Hex(pcm),
+        caller_pcm_byte_length: pcm.byteLength,
+        opportunity_contract_sha256: sha256Hex(`failure-contract-${index + 1}`),
+      });
+    })),
+  });
+  const evidenceStore = replayEvidenceFixture();
+  const listenerEvidence = await evidenceStore.retainJson({
+    kind: "listener_evidence",
+    body: Object.freeze({ fixture: "failure-listener-evidence" }),
+  });
+  const listenerResult = Object.freeze({
+    listener_evidence_sha256: listenerEvidence.evidence_sha256,
+    listener_evidence: listenerEvidence,
+    repair_projection: createLc4DevArmBlindRepairProjection({
+      opportunity_id: corpus.opportunities[0]!.id,
+      listener_status: "verified",
+      semantic_result_sha256: sha256Hex("failure-semantic-result"),
+      semantic_replay_sha256: sha256Hex("failure-semantic-replay"),
+      unmet_blocker_codes: [],
+      final_required_criteria_pass: true,
+    }),
+    playback_authority_receipt_sha256: sha256Hex("failure-playback-authority"),
+  });
+  const gateway: Lc4DevGatewayExecutor = Object.freeze({
+    kind: "lc4-dev-arm-aware-gateway-v1",
+    manifest_sha256: "d".repeat(64),
+    async execute() { throw new Error("failure fixture gateway must not execute"); },
+  });
+  const bridge = new Lc4RealtimeProviderBridge(() => input.client);
+  const session = await bridge.openSegment({
+    manifest: devManifest,
+    segment: base.episode_shape.segments[0]!,
+    profile: base.episode_shape.provider_profile,
+    configuration: Object.freeze({
+      ...configuration(base),
+      providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
+    }),
+    rotation_context: null,
+    listener: { accept: input.listener ?? (async () => listenerResult) },
+    dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
+  });
+  return Object.freeze({
+    session,
+    opportunity_id: corpus.opportunities[0]!.id,
+    caller_pcm: new Uint8Array([1, 7, 11, 13]),
+  });
+}
+
 class PrepareFailureRealtimeClient extends FakeRealtimeClient {
   override prepareResponse() {
     this.events.push("prepare");
@@ -515,7 +688,222 @@ class PrepareFailureRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+async function caughtFailure(promise: Promise<unknown>): Promise<Lc4DevFailureEvidenceError> {
+  try {
+    await promise;
+  } catch (error) {
+    expect(error).toBeInstanceOf(Lc4DevFailureEvidenceError);
+    return error as Lc4DevFailureEvidenceError;
+  }
+  throw new Error("expected an LC4-DEV failure evidence error");
+}
+
 describe("LC4 production realtime adapter bridge", () => {
+  it("retains sanitized pre-send contract failure evidence without requesting a response", async () => {
+    const events: string[] = [];
+    const fixture = await openDevFailureFixture({ client: new FakeRealtimeClient("openai", events) });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: new Uint8Array([1]),
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "pre_send_contract",
+      failure_code: "invalid_contract",
+      failure_class: "adapter_contract",
+      caller_pcm_appended_byte_length: 0,
+      caller_pcm_appended_chunk_count: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+      wire_observation_count: 0,
+    });
+    expect(events).toEqual(["connect"]);
+    await fixture.session.close();
+  });
+
+  it("retains provider-fatal evidence without provider plaintext or credentials", async () => {
+    const fixture = await openDevFailureFixture({ client: new ProviderFatalRealtimeClient("openai", []) });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "provider_wait",
+      failure_code: "provider_fatal",
+      failure_class: "provider_external",
+      caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+      response_generation_requested: true,
+      response_generation_started: false,
+      response_completed: false,
+      terminal_wire_type: "response_request",
+    });
+    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
+    const cleanup = await caughtFailure(fixture.session.close());
+    expect(cleanup.failure).toMatchObject({ failure_role: "cleanup", failure_stage: "segment_close" });
+  });
+
+  it("retains exact audio-delivery progress without leaking the transport error", async () => {
+    const events: string[] = [];
+    const fixture = await openDevFailureFixture({ client: new AudioAppendFailureRealtimeClient("openai", events) });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "audio_append",
+      failure_code: "audio_delivery_failed",
+      failure_class: "audio_delivery",
+      caller_pcm_byte_length: fixture.caller_pcm.byteLength,
+      caller_pcm_chunk_count: 1,
+      caller_pcm_appended_chunk_count: 0,
+      caller_pcm_appended_byte_length: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+    });
+    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
+    expect(events).toEqual(["connect", "append", "close"]);
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("classifies malformed gateway input without retaining arguments or raw provider IDs", async () => {
+    const fixture = await openDevFailureFixture({ client: new GatewayParseRealtimeClient("openai", []) });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "gateway_dispatch",
+      failure_code: "gateway_fatal",
+      failure_class: "gateway",
+      gateway_batch_count: 0,
+      gateway_fatal_class: "parse",
+      response_generation_requested: true,
+      response_generation_started: true,
+    });
+    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("retains a true provider timeout after a response request", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = await openDevFailureFixture({ client: new HangingRealtimeClient("openai", []) });
+      const pending = caughtFailure(fixture.session.exchange({
+        opportunity_id: fixture.opportunity_id,
+        caller_pcm: fixture.caller_pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      }));
+      await vi.advanceTimersByTimeAsync(45_000);
+      const error = await pending;
+      expect(error.failure).toMatchObject({
+        failure_stage: "provider_wait",
+        failure_code: "provider_response_timeout",
+        failure_class: "timeout",
+        response_generation_requested: true,
+        response_generation_started: false,
+        response_terminal_observed: false,
+        response_completed: false,
+      });
+      await caughtFailure(fixture.session.close());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains partial output commitments when the listener handoff fails", async () => {
+    const fixture = await openDevFailureFixture({
+      client: new FakeRealtimeClient("openai", []),
+      async listener() { throw new Error("listener private transcript SENTINEL"); },
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "listener_handoff",
+      failure_code: "listener_failed",
+      failure_class: "listener",
+      response_generation_requested: true,
+      response_generation_started: true,
+      response_terminal_observed: true,
+      response_completed: true,
+      output_pcm_byte_length: 4,
+      output_pcm_chunk_count: 1,
+    });
+    expect(error.failure.output_pcm_sha256).toBe(sha256Hex(new Uint8Array([1, 0, 2, 0])));
+    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("sanitizes evidence-assembly failures after a completed provider response", async () => {
+    const cyclic: Record<string, unknown> = { private_transcript: "SENTINEL" };
+    cyclic.self = cyclic;
+    const fixture = await openDevFailureFixture({
+      client: new FakeRealtimeClient("openai", []),
+      listener: async () => cyclic as never,
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "exchange_evidence",
+      failure_code: "evidence_assembly_failed",
+      failure_class: "evidence_retention",
+      response_generation_requested: true,
+      response_generation_started: true,
+      response_terminal_observed: true,
+      response_completed: true,
+      output_pcm_byte_length: 4,
+    });
+    expect(error.failure.operation_order.at(-1)).toBe("listener_evidence_handed_off");
+    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("emits cleanup evidence instead of a rotation receipt for an unfinalized success", async () => {
+    const fixture = await openDevFailureFixture({ client: new FakeRealtimeClient("openai", []) });
+    await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    const closeError = await caughtFailure(fixture.session.close());
+    expect(closeError.failure).toMatchObject({
+      failure_role: "cleanup",
+      failure_stage: "segment_close",
+      failure_code: "segment_close_failed",
+      failure_class: "cleanup",
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+      output_pcm_byte_length: 0,
+    });
+  });
+
+  it("keeps the success path replayable after failure instrumentation", async () => {
+    const fixture = await openDevFailureFixture({ client: new FakeRealtimeClient("openai", []) });
+    const evidence = await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    expect(evidence.operation_order.at(-1)).toBe("listener_evidence_handed_off");
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("failure-fixture-no-repair"),
+      repair_played: false,
+    });
+    await expect(fixture.session.close()).resolves.toHaveProperty("rotation_receipt_sha256");
+  });
+
   it("delivers PCM, response plan, commit, generation, capture, and listener handoff in order", async () => {
     const value = manifest();
     const events: string[] = [];

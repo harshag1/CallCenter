@@ -313,6 +313,7 @@ export class Lc4DevGatewayTurnCoordinator {
   #context: OpportunityContext | null = null;
   #queue: Promise<void> = Promise.resolve();
   #fatal: Error | null = null;
+  #fatalClass: "none" | "parse" | "provenance" | "execution" | "delivery" | "unknown" = "none";
   #batchOrdinal = 0;
   #receipts: Lc4DevSanitizedGatewayReceipt[] = [];
   #authorityProjections: Lc4DevGatewayAuthorityProjection[] = [];
@@ -344,36 +345,36 @@ export class Lc4DevGatewayTurnCoordinator {
     try {
       batch = callsFromEvent(event);
     } catch (error) {
-      this.#fail(error);
+      this.#fail(error, "parse");
       return;
     }
     if (batch === null) return;
     const { calls } = batch;
     const context = this.#context;
     if (!context) {
-      this.#fail(new Error("LC4-DEV provider emitted a tool batch outside an active opportunity"));
+      this.#fail(new Error("LC4-DEV provider emitted a tool batch outside an active opportunity"), "provenance");
       return;
     }
     if (calls.length === 0 || calls.length > MAX_TOOL_CALLS_PER_BATCH) {
-      this.#fail(new Error("LC4-DEV provider tool batch is empty or exceeds 16 calls"));
+      this.#fail(new Error("LC4-DEV provider tool batch is empty or exceeds 16 calls"), "provenance");
       return;
     }
     const responseIds = new Set(calls.map((call) => call.response_id));
     if (responseIds.size !== 1 || !responseIds.has(batch.response_id)) {
-      this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"));
+      this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"), "provenance");
       return;
     }
     if (context.episode.provider !== "gemini" && this.#toolResponseIds.has(batch.response_id)) {
-      this.#fail(new Error("LC4-DEV provider repeated an executable tool batch response"));
+      this.#fail(new Error("LC4-DEV provider repeated an executable tool batch response"), "provenance");
       return;
     }
     if (this.#batchOrdinal >= MAX_TOOL_BATCHES_PER_OPPORTUNITY) {
-      this.#fail(new Error("LC4-DEV opportunity exceeded eight provider tool batches"));
+      this.#fail(new Error("LC4-DEV opportunity exceeded eight provider tool batches"), "provenance");
       return;
     }
     for (const call of calls) {
       if (this.#seenCallIds.has(call.call_id)) {
-        this.#fail(new Error("LC4-DEV provider reused a tool call identity"));
+        this.#fail(new Error("LC4-DEV provider reused a tool call identity"), "provenance");
         return;
       }
       this.#seenCallIds.add(call.call_id);
@@ -385,12 +386,25 @@ export class Lc4DevGatewayTurnCoordinator {
     this.#toolResponseIds.add(batch.response_id);
     const batchOrdinal = ++this.#batchOrdinal;
     this.#queue = this.#queue.then(() => this.#executeBatch(context, batchOrdinal, calls!)).catch((error) => {
-      this.#fail(error);
+      this.#fail(error, "execution");
     });
   }
 
   ownsToolResponse(responseId: string): boolean {
     return this.#toolResponseIds.has(responseId);
+  }
+
+  /** A strict, plaintext-free projection suitable for failed-exchange evidence. */
+  diagnosticSnapshot(): Readonly<{
+    batch_count: number;
+    receipt_count: number;
+    fatal_class: "none" | "parse" | "provenance" | "execution" | "delivery" | "unknown";
+  }> {
+    return Object.freeze({
+      batch_count: this.#batchOrdinal,
+      receipt_count: this.#receipts.length,
+      fatal_class: this.#fatalClass,
+    });
   }
 
   async finishOpportunity(): Promise<Lc4DevGatewayReceiptSet> {
@@ -407,6 +421,7 @@ export class Lc4DevGatewayTurnCoordinator {
     this.#toolResponseIds = new Set();
     this.#seenCallIds = new Set();
     this.#queue = Promise.resolve();
+    this.#fatalClass = "none";
     return Object.freeze({ receipts, authority_projections: authorityProjections, receipt_set_sha256: receiptSetSha256 });
   }
 
@@ -491,13 +506,22 @@ export class Lc4DevGatewayTurnCoordinator {
     // Every adapter has a different default. Passing false removes ambiguity;
     // the host requests exactly one continuation only after the full batch is sent.
     if (this.#fatal) throw this.#fatal;
-    this.#client.submitToolResults(Object.freeze(results), false);
-    this.#client.createResponse();
+    try {
+      this.#client.submitToolResults(Object.freeze(results), false);
+      this.#client.createResponse();
+    } catch (error) {
+      this.#fail(error, "delivery");
+      throw error;
+    }
   }
 
-  #fail(error: unknown): void {
+  #fail(
+    error: unknown,
+    failureClass: "parse" | "provenance" | "execution" | "delivery" | "unknown" = "unknown",
+  ): void {
     if (this.#fatal) return;
     this.#fatal = error instanceof Error ? error : new Error("LC4-DEV gateway bridge failed");
+    this.#fatalClass = failureClass;
     this.#onFatal(this.#fatal);
   }
 }

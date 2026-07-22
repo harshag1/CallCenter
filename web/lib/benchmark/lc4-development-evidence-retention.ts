@@ -22,7 +22,8 @@ export type Lc4DevReplayArtifactKind =
   | "authority_episode_artifact"
   | "opportunity_finalization"
   | "segment_finalization"
-  | "episode_finalization";
+  | "episode_finalization"
+  | "failure_evidence";
 
 export type Lc4DevReplayArtifactReference = Readonly<{
   schema_version: 1;

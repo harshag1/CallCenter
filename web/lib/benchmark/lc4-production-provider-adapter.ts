@@ -1,6 +1,19 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
 import type { JsonValue } from "./artifacts";
 import type { Lc4DevReplayEvidenceStore } from "./lc4-development-evidence-retention";
+import {
+  LC4_DEV_FAILURE_EVIDENCE_DOMAIN,
+  LC4_DEV_FAILURE_EVIDENCE_VERSION,
+  Lc4DevFailureEvidenceError,
+  classifyLc4DevTerminalWireType,
+  createLc4DevFailureEvidence,
+  isLc4DevFailureEvidenceError,
+  lc4DevFailureEvidenceBody,
+  type Lc4DevFailureClass,
+  type Lc4DevFailureCode,
+  type Lc4DevFailureOperation,
+  type Lc4DevFailureStage,
+} from "./lc4-development-failure-evidence";
 import { createLc4CapturedOutput, type Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
@@ -676,10 +689,12 @@ export class Lc4RealtimeProviderBridge {
     const outputByResponse = new Map<string, Uint8Array[]>();
     const outputFormatByResponse = new Map<string, Readonly<{ encoding: "pcm16"; sampleRateHz: number; channels: 1 }>>();
     const terminalByResponse = new Set<string>();
+    const completedByResponse = new Set<string>();
     const waiters = new Map<string, () => void>();
     let currentOpportunity: string | null = null;
     let activeResponseId: string | null = null;
     let terminalError: Error | null = null;
+    let terminalFailureCode: "provider_fatal" | "provider_terminal_failed" | "invalid_output_audio" | null = null;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
           client,
@@ -704,6 +719,7 @@ export class Lc4RealtimeProviderBridge {
           || (priorFormat !== undefined && canonicalJson(priorFormat) !== canonicalJson(event.format))
         ) {
           terminalError = new Error("provider output PCM format differs from the frozen LC4 profile");
+          terminalFailureCode = "invalid_output_audio";
         } else {
           outputFormatByResponse.set(event.responseId, Object.freeze({ ...event.format }));
         }
@@ -716,6 +732,9 @@ export class Lc4RealtimeProviderBridge {
         terminalByResponse.add(event.responseId);
         if (event.status !== "completed") {
           terminalError = new Error(`provider response ended with ${event.status}`);
+          terminalFailureCode = "provider_terminal_failed";
+        } else {
+          completedByResponse.add(event.responseId);
         }
         // A tool-producing response is an intermediate provider turn. The DEV
         // coordinator alone owns its continuation and requests it exactly once
@@ -739,6 +758,7 @@ export class Lc4RealtimeProviderBridge {
       }
       if (event.type === "error" && event.fatal) {
         terminalError = new Error(`provider error: ${event.code ?? "unspecified"}`);
+        terminalFailureCode = "provider_fatal";
         waiters.get(currentOpportunity ?? "")?.();
       }
     });
@@ -761,6 +781,15 @@ export class Lc4RealtimeProviderBridge {
       canonical_evidence_sha256: string;
       repair_played: boolean;
     }> | null = null;
+    let lastFailedExchange: Readonly<{
+      error: unknown;
+      opportunity_id: string | null;
+      playback_kind: "canonical" | "repair";
+      caller_pcm: Uint8Array | null;
+      wire_start: number;
+      stage: Lc4DevFailureStage;
+      operation_order: readonly Lc4ProviderExchangeEvidence["operation_order"][number][];
+    }> | null = null;
     const openedWireIndex = wire.length;
     const segmentAbort = new AbortController();
     const poisonSegment = (reason = "LC4 in-flight provider exchange failed") => {
@@ -778,9 +807,199 @@ export class Lc4RealtimeProviderBridge {
         throw new Error("LC4 provider exchange was aborted or its segment is no longer usable");
       }
     };
+    const failureFromExchange = (failureInput: Readonly<{
+      error: unknown;
+      opportunity_id: string | null;
+      playback_kind: "canonical" | "repair";
+      caller_pcm: Uint8Array | null;
+      wire_start: number;
+      stage: Lc4DevFailureStage;
+      operation_order: readonly Lc4ProviderExchangeEvidence["operation_order"][number][];
+    }>) => {
+      const opportunityWire = wire.slice(failureInput.wire_start);
+      const terminalWire = opportunityWire.at(-1) ?? null;
+      const gateway = devGateway?.diagnosticSnapshot() ?? Object.freeze({
+        batch_count: 0,
+        receipt_count: 0,
+        fatal_class: "none" as const,
+      });
+      const outputChunks = activeResponseId === null
+        ? [...outputByResponse.values()].flat()
+        : outputByResponse.get(activeResponseId) ?? [];
+      const outputPcm = concatenate(outputChunks);
+      const responseRequested = failureInput.operation_order.includes("response_generation_requested");
+      const responseStarted = responseRequested && activeResponseId !== null;
+      const terminalObserved = responseStarted && terminalByResponse.has(activeResponseId!);
+      const responseCompleted = terminalObserved && completedByResponse.has(activeResponseId!) && terminalError === null;
+      const deliveryDiagnostic = failureInput.error instanceof Lc4ProviderInputAudioDeliveryError
+        ? failureInput.error.diagnostic
+        : null;
+      const failureOperations: Lc4DevFailureOperation[] = [];
+      for (const operation of [
+        "caller_pcm_appended",
+        "response_plan_prepared",
+        "caller_pcm_committed",
+        "response_generation_requested",
+      ] as const) {
+        if (failureInput.operation_order.includes(operation)
+          || (operation === "caller_pcm_appended" && (deliveryDiagnostic?.appended_chunk_count ?? 0) > 0)) {
+          failureOperations.push(operation);
+        }
+      }
+      if (responseStarted) failureOperations.push("response_generation_started");
+      if (terminalObserved) failureOperations.push("response_terminal_observed");
+      if (outputPcm.byteLength > 0) failureOperations.push("assistant_pcm_captured");
+      if (failureInput.operation_order.includes("listener_evidence_handed_off")) {
+        failureOperations.push("listener_evidence_handed_off");
+      }
+      let failureStage = failureInput.stage;
+      let failureCode: Lc4DevFailureCode;
+      let failureClass: Lc4DevFailureClass;
+      if (failureInput.error instanceof Lc4ProviderInputAudioDeliveryError) {
+        failureStage = "audio_append";
+        failureCode = "audio_delivery_failed";
+        failureClass = "audio_delivery";
+      } else if (gateway.fatal_class !== "none") {
+        failureStage = "gateway_dispatch";
+        failureCode = "gateway_fatal";
+        failureClass = "gateway";
+      } else if (terminalFailureCode !== null) {
+        failureCode = terminalFailureCode;
+        failureClass = terminalFailureCode === "invalid_output_audio" ? "adapter_contract" : "provider_external";
+      } else if (failureInput.stage === "pre_send_contract") {
+        failureCode = "invalid_contract";
+        failureClass = "adapter_contract";
+      } else if (failureInput.stage === "response_prepare" || failureInput.stage === "audio_commit") {
+        failureCode = "audio_delivery_failed";
+        failureClass = "audio_delivery";
+      } else if (failureInput.stage === "response_request") {
+        failureCode = "response_request_failed";
+        failureClass = "provider_external";
+      } else if (failureInput.stage === "provider_wait"
+        && failureInput.error instanceof Error
+        && failureInput.error.message === "LC4 provider response timed out") {
+        failureCode = "provider_response_timeout";
+        failureClass = "timeout";
+      } else if (failureInput.stage === "response_validate") {
+        failureCode = outputPcm.byteLength === 0 ? "missing_output_audio" : "missing_terminal_response";
+        failureClass = "adapter_contract";
+      } else if (failureInput.stage === "listener_handoff") {
+        failureCode = "listener_failed";
+        failureClass = "listener";
+      } else if (failureInput.stage === "exchange_evidence") {
+        failureCode = "evidence_assembly_failed";
+        failureClass = "evidence_retention";
+      } else {
+        failureCode = "adapter_failure";
+        failureClass = "unknown";
+      }
+      const callerBytes = failureInput.caller_pcm?.byteLength ?? 0;
+      const frameBytes = input.profile.input_sample_rate_hz * input.configuration.audioDeliveryProfile.chunkMs / 1_000 * 2;
+      const plannedChunks = callerBytes === 0 ? 0 : Math.ceil(callerBytes / frameBytes);
+      const appendedChunks = deliveryDiagnostic?.appended_chunk_count
+        ?? (failureInput.operation_order.includes("caller_pcm_appended") ? plannedChunks : 0);
+      const appendedBytes = deliveryDiagnostic?.appended_pcm_byte_length
+        ?? (failureInput.operation_order.includes("caller_pcm_appended") ? callerBytes : 0);
+      return createLc4DevFailureEvidence({
+        schema_version: 1,
+        evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
+        redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
+        failure_role: "primary_exchange",
+        failure_stage: failureStage,
+        failure_code: failureCode,
+        failure_class: failureClass,
+        episode_id: input.manifest.run_id,
+        opportunity_id: failureInput.opportunity_id,
+        provider: input.profile.provider,
+        model: input.profile.model,
+        playback_kind: failureInput.playback_kind,
+        operation_order: Object.freeze(failureOperations),
+        caller_pcm_sha256: failureInput.caller_pcm === null ? null : sha256Hex(failureInput.caller_pcm),
+        caller_pcm_byte_length: callerBytes,
+        caller_pcm_chunk_count: plannedChunks,
+        caller_pcm_appended_chunk_count: appendedChunks,
+        caller_pcm_appended_byte_length: appendedBytes,
+        response_generation_requested: responseRequested,
+        response_generation_started: responseStarted,
+        response_terminal_observed: terminalObserved,
+        response_completed: responseCompleted,
+        output_pcm_sha256: outputPcm.byteLength === 0 ? null : sha256Hex(outputPcm),
+        output_pcm_byte_length: outputPcm.byteLength,
+        output_pcm_chunk_count: outputChunks.length,
+        wire_observation_count: opportunityWire.length,
+        terminal_wire_type: classifyLc4DevTerminalWireType(terminalWire?.wire_type ?? null),
+        terminal_wire_type_sha256: terminalWire === null ? null : sha256Hex(terminalWire.wire_type),
+        terminal_wire_observation_sha256: terminalWire?.observation_sha256 ?? null,
+        gateway_batch_count: gateway.batch_count,
+        gateway_fatal_class: gateway.fatal_class,
+        secondary_failure_evidence_sha256: null,
+      });
+    };
+    const failureFromClose = (error: unknown) => {
+      if (lastFailedExchange === null) {
+        const segmentWire = wire.slice(openedWireIndex);
+        const terminalWire = segmentWire.at(-1) ?? null;
+        const gateway = devGateway?.diagnosticSnapshot() ?? Object.freeze({
+          batch_count: 0,
+          receipt_count: 0,
+          fatal_class: "none" as const,
+        });
+        return createLc4DevFailureEvidence({
+          schema_version: 1,
+          evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
+          redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
+          failure_role: "cleanup",
+          failure_stage: "segment_close",
+          failure_code: "segment_close_failed",
+          failure_class: "cleanup",
+          episode_id: input.manifest.run_id,
+          opportunity_id: currentOpportunity,
+          provider: input.profile.provider,
+          model: input.profile.model,
+          playback_kind: null,
+          operation_order: Object.freeze([]),
+          caller_pcm_sha256: null,
+          caller_pcm_byte_length: 0,
+          caller_pcm_chunk_count: 0,
+          caller_pcm_appended_chunk_count: 0,
+          caller_pcm_appended_byte_length: 0,
+          response_generation_requested: false,
+          response_generation_started: false,
+          response_terminal_observed: false,
+          response_completed: false,
+          output_pcm_sha256: null,
+          output_pcm_byte_length: 0,
+          output_pcm_chunk_count: 0,
+          wire_observation_count: segmentWire.length,
+          terminal_wire_type: classifyLc4DevTerminalWireType(terminalWire?.wire_type ?? null),
+          terminal_wire_type_sha256: terminalWire === null ? null : sha256Hex(terminalWire.wire_type),
+          terminal_wire_observation_sha256: terminalWire?.observation_sha256 ?? null,
+          gateway_batch_count: gateway.batch_count,
+          gateway_fatal_class: gateway.fatal_class,
+          secondary_failure_evidence_sha256: null,
+        });
+      }
+      const primaryProjection = failureFromExchange({ ...lastFailedExchange, error });
+      return createLc4DevFailureEvidence({
+        ...lc4DevFailureEvidenceBody(primaryProjection),
+        failure_role: "cleanup",
+        failure_stage: "segment_close",
+        failure_code: "segment_close_failed",
+        failure_class: "cleanup",
+      });
+    };
 
     return Object.freeze({
       exchange: async (exchangeInput) => {
+        const diagnosticOpportunityId = SAFE_ID.test(exchangeInput.opportunity_id) ? exchangeInput.opportunity_id : null;
+        const diagnosticPlaybackKind = exchangeInput.playback_kind ?? "canonical";
+        const diagnosticCallerPcm = exchangeInput.caller_pcm instanceof Uint8Array
+          ? Uint8Array.from(exchangeInput.caller_pcm)
+          : null;
+        const diagnosticWireStart = wire.length;
+        const operationOrder: Lc4ProviderExchangeEvidence["operation_order"][number][] = [];
+        let diagnosticStage: Lc4DevFailureStage = "pre_send_contract";
+        try {
         if (closed || !this.#active || client.state !== "ready") throw new Error("LC4 realtime segment session is not open");
         if (currentOpportunity !== null) throw new Error("LC4 realtime segment allows only one in-flight opportunity");
         const opportunityId = safeId(exchangeInput.opportunity_id, "LC4 opportunity ID");
@@ -839,15 +1058,16 @@ export class Lc4RealtimeProviderBridge {
         currentOpportunity = opportunityId;
         activeResponseId = null;
         terminalError = null;
+        terminalFailureCode = null;
         if (devGateway && input.dev_gateway) {
           const opportunity = input.dev_gateway.opportunities.find((candidate) => candidate.id === opportunityId);
           if (!opportunity) throw new Error("LC4-DEV gateway lacks the exact public opportunity context");
           devGateway.beginOpportunity({ episode: input.dev_gateway.episode, opportunity });
         }
-        const operationOrder: Lc4ProviderExchangeEvidence["operation_order"][number][] = [];
         const exchangeSignal = linkedAbortSignal(segmentAbort.signal, exchangeInput.signal);
         let providerInputAppended = false;
         try {
+          diagnosticStage = "audio_append";
           let inputAudioDelivery: RealtimeAudioDeliveryReceipt;
           try {
             inputAudioDelivery = await deliverRealtimePcm16({
@@ -882,17 +1102,21 @@ export class Lc4RealtimeProviderBridge {
           providerInputAppended = true;
           assertExchangeActive(exchangeSignal.signal);
           operationOrder.push("caller_pcm_appended");
+          diagnosticStage = "response_prepare";
           client.prepareResponse({
             additionalInstructions: renderedControl,
             contextSha256: sha256Hex(renderedControl),
             contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
           });
           operationOrder.push("response_plan_prepared");
+          diagnosticStage = "audio_commit";
           client.commitInputAudio();
           operationOrder.push("caller_pcm_committed");
           const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
+          diagnosticStage = "response_request";
           client.createResponse();
           operationOrder.push("response_generation_requested");
+          diagnosticStage = "provider_wait";
           let responseTimer: ReturnType<typeof setTimeout> | null = null;
           const aborted = abortWait(exchangeSignal.signal);
           try {
@@ -909,7 +1133,9 @@ export class Lc4RealtimeProviderBridge {
           }
           assertExchangeActive(exchangeSignal.signal);
           if (terminalError) throw terminalError;
+          diagnosticStage = "response_validate";
           if (!activeResponseId || !terminalByResponse.has(activeResponseId)) throw new Error("LC4 provider response lacks a terminal identity");
+          diagnosticStage = "gateway_dispatch";
           const devGatewayReceiptSet = devGateway
             ? await devGateway.finishOpportunity()
             : null;
@@ -924,6 +1150,7 @@ export class Lc4RealtimeProviderBridge {
             ?? initialResponseControlSha256;
           const chunks = outputByResponse.get(activeResponseId) ?? [];
           const pcm = concatenate(chunks);
+          diagnosticStage = "response_validate";
           if (pcm.byteLength === 0) throw new Error("LC4 provider response produced no PCM output");
           operationOrder.push("assistant_pcm_captured");
           const capture = createLc4CapturedOutput({
@@ -939,6 +1166,7 @@ export class Lc4RealtimeProviderBridge {
           const wireObservationSetSha256 = sha256Hex(
             `harshas-amazing-call-center/lc4-wire-observation-set/v1\n${canonicalJson(opportunityWire)}`,
           );
+          diagnosticStage = "listener_handoff";
           const listenerResult = await input.listener.accept({
             capture,
             response_plan_sha256: terminalResponsePlanSha256,
@@ -949,6 +1177,7 @@ export class Lc4RealtimeProviderBridge {
           if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !listenerResult) {
             throw new Error("LC4-DEV exchange completed without signed listener semantic evidence");
           }
+          diagnosticStage = "exchange_evidence";
           const body = Object.freeze({
             schema_version: 1 as const,
             adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
@@ -1021,6 +1250,19 @@ export class Lc4RealtimeProviderBridge {
           waiters.delete(opportunityId);
           currentOpportunity = null;
         }
+        } catch (error) {
+          if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" || isLc4DevFailureEvidenceError(error)) throw error;
+          lastFailedExchange = Object.freeze({
+            error,
+            opportunity_id: diagnosticOpportunityId,
+            playback_kind: diagnosticPlaybackKind,
+            caller_pcm: diagnosticCallerPcm,
+            wire_start: diagnosticWireStart,
+            stage: diagnosticStage,
+            operation_order: Object.freeze([...operationOrder]),
+          });
+          throw new Lc4DevFailureEvidenceError(failureFromExchange(lastFailedExchange));
+        }
       },
       finalizeOpportunity: input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? async (finalizeInput) => {
         if (closed || poisoned || this.#active === false || client.state !== "ready" || currentOpportunity !== null) {
@@ -1048,6 +1290,7 @@ export class Lc4RealtimeProviderBridge {
         });
       } : undefined,
       close: async () => {
+        try {
         if (closed) throw new Error("LC4 realtime segment session is already closed");
         if (currentOpportunity !== null) {
           // Abort and poison the socket without minting a rotation receipt
@@ -1097,6 +1340,10 @@ export class Lc4RealtimeProviderBridge {
           rotation_receipt_sha256: receipt,
           finalization_body: body as unknown as JsonValue,
         });
+        } catch (error) {
+          if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" || isLc4DevFailureEvidenceError(error)) throw error;
+          throw new Lc4DevFailureEvidenceError(failureFromClose(error));
+        }
       },
     });
   }
@@ -1422,13 +1669,26 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           || pendingOpportunity.repair_played) {
           throw new Error("LC4-DEV repair is not attached to the pending canonical opportunity and control receipt");
         }
-        const evidence = await bridgeSession.exchange({
-          opportunity_id: exchangeInput.opportunity.id,
-          caller_pcm: exchangeInput.caller_pcm,
-          response_control: exchangeInput.control_receipt.response_control,
-          playback_kind: exchangeInput.playback_kind,
-          ...(exchangeInput.repair_binding ? { repair_binding: exchangeInput.repair_binding } : {}),
-        });
+        let evidence: Lc4ProviderExchangeEvidence;
+        try {
+          evidence = await bridgeSession.exchange({
+            opportunity_id: exchangeInput.opportunity.id,
+            caller_pcm: exchangeInput.caller_pcm,
+            response_control: exchangeInput.control_receipt.response_control,
+            playback_kind: exchangeInput.playback_kind,
+            ...(exchangeInput.repair_binding ? { repair_binding: exchangeInput.repair_binding } : {}),
+          });
+        } catch (error) {
+          if (!isLc4DevFailureEvidenceError(error)) throw error;
+          const failureEvidence = await input.evidence.retainJson({
+            kind: "failure_evidence",
+            body: lc4DevFailureEvidenceBody(error.failure) as unknown as JsonValue,
+            domain_prefix: LC4_DEV_FAILURE_EVIDENCE_DOMAIN,
+            expected_evidence_sha256: error.failure.failure_evidence_sha256,
+          });
+          await input.evidence.assertResolvable(failureEvidence);
+          throw new Lc4DevFailureEvidenceError(error.failure, failureEvidence);
+        }
         if (exchangeInput.playback_kind === "canonical") {
           runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
             previous: runtime!.response_plan_chain_head_sha256,
@@ -1515,9 +1775,21 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         },
         close: async () => {
           if (closed) throw new Error("LC4-DEV adapter session is already closed");
-          if (pendingOpportunity) throw new Error("LC4-DEV adapter cannot close with an unfinalized opportunity");
           closed = true;
-          const receipt = await bridgeSession.close();
+          let receipt: Awaited<ReturnType<typeof bridgeSession.close>>;
+          try {
+            receipt = await bridgeSession.close();
+          } catch (error) {
+            if (!isLc4DevFailureEvidenceError(error)) throw error;
+            const failureEvidence = await input.evidence.retainJson({
+              kind: "failure_evidence",
+              body: lc4DevFailureEvidenceBody(error.failure) as unknown as JsonValue,
+              domain_prefix: LC4_DEV_FAILURE_EVIDENCE_DOMAIN,
+              expected_evidence_sha256: error.failure.failure_evidence_sha256,
+            });
+            await input.evidence.assertResolvable(failureEvidence);
+            throw new Lc4DevFailureEvidenceError(error.failure, failureEvidence);
+          }
           const segmentFinalization = await input.evidence.retainJson({
             kind: "segment_finalization",
             body: receipt.finalization_body,
