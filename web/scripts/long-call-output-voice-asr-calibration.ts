@@ -121,8 +121,11 @@ async function lockAndPublishDirectory(input: Readonly<{
 }>): Promise<void> {
   await Promise.all(input.filePaths.map((path) => chmod(path, 0o400)));
   await chmod(resolve(input.stagingDirectory, "receipts"), 0o500);
-  await chmod(input.stagingDirectory, 0o500);
+  // macOS can reject a sibling-directory rename after the source directory
+  // itself has been made non-writable. Keep the unpublished container private
+  // through the atomic rename, then remove its write bit at the final path.
   await rename(input.stagingDirectory, input.finalDirectory);
+  await chmod(input.finalDirectory, 0o500);
 }
 
 function calibrationMarkdown(artifact: OutputVoiceAsrCalibrationArtifact): string {
