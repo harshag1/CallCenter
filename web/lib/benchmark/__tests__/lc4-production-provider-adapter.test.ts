@@ -69,9 +69,12 @@ function opportunities(): readonly Lc4OpportunityBinding[] {
   }));
 }
 
-function manifest(arm: "native" | "hacc" = "hacc"): Lc4EpisodeManifest {
+function manifest(
+  arm: "native" | "hacc" = "hacc",
+  provider: "openai" | "gemini" | "xai" = "openai",
+): Lc4EpisodeManifest {
   const schedule = compileLc4ProductionScheduleShape();
-  const episode = schedule.episode_shapes.find((candidate) => candidate.arm === arm)!;
+  const episode = schedule.episode_shapes.find((candidate) => candidate.arm === arm && candidate.provider === provider)!;
   const reservation = {
     reservation_id: "reservation-1",
     run_id: episode.run_id,
@@ -273,13 +276,20 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly #wire = new Set<RealtimeWireObservationListener>();
   #wireSequence = 0;
   #toolRoundtrip: boolean;
+  readonly #terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled";
   #responseOrdinal = 0;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
 
-  constructor(provider: "openai" | "gemini" | "xai", events: string[], toolRoundtrip = false) {
+  constructor(
+    provider: "openai" | "gemini" | "xai",
+    events: string[],
+    toolRoundtrip = false,
+    terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled" = "completed",
+  ) {
     this.provider = provider;
     this.events = events;
     this.#toolRoundtrip = toolRoundtrip;
+    this.#terminalStatus = terminalStatus;
   }
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
@@ -295,10 +305,51 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     if (!this.#toolRoundtrip) throw new Error("not used");
     this.events.push(`submit:${String(createResponse)}`);
     this.submittedToolResults.push({ results, createResponse });
+    if (this.provider === "gemini") {
+      queueMicrotask(() => {
+        const responseId = "provider-tool-response-plaintext";
+        if (this.submittedToolResults.length === 1) {
+          this.emit({
+            type: "tool.calls",
+            provider: this.provider,
+            receivedAtMs: 3,
+            wireType: "toolCall",
+            responseId,
+            calls: [{
+              callId: "call-2",
+              name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+              argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: "PUBLIC-18" } }),
+              argumentsJson: { tool_name: "records.lookup", arguments: { record_id: "PUBLIC-18" } },
+              responseId,
+              terminalWireType: "toolCall",
+            }],
+          });
+          return;
+        }
+        this.emit({
+          type: "output.audio",
+          provider: this.provider,
+          receivedAtMs: 3,
+          wireType: "serverContent.modelTurn.part.inlineData",
+          responseId,
+          audio: new Uint8Array([1, 0, 2, 0]),
+          format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+        });
+        this.emit({
+          type: "response.completed",
+          provider: this.provider,
+          receivedAtMs: 4,
+          wireType: "serverContent.turnComplete",
+          responseId,
+          status: this.#terminalStatus,
+        });
+      });
+    }
   }
   createResponse() {
     this.events.push("create");
     this.wire("response.create", {});
+    if (this.provider === "gemini" && this.#toolRoundtrip && this.#responseOrdinal > 0) return;
     queueMicrotask(() => {
       this.#responseOrdinal += 1;
       if (this.#toolRoundtrip && this.#responseOrdinal === 1) {
@@ -352,7 +403,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             }],
           });
         }
-        this.emit({ type: "response.completed", provider: this.provider, receivedAtMs: 3, wireType: "response.done", responseId, status: "completed" });
+        if (this.provider !== "gemini") {
+          this.emit({ type: "response.completed", provider: this.provider, receivedAtMs: 3, wireType: "response.done", responseId, status: "completed" });
+        }
         return;
       }
       const responseId = "provider-response-plaintext";
@@ -366,7 +419,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         audio: new Uint8Array([1, 0, 2, 0]),
         format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
       });
-      this.emit({ type: "response.completed", provider: this.provider, receivedAtMs: 3, wireType: "response.done", responseId, status: "completed" });
+      this.emit({
+        type: "response.completed",
+        provider: this.provider,
+        receivedAtMs: 3,
+        wireType: "response.done",
+        responseId,
+        status: this.#terminalStatus,
+      });
     });
   }
 
@@ -430,8 +490,33 @@ describe("LC4 production realtime adapter bridge", () => {
     await session.close();
   });
 
-  it("keeps a DEV tool response intermediate, executes the injected gateway, and continues exactly once", async () => {
-    const base = manifest("hacc");
+  it.each(["failed", "incomplete", "interrupted", "cancelled"] as const)(
+    "rejects a Gemini %s terminal even when the provider emitted PCM",
+    async (terminalStatus) => {
+      const value = manifest("hacc", "gemini");
+      const bridge = new Lc4RealtimeProviderBridge(
+        (provider) => new FakeRealtimeClient(provider, [], false, terminalStatus),
+      );
+      const session = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[0]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() { throw new Error("failed provider turn must not reach listener"); } },
+      });
+      await expect(session.exchange({
+        opportunity_id: "op-01",
+        caller_pcm: new Uint8Array([1, 7, 11, 13]),
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      })).rejects.toThrow(`provider response ended with ${terminalStatus}`);
+    },
+  );
+
+  it.each(["openai", "gemini"] as const)(
+    "keeps a DEV %s tool response intermediate, executes the injected gateway, and continues exactly once",
+    async (provider) => {
+    const base = manifest("hacc", provider);
     const corpus = createLc4PublicDevelopmentCorpus();
     const episode: Lc4DevLiveEpisodePlan = Object.freeze({
       episode_id: `lc4-dev-${base.episode_shape.provider}-hacc`,
@@ -515,11 +600,15 @@ describe("LC4 production realtime adapter bridge", () => {
       response_control: { kind: "hacc_response_plan", plan: responsePlan() },
     });
 
-    expect(executed).toEqual(["hacc:records.lookup"]);
-    expect(events).toEqual(["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
-    expect(fake!.submittedToolResults).toHaveLength(1);
+    expect(executed).toEqual(provider === "gemini"
+      ? ["hacc:records.lookup", "hacc:records.lookup"]
+      : ["hacc:records.lookup"]);
+    expect(events).toEqual(provider === "gemini"
+      ? ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "submit:false", "create", "listener"]
+      : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
+    expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
-    expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(1);
+    expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-17");
     expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-RESULT");
     await session.finalizeOpportunity!({
@@ -528,7 +617,8 @@ describe("LC4 production realtime adapter bridge", () => {
       repair_played: false,
     });
     await session.close();
-  });
+    },
+  );
 
   it("requires close-before-open rotation and chains three segment session receipts", async () => {
     const value = manifest();

@@ -606,10 +606,18 @@ export class Lc4RealtimeProviderBridge {
       if (event.type === "response.completed") {
         activeResponseId = event.responseId;
         terminalByResponse.add(event.responseId);
+        if (event.status !== "completed") {
+          terminalError = new Error(`provider response ended with ${event.status}`);
+        }
         // A tool-producing response is an intermediate provider turn. The DEV
         // coordinator alone owns its continuation and requests it exactly once
         // after all authoritative results have crossed the wire.
-        if (!devGateway) {
+        if (!devGateway || client.provider === "gemini") {
+          // Gemini Live keeps one normalized response id across sequential
+          // toolCall/toolResponse continuations and emits response.completed
+          // only when serverContent.turnComplete seals that entire model turn.
+          // OpenAI/xAI instead complete an intermediate tool-bearing response
+          // before the gateway requests a distinct continuation response.
           waiters.get(currentOpportunity ?? "")?.();
         } else {
           // Some adapters derive tool.dispatch and response.completed from the

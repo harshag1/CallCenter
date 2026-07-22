@@ -226,7 +226,7 @@ export class Lc4DevGatewayTurnCoordinator {
       this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"));
       return;
     }
-    if (this.#toolResponseIds.has(batch.response_id)) {
+    if (context.episode.provider !== "gemini" && this.#toolResponseIds.has(batch.response_id)) {
       this.#fail(new Error("LC4-DEV provider repeated an executable tool batch response"));
       return;
     }
@@ -241,6 +241,10 @@ export class Lc4DevGatewayTurnCoordinator {
       }
       this.#seenCallIds.add(call.call_id);
     }
+    // Gemini Live can emit several sequential toolCall batches under one
+    // model-turn response id as each tool result advances the same turn. The
+    // provider call id is its replay boundary; OpenAI/xAI retain the stricter
+    // one-executable-batch-per-response invariant above.
     this.#toolResponseIds.add(batch.response_id);
     const batchOrdinal = ++this.#batchOrdinal;
     this.#queue = this.#queue.then(() => this.#executeBatch(context, batchOrdinal, calls!)).catch((error) => {

@@ -78,11 +78,15 @@ function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor 
   });
 }
 
-function dispatchEvent(provider: "openai" | "xai", responseId = "response-1"): NormalizedRealtimeEvent {
+function dispatchEvent(
+  provider: "openai" | "xai",
+  responseId = "response-1",
+  callId = "call-1",
+): NormalizedRealtimeEvent {
   const provenance = Object.freeze({
     schemaVersion: 1 as const,
     provider,
-    nativeCallId: "call-1",
+    nativeCallId: callId,
     nativeResponseId: responseId,
     terminalWireType: "response.function_call_arguments.done",
   });
@@ -94,7 +98,7 @@ function dispatchEvent(provider: "openai" | "xai", responseId = "response-1"): N
     responseId,
     gateway: "capability_gateway",
     dispatches: [{
-      callId: "call-1",
+      callId,
       provenance,
       request: {
         method: "tools/call",
@@ -102,7 +106,7 @@ function dispatchEvent(provider: "openai" | "xai", responseId = "response-1"): N
           name: "records.lookup",
           arguments: { record_id: "PUBLIC-17" },
           _meta: {
-            [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "call-1",
+            [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: callId,
             [PROVIDER_PROVENANCE_META_KEY]: provenance,
           },
         },
@@ -164,16 +168,60 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     expect(client.operations).toEqual(["submit:false", "create"]);
   });
 
-  it("fails closed on duplicate executable batches and never submits a second result", async () => {
+  it("accepts sequential Gemini tool batches in one model-turn response", async () => {
+    const client = new FakeClient("gemini");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({ client, executor: executor(inputs), onFatal: (error) => failures.push(error) });
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+
+    for (const [callId, recordId] of [["gemini-call-1", "PUBLIC-17"], ["gemini-call-2", "PUBLIC-18"]] as const) {
+      coordinator.observe({
+        type: "tool.calls",
+        provider: "gemini",
+        receivedAtMs: 1,
+        wireType: "toolCall",
+        responseId: "gemini-response-1",
+        calls: [{
+          callId,
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: recordId } }),
+          argumentsJson: { tool_name: "records.lookup", arguments: { record_id: recordId } },
+          responseId: "gemini-response-1",
+          terminalWireType: "toolCall",
+        }],
+      });
+    }
+
+    const evidence = await coordinator.finishOpportunity();
+    expect(failures).toEqual([]);
+    expect(inputs.map((input) => input.provider_call_id)).toEqual(["gemini-call-1", "gemini-call-2"]);
+    expect(client.operations).toEqual(["submit:false", "create", "submit:false", "create"]);
+    expect(client.submitted).toHaveLength(2);
+    expect(evidence.receipts.map((receipt) => receipt.batch_ordinal)).toEqual([1, 2]);
+  });
+
+  it("fails closed on a replayed provider call identity and never submits a result", async () => {
     const client = new FakeClient("xai");
     const inputs: Lc4DevGatewayExecutionInput[] = [];
     const failures: Error[] = [];
     const coordinator = new Lc4DevGatewayTurnCoordinator({ client, executor: executor(inputs), onFatal: (error) => failures.push(error) });
     coordinator.beginOpportunity({ episode: episode("xai", "hacc"), opportunity });
-    const event = dispatchEvent("xai");
-    coordinator.observe(event);
-    coordinator.observe(event);
-    await expect(coordinator.finishOpportunity()).rejects.toThrow("repeated an executable tool batch");
+    coordinator.observe(dispatchEvent("xai", "response-1", "call-1"));
+    coordinator.observe(dispatchEvent("xai", "response-2", "call-1"));
+    await expect(coordinator.finishOpportunity()).rejects.toThrow("reused a tool call identity");
+    expect(failures).toHaveLength(1);
+    expect(client.submitted).toHaveLength(0);
+  });
+
+  it("fails closed when OpenAI or xAI repeats a response identity with a fresh call", async () => {
+    const client = new FakeClient("xai");
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({ client, executor: executor([]), onFatal: (error) => failures.push(error) });
+    coordinator.beginOpportunity({ episode: episode("xai", "hacc"), opportunity });
+    coordinator.observe(dispatchEvent("xai", "response-1", "call-1"));
+    coordinator.observe(dispatchEvent("xai", "response-1", "call-2"));
+    await expect(coordinator.finishOpportunity()).rejects.toThrow("repeated an executable tool batch response");
     expect(failures).toHaveLength(1);
     expect(client.submitted).toHaveLength(0);
   });
