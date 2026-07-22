@@ -213,15 +213,16 @@ function repairPlan(artifact: Lc4DevelopmentAnalog): Readonly<{
   pcm_by_id: ReadonlyMap<string, Uint8Array>;
 }> {
   const acts = ["establish", "interleave", "reconcile"] as const;
-  const inventory = acts.map((act) => {
-    const id = `repair.${act}.evidence`;
-    const source = `Please use the authoritative receipt to reconcile the unresolved ${act} checkpoint.`;
+  const inventory = acts.flatMap((act) => ([1, 2] as const).map((ordinal) => {
+    const id = `repair.${act}.evidence.${ordinal}`;
+    const source = `Please use the authoritative receipt to reconcile the unresolved ${act} checkpoint. Bounded repair ${ordinal}.`;
     const bytes = deterministicPcm(`repair-pcm\n${source}`);
     return {
       fixture: {
         repair_pcm_id: id,
         stage_id: `stage.${act}`,
         blocker_code: "required_evidence_missing" as const,
+        repair_ordinal: ordinal,
         source_text_sha256: sha256Hex(source),
         pcm_sha256: sha256Hex(bytes),
         byte_length: bytes.byteLength,
@@ -233,7 +234,7 @@ function repairPlan(artifact: Lc4DevelopmentAnalog): Readonly<{
       },
       bytes,
     };
-  });
+  }));
   const plan = createConversationalRepairPlan({
     schema_version: 1,
     protocol_id: "HACC-LC4-v1",

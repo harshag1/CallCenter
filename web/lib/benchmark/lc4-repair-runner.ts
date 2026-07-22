@@ -71,6 +71,7 @@ export type Lc4RepairPlayback = Readonly<{
   canonical_opportunity_id: string;
   stage_id: string;
   blocker_code: string;
+  repair_ordinal: 1 | 2;
   canonical_ordinal: number;
   canonical_horizon_count: number;
   advances_canonical_horizon: false;
@@ -242,6 +243,7 @@ function repairFixture(
     candidate.repair_pcm_id === selection.repair_pcm_id
     && candidate.stage_id === selection.stage_id
     && candidate.blocker_code === selection.blocker_code
+    && candidate.repair_ordinal === selection.repair_ordinal
   );
   if (!fixture
     || fixture.pcm_sha256 !== selection.pcm_sha256
@@ -450,6 +452,7 @@ export async function runLc4RepairEpisode(input: Lc4RepairRunnerInput): Promise<
         canonical_horizon_count: input.canonical_turns.length,
         advances_canonical_horizon: false,
         blocker_code: fixture.blocker_code,
+        repair_ordinal: fixture.repair_ordinal,
         pcm_id: fixture.repair_pcm_id,
         pcm_sha256: fixture.pcm_sha256,
         source_text_sha256: fixture.source_text_sha256,
@@ -467,6 +470,7 @@ export async function runLc4RepairEpisode(input: Lc4RepairRunnerInput): Promise<
           canonical_opportunity_id: turn.canonical_opportunity_id,
           stage_id: turn.stage_id,
           blocker_code: fixture.blocker_code,
+          repair_ordinal: fixture.repair_ordinal,
           canonical_ordinal: canonicalOrdinal,
           canonical_horizon_count: input.canonical_turns.length,
           advances_canonical_horizon: false as const,
@@ -496,6 +500,7 @@ export async function runLc4RepairEpisode(input: Lc4RepairRunnerInput): Promise<
         canonical_horizon_count: input.canonical_turns.length,
         advances_canonical_horizon: false,
         blocker_code: fixture.blocker_code,
+        repair_ordinal: fixture.repair_ordinal,
         pcm_sha256: fixture.pcm_sha256,
       });
     }

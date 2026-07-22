@@ -17,38 +17,49 @@ import {
 
 const sha = (value: string) => sha256Hex(`lc4-runner-test:${value}`);
 const bytesSha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const REPAIR_BYTES = Uint8Array.from([1, 0, 2, 0, 3, 0, 4, 0]);
+const REPAIR_BYTES = Object.freeze({
+  "repair.resolve.1": Uint8Array.from([1, 0, 2, 0, 3, 0, 4, 0]),
+  "repair.resolve.2": Uint8Array.from([5, 0, 6, 0, 7, 0, 8, 0]),
+  "repair.followup.1": Uint8Array.from([9, 0, 10, 0, 11, 0, 12, 0]),
+  "repair.followup.2": Uint8Array.from([13, 0, 14, 0, 15, 0, 16, 0]),
+});
 
 const PLAN: ConversationalRepairPlan = createConversationalRepairPlan({
   schema_version: 1,
   protocol_id: "HACC-LC4-v1",
   scenario_id: "scenario.runner",
   scenario_version: "version.1",
-  stages: [{
-    stage_id: "stage.resolve",
-    applicable_blockers: ["required_evidence_missing"],
-  }],
-  pcm_inventory: [{
-    repair_pcm_id: "repair.evidence",
-    stage_id: "stage.resolve",
-    blocker_code: "required_evidence_missing",
-    source_text_sha256: sha("repair text"),
-    pcm_sha256: bytesSha(REPAIR_BYTES),
-    byte_length: REPAIR_BYTES.byteLength,
-    sample_rate_hz: 16_000,
-    channels: 1,
-    encoding: "pcm16le",
-    voice_id: "voice.fixture",
-    repeats_spoken_fact_ids: [],
-  }],
+  stages: ["resolve", "followup"].map((stage) => ({
+    stage_id: `stage.${stage}`,
+    applicable_blockers: ["required_evidence_missing"] as const,
+  })),
+  pcm_inventory: (["resolve", "followup"] as const).flatMap((stage) =>
+    ([1, 2] as const).map((ordinal) => {
+      const id = `repair.${stage}.${ordinal}` as keyof typeof REPAIR_BYTES;
+      const bytes = REPAIR_BYTES[id];
+      return {
+        repair_pcm_id: id,
+        stage_id: `stage.${stage}`,
+        blocker_code: "required_evidence_missing" as const,
+        repair_ordinal: ordinal,
+        source_text_sha256: sha(`repair text:${stage}:${ordinal}`),
+        pcm_sha256: bytesSha(bytes),
+        byte_length: bytes.byteLength,
+        sample_rate_hz: 16_000 as const,
+        channels: 1 as const,
+        encoding: "pcm16le" as const,
+        voice_id: "voice.fixture",
+        repeats_spoken_fact_ids: [],
+      };
+    })),
 });
 
-function canonicalTurn(ordinal: number): Lc4CanonicalCallerTurn {
+function canonicalTurn(ordinal: number, stageId = "stage.resolve"): Lc4CanonicalCallerTurn {
   const bytes = Uint8Array.from([ordinal, 0, ordinal + 1, 0]);
   return {
     caller_turn_id: `turn.${ordinal}`,
     canonical_opportunity_id: `opportunity.${ordinal}`,
-    stage_id: "stage.resolve",
+    stage_id: stageId,
     pcm: {
       caller_pcm_id: `caller.${ordinal}`,
       pcm_sha256: bytesSha(bytes),
@@ -106,7 +117,11 @@ function runnerInput(input: Partial<Lc4RepairRunnerInput> & Readonly<{
     episode_id: episodeId,
     plan: input.plan ?? PLAN,
     canonical_turns: turns,
-    load_repair_pcm: input.load_repair_pcm ?? (() => REPAIR_BYTES.slice()),
+    load_repair_pcm: input.load_repair_pcm ?? ((fixture) => {
+      const bytes = REPAIR_BYTES[fixture.repair_pcm_id as keyof typeof REPAIR_BYTES];
+      if (!bytes) throw new Error("missing test repair bytes");
+      return bytes.slice();
+    }),
     play_caller_pcm: input.play_caller_pcm ?? ((playback) => {
       playbackLog.push(playback);
       if (playback.kind === "repair") return { repair_observation: null };
@@ -137,8 +152,9 @@ describe("LC4 repair development runner", () => {
     const repair = playbackLog[1]!;
     expect(repair.kind).toBe("repair");
     if (repair.kind === "repair") {
-      expect(bytesSha(repair.pcm.bytes)).toBe(bytesSha(REPAIR_BYTES));
-      expect(repair.source_text_sha256).toBe(sha("repair text"));
+      expect(bytesSha(repair.pcm.bytes)).toBe(bytesSha(REPAIR_BYTES["repair.resolve.1"]));
+      expect(repair.source_text_sha256).toBe(sha("repair text:resolve:1"));
+      expect(repair.repair_ordinal).toBe(1);
     }
     const repairEvents = result.journal.filter((event) =>
       event.event_type === "lc4.caller_audio.played"
@@ -152,7 +168,7 @@ describe("LC4 repair development runner", () => {
       canonical_ordinal: 1,
       canonical_horizon_count: 2,
       advances_canonical_horizon: false,
-      pcm_sha256: bytesSha(REPAIR_BYTES),
+      pcm_sha256: bytesSha(REPAIR_BYTES["repair.resolve.1"]),
     });
   });
 
@@ -179,6 +195,30 @@ describe("LC4 repair development runner", () => {
     expect(raw.result.plan_sha256).toBe(hacc.result.plan_sha256);
   });
 
+  it("plays ordinal two after a later response in the same stage without creating a repair horizon", async () => {
+    const turns = [canonicalTurn(1), canonicalTurn(2), canonicalTurn(3)];
+    const playbackLog: Lc4CallerPlayback[] = [];
+    const result = await runLc4RepairEpisode(runnerInput({
+      canonical_turns: turns,
+      playback_log: playbackLog,
+      play_caller_pcm: (playback) => {
+        playbackLog.push(playback);
+        if (playback.kind === "repair") return { repair_observation: null };
+        return { repair_observation: observation("episode.runner", turns[playback.canonical_ordinal - 1]!) };
+      },
+    }));
+
+    expect(playbackLog.map((playback) =>
+      playback.kind === "repair" ? `repair-${playback.repair_ordinal}` : `canonical-${playback.canonical_ordinal}`
+    )).toEqual(["canonical-1", "repair-1", "canonical-2", "repair-2", "canonical-3"]);
+    expect(result.canonical_horizon_executed).toBe(3);
+    expect(result.repair_turns_played).toBe(2);
+    expect(result.repair_state.decisions[2]).toMatchObject({
+      selection: null,
+      no_repair_reason: "stage_budget_exhausted",
+    });
+  });
+
   it("fails closed before repair playback when preregistered PCM bytes do not match", async () => {
     const playbackLog: Lc4CallerPlayback[] = [];
     const result = await runLc4RepairEpisode(runnerInput({
@@ -195,7 +235,14 @@ describe("LC4 repair development runner", () => {
   });
 
   it("enforces the four-repair episode budget while executing every canonical opportunity", async () => {
-    const turns = Array.from({ length: 6 }, (_, index) => canonicalTurn(index + 1));
+    const turns = [
+      canonicalTurn(1),
+      canonicalTurn(2),
+      canonicalTurn(3, "stage.followup"),
+      canonicalTurn(4, "stage.followup"),
+      canonicalTurn(5),
+      canonicalTurn(6, "stage.followup"),
+    ];
     const playbackLog: Lc4CallerPlayback[] = [];
     const result = await runLc4RepairEpisode(runnerInput({
       canonical_turns: turns,

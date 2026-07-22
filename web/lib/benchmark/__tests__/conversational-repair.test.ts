@@ -37,21 +37,23 @@ function planInput(): ConversationalRepairPlanInput {
       ] as const,
     },
   ];
-  const pcmInventory = stages.flatMap((stage) => stage.applicable_blockers.map((blocker, index) => ({
-    repair_pcm_id: `repair.${stage.stage_id}.${blocker}`,
-    stage_id: stage.stage_id,
-    blocker_code: blocker,
-    source_text_sha256: sha(`text:${stage.stage_id}:${blocker}`),
-    pcm_sha256: sha(`pcm:${stage.stage_id}:${blocker}`),
-    byte_length: 3_200 + index * 2,
-    sample_rate_hz: 16_000 as const,
-    channels: 1 as const,
-    encoding: "pcm16le" as const,
-    voice_id: "voice.samantha",
-    repeats_spoken_fact_ids: blocker === "latest_revision_unacknowledged"
-      ? ["fact.corrected_subject"]
-      : [],
-  })));
+  const pcmInventory = stages.flatMap((stage) => stage.applicable_blockers.flatMap((blocker, index) =>
+    ([1, 2] as const).map((ordinal) => ({
+      repair_pcm_id: `repair.${stage.stage_id}.${blocker}.${ordinal}`,
+      stage_id: stage.stage_id,
+      blocker_code: blocker,
+      repair_ordinal: ordinal,
+      source_text_sha256: sha(`text:${stage.stage_id}:${blocker}:${ordinal}`),
+      pcm_sha256: sha(`pcm:${stage.stage_id}:${blocker}:${ordinal}`),
+      byte_length: 3_200 + index * 4 + ordinal * 2,
+      sample_rate_hz: 16_000 as const,
+      channels: 1 as const,
+      encoding: "pcm16le" as const,
+      voice_id: "voice.samantha",
+      repeats_spoken_fact_ids: blocker === "latest_revision_unacknowledged"
+        ? ["fact.corrected_subject"]
+        : [],
+    }))));
   return {
     schema_version: 1,
     protocol_id: "HACC-LC4-v1",
@@ -84,6 +86,7 @@ function nextTurn(
   state: ConversationalRepairState,
   ordinal: number,
   blocker: ConversationalRepairBlocker = "required_evidence_missing",
+  stageId = "stage.identity",
 ) {
   const suffix = String(ordinal).padStart(3, "0");
   return decideConversationalRepair({
@@ -92,6 +95,7 @@ function nextTurn(
     observation: observation({
       caller_turn_id: `turn.${suffix}`,
       canonical_opportunity_id: `opportunity.${suffix}`,
+      stage_id: stageId,
       unmet_blocker_codes: [blocker],
     }),
   });
@@ -103,8 +107,9 @@ describe("LC4 arm-blind bounded conversational repair", () => {
   it("freezes the blocker order, bounded budgets, and complete PCM inventory", () => {
     expect(PLAN.blocker_precedence).toEqual(CONVERSATIONAL_REPAIR_BLOCKERS);
     expect(PLAN.max_repairs_per_caller_turn).toBe(1);
+    expect(PLAN.max_repairs_per_stage).toBe(2);
     expect(PLAN.max_repairs_per_episode).toBe(4);
-    expect(PLAN.pcm_inventory).toHaveLength(7);
+    expect(PLAN.pcm_inventory).toHaveLength(14);
     expect(PLAN.plan_sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -119,10 +124,27 @@ describe("LC4 arm-blind bounded conversational repair", () => {
     });
     expect(result.decision.selection).toMatchObject({
       blocker_code: "latest_revision_unacknowledged",
-      repair_pcm_id: "repair.stage.identity.latest_revision_unacknowledged",
-      pcm_sha256: sha("pcm:stage.identity:latest_revision_unacknowledged"),
+      repair_ordinal: 1,
+      repair_pcm_id: "repair.stage.identity.latest_revision_unacknowledged.1",
+      pcm_sha256: sha("pcm:stage.identity:latest_revision_unacknowledged:1"),
     });
     expect(result.state.repair_count).toBe(1);
+  });
+
+  it("selects the frozen second PCM on a later response in the same stage, then exhausts that stage", () => {
+    const state = createConversationalRepairState(PLAN, "episode.freight.001");
+    const first = nextTurn(state, 1);
+    const second = nextTurn(first.state, 2);
+    const exhausted = nextTurn(second.state, 3);
+
+    expect(first.decision.selection).toMatchObject({ repair_ordinal: 1 });
+    expect(second.decision.selection).toMatchObject({
+      repair_ordinal: 2,
+      repair_pcm_id: "repair.stage.identity.required_evidence_missing.2",
+    });
+    expect(exhausted.decision.selection).toBeNull();
+    expect(exhausted.decision.no_repair_reason).toBe("stage_budget_exhausted");
+    expect(exhausted.state.repair_count).toBe(2);
   });
 
   it("makes one immutable decision per caller turn and exactly replays it", () => {
@@ -157,7 +179,10 @@ describe("LC4 arm-blind bounded conversational repair", () => {
 
   it("stops after four episode repairs without extending the canonical opportunity", () => {
     let state = createConversationalRepairState(PLAN, "episode.freight.001");
-    for (let ordinal = 1; ordinal <= 4; ordinal += 1) state = nextTurn(state, ordinal).state;
+    state = nextTurn(state, 1).state;
+    state = nextTurn(state, 2).state;
+    state = nextTurn(state, 3, "ambiguity_unreconciled", "stage.commit").state;
+    state = nextTurn(state, 4, "ambiguity_unreconciled", "stage.commit").state;
     const exhausted = nextTurn(state, 5);
     expect(exhausted.decision.selection).toBeNull();
     expect(exhausted.decision.no_repair_reason).toBe("episode_budget_exhausted");
@@ -305,6 +330,6 @@ describe("LC4 arm-blind bounded conversational repair", () => {
       pcm_inventory: Array<ConversationalRepairPlanInput["pcm_inventory"][number]>;
     };
     missing.pcm_inventory.pop();
-    expect(() => createConversationalRepairPlan(missing)).toThrow("cover every applicable stage blocker exactly once");
+    expect(() => createConversationalRepairPlan(missing)).toThrow("cover both ordinals");
   });
 });

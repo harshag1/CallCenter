@@ -11,6 +11,7 @@ const FIREWALL_DOMAIN = "hacc/lc4/conversational-repair-firewall/v1\n";
 const TERMINAL_DOMAIN = "hacc/lc4/conversational-repair-terminal/v1\n";
 
 export const CONVERSATIONAL_REPAIR_MAX_PER_CALLER_TURN = 1 as const;
+export const CONVERSATIONAL_REPAIR_MAX_PER_STAGE = 2 as const;
 export const CONVERSATIONAL_REPAIR_MAX_PER_EPISODE = 4 as const;
 
 export const CONVERSATIONAL_REPAIR_BLOCKERS = Object.freeze([
@@ -43,6 +44,7 @@ export type ConversationalRepairPcm = Readonly<{
   repair_pcm_id: string;
   stage_id: string;
   blocker_code: ConversationalRepairBlocker;
+  repair_ordinal: 1 | 2;
   source_text_sha256: string;
   pcm_sha256: string;
   byte_length: number;
@@ -70,6 +72,7 @@ export type ConversationalRepairPlanInput = Readonly<{
 export type ConversationalRepairPlan = ConversationalRepairPlanInput & Readonly<{
   blocker_precedence: typeof CONVERSATIONAL_REPAIR_BLOCKERS;
   max_repairs_per_caller_turn: typeof CONVERSATIONAL_REPAIR_MAX_PER_CALLER_TURN;
+  max_repairs_per_stage: typeof CONVERSATIONAL_REPAIR_MAX_PER_STAGE;
   max_repairs_per_episode: typeof CONVERSATIONAL_REPAIR_MAX_PER_EPISODE;
   plan_sha256: string;
 }>;
@@ -93,6 +96,7 @@ export type ConversationalRepairSelection = Readonly<{
   kind: "repair";
   stage_id: string;
   blocker_code: ConversationalRepairBlocker;
+  repair_ordinal: 1 | 2;
   repair_pcm_id: string;
   pcm_sha256: string;
   byte_length: number;
@@ -104,6 +108,7 @@ export type ConversationalRepairSelection = Readonly<{
 export type ConversationalNoRepairReason =
   | "deadline_not_reached"
   | "no_unmet_blocker"
+  | "stage_budget_exhausted"
   | "episode_budget_exhausted";
 
 export type ConversationalRepairDecision = Readonly<{
@@ -237,13 +242,16 @@ export function createConversationalRepairPlan(input: ConversationalRepairPlanIn
   const stageById = new Map(stages.map((stage) => [stage.stage_id, stage]));
   const pcmInventory = input.pcm_inventory.map((fixture, fixtureIndex) => {
     assertExactKeys(fixture, [
-      "repair_pcm_id", "stage_id", "blocker_code", "source_text_sha256", "pcm_sha256",
+      "repair_pcm_id", "stage_id", "blocker_code", "repair_ordinal", "source_text_sha256", "pcm_sha256",
       "byte_length", "sample_rate_hz", "channels", "encoding", "voice_id", "repeats_spoken_fact_ids",
     ], `pcm_inventory[${fixtureIndex}]`);
     assertIdentifier(fixture.repair_pcm_id, `pcm_inventory[${fixtureIndex}].repair_pcm_id`);
     assertIdentifier(fixture.stage_id, `pcm_inventory[${fixtureIndex}].stage_id`);
     assertIdentifier(fixture.voice_id, `pcm_inventory[${fixtureIndex}].voice_id`);
     const blockerCode = parseBlocker(fixture.blocker_code, `pcm_inventory[${fixtureIndex}].blocker_code`);
+    if (fixture.repair_ordinal !== 1 && fixture.repair_ordinal !== 2) {
+      throw new Error(`repair PCM ${fixture.repair_pcm_id} ordinal must be 1 or 2`);
+    }
     const stage = stageById.get(fixture.stage_id);
     if (!stage || !stage.applicable_blockers.includes(blockerCode)) {
       throw new Error(`repair PCM ${fixture.repair_pcm_id} is not bound to an applicable stage blocker`);
@@ -270,13 +278,17 @@ export function createConversationalRepairPlan(input: ConversationalRepairPlanIn
   });
   assertUnique(pcmInventory.map((fixture) => fixture.repair_pcm_id), "repair PCM IDs");
   assertUnique(pcmInventory.map((fixture) => fixture.pcm_sha256), "repair PCM hashes");
-  const fixtureKeys = pcmInventory.map((fixture) => `${fixture.stage_id}:${fixture.blocker_code}`);
-  assertUnique(fixtureKeys, "stage/blocker repair PCM bindings");
+  const fixtureKeys = pcmInventory.map((fixture) =>
+    `${fixture.stage_id}:${fixture.blocker_code}:${fixture.repair_ordinal}`
+  );
+  assertUnique(fixtureKeys, "stage/blocker/ordinal repair PCM bindings");
   const expectedFixtureKeys = stages.flatMap((stage) =>
-    stage.applicable_blockers.map((blocker) => `${stage.stage_id}:${blocker}`)
+    stage.applicable_blockers.flatMap((blocker) => ([1, 2] as const).map((ordinal) =>
+      `${stage.stage_id}:${blocker}:${ordinal}`
+    ))
   );
   if (canonicalJson([...fixtureKeys].sort()) !== canonicalJson([...expectedFixtureKeys].sort())) {
-    throw new Error("repair PCM inventory must cover every applicable stage blocker exactly once");
+    throw new Error("repair PCM inventory must cover both ordinals for every applicable stage blocker exactly once");
   }
 
   const body = Object.freeze({
@@ -288,6 +300,7 @@ export function createConversationalRepairPlan(input: ConversationalRepairPlanIn
     pcm_inventory: Object.freeze(pcmInventory),
     blocker_precedence: CONVERSATIONAL_REPAIR_BLOCKERS,
     max_repairs_per_caller_turn: CONVERSATIONAL_REPAIR_MAX_PER_CALLER_TURN,
+    max_repairs_per_stage: CONVERSATIONAL_REPAIR_MAX_PER_STAGE,
     max_repairs_per_episode: CONVERSATIONAL_REPAIR_MAX_PER_EPISODE,
   });
   return Object.freeze({
@@ -355,6 +368,32 @@ function verifyState(plan: ConversationalRepairPlan, state: ConversationalRepair
     }
     if ((decision.selection === null) === (decision.no_repair_reason === null)) {
       throw new Error(`repair decision[${index}] must contain exactly one disposition`);
+    }
+    if (decision.selection) {
+      if (decision.selection.stage_id !== decision.stage_id) {
+        throw new Error(`repair decision[${index}] selection stage is inconsistent`);
+      }
+      const priorStageRepairs = state.decisions.slice(0, index).filter((candidate) =>
+        candidate.selection?.stage_id === decision.stage_id
+      ).length;
+      if (priorStageRepairs >= CONVERSATIONAL_REPAIR_MAX_PER_STAGE
+        || decision.selection.repair_ordinal !== priorStageRepairs + 1) {
+        throw new Error(`repair decision[${index}] violates the frozen stage ordinal`);
+      }
+      const fixture = plan.pcm_inventory.find((candidate) =>
+        candidate.repair_pcm_id === decision.selection?.repair_pcm_id
+        && candidate.stage_id === decision.selection?.stage_id
+        && candidate.blocker_code === decision.selection?.blocker_code
+        && candidate.repair_ordinal === decision.selection?.repair_ordinal
+      );
+      if (!fixture
+        || fixture.pcm_sha256 !== decision.selection.pcm_sha256
+        || fixture.byte_length !== decision.selection.byte_length
+        || fixture.sample_rate_hz !== decision.selection.sample_rate_hz
+        || fixture.channels !== decision.selection.channels
+        || fixture.encoding !== decision.selection.encoding) {
+        throw new Error(`repair decision[${index}] is not bound to its ordinal PCM fixture`);
+      }
     }
   }
   const counted = state.decisions.filter((decision) => decision.selection !== null).length;
@@ -441,26 +480,37 @@ export function decideConversationalRepair(input: Readonly<{
   } else if (input.state.repair_count >= CONVERSATIONAL_REPAIR_MAX_PER_EPISODE) {
     noRepairReason = "episode_budget_exhausted";
   } else {
-    const blocker = observation.unmet_blocker_codes[0]!;
-    const fixture = input.plan.pcm_inventory.find((candidate) =>
-      candidate.stage_id === observation.stage_id && candidate.blocker_code === blocker
-    );
-    if (!fixture) throw new Error("selected blocker has no preregistered repair PCM");
-    const spokenFacts = new Set(observation.spoken_caller_fact_ids);
-    if (fixture.repeats_spoken_fact_ids.some((factId) => !spokenFacts.has(factId))) {
-      throw new Error("repair PCM would reveal a caller fact that has not already been spoken");
+    const stageRepairCount = input.state.decisions.filter((decision) =>
+      decision.selection?.stage_id === observation.stage_id
+    ).length;
+    if (stageRepairCount >= CONVERSATIONAL_REPAIR_MAX_PER_STAGE) {
+      noRepairReason = "stage_budget_exhausted";
+    } else {
+      const blocker = observation.unmet_blocker_codes[0]!;
+      const repairOrdinal = (stageRepairCount + 1) as 1 | 2;
+      const fixture = input.plan.pcm_inventory.find((candidate) =>
+        candidate.stage_id === observation.stage_id
+        && candidate.blocker_code === blocker
+        && candidate.repair_ordinal === repairOrdinal
+      );
+      if (!fixture) throw new Error("selected blocker has no preregistered ordinal repair PCM");
+      const spokenFacts = new Set(observation.spoken_caller_fact_ids);
+      if (fixture.repeats_spoken_fact_ids.some((factId) => !spokenFacts.has(factId))) {
+        throw new Error("repair PCM would reveal a caller fact that has not already been spoken");
+      }
+      selection = Object.freeze({
+        kind: "repair" as const,
+        stage_id: fixture.stage_id,
+        blocker_code: fixture.blocker_code,
+        repair_ordinal: fixture.repair_ordinal,
+        repair_pcm_id: fixture.repair_pcm_id,
+        pcm_sha256: fixture.pcm_sha256,
+        byte_length: fixture.byte_length,
+        sample_rate_hz: fixture.sample_rate_hz,
+        channels: fixture.channels,
+        encoding: fixture.encoding,
+      });
     }
-    selection = Object.freeze({
-      kind: "repair" as const,
-      stage_id: fixture.stage_id,
-      blocker_code: fixture.blocker_code,
-      repair_pcm_id: fixture.repair_pcm_id,
-      pcm_sha256: fixture.pcm_sha256,
-      byte_length: fixture.byte_length,
-      sample_rate_hz: fixture.sample_rate_hz,
-      channels: fixture.channels,
-      encoding: fixture.encoding,
-    });
   }
 
   const decision = makeDecision({
