@@ -1,0 +1,1522 @@
+{
+  "schema_version": 1,
+  "artifact_id": "HACC-LC4-POWER-v1",
+  "protocol_id": "HACC-LC4-v1",
+  "status": "outcome-blind planning artifact; not a preregistration or run authorization",
+  "created_at": "2026-07-21T00:00:00.000Z",
+  "outcome_blindness": {
+    "lc3_treatment_effect_outcomes_used": false,
+    "nuisance_parameters_source": "prospective alternatives stated in HACC_LC4_V1_PROTOCOL_DRAFT.md",
+    "resizing_rule": "no optional stopping, outcome-based sample-size re-estimation, provider removal, family removal, or endpoint substitution"
+  },
+  "schedule": {
+    "independent_templates": 24,
+    "provider_strata": 3,
+    "matched_pairs": 72,
+    "episodes": 144,
+    "caller_opportunities_per_episode": 60,
+    "scheduled_caller_opportunities": 8640,
+    "providers": [
+      "openai",
+      "gemini",
+      "xai"
+    ],
+    "families": [
+      "freight-customs",
+      "fleet-repair",
+      "live-event",
+      "invoice-dispute",
+      "equipment-rental",
+      "datacenter-maintenance"
+    ],
+    "structural_variants": [
+      "branch-changing-correction",
+      "two-goal-resumption",
+      "async-result-conflict",
+      "committed-effect-reconciliation"
+    ],
+    "tts_voice_slots": [
+      "tts-slot-1",
+      "tts-slot-2",
+      "tts-slot-3"
+    ]
+  },
+  "randomization": {
+    "seed": "hacc-lc4-power-plan-20260721-v1",
+    "method": "seeded constrained rank-parity allocation with exact marginal balance",
+    "arm_labels": [
+      "native",
+      "hacc"
+    ],
+    "provider_execution_method": "seeded provider order rotated as a three-period Latin square",
+    "assignments": [
+      {
+        "pair_id": "lc4-template-01-openai",
+        "template_id": "lc4-template-01",
+        "provider": "openai",
+        "family": "freight-customs",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-01-gemini",
+        "template_id": "lc4-template-01",
+        "provider": "gemini",
+        "family": "freight-customs",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-01-xai",
+        "template_id": "lc4-template-01",
+        "provider": "xai",
+        "family": "freight-customs",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-02-openai",
+        "template_id": "lc4-template-02",
+        "provider": "openai",
+        "family": "freight-customs",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-02-gemini",
+        "template_id": "lc4-template-02",
+        "provider": "gemini",
+        "family": "freight-customs",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-02-xai",
+        "template_id": "lc4-template-02",
+        "provider": "xai",
+        "family": "freight-customs",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-03-openai",
+        "template_id": "lc4-template-03",
+        "provider": "openai",
+        "family": "freight-customs",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-03-gemini",
+        "template_id": "lc4-template-03",
+        "provider": "gemini",
+        "family": "freight-customs",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-03-xai",
+        "template_id": "lc4-template-03",
+        "provider": "xai",
+        "family": "freight-customs",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-04-openai",
+        "template_id": "lc4-template-04",
+        "provider": "openai",
+        "family": "freight-customs",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-04-gemini",
+        "template_id": "lc4-template-04",
+        "provider": "gemini",
+        "family": "freight-customs",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-04-xai",
+        "template_id": "lc4-template-04",
+        "provider": "xai",
+        "family": "freight-customs",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-05-openai",
+        "template_id": "lc4-template-05",
+        "provider": "openai",
+        "family": "fleet-repair",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-05-gemini",
+        "template_id": "lc4-template-05",
+        "provider": "gemini",
+        "family": "fleet-repair",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-05-xai",
+        "template_id": "lc4-template-05",
+        "provider": "xai",
+        "family": "fleet-repair",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-06-openai",
+        "template_id": "lc4-template-06",
+        "provider": "openai",
+        "family": "fleet-repair",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-06-gemini",
+        "template_id": "lc4-template-06",
+        "provider": "gemini",
+        "family": "fleet-repair",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-06-xai",
+        "template_id": "lc4-template-06",
+        "provider": "xai",
+        "family": "fleet-repair",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-07-openai",
+        "template_id": "lc4-template-07",
+        "provider": "openai",
+        "family": "fleet-repair",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-07-gemini",
+        "template_id": "lc4-template-07",
+        "provider": "gemini",
+        "family": "fleet-repair",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-07-xai",
+        "template_id": "lc4-template-07",
+        "provider": "xai",
+        "family": "fleet-repair",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-08-openai",
+        "template_id": "lc4-template-08",
+        "provider": "openai",
+        "family": "fleet-repair",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-08-gemini",
+        "template_id": "lc4-template-08",
+        "provider": "gemini",
+        "family": "fleet-repair",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-08-xai",
+        "template_id": "lc4-template-08",
+        "provider": "xai",
+        "family": "fleet-repair",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-09-openai",
+        "template_id": "lc4-template-09",
+        "provider": "openai",
+        "family": "live-event",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-09-gemini",
+        "template_id": "lc4-template-09",
+        "provider": "gemini",
+        "family": "live-event",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-09-xai",
+        "template_id": "lc4-template-09",
+        "provider": "xai",
+        "family": "live-event",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-10-openai",
+        "template_id": "lc4-template-10",
+        "provider": "openai",
+        "family": "live-event",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-10-gemini",
+        "template_id": "lc4-template-10",
+        "provider": "gemini",
+        "family": "live-event",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-10-xai",
+        "template_id": "lc4-template-10",
+        "provider": "xai",
+        "family": "live-event",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-11-openai",
+        "template_id": "lc4-template-11",
+        "provider": "openai",
+        "family": "live-event",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-11-gemini",
+        "template_id": "lc4-template-11",
+        "provider": "gemini",
+        "family": "live-event",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-11-xai",
+        "template_id": "lc4-template-11",
+        "provider": "xai",
+        "family": "live-event",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-12-openai",
+        "template_id": "lc4-template-12",
+        "provider": "openai",
+        "family": "live-event",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-12-gemini",
+        "template_id": "lc4-template-12",
+        "provider": "gemini",
+        "family": "live-event",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-12-xai",
+        "template_id": "lc4-template-12",
+        "provider": "xai",
+        "family": "live-event",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-13-openai",
+        "template_id": "lc4-template-13",
+        "provider": "openai",
+        "family": "invoice-dispute",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-13-gemini",
+        "template_id": "lc4-template-13",
+        "provider": "gemini",
+        "family": "invoice-dispute",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-13-xai",
+        "template_id": "lc4-template-13",
+        "provider": "xai",
+        "family": "invoice-dispute",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-14-openai",
+        "template_id": "lc4-template-14",
+        "provider": "openai",
+        "family": "invoice-dispute",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-14-gemini",
+        "template_id": "lc4-template-14",
+        "provider": "gemini",
+        "family": "invoice-dispute",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-14-xai",
+        "template_id": "lc4-template-14",
+        "provider": "xai",
+        "family": "invoice-dispute",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-15-openai",
+        "template_id": "lc4-template-15",
+        "provider": "openai",
+        "family": "invoice-dispute",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-15-gemini",
+        "template_id": "lc4-template-15",
+        "provider": "gemini",
+        "family": "invoice-dispute",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-15-xai",
+        "template_id": "lc4-template-15",
+        "provider": "xai",
+        "family": "invoice-dispute",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-16-openai",
+        "template_id": "lc4-template-16",
+        "provider": "openai",
+        "family": "invoice-dispute",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-16-gemini",
+        "template_id": "lc4-template-16",
+        "provider": "gemini",
+        "family": "invoice-dispute",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-16-xai",
+        "template_id": "lc4-template-16",
+        "provider": "xai",
+        "family": "invoice-dispute",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-17-openai",
+        "template_id": "lc4-template-17",
+        "provider": "openai",
+        "family": "equipment-rental",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-17-gemini",
+        "template_id": "lc4-template-17",
+        "provider": "gemini",
+        "family": "equipment-rental",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-17-xai",
+        "template_id": "lc4-template-17",
+        "provider": "xai",
+        "family": "equipment-rental",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-18-openai",
+        "template_id": "lc4-template-18",
+        "provider": "openai",
+        "family": "equipment-rental",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-18-gemini",
+        "template_id": "lc4-template-18",
+        "provider": "gemini",
+        "family": "equipment-rental",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-18-xai",
+        "template_id": "lc4-template-18",
+        "provider": "xai",
+        "family": "equipment-rental",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-19-openai",
+        "template_id": "lc4-template-19",
+        "provider": "openai",
+        "family": "equipment-rental",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-19-gemini",
+        "template_id": "lc4-template-19",
+        "provider": "gemini",
+        "family": "equipment-rental",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-19-xai",
+        "template_id": "lc4-template-19",
+        "provider": "xai",
+        "family": "equipment-rental",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-20-openai",
+        "template_id": "lc4-template-20",
+        "provider": "openai",
+        "family": "equipment-rental",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-20-gemini",
+        "template_id": "lc4-template-20",
+        "provider": "gemini",
+        "family": "equipment-rental",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-20-xai",
+        "template_id": "lc4-template-20",
+        "provider": "xai",
+        "family": "equipment-rental",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-21-openai",
+        "template_id": "lc4-template-21",
+        "provider": "openai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-21-gemini",
+        "template_id": "lc4-template-21",
+        "provider": "gemini",
+        "family": "datacenter-maintenance",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-21-xai",
+        "template_id": "lc4-template-21",
+        "provider": "xai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "branch-changing-correction",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-22-openai",
+        "template_id": "lc4-template-22",
+        "provider": "openai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-22-gemini",
+        "template_id": "lc4-template-22",
+        "provider": "gemini",
+        "family": "datacenter-maintenance",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-22-xai",
+        "template_id": "lc4-template-22",
+        "provider": "xai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "two-goal-resumption",
+        "tts_voice_slot": "tts-slot-1",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "openai",
+          "xai",
+          "gemini"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-23-openai",
+        "template_id": "lc4-template-23",
+        "provider": "openai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-23-gemini",
+        "template_id": "lc4-template-23",
+        "provider": "gemini",
+        "family": "datacenter-maintenance",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-23-xai",
+        "template_id": "lc4-template-23",
+        "provider": "xai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "async-result-conflict",
+        "tts_voice_slot": "tts-slot-2",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "xai",
+          "gemini",
+          "openai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-24-openai",
+        "template_id": "lc4-template-24",
+        "provider": "openai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-24-gemini",
+        "template_id": "lc4-template-24",
+        "provider": "gemini",
+        "family": "datacenter-maintenance",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "native",
+          "hacc"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      },
+      {
+        "pair_id": "lc4-template-24-xai",
+        "template_id": "lc4-template-24",
+        "provider": "xai",
+        "family": "datacenter-maintenance",
+        "structural_variant": "committed-effect-reconciliation",
+        "tts_voice_slot": "tts-slot-3",
+        "arm_order": [
+          "hacc",
+          "native"
+        ],
+        "provider_execution_order": [
+          "gemini",
+          "openai",
+          "xai"
+        ]
+      }
+    ],
+    "balance": {
+      "by_provider_and_order": {
+        "gemini/hacc-native": 12,
+        "gemini/native-hacc": 12,
+        "openai/hacc-native": 12,
+        "openai/native-hacc": 12,
+        "xai/hacc-native": 12,
+        "xai/native-hacc": 12
+      },
+      "by_provider_family_and_order": {
+        "gemini/datacenter-maintenance/hacc-native": 2,
+        "gemini/datacenter-maintenance/native-hacc": 2,
+        "gemini/equipment-rental/hacc-native": 2,
+        "gemini/equipment-rental/native-hacc": 2,
+        "gemini/fleet-repair/hacc-native": 2,
+        "gemini/fleet-repair/native-hacc": 2,
+        "gemini/freight-customs/hacc-native": 2,
+        "gemini/freight-customs/native-hacc": 2,
+        "gemini/invoice-dispute/hacc-native": 2,
+        "gemini/invoice-dispute/native-hacc": 2,
+        "gemini/live-event/hacc-native": 2,
+        "gemini/live-event/native-hacc": 2,
+        "openai/datacenter-maintenance/hacc-native": 2,
+        "openai/datacenter-maintenance/native-hacc": 2,
+        "openai/equipment-rental/hacc-native": 2,
+        "openai/equipment-rental/native-hacc": 2,
+        "openai/fleet-repair/hacc-native": 2,
+        "openai/fleet-repair/native-hacc": 2,
+        "openai/freight-customs/hacc-native": 2,
+        "openai/freight-customs/native-hacc": 2,
+        "openai/invoice-dispute/hacc-native": 2,
+        "openai/invoice-dispute/native-hacc": 2,
+        "openai/live-event/hacc-native": 2,
+        "openai/live-event/native-hacc": 2,
+        "xai/datacenter-maintenance/hacc-native": 2,
+        "xai/datacenter-maintenance/native-hacc": 2,
+        "xai/equipment-rental/hacc-native": 2,
+        "xai/equipment-rental/native-hacc": 2,
+        "xai/fleet-repair/hacc-native": 2,
+        "xai/fleet-repair/native-hacc": 2,
+        "xai/freight-customs/hacc-native": 2,
+        "xai/freight-customs/native-hacc": 2,
+        "xai/invoice-dispute/hacc-native": 2,
+        "xai/invoice-dispute/native-hacc": 2,
+        "xai/live-event/hacc-native": 2,
+        "xai/live-event/native-hacc": 2
+      },
+      "by_provider_variant_and_order": {
+        "gemini/async-result-conflict/hacc-native": 3,
+        "gemini/async-result-conflict/native-hacc": 3,
+        "gemini/branch-changing-correction/hacc-native": 3,
+        "gemini/branch-changing-correction/native-hacc": 3,
+        "gemini/committed-effect-reconciliation/hacc-native": 3,
+        "gemini/committed-effect-reconciliation/native-hacc": 3,
+        "gemini/two-goal-resumption/hacc-native": 3,
+        "gemini/two-goal-resumption/native-hacc": 3,
+        "openai/async-result-conflict/hacc-native": 3,
+        "openai/async-result-conflict/native-hacc": 3,
+        "openai/branch-changing-correction/hacc-native": 3,
+        "openai/branch-changing-correction/native-hacc": 3,
+        "openai/committed-effect-reconciliation/hacc-native": 3,
+        "openai/committed-effect-reconciliation/native-hacc": 3,
+        "openai/two-goal-resumption/hacc-native": 3,
+        "openai/two-goal-resumption/native-hacc": 3,
+        "xai/async-result-conflict/hacc-native": 3,
+        "xai/async-result-conflict/native-hacc": 3,
+        "xai/branch-changing-correction/hacc-native": 3,
+        "xai/branch-changing-correction/native-hacc": 3,
+        "xai/committed-effect-reconciliation/hacc-native": 3,
+        "xai/committed-effect-reconciliation/native-hacc": 3,
+        "xai/two-goal-resumption/hacc-native": 3,
+        "xai/two-goal-resumption/native-hacc": 3
+      },
+      "by_provider_tts_slot_and_order": {
+        "gemini/tts-slot-1/hacc-native": 4,
+        "gemini/tts-slot-1/native-hacc": 4,
+        "gemini/tts-slot-2/hacc-native": 4,
+        "gemini/tts-slot-2/native-hacc": 4,
+        "gemini/tts-slot-3/hacc-native": 4,
+        "gemini/tts-slot-3/native-hacc": 4,
+        "openai/tts-slot-1/hacc-native": 4,
+        "openai/tts-slot-1/native-hacc": 4,
+        "openai/tts-slot-2/hacc-native": 4,
+        "openai/tts-slot-2/native-hacc": 4,
+        "openai/tts-slot-3/hacc-native": 4,
+        "openai/tts-slot-3/native-hacc": 4,
+        "xai/tts-slot-1/hacc-native": 4,
+        "xai/tts-slot-1/native-hacc": 4,
+        "xai/tts-slot-2/hacc-native": 4,
+        "xai/tts-slot-2/native-hacc": 4,
+        "xai/tts-slot-3/hacc-native": 4,
+        "xai/tts-slot-3/native-hacc": 4
+      },
+      "provider_execution_position": {
+        "gemini/position-1": 8,
+        "gemini/position-2": 8,
+        "gemini/position-3": 8,
+        "openai/position-1": 8,
+        "openai/position-2": 8,
+        "openai/position-3": 8,
+        "xai/position-1": 8,
+        "xai/position-2": 8,
+        "xai/position-3": 8
+      }
+    },
+    "allocation_sha256": "af8cb6c4a464c5e57f7807106e936ae6e7eb65647d0f82d1694ff95f49cb432d"
+  },
+  "primary_analysis": {
+    "estimand": "equal-provider-weight paired risk difference in bounded useful completion",
+    "null_test": "planned exact provider-stratified constrained paired randomization test; executable enumeration required before preregistration",
+    "statistic": "mean of the three provider-specific paired risk differences",
+    "randomization_unit": "provider-template pair",
+    "randomization_support_size": "not 2^72 because exact marginal balance constrains assignments; support must be derived from the frozen allocation generator before preregistration",
+    "interval": "paired template-cluster bootstrap over 24 templates",
+    "provider_specific_rows": "descriptive; n=24 pairs/provider is not powered for provider-specific claims",
+    "missingness": "all opened or missing episodes remain ITT failures; no retries"
+  },
+  "exact_independent_pair_power": {
+    "method_scope": "exact two-sided conditional McNemar power under independent provider-template pairs",
+    "alpha": 0.05,
+    "minimally_important_risk_difference": 0.25,
+    "scenarios": [
+      {
+        "hacc_only_probability": 0.3,
+        "native_only_probability": 0.05,
+        "method": "exact_conditional_mcnemar_two_sided",
+        "sample_size": 72,
+        "alpha": 0.05,
+        "risk_difference": 0.25,
+        "discordance": 0.35,
+        "treatment_only_probability": 0.3,
+        "baseline_only_probability": 0.04999999999999999,
+        "power": 0.9601001249977493
+      },
+      {
+        "hacc_only_probability": 0.35,
+        "native_only_probability": 0.1,
+        "method": "exact_conditional_mcnemar_two_sided",
+        "sample_size": 72,
+        "alpha": 0.05,
+        "risk_difference": 0.24999999999999997,
+        "discordance": 0.44999999999999996,
+        "treatment_only_probability": 0.35,
+        "baseline_only_probability": 0.09999999999999999,
+        "power": 0.8772507900580806
+      }
+    ]
+  },
+  "template_cluster_sensitivity": {
+    "method_scope": "design-effect floor sensitivity, not power for the final cluster-bootstrap decision rule",
+    "formula": "design_effect = 1 + (3 - 1) * ICC; effective_pairs = floor(72 / design_effect)",
+    "rows": [
+      {
+        "alternative": "hacc-only-0.30_native-only-0.05",
+        "within_template_provider_icc": 0,
+        "providers_per_template": 3,
+        "design_effect": 1,
+        "effective_pairs_floor": 72,
+        "exact_power_at_effective_pairs": 0.9601001249977493
+      },
+      {
+        "alternative": "hacc-only-0.35_native-only-0.10",
+        "within_template_provider_icc": 0,
+        "providers_per_template": 3,
+        "design_effect": 1,
+        "effective_pairs_floor": 72,
+        "exact_power_at_effective_pairs": 0.8772507900580803
+      },
+      {
+        "alternative": "hacc-only-0.30_native-only-0.05",
+        "within_template_provider_icc": 0.1,
+        "providers_per_template": 3,
+        "design_effect": 1.2,
+        "effective_pairs_floor": 60,
+        "exact_power_at_effective_pairs": 0.9186662307332938
+      },
+      {
+        "alternative": "hacc-only-0.35_native-only-0.10",
+        "within_template_provider_icc": 0.1,
+        "providers_per_template": 3,
+        "design_effect": 1.2,
+        "effective_pairs_floor": 60,
+        "exact_power_at_effective_pairs": 0.8014223234096615
+      },
+      {
+        "alternative": "hacc-only-0.30_native-only-0.05",
+        "within_template_provider_icc": 0.25,
+        "providers_per_template": 3,
+        "design_effect": 1.5,
+        "effective_pairs_floor": 48,
+        "exact_power_at_effective_pairs": 0.8358440679142405
+      },
+      {
+        "alternative": "hacc-only-0.35_native-only-0.10",
+        "within_template_provider_icc": 0.25,
+        "providers_per_template": 3,
+        "design_effect": 1.5,
+        "effective_pairs_floor": 48,
+        "exact_power_at_effective_pairs": 0.6952042194243462
+      },
+      {
+        "alternative": "hacc-only-0.30_native-only-0.05",
+        "within_template_provider_icc": 0.5,
+        "providers_per_template": 3,
+        "design_effect": 2,
+        "effective_pairs_floor": 36,
+        "exact_power_at_effective_pairs": 0.6794577804388112
+      },
+      {
+        "alternative": "hacc-only-0.35_native-only-0.10",
+        "within_template_provider_icc": 0.5,
+        "providers_per_template": 3,
+        "design_effect": 2,
+        "effective_pairs_floor": 36,
+        "exact_power_at_effective_pairs": 0.5482371829343844
+      },
+      {
+        "alternative": "hacc-only-0.30_native-only-0.05",
+        "within_template_provider_icc": 1,
+        "providers_per_template": 3,
+        "design_effect": 3,
+        "effective_pairs_floor": 24,
+        "exact_power_at_effective_pairs": 0.43219033659290973
+      },
+      {
+        "alternative": "hacc-only-0.35_native-only-0.10",
+        "within_template_provider_icc": 1,
+        "providers_per_template": 3,
+        "design_effect": 3,
+        "effective_pairs_floor": 24,
+        "exact_power_at_effective_pairs": 0.3392263361999647
+      }
+    ],
+    "perfect_cluster_note": "ICC=1 reduces the sensitivity calculation to 24 effective template pairs; provider-specific rows and clustered confirmation remain descriptive unless separately powered."
+  },
+  "claim_boundaries": [
+    "The exact calculations do not include provider heterogeneity, the template-cluster bootstrap decision rule, missingness, safety conjunctions, or multiplicity.",
+    "The exact McNemar power calculation is not power for the still-unimplemented constrained randomization test.",
+    "The design-effect rows are sensitivity diagnostics, not confirmatory power guarantees.",
+    "A favorable pooled result does not establish success for every provider, and provider-specific rows remain descriptive.",
+    "LC3 outcomes are development evidence and were not used to choose LC4 power assumptions or resize the schedule.",
+    "This artifact authorizes zero provider calls and zero efficacy claims."
+  ],
+  "artifact_sha256": "2f55bb8cae3185a1b04235ca62a174fcfb6f67600500fb3725c3be28e07bfd90"
+}
