@@ -86,10 +86,57 @@ At `57dbb21`, validation passed 227 test files and 2,298 tests, with 21 files
 and 59 tests conditionally skipped. TypeScript, ESLint, and the production Next
 build also passed.
 
+## Completed Gemini/xAI transport diagnostic at `61a1b22`
+
+**Non-efficacy evidence only.** This diagnostic completed its signed
+four-episode Gemini/xAI horizon, but its terminal explicitly sets
+`efficacy_claim_eligible: false`. It must not be converted into model scores,
+a HACC-versus-Native comparison, or a launch benchmark claim.
+
+- Source commit: `61a1b22d4e6800ff4da99533ca1277086166543b`
+- Protocol: `HACC-LC4-DEV-GX-DIAGNOSTIC-v1`
+- Episodes: Gemini HACC, Gemini Native, xAI Native, and xAI HACC; no OpenAI
+  episode or provider call was observed.
+- Completed: four of four episodes and 240 of 240 canonical opportunities.
+- Playback accounting: 240 canonical generations plus 16 bounded repair
+  generations, for 256 total; zero paid retries.
+- Retention/accounting: 240 mechanism-receipt count, 256 listener records, 256
+  retained caller-audio objects, and 256 retained assistant-audio objects.
+- Terminal: `251f1cb758439cb6e45222094dbfe21c99c3dbb3cdbd4b91f605e4d4a86946d4`
+- Terminal envelope: `abb9e4645c8eefc5d49ec5f5bf0dca62e1a6cf47a5ca9d27ef1e7c8721c66727`
+- Terminal CAS object: `6d527eb2c4458df9a46306fd90e4593a36e98386791debd29b6ceeed319a8091`
+- Ledger: 762 valid chained events; head
+  `4862217197b21216497000a182d0fb92e10ffc1990db0c963a785ddeb150bc7d`;
+  raw artifact
+  `40661b8f3452801fe50622c0c1d2a741fb1a9111d2154b8070b3a76b1fa56cf5`.
+- CAS audit: 1,412 content-addressed regular files with no symlinks; audit
+  `745f54bf6b0e8cf67decc8816d1119311ac8a3ce35c1c53cb2ba5b15fca1ccb9`.
+
+The retained listener transcripts expose two gaps that block efficacy scoring.
+At opportunity 35, Gemini HACC spoke a success claim without a retained
+accepted-action or commit receipt; Gemini Native reported an argument mismatch;
+and both xAI arms reported that the submission capability was absent from the
+catalog. At opportunity 42, the arms variously reported unavailable
+reconciliation/status capability or made an unsupported status claim. These
+are descriptive spoken outcomes only, not authoritative action outcomes.
+
+The fixed semantic evaluator recorded an empty criterion list for every one of
+the eight opportunity-35/opportunity-42 arm records, then projected each as
+`final_required_criteria_pass: true`. Those are vacuous listener passes. In
+addition, this root retains HACC response-plan hashes but no response-plan,
+control-receipt, or tool-action request/result object that can prove action
+acceptance, rejection, idempotency, or commitment. Before another efficacy run,
+the catalog must expose the exact mutation and reconciliation capabilities, and
+the evidence/evaluator contract must require receipt-grounded action outcomes
+with non-empty criteria for action-bearing opportunities.
+
 ## Current release boundary
 
 The next admissible provider run requires a fresh clean-source qualification
-and fresh signed execution root. OpenAI realtime generation remains blocked by
-the shared API project's `insufficient_quota` response. Until that project can
-generate again, the six-episode comparison is incomplete and no benchmark
-number or launch graph is authorized.
+and fresh signed execution root. Fresh zero-audio probes against the current
+OpenAI realtime target still fail before response creation with zero usage; the
+latest sanitized probe did not preserve a provider subcode specific enough to
+attribute that failure to quota alone. Until OpenAI generation succeeds and the
+catalog/evaluator gaps above are fixed under a newly frozen protocol, the
+six-episode comparison is incomplete and no benchmark number or launch graph is
+authorized.
