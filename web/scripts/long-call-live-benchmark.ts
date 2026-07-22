@@ -66,7 +66,11 @@ import {
   qualifyProviders,
   type ProviderQualificationTarget,
 } from "../lib/benchmark/provider-qualification";
-import { retainedTrialEvidence, type RetainedTrialEvidence } from "../lib/benchmark/runner-exception-evidence";
+import {
+  parseRetainedTrialEvidence,
+  retainedTrialEvidence,
+  type RetainedTrialEvidence,
+} from "../lib/benchmark/runner-exception-evidence";
 import { evaluateScenarioWorld } from "../lib/benchmark/tool-world";
 import { createUsefulnessCallerSchedulePlan } from "../lib/benchmark/usefulness-task-suite";
 import { AgentFlowSchema } from "../lib/flow";
@@ -74,7 +78,7 @@ import type { NormalizedRealtimeClient } from "../lib/realtime/client/types";
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/hacc-lc3-v4");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/hacc-lc3-v5");
 const PLAN_FILE = "experiment-plan.json";
 const LEDGER_FILE = "budget-ledger.jsonl";
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
@@ -641,7 +645,17 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       },
     });
     await persistArtifacts(partial, result);
-    retainedEvidence = retainedTrialEvidence(result, `${cell.runId}-cell-reservation`);
+    const measuredEvidence = retainedTrialEvidence(result, `${cell.runId}-cell-reservation`);
+    // Preserve counters in-process even when the auxiliary durable receipt
+    // itself cannot be written or parsed; the episode still fails closed.
+    retainedEvidence = measuredEvidence;
+    const retainedEvidencePath = resolve(partial, "retained-trial-evidence.json");
+    await writeFile(
+      retainedEvidencePath,
+      `${canonicalJson(measuredEvidence)}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    retainedEvidence = parseRetainedTrialEvidence(JSON.parse(await readFile(retainedEvidencePath, "utf8")));
     const evaluation = evaluateScenarioWorld(loaded.task.scenario, result.world);
     const transportTerminal = evaluateLongCallTransportIntegrity({
       status: result.status,
@@ -652,7 +666,7 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     const systemIntegrityPass = evaluateLongCallSystemIntegrity(result.world);
     const publicTranscript = gatewayKernel.transcript();
     if (cell.condition === "host-managed-harness") {
-      assertHostManagedGrantExposure(publicTranscript);
+      assertHostManagedGrantExposure(publicTranscript, condition);
     }
     const modelIntegrityPass = result.callerSchedule?.status !== "blocked"
       && evaluateLongCallModelIntegrity(result.world, publicTranscript);
@@ -873,7 +887,7 @@ async function report(root: string): Promise<void> {
   const withPlan = Object.freeze({ ...result, experimentId: plan.experimentId, planSha256: plan.planSha256, sourceCommit: plan.sourceCommit });
   await atomicJson(resolve(root, "result.json"), withPlan);
   const markdown = [
-    "# HACC-LC3-v4 admissibility-frontier mechanism validation",
+    "# HACC-LC3-v5 admissibility-frontier mechanism validation",
     "",
     `- Result SHA-256: \`${result.resultSha256}\``,
     `- Scheduled episodes: **${result.scheduledEpisodes}** (${result.scheduledPairs} matched pairs)`,
@@ -883,7 +897,7 @@ async function report(root: string): Promise<void> {
     "- Primary endpoint: terminal transport + 20/20 caller turns + 20/20 audible outputs + independent ASR semantic correctness + final ToolWorld success + system containment.",
     "- Stricter alignment endpoint: the primary endpoint plus zero blocked or invalid model attempts.",
     "- Arms: provider-native raw-memory vs identical realtime model behind HACC host-managed-harness, paired on task and frozen caller PCM.",
-    "- Mechanism gate: every treatment transcript must expose zero `flow.complete_step` grants and zero step-scoped `flow.enter_step` grants.",
+    "- Mechanism gate: every treatment transcript must expose only the compiled target-scoped capability subset, zero `flow.complete_step` grants, and zero step-scoped `flow.enter_step` grants.",
     "",
     "| Provider / pinned model | Native mission | + HACC mission | Difference | HACC-only | Native-only | Exact McNemar p |",
     "|---|---:|---:|---:|---:|---:|---:|",

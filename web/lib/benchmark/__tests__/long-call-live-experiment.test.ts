@@ -21,7 +21,7 @@ import {
   type LongCallSummary,
 } from "../long-call-live-experiment";
 
-describe("HACC-LC3-v4 long-call live experiment", () => {
+describe("HACC-LC3-v5 long-call live experiment", () => {
   it("freezes 9 paired strata, 18 episodes, and 360 caller turns", () => {
     const pairs = createLongCallPairs();
     const cells = createLongCallCells();
@@ -32,8 +32,10 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
     expect(new Set(pairs.map((pair) => pair.family))).toEqual(new Set(LONG_CALL_FAMILIES));
     expect(new Set(pairs.map((pair) => pair.ttsVoice))).toEqual(new Set(LONG_CALL_TTS_VOICES));
     for (const pair of pairs) {
+      expect(pair.pairId).toMatch(/^lc3v5-(?:openai|gemini|xai)-(?:museum|campus|water)-samantha$/);
       expect(new Set(pair.armOrder)).toEqual(new Set(["raw-memory", "host-managed-harness"]));
       const pairCells = cells.filter((cell) => cell.pairId === pair.pairId);
+      expect(pairCells.every((cell) => cell.runId.startsWith(`${pair.pairId}-`))).toBe(true);
       expect(pairCells.map((cell) => cell.condition)).toEqual([...pair.armOrder]);
       expect(new Set(pairCells.map((cell) => `${cell.provider}/${cell.family}/${cell.ttsVoice}`)).size).toBe(1);
     }
@@ -96,7 +98,23 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
     expect(classifyLongCallFailure({ ...pass, audioSemanticPass: false })).toBe("audio");
   });
 
-  it("fails closed if host-managed provider catalogs expose model-owned linear transitions", () => {
+  it("fails closed if host-managed provider catalogs escape their compiled target subset", () => {
+    const baseStateHash = "1".repeat(64);
+    const stepStateHash = "2".repeat(64);
+    const lookupHash = "3".repeat(64);
+    const grantCommitment = "4".repeat(64);
+    const condition = {
+      visibleCapabilities: [
+        { name: "flow.get_state", semanticHash: baseStateHash },
+      ],
+      disclosures: [{
+        target: "step:route.lookup",
+        visibleCapabilities: [
+          { name: "flow.get_state", semanticHash: stepStateHash },
+          { name: "lookup_record", semanticHash: lookupHash },
+        ],
+      }],
+    } as unknown as Parameters<typeof assertHostManagedGrantExposure>[1];
     const transcript = (scope: string, actions: readonly string[]) => ({
       view: "public_commitment",
       entries: [{
@@ -106,17 +124,40 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
             gateway_version: 1,
             scope,
             capability_epoch: 1,
-            actions: actions.map((name) => ({ name })),
+            actions: actions.map((name) => ({
+              name,
+              semantic_hash: name === "lookup_record" ? lookupHash : scope === "$base" ? baseStateHash : stepStateHash,
+              capability_grant_commitment: grantCommitment,
+            })),
           },
         },
       }],
     }) as unknown as Parameters<typeof assertHostManagedGrantExposure>[0];
-    expect(() => assertHostManagedGrantExposure(transcript("step:route.lookup", ["flow.get_state", "lookup_record"]))).not.toThrow();
-    expect(() => assertHostManagedGrantExposure(transcript("step:route.lookup", ["flow.enter_step"]))).toThrow("step-scoped flow.enter_step");
-    expect(() => assertHostManagedGrantExposure(transcript("$base", ["flow.complete_step"]))).toThrow("flow.complete_step");
+    expect(() => assertHostManagedGrantExposure(transcript("step:route.lookup", ["flow.get_state", "lookup_record"]), condition)).not.toThrow();
+    expect(() => assertHostManagedGrantExposure(transcript("step:route.lookup", ["flow.enter_step"]), condition)).toThrow("outside target-scoped subset");
+    expect(() => assertHostManagedGrantExposure(transcript("$base", ["lookup_record"]), condition)).toThrow(
+      "outside target-scoped subset $base",
+    );
+    expect(() => assertHostManagedGrantExposure(transcript("step:missing", ["flow.get_state"]), condition)).toThrow(
+      "unknown target scope",
+    );
   });
 
   it("validates caller-turn snapshots without treating them as invocation outcomes", () => {
+    const baseStateHash = "1".repeat(64);
+    const stepStateHash = "2".repeat(64);
+    const lookupHash = "3".repeat(64);
+    const grantCommitment = "4".repeat(64);
+    const condition = {
+      visibleCapabilities: [{ name: "flow.get_state", semanticHash: baseStateHash }],
+      disclosures: [{
+        target: "step:route.lookup",
+        visibleCapabilities: [
+          { name: "flow.get_state", semanticHash: stepStateHash },
+          { name: "lookup_record", semanticHash: lookupHash },
+        ],
+      }],
+    } as unknown as Parameters<typeof assertHostManagedGrantExposure>[1];
     const transcript = (callerActions: readonly string[]) => ({
       view: "public_commitment",
       entries: [{
@@ -126,7 +167,11 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
             gateway_version: 1,
             scope: "$base",
             capability_epoch: 0,
-            actions: [{ name: "flow.get_state" }],
+            actions: [{
+              name: "flow.get_state",
+              semantic_hash: baseStateHash,
+              capability_grant_commitment: grantCommitment,
+            }],
           },
         },
       }, {
@@ -136,16 +181,28 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
             gateway_version: 1,
             scope: "step:route.lookup",
             capability_epoch: 1,
-            actions: callerActions.map((name) => ({ name })),
+            actions: callerActions.map((name) => ({
+              name,
+              semantic_hash: name === "lookup_record" ? lookupHash : stepStateHash,
+              capability_grant_commitment: grantCommitment,
+            })),
           },
         },
       }],
     }) as unknown as Parameters<typeof assertHostManagedGrantExposure>[0];
 
-    expect(() => assertHostManagedGrantExposure(transcript(["flow.get_state", "lookup_record"]))).not.toThrow();
-    expect(() => assertHostManagedGrantExposure(transcript(["flow.enter_step"]))).toThrow(
-      "step-scoped flow.enter_step in entry[1].caller_turn_snapshot",
+    expect(() => assertHostManagedGrantExposure(transcript(["flow.get_state", "lookup_record"]), condition)).not.toThrow();
+    expect(() => assertHostManagedGrantExposure(transcript(["flow.enter_step"]), condition)).toThrow(
+      "outside target-scoped subset step:route.lookup in entry[1].caller_turn_snapshot",
     );
+    const missingSemanticHash = JSON.parse(JSON.stringify(transcript(["flow.get_state"]))) as {
+      entries: Array<{ payload: { capability_snapshot?: { actions: Array<Record<string, unknown>> } } }>;
+    };
+    delete missingSemanticHash.entries[1].payload.capability_snapshot!.actions[0].semantic_hash;
+    expect(() => assertHostManagedGrantExposure(
+      missingSemanticHash as unknown as Parameters<typeof assertHostManagedGrantExposure>[0],
+      condition,
+    )).toThrow("malformed entry[1].caller_turn_snapshot.actions[0]");
   });
 
   it("classifies a caller-policy stop as model evidence rather than a transport failure", () => {

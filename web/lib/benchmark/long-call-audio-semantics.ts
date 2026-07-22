@@ -234,7 +234,7 @@ async function requirePassedCalibration(
   };
   const calibration = JSON.parse(await readFile(resolve(experimentRoot, "asr-calibration.json"), "utf8")) as unknown;
   if (
-    plan.protocolId !== "HACC-LC3-v4"
+    plan.protocolId !== "HACC-LC3-v5"
     || typeof plan.planSha256 !== "string"
     || !SHA256.test(plan.planSha256)
     || typeof plan.fixtureManifestSha256 !== "string"

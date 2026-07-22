@@ -12,8 +12,9 @@ import {
 } from "./live-sts-development-experiment";
 import type { PublicKernelTranscript } from "./kernel-transcript";
 import type { ToolWorldState } from "./tool-world";
+import type { CompiledBenchmarkCondition } from "./condition-compiler";
 
-export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v4" as const;
+export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v5" as const;
 export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v3";
 export const LONG_CALL_TTS_VOICES = Object.freeze(["Samantha"] as const);
 export const LONG_CALL_CONDITIONS = Object.freeze(["raw-memory", "host-managed-harness"] as const);
@@ -109,7 +110,7 @@ export function createLongCallPairs(): readonly LongCallPair[] {
   for (const provider of LONG_CALL_PROVIDERS) {
     for (const family of LONG_CALL_FAMILIES) {
       for (const ttsVoice of LONG_CALL_TTS_VOICES) {
-        const pairId = `lc3v4-${provider}-${family}-${ttsVoice.toLowerCase()}`;
+        const pairId = `lc3v5-${provider}-${family}-${ttsVoice.toLowerCase()}`;
         pairs.push(Object.freeze({
           ordinal: ++ordinal,
           pairId,
@@ -168,7 +169,7 @@ export function longCallScheduleArtifact() {
     maximumAggregateUsd: LONG_CALL_MAXIMUM_AGGREGATE_USD,
     retryPolicy: "no paid episode retry" as const,
     executionOrder: "arms adjacent within pair; pairs may execute concurrently" as const,
-    mechanismValidation: "host-managed-harness provider catalogs contain no flow.complete_step grant and no step-scoped flow.enter_step grant" as const,
+    mechanismValidation: "host-managed-harness provider catalogs contain only target-scoped capability subsets, no flow.complete_step grant, and no step-scoped flow.enter_step grant" as const,
   });
   return Object.freeze({
     ...body,
@@ -328,12 +329,22 @@ export function evaluateLongCallModelIntegrity(
 }
 
 /**
- * Fail-closed check for the v3 treatment mechanism. Linear step transitions
+ * Fail-closed check for the v5 host-managed treatment mechanism. Linear step transitions
  * belong to the attested host runtime, not to the realtime model. The public
  * transcript is sufficient evidence because every catalog disclosure commits
  * action names, scopes, epochs, and opaque grants.
  */
-export function assertHostManagedGrantExposure(transcript: PublicKernelTranscript): void {
+export function assertHostManagedGrantExposure(
+  transcript: PublicKernelTranscript,
+  condition: Pick<CompiledBenchmarkCondition, "visibleCapabilities" | "disclosures">,
+): void {
+  const capabilitiesByScope = new Map<string, ReadonlyMap<string, string>>([
+    ["$base", new Map(condition.visibleCapabilities.map((capability) => [capability.name, capability.semanticHash]))],
+    ...condition.disclosures.map((disclosure) => [
+      disclosure.target,
+      new Map(disclosure.visibleCapabilities.map((capability) => [capability.name, capability.semanticHash])),
+    ] as const),
+  ]);
   let snapshotCount = 0;
   const inspectSnapshot = (value: unknown, label: string): void => {
     if (value === null) return;
@@ -341,11 +352,34 @@ export function assertHostManagedGrantExposure(transcript: PublicKernelTranscrip
     if (!snapshot || snapshot.gateway_version !== 1 || typeof snapshot.scope !== "string" || !Array.isArray(snapshot.actions)) {
       throw new Error(`host-managed mechanism evidence has malformed ${label}`);
     }
+    const targetCapabilities = capabilitiesByScope.get(snapshot.scope);
+    if (!targetCapabilities) {
+      throw new Error(`host-managed mechanism evidence has unknown target scope ${snapshot.scope} in ${label}`);
+    }
     snapshotCount += 1;
+    const observed = new Set<string>();
     for (const [index, value] of snapshot.actions.entries()) {
       const action = record(value);
-      if (!action || typeof action.name !== "string") {
+      if (
+        !action
+        || typeof action.name !== "string"
+        || typeof action.semantic_hash !== "string"
+        || !/^[a-f0-9]{64}$/.test(action.semantic_hash)
+        || typeof action.capability_grant_commitment !== "string"
+        || !/^[a-f0-9]{64}$/.test(action.capability_grant_commitment)
+      ) {
         throw new Error(`host-managed mechanism evidence has malformed ${label}.actions[${index}]`);
+      }
+      if (observed.has(action.name)) {
+        throw new Error(`host-managed mechanism duplicated ${action.name} in ${label}`);
+      }
+      observed.add(action.name);
+      const expectedSemanticHash = targetCapabilities.get(action.name);
+      if (!expectedSemanticHash) {
+        throw new Error(`host-managed mechanism exposed ${action.name} outside target-scoped subset ${snapshot.scope} in ${label}`);
+      }
+      if (action.semantic_hash !== expectedSemanticHash) {
+        throw new Error(`host-managed mechanism exposed mismatched ${action.name} semantic hash in ${label}`);
       }
       if (action.name === "flow.complete_step") {
         throw new Error(`host-managed mechanism exposed flow.complete_step in ${label}`);

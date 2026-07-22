@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../artifacts";
 import type { TrialResult } from "../orchestrator";
-import { retainedTrialEvidence } from "../runner-exception-evidence";
+import { parseRetainedTrialEvidence, retainedTrialEvidence } from "../runner-exception-evidence";
 
 function trialResult(
   estimatedMicroUsd: number | null,
@@ -50,5 +50,15 @@ describe("runner exception retained trial evidence", () => {
       trialResult(1_234_567),
       "other-cell-reservation",
     ).estimatedCostUsd).toBeNull();
+  });
+
+  it("strictly parses a durably persisted measurement snapshot", () => {
+    const retained = retainedTrialEvidence(trialResult(1_234_567), "episode-cell-reservation");
+    expect(parseRetainedTrialEvidence(JSON.parse(JSON.stringify(retained)))).toEqual(retained);
+    expect(() => parseRetainedTrialEvidence({ ...retained, extra: true })).toThrow("unexpected fields");
+    expect(() => parseRetainedTrialEvidence({ ...retained, turnsSent: 21 })).toThrow("above turnsPlanned");
+    expect(() => parseRetainedTrialEvidence({ ...retained, artifactManifestSha256: "bad" })).toThrow(
+      "invalid artifactManifestSha256",
+    );
   });
 });

@@ -31,7 +31,7 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).toContain("ASR semantic scoring is incomplete");
     expect(source).toContain("summary.asrReceiptsSha256 ??");
     expect(source).toContain("evaluateLongCallModelIntegrity(result.world, publicTranscript)");
-    expect(source).toContain("assertHostManagedGrantExposure(publicTranscript)");
+    expect(source).toContain("assertHostManagedGrantExposure(publicTranscript, condition)");
     expect(source).toContain("isLongCallMissionCompletionPass(summary)");
     expect(source).not.toContain("autoAdvanceLinearFlow:");
   });
@@ -39,11 +39,15 @@ describe("HACC-LC3 live runner release contract", () => {
   it("retains completed trial measurements when post-trial validation fails closed", async () => {
     const source = await runnerSource();
     const persistence = source.indexOf("await persistArtifacts(partial, result)");
-    const retention = source.indexOf("retainedEvidence = retainedTrialEvidence(result");
+    const durableWrite = source.indexOf('resolve(partial, "retained-trial-evidence.json")');
+    const retention = source.indexOf("retainedEvidence = parseRetainedTrialEvidence");
     const validation = source.indexOf("const evaluation = evaluateScenarioWorld");
     expect(persistence).toBeGreaterThan(-1);
-    expect(retention).toBeGreaterThan(persistence);
+    expect(durableWrite).toBeGreaterThan(persistence);
+    expect(retention).toBeGreaterThan(durableWrite);
     expect(validation).toBeGreaterThan(retention);
+    expect(source.indexOf("retainedEvidence = measuredEvidence")).toBeLessThan(durableWrite);
+    expect(source).toContain('await readFile(retainedEvidencePath, "utf8")');
     expect(source).toContain("turnsSent: retainedEvidence?.turnsSent ?? 0");
     expect(source).toContain("outputAudioTurns: retainedEvidence?.outputAudioTurns ?? 0");
     expect(source).toContain("estimatedCostUsd: retainedEvidence?.estimatedCostUsd ?? null");
