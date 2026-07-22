@@ -10,8 +10,8 @@
     "result_hash": "f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab"
   },
   "tracked_base": {
-    "commit_oid": "06c317496e7e2c104ef6777d8b6a3e8e1a7b5c9c",
-    "tree_oid": "2047cd96160cd6f74986548c0b7bf4775a0ce215",
+    "commit_oid": "22f3f5c9e4eb1712b65fd8046d24c42e1a2c31cd",
+    "tree_oid": "40f8575f61dbb62767e4a2a7db456cecf9c3a03e",
     "capture_worktree_dirty": false,
     "claim": "tracked base before the selected worktree bytes; not a clean-build claim"
   },
@@ -31,11 +31,11 @@
     },
     {
       "path": "web/lib/benchmark/tool-world.ts",
-      "byte_length": 89987,
-      "sha256": "f45beee24fd4626e34457ad62be6a961fb825be8676e53cc9624d76b839ced9b",
+      "byte_length": 91989,
+      "sha256": "631912476a16429f5abadf023be374ec7a538c0bc7992261150dbd4157545172",
       "relation_to_tracked_base": "matches-base",
-      "base_blob_oid": "202cfef27bf7c751763ed98a3c74b6433e2a2370",
-      "base_content_sha256": "f45beee24fd4626e34457ad62be6a961fb825be8676e53cc9624d76b839ced9b"
+      "base_blob_oid": "c7ea91da3a66e0599bec79d360f9990592a1db67",
+      "base_content_sha256": "631912476a16429f5abadf023be374ec7a538c0bc7992261150dbd4157545172"
     },
     {
       "path": "web/lib/benchmark/world-events.ts",
@@ -54,5 +54,5 @@
       "base_content_sha256": "10362dbbaf3a1c871664b7dbd39de3eeb8ea0fee89ff8babc4c27ae2129e6abd"
     }
   ],
-  "binding_sha256": "129b912feb6e784b89846f7ae7456207c03dd2fe611f81ef82201126b0cc71a7"
+  "binding_sha256": "bc9e9a78fed8e4ebe02629bc00f5cd7518d902a1c65f510673d763ca6f7b450f"
 }

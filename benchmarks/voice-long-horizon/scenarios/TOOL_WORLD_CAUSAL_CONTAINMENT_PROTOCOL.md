@@ -50,9 +50,9 @@ The checked JSON artifact is `tool-world-causal-containment.v1.json` (file SHA-2
 
 ## Source and Git provenance
 
-`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `bb16e69ba3b6185a3fc0c33004be4bd2d6a038ddfc89bff5242014ff7bd02a9e`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `129b912feb6e784b89846f7ae7456207c03dd2fe611f81ef82201126b0cc71a7`.
+`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `a01027b9ec8c51ad0d1775adfa0f9444d8f037bb4d0707e6a0095738a24480a1`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `bc9e9a78fed8e4ebe02629bc00f5cd7518d902a1c65f510673d763ca6f7b450f`.
 
-The provenance capture started from clean commit `c965fb7d04fd580db8034d745bbd4bb34aebfa6f` and tree `8a560886d2d044b35b706e048585fdfbc1dd7576`. All four bound source files match their base blobs exactly; current per-file SHA-256 values and byte lengths bind the tested implementation.
+The provenance capture started from clean commit `22f3f5c9e4eb1712b65fd8046d24c42e1a2c31cd` and tree `40f8575f61dbb62767e4a2a7db456cecf9c3a03e`. All four bound source files match their base blobs exactly; current per-file SHA-256 values and byte lengths bind the tested implementation.
 
 The verifier recomputes the artifact identity, manifest binding, source byte hashes, base commit/tree, base blob identities, and each file's relation to the base. The focused test substitutes bytes into every bound source path in turn and requires all four substitutions to fail verification.
 
