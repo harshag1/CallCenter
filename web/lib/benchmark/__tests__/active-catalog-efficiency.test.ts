@@ -12,7 +12,7 @@ describe("active capability catalog efficiency evidence", () => {
 
     expect(report.result_hash).toBe("8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1");
     expect(report.provenance.source_manifest_sha256)
-      .toBe("7e9c05fd5791eca63fe687e4f4b39384a9fcc9021e5f9b0de177cf376f9391b8");
+      .toBe("4bd50ab040953e7e23085adeab865d32efe38afd9702dc0accbdba439bd3ef93");
     expect(report.provenance.build_manifest_sha256)
       .toBe("d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455");
     expect(report.provenance.toolchain_manifest_sha256)

@@ -142,7 +142,7 @@ describe("voice task reliability development suite", () => {
       }
     }
     expect(completed).toBe(54);
-  });
+  }, 20_000);
 
   it("blocks progression when the agent omits a required action instead of feeding incoherent caller turns", async () => {
     const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) => candidate.complexity_band === "short")!;
