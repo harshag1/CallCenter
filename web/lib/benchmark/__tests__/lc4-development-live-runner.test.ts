@@ -22,6 +22,7 @@ import {
   createLc4DevelopmentRealtimeAdapter,
   lc4DevCredentialIdentitySetSha256,
 } from "../lc4-production-provider-adapter";
+import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
 import type { HaccResponsePlan } from "../response-plan";
 import {
   LC4_QUALIFICATION_RUNNER_VERSION,
@@ -333,10 +334,16 @@ describe("LC4-DEV live runner", () => {
     const { prepare } = fixtures();
     const credentials = { openai: "test-openai-secret", gemini: "test-gemini-secret", xai: "test-xai-secret" } as const;
     const preflight = authorizedPreflight(prepare, lc4DevCredentialIdentitySetSha256(credentials));
+    const gatewayExecutor: Lc4DevGatewayExecutor = {
+      kind: "lc4-dev-arm-aware-gateway-v1",
+      manifest_sha256: preflight.control_plane_manifest_sha256,
+      async execute() { throw new Error("factory construction test must not execute the gateway"); },
+    };
     const adapter = createLc4DevelopmentRealtimeAdapter({
       prepare,
       preflight,
       credentials,
+      gateway_executor: gatewayExecutor,
       listener: { async accept() { return { listener_evidence_sha256: HASH }; } },
       now: () => new Date(NOW),
     });
@@ -351,6 +358,7 @@ describe("LC4-DEV live runner", () => {
       prepare,
       preflight,
       credentials: { ...credentials, xai: "different-xai-secret" },
+      gateway_executor: gatewayExecutor,
       listener: { async accept() { return { listener_evidence_sha256: HASH }; } },
       now: () => new Date(NOW),
     })).toThrow(/credentials differ/);

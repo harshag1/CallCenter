@@ -11,9 +11,13 @@ import {
   createLc4HaccRotationStatePacket,
   createLc4StrongNativeContinuityPacket,
   type Lc4NativeContinuityFactInput,
+  type Lc4RealtimeEpisodeManifest,
   type Lc4RotationContext,
   type Lc4StrongNativeContinuityPacket,
 } from "../lc4-production-provider-adapter";
+import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
+import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import {
   compileLc4ProductionScheduleShape,
   createLc4EpisodeManifest,
@@ -36,9 +40,15 @@ import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   RealtimeEventListener,
+  RealtimeToolResult,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
-import { LOCAL_TOOL_PROXY_FUNCTION } from "../../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION,
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../../realtime/client/types";
 
 const HASH = "a".repeat(64);
 const COMMIT = "b".repeat(40);
@@ -261,10 +271,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly #listeners = new Set<RealtimeEventListener>();
   readonly #wire = new Set<RealtimeWireObservationListener>();
   #wireSequence = 0;
+  #toolRoundtrip: boolean;
+  #responseOrdinal = 0;
+  readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
 
-  constructor(provider: "openai" | "gemini" | "xai", events: string[]) {
+  constructor(provider: "openai" | "gemini" | "xai", events: string[], toolRoundtrip = false) {
     this.provider = provider;
     this.events = events;
+    this.#toolRoundtrip = toolRoundtrip;
   }
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
@@ -276,11 +290,70 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   prepareResponse() { this.events.push("prepare"); this.wire("response.plan", { oracle: ORACLE_SECRET }); }
   commitInputAudio() { this.events.push("commit"); this.wire("input.commit", {}); }
   sendTurn() { throw new Error("bridge must use append/commit, not sendTurn"); }
-  submitToolResults() { throw new Error("not used"); }
+  submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean) {
+    if (!this.#toolRoundtrip) throw new Error("not used");
+    this.events.push(`submit:${String(createResponse)}`);
+    this.submittedToolResults.push({ results, createResponse });
+  }
   createResponse() {
     this.events.push("create");
     this.wire("response.create", {});
     queueMicrotask(() => {
+      this.#responseOrdinal += 1;
+      if (this.#toolRoundtrip && this.#responseOrdinal === 1) {
+        const responseId = "provider-tool-response-plaintext";
+        this.emit({ type: "response.started", provider: this.provider, receivedAtMs: 1, wireType: "response.created", responseId });
+        if (this.provider === "gemini") {
+          this.emit({
+            type: "tool.calls",
+            provider: this.provider,
+            receivedAtMs: 2,
+            wireType: "toolCall",
+            responseId,
+            calls: [{
+              callId: "call-1",
+              name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+              argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } }),
+              argumentsJson: { tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } },
+              responseId,
+              terminalWireType: "toolCall",
+            }],
+          });
+        } else {
+          const provenance = {
+            schemaVersion: 1 as const,
+            provider: this.provider,
+            nativeCallId: "call-1",
+            nativeResponseId: responseId,
+            terminalWireType: "response.function_call_arguments.done",
+          };
+          this.emit({
+            type: "tool.dispatch",
+            provider: this.provider,
+            receivedAtMs: 2,
+            wireType: "response.function_call_arguments.done",
+            responseId,
+            gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+            dispatches: [{
+              callId: "call-1",
+              provenance,
+              request: {
+                method: "tools/call",
+                params: {
+                  name: "records.lookup",
+                  arguments: { record_id: "PUBLIC-17" },
+                  _meta: {
+                    [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "call-1",
+                    [PROVIDER_PROVENANCE_META_KEY]: provenance,
+                  },
+                },
+              },
+            }],
+          });
+        }
+        this.emit({ type: "response.completed", provider: this.provider, receivedAtMs: 3, wireType: "response.done", responseId, status: "completed" });
+        return;
+      }
       const responseId = "provider-response-plaintext";
       this.emit({ type: "response.started", provider: this.provider, receivedAtMs: 1, wireType: "response.created", responseId });
       this.emit({
@@ -353,6 +426,85 @@ describe("LC4 production realtime adapter bridge", () => {
     const encoded = JSON.stringify(evidence);
     expect(encoded).not.toContain(ORACLE_SECRET);
     expect(encoded).not.toContain("provider-response-plaintext");
+    await session.close();
+  });
+
+  it("keeps a DEV tool response intermediate, executes the injected gateway, and continues exactly once", async () => {
+    const base = manifest("hacc");
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const episode: Lc4DevLiveEpisodePlan = Object.freeze({
+      episode_id: `lc4-dev-${base.episode_shape.provider}-hacc`,
+      pair_id: `lc4-dev-${base.episode_shape.provider}`,
+      pair_position: 2,
+      provider: base.episode_shape.provider,
+      arm: "hacc",
+      model: base.episode_shape.provider_profile.model,
+      voice: base.episode_shape.provider_profile.voice,
+      maximum_micro_usd: 1_000,
+      opportunity_binding_set_sha256: HASH,
+    });
+    const devManifest: Lc4RealtimeEpisodeManifest = Object.freeze({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: episode.episode_id,
+      episode_shape: Object.freeze({
+        provider: episode.provider,
+        arm: episode.arm,
+        provider_profile: base.episode_shape.provider_profile,
+      }),
+      opportunities: Object.freeze(corpus.opportunities.map((opportunity, index) => {
+        const pcm = new Uint8Array([index + 1, 7, 11, 13]);
+        return Object.freeze({
+          ordinal: index + 1,
+          opportunity_id: opportunity.id,
+          segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+          caller_pcm_sha256: sha256Hex(pcm),
+          caller_pcm_byte_length: pcm.byteLength,
+          opportunity_contract_sha256: sha256Hex(`dev-contract-${index + 1}`),
+        });
+      })),
+    });
+    const executed: string[] = [];
+    const gateway: Lc4DevGatewayExecutor = Object.freeze({
+      kind: "lc4-dev-arm-aware-gateway-v1" as const,
+      manifest_sha256: "d".repeat(64),
+      async execute(input) {
+        executed.push(`${input.arm}:${input.target_tool}`);
+        return {
+          provider_output: { ok: true, receipt: "PUBLIC-RESULT" },
+          authoritative_receipt_sha256: "e".repeat(64),
+          control_plane_head_sha256: "f".repeat(64),
+          disposition: "executed" as const,
+        };
+      },
+    });
+    const events: string[] = [];
+    let fake: FakeRealtimeClient | null = null;
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      fake = new FakeRealtimeClient(provider, events, true);
+      return fake;
+    });
+    const session = await bridge.openSegment({
+      manifest: devManifest,
+      segment: base.episode_shape.segments[0]!,
+      profile: base.episode_shape.provider_profile,
+      configuration: configuration(base),
+      rotation_context: null,
+      listener: { accept() { events.push("listener"); } },
+      dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
+    });
+    const evidence = await session.exchange({
+      opportunity_id: corpus.opportunities[0]!.id,
+      caller_pcm: new Uint8Array([1, 7, 11, 13]),
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+
+    expect(executed).toEqual(["hacc:records.lookup"]);
+    expect(events).toEqual(["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
+    expect(fake!.submittedToolResults).toHaveLength(1);
+    expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
+    expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(1);
+    expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-17");
+    expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-RESULT");
     await session.close();
   });
 

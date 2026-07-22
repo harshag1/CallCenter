@@ -62,7 +62,6 @@ describe("LC4-DEV concrete live dependencies", () => {
       "public_corpus_missing_durable_worker_execution_plan",
       "public_corpus_missing_frozen_semantic_registry",
       "public_corpus_missing_pinned_asr_evaluator",
-      "realtime_exchange_missing_gateway_tool_call_channel",
       "realtime_exchange_missing_repair_playback_channel",
       "listener_handoff_missing_playback_authority",
     ]);
@@ -255,4 +254,3 @@ describe("LC4-DEV concrete live dependencies", () => {
     })).rejects.toThrow("not pinned to the exact played PCM");
   });
 });
-

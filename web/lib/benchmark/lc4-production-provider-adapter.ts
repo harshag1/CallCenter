@@ -20,7 +20,15 @@ import type {
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
-import { createLc4PublicDevelopmentCorpus } from "./lc4-public-development-corpus";
+import {
+  Lc4DevGatewayTurnCoordinator,
+  type Lc4DevGatewayExecutor,
+  type Lc4DevGatewayReceiptSet,
+} from "./lc4-development-gateway-bridge";
+import {
+  createLc4PublicDevelopmentCorpus,
+  type Lc4PublicDevOpportunity,
+} from "./lc4-public-development-corpus";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import { createProductionRealtimeClient } from "./production-realtime-provider";
 import { assertHaccResponsePlan, renderHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
@@ -336,6 +344,8 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   output_capture: Lc4CapturedOutput;
   wire_observations: readonly Lc4SanitizedWireObservation[];
   wire_observation_set_sha256: string;
+  /** Present only for HACC-LC4-DEV; never contains arguments, results, or native IDs. */
+  dev_gateway_receipt_set: Lc4DevGatewayReceiptSet | null;
   operation_order: readonly [
     "caller_pcm_appended",
     "response_plan_prepared",
@@ -398,6 +408,11 @@ export type Lc4OpenRealtimeSegmentInput = Readonly<{
   configuration: TrialSessionConfiguration;
   rotation_context: Lc4RotationContext | null;
   listener: Lc4ListenerEvidenceHandoff;
+  dev_gateway?: Readonly<{
+    episode: Lc4DevLiveEpisodePlan;
+    opportunities: readonly Lc4PublicDevOpportunity[];
+    executor: Lc4DevGatewayExecutor;
+  }>;
 }>;
 
 function safeId(value: string, label: string): string {
@@ -510,6 +525,17 @@ export class Lc4RealtimeProviderBridge {
   async openSegment(input: Lc4OpenRealtimeSegmentInput): Promise<Lc4RealtimeSegmentSession> {
     if (this.#active) throw new Error("LC4 provider session must close before rotation opens the next segment");
     assertExactProfile(input);
+    if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !input.dev_gateway) {
+      throw new Error("LC4-DEV provider session requires an executable arm-aware gateway bridge");
+    }
+    if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" && input.dev_gateway) {
+      throw new Error("LC4 confirmatory provider session cannot receive the DEV gateway bridge");
+    }
+    if (input.dev_gateway && (
+      input.dev_gateway.episode.episode_id !== input.manifest.run_id
+      || input.dev_gateway.episode.provider !== input.profile.provider
+      || input.dev_gateway.episode.arm !== input.manifest.episode_shape.arm
+    )) throw new Error("LC4-DEV gateway context differs from the provider manifest");
     if (input.segment.ordinal !== this.#sessionOrdinal + 1) throw new Error("LC4 provider sessions must rotate in segment order");
     const rotationContext = validateRotationContext(input, this.#previousRotationReceiptSha256);
     const effectiveConfiguration = rotationContext.rendered === null
@@ -528,8 +554,19 @@ export class Lc4RealtimeProviderBridge {
     let currentOpportunity: string | null = null;
     let activeResponseId: string | null = null;
     let terminalError: Error | null = null;
+    const devGateway = input.dev_gateway
+      ? new Lc4DevGatewayTurnCoordinator({
+          client,
+          executor: input.dev_gateway.executor,
+          onFatal: (error) => {
+            terminalError = error;
+            waiters.get(currentOpportunity ?? "")?.();
+          },
+        })
+      : null;
     const unsubscribeWire = client.onWireObservation?.((observation) => wire.push(sanitizeWireObservation(observation)));
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
+      devGateway?.observe(event);
       if (event.type === "response.started") activeResponseId = event.responseId;
       if (event.type === "output.audio") {
         activeResponseId = event.responseId;
@@ -551,7 +588,20 @@ export class Lc4RealtimeProviderBridge {
       if (event.type === "response.completed") {
         activeResponseId = event.responseId;
         terminalByResponse.add(event.responseId);
-        waiters.get(currentOpportunity ?? "")?.();
+        // A tool-producing response is an intermediate provider turn. The DEV
+        // coordinator alone owns its continuation and requests it exactly once
+        // after all authoritative results have crossed the wire.
+        if (!devGateway) {
+          waiters.get(currentOpportunity ?? "")?.();
+        } else {
+          // Some adapters derive tool.dispatch and response.completed from the
+          // same provider frame. Defer one microtask so normalized event order
+          // cannot turn the intermediate tool response into a false terminal.
+          const responseId = event.responseId;
+          queueMicrotask(() => {
+            if (!devGateway.ownsToolResponse(responseId)) waiters.get(currentOpportunity ?? "")?.();
+          });
+        }
       }
       if (event.type === "error" && event.fatal) {
         terminalError = new Error(`provider error: ${event.code ?? "unspecified"}`);
@@ -614,6 +664,11 @@ export class Lc4RealtimeProviderBridge {
         currentOpportunity = opportunityId;
         activeResponseId = null;
         terminalError = null;
+        if (devGateway && input.dev_gateway) {
+          const opportunity = input.dev_gateway.opportunities.find((candidate) => candidate.id === opportunityId);
+          if (!opportunity) throw new Error("LC4-DEV gateway lacks the exact public opportunity context");
+          devGateway.beginOpportunity({ episode: input.dev_gateway.episode, opportunity });
+        }
         const operationOrder: Lc4ProviderExchangeEvidence["operation_order"][number][] = [];
         try {
           client.appendInputAudio({
@@ -647,6 +702,9 @@ export class Lc4RealtimeProviderBridge {
           }
           if (terminalError) throw terminalError;
           if (!activeResponseId || !terminalByResponse.has(activeResponseId)) throw new Error("LC4 provider response lacks a terminal identity");
+          const devGatewayReceiptSet = devGateway
+            ? await devGateway.finishOpportunity()
+            : null;
           const chunks = outputByResponse.get(activeResponseId) ?? [];
           const pcm = concatenate(chunks);
           if (pcm.byteLength === 0) throw new Error("LC4 provider response produced no PCM output");
@@ -689,6 +747,7 @@ export class Lc4RealtimeProviderBridge {
             output_capture: capture,
             wire_observations: opportunityWire,
             wire_observation_set_sha256: wireObservationSetSha256,
+            dev_gateway_receipt_set: devGatewayReceiptSet,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
           });
           opportunityOrdinal += 1;
@@ -898,6 +957,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   preflight: Lc4DevLivePreflightArtifact;
   credentials: Readonly<Record<LiveStsProvider, string>>;
   listener: Lc4DevelopmentListenerSink;
+  gateway_executor: Lc4DevGatewayExecutor;
   now?: () => Date;
 }>): Lc4DevelopmentRealtimeAdapter {
   const now = input.now ?? (() => new Date());
@@ -910,6 +970,10 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   }
   if (lc4DevCredentialIdentitySetSha256(input.credentials) !== input.preflight.credential_identity_set_sha256) {
     throw new Error("LC4-DEV credentials differ from the hash-bound preflight identities");
+  }
+  if (input.gateway_executor.kind !== "lc4-dev-arm-aware-gateway-v1"
+    || input.gateway_executor.manifest_sha256 !== input.preflight.control_plane_manifest_sha256) {
+    throw new Error("LC4-DEV gateway executor differs from the preflight-bound control plane");
   }
   const corpus = createLc4PublicDevelopmentCorpus();
   if (corpus.artifact_sha256 !== input.prepare.corpus_sha256) throw new Error("LC4-DEV adapter corpus drifted from prepare");
@@ -1010,6 +1074,11 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             if (!SHA256.test(receipt.listener_evidence_sha256)) throw new Error("LC4-DEV listener sink returned an invalid evidence hash");
             listenerReceipts.set(opportunity.id, receipt.listener_evidence_sha256);
           },
+        },
+        dev_gateway: {
+          episode,
+          opportunities: corpus.opportunities,
+          executor: input.gateway_executor,
         },
       });
       let closed = false;

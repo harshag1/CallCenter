@@ -78,7 +78,6 @@ export type Lc4DevLiveReadinessGapCode =
   | "public_corpus_missing_durable_worker_execution_plan"
   | "public_corpus_missing_frozen_semantic_registry"
   | "public_corpus_missing_pinned_asr_evaluator"
-  | "realtime_exchange_missing_gateway_tool_call_channel"
   | "realtime_exchange_missing_repair_playback_channel"
   | "listener_handoff_missing_playback_authority";
 
@@ -97,7 +96,6 @@ const CURRENT_PUBLIC_CORPUS_GAPS: readonly Lc4DevLiveReadinessGap[] = Object.fre
   Object.freeze({ code: "public_corpus_missing_durable_worker_execution_plan", blocks: "hacc_control", detail: "Worker event labels lack executable payloads, generations, leases, result envelopes, and fault schedule." }),
   Object.freeze({ code: "public_corpus_missing_frozen_semantic_registry", blocks: "listener_evidence", detail: "Expected listener prose is not a frozen phrase/operator registry committed before provider output." }),
   Object.freeze({ code: "public_corpus_missing_pinned_asr_evaluator", blocks: "listener_evidence", detail: "No evaluator executable, weights, decoding contract, calibration, or signing identity is bound to the public DEV corpus." }),
-  Object.freeze({ code: "realtime_exchange_missing_gateway_tool_call_channel", blocks: "all_provider_calls", detail: "Lc4DevelopmentRealtimeSession.exchange returns PCM and hashes only; it cannot expose provider tool calls to the capability gateway or return authoritative tool results." }),
   Object.freeze({ code: "realtime_exchange_missing_repair_playback_channel", blocks: "all_provider_calls", detail: "The exchange contract has no arm-blind channel for playing bounded repair PCM inside the same canonical opportunity without extending the horizon." }),
   Object.freeze({ code: "listener_handoff_missing_playback_authority", blocks: "listener_evidence", detail: "The listener handoff contains generated PCM but no independently verified byte range proving what the caller actually heard." }),
 ]);
