@@ -536,7 +536,7 @@ describe("LC4-DEV live runner", () => {
               async exchangeCanonical() { calls += 1; throw new Error("transport disconnected"); },
               async exchangeRepair() { throw new Error("repair must not run after canonical transport failure"); },
               async finalizeOpportunity() { throw new Error("failed canonical opportunity cannot finalize"); },
-              async close() { return { rotation_receipt_sha256: HASH }; },
+              async close() { throw new Error("secondary cleanup failure"); },
             };
           },
         },
@@ -553,6 +553,7 @@ describe("LC4-DEV live runner", () => {
     expect(run.opportunities_submitted).toBe(1);
     expect(run.opportunities_completed).toBe(0);
     expect(run.paid_retry_count).toBe(0);
+    expect(run.failure_message_sha256).toBe(sha256Hex("transport disconnected"));
   });
 
   it("documents the exact safe source unlock instead of casting DEV as confirmatory", () => {

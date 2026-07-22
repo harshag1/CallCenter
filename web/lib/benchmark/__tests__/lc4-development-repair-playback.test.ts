@@ -142,7 +142,13 @@ describe("LC4-DEV same-opportunity repair playback", () => {
 
     for (const opportunity of corpus.opportunities.slice(0, 9)) {
       const criteria = LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities[opportunity.index - 1]!.criteria;
-      const transcript = criteria.map((criterion) => criterion.phrases[0]).join(" ") || "acknowledged";
+      // Opportunity 2 deliberately fails its listener criterion with a generic
+      // required_evidence_missing projection. It is not a registered CRP
+      // deadline, so the controller must ignore that repair blocker and emit
+      // no_repair instead of rejecting the stage.
+      const transcript = opportunity.index === 2
+        ? "I am not sure."
+        : criteria.map((criterion) => criterion.phrases[0]).join(" ") || "acknowledged";
       const result = await controller.decide({
         episode,
         opportunity,

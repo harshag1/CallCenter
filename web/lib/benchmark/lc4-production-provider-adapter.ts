@@ -836,12 +836,17 @@ export class Lc4RealtimeProviderBridge {
       } : undefined,
       close: async () => {
         if (closed) throw new Error("LC4 realtime segment session is already closed");
-        if (pendingDevOpportunity !== null) throw new Error("LC4-DEV segment cannot close with an unfinalized canonical opportunity");
+        const hadUnfinalizedDevOpportunity = pendingDevOpportunity !== null;
         closed = true;
         client.close(1000, "LC4 segment rotation");
         unsubscribeEvent();
         unsubscribeWire?.();
         this.#active = false;
+        if (hadUnfinalizedDevOpportunity) {
+          // Always release the authenticated provider socket on an aborting
+          // path, but never mint a rotation receipt for an unfinalized turn.
+          throw new Error("LC4-DEV segment cannot close with an unfinalized canonical opportunity");
+        }
         const body = Object.freeze({
           adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
           session_ordinal: sessionOrdinal,

@@ -234,7 +234,15 @@ export function createLc4DevRepairPlaybackController(input: Readonly<{
           spoken_caller_fact_ids: [...new Set(facts)].sort(),
           visible_receipt_ids: [`control.${control_receipt.control_receipt_sha256}`, `exchange.${canonical_exchange_sha256}`],
           visible_worker_result_ids: [`worker.${control_receipt.worker_state_sha256}`],
-          unmet_blocker_codes: earliest === null ? [] : [earliest as ConversationalRepairBlocker],
+          // CRP is only permitted to interpret blocker codes at preregistered
+          // deadlines. A listener can legitimately report an unmet semantic on
+          // any turn, including one whose generic blocker is outside the
+          // current stage's repair inventory. Non-deadline observations must
+          // therefore deterministically emit no_repair without selecting or
+          // validating a repair blocker.
+          unmet_blocker_codes: deadlineReached && earliest !== null
+            ? [earliest as ConversationalRepairBlocker]
+            : [],
         },
       });
       if (result.replayed) throw new Error("LC4-DEV canonical repair decision replay is forbidden");

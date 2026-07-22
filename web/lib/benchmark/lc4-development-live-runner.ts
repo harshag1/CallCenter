@@ -733,6 +733,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
           segment_ordinal: segmentOrdinal,
           previous_rotation_receipt_sha256: previousRotationReceipt,
         }));
+        let segmentBodyFailed = false;
         try {
           const start = (segmentOrdinal - 1) * 20;
           for (let offset = 0; offset < 20; offset += 1) {
@@ -877,11 +878,25 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               assistant_pcm_sha256: assistantReceipt.artifact_sha256,
             });
           }
+        } catch (error) {
+          segmentBodyFailed = true;
+          throw error;
         } finally {
-          failureClass = "transport";
-          const closed = await bounded("segment-close", LC4_DEV_LIVE_TIMEOUTS.segment_close_ms, () => session.close());
-          requireHash(closed.rotation_receipt_sha256, "LC4-DEV segment rotation receipt");
-          previousRotationReceipt = closed.rotation_receipt_sha256;
+          const originalFailureClass = failureClass;
+          if (!segmentBodyFailed) failureClass = "transport";
+          try {
+            const closed = await bounded("segment-close", LC4_DEV_LIVE_TIMEOUTS.segment_close_ms, () => session.close());
+            requireHash(closed.rotation_receipt_sha256, "LC4-DEV segment rotation receipt");
+            previousRotationReceipt = closed.rotation_receipt_sha256;
+          } catch (closeError) {
+            // Cleanup failure is terminal when it is the first failure. When
+            // the opportunity body already failed, retain that original error
+            // and classification instead of replacing the diagnostic with a
+            // secondary close failure.
+            if (!segmentBodyFailed) throw closeError;
+          } finally {
+            if (segmentBodyFailed) failureClass = originalFailureClass;
+          }
         }
       }
       episodesCompleted += 1;
