@@ -114,9 +114,9 @@ function outputVoiceReferenceText(slotId: string): string {
   // homophones (for example "parts"/"carts") needlessly ambiguous to an
   // independent ASR. Keep the wrapper fixed by slot kind so every provider is
   // calibrated against the same natural, non-cherry-picked sentence shape.
-  return slot.kind === "numeric_limit"
-    ? `The exact limit is ${slot.canonicalText}.`
-    : `The corrected identifier is ${slot.canonicalText}.`;
+  if (slot.kind === "numeric_limit") return `The exact limit is ${slot.canonicalText}.`;
+  const spokenIdentifier = slot.canonicalText.replace(/^([A-Z]{2,})(?=\s)/u, (prefix) => [...prefix].join(" "));
+  return `The corrected identifier is ${spokenIdentifier}.`;
 }
 
 /** Duplicate slot rows are rejected by the manifest; retain one deterministic row per semantic ID. */

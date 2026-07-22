@@ -239,6 +239,12 @@ describe("production output-voice calibration capture", () => {
     expect(outputVoiceCaptureSlotIds()).toHaveLength(6);
     expect(batch.captures).toHaveLength(18);
     expect(batch.manifest.fixtures).toHaveLength(18);
+    expect(batch.manifest.fixtures.find((fixture) => fixture.slotId === "campus.corrected_assessment")?.referenceText)
+      .toBe("The corrected identifier is C H E M 318 practical.");
+    expect(batch.manifest.fixtures.find((fixture) => fixture.slotId === "water.corrected_site")?.referenceText)
+      .toBe("The corrected identifier is H Y D 14 daycare.");
+    expect(batch.manifest.fixtures.find((fixture) => fixture.slotId === "water.threshold_limit")?.referenceText)
+      .toBe("The exact limit is 10 parts per billion.");
     expect(new Set(batch.captures.map((capture) => capture.fixture.provider))).toEqual(new Set(["openai", "gemini", "xai"]));
     expect(calls.filter((call) => call.provider === "gemini").every((call) => call.sampleRateHz === 16_000)).toBe(true);
     expect(calls.filter((call) => call.provider !== "gemini").every((call) => call.sampleRateHz === 24_000)).toBe(true);
