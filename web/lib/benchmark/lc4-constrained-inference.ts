@@ -1,5 +1,10 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
 import { createLc4PowerPlanArtifact } from "./lc4-power-plan";
+import {
+  assertLc4ResultReport,
+  type Lc4AnalysisRow,
+  type Lc4ResultReport,
+} from "./lc4-result-report";
 import { createSeededRng } from "./statistics";
 
 export const LC4_CONSTRAINED_INFERENCE_ARTIFACT_ID = "HACC-LC4-CONSTRAINED-INFERENCE-v1" as const;
@@ -11,13 +16,7 @@ const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 
 export type Lc4Provider = (typeof PROVIDERS)[number];
 
-export type Lc4PairedBinaryObservation = Readonly<{
-  pair_id: string;
-  template_id: string;
-  provider: Lc4Provider;
-  native_success: boolean;
-  hacc_success: boolean;
-}>;
+type Lc4PairedBinaryObservation = Lc4AnalysisRow;
 
 function combinationsOfTwo(values: readonly number[]): readonly (readonly [number, number])[] {
   const result: [number, number][] = [];
@@ -115,7 +114,7 @@ function pairDifference(row: Lc4PairedBinaryObservation): number {
 }
 
 /** Equal-weight average of the three provider-specific paired risk differences. */
-export function providerStratifiedEqualWeightPairedStatistic(
+function providerStratifiedEqualWeightPairedStatistic(
   observations: readonly Lc4PairedBinaryObservation[]
 ) {
   const observed = validateObservations(observations);
@@ -152,7 +151,7 @@ function convolveIntegerFrequencies(
  * The sharp-null distribution is evaluated over the complete 504^3 support,
  * using exact integer frequency convolution rather than random draws.
  */
-export function exactLc4ConstrainedRandomizationTest(
+function exactLc4ConstrainedRandomizationTest(
   observations: readonly Lc4PairedBinaryObservation[]
 ) {
   const observed = validateObservations(observations);
@@ -221,7 +220,7 @@ function quantile(sorted: readonly number[], probability: number): number {
  * templates and carries all three provider pair effects with it. The DKW bound
  * quantifies Monte Carlo CDF error only; it is not a coverage guarantee.
  */
-export function lc4TemplateClusterBootstrapInterval(
+function lc4TemplateClusterBootstrapInterval(
   observations: readonly Lc4PairedBinaryObservation[],
   options: Readonly<{
     iterations?: number;
@@ -289,6 +288,41 @@ export function lc4TemplateClusterBootstrapInterval(
       }),
       scope: "bounds simulation CDF error only; does not bound statistical interval coverage error" as const,
     }),
+  });
+}
+
+/**
+ * The sole production inference entry point. Outcomes are accepted only from a
+ * self-consistent LC4 report whose complete root matches the independently
+ * supplied expected root; detached or caller-constructed boolean rows have no
+ * exported analysis path.
+ */
+export function analyzeVerifiedLc4ResultReport(
+  report: Lc4ResultReport,
+  expectedResultSha256: string,
+  options: Readonly<{
+    bootstrapIterations?: number;
+    bootstrapSeed?: string;
+  }> = {},
+) {
+  if (!/^[a-f0-9]{64}$/u.test(expectedResultSha256)) {
+    throw new Error("expected LC4 result root must be a lowercase SHA-256 digest");
+  }
+  if (report.resultSha256 !== expectedResultSha256) {
+    throw new Error("LC4 inference report root differs from the expected result root");
+  }
+  assertLc4ResultReport(report);
+  const exactTest = exactLc4ConstrainedRandomizationTest(report.analysisRows);
+  const templateClusterInterval = lc4TemplateClusterBootstrapInterval(report.analysisRows, {
+    iterations: options.bootstrapIterations,
+    seed: options.bootstrapSeed,
+  });
+  return Object.freeze({
+    protocol_id: "HACC-LC4-v1" as const,
+    result_report_sha256: report.resultSha256,
+    analysis_rows_sha256: report.analysisRowsSha256,
+    exact_test: exactTest,
+    template_cluster_interval: templateClusterInterval,
   });
 }
 

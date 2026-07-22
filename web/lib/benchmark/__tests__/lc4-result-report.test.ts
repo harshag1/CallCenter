@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
-import {
-  classifyConversationalRepairTerminal,
-  type ConversationalRepairTerminalEvidence,
-} from "../conversational-repair";
+import type { ConversationalRepairTerminalEvidence } from "../conversational-repair";
 import { createLc4PowerPlanArtifact } from "../lc4-power-plan";
 import {
   LC4_EVIDENCE_DOMAINS,
@@ -12,12 +9,13 @@ import {
   createLc4ResultReport,
   type Lc4Arm,
   type Lc4EvidenceArtifacts,
+  type Lc4EvidenceDerivation,
   type Lc4EvidenceDomain,
+  type Lc4EvidenceReplayContext,
   type Lc4EvidenceReplayers,
   type Lc4Provider,
   type Lc4ResultReportInput,
   type Lc4TerminalDispositionInput,
-  type Lc4UsefulConjuncts,
 } from "../lc4-result-report";
 
 const H = (value: string): string => sha256Hex(`lc4-result-test:${value}`);
@@ -31,65 +29,29 @@ const verifierHashes = Object.freeze(Object.fromEntries(LC4_EVIDENCE_DOMAINS.map
   domain,
   H(`verifier:${domain}`),
 ])) as Record<Lc4EvidenceDomain, string>);
+const observedReplayContexts: Lc4EvidenceReplayContext[] = [];
 
-const replayers: Lc4EvidenceReplayers = Object.freeze(Object.fromEntries(LC4_EVIDENCE_DOMAINS.map((domain) => [
+const replayers = Object.freeze(Object.fromEntries(LC4_EVIDENCE_DOMAINS.map((domain) => [
   domain,
-  (artifact: JsonValue, context: { runId: string; domain: Lc4EvidenceDomain }) => {
-    const value = artifact as { runId?: unknown; domain?: unknown; valid?: unknown };
-    const valid = value.runId === context.runId && value.domain === context.domain && value.valid === true;
+  (artifact: JsonValue, context: Lc4EvidenceReplayContext) => {
+    observedReplayContexts.push(context);
+    const value = artifact as { domain?: unknown; valid?: unknown; derivation?: unknown };
+    const valid = value.domain === context.domain && value.valid === true;
     return Object.freeze({
       verifierSha256: verifierHashes[domain],
-      replaySha256: sha256Hex(`replayed:${domain}\n${canonicalJson(artifact)}`),
+      replaySha256: sha256Hex(`replayed:${domain}\n${context.artifactSha256}\n${canonicalJson(artifact)}`),
       valid,
-      errors: Object.freeze(valid ? [] : ["artifact_identity_or_replay_invalid"]),
+      errors: Object.freeze(valid ? [] : ["artifact_domain_or_replay_invalid"]),
+      derivation: value.derivation,
     });
   },
 ])) as unknown as Lc4EvidenceReplayers);
 
-function conjuncts(passed: boolean): Lc4UsefulConjuncts {
-  return Object.freeze(Object.fromEntries(LC4_USEFUL_CONJUNCTS.map((name) => [name, passed])) as Record<
-    typeof LC4_USEFUL_CONJUNCTS[number],
-    boolean
-  >);
-}
-
-function evidenceFor(runId: string): Lc4EvidenceArtifacts {
-  return Object.freeze(Object.fromEntries(LC4_EVIDENCE_DOMAINS.map((domain) => [domain, Object.freeze({
-    schemaVersion: 1,
-    runId,
-    domain,
-    valid: true,
-    payloadSha256: H(`${runId}:${domain}:payload`),
-  })])) as unknown as Record<Lc4EvidenceDomain, JsonValue>);
-}
-
-function failureLabels(
-  terminalEvidence: ConversationalRepairTerminalEvidence,
-  useful: Lc4UsefulConjuncts,
-  parity: boolean,
-  breach: boolean,
-): readonly string[] {
-  const labels: string[] = [];
-  for (const [name, passed] of Object.entries(useful)) if (!passed) labels.push(`requirement.${name}`);
-  if (!parity) labels.push("information_parity_mismatch");
-  if (breach) labels.push("critical_external_effect_breach");
-  if (terminalEvidence.scenario_invalid) labels.push("scenario_invalid");
-  if (terminalEvidence.system_failure) labels.push("system_failure");
-  if (terminalEvidence.harness_deadlock) labels.push("harness_deadlock");
-  if (terminalEvidence.transport_failure) labels.push("transport_failure");
-  if (terminalEvidence.absorbing_model_policy_attempt) labels.push("absorbing_model_policy_attempt");
-  if (!terminalEvidence.mission_complete) labels.push("mission_incomplete");
-  return Object.freeze(labels.sort());
-}
-
-function disposition(
-  assignment: typeof powerPlan.randomization.assignments[number],
-  arm: Lc4Arm,
+function terminalEvidence(
   success: boolean,
-  successClass: "clean" | "recovered" | "contained-model-violation" = "clean",
-): Lc4TerminalDispositionInput {
-  const runId = `${assignment.pair_id}-${arm}`;
-  const terminalEvidence: ConversationalRepairTerminalEvidence = success
+  successClass: "clean" | "recovered" | "contained-model-violation",
+): ConversationalRepairTerminalEvidence {
+  return success
     ? Object.freeze({
         scenario_invalid: false,
         system_failure: false,
@@ -108,19 +70,88 @@ function disposition(
         absorbing_model_policy_attempt: false,
         repair_count: 4,
       });
-  const useful = conjuncts(success);
+}
+
+function derivations(
+  success: boolean,
+  terminal: ConversationalRepairTerminalEvidence,
+  parity = true,
+  breach = false,
+): Readonly<Record<Lc4EvidenceDomain, Lc4EvidenceDerivation>> {
+  return Object.freeze({
+    worker: Object.freeze({
+      domain: "worker" as const,
+      usefulConjuncts: Object.freeze({ worker_exactly_once: success, worker_rejection: success }),
+    }),
+    repair: Object.freeze({
+      domain: "repair" as const,
+      usefulConjuncts: Object.freeze({ checkpoints_and_obligations: success, ambiguity_reconciliation: success }),
+      terminalEvidence: Object.freeze({ repair_count: terminal.repair_count }),
+    }),
+    authority: Object.freeze({
+      domain: "authority" as const,
+      usefulConjuncts: Object.freeze({
+        terminal_world: success,
+        latest_revision_authority: success,
+        external_effect_integrity: success,
+      }),
+      criticalExternalEffectBreach: breach,
+      terminalEvidence: Object.freeze({
+        scenario_invalid: terminal.scenario_invalid,
+        system_failure: terminal.system_failure,
+        harness_deadlock: terminal.harness_deadlock,
+        mission_complete: terminal.mission_complete,
+        absorbing_model_policy_attempt: terminal.absorbing_model_policy_attempt,
+      }),
+    }),
+    audio: Object.freeze({
+      domain: "audio" as const,
+      usefulConjuncts: Object.freeze({ terminal_claim_integrity: success, canonical_horizon: success }),
+      terminalEvidence: Object.freeze({ transport_failure: terminal.transport_failure }),
+    }),
+    asr: Object.freeze({
+      domain: "asr" as const,
+      usefulConjuncts: Object.freeze({ audible_semantics: success }),
+    }),
+    attestation: Object.freeze({ domain: "attestation" as const, informationParityPass: parity }),
+  });
+}
+
+function evidenceFor(
+  seed: string,
+  pairId: string,
+  decisions: Readonly<Record<Lc4EvidenceDomain, Lc4EvidenceDerivation>>,
+): Lc4EvidenceArtifacts {
+  return Object.freeze(Object.fromEntries(LC4_EVIDENCE_DOMAINS.map((domain) => [domain, Object.freeze({
+    schemaVersion: 1,
+    evidenceId: H(`${domain === "attestation" ? pairId : seed}:${domain}:id`),
+    domain,
+    valid: true,
+    payloadSha256: H(`${domain === "attestation" ? pairId : seed}:${domain}:payload`),
+    derivation: decisions[domain],
+  })])) as unknown as Record<Lc4EvidenceDomain, JsonValue>);
+}
+
+function disposition(
+  assignment: typeof powerPlan.randomization.assignments[number],
+  arm: Lc4Arm,
+  success: boolean,
+  successClass: "clean" | "recovered" | "contained-model-violation" = "clean",
+  overrides: Readonly<{
+    terminal?: ConversationalRepairTerminalEvidence;
+    parity?: boolean;
+    breach?: boolean;
+  }> = {},
+): Lc4TerminalDispositionInput {
+  const runId = `${assignment.pair_id}-${arm}`;
+  const terminal = overrides.terminal ?? terminalEvidence(success, successClass);
   return Object.freeze({
     runId,
     pairId: assignment.pair_id,
     templateId: assignment.template_id,
     provider: assignment.provider,
     arm,
-    terminal: classifyConversationalRepairTerminal(terminalEvidence),
-    usefulConjuncts: useful,
-    informationParityPass: true,
-    criticalExternalEffectBreach: false,
-    failureLabels: failureLabels(terminalEvidence, useful, true, false),
-    evidence: evidenceFor(runId),
+    evidence: evidenceFor(runId, assignment.pair_id, derivations(success, terminal, overrides.parity, overrides.breach)),
   });
 }
 
@@ -148,11 +179,12 @@ function input(values = dispositions()): Lc4ResultReportInput {
 }
 
 describe("isolated LC4 ITT result/report contract", () => {
-  it("reports all 144 dispositions, provider rows, CRP composition, and equal-provider pooled effect", () => {
+  it("derives all 144 outcomes and the sole admissible 72 analysis rows from blinded evidence", () => {
+    observedReplayContexts.length = 0;
     const report = createLc4ResultReport(input(), replayers);
     expect(report.status).toBe("descriptive_contract_only_no_efficacy_claim");
     expect(report.terminalDispositions).toBe(144);
-    expect(report.scheduledPairs).toBe(72);
+    expect(report.analysisRows).toHaveLength(72);
     expect(report.providerRows.map((row) => ({
       provider: row.provider,
       native: row.nativeBoundedUseful,
@@ -165,38 +197,46 @@ describe("isolated LC4 ITT result/report contract", () => {
       { provider: "gemini", native: 12, hacc: 16, difference: 1 / 6, haccOnly: 4, nativeOnly: 0 },
       { provider: "xai", native: 12, hacc: 12, difference: 0, haccOnly: 0, nativeOnly: 0 },
     ]);
-    expect(report.equalProviderWeightPooled).toEqual({
-      estimand: "mean_of_three_provider_specific_paired_risk_differences",
-      pairedRiskDifference: (0.25 + 1 / 6) / 3,
-      providerCount: 3,
-      confirmatoryInferenceImplemented: false,
-    });
-    expect(report.terminalClassCounts.clean).toBeGreaterThan(0);
-    expect(report.terminalClassCounts.recovered).toBeGreaterThan(0);
-    expect(report.terminalClassCounts["contained-model-violation"]).toBeGreaterThan(0);
-    expect(report.terminalClassCounts["model-unrecovered"]).toBeGreaterThan(0);
+    expect(report.equalProviderWeightPooled.pairedRiskDifference).toBe((0.25 + 1 / 6) / 3);
     expect(report.failureLabelCounts.mission_incomplete).toBeGreaterThan(0);
-    expect(report.dispositions.every((item) => LC4_EVIDENCE_DOMAINS.every((domain) => (
-      item.evidenceReplayReceipts[domain].verifierSha256 === verifierHashes[domain]
-    )))).toBe(true);
+    expect(observedReplayContexts).toHaveLength(144 * 6);
+    expect(observedReplayContexts.every((context) => (
+      canonicalJson(Object.keys(context).sort()) === canonicalJson(["artifactSha256", "domain"])
+    ))).toBe(true);
   });
 
-  it("refuses missing, duplicate, or unscheduled ITT terminal dispositions", () => {
+  it("refuses missing, duplicate, or allocation-substituted ITT dispositions", () => {
     const values = [...dispositions()];
     expect(() => createLc4ResultReport(input(values.slice(0, -1)), replayers)).toThrow("all 144");
-
     const duplicate = [...values];
     duplicate[1] = duplicate[0];
     expect(() => createLc4ResultReport(input(duplicate), replayers)).toThrow("repeat a run ID");
-
-    const unscheduled = [...values];
-    unscheduled[0] = { ...unscheduled[0], runId: "unscheduled-run" };
-    expect(() => createLc4ResultReport(input(unscheduled), replayers)).toThrow("missing ITT terminal disposition");
+    const substituted = [...values];
+    substituted[0] = { ...substituted[0], provider: "xai" };
+    expect(() => createLc4ResultReport(input(substituted), replayers)).toThrow("frozen allocation");
   });
 
-  it("replays CRP terminal classification and preserves every derived multi-label failure", () => {
+  it("makes caller-substituted outcome booleans and allocation metadata inadmissible", () => {
+    const injected = [...dispositions()];
+    injected[0] = { ...injected[0], usefulConjuncts: Object.fromEntries(
+      LC4_USEFUL_CONJUNCTS.map((name) => [name, false]),
+    ) } as unknown as Lc4TerminalDispositionInput;
+    expect(() => createLc4ResultReport(input(injected), replayers)).toThrow("disposition keys differ");
+
+    const leaked = [...dispositions()];
+    leaked[0] = {
+      ...leaked[0],
+      evidence: {
+        ...leaked[0].evidence,
+        worker: { ...leaked[0].evidence.worker as object, provider: "openai", arm: "native" } as JsonValue,
+      },
+    };
+    expect(() => createLc4ResultReport(input(leaked), replayers)).toThrow("leaks allocation metadata");
+  });
+
+  it("derives terminal precedence, breach, parity, and every multi-label failure from replay artifacts", () => {
     const values = [...dispositions()];
-    const terminalEvidence = {
+    const terminal = Object.freeze({
       scenario_invalid: false,
       system_failure: true,
       harness_deadlock: false,
@@ -204,34 +244,33 @@ describe("isolated LC4 ITT result/report contract", () => {
       mission_complete: false,
       absorbing_model_policy_attempt: true,
       repair_count: 2,
-    } as const;
-    const failedConjuncts = conjuncts(false);
-    values[0] = Object.freeze({
-      ...values[0],
-      terminal: classifyConversationalRepairTerminal(terminalEvidence),
-      usefulConjuncts: failedConjuncts,
-      criticalExternalEffectBreach: true,
-      failureLabels: failureLabels(terminalEvidence, failedConjuncts, true, true),
     });
+    values[0] = disposition(powerPlan.randomization.assignments[0], "native", false, "clean", {
+      terminal,
+      parity: false,
+      breach: true,
+    });
+    values[1] = disposition(powerPlan.randomization.assignments[0], "hacc", true, "clean", { parity: false });
     const report = createLc4ResultReport(input(values), replayers);
     expect(report.dispositions[0].terminalClass).toBe("system-failure");
+    expect(report.dispositions[0].boundedUsefulCompletion).toBe(false);
     expect(report.dispositions[0].failureLabels).toEqual(expect.arrayContaining([
       "system_failure",
       "transport_failure",
       "absorbing_model_policy_attempt",
       "critical_external_effect_breach",
+      "information_parity_mismatch",
       "mission_incomplete",
     ]));
-
-    const contradictory = [...dispositions()];
-    contradictory[0] = {
-      ...contradictory[0],
-      terminal: { ...contradictory[0].terminal, terminal_class: "transport" },
-    };
-    expect(() => createLc4ResultReport(input(contradictory), replayers)).toThrow("does not replay");
   });
 
-  it("requires every evidence domain to replay under its preregistered verifier", () => {
+  it("requires parity to come from one arm-common pair attestation", () => {
+    const values = [...dispositions()];
+    values[0] = disposition(powerPlan.randomization.assignments[0], "native", true, "clean", { parity: false });
+    expect(() => createLc4ResultReport(input(values), replayers)).toThrow("one shared pair attestation");
+  });
+
+  it("requires every evidence domain to replay under its registered verifier and exact derivation schema", () => {
     const invalid = [...dispositions()];
     invalid[0] = {
       ...invalid[0],
@@ -239,65 +278,50 @@ describe("isolated LC4 ITT result/report contract", () => {
     };
     expect(() => createLc4ResultReport(input(invalid), replayers)).toThrow("worker evidence did not replay cleanly");
 
-    const missing = [...dispositions()];
-    const { asr: _asr, ...withoutAsr } = missing[0].evidence;
-    void _asr;
-    missing[0] = { ...missing[0], evidence: withoutAsr as Lc4EvidenceArtifacts };
-    expect(() => createLc4ResultReport(input(missing), replayers)).toThrow("evidence keys differ");
-
     const wrongVerifier = { ...replayers, audio: (artifact: JsonValue) => ({
       verifierSha256: H("unregistered-audio-verifier"),
       replaySha256: H(canonicalJson(artifact)),
       valid: true,
       errors: [],
-    }) };
+      derivation: (artifact as { derivation: Lc4EvidenceDerivation }).derivation,
+    }) } as unknown as Lc4EvidenceReplayers;
     expect(() => createLc4ResultReport(input(), wrongVerifier)).toThrow("unregistered verifier");
-  });
 
-  it("retains parity mismatches as ITT failures without silently dropping the pair", () => {
-    const values = [...dispositions()];
-    const original = values[0];
-    values[0] = Object.freeze({
-      ...original,
-      informationParityPass: false,
-      failureLabels: Object.freeze([...original.failureLabels, "information_parity_mismatch"].sort()),
-    });
-    const report = createLc4ResultReport(input(values), replayers);
-    expect(report.terminalDispositions).toBe(144);
-    expect(report.informationParityFailedPairs).toBe(1);
-    expect(report.dispositions[0].boundedUsefulCompletion).toBe(false);
-    expect(report.failureLabelCounts.information_parity_mismatch).toBe(1);
-    expect(report.providerRows.find((row) => row.provider === values[0].provider)?.causalComparisonEligiblePairs).toBe(23);
+    const malformed = [...dispositions()];
+    malformed[0] = {
+      ...malformed[0],
+      evidence: {
+        ...malformed[0].evidence,
+        attestation: {
+          ...malformed[0].evidence.attestation as object,
+          derivation: { domain: "attestation", informationParityPass: true, nativeSuccess: true },
+        } as JsonValue,
+      },
+    };
+    expect(() => createLc4ResultReport(input(malformed), replayers)).toThrow("derivation keys differ");
   });
 
   it("rejects native harness-deadlock and breach evidence without system-failure precedence", () => {
     const nativeDeadlock = [...dispositions()];
-    const deadlockEvidence = {
-      scenario_invalid: false,
-      system_failure: false,
-      harness_deadlock: true,
-      transport_failure: false,
-      mission_complete: false,
-      absorbing_model_policy_attempt: false,
-      repair_count: 1,
-    } as const;
-    nativeDeadlock[0] = {
-      ...nativeDeadlock[0],
-      terminal: classifyConversationalRepairTerminal(deadlockEvidence),
-      failureLabels: Object.freeze([...nativeDeadlock[0].failureLabels, "harness_deadlock"].sort()),
-    };
+    nativeDeadlock[0] = disposition(powerPlan.randomization.assignments[0], "native", false, "clean", {
+      terminal: Object.freeze({
+        scenario_invalid: false,
+        system_failure: false,
+        harness_deadlock: true,
+        transport_failure: false,
+        mission_complete: false,
+        absorbing_model_policy_attempt: false,
+        repair_count: 1,
+      }),
+    });
     expect(() => createLc4ResultReport(input(nativeDeadlock), replayers)).toThrow("native disposition cannot");
 
     const breach = [...dispositions()];
-    breach[0] = {
-      ...breach[0],
-      criticalExternalEffectBreach: true,
-      failureLabels: Object.freeze([...breach[0].failureLabels, "critical_external_effect_breach"].sort()),
-    };
+    breach[0] = disposition(powerPlan.randomization.assignments[0], "native", false, "clean", { breach: true });
     expect(() => createLc4ResultReport(input(breach), replayers)).toThrow("critical breach must terminate");
   });
 
-  it("domain-hashes the complete report and changes on valid evidence-root substitution", () => {
+  it("verifies derivation, analysis-row, evidence, and complete report roots", () => {
     const baseline = createLc4ResultReport(input(), replayers);
     expect(() => assertLc4ResultReport(baseline)).not.toThrow();
     const values = [...dispositions()];
@@ -313,7 +337,11 @@ describe("isolated LC4 ITT result/report contract", () => {
     expect(changed.evidenceReplaySetSha256).not.toBe(baseline.evidenceReplaySetSha256);
 
     const mutated = structuredClone(baseline) as DeepMutable<typeof baseline>;
-    mutated.dispositions[0].evidenceReplayReceipts.worker.replaySha256 = H("in-place-replay-mutation");
+    mutated.dispositions[0].evidenceDerivations.worker.usefulConjuncts.worker_exactly_once = false;
     expect(() => assertLc4ResultReport(mutated)).toThrow("replay receipt hash mismatch");
+
+    const substitutedRows = structuredClone(baseline) as DeepMutable<typeof baseline>;
+    substitutedRows.analysisRows[0].native_success = !substitutedRows.analysisRows[0].native_success;
+    expect(() => assertLc4ResultReport(substitutedRows)).toThrow("analysis rows are not report-derived");
   });
 });
