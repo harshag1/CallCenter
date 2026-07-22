@@ -178,4 +178,76 @@ describe("LC4-DEV municipal executable control plane", () => {
     expect(control.manifest.native_information_parity).toBe("full_equivalent_policy_and_accumulated_public_state");
     expect(control.manifest.manifest_sha256).toMatch(/^[a-f0-9]{64}$/u);
   }, 30_000);
+
+  it("keeps running when the model requests reconciliation after omitting the original mutation", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const signer = createBenchmarkKernelAttestationSigner({
+      keyId: "lc4-dev-missing-mutation-test",
+      privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    });
+    const control = createLc4DevMunicipalControlPlane({
+      audio_manifest: artifacts.manifest,
+      repair_manifest: artifacts.repairManifest,
+      signer,
+      now: () => new Date("2026-07-21T22:00:00.000Z"),
+    });
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const plan = episode("hacc");
+    let previous: string | null = null;
+    let callSequence = 0;
+    let rejectedReconciliation: Awaited<ReturnType<typeof control.gateway_executor.execute>> | null = null;
+
+    for (const opportunity of corpus.opportunities) {
+      await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
+
+      if (opportunity.events.some((event) => event.kind === "authoritative-reconciliation")) {
+        callSequence += 1;
+        rejectedReconciliation = await control.gateway_executor.execute({
+          bridge_version: "lc4-dev-gateway-bridge-v1",
+          episode_id: plan.episode_id,
+          opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
+          provider: plan.provider,
+          arm: plan.arm,
+          provider_call_id: `test.missing-mutation.reconcile.${callSequence}`,
+          provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          target_tool: "archive.reconcile_transcript_request",
+          target_arguments: { invocation_id: "world.fabricated" },
+          request_sha256: sha256Hex(`request:missing-mutation:reconcile:${callSequence}`),
+          provider_provenance_sha256: sha256Hex(`provenance:missing-mutation:reconcile:${callSequence}`),
+        });
+      }
+
+      for (const call of control.development_pending_calls(plan.episode_id)) {
+        // Deliberately model an agent that never issued the original mutation.
+        if (call.target_tool === "archive.submit_transcript_request") continue;
+        callSequence += 1;
+        await control.gateway_executor.execute({
+          bridge_version: "lc4-dev-gateway-bridge-v1",
+          episode_id: plan.episode_id,
+          opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
+          provider: plan.provider,
+          arm: plan.arm,
+          provider_call_id: `test.missing-mutation.${opportunity.id}.${callSequence}`,
+          provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          target_tool: call.target_tool,
+          target_arguments: call.target_arguments,
+          request_sha256: sha256Hex(`request:missing-mutation:${opportunity.id}:${callSequence}`),
+          provider_provenance_sha256: sha256Hex(`provenance:missing-mutation:${opportunity.id}:${callSequence}`),
+        });
+      }
+      previous = sha256Hex(`provider-exchange:${plan.episode_id}:${opportunity.id}`);
+    }
+
+    expect(rejectedReconciliation).toMatchObject({
+      disposition: "rejected",
+      provider_output: { ok: false, code: "reconciliation_source_missing" },
+    });
+    const snapshot = control.snapshot(plan.episode_id);
+    expect(snapshot.opportunities).toBe(60);
+    expect(snapshot.world.receipts.some((receipt) => receipt.tool === "archive.submit_transcript_request")).toBe(false);
+    expect(snapshot.world.receipts.some((receipt) => receipt.tool === "archive.reconcile_transcript_request")).toBe(false);
+    expect(snapshot.pending_gateway_actions).toBeGreaterThanOrEqual(2);
+  }, 30_000);
 });

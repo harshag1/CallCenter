@@ -530,8 +530,6 @@ function applyOpportunityToCommon(state: CommonState, opportunity: Lc4PublicDevO
     if (event.kind === "detour-suspend") state.goals[event.ref] = "suspended";
     if (event.kind === "detour-resume") state.goals[event.ref] = "active";
     if (event.kind === "connection-rotation") state.connectionRotations += 1;
-    if (event.kind === "committed-after-error") state.effectStatus = "ambiguous";
-    if (event.kind === "authoritative-reconciliation") state.effectStatus = "reconciled";
   }
   state.opportunities = opportunity.index;
 }
@@ -685,9 +683,13 @@ function gatewayExecute(
   return freeze({ result: outcome.result, provider_output: providerOutput, invocation_id: invocationId });
 }
 
-function reconcileArguments(state: EpisodeState): Readonly<Record<string, JsonValue>> {
-  if (!state.originalMutationInvocationId) throw new Error("LC4-DEV reconciliation lacks the original mutation invocation identity");
-  return { invocation_id: state.originalMutationInvocationId };
+function reconcileArguments(state: EpisodeState): Readonly<Record<string, JsonValue>> | null {
+  // Reconciliation is model-owned and may be requested even when the model
+  // omitted the mutation that would have created its authoritative invocation
+  // identity. That is an agent failure, not an infrastructure failure.
+  return state.originalMutationInvocationId
+    ? { invocation_id: state.originalMutationInvocationId }
+    : null;
 }
 
 function dueStageCompletions(state: EpisodeState, opportunity: Lc4PublicDevOpportunity): LogicalAction[] {
@@ -949,7 +951,8 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         const expectedArguments = logical.action === "archive.reconcile_transcript_request"
           ? reconcileArguments(state)
           : logical.arguments;
-        return canonicalJson(expectedArguments) === canonicalJson(targetArguments);
+        return expectedArguments !== null
+          && canonicalJson(expectedArguments) === canonicalJson(targetArguments);
       });
 
       let providerOutput: JsonValue;
@@ -957,7 +960,32 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       let disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
       let accepted = false;
       let invocationId: string | null = null;
-      if (state.episode.arm === "native") {
+      const requiredReconciliationArguments = request.target_tool === "archive.reconcile_transcript_request"
+        ? reconcileArguments(state)
+        : null;
+      const reconciliationBindingFailure = request.target_tool === "archive.reconcile_transcript_request"
+        ? requiredReconciliationArguments === null
+          ? "reconciliation_source_missing"
+          : canonicalJson(requiredReconciliationArguments) !== canonicalJson(targetArguments)
+            ? "reconciliation_identity_mismatch"
+            : null
+        : null;
+      if (reconciliationBindingFailure) {
+        const result: CapabilityGatewayResult = {
+          ok: false,
+          gateway_version: 1,
+          action: request.target_tool,
+          code: reconciliationBindingFailure,
+          message: reconciliationBindingFailure === "reconciliation_source_missing"
+            ? "Authoritative reconciliation is unavailable because no source mutation receipt exists"
+            : "Reconciliation identity differs from the host-bound source mutation receipt",
+          retriable: false,
+          ...(state.snapshot ? { current_capability_epoch: state.snapshot.capability_epoch } : {}),
+        };
+        providerOutput = result;
+        authoritativeReceipt = result;
+        disposition = "rejected";
+      } else if (state.episode.arm === "native") {
         const execution = executeTool(LC4_DEV_MUNICIPAL_SCENARIO, state.world, {
           invocation_id: `native.${state.episode.episode_id}.${opportunity.id}.${sha256Hex(request.provider_call_id).slice(0, 12)}`,
           tool: request.target_tool,
@@ -1006,6 +1034,10 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         }
         if (completed?.action === "archive.submit_transcript_request" && invocationId) {
           state.originalMutationInvocationId = invocationId;
+          state.common.effectStatus = "ambiguous";
+        }
+        if (completed?.action === "archive.reconcile_transcript_request") {
+          state.common.effectStatus = "reconciled";
         }
       }
       if (state.episode.arm === "hacc" && accepted && request.target_tool === "archive.reconcile_transcript_request") {
@@ -1053,12 +1085,15 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         return freeze([{ opportunity_id: currentOpportunityId, target_tool: "flow.get_state", target_arguments: {} }]);
       }
       const executable = state.pendingGatewayActions
-        .filter((logical) => state.episode.arm === "native" || Boolean(state.snapshot && capability(state.snapshot, logical.action)))
+        .filter((logical) => (
+          (state.episode.arm === "native" || Boolean(state.snapshot && capability(state.snapshot, logical.action)))
+          && (logical.action !== "archive.reconcile_transcript_request" || reconcileArguments(state) !== null)
+        ))
         .map((logical) => ({
         opportunity_id: currentOpportunityId,
         target_tool: logical.action,
         target_arguments: logical.action === "archive.reconcile_transcript_request"
-          ? reconcileArguments(state)
+          ? reconcileArguments(state)!
           : logical.arguments,
         }));
       return freeze(executable);
