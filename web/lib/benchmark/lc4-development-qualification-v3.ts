@@ -34,14 +34,23 @@ import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import type { RealtimeWireObservation } from "../realtime/client/types";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+import {
+  replayProviderToolRoundtrip,
+  type RoundtripSanitizedUsage,
+} from "./provider-roundtrip-replay";
+import {
+  readLc4QualificationPackageDirectoryV5,
+  verifySignedLc4QualificationPackageEnvelopeV5,
+  type Lc4QualificationTerminalClaimsV5,
+  type SignedLc4QualificationPackageEnvelopeV5,
+} from "./lc4-qualification-package-envelope";
 
 const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
 const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
-const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v4\n";
-const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v4\n";
+const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v5\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v5\n";
 const AUTHORIZATION_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
-const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-package/v4\n";
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification-v3/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-qualification-v3-report/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
@@ -67,16 +76,9 @@ type QualificationReport = Readonly<{
   latest: Lc4QualificationV3TerminalArtifact["body"];
 }>;
 
-type PackageManifest = Readonly<{
-  schema_version: 1;
-  manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4";
-  self_excluded: true;
-  entries: readonly Readonly<{ path: string; byte_length: number; sha256: string }>[];
-  bindings: Readonly<Record<string, string>>;
-  package_sha256: string;
-}>;
+type PackageManifest = SignedLc4QualificationPackageEnvelopeV5;
 
-type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage"> & Readonly<{
+type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage" | "sanitized_usage"> & Readonly<{
   wire_observation_count: number;
   usage_event_count: number;
 }>;
@@ -85,6 +87,8 @@ export type Lc4DevQualificationV3SpokenEvidence = Readonly<{
   provider: LiveStsProvider;
   model: string;
   evidence_sha256: string;
+  public_execution_sha256: string;
+  replay_sha256: string;
   summary_file_sha256: string;
   wire_file_sha256: string;
   usage_file_sha256: string;
@@ -344,21 +348,22 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     || input.budget_evidence.terminal_outcome !== "completed"
     || input.budget_evidence.evidence_sha256 !== terminal.budget_evidence_sha256
     || input.budget_evidence.final_head_sha256 !== terminal.budget_final_head_sha256
-    || input.package_manifest.bindings.plan_artifact_sha256 !== input.plan.artifact_sha256
-    || input.package_manifest.bindings.authorization_artifact_sha256 !== input.authorization.artifact_sha256
-    || input.package_manifest.bindings.terminal_artifact_sha256 !== input.terminal.artifact_sha256
-    || input.package_manifest.bindings.budget_evidence_sha256 !== input.budget_evidence.evidence_sha256) {
+    || input.package_manifest.body.bindings.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || input.package_manifest.body.bindings.authorization_artifact_sha256 !== input.authorization.artifact_sha256
+    || input.package_manifest.body.terminal_artifact_sha256 !== input.terminal.artifact_sha256
+    || input.package_manifest.body.bindings.budget_evidence_sha256 !== input.budget_evidence.evidence_sha256
+    || input.package_manifest.body.payload_root_sha256 !== terminal.payload_root_sha256
+    || canonicalJson(input.package_manifest.body.bindings) !== canonicalJson(terminal.package_bindings)) {
     throw new Error("LC4-DEV qualification v3 plan, Gate A, Gate B, budget, report, and terminal bindings are not exact");
   }
-  const { package_sha256: claimedPackageSha256, ...packageBody } = input.package_manifest;
-  if (input.package_manifest.schema_version !== 1
-    || input.package_manifest.manifest_version !== "HACC-LC4-QUALIFICATION-PACKAGE-v4"
-    || input.package_manifest.self_excluded !== true
-    || claimedPackageSha256 !== sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(packageBody)}`)
-    || input.package_manifest.entries.some((entry) => entry.path.includes("/") || !HASH.test(entry.sha256))) {
+  if (input.package_manifest.body.schema_version !== 1
+    || input.package_manifest.body.envelope_version !== "HACC-LC4-QUALIFICATION-PACKAGE-ENVELOPE-v5"
+    || input.package_manifest.body.self_excluded !== true
+    || !HASH.test(input.package_manifest.artifact_sha256)
+    || input.package_manifest.body.entries.some((entry) => entry.path.includes("/") || !HASH.test(entry.sha256))) {
     throw new Error("LC4-DEV qualification v3 retained package manifest is invalid");
   }
-  const entries = new Map(input.package_manifest.entries.map((entry) => [entry.path, entry]));
+  const entries = new Map(input.package_manifest.body.entries.map((entry) => [entry.path, entry]));
   for (const evidence of input.spoken_gate_evidence) {
     for (const [path, digest] of [
       [`${evidence.provider}-spoken-roundtrip.json`, evidence.summary_file_sha256],
@@ -392,6 +397,8 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
       || spoken.provider !== provider
       || spoken.model !== target.model
       || spoken.evidence_sha256 !== terminal.roundtrip_evidence_sha256[index]
+      || spoken.public_execution_sha256 !== terminal.roundtrip_public_execution_sha256[index]
+      || spoken.replay_sha256 !== terminal.roundtrip_replay_sha256[index]
       || spoken.evidence_sha256 !== result.evidence_sha256
       || spoken.caller_audio_bytes !== target.caller_audio_bytes
       || result.caller_audio_bytes !== target.caller_audio_bytes
@@ -430,7 +437,7 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     authorization_artifact_sha256: input.authorization.artifact_sha256,
     terminal_artifact_sha256: input.terminal.artifact_sha256,
     report_sha256: reportSha256,
-    package_sha256: input.package_manifest.package_sha256,
+    package_sha256: input.package_manifest.artifact_sha256,
     setup_qualification_artifact_sha256: input.setup_qualification.artifactSha256,
     budget_evidence_sha256: input.budget_evidence.evidence_sha256,
     spoken_gate_evidence: input.spoken_gate_evidence,
@@ -455,7 +462,7 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     terminal_artifact_sha256: input.terminal.artifact_sha256,
     terminal_root_sha256: input.terminal.artifact_sha256,
     report_sha256: reportSha256,
-    package_sha256: input.package_manifest.package_sha256,
+    package_sha256: input.package_manifest.artifact_sha256,
     setup_qualification_artifact_sha256: input.setup_qualification.artifactSha256,
     budget_evidence_sha256: input.budget_evidence.evidence_sha256,
     budget_final_head_sha256: input.budget_evidence.final_head_sha256,
@@ -541,14 +548,40 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.endsWith(".complete"));
   if (complete.length !== 1) throw new Error("LC4-DEV qualification v3 must retain exactly one completed attempt");
   const directory = resolve(attemptsRoot, complete[0]!.name);
-  const [authorization, terminal, manifest, setup, budget] = await Promise.all([
+  const [authorization, terminal, retainedPackage, setup, budget] = await Promise.all([
     readBoundedJson<Lc4QualificationV3AuthorizationArtifact>(resolve(directory, "authorization.json")),
     readBoundedJson<Lc4QualificationV3TerminalArtifact>(resolve(directory, "terminal.json")),
-    readBoundedJson<PackageManifest>(resolve(directory, "artifact-manifest.json")),
+    readLc4QualificationPackageDirectoryV5({
+      directory,
+      envelopePath: "qualification-package-envelope.json",
+    }),
     readBoundedJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json")),
     readBoundedJson<Lc4QualificationBudgetEvidence>(resolve(directory, "budget-settlement.json")),
   ]);
+  const manifest = await verifySignedLc4QualificationPackageEnvelopeV5({
+    envelope: retainedPackage.envelope,
+    files: retainedPackage.files,
+    expectedAuthorityFingerprintSha256: authorization.body.terminal_public_key_fingerprint_sha256,
+    verifyTerminal: (bytes): Lc4QualificationTerminalClaimsV5 => {
+      const retained = JSON.parse(Buffer.from(bytes).toString("utf8")) as Lc4QualificationV3TerminalArtifact;
+      assertSignedArtifact({
+        artifact: retained,
+        expected_fingerprint: authorization.body.terminal_public_key_fingerprint_sha256,
+        signing_domain: TERMINAL_SIGNING_DOMAIN,
+        artifact_domain: TERMINAL_ARTIFACT_DOMAIN,
+      });
+      if (canonicalJson(retained) !== canonicalJson(terminal)) {
+        throw new Error("LC4-DEV qualification package terminal differs from retained terminal");
+      }
+      return freeze({
+        terminal_artifact_sha256: retained.artifact_sha256,
+        payload_root_sha256: retained.body.payload_root_sha256,
+        bindings: retained.body.package_bindings,
+      });
+    },
+  });
   const spoken: Lc4DevQualificationV3SpokenEvidence[] = [];
+  const retainedUsage: RoundtripSanitizedUsage[] = [];
   for (const provider of LC4_QUALIFICATION_V3_PROVIDER_ORDER) {
     const summaryPath = resolve(directory, `${provider}-spoken-roundtrip.json`);
     const wirePath = resolve(directory, `${provider}-spoken-roundtrip-wire.jsonl`);
@@ -557,7 +590,7 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
       readFile(summaryPath), readFile(wirePath), readFile(usagePath),
       readBoundedJson<RetainedRoundtripSummary>(summaryPath),
       readJsonLines<RealtimeWireObservation>(wirePath),
-      readJsonLines<Readonly<Record<string, unknown>>>(usagePath),
+      readJsonLines<RoundtripSanitizedUsage>(usagePath),
     ]);
     const { wire_observation_count, usage_event_count } = summary;
     if (wire_observation_count !== wire.length || usage_event_count !== usage.length) {
@@ -581,10 +614,28 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
       throw new Error(`LC4-DEV qualification v3 ${provider} spoken Gate B did not pass`);
     }
     assertClosedLoopWire(provider, wire, usage);
+    if (summary.replay_summary === null || summary.replay_causal_binding === null) {
+      throw new Error(`LC4-DEV qualification v3 ${provider} lacks replay-complete causal evidence`);
+    }
+    const replay = replayProviderToolRoundtrip({
+      expected: { provider, model: summary.model },
+      summary: summary.replay_summary,
+      wire_observations: wire,
+      sanitized_usage: usage,
+      causal_binding: summary.replay_causal_binding,
+    });
+    if (!replay.valid
+      || replay.public_execution_sha256 !== summary.public_execution_sha256
+      || replay.replay_sha256 !== summary.replay_sha256) {
+      throw new Error(`LC4-DEV qualification v3 ${provider} retained replay failed integrity`);
+    }
+    retainedUsage.push(...usage);
     spoken.push(freeze({
       provider,
       model: summary.model,
       evidence_sha256: summary.evidence_sha256,
+      public_execution_sha256: summary.public_execution_sha256!,
+      replay_sha256: summary.replay_sha256!,
       summary_file_sha256: sha256Hex(summaryBytes),
       wire_file_sha256: sha256Hex(wireBytes),
       usage_file_sha256: sha256Hex(usageBytes),
@@ -596,6 +647,10 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
       post_tool_terminal_observed: true,
       post_tool_usage_observed: true,
     }));
+  }
+  if (budget.usage_event_count !== retainedUsage.length
+    || budget.usage_evidence_sha256 !== sha256Hex(canonicalJson(retainedUsage))) {
+    throw new Error("LC4-DEV qualification v3 retained usage differs from budget settlement");
   }
   return createLc4DevRetainedQualificationReceipt({
     plan,

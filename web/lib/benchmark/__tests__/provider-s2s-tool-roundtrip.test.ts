@@ -859,7 +859,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       ...fabricatedBody,
       evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(fabricatedBody)}`),
     });
-    expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("ordered provider-native server-VAD evidence");
+    expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("lacks closed-loop evidence");
   });
 
   it("rejects a call whose compact dynamic control is absent from wire evidence", async () => {

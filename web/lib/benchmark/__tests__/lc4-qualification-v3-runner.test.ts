@@ -29,6 +29,7 @@ import {
   LC4_S2S_SOURCE_TEXT,
   LC4_S2S_TOOL,
   LC4_S2S_TOOL_SCHEMA_SHA256,
+  assertLc4S2sRoundtripExecution,
   type Lc4S2sAudioRenderer,
   type Lc4S2sRoundtripExecution,
 } from "../provider-s2s-tool-roundtrip";
@@ -48,6 +49,11 @@ import {
 } from "../../realtime/client/wire-evidence";
 import { realtimeToolFrontierSha256 } from "../../realtime/client/openai-compatible";
 import { LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 } from "../xai-server-vad";
+import {
+  replayProviderToolRoundtrip,
+  roundtripCausalBindingSha256,
+  roundtripSanitizedUsageSha256,
+} from "../provider-roundtrip-replay";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -181,8 +187,8 @@ class SetupClient implements NormalizedRealtimeClient {
       predecessor = observation.observationSha256;
       for (const listener of this.#wireListeners) listener(observation);
     };
-    observe("outbound", "session.update", 1);
-    observe("inbound", "session.updated", 2);
+    observe("outbound", this.provider === "gemini" ? "setup" : "session.update", 1);
+    observe("inbound", this.provider === "gemini" ? "setupComplete" : "session.updated", 2);
     const event: NormalizedRealtimeEvent = {
       type: "session.ready", provider: this.provider, receivedAtMs: 1,
       wireType: this.provider === "gemini" ? "setupComplete" : "session.updated",
@@ -208,9 +214,10 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     direction: "inbound" | "outbound",
     wireType: string,
     identities: RealtimeWireObservation["identities"] = Object.freeze({}),
+    extraProjection: Readonly<Record<string, unknown>> = Object.freeze({}),
   ) => {
     const sequence = wire.length + 1;
-    const projection = Object.freeze({ direction, wireType, sequence });
+    const projection = Object.freeze({ direction, wireType, sequence, ...extraProjection });
     const core = Object.freeze({
       schemaVersion: 1 as const, provider: input.provider, direction, connectionEpoch: 1, sequence,
       observedAtMs: sequence, observedAtMonotonicMs: sequence, wireType,
@@ -223,6 +230,12 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     wire.push(observation);
     return observation;
   };
+  const callId = `${input.provider}-call`;
+  const initialResponseId = `${input.provider}-initial`;
+  const continuationResponseId = `${input.provider}-continuation`;
+  const callIdSha256 = realtimeWireIdentitySha256("call", callId);
+  const initialResponseIdSha256 = realtimeWireIdentitySha256("response", initialResponseId);
+  const continuationResponseIdSha256 = realtimeWireIdentitySha256("response", continuationResponseId);
   const xaiWire = input.provider === "xai" ? (() => {
     const control = observe("outbound", "session.update");
     const ack = observe("inbound", "session.updated");
@@ -231,18 +244,98 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     const speechStop = observe("inbound", "input_audio_buffer.speech_stopped");
     const commit = observe("inbound", "input_audio_buffer.committed");
     const rootResponse = observe("inbound", "response.created", {
-      responseIdSha256: realtimeWireIdentitySha256("response", "xai-root"),
+      responseIdSha256: initialResponseIdSha256,
     });
-    observe("inbound", "response.function_call_arguments.done", {
-      responseIdSha256: realtimeWireIdentitySha256("response", "xai-root"),
-      callIdSha256: realtimeWireIdentitySha256("call", "xai-call"),
-    });
-    observe("outbound", "conversation.item.create", {
-      callIdSha256: realtimeWireIdentitySha256("call", "xai-call"),
+    const call = observe("inbound", "response.function_call_arguments.done", {
+      responseIdSha256: initialResponseIdSha256, callIdSha256,
+    }, { gatewayCalls: [{ gateway: "capability_gateway", callIdSha256, responseIdSha256: initialResponseIdSha256 }] });
+    const result = observe("outbound", "conversation.item.create", { callIdSha256 }, {
+      gatewayResults: [{ gateway: "capability_gateway", callIdSha256 }],
     });
     const continuation = observe("outbound", "response.create");
-    return { control, ack, speechStart, speechStop, commit, rootResponse, continuation };
+    const continuationStarted = observe("inbound", "response.created", { responseIdSha256: continuationResponseIdSha256 });
+    observe("inbound", "response.audio.delta", { responseIdSha256: continuationResponseIdSha256 }, {
+      audio: { validCanonicalBase64: true, byteLength: 2, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 } },
+    });
+    const terminal = observe("inbound", "response.done", { responseIdSha256: continuationResponseIdSha256 }, {
+      terminal: { status: "completed" }, usage: { totalTokens: 8 },
+    });
+    return { control, ack, speechStart, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, terminal };
   })() : null;
+  const commonWire = input.provider !== "xai" ? (() => {
+    const trigger = observe("outbound", input.provider === "gemini" ? "realtimeInput.activityEnd" : "response.create");
+    const call = observe("inbound", input.provider === "gemini" ? "toolCall" : "response.function_call_arguments.done", {
+      callIdSha256,
+      ...(input.provider === "gemini" ? {} : { responseIdSha256: initialResponseIdSha256 }),
+    }, { gatewayCalls: [{ gateway: "capability_gateway", callIdSha256, ...(input.provider === "gemini" ? {} : { responseIdSha256: initialResponseIdSha256 }) }] });
+    const result = observe("outbound", input.provider === "gemini" ? "toolResponse" : "conversation.item.create", { callIdSha256 }, {
+      gatewayResults: [{ gateway: "capability_gateway", callIdSha256 }],
+    });
+    const continuation = input.provider === "gemini" ? result : observe("outbound", "response.create");
+    const continuationStarted = observe("inbound", input.provider === "gemini" ? "serverContent" : "response.created", {
+      ...(input.provider === "gemini" ? {} : { responseIdSha256: continuationResponseIdSha256 }),
+    }, input.provider === "gemini"
+      ? { audio: { direction: "output", chunks: [{ validCanonicalBase64: true, byteLength: 2, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 } }] } }
+      : {});
+    const terminal = observe("inbound", input.provider === "gemini" ? "serverContent" : "response.done", {
+      ...(input.provider === "gemini" ? {} : { responseIdSha256: continuationResponseIdSha256 }),
+    }, { terminal: { status: "completed" }, usage: { totalTokens: 8 } });
+    return { trigger, call, result, continuation, continuationStarted, terminal };
+  })() : null;
+  const causalWire = xaiWire ?? commonWire!;
+  const triggerObservationSha256 = input.provider === "xai"
+    ? xaiWire!.speechStop.observationSha256
+    : commonWire!.trigger.observationSha256;
+  const sanitizedUsage = Object.freeze({
+    schema_version: 1 as const,
+    source: "provider_reported" as const,
+    response_id_sha256: continuationResponseIdSha256,
+    terminal_observation_sha256: causalWire.terminal.observationSha256,
+    provider_usage_observation_sha256: causalWire.terminal.observationSha256,
+    contributing_wire_observation_sha256s: Object.freeze([causalWire.terminal.observationSha256]),
+    counters: Object.freeze({ totalTokens: 8 }),
+  });
+  const causalBody = Object.freeze({
+    schema_version: 1 as const,
+    provider: input.provider,
+    response_id_source: input.provider === "gemini" ? "client_local" as const : "provider" as const,
+    connection_epoch: 1 as const,
+    input_turn: 1,
+    trigger_observation_sha256: triggerObservationSha256,
+    initial_response_id_sha256: initialResponseIdSha256,
+    call_id_sha256: callIdSha256,
+    call_response_id_sha256: initialResponseIdSha256,
+    call_observation_sha256: causalWire.call.observationSha256,
+    result_observation_sha256: causalWire.result.observationSha256,
+    continuation_request_observation_sha256: causalWire.continuation.observationSha256,
+    continuation_response_id_sha256: continuationResponseIdSha256,
+    continuation_start_observation_sha256: causalWire.continuationStarted.observationSha256,
+    terminal_observation_sha256: causalWire.terminal.observationSha256,
+    usage_observation_sha256: causalWire.terminal.observationSha256,
+    usage_response_id_sha256: continuationResponseIdSha256,
+  });
+  const causalBinding = Object.freeze({ ...causalBody, evidence_sha256: roundtripCausalBindingSha256(causalBody) });
+  const replaySummary = Object.freeze({
+    schema_version: 1 as const,
+    provider: input.provider,
+    model: input.model,
+    connection_epoch: 1 as const,
+    call: Object.freeze({ observation_sha256: causalWire.call.observationSha256, call_id_sha256: callIdSha256, response_id_sha256: initialResponseIdSha256 }),
+    result: Object.freeze({ observation_sha256: causalWire.result.observationSha256, call_id_sha256: callIdSha256 }),
+    continuation: Object.freeze({
+      request_observation_sha256: causalWire.continuation.observationSha256,
+      origin_response_id_sha256: initialResponseIdSha256,
+      started_observation_sha256: causalWire.continuationStarted.observationSha256,
+      response_id_sha256: continuationResponseIdSha256,
+    }),
+    terminal: Object.freeze({ observation_sha256: causalWire.terminal.observationSha256, response_id_sha256: continuationResponseIdSha256, status: "completed" as const }),
+    usage: Object.freeze({ evidence_sha256: roundtripSanitizedUsageSha256(sanitizedUsage), response_id_sha256: continuationResponseIdSha256 }),
+  });
+  const replay = replayProviderToolRoundtrip({
+    expected: { provider: input.provider, model: input.model },
+    summary: replaySummary, wire_observations: wire, sanitized_usage: [sanitizedUsage], causal_binding: causalBinding,
+  });
+  expect(replay.valid, replay.errors.join(", ")).toBe(true);
   const body = Object.freeze({
     schema_version: 2 as const,
     roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v5" as const,
@@ -293,15 +386,22 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     tool_result_evidence_sha256: "5".repeat(64),
     wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
+    replay_summary: replaySummary,
+    replay_causal_binding: causalBinding,
+    sanitized_usage: Object.freeze([sanitizedUsage]),
+    public_execution_sha256: replay.public_execution_sha256,
+    replay_sha256: replay.replay_sha256,
     operation_order: Object.freeze(input.provider === "xai"
       ? ["session_ready", "server_vad_control_updated", "server_vad_control_acknowledged", "server_vad_speech_started", "server_vad_speech_stopped", "server_vad_auto_commit_observed", "provider_auto_response_observed", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_continuation_requested", "post_tool_terminal_observed"]
       : ["session_ready", "response_generation_requested", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]),
     failure_evidence_sha256: "6".repeat(64),
   });
-  return Object.freeze({
+  const execution = Object.freeze({
     ...body,
     evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(body)}`),
   });
+  assertLc4S2sRoundtripExecution(execution);
+  return execution;
 }
 
 describe("LC4 qualification v3 signed runner", () => {
@@ -338,7 +438,7 @@ describe("LC4 qualification v3 signed runner", () => {
     }, authority.fingerprint)).toThrow("hash mismatch");
   });
 
-  it("retains a signed full-loop terminal and a self-excluding package manifest", async () => {
+  it("retains a signed replay-complete terminal and self-excluding package envelope", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-evidence-"));
     const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
     roots.push(root, repositoryRoot);
@@ -410,10 +510,20 @@ describe("LC4 qualification v3 signed runner", () => {
         benchmark_ready: true,
       },
     });
-    const manifest = JSON.parse(await readFile(join(root, "attempts", `${authBody.authorization_id}.complete`, "artifact-manifest.json"), "utf8")) as { self_excluded: boolean; entries: { path: string }[] };
-    expect(manifest.self_excluded).toBe(true);
-    expect(manifest.entries.map((entry) => entry.path)).not.toContain("artifact-manifest.json");
-    expect(manifest.entries.some((entry) => /\.pem$|\.env$/u.test(entry.path))).toBe(false);
+    const envelope = JSON.parse(await readFile(join(root, "attempts", `${authBody.authorization_id}.complete`, "qualification-package-envelope.json"), "utf8")) as { body: { self_excluded: boolean; entries: { path: string }[] } };
+    expect(envelope.body.self_excluded).toBe(true);
+    expect(envelope.body.entries.map((entry) => entry.path)).not.toContain("qualification-package-envelope.json");
+    expect(envelope.body.entries.some((entry) => /\.pem$|\.env$/u.test(entry.path))).toBe(false);
+    expect(terminal.body.roundtrip_public_execution_sha256).toHaveLength(3);
+    expect(terminal.body.roundtrip_replay_sha256).toHaveLength(3);
+    expect(terminal.body.package_bindings).toMatchObject({
+      provider_session_count: 6,
+      paid_session_count: 3,
+      generation_phase_count: 6,
+      tool_roundtrip_count: 3,
+      retry_count: 0,
+      reconnect_count: 0,
+    });
     const report = await reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint });
     expect(report).toMatchObject({
       invoked_attempts: 1,
@@ -435,7 +545,7 @@ describe("LC4 qualification v3 signed runner", () => {
     await chmod(riskPath, 0o600);
     await writeFile(riskPath, `${canonicalJson({ ...risk, policy_sha256: "0".repeat(64) })}\n`);
     await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
-      .rejects.toThrow(/package entry|risk artifact/u);
+      .rejects.toThrow(/qualification package|risk artifact/u);
   });
 
   it("loads only two explicit regular files with stable repository-last precedence", async () => {

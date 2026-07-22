@@ -89,6 +89,11 @@ import {
   trialAudioDeliveryProfileHash,
 } from "../orchestrator";
 import {
+  createLc4QualificationPayloadManifestV5,
+  createSignedLc4QualificationPackageEnvelopeV5,
+  type Lc4QualificationPackageFile,
+} from "../lc4-qualification-package-envelope";
+import {
   LC4_QUALIFICATION_BUDGET_VERSION,
   type Lc4QualificationBudgetEvidence,
 } from "../lc4-qualification-budget";
@@ -393,9 +398,12 @@ function qualificationFixture() {
     toolSchemaVerification: "verified_by_provider_echo" as const,
     turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" as const : "verified_by_provider_echo" as const,
     setupWireEvidence: Object.freeze({
+      provider: target.provider,
       connectionEpoch: 1,
-      sessionUpdateObservationSha256: observations[0]!.observationSha256,
-      sessionUpdatedObservationSha256: observations[1]!.observationSha256,
+      requestWireType,
+      acknowledgementWireType,
+      requestObservationSha256: observations[0]!.observationSha256,
+      acknowledgementObservationSha256: observations[1]!.observationSha256,
       observations,
     }),
   });
@@ -435,13 +443,20 @@ function qualificationFixture() {
     ...budgetBody,
     evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-budget-evidence/v3\n${canonicalJson(budgetBody)}`),
   };
+  const spokenFiles = new Map(plannedTargets.flatMap((target) => ([
+    [`${target.provider}-spoken-roundtrip.json`, Buffer.from(`summary:${target.provider}\n`)],
+    [`${target.provider}-spoken-roundtrip-wire.jsonl`, Buffer.from(`wire:${target.provider}\n`)],
+    [`${target.provider}-spoken-roundtrip-usage.jsonl`, Buffer.from(`usage:${target.provider}\n`)],
+  ] as const)));
   const spokenGateEvidence = plannedTargets.map((target) => ({
     provider: target.provider,
     model: target.model,
     evidence_sha256: sha256Hex(`qualification-v3-spoken-evidence:${target.provider}`),
-    summary_file_sha256: sha256Hex(`qualification-v3-spoken-summary:${target.provider}`),
-    wire_file_sha256: sha256Hex(`qualification-v3-spoken-wire:${target.provider}`),
-    usage_file_sha256: sha256Hex(`qualification-v3-spoken-usage:${target.provider}`),
+    summary_file_sha256: sha256Hex(spokenFiles.get(`${target.provider}-spoken-roundtrip.json`)!),
+    wire_file_sha256: sha256Hex(spokenFiles.get(`${target.provider}-spoken-roundtrip-wire.jsonl`)!),
+    usage_file_sha256: sha256Hex(spokenFiles.get(`${target.provider}-spoken-roundtrip-usage.jsonl`)!),
+    public_execution_sha256: sha256Hex(`qualification-v3-public-execution:${target.provider}`),
+    replay_sha256: sha256Hex(`qualification-v3-replay:${target.provider}`),
     wire_observation_count: 12,
     usage_event_count: 1,
     caller_audio_bytes: target.caller_audio_bytes,
@@ -450,9 +465,48 @@ function qualificationFixture() {
     post_tool_terminal_observed: true as const,
     post_tool_usage_observed: true as const,
   }));
+  const replaySha256s = spokenGateEvidence.map((evidence) => evidence.replay_sha256);
+  const packageBindings = {
+    attempt_id: authorization.body.authorization_id,
+    source_commit: source.source_commit,
+    source_tree_oid: source.source_tree_oid,
+    source_tree_sha256: source.source_tree_sha256,
+    plan_artifact_sha256: plan.artifact_sha256,
+    plan_sha256: plan.body.plan_sha256,
+    authorization_artifact_sha256: authorization.artifact_sha256,
+    setup_qualification_artifact_sha256: setupQualification.artifactSha256,
+    budget_evidence_sha256: budgetEvidence.evidence_sha256,
+    budget_final_head_sha256: budgetEvidence.final_head_sha256,
+    provider_session_count: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+    paid_session_count: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+    generation_phase_count: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+    tool_roundtrip_count: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+    retry_count: 0,
+    reconnect_count: 0,
+    replay_artifact_sha256: sha256Hex(
+      `harshas-amazing-call-center/lc4-qualification-replay-aggregate/v1\n${canonicalJson(replaySha256s)}`,
+    ),
+    replay_event_count: setupResults.reduce(
+      (total, result) => total + (result.setupWireEvidence?.observations.length ?? 0),
+      spokenGateEvidence.reduce((total, evidence) => total + evidence.wire_observation_count, 0),
+    ),
+    replay_chain_head_sha256: sha256Hex("qualification-v3-replay-chain-head"),
+  };
+  const payloadFiles: Lc4QualificationPackageFile[] = [
+    { path: "authorization.json", bytes: Buffer.from(`${canonicalJson(authorization)}\n`) },
+    { path: "setup-acceptance.json", bytes: Buffer.from(`${canonicalJson(setupQualification)}\n`) },
+    { path: "budget-settlement.json", bytes: Buffer.from(`${canonicalJson(budgetEvidence)}\n`) },
+    ...[...spokenFiles].map(([path, bytes]) => ({ path, bytes })),
+  ];
+  const payloadManifest = createLc4QualificationPayloadManifestV5({
+    files: [...payloadFiles, { path: "terminal.json", bytes: Buffer.alloc(0) }],
+    terminalPath: "terminal.json",
+    envelopePath: "qualification-package-envelope.json",
+  });
   const unsignedTerminalBody = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
+    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v5" as const,
     attempt_id: "lc4-dev-qualification-v3-attempt",
     plan_artifact_sha256: plan.artifact_sha256,
     plan_sha256: plan.body.plan_sha256,
@@ -466,8 +520,12 @@ function qualificationFixture() {
     setup_qualification_artifact_sha256: setupQualification.artifactSha256,
     control_size_diagnostic_sha256: unsignedPlanBody.control_size_diagnostic.diagnostic_sha256,
     roundtrip_evidence_sha256: spokenGateEvidence.map((evidence) => evidence.evidence_sha256),
+    roundtrip_public_execution_sha256: spokenGateEvidence.map((evidence) => evidence.public_execution_sha256),
+    roundtrip_replay_sha256: replaySha256s,
     budget_evidence_sha256: budgetEvidence.evidence_sha256,
     budget_final_head_sha256: budgetEvidence.final_head_sha256,
+    payload_root_sha256: payloadManifest.payload_root_sha256,
+    package_bindings: packageBindings,
     provider_sessions_opened: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
     paid_sessions_opened: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
     generation_phases_attempted: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
@@ -503,14 +561,14 @@ function qualificationFixture() {
   };
   const terminalBody = {
     ...unsignedTerminalBody,
-    terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v4\n${canonicalJson(unsignedTerminalBody)}`),
+    terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v5\n${canonicalJson(unsignedTerminalBody)}`),
   };
   const terminal = signArtifact({
     body: terminalBody,
     privateKey: terminalAuthority.privateKey,
     publicKey: terminalAuthority.publicKey,
-    signingDomain: "harshas-amazing-call-center/lc4-qualification-terminal/v4\n",
-    artifactDomain: "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v4\n",
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-terminal/v5\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v5\n",
   }) as Lc4QualificationV3TerminalArtifact;
   const report = {
     schema_version: 1 as const,
@@ -530,33 +588,20 @@ function qualificationFixture() {
     paid_retry_allowed: false as const,
     latest: terminal.body,
   };
-  const packageEntries = [
-    { path: "authorization.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(authorization)}\n`) },
-    { path: "terminal.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(terminal)}\n`) },
-    { path: "setup-acceptance.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(setupQualification)}\n`) },
-    { path: "budget-settlement.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(budgetEvidence)}\n`) },
-    ...spokenGateEvidence.flatMap((evidence) => [
-      { path: `${evidence.provider}-spoken-roundtrip.json`, byte_length: 1, sha256: evidence.summary_file_sha256 },
-      { path: `${evidence.provider}-spoken-roundtrip-wire.jsonl`, byte_length: 1, sha256: evidence.wire_file_sha256 },
-      { path: `${evidence.provider}-spoken-roundtrip-usage.jsonl`, byte_length: 1, sha256: evidence.usage_file_sha256 },
-    ]),
-  ];
-  const packageBody = {
-    schema_version: 1 as const,
-    manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4" as const,
-    self_excluded: true as const,
-    entries: packageEntries,
-    bindings: {
-      plan_artifact_sha256: plan.artifact_sha256,
-      authorization_artifact_sha256: authorization.artifact_sha256,
+  const packageManifest = createSignedLc4QualificationPackageEnvelopeV5({
+    files: [
+      ...payloadFiles,
+      { path: "terminal.json", bytes: Buffer.from(`${canonicalJson(terminal)}\n`) },
+    ],
+    terminalClaims: {
       terminal_artifact_sha256: terminal.artifact_sha256,
-      budget_evidence_sha256: budgetEvidence.evidence_sha256,
+      payload_root_sha256: payloadManifest.payload_root_sha256,
+      bindings: packageBindings,
     },
-  };
-  const packageManifest = {
-    ...packageBody,
-    package_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-package/v4\n${canonicalJson(packageBody)}`),
-  };
+    terminalPath: "terminal.json",
+    envelopePath: "qualification-package-envelope.json",
+    authorityPrivateKeyPem: terminalAuthority.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+  });
   return createLc4DevRetainedQualificationReceipt({
     plan,
     authorization,
@@ -1510,10 +1555,13 @@ describe("LC4-DEV live runner", () => {
       ...qualificationInput,
       package_manifest: {
         ...valid.qualification.package_manifest,
-        entries: valid.qualification.package_manifest.entries.map((entry, index) => (
-          index === 0 ? { ...entry, sha256: "9".repeat(64) } : entry
-        )),
+        body: {
+          ...valid.qualification.package_manifest.body,
+          entries: valid.qualification.package_manifest.body.entries.map((entry, index) => (
+            index === 0 ? { ...entry, sha256: "9".repeat(64) } : entry
+          )),
+        },
       },
-    })).toThrow(/package manifest is invalid/);
+    })).toThrow(/package omits a required admission artifact/);
   });
 });

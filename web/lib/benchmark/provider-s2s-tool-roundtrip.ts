@@ -39,6 +39,15 @@ import {
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 import {
+  replayProviderToolRoundtrip,
+  roundtripCausalBindingSha256,
+  roundtripSanitizedUsageSha256,
+  type RoundtripCausalBinding,
+  type RoundtripReplaySummary,
+  type RoundtripSanitizedUsage,
+  type RoundtripUsageCounter,
+} from "./provider-roundtrip-replay";
+import {
   RealtimeAudioDeliveryError,
   SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
   deliverRealtimePcm16,
@@ -222,6 +231,11 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   tool_result_evidence_sha256: string | null;
   wire_observations: readonly RealtimeWireObservation[];
   usage: readonly NormalizedRealtimeUsage[];
+  replay_summary: RoundtripReplaySummary | null;
+  replay_causal_binding: RoundtripCausalBinding | null;
+  sanitized_usage: readonly RoundtripSanitizedUsage[];
+  public_execution_sha256: string | null;
+  replay_sha256: string | null;
   operation_order: readonly string[];
   failure_evidence_sha256: string;
   evidence_sha256: string;
@@ -544,6 +558,14 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let continuationObserved = false;
   let terminalObserved = false;
   let postToolUsageObserved = false;
+  let continuationRequestObservationSha256: string | null = null;
+  let continuationStartObservationSha256: string | null = null;
+  let continuationResponseId: string | null = null;
+  let terminalObservationSha256: string | null = null;
+  let terminalResponseId: string | null = null;
+  let usageObservationSha256: string | null = null;
+  let usageResponseId: string | null = null;
+  let retainedUsage: NormalizedRealtimeUsage | null = null;
   let triggerObservationSha256: string | null = null;
   let commitObservationSha256: string | null = null;
   let controlObservationSha256: string | null = null;
@@ -599,6 +621,12 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       && (observation.wireType === "conversation.item.create" || observation.wireType === "toolResponse")) {
       toolResultWireObservationSha256 = observation.observationSha256;
       operations.push("matching_tool_result_wire_observed");
+    }
+    if (toolResultWireObservationSha256 !== null
+      && continuationRequestObservationSha256 === null
+      && observation.direction === "outbound"
+      && observation.wireType === "response.create") {
+      continuationRequestObservationSha256 = observation.observationSha256;
     }
   });
   const maybeFinish = () => {
@@ -666,12 +694,21 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     }
     if (event.type === "response.started" && toolResultWireObservationSha256 !== null) {
       continuationObserved = true;
+      continuationResponseId ??= event.responseId;
+      if (event.wireObservation?.availability === "observed") {
+        continuationStartObservationSha256 ??= event.wireObservation.observationSha256;
+      }
       operations.push("post_tool_continuation_observed");
     }
     if (event.type === "usage") {
       usage.push(event.usage);
       if (toolResultWireObservationSha256 !== null) {
         postToolUsageObserved = true;
+        retainedUsage = event.usage;
+        usageResponseId = event.responseId ?? continuationResponseId;
+        if (event.wireObservation?.availability === "observed") {
+          usageObservationSha256 = event.wireObservation.observationSha256;
+        }
         operations.push("post_tool_usage_observed");
       }
     }
@@ -766,6 +803,10 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       }
       if (toolResultWireObservationSha256 !== null && event.status === "completed") {
         terminalObserved = true;
+        terminalResponseId = event.responseId;
+        if (event.wireObservation?.availability === "observed") {
+          terminalObservationSha256 = event.wireObservation.observationSha256;
+        }
         operations.push("post_tool_terminal_observed");
       }
     }
@@ -919,6 +960,122 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     && postToolUsageObserved;
   if (!passed && failure === "none") failure = "provider_error";
   const retainedToolCall = toolCall as RealtimeToolCall | null;
+  if (input.provider === "gemini" && toolResultWireObservationSha256 !== null) {
+    continuationRequestObservationSha256 ??= toolResultWireObservationSha256;
+  }
+  const usageCounters = retainedUsage === null ? null : Object.freeze(Object.fromEntries(
+    Object.entries(retainedUsage)
+      .filter(([key, value]) => key !== "raw" && key !== "meteringSource"
+        && typeof value === "number" && Number.isFinite(value) && value >= 0),
+  ) as Partial<Record<RoundtripUsageCounter, number>>);
+  const sanitizedUsage = retainedUsage === null
+    || usageResponseId === null
+    || terminalObservationSha256 === null
+    || usageObservationSha256 === null
+    || usageCounters === null
+    || Object.keys(usageCounters).length === 0
+    ? [] as const
+    : [freeze({
+        schema_version: 1 as const,
+        source: "provider_reported" as const,
+        response_id_sha256: realtimeWireIdentitySha256("response", usageResponseId),
+        terminal_observation_sha256: terminalObservationSha256,
+        provider_usage_observation_sha256: usageObservationSha256,
+        contributing_wire_observation_sha256s: freeze([usageObservationSha256]),
+        counters: usageCounters,
+      })] as const;
+  const callResponseIdSha256 = retainedToolCall === null
+    ? null
+    : realtimeWireIdentitySha256("response", retainedToolCall.responseId);
+  const continuationResponseIdSha256 = continuationResponseId === null
+    ? null
+    : realtimeWireIdentitySha256("response", continuationResponseId);
+  const callIdSha256 = retainedToolCall === null
+    ? null
+    : realtimeWireIdentitySha256("call", retainedToolCall.callId);
+  const completeCausalEvidence = retainedToolCall !== null
+    && callResponseIdSha256 !== null
+    && continuationResponseIdSha256 !== null
+    && callIdSha256 !== null
+    && triggerObservationSha256 !== null
+    && toolCallEvidenceSha256 !== null
+    && toolResultWireObservationSha256 !== null
+    && continuationRequestObservationSha256 !== null
+    && continuationStartObservationSha256 !== null
+    && terminalObservationSha256 !== null
+    && terminalResponseId !== null
+    && usageObservationSha256 !== null
+    && usageResponseId !== null
+    && sanitizedUsage.length === 1;
+  const replayCausalBindingBody = completeCausalEvidence ? freeze({
+    schema_version: 1 as const,
+    provider: input.provider,
+    response_id_source: input.provider === "gemini" ? "client_local" as const : "provider" as const,
+    connection_epoch: 1 as const,
+    input_turn: retainedToolCall!.causalBinding?.inputTurn ?? 1,
+    trigger_observation_sha256: triggerObservationSha256!,
+    initial_response_id_sha256: callResponseIdSha256!,
+    call_id_sha256: callIdSha256!,
+    call_response_id_sha256: callResponseIdSha256!,
+    call_observation_sha256: wire.find((observation) => (
+      observation.identities.callIdSha256 === callIdSha256
+      && observation.direction === "inbound"
+      && observation.observationSha256 !== toolResultWireObservationSha256
+    ))?.observationSha256 ?? "",
+    result_observation_sha256: toolResultWireObservationSha256!,
+    continuation_request_observation_sha256: continuationRequestObservationSha256!,
+    continuation_response_id_sha256: continuationResponseIdSha256!,
+    continuation_start_observation_sha256: continuationStartObservationSha256!,
+    terminal_observation_sha256: terminalObservationSha256!,
+    usage_observation_sha256: usageObservationSha256!,
+    usage_response_id_sha256: realtimeWireIdentitySha256("response", usageResponseId!),
+  }) : null;
+  const replayCausalBinding = replayCausalBindingBody === null
+    || !SHA256.test(replayCausalBindingBody.call_observation_sha256)
+    ? null
+    : freeze({
+        ...replayCausalBindingBody,
+        evidence_sha256: roundtripCausalBindingSha256(replayCausalBindingBody),
+      });
+  const replaySummary = replayCausalBinding === null || sanitizedUsage.length !== 1
+    ? null
+    : freeze({
+        schema_version: 1 as const,
+        provider: input.provider,
+        model: input.model,
+        connection_epoch: 1 as const,
+        call: freeze({
+          observation_sha256: replayCausalBinding.call_observation_sha256,
+          call_id_sha256: replayCausalBinding.call_id_sha256,
+          response_id_sha256: replayCausalBinding.call_response_id_sha256,
+        }),
+        result: freeze({
+          observation_sha256: replayCausalBinding.result_observation_sha256,
+          call_id_sha256: replayCausalBinding.call_id_sha256,
+        }),
+        continuation: freeze({
+          request_observation_sha256: replayCausalBinding.continuation_request_observation_sha256,
+          origin_response_id_sha256: replayCausalBinding.initial_response_id_sha256,
+          started_observation_sha256: replayCausalBinding.continuation_start_observation_sha256,
+          response_id_sha256: replayCausalBinding.continuation_response_id_sha256,
+        }),
+        terminal: freeze({
+          observation_sha256: replayCausalBinding.terminal_observation_sha256,
+          response_id_sha256: realtimeWireIdentitySha256("response", terminalResponseId!),
+          status: "completed" as const,
+        }),
+        usage: freeze({
+          evidence_sha256: roundtripSanitizedUsageSha256(sanitizedUsage[0]!),
+          response_id_sha256: replayCausalBinding.usage_response_id_sha256,
+        }),
+      });
+  const replay = replaySummary === null ? null : replayProviderToolRoundtrip({
+    expected: { provider: input.provider, model: input.model },
+    summary: replaySummary,
+    wire_observations: wire,
+    sanitized_usage: sanitizedUsage,
+    causal_binding: replayCausalBinding,
+  });
   const failureBody = freeze({
     provider: input.provider,
     model: input.model,
@@ -975,6 +1132,11 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     })),
     wire_observations: freeze([...wire]),
     usage: freeze([...usage]),
+    replay_summary: replaySummary,
+    replay_causal_binding: replayCausalBinding,
+    sanitized_usage: freeze([...sanitizedUsage]),
+    public_execution_sha256: replay?.valid === true ? replay.public_execution_sha256 : null,
+    replay_sha256: replay?.valid === true ? replay.replay_sha256 : null,
     operation_order: freeze([...operations]),
     failure_evidence_sha256: sha256Hex(`${ROUNDTRIP_FAILURE_DOMAIN}${canonicalJson(failureBody)}`),
   });
@@ -1010,7 +1172,26 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || !execution.post_tool_usage_observed
     || execution.provider_tool_call_evidence_sha256 === null
     || execution.tool_result_evidence_sha256 === null
+    || execution.replay_summary === null
+    || execution.replay_causal_binding === null
+    || execution.sanitized_usage.length === 0
+    || execution.public_execution_sha256 === null
+    || execution.replay_sha256 === null
   )) throw new Error("passing LC4 S2S roundtrip lacks closed-loop evidence");
+  if (execution.status === "passed") {
+    const replay = replayProviderToolRoundtrip({
+      expected: { provider: execution.provider, model: execution.model },
+      summary: execution.replay_summary!,
+      wire_observations: execution.wire_observations,
+      sanitized_usage: execution.sanitized_usage,
+      causal_binding: execution.replay_causal_binding,
+    });
+    if (!replay.valid
+      || replay.public_execution_sha256 !== execution.public_execution_sha256
+      || replay.replay_sha256 !== execution.replay_sha256) {
+      throw new Error("passing LC4 S2S roundtrip replay evidence failed integrity");
+    }
+  }
   if (execution.status === "passed" && execution.provider === "xai") {
     const index = (hash: string | null) => execution.wire_observations
       .findIndex((observation) => observation.observationSha256 === hash);

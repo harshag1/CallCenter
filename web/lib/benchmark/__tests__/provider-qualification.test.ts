@@ -231,8 +231,16 @@ class QualificationClient implements NormalizedRealtimeClient {
       predecessor = observation.observationSha256;
       return observation;
     };
-    for (const listener of this.#wireListeners) listener(wire("outbound", 1, "session.update"));
-    for (const listener of this.#wireListeners) listener(wire("inbound", 2, "session.updated"));
+    for (const listener of this.#wireListeners) listener(wire(
+      "outbound",
+      1,
+      this.provider === "gemini" ? "setup" : "session.update",
+    ));
+    for (const listener of this.#wireListeners) listener(wire(
+      "inbound",
+      2,
+      this.provider === "gemini" ? "setupComplete" : "session.updated",
+    ));
     const event = Object.freeze({
       type: "session.ready" as const,
       provider: this.provider,

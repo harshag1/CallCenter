@@ -41,9 +41,12 @@ export const XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256 = sha256Hex(
 );
 
 export type ProviderSetupWireEvidence = Readonly<{
+  provider: LiveStsProvider;
   connectionEpoch: number;
-  sessionUpdateObservationSha256: string;
-  sessionUpdatedObservationSha256: string;
+  requestWireType: "session.update" | "setup";
+  acknowledgementWireType: "session.updated" | "setupComplete";
+  requestObservationSha256: string;
+  acknowledgementObservationSha256: string;
   observations: readonly RealtimeWireObservation[];
 }>;
 
@@ -242,36 +245,51 @@ function boundedOmission(
 
 function setupWireEvidence(observations: readonly RealtimeWireObservation[]): ProviderSetupWireEvidence | null {
   if (!verifyRealtimeWireObservationChain(observations).valid) return null;
+  const provider = observations[0]?.provider;
+  if (provider !== "openai" && provider !== "gemini" && provider !== "xai") return null;
+  if (observations.some((observation) => observation.provider !== provider)) return null;
+  const requestWireType = provider === "gemini" ? "setup" as const : "session.update" as const;
+  const acknowledgementWireType = provider === "gemini" ? "setupComplete" as const : "session.updated" as const;
   const outbound = observations.find((observation) => (
-    observation.direction === "outbound" && observation.wireType === "session.update"
+    observation.direction === "outbound" && observation.wireType === requestWireType
   ));
   const inbound = observations.find((observation) => (
-    observation.direction === "inbound" && observation.wireType === "session.updated"
+    observation.direction === "inbound" && observation.wireType === acknowledgementWireType
       && outbound !== undefined
       && observation.connectionEpoch === outbound.connectionEpoch
       && observation.sequence > outbound.sequence
   ));
   if (!outbound || !inbound) return null;
   return Object.freeze({
+    provider,
     connectionEpoch: outbound.connectionEpoch,
-    sessionUpdateObservationSha256: outbound.observationSha256,
-    sessionUpdatedObservationSha256: inbound.observationSha256,
+    requestWireType,
+    acknowledgementWireType,
+    requestObservationSha256: outbound.observationSha256,
+    acknowledgementObservationSha256: inbound.observationSha256,
     observations: Object.freeze([...observations]),
   });
 }
 
 function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
   if (!verifyRealtimeWireObservationChain(evidence.observations).valid) return false;
+  if (evidence.provider !== "openai" && evidence.provider !== "gemini" && evidence.provider !== "xai") return false;
+  const expectedRequest = evidence.provider === "gemini" ? "setup" : "session.update";
+  const expectedAcknowledgement = evidence.provider === "gemini" ? "setupComplete" : "session.updated";
   const outbound = evidence.observations.find((observation) => (
-    observation.observationSha256 === evidence.sessionUpdateObservationSha256
+    observation.observationSha256 === evidence.requestObservationSha256
   ));
   const inbound = evidence.observations.find((observation) => (
-    observation.observationSha256 === evidence.sessionUpdatedObservationSha256
+    observation.observationSha256 === evidence.acknowledgementObservationSha256
   ));
-  return outbound?.direction === "outbound"
-    && outbound.wireType === "session.update"
+  return evidence.requestWireType === expectedRequest
+    && evidence.acknowledgementWireType === expectedAcknowledgement
+    && evidence.observations.every((observation) => observation.provider === evidence.provider)
+    && evidence.observations.every((observation) => observation.connectionEpoch === 1)
+    && outbound?.direction === "outbound"
+    && outbound.wireType === expectedRequest
     && inbound?.direction === "inbound"
-    && inbound.wireType === "session.updated"
+    && inbound.wireType === expectedAcknowledgement
     && outbound.connectionEpoch === evidence.connectionEpoch
     && inbound.connectionEpoch === evidence.connectionEpoch
     && outbound.sequence < inbound.sequence;
@@ -306,7 +324,7 @@ function acknowledgementResult(
       toolSchemaVerification,
       turnBoundaryVerification: unverifiedTurnBoundary,
       ...(target.provider === "xai" ? { configurationEvidence: acknowledgement } : {}),
-      ...(target.provider === "xai" && observedWireEvidence !== null
+      ...(observedWireEvidence !== null
         ? { setupWireEvidence: observedWireEvidence }
         : {}),
     };
@@ -318,6 +336,7 @@ function acknowledgementResult(
       || acknowledgement.strictParityVerified
       || acknowledgement.paidBenchmarkReady
       || !allowed
+      || observedWireEvidence === null
     ) {
       return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: "not_applicable" };
     }
@@ -328,6 +347,7 @@ function acknowledgementResult(
       acknowledgementSha256: digest,
       toolSchemaVerification,
       turnBoundaryVerification: "not_applicable",
+      setupWireEvidence: observedWireEvidence,
     };
   }
   if (target.provider === "xai") {
@@ -421,7 +441,7 @@ function acknowledgementResult(
       }),
     };
   }
-  if (!acknowledgement.strictParityVerified || !acknowledgement.paidBenchmarkReady) {
+  if (!acknowledgement.strictParityVerified || !acknowledgement.paidBenchmarkReady || observedWireEvidence === null) {
     return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   return {
@@ -429,6 +449,7 @@ function acknowledgementResult(
     code: "configuration_echo_verified",
     acknowledgementMode: "exact_provider_echo",
     acknowledgementSha256: digest,
+    setupWireEvidence: observedWireEvidence,
     toolSchemaVerification: target.configuration.providerTools.length === 0
       ? "not_requested"
       : acknowledgement.fields.tools.status === "verified"
@@ -582,6 +603,14 @@ export function assertProviderQualificationArtifactIntegrity(
       && result.turnBoundaryVerification !== "verified_by_provider_echo"
       && result.turnBoundaryVerification !== "requires_paid_behavioral_canary") {
       throw new Error("passing xAI provider qualification lacks server-VAD verification");
+    }
+    if (result.status === "passed" && (
+      result.setupWireEvidence === undefined
+      || result.setupWireEvidence.provider !== result.provider
+      || result.setupWireEvidence.connectionEpoch !== 1
+      || !validSetupWireEvidence(result.setupWireEvidence)
+    )) {
+      throw new Error("passing provider qualification lacks one replayable setup session");
     }
   }
 }

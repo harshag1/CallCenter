@@ -65,8 +65,21 @@ import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   assertLc4ProviderProfileManifest,
 } from "./lc4-provider-profiles";
-import type { NormalizedRealtimeClient, NormalizedRealtimeUsage, RealtimeWireObservation } from "../realtime/client/types";
+import type { NormalizedRealtimeClient, RealtimeWireObservation } from "../realtime/client/types";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+import {
+  replayProviderToolRoundtrip,
+  type RoundtripSanitizedUsage,
+} from "./provider-roundtrip-replay";
+import {
+  createLc4QualificationPayloadManifestV5,
+  createSignedLc4QualificationPackageEnvelopeV5,
+  readLc4QualificationPackageDirectoryV5,
+  verifySignedLc4QualificationPackageEnvelopeV5,
+  type Lc4QualificationPackageBindingsV5,
+  type Lc4QualificationPackageFile,
+  type Lc4QualificationTerminalClaimsV5,
+} from "./lc4-qualification-package-envelope";
 import {
   assertLc4QualificationBudgetEvidence,
   finalizeLc4QualificationBudget,
@@ -89,9 +102,9 @@ const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
 const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
 const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
-const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v4\n";
-const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v4\n";
-const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-package/v4\n";
+const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v5\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v5\n";
+const REPLAY_AGGREGATE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-replay-aggregate/v1\n";
 const CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
 const SOURCE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-git-tree/v1\n";
@@ -290,7 +303,8 @@ export type Lc4QualificationV3RefusalPackage = Readonly<{
 }>;
 
 export type Lc4QualificationV3TerminalBody = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
+  terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v5";
   runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
   attempt_id: string;
   plan_artifact_sha256: string;
@@ -305,6 +319,10 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
   setup_qualification_artifact_sha256: string;
   control_size_diagnostic_sha256: string;
   roundtrip_evidence_sha256: readonly string[];
+  roundtrip_public_execution_sha256: readonly string[];
+  roundtrip_replay_sha256: readonly string[];
+  payload_root_sha256: string;
+  package_bindings: Lc4QualificationPackageBindingsV5;
   budget_evidence_sha256: string;
   budget_final_head_sha256: string;
   provider_sessions_opened: number;
@@ -433,7 +451,7 @@ async function readJsonLines<T>(path: string): Promise<readonly T[]> {
   return freeze(text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as T));
 }
 
-type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage"> & Readonly<{
+type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage" | "sanitized_usage"> & Readonly<{
   wire_observation_count: number;
   usage_event_count: number;
 }>;
@@ -483,7 +501,7 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
   const { risk_sha256, ...body } = artifact;
   const setupWire = artifact.setup_wire_evidence;
   const inbound = setupWire?.observations.find((observation) => (
-    observation.observationSha256 === setupWire.sessionUpdatedObservationSha256
+    observation.observationSha256 === setupWire.acknowledgementObservationSha256
   ));
   const projectedFieldEvidence = inbound === undefined
     ? undefined
@@ -508,10 +526,11 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
 function assertRetainedXaiServerVadEvidence(input: Readonly<{
   summary: RetainedRoundtripSummary;
   wire: readonly RealtimeWireObservation[];
+  usage: readonly RoundtripSanitizedUsage[];
   terminalResult: Lc4QualificationV3TerminalBody["results"][number];
   gateEvidenceSha256: string | null;
 }>): void {
-  const { summary, wire, terminalResult } = input;
+  const { summary, wire, usage, terminalResult } = input;
   if (summary.provider !== "xai"
     || summary.status !== "passed"
     || summary.failure_class !== "none"
@@ -544,6 +563,59 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
     || forbiddenCommit
     || responseCreates.length !== 1) {
     throw new Error("LC4 qualification retained xAI server-VAD order failed integrity");
+  }
+  if (summary.replay_summary === null || summary.replay_causal_binding === null) {
+    throw new Error("LC4 qualification retained xAI replay evidence is missing");
+  }
+  const replay = replayProviderToolRoundtrip({
+    expected: { provider: "xai", model: summary.model },
+    summary: summary.replay_summary,
+    wire_observations: wire,
+    sanitized_usage: usage,
+    causal_binding: summary.replay_causal_binding,
+  });
+  if (!replay.valid
+    || replay.public_execution_sha256 !== summary.public_execution_sha256
+    || replay.replay_sha256 !== summary.replay_sha256) {
+    throw new Error("LC4 qualification retained xAI replay failed integrity");
+  }
+}
+
+function assertRetainedProviderReplayEvidence(input: Readonly<{
+  provider: LiveStsProvider;
+  summary: RetainedRoundtripSummary;
+  wire: readonly RealtimeWireObservation[];
+  usage: readonly RoundtripSanitizedUsage[];
+  terminalResult: Lc4QualificationV3TerminalBody["results"][number];
+  terminalPublicExecutionSha256: string;
+  terminalReplaySha256: string;
+}>): void {
+  const { summary, wire, usage, terminalResult } = input;
+  if (summary.provider !== input.provider
+    || summary.model !== terminalResult.model
+    || summary.status !== "passed"
+    || summary.failure_class !== "none"
+    || summary.replay_summary === null
+    || summary.replay_causal_binding === null
+    || summary.wire_observation_count !== wire.length
+    || summary.usage_event_count !== usage.length
+    || terminalResult.wire_observation_count !== wire.length
+    || terminalResult.usage_event_count !== usage.length) {
+    throw new Error(`LC4 qualification retained ${input.provider} replay inputs differ from terminal`);
+  }
+  const replay = replayProviderToolRoundtrip({
+    expected: { provider: input.provider, model: summary.model },
+    summary: summary.replay_summary,
+    wire_observations: wire,
+    sanitized_usage: usage,
+    causal_binding: summary.replay_causal_binding,
+  });
+  if (!replay.valid
+    || replay.public_execution_sha256 !== summary.public_execution_sha256
+    || replay.replay_sha256 !== summary.replay_sha256
+    || replay.public_execution_sha256 !== input.terminalPublicExecutionSha256
+    || replay.replay_sha256 !== input.terminalReplaySha256) {
+    throw new Error(`LC4 qualification retained ${input.provider} replay failed integrity`);
   }
 }
 
@@ -918,44 +990,29 @@ export function assertLc4QualificationV3Authorization(input: Readonly<{
   if (end <= start || input.now.getTime() < start || input.now.getTime() >= end) throw new Error("LC4 qualification v3 authorization is inactive");
 }
 
-function sanitizeUsage(usage: NormalizedRealtimeUsage): Readonly<Record<string, unknown>> {
-  const { raw, ...meters } = usage;
-  return freeze({ ...meters, raw_usage_sha256: sha256Hex(canonicalJson(raw)) });
-}
-
 async function retainRoundtrip(partial: string, execution: Lc4S2sRoundtripExecution): Promise<void> {
   assertLc4S2sRoundtripExecution(execution);
-  const { wire_observations, usage, ...summary } = execution;
+  const { wire_observations, usage, sanitized_usage, ...summary } = execution;
   await Promise.all([
     writeImmutableJson(resolve(partial, `${execution.provider}-spoken-roundtrip.json`), freeze({ ...summary, wire_observation_count: wire_observations.length, usage_event_count: usage.length })),
     writeFile(resolve(partial, `${execution.provider}-spoken-roundtrip-wire.jsonl`), wire_observations.map((entry) => canonicalJson(entry)).join("\n") + (wire_observations.length ? "\n" : ""), { flag: "wx", mode: 0o400 }),
-    writeFile(resolve(partial, `${execution.provider}-spoken-roundtrip-usage.jsonl`), usage.map((entry) => canonicalJson(sanitizeUsage(entry))).join("\n") + (usage.length ? "\n" : ""), { flag: "wx", mode: 0o400 }),
+    writeFile(resolve(partial, `${execution.provider}-spoken-roundtrip-usage.jsonl`), sanitized_usage.map((entry) => canonicalJson(entry)).join("\n") + (sanitized_usage.length ? "\n" : ""), { flag: "wx", mode: 0o400 }),
   ]);
 }
 
-async function retainPackageManifest(partial: string, bindings: Readonly<Record<string, string>>): Promise<string> {
-  const forbidden = /(?:^|\/)(?:artifact-manifest\.json|.*\.pem|.*\.env|budget.*signing-key)(?:$|\/)/u;
+async function retainedPackageFiles(partial: string): Promise<readonly Lc4QualificationPackageFile[]> {
+  const forbidden = /(?:^|\/)(?:qualification-package-envelope\.json|.*\.pem|.*\.env|budget.*signing-key)(?:$|\/)/u;
   const names = (await readdir(partial)).sort();
   if (names.some((name) => name.includes("/") || forbidden.test(name))) throw new Error("LC4 qualification v3 package contains a forbidden path");
-  const entries = [] as Array<Readonly<{ path: string; byte_length: number; sha256: string }>>;
+  const files: Lc4QualificationPackageFile[] = [];
   for (const name of names) {
-    if (name === "artifact-manifest.json") throw new Error("LC4 qualification v3 package manifest cannot include itself");
     const path = resolve(partial, name);
     const metadata = await stat(path);
     if (!metadata.isFile()) throw new Error("LC4 qualification v3 package accepts only regular files");
     const bytes = await readFile(path);
-    entries.push(freeze({ path: name, byte_length: bytes.byteLength, sha256: sha256Hex(bytes) }));
+    files.push(freeze({ path: name, bytes }));
   }
-  const body = freeze({
-    schema_version: 1 as const,
-    manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4" as const,
-    self_excluded: true as const,
-    entries: freeze(entries),
-    bindings,
-  });
-  const artifact = freeze({ ...body, package_sha256: sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(body)}`) });
-  await writeImmutableJson(resolve(partial, "artifact-manifest.json"), artifact);
-  return artifact.package_sha256;
+  return freeze(files);
 }
 
 function createInvocationArtifact(input: Readonly<{
@@ -1423,7 +1480,7 @@ export async function runLc4QualificationV3(input: Readonly<{
       artifactSha256: sha256Hex(`runner-exception:${attemptId}`),
     });
   } finally {
-    const usageProjection = executions.flatMap((execution) => execution.usage.map((usage) => sanitizeUsage(usage)));
+    const usageProjection = executions.flatMap((execution) => execution.sanitized_usage);
     budgetEvidence = await finalizeLc4QualificationBudget({
       reservation: budgetReservation,
       attemptId,
@@ -1496,8 +1553,65 @@ export async function runLc4QualificationV3(input: Readonly<{
     && xaiGateBStatus !== "behaviorally_verified") {
     primaryFailure ??= `xai:server_vad_behavioral_verification_${xaiGateBStatus}`;
   }
+  const setupWire = LC4_QUALIFICATION_V3_PROVIDER_ORDER.flatMap((provider) => {
+    const result = setupArtifact!.results.find((candidate) => candidate.provider === provider);
+    return result?.setupWireEvidence === undefined ? [] : [result.setupWireEvidence];
+  });
+  const replayHeads = [
+    ...setupWire.map((evidence) => evidence.observations.at(-1)?.observationSha256 ?? null),
+    ...executions.map((execution) => execution.wire_observations.at(-1)?.observationSha256 ?? null),
+  ];
+  const reconnectCount = [
+    ...setupWire.flatMap((evidence) => evidence.observations),
+    ...executions.flatMap((execution) => execution.wire_observations),
+  ].filter((observation) => observation.connectionEpoch !== 1).length;
+  const replaySha256s = executions.flatMap((execution) => execution.replay_sha256 === null ? [] : [execution.replay_sha256]);
+  const replayArtifactSha256 = sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replaySha256s)}`);
+  const replayChainHeadSha256 = replayHeads.length === 0 || replayHeads.some((head) => head === null)
+    ? null
+    : sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`);
+  const packageBindings = freeze({
+    attempt_id: attemptId,
+    source_commit: plan.body.source.source_commit,
+    source_tree_oid: plan.body.source.source_tree_oid,
+    source_tree_sha256: plan.body.source.source_tree_sha256,
+    plan_artifact_sha256: plan.artifact_sha256,
+    plan_sha256: plan.body.plan_sha256,
+    authorization_artifact_sha256: input.authorization.artifact_sha256,
+    setup_qualification_artifact_sha256: setupArtifact!.artifactSha256,
+    budget_evidence_sha256: budgetEvidence!.evidence_sha256,
+    budget_final_head_sha256: budgetEvidence!.final_head_sha256,
+    provider_session_count: setupWire.length + executions.length,
+    paid_session_count: executions.length,
+    generation_phase_count: executions.length * 2,
+    tool_roundtrip_count: executions.length,
+    retry_count: 0,
+    reconnect_count: reconnectCount,
+    replay_artifact_sha256: replayArtifactSha256,
+    replay_event_count: setupWire.reduce((total, evidence) => total + evidence.observations.length, 0)
+      + executions.reduce((total, execution) => total + execution.wire_observations.length, 0),
+    replay_chain_head_sha256: replayChainHeadSha256,
+  }) satisfies Lc4QualificationPackageBindingsV5;
+  if (primaryFailure === null && (
+    setupWire.length !== 3
+    || executions.length !== 3
+    || reconnectCount !== 0
+    || replaySha256s.length !== 3
+    || replayChainHeadSha256 === null
+    || packageBindings.provider_session_count !== providerSessionsOpened
+    || packageBindings.paid_session_count !== paidSessionsOpened
+    || packageBindings.generation_phase_count !== generationPhasesAttempted
+    || packageBindings.tool_roundtrip_count !== toolRoundtripsAttempted
+  )) primaryFailure = "replay_derived_session_or_counter_mismatch";
+  const preTerminalFiles = await retainedPackageFiles(partial);
+  const payloadManifest = createLc4QualificationPayloadManifestV5({
+    files: freeze([...preTerminalFiles, freeze({ path: "terminal.json", bytes: Buffer.from("pending") })]),
+    terminalPath: "terminal.json",
+    envelopePath: "qualification-package-envelope.json",
+  });
   const terminalWithoutHash = freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
+    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v5" as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     attempt_id: attemptId,
     plan_artifact_sha256: plan.artifact_sha256,
@@ -1512,6 +1626,10 @@ export async function runLc4QualificationV3(input: Readonly<{
     setup_qualification_artifact_sha256: setupArtifact!.artifactSha256,
     control_size_diagnostic_sha256: plan.body.control_size_diagnostic.diagnostic_sha256,
     roundtrip_evidence_sha256: freeze(executions.map((execution) => execution.evidence_sha256)),
+    roundtrip_public_execution_sha256: freeze(executions.map((execution) => execution.public_execution_sha256!)),
+    roundtrip_replay_sha256: freeze(executions.map((execution) => execution.replay_sha256!)),
+    payload_root_sha256: payloadManifest.payload_root_sha256,
+    package_bindings: packageBindings,
     budget_evidence_sha256: budgetEvidence!.evidence_sha256,
     budget_final_head_sha256: budgetEvidence!.final_head_sha256,
     provider_sessions_opened: providerSessionsOpened,
@@ -1535,12 +1653,19 @@ export async function runLc4QualificationV3(input: Readonly<{
   const terminalBody = freeze({ ...terminalWithoutHash, terminal_sha256: sha256Hex(`${TERMINAL_DOMAIN}${canonicalJson(terminalWithoutHash)}`) });
   const terminal = signedArtifact({ body: terminalBody, privateKeyPem: input.terminalPrivateKeyPem, signingDomain: TERMINAL_DOMAIN, artifactDomain: TERMINAL_ARTIFACT_DOMAIN });
   await writeImmutableJson(resolve(partial, "terminal.json"), terminal);
-  await retainPackageManifest(partial, freeze({
-    plan_artifact_sha256: plan.artifact_sha256,
-    authorization_artifact_sha256: input.authorization.artifact_sha256,
-    terminal_artifact_sha256: terminal.artifact_sha256,
-    budget_evidence_sha256: budgetEvidence!.evidence_sha256,
-  }));
+  const packageFiles = await retainedPackageFiles(partial);
+  const envelope = createSignedLc4QualificationPackageEnvelopeV5({
+    files: packageFiles,
+    terminalClaims: freeze({
+      terminal_artifact_sha256: terminal.artifact_sha256,
+      payload_root_sha256: terminal.body.payload_root_sha256,
+      bindings: terminal.body.package_bindings,
+    }),
+    terminalPath: "terminal.json",
+    envelopePath: "qualification-package-envelope.json",
+    authorityPrivateKeyPem: input.terminalPrivateKeyPem,
+  });
+  await writeImmutableJson(resolve(partial, "qualification-package-envelope.json"), envelope);
   await rename(partial, complete);
   return terminal;
 }
@@ -1606,17 +1731,13 @@ export async function reportLc4QualificationV3(input: Readonly<{
       throw new Error("LC4 qualification v3 complete attempt has an invalid invocation state");
     }
     const directory = resolve(attemptsRoot, name);
-    const [authorization, terminal, manifest] = await Promise.all([
+    const [authorization, terminal, retainedPackage] = await Promise.all([
       readJson<Lc4QualificationV3AuthorizationArtifact>(resolve(directory, "authorization.json")),
       readJson<Lc4QualificationV3TerminalArtifact>(resolve(directory, "terminal.json")),
-      readJson<Readonly<{
-        schema_version: 1;
-        manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4";
-        self_excluded: true;
-        entries: readonly Readonly<{ path: string; byte_length: number; sha256: string }>[];
-        bindings: Readonly<Record<string, string>>;
-        package_sha256: string;
-      }>>(resolve(directory, "artifact-manifest.json")),
+      readLc4QualificationPackageDirectoryV5({
+        directory,
+        envelopePath: "qualification-package-envelope.json",
+      }),
     ]);
     assertSignedArtifact({
       artifact: authorization,
@@ -1635,11 +1756,57 @@ export async function reportLc4QualificationV3(input: Readonly<{
     });
     const { terminal_sha256, ...terminalBody } = terminal.body;
     if (terminal_sha256 !== sha256Hex(`${TERMINAL_DOMAIN}${canonicalJson(terminalBody)}`)
+      || terminal.body.schema_version !== 2
+      || terminal.body.terminal_version !== "HACC-LC4-QUALIFICATION-TERMINAL-v5"
       || terminal.body.plan_artifact_sha256 !== plan.artifact_sha256
       || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256
       || terminal.body.source_commit !== plan.body.source.source_commit
       || terminal.body.source_tree_sha256 !== plan.body.source.source_tree_sha256) {
       throw new Error("LC4 qualification v3 terminal binding failed integrity");
+    }
+    await verifySignedLc4QualificationPackageEnvelopeV5({
+      envelope: retainedPackage.envelope,
+      files: retainedPackage.files,
+      expectedAuthorityFingerprintSha256: authorization.body.terminal_public_key_fingerprint_sha256,
+      verifyTerminal: (bytes): Lc4QualificationTerminalClaimsV5 => {
+        const retained = JSON.parse(Buffer.from(bytes).toString("utf8")) as Lc4QualificationV3TerminalArtifact;
+        assertSignedArtifact({
+          artifact: retained,
+          expectedFingerprint: authorization.body.terminal_public_key_fingerprint_sha256,
+          signingDomain: TERMINAL_DOMAIN,
+          artifactDomain: TERMINAL_ARTIFACT_DOMAIN,
+        });
+        if (canonicalJson(retained) !== canonicalJson(terminal)) {
+          throw new Error("LC4 qualification envelope terminal differs from retained terminal");
+        }
+        return freeze({
+          terminal_artifact_sha256: retained.artifact_sha256,
+          payload_root_sha256: retained.body.payload_root_sha256,
+          bindings: retained.body.package_bindings,
+        });
+      },
+    });
+    const packageBindings = terminal.body.package_bindings;
+    if (packageBindings.attempt_id !== terminal.body.attempt_id
+      || packageBindings.source_commit !== terminal.body.source_commit
+      || packageBindings.source_tree_oid !== plan.body.source.source_tree_oid
+      || packageBindings.source_tree_sha256 !== terminal.body.source_tree_sha256
+      || packageBindings.plan_artifact_sha256 !== terminal.body.plan_artifact_sha256
+      || packageBindings.plan_sha256 !== terminal.body.plan_sha256
+      || packageBindings.authorization_artifact_sha256 !== terminal.body.authorization_artifact_sha256
+      || packageBindings.setup_qualification_artifact_sha256 !== terminal.body.setup_qualification_artifact_sha256
+      || packageBindings.budget_evidence_sha256 !== terminal.body.budget_evidence_sha256
+      || packageBindings.budget_final_head_sha256 !== terminal.body.budget_final_head_sha256
+      || packageBindings.provider_session_count !== terminal.body.provider_sessions_opened
+      || packageBindings.paid_session_count !== terminal.body.paid_sessions_opened
+      || packageBindings.generation_phase_count !== terminal.body.generation_phases_attempted
+      || packageBindings.tool_roundtrip_count !== terminal.body.tool_roundtrips_attempted
+      || packageBindings.retry_count !== terminal.body.paid_retries_attempted
+      || packageBindings.reconnect_count !== 0
+      || packageBindings.replay_artifact_sha256 !== sha256Hex(
+        `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(terminal.body.roundtrip_replay_sha256)}`,
+      )) {
+      throw new Error("LC4 qualification signed package bindings differ from terminal authority");
     }
     const xaiResult = terminal.body.results.find((result) => result.provider === "xai");
     const serverVad = terminal.body.server_vad_qualification;
@@ -1662,28 +1829,91 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || (terminal.body.status === "passed" && !serverVad.benchmark_ready)) {
       throw new Error("LC4 qualification v3 server-VAD promotion binding failed integrity");
     }
-    const { package_sha256, ...packageBody } = manifest;
-    if (manifest.self_excluded !== true
-      || manifest.entries.some((entry) => entry.path === "artifact-manifest.json")
-      || package_sha256 !== sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(packageBody)}`)
-      || manifest.bindings.terminal_artifact_sha256 !== terminal.artifact_sha256) {
-      throw new Error("LC4 qualification v3 detached package manifest failed integrity");
-    }
-    const actualNames = (await readdir(directory)).filter((entry) => entry !== "artifact-manifest.json").sort();
-    if (canonicalJson(actualNames) !== canonicalJson(manifest.entries.map((entry) => entry.path))) {
-      throw new Error("LC4 qualification v3 package has unknown, missing, or unsorted entries");
-    }
-    for (const entry of manifest.entries) {
-      if (entry.path.includes("/") || /(?:\.pem|\.env)$/u.test(entry.path)) throw new Error("LC4 qualification v3 package contains a forbidden entry");
-      const bytes = await readFile(resolve(directory, entry.path));
-      if (bytes.byteLength !== entry.byte_length || sha256Hex(bytes) !== entry.sha256) {
-        throw new Error("LC4 qualification v3 package entry failed integrity");
+    if (terminal.body.status === "passed" && (
+      terminal.body.roundtrip_public_execution_sha256.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+      || terminal.body.roundtrip_replay_sha256.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+      || terminal.body.provider_sessions_opened !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
+      || terminal.body.paid_sessions_opened !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
+      || terminal.body.generation_phases_attempted !== LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES
+      || terminal.body.tool_roundtrips_attempted !== LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS
+      || terminal.body.paid_retries_attempted !== 0
+    )) throw new Error("LC4 qualification terminal lacks three replay-derived roundtrip bindings");
+    const paidReplayHeads: string[] = [];
+    let paidReplayEventCount = 0;
+    for (const [providerIndex, provider] of (terminal.body.status === "passed"
+      ? LC4_QUALIFICATION_V3_PROVIDER_ORDER.entries()
+      : [])) {
+      const [summary, retainedWire, retainedUsage] = await Promise.all([
+        readJson<RetainedRoundtripSummary>(resolve(directory, `${provider}-spoken-roundtrip.json`)),
+        readJsonLines<RealtimeWireObservation>(resolve(directory, `${provider}-spoken-roundtrip-wire.jsonl`)),
+        readJsonLines<RoundtripSanitizedUsage>(resolve(directory, `${provider}-spoken-roundtrip-usage.jsonl`)),
+      ]);
+      const terminalResult = terminal.body.results[providerIndex];
+      if (!terminalResult || terminalResult.provider !== provider) {
+        throw new Error("LC4 qualification terminal provider order is not canonical");
       }
+      assertRetainedProviderReplayEvidence({
+        provider,
+        summary,
+        wire: retainedWire,
+        usage: retainedUsage,
+        terminalResult,
+        terminalPublicExecutionSha256: terminal.body.roundtrip_public_execution_sha256[providerIndex]!,
+        terminalReplaySha256: terminal.body.roundtrip_replay_sha256[providerIndex]!,
+      });
+      const paidHead = retainedWire.at(-1)?.observationSha256;
+      if (!paidHead) throw new Error(`LC4 qualification ${provider} replay has no terminal chain head`);
+      paidReplayHeads.push(paidHead);
+      paidReplayEventCount += retainedWire.length;
     }
     const setupQualification = await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"));
     const gateARisk = await readJson<Lc4XaiServerVadGateARiskArtifact>(resolve(directory, "xai-server-vad-gate-a-risk.json"));
     assertProviderQualificationArtifactIntegrity(setupQualification);
     assertXaiServerVadGateARiskArtifact(gateARisk);
+    const setupByProvider = new Map(setupQualification.results.map((result) => [result.provider, result]));
+    if (setupByProvider.size !== setupQualification.results.length) {
+      throw new Error("LC4 qualification setup replay contains a duplicate provider result");
+    }
+    const setupWireEvidence = LC4_QUALIFICATION_V3_PROVIDER_ORDER.flatMap((expectedProvider) => {
+      const result = setupByProvider.get(expectedProvider);
+      if (!result) throw new Error(`LC4 qualification setup replay lacks ${expectedProvider}`);
+      const evidence = result.setupWireEvidence;
+      if (terminal.body.status === "passed" && (
+        result.provider !== expectedProvider
+        || result.status !== "passed"
+        || evidence === undefined
+        || evidence.provider !== expectedProvider
+        || evidence.connectionEpoch !== 1
+        || evidence.observations.length < 2
+        || evidence.observations.some((observation) => observation.connectionEpoch !== 1)
+      )) throw new Error(`LC4 qualification ${expectedProvider} setup replay is not one exact epoch-1 session: ${canonicalJson({
+        actual_provider: result.provider,
+        status: result.status,
+        evidence_provider: evidence?.provider ?? null,
+        evidence_epoch: evidence?.connectionEpoch ?? null,
+        observation_count: evidence?.observations.length ?? 0,
+        observation_epochs: evidence?.observations.map((observation) => observation.connectionEpoch) ?? [],
+      })}`);
+      return evidence === undefined ? [] : [evidence];
+    });
+    if (terminal.body.status === "passed") {
+      const setupReplayHeads = setupWireEvidence.map((evidence) => evidence.observations.at(-1)?.observationSha256 ?? null);
+      const replayHeads = [...setupReplayHeads, ...paidReplayHeads];
+      const replayEventCount = setupWireEvidence.reduce(
+        (total, evidence) => total + evidence.observations.length,
+        paidReplayEventCount,
+      );
+      const replayChainHeadSha256 = replayHeads.some((head) => head === null)
+        ? null
+        : sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`);
+      if (setupWireEvidence.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+        || paidReplayHeads.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+        || packageBindings.provider_session_count !== setupWireEvidence.length + paidReplayHeads.length
+        || packageBindings.replay_event_count !== replayEventCount
+        || packageBindings.replay_chain_head_sha256 !== replayChainHeadSha256) {
+        throw new Error("LC4 qualification signed replay chain, session count, or event count differs from retained evidence");
+      }
+    }
     const retainedXaiSetup = setupQualification.results.find((result) => result.provider === "xai");
     if (setupQualification.artifactSha256 !== terminal.body.setup_qualification_artifact_sha256
       || retainedXaiSetup === undefined
@@ -1708,13 +1938,15 @@ export async function reportLc4QualificationV3(input: Readonly<{
     }
     if (serverVad.benchmark_ready) {
       if (!xaiResult) throw new Error("LC4 qualification terminal lacks xAI result");
-      const [xaiSummary, xaiWire] = await Promise.all([
+      const [xaiSummary, xaiWire, xaiUsage] = await Promise.all([
         readJson<RetainedRoundtripSummary>(resolve(directory, "xai-spoken-roundtrip.json")),
         readJsonLines<RealtimeWireObservation>(resolve(directory, "xai-spoken-roundtrip-wire.jsonl")),
+        readJsonLines<RoundtripSanitizedUsage>(resolve(directory, "xai-spoken-roundtrip-usage.jsonl")),
       ]);
       assertRetainedXaiServerVadEvidence({
         summary: xaiSummary,
         wire: xaiWire,
+        usage: xaiUsage,
         terminalResult: xaiResult,
         gateEvidenceSha256: serverVad.gate_b_evidence_sha256,
       });
