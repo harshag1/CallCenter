@@ -26,7 +26,7 @@ describe("HACC-LC3 live runner release contract", () => {
   it("fails closed while the next paid protocol remains an unregistered draft", async () => {
     const source = await runnerSource();
     expect(source).toContain("const PAID_EXECUTION_FROZEN = true");
-    expect(source).toContain('["prepare", "qualify", "run"].includes');
+    expect(source).toContain('["prepare", "qualify", "response-tool-canary", "run"].includes');
     expect(source).toContain("paid long-call execution is frozen until a new protocol is preregistered");
   });
 
@@ -74,13 +74,25 @@ describe("HACC-LC3 live runner release contract", () => {
   it("requires a fresh, plan-bound three-provider qualification before paid execution", async () => {
     const source = await runnerSource();
     expect(source).toContain('if (command === "qualify") return qualify(root)');
-    expect(source).toContain("assertRecentPassingProviderQualification({");
-    expect(source.indexOf("assertRecentPassingProviderQualification({")).toBeLessThan(
+    expect(source).toContain("assertRecentPassingProviderQualificationBundle({");
+    expect(source.indexOf("assertRecentPassingProviderQualificationBundle({")).toBeLessThan(
       source.indexOf("await mkdir(resolve(root, \"runs\")"),
     );
     expect(source).toContain("loadProductionRealtimeCredentialCandidates");
     expect(source).toContain("qualificationArtifactSha256");
-    expect(source).toContain("qualification.artifactSha256");
+    expect(source).toContain("qualificationBundle.qualification.artifactSha256");
+  });
+
+  it("keeps the zero-audio response/tool-call canary separately budgeted and globally frozen", async () => {
+    const source = await runnerSource();
+    expect(source).toContain('if (command === "response-tool-canary") return responseToolCanary(root)');
+    expect(source).toContain('const RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD = "3"');
+    expect(source).toContain('const RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER = "1"');
+    expect(source).toContain("executeProviderResponseToolCanary({");
+    expect(source).toContain("callerAudioBytes: 0");
+    expect(source).toContain("no-retry policy blocks");
+    expect(source).toContain("wire-observations.jsonl");
+    expect(source).toContain("assertRecentProviderHandshakeQualification({");
   });
 
   it("reports only through the next-version complete provenance bundle", async () => {

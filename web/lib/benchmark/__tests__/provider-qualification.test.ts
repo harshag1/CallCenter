@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertRecentPassingProviderQualification,
   qualifyProviders,
+  recordProviderResponseToolCanary,
   type ProviderQualificationTarget,
 } from "../provider-qualification";
+import { canonicalJson, sha256Hex } from "../artifacts";
+import { createProductionRealtimeClient } from "../production-realtime-provider";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -83,7 +86,11 @@ function xaiAcknowledgement(): SessionConfigurationAcknowledgement {
   });
 }
 
-function configuration(provider: "openai" | "gemini" | "xai", model: string): TrialSessionConfiguration {
+function configuration(
+  provider: "openai" | "gemini" | "xai",
+  model: string,
+  withTool = false,
+): TrialSessionConfiguration {
   return Object.freeze({
     provider,
     model,
@@ -91,7 +98,12 @@ function configuration(provider: "openai" | "gemini" | "xai", model: string): Tr
     instructions: `qualification-${provider}`,
     initialPrompt: "qualification",
     renderedCapabilitySnapshot: "<capability_snapshot>{}</capability_snapshot>",
-    providerTools: Object.freeze([]),
+    providerTools: Object.freeze(withTool ? [Object.freeze({
+      type: "function" as const,
+      name: "capability_gateway",
+      description: "Invoke an authorized local capability.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    })] : []),
     conditionHash: H("c"),
     inputAudioFormat: Object.freeze({ encoding: "pcm16", sampleRateHz: provider === "gemini" ? 16_000 : 24_000, channels: 1 }),
     audioDeliveryProfile: Object.freeze({ schemaVersion: 1, chunkMs: 20, pace: "realtime" }),
@@ -99,11 +111,11 @@ function configuration(provider: "openai" | "gemini" | "xai", model: string): Tr
   });
 }
 
-function targets(): readonly ProviderQualificationTarget[] {
+function targets(withTool = false): readonly ProviderQualificationTarget[] {
   return Object.freeze([
-    Object.freeze({ provider: "openai", model: "gpt-realtime-test", configuration: configuration("openai", "gpt-realtime-test") }),
-    Object.freeze({ provider: "gemini", model: "gemini-live-test", configuration: configuration("gemini", "gemini-live-test") }),
-    Object.freeze({ provider: "xai", model: "grok-voice-test", configuration: configuration("xai", "grok-voice-test") }),
+    Object.freeze({ provider: "openai", model: "gpt-realtime-test", configuration: configuration("openai", "gpt-realtime-test", withTool) }),
+    Object.freeze({ provider: "gemini", model: "gemini-live-test", configuration: configuration("gemini", "gemini-live-test", withTool) }),
+    Object.freeze({ provider: "xai", model: "grok-voice-test", configuration: configuration("xai", "grok-voice-test", withTool) }),
   ]);
 }
 
@@ -303,5 +315,74 @@ describe("provider qualification", () => {
     });
     expect(artifact.status).toBe("failed");
     expect(artifact.results.find((result) => result.provider === "openai")?.code).toBe("handshake_failed");
+  });
+
+  it("refuses a production client whose provider or model differs from the hashed configuration", () => {
+    expect(() => createProductionRealtimeClient(
+      "openai",
+      configuration("xai", "gpt-realtime-2.1"),
+      "openai-secret-test",
+    )).toThrow("provider differs");
+    expect(() => createProductionRealtimeClient(
+      "openai",
+      configuration("openai", "not-the-pinned-model"),
+      "openai-secret-test",
+    )).toThrow("model differs");
+  });
+
+  it("requires a separate paid response/tool-call canary when setup does not echo tool schemas", async () => {
+    const prepared = await setup();
+    const canaryTargets = targets(true);
+    const qualification = await qualifyProviders({ ...prepared.input, targets: canaryTargets });
+    expect(qualification.status).toBe("conditional");
+    expect(qualification.results.find((result) => result.provider === "openai")?.toolSchemaVerification)
+      .toBe("verified_by_provider_echo");
+    expect(qualification.results.find((result) => result.provider === "gemini")?.toolSchemaVerification)
+      .toBe("requires_paid_response_canary");
+    expect(qualification.results.find((result) => result.provider === "xai")?.toolSchemaVerification)
+      .toBe("requires_paid_response_canary");
+    const gate = () => assertRecentPassingProviderQualification({
+      root: prepared.root,
+      protocolId: prepared.input.protocolId,
+      planSha256: prepared.input.planSha256,
+      sourceCommit: prepared.input.sourceCommit,
+      targets: canaryTargets,
+      credentials: prepared.input.credentials,
+      now: prepared.input.now,
+    });
+    await expect(gate()).rejects.toThrow("paid response/tool-call canary");
+
+    const toolSchemaSha256 = sha256Hex(
+      `harshas-amazing-call-center/provider-tool-schema/v1\n${canonicalJson(canaryTargets[0]!.configuration.providerTools)}`,
+    );
+    const timestamp = prepared.input.now().toISOString();
+    const canary = await recordProviderResponseToolCanary({
+      root: prepared.root,
+      protocolId: prepared.input.protocolId,
+      planSha256: prepared.input.planSha256,
+      sourceCommit: prepared.input.sourceCommit,
+      targets: canaryTargets,
+      credentials: prepared.input.credentials,
+      attemptedAt: timestamp,
+      completedAt: timestamp,
+      canaryId: "paid-tool-call-canary",
+      results: canaryTargets.map((target) => Object.freeze({
+        provider: target.provider,
+        model: target.model,
+        toolSchemaSha256,
+        attemptedAt: timestamp,
+        completedAt: timestamp,
+        status: "passed" as const,
+        code: "gateway_tool_call_observed" as const,
+        callerAudioBytes: 0 as const,
+        responseGenerationEvidenceSha256: H("7"),
+        providerToolCallEvidenceSha256: H("8"),
+      })),
+    });
+    expect(canary).toMatchObject({
+      status: "passed",
+      probeScope: "paid_response_generation_tool_call_no_caller_audio",
+    });
+    await expect(gate()).resolves.toMatchObject({ status: "conditional" });
   });
 });

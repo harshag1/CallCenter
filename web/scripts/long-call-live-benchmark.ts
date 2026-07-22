@@ -98,12 +98,16 @@ import {
   loadProductionRealtimeCredentials,
 } from "../lib/benchmark/production-realtime-provider";
 import {
-  assertRecentPassingProviderQualification,
+  assertRecentProviderHandshakeQualification,
+  assertRecentPassingProviderQualificationBundle,
   assertProviderQualificationArtifactIntegrity,
   qualifyProviders,
+  providerResponseToolCanaryRequirements,
+  recordProviderResponseToolCanary,
   type ProviderQualificationArtifact,
   type ProviderQualificationTarget,
 } from "../lib/benchmark/provider-qualification";
+import { executeProviderResponseToolCanary } from "../lib/benchmark/provider-response-tool-canary";
 import { verifyLongCallAsrCalibrationArtifact } from "../lib/benchmark/long-call-asr-calibration";
 import {
   parseRetainedTrialEvidence,
@@ -123,6 +127,9 @@ const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.lo
 const PAID_EXECUTION_FROZEN = true;
 const PLAN_FILE = "experiment-plan.json";
 const LEDGER_FILE = "budget-ledger.jsonl";
+const RESPONSE_CANARY_LEDGER_FILE = "response-tool-canary-budget-ledger.jsonl";
+const RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER = "1" as const;
+const RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD = "3" as const;
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
 const SAFE_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const ASR_BATCH_FINALIZATION_DOMAIN = "hacc/whisper-cpp-asr-batch-finalization/v1\n";
@@ -155,6 +162,13 @@ type ExperimentPlan = Readonly<{
   outputVoiceCaptureAuthoritySha256: string;
   fixtureToolchain: Readonly<{ macos: string; ffmpeg: string }>;
   signer: Readonly<{ keyId: string; publicKeyPem: string; publicKeySha256: string }>;
+  responseToolCanary: Readonly<{
+    maximumUsdPerProvider: typeof RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER;
+    maximumAggregateUsd: typeof RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD;
+    zeroCallerAudio: true;
+    paidResponseGeneration: true;
+    noPaidRetry: true;
+  }>;
   planSha256: string;
 }>;
 
@@ -324,6 +338,10 @@ function aggregateLedgerPath(root: string): string {
   return resolve(root, LEDGER_FILE);
 }
 
+function responseCanaryLedgerPath(root: string): string {
+  return resolve(root, RESPONSE_CANARY_LEDGER_FILE);
+}
+
 function episodeCostEnvelope(plan: ExperimentPlan, cell: LongCallCell): BudgetCostEnvelope {
   return Object.freeze({
     schema_version: 1,
@@ -430,6 +448,13 @@ async function prepare(root: string): Promise<void> {
       ffmpeg: await commandFirstLine("ffmpeg", ["-version"]),
     }),
     signer: Object.freeze({ keyId: signer.keyId, publicKeyPem, publicKeySha256: signer.publicKeySha256 }),
+    responseToolCanary: Object.freeze({
+      maximumUsdPerProvider: RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER,
+      maximumAggregateUsd: RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD,
+      zeroCallerAudio: true as const,
+      paidResponseGeneration: true as const,
+      noPaidRetry: true as const,
+    }),
   });
   const plan: ExperimentPlan = Object.freeze({
     ...body,
@@ -456,6 +481,37 @@ async function prepare(root: string): Promise<void> {
       condition: cell.condition,
       expiresAt,
       costEnvelope: episodeCostEnvelope(plan, cell),
+      lockTimeoutMs: 60_000,
+    });
+  }
+  const responseCanaryLedger = responseCanaryLedgerPath(root);
+  await initializeFilesystemBudgetLedger({
+    ledgerPath: responseCanaryLedger,
+    ledgerId: `${experimentId}-response-tool-canary-budget`,
+    operationId: `${experimentId}-initialize-response-tool-canary-budget`,
+    operationalCeilingUsd: RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD,
+  });
+  for (const requirement of providerResponseToolCanaryRequirements(qualificationTargets(plan))) {
+    const runId = `${experimentId}-response-tool-canary-${requirement.provider}`;
+    await reserveFilesystemBudget({
+      ledgerPath: responseCanaryLedger,
+      operationId: `${runId}-reserve`,
+      reservationId: `${runId}-reservation`,
+      runId,
+      provider: requirement.provider,
+      model: requirement.model,
+      condition: "paid-response-tool-call-canary",
+      expiresAt,
+      costEnvelope: Object.freeze({
+        schema_version: 1,
+        kind: "hacc_provider_gate1_cost_envelope",
+        pricing_snapshot_sha256: sha256Hex(`hacc-lc3/response-canary-pricing/v1\n${canonicalJson(requirement)}`),
+        provider_hard_session_caps_sha256: sha256Hex("hacc-lc3/response-canary-caps/v1\nzero-caller-audio;one-response;20-seconds"),
+        runner_config_sha256: sha256Hex(`hacc-lc3/response-canary-runner/v1\n${plan.planSha256}\n${requirement.provider}`),
+        formula_sha256: sha256Hex("hacc-lc3/response-canary-cost/v1\nprovider-usage-or-full-reserve"),
+        components: Object.freeze([Object.freeze({ name: "hard-per-provider-reserve", upper_bound_micro_usd: 1_000_000 })]),
+        safety_margin_micro_usd: 0,
+      }),
       lockTimeoutMs: 60_000,
     });
   }
@@ -680,6 +736,7 @@ async function runCell(
   cell: LongCallCell,
   apiKey: string,
   qualificationArtifactSha256: string,
+  responseToolCanaryArtifactSha256: string | null,
 ): Promise<void> {
   const runsRoot = resolve(root, "runs");
   const partial = resolve(runsRoot, `${cell.runId}.partial`);
@@ -712,6 +769,7 @@ async function runCell(
     protocolId: LONG_CALL_PROTOCOL_ID,
     planSha256: plan.planSha256,
     qualificationArtifactSha256,
+    responseToolCanaryArtifactSha256,
     cell,
     scheduledBeforeSocket: true,
   })}\n`, { flag: "wx", mode: 0o600 });
@@ -1045,7 +1103,229 @@ async function qualify(root: string): Promise<void> {
       })),
     ])),
   })}\n`);
+  if (artifact.status === "conditional") {
+    throw new Error("provider handshake qualification is conditional; a separately retained paid response/tool-call canary is required before run");
+  }
   if (artifact.status !== "passed") throw new Error("provider qualification failed; immutable sanitized artifact retained");
+}
+
+function responseCanaryTarget(
+  targets: readonly ProviderQualificationTarget[],
+  requirement: ReturnType<typeof providerResponseToolCanaryRequirements>[number],
+): ProviderQualificationTarget {
+  const matching = targets.filter((target) => (
+    target.provider === requirement.provider
+    && target.model === requirement.model
+    && sha256Hex(`harshas-amazing-call-center/provider-tool-schema/v1\n${canonicalJson(target.configuration.providerTools)}`)
+      === requirement.toolSchemaSha256
+  ));
+  if (matching.length === 0) throw new Error(`response canary target is missing for ${requirement.provider}`);
+  return matching.sort((left, right) => left.configuration.conditionHash.localeCompare(right.configuration.conditionHash))[0]!;
+}
+
+async function runResponseToolCanaryCell(
+  root: string,
+  plan: ExperimentPlan,
+  qualificationArtifactSha256: string,
+  target: ProviderQualificationTarget,
+  toolSchemaSha256: string,
+  apiKey: string,
+) {
+  const runId = `${plan.experimentId}-response-tool-canary-${target.provider}`;
+  const reservationId = `${runId}-reservation`;
+  const runsRoot = resolve(root, "response-tool-canary-runs");
+  const partial = resolve(runsRoot, `${runId}.partial`);
+  const complete = resolve(runsRoot, `${runId}.complete`);
+  for (const path of [partial, complete]) {
+    try {
+      await stat(path);
+      throw new Error(`response tool canary evidence already exists; no-retry policy blocks ${runId}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const ledgerPath = responseCanaryLedgerPath(root);
+  const before = await inspectFilesystemBudgetLedger({ ledgerPath, lockTimeoutMs: 60_000 });
+  const reservation = before.reservations.find((candidate) => candidate.reservation_id === reservationId);
+  if (reservation?.status !== "reserved" || reservation.maximum_micro_usd !== 1_000_000) {
+    throw new Error(`response tool canary reservation is not fresh for ${target.provider}`);
+  }
+  await mkdir(runsRoot, { recursive: true, mode: 0o700 });
+  await mkdir(partial, { recursive: false, mode: 0o700 });
+  await writeFile(resolve(partial, "scheduled.json"), `${canonicalJson({
+    schemaVersion: 1,
+    protocolId: plan.protocolId,
+    planSha256: plan.planSha256,
+    qualificationArtifactSha256,
+    provider: target.provider,
+    model: target.model,
+    conditionHash: target.configuration.conditionHash,
+    toolSchemaSha256,
+    callerAudioBytes: 0,
+    maximumUsd: RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER,
+    noPaidRetry: true,
+    scheduledBeforeSocket: true,
+  })}\n`, { flag: "wx", mode: 0o600 });
+  await markBudgetConnectionIntent({
+    ledgerPath,
+    operationId: `${runId}-connection-intent`,
+    reservationId,
+    lockTimeoutMs: 60_000,
+  });
+  let providerSessionOpened = false;
+  const attemptedAt = new Date().toISOString();
+  let execution: Awaited<ReturnType<typeof executeProviderResponseToolCanary>>;
+  try {
+    const client = createProductionRealtimeClient(target.provider, target.configuration, apiKey);
+    const budgetTracked = new Proxy(client, {
+      get(instance, property) {
+        if (property === "connect") {
+          return async () => {
+            await instance.connect();
+            providerSessionOpened = true;
+            await markBudgetSessionOpened({
+              ledgerPath,
+              operationId: `${runId}-opened`,
+              reservationId,
+              lockTimeoutMs: 60_000,
+            });
+          };
+        }
+        const value = Reflect.get(instance, property, instance);
+        return typeof value === "function" ? value.bind(instance) : value;
+      },
+    });
+    execution = await executeProviderResponseToolCanary({
+      provider: target.provider,
+      model: target.model,
+      client: budgetTracked,
+      timeoutMs: 20_000,
+    });
+  } catch (error) {
+    execution = Object.freeze({
+      provider: target.provider,
+      model: target.model,
+      attemptedAt,
+      completedAt: new Date().toISOString(),
+      status: "failed" as const,
+      code: "response_generation_failed" as const,
+      callerAudioBytes: 0 as const,
+      responseGenerationEvidenceSha256: sha256Hex(`hacc-lc3/response-canary-runner-failure/v1\n${error instanceof Error ? error.name : "NonErrorThrow"}`),
+      providerToolCallEvidenceSha256: null,
+      wireObservations: Object.freeze([]),
+      usage: Object.freeze([]),
+    });
+  }
+  const wireEvidence = execution.wireObservations.map((observation) => canonicalJson(observation)).join("\n");
+  await writeFile(resolve(partial, "wire-observations.jsonl"), wireEvidence ? `${wireEvidence}\n` : "", { flag: "wx", mode: 0o600 });
+  const retained = Object.freeze({
+    provider: execution.provider,
+    model: execution.model,
+    attemptedAt: execution.attemptedAt,
+    completedAt: execution.completedAt,
+    status: execution.status,
+    code: execution.code,
+    callerAudioBytes: execution.callerAudioBytes,
+    responseGenerationEvidenceSha256: execution.responseGenerationEvidenceSha256,
+    providerToolCallEvidenceSha256: execution.providerToolCallEvidenceSha256,
+    wireObservationCount: execution.wireObservations.length,
+    wireObservationsSha256: sha256Hex(wireEvidence),
+    usageSha256: sha256Hex(canonicalJson(execution.usage)),
+  });
+  await writeFile(resolve(partial, "result.json"), `${canonicalJson(retained)}\n`, { flag: "wx", mode: 0o600 });
+  await recordBudgetTerminal({
+    ledgerPath,
+    operationId: `${runId}-terminal`,
+    reservationId,
+    outcome: execution.status === "passed" ? "completed" : "failed",
+    lockTimeoutMs: 60_000,
+  });
+  await settleFilesystemBudget({
+    ledgerPath,
+    operationId: `${runId}-settle`,
+    reservationId,
+    // A provider-opened canary settles at its full reserve when authoritative
+    // response-scoped billing is absent. This overstates spend rather than hiding it.
+    estimatedUsd: providerSessionOpened ? RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER : "0",
+    lockTimeoutMs: 60_000,
+  });
+  await rename(partial, complete);
+  return Object.freeze({
+    provider: target.provider,
+    model: target.model,
+    toolSchemaSha256,
+    attemptedAt: execution.attemptedAt,
+    completedAt: execution.completedAt,
+    status: execution.status,
+    code: execution.code,
+    callerAudioBytes: 0 as const,
+    responseGenerationEvidenceSha256: execution.responseGenerationEvidenceSha256,
+    providerToolCallEvidenceSha256: execution.providerToolCallEvidenceSha256,
+  });
+}
+
+async function responseToolCanary(root: string): Promise<void> {
+  const plan = await loadPlan(root);
+  await verifyFixtures(root, plan);
+  if (
+    plan.responseToolCanary.maximumUsdPerProvider !== RESPONSE_CANARY_MAXIMUM_USD_PER_PROVIDER
+    || plan.responseToolCanary.maximumAggregateUsd !== RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD
+    || !plan.responseToolCanary.zeroCallerAudio
+    || !plan.responseToolCanary.paidResponseGeneration
+    || !plan.responseToolCanary.noPaidRetry
+  ) throw new Error("frozen response tool canary policy differs from the runner");
+  const providerCredentials = await credentials();
+  const targets = qualificationTargets(plan);
+  const qualification = await assertRecentProviderHandshakeQualification({
+    root,
+    protocolId: plan.protocolId,
+    planSha256: plan.planSha256,
+    sourceCommit: plan.sourceCommit,
+    targets,
+    credentials: providerCredentials,
+  });
+  if (qualification.status !== "conditional") {
+    throw new Error("paid response/tool-call canary requires a conditional handshake qualification with unverified tool schemas");
+  }
+  const requirements = providerResponseToolCanaryRequirements(targets);
+  const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: responseCanaryLedgerPath(root), lockTimeoutMs: 60_000 });
+  if (
+    ledger.operational_ceiling_micro_usd !== 3_000_000
+    || ledger.reservations.length !== requirements.length
+    || ledger.reservations.some((reservation) => reservation.status !== "reserved" || reservation.maximum_micro_usd !== 1_000_000)
+  ) throw new Error("response tool canary budget ledger differs from the frozen plan or is not fresh");
+  const results = [];
+  for (const requirement of requirements) {
+    const target = responseCanaryTarget(targets, requirement);
+    results.push(await runResponseToolCanaryCell(
+      root,
+      plan,
+      qualification.artifactSha256,
+      target,
+      requirement.toolSchemaSha256,
+      providerCredentials[requirement.provider],
+    ));
+  }
+  const artifact = await recordProviderResponseToolCanary({
+    root,
+    protocolId: plan.protocolId,
+    planSha256: plan.planSha256,
+    sourceCommit: plan.sourceCommit,
+    targets,
+    credentials: providerCredentials,
+    results,
+    attemptedAt: results.map((result) => result.attemptedAt).sort()[0]!,
+    completedAt: results.map((result) => result.completedAt).sort().at(-1)!,
+  });
+  process.stdout.write(`${canonicalJson({
+    action: "paid-response-tool-call-canary-retained",
+    status: artifact.status,
+    artifactSha256: artifact.artifactSha256,
+    callerAudioBytes: 0,
+    maximumAggregateUsd: RESPONSE_CANARY_MAXIMUM_AGGREGATE_USD,
+    results: artifact.results.map((result) => ({ provider: result.provider, model: result.model, status: result.status, code: result.code })),
+  })}\n`);
+  if (artifact.status !== "passed") throw new Error("paid response/tool-call canary failed; immutable evidence retained and no-retry policy remains active");
 }
 
 async function run(root: string, concurrency: number): Promise<void> {
@@ -1053,7 +1333,7 @@ async function run(root: string, concurrency: number): Promise<void> {
   const plan = await loadPlan(root);
   await verifyFixtures(root, plan);
   const providerCredentials = await credentials();
-  const qualification = await assertRecentPassingProviderQualification({
+  const qualificationBundle = await assertRecentPassingProviderQualificationBundle({
     root,
     protocolId: plan.protocolId,
     planSha256: plan.planSha256,
@@ -1076,7 +1356,14 @@ async function run(root: string, concurrency: number): Promise<void> {
       if (!pair) return;
       const adjacentCells = plan.schedule.cells.filter((cell) => cell.pairId === pair.pairId);
       for (const cell of adjacentCells) {
-        await runCell(root, plan, cell, providerCredentials[cell.provider], qualification.artifactSha256);
+        await runCell(
+          root,
+          plan,
+          cell,
+          providerCredentials[cell.provider],
+          qualificationBundle.qualification.artifactSha256,
+          qualificationBundle.responseToolCanary?.artifactSha256 ?? null,
+        );
       }
     }
   }));
@@ -1692,15 +1979,16 @@ async function inspect(root: string): Promise<void> {
 async function main(): Promise<void> {
   const command = process.argv[2];
   const root = rootDirectory();
-  if (PAID_EXECUTION_FROZEN && ["prepare", "qualify", "run"].includes(command ?? "")) {
+  if (PAID_EXECUTION_FROZEN && ["prepare", "qualify", "response-tool-canary", "run"].includes(command ?? "")) {
     throw new Error("paid long-call execution is frozen until a new protocol is preregistered at a clean source boundary");
   }
   if (command === "prepare") return prepare(root);
   if (command === "qualify") return qualify(root);
+  if (command === "response-tool-canary") return responseToolCanary(root);
   if (command === "run") return run(root, Number(option("concurrency") ?? "3"));
   if (command === "report") return report(root);
   if (command === "inspect") return inspect(root);
-  throw new Error("usage: long-call-live-benchmark <prepare|qualify|run|report|inspect> [--root DIR] [--output-voice-calibration-manifest ABSOLUTE_PATH] [--output-voice-capture-authority-sha256 SHA256] [--concurrency 1..9] [--pair-id ID] [--env-file ABSOLUTE_PATH]");
+  throw new Error("usage: long-call-live-benchmark <prepare|qualify|response-tool-canary|run|report|inspect> [--root DIR] [--output-voice-calibration-manifest ABSOLUTE_PATH] [--output-voice-capture-authority-sha256 SHA256] [--concurrency 1..9] [--pair-id ID] [--env-file ABSOLUTE_PATH]");
 }
 
 main().catch((error) => {

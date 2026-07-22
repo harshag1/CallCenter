@@ -15,6 +15,7 @@ export const PROVIDER_QUALIFICATION_MAX_AGE_MS = 30 * 60_000;
 const MAX_CLOCK_SKEW_MS = 2 * 60_000;
 const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v1";
 const MATRIX_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification-matrix/v1";
+const RESPONSE_CANARY_HASH_DOMAIN = "harshas-amazing-call-center/provider-response-tool-canary/v1";
 
 export type ProviderQualificationTarget = Readonly<{
   provider: LiveStsProvider;
@@ -46,6 +47,7 @@ export type ProviderQualificationResult = Readonly<{
   code: ProviderQualificationCode;
   acknowledgementMode: "exact_provider_echo" | "partial_provider_echo" | "setup_complete_no_field_echo" | "none";
   acknowledgementSha256: string | null;
+  toolSchemaVerification: "verified_by_provider_echo" | "requires_paid_response_canary" | "not_requested";
 }>;
 
 export type ProviderQualificationArtifact = Readonly<{
@@ -59,8 +61,37 @@ export type ProviderQualificationArtifact = Readonly<{
   probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation";
   attemptedAt: string;
   completedAt: string;
-  status: "passed" | "failed";
+  status: "passed" | "conditional" | "failed";
   results: readonly ProviderQualificationResult[];
+  artifactSha256: string;
+}>;
+
+export type ProviderResponseToolCanaryResult = Readonly<{
+  provider: LiveStsProvider;
+  model: string;
+  toolSchemaSha256: string;
+  attemptedAt: string;
+  completedAt: string;
+  status: "passed" | "failed";
+  code: "gateway_tool_call_observed" | "tool_call_not_observed" | "response_generation_failed";
+  callerAudioBytes: 0;
+  responseGenerationEvidenceSha256: string;
+  providerToolCallEvidenceSha256: string | null;
+}>;
+
+export type ProviderResponseToolCanaryArtifact = Readonly<{
+  schemaVersion: 1;
+  canaryId: string;
+  protocolId: string;
+  planSha256: string;
+  sourceCommit: string;
+  configurationMatrixSha256: string;
+  credentialSetSha256: string;
+  probeScope: "paid_response_generation_tool_call_no_caller_audio";
+  attemptedAt: string;
+  completedAt: string;
+  status: "passed" | "failed";
+  results: readonly ProviderResponseToolCanaryResult[];
   artifactSha256: string;
 }>;
 
@@ -87,6 +118,19 @@ type GateInput = Readonly<{
   targets: readonly ProviderQualificationTarget[];
   credentials: Readonly<Partial<Record<LiveStsProvider, string>>>;
   now?: () => Date;
+}>;
+
+type RecordResponseCanaryInput = Readonly<{
+  root: string;
+  protocolId: string;
+  planSha256: string;
+  sourceCommit: string;
+  targets: readonly ProviderQualificationTarget[];
+  credentials: Readonly<Partial<Record<LiveStsProvider, string>>>;
+  results: readonly ProviderResponseToolCanaryResult[];
+  attemptedAt: string;
+  completedAt: string;
+  canaryId?: string;
 }>;
 
 function configurationSha256(target: ProviderQualificationTarget): string {
@@ -145,18 +189,21 @@ function acknowledgementResult(
   target: ProviderQualificationTarget,
   readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null,
   fallback: SessionConfigurationAcknowledgement | null | undefined,
-): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256"> {
+): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256" | "toolSchemaVerification"> {
+  const toolSchemaVerification = target.configuration.providerTools.length === 0
+    ? "not_requested" as const
+    : "requires_paid_response_canary" as const;
   if (readyEvent?.provider !== target.provider) {
-    return { status: "failed", code: "provider_identity_mismatch", acknowledgementMode: "none", acknowledgementSha256: null };
+    return { status: "failed", code: "provider_identity_mismatch", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification };
   }
   const acknowledgement = readyEvent.configuration ?? fallback ?? null;
   if (!acknowledgement) {
-    return { status: "failed", code: "acknowledgement_missing", acknowledgementMode: "none", acknowledgementSha256: null };
+    return { status: "failed", code: "acknowledgement_missing", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification };
   }
   const digest = acknowledgementSha256(acknowledgement);
   const fields = Object.values(acknowledgement.fields);
   if (fields.some((field) => field.status === "mismatch")) {
-    return { status: "failed", code: "configuration_rejected", acknowledgementMode: "none", acknowledgementSha256: digest };
+    return { status: "failed", code: "configuration_rejected", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification };
   }
   if (target.provider === "gemini") {
     const allowed = fields.every((field) => field.status === "unverifiable" || field.status === "not_requested");
@@ -166,13 +213,14 @@ function acknowledgementResult(
       || acknowledgement.paidBenchmarkReady
       || !allowed
     ) {
-      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest };
+      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification };
     }
     return {
       status: "passed",
       code: "setup_accepted_without_field_echo",
       acknowledgementMode: "setup_complete_no_field_echo",
       acknowledgementSha256: digest,
+      toolSchemaVerification,
     };
   }
   if (target.provider === "xai" && (!acknowledgement.strictParityVerified || !acknowledgement.paidBenchmarkReady)) {
@@ -192,23 +240,29 @@ function acknowledgementResult(
       || !acceptedStatuses
       || (acknowledgement.session?.status !== "verified" && acknowledgement.session?.status !== "unverifiable")
     ) {
-      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest };
+      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification };
     }
     return {
       status: "passed",
       code: "configuration_accepted_partial_echo",
       acknowledgementMode: "partial_provider_echo",
       acknowledgementSha256: digest,
+      toolSchemaVerification,
     };
   }
   if (!acknowledgement.strictParityVerified || !acknowledgement.paidBenchmarkReady) {
-    return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest };
+    return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification };
   }
   return {
     status: "passed",
     code: "configuration_echo_verified",
     acknowledgementMode: "exact_provider_echo",
     acknowledgementSha256: digest,
+    toolSchemaVerification: target.configuration.providerTools.length === 0
+      ? "not_requested"
+      : acknowledgement.fields.tools.status === "verified"
+        ? "verified_by_provider_echo"
+        : "requires_paid_response_canary",
   };
 }
 
@@ -242,6 +296,7 @@ async function qualifyTarget(
       code: "credential_missing",
       acknowledgementMode: "none",
       acknowledgementSha256: null,
+      toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
     });
   }
   let client: NormalizedRealtimeClient | null = null;
@@ -264,6 +319,7 @@ async function qualifyTarget(
         code: "handshake_failed",
         acknowledgementMode: "none",
         acknowledgementSha256: null,
+        toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
       });
     }
     const outcome = acknowledgementResult(target, readyEvent, client.sessionConfigurationAcknowledgement);
@@ -286,6 +342,7 @@ async function qualifyTarget(
       code: classifiedFailure(error),
       acknowledgementMode: "none",
       acknowledgementSha256: null,
+      toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
     });
   } finally {
     unsubscribe?.();
@@ -297,6 +354,13 @@ function qualificationArtifactSha256(body: Omit<ProviderQualificationArtifact, "
   return sha256Hex(`${QUALIFICATION_HASH_DOMAIN}\n${canonicalJson(body)}`);
 }
 
+function expectedQualificationStatus(results: readonly ProviderQualificationResult[]): ProviderQualificationArtifact["status"] {
+  if (results.some((result) => result.status === "failed")) return "failed";
+  return results.some((result) => result.toolSchemaVerification === "requires_paid_response_canary")
+    ? "conditional"
+    : "passed";
+}
+
 export function assertProviderQualificationArtifactIntegrity(
   artifact: ProviderQualificationArtifact,
 ): void {
@@ -304,7 +368,7 @@ export function assertProviderQualificationArtifactIntegrity(
   const { artifactSha256, ...body } = artifact;
   if (qualificationArtifactSha256(body) !== artifactSha256) throw new Error("provider qualification artifact hash mismatch");
   if (!artifact.results.length) throw new Error("provider qualification artifact has no results");
-  if (artifact.status === "passed" !== artifact.results.every((result) => result.status === "passed")) {
+  if (artifact.status !== expectedQualificationStatus(artifact.results)) {
     throw new Error("provider qualification aggregate status is inconsistent");
   }
 }
@@ -345,7 +409,7 @@ export async function qualifyProviders(input: QualifyInput): Promise<ProviderQua
     probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation" as const,
     attemptedAt,
     completedAt: now().toISOString(),
-    status: results.every((result) => result.status === "passed") ? "passed" as const : "failed" as const,
+    status: expectedQualificationStatus(results),
     results,
   });
   const artifact: ProviderQualificationArtifact = Object.freeze({
@@ -367,7 +431,153 @@ export async function qualifyProviders(input: QualifyInput): Promise<ProviderQua
   return artifact;
 }
 
-export async function assertRecentPassingProviderQualification(input: GateInput): Promise<ProviderQualificationArtifact> {
+export function providerResponseToolCanaryRequirements(targets: readonly ProviderQualificationTarget[]) {
+  const requirements = new Map<string, Readonly<{
+    provider: LiveStsProvider;
+    model: string;
+    toolSchemaSha256: string;
+  }>>();
+  for (const target of targets) {
+    if (target.configuration.providerTools.length === 0) continue;
+    const requirement = Object.freeze({
+      provider: target.provider,
+      model: target.model,
+      toolSchemaSha256: sha256Hex(`harshas-amazing-call-center/provider-tool-schema/v1\n${canonicalJson(
+        target.configuration.providerTools,
+      )}`),
+    });
+    requirements.set(canonicalJson(requirement), requirement);
+  }
+  return Object.freeze([...requirements.values()].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right))));
+}
+
+function responseCanaryArtifactSha256(body: Omit<ProviderResponseToolCanaryArtifact, "artifactSha256">): string {
+  return sha256Hex(`${RESPONSE_CANARY_HASH_DOMAIN}\n${canonicalJson(body)}`);
+}
+
+export function assertProviderResponseToolCanaryArtifactIntegrity(
+  artifact: ProviderResponseToolCanaryArtifact,
+  targets: readonly ProviderQualificationTarget[],
+): void {
+  if (artifact.schemaVersion !== 1) throw new Error("unsupported provider response canary schema");
+  const { artifactSha256, ...body } = artifact;
+  if (responseCanaryArtifactSha256(body) !== artifactSha256) throw new Error("provider response canary artifact hash mismatch");
+  const expected = providerResponseToolCanaryRequirements(targets);
+  const actual = artifact.results.map((result) => ({
+    provider: result.provider,
+    model: result.model,
+    toolSchemaSha256: result.toolSchemaSha256,
+  })).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  if (canonicalJson(actual) !== canonicalJson(expected)) throw new Error("provider response canary result matrix mismatch");
+  for (const result of artifact.results) {
+    if (result.callerAudioBytes !== 0) throw new Error("provider response canary cannot include caller audio");
+    if (!/^[a-f0-9]{64}$/.test(result.responseGenerationEvidenceSha256)) {
+      throw new Error("provider response canary generation evidence hash is invalid");
+    }
+    if (
+      result.status === "passed"
+      && (result.code !== "gateway_tool_call_observed" || !/^[a-f0-9]{64}$/.test(result.providerToolCallEvidenceSha256 ?? ""))
+    ) {
+      throw new Error("passing provider response canary lacks provider tool-call evidence");
+    }
+    if (result.status === "failed" && result.code === "gateway_tool_call_observed") {
+      throw new Error("failed provider response canary cannot claim an observed gateway call");
+    }
+  }
+  if (artifact.status === "passed" !== artifact.results.every((result) => result.status === "passed")) {
+    throw new Error("provider response canary aggregate status is inconsistent");
+  }
+}
+
+export async function recordProviderResponseToolCanary(
+  input: RecordResponseCanaryInput,
+): Promise<ProviderResponseToolCanaryArtifact> {
+  const canaryId = input.canaryId ?? randomUUID();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(canaryId)) {
+    throw new Error("provider response canary ID must be a safe opaque identifier");
+  }
+  const sortedResults = Object.freeze([...input.results].sort((left, right) => (
+    left.provider.localeCompare(right.provider)
+    || left.model.localeCompare(right.model)
+    || left.toolSchemaSha256.localeCompare(right.toolSchemaSha256)
+  )));
+  const body = Object.freeze({
+    schemaVersion: 1 as const,
+    canaryId,
+    protocolId: input.protocolId,
+    planSha256: input.planSha256,
+    sourceCommit: input.sourceCommit,
+    configurationMatrixSha256: providerQualificationMatrixSha256(input.targets),
+    credentialSetSha256: providerCredentialSetSha256(input.credentials),
+    probeScope: "paid_response_generation_tool_call_no_caller_audio" as const,
+    attemptedAt: input.attemptedAt,
+    completedAt: input.completedAt,
+    status: sortedResults.every((result) => result.status === "passed") ? "passed" as const : "failed" as const,
+    results: sortedResults,
+  });
+  const artifact: ProviderResponseToolCanaryArtifact = Object.freeze({
+    ...body,
+    artifactSha256: responseCanaryArtifactSha256(body),
+  });
+  assertProviderResponseToolCanaryArtifactIntegrity(artifact, input.targets);
+  const directory = resolve(input.root, "response-tool-canaries");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const timestamp = input.attemptedAt.replace(/[:.]/g, "-");
+  const path = resolve(directory, `${timestamp}-${canaryId}.json`);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${canonicalJson(artifact)}\n`, { flag: "wx", mode: 0o600 });
+  try {
+    await link(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+  return artifact;
+}
+
+async function assertRecentPassingResponseToolCanary(
+  input: GateInput,
+): Promise<ProviderResponseToolCanaryArtifact> {
+  const directory = resolve(input.root, "response-tool-canaries");
+  const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const expectedMatrix = providerQualificationMatrixSha256(input.targets);
+  const expectedCredentials = providerCredentialSetSha256(input.credentials);
+  const nowMs = (input.now ?? (() => new Date()))().getTime();
+  const passing: ProviderResponseToolCanaryArtifact[] = [];
+  for (const name of names.filter((candidate) => candidate.endsWith(".json")).sort()) {
+    try {
+      const artifact = JSON.parse(await readFile(resolve(directory, name), "utf8")) as ProviderResponseToolCanaryArtifact;
+      assertProviderResponseToolCanaryArtifactIntegrity(artifact, input.targets);
+      if (
+        artifact.status === "passed"
+        && artifact.protocolId === input.protocolId
+        && artifact.planSha256 === input.planSha256
+        && artifact.sourceCommit === input.sourceCommit
+        && artifact.configurationMatrixSha256 === expectedMatrix
+        && artifact.credentialSetSha256 === expectedCredentials
+        && artifact.probeScope === "paid_response_generation_tool_call_no_caller_audio"
+      ) {
+        const completedAtMs = Date.parse(artifact.completedAt);
+        if (
+          Number.isFinite(completedAtMs)
+          && completedAtMs <= nowMs + MAX_CLOCK_SKEW_MS
+          && nowMs - completedAtMs <= PROVIDER_QUALIFICATION_MAX_AGE_MS
+        ) passing.push(artifact);
+      }
+    } catch (error) {
+      throw new Error(`provider response canary artifact ${name} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const latest = passing.sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0];
+  if (!latest) {
+    throw new Error("paid run requires a recent passing paid response/tool-call canary because provider setup did not echo the tool schema");
+  }
+  return latest;
+}
+
+export async function assertRecentProviderHandshakeQualification(input: GateInput): Promise<ProviderQualificationArtifact> {
   const directory = resolve(input.root, "qualifications");
   const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
@@ -386,7 +596,7 @@ export async function assertRecentPassingProviderQualification(input: GateInput)
       throw new Error(`provider qualification artifact ${name} is invalid: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (
-      artifact.status !== "passed"
+      (artifact.status !== "passed" && artifact.status !== "conditional")
       || artifact.protocolId !== input.protocolId
       || artifact.planSha256 !== input.planSha256
       || artifact.sourceCommit !== input.sourceCommit
@@ -404,4 +614,19 @@ export async function assertRecentPassingProviderQualification(input: GateInput)
   const latest = passing.sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0];
   if (!latest) throw new Error("paid run requires a recent passing provider qualification bound to this exact plan and configuration matrix");
   return latest;
+}
+
+export async function assertRecentPassingProviderQualification(input: GateInput): Promise<ProviderQualificationArtifact> {
+  return (await assertRecentPassingProviderQualificationBundle(input)).qualification;
+}
+
+export async function assertRecentPassingProviderQualificationBundle(input: GateInput): Promise<Readonly<{
+  qualification: ProviderQualificationArtifact;
+  responseToolCanary: ProviderResponseToolCanaryArtifact | null;
+}>> {
+  const qualification = await assertRecentProviderHandshakeQualification(input);
+  const responseToolCanary = qualification.status === "conditional"
+    ? await assertRecentPassingResponseToolCanary(input)
+    : null;
+  return Object.freeze({ qualification, responseToolCanary });
 }
