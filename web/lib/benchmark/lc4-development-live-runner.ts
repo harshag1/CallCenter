@@ -876,7 +876,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   }>): Lc4DevFailureEvidence => {
     const timedOut = failureInput.error instanceof Error && failureInput.error.message.startsWith("timeout:");
     return createLc4DevFailureEvidence({
-      schema_version: 1,
+      schema_version: 2,
       evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
       redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
       failure_role: failureInput.role,
@@ -1047,7 +1047,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 throw new Error("LC4-DEV failure evidence is not retained under its failure hash");
               }
               await input.dependencies.evidence.assertResolvable(retainedFailure);
-              providerCallsStarted += Number(failure.response_generation_requested);
+              providerCallsStarted += Number(failure.response_generation_started);
               responseGenerationsCompleted += Number(failure.response_completed);
               await append("opportunity_failed", episode.episode_id, opportunity.id, {
                 failure_evidence_sha256: failure.failure_evidence_sha256,
@@ -1149,7 +1149,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                   throw new Error("LC4-DEV repair failure evidence is not retained under its failure hash");
                 }
                 await input.dependencies.evidence.assertResolvable(retainedFailure);
-                providerCallsStarted += Number(failure.response_generation_requested);
+                providerCallsStarted += Number(failure.response_generation_started);
                 responseGenerationsCompleted += Number(failure.response_completed);
                 await append("opportunity_failed", episode.episode_id, opportunity.id, {
                   failure_evidence_sha256: failure.failure_evidence_sha256,

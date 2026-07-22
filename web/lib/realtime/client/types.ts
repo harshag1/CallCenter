@@ -300,6 +300,58 @@ export type RealtimeWireObservationAttribution =
   | RealtimeWireObservationReference
   | RealtimeWireObservationUnavailable;
 
+/**
+ * Content-free failure evidence for OpenAI-compatible realtime transports.
+ * Provider/socket plaintext is never retained here: raw values are represented
+ * by domain-separated hashes and a raw code is included only from a closed,
+ * non-sensitive allowlist.
+ */
+export type RealtimeTransportFailureDiagnostic = Readonly<{
+  schemaVersion: 1;
+  origin: "provider_wire" | "websocket_error" | "websocket_close" | "client_transport";
+  category:
+    | "provider_authentication"
+    | "provider_quota"
+    | "provider_rate_limit"
+    | "provider_request"
+    | "provider_safety"
+    | "provider_service"
+    | "provider_protocol"
+    | "network"
+    | "tls"
+    | "websocket_protocol"
+    | "normal_close"
+    | "policy_close"
+    | "server_close"
+    | "application_close"
+    | "unknown";
+  /** Present only when the exact code belongs to the module's closed allowlist. */
+  safeRawCode?: string;
+  rawCodeSha256?: string;
+  messageSha256?: string;
+  reasonSha256?: string;
+  closeCodeClass?:
+    | "normal"
+    | "going_away"
+    | "protocol_error"
+    | "unsupported_data"
+    | "abnormal"
+    | "invalid_payload"
+    | "policy_violation"
+    | "message_too_big"
+    | "extension_required"
+    | "server_error"
+    | "service_restart"
+    | "try_again_later"
+    | "bad_gateway"
+    | "registered"
+    | "private_use"
+    | "unknown";
+  responseGenerationRequested: boolean;
+  responseGenerationStarted: boolean;
+  responseTerminalObserved: boolean;
+}>;
+
 type EventBase = {
   provider: ServerRealtimeProvider;
   receivedAtMs: number;
@@ -355,6 +407,12 @@ export type NormalizedRealtimeEvent =
       type: "response.started";
       responseId: string;
       responseIdSource?: "provider" | "client_local";
+      causalBinding?: Readonly<{
+        trigger: "server_vad_speech_stopped" | "tool_continuation";
+        turnOrdinal: number;
+        triggerObservationSha256: string;
+        originResponseId?: string;
+      }>;
     })
   | (EventBase & {
       type: "response.completed";
@@ -396,7 +454,7 @@ export type NormalizedRealtimeEvent =
       itemId?: string;
     })
   | (EventBase & {
-      /** Provider VAD activity observed despite the requested manual-turn mode. */
+      /** Provider VAD activity; expected only for an explicitly configured server-VAD session. */
       type: "input.speech_activity";
       phase: "started" | "stopped";
       itemId?: string;
@@ -446,12 +504,14 @@ export type NormalizedRealtimeEvent =
       code?: string;
       fatal: boolean;
       details?: Record<string, unknown>;
+      transportDiagnostic?: RealtimeTransportFailureDiagnostic;
     })
   | (EventBase & {
       type: "connection.closed";
       code?: number;
       reason?: string;
       clean?: boolean;
+      transportDiagnostic?: RealtimeTransportFailureDiagnostic;
     })
   | (EventBase & {
       /** Escape hatch for provider lifecycle events without weakening typed core events. */
@@ -532,6 +592,34 @@ export type RealtimeResponsePreparation = Readonly<{
   contextAuthority: "advisory_only_gateway_and_speech_gate_enforced";
 }>;
 
+/**
+ * xAI server-VAD needs the next turn's control plane installed before the first
+ * audio byte can trigger speech detection. The provider still owns audio
+ * commit and the initial response trigger; this packet only updates the exact
+ * instructions/tool frontier for that one caller turn.
+ */
+export type RealtimeServerVadTurnPreparation = Readonly<{
+  additionalInstructions: string;
+  contextSha256: string;
+  contextAuthority: "advisory_only_gateway_and_speech_gate_enforced";
+  tools: readonly Readonly<Record<string, unknown>>[];
+  toolFrontierSha256: string;
+  transportParitySha256: string;
+}>;
+
+export type RealtimeServerVadTurnAcknowledgement = Readonly<{
+  provider: "xai";
+  connectionEpoch: number;
+  turnOrdinal: number;
+  status: "acknowledged";
+  contextSha256: string;
+  toolFrontierSha256: string;
+  transportParitySha256: string;
+  configuration: SessionConfigurationAcknowledgement;
+  outboundObservation?: RealtimeWireObservationAttribution;
+  inboundObservation?: RealtimeWireObservationAttribution;
+}>;
+
 export interface NormalizedRealtimeClient {
   readonly provider: ServerRealtimeProvider;
   readonly state: RealtimeClientState;
@@ -543,9 +631,19 @@ export interface NormalizedRealtimeClient {
   onWireObservation?(listener: RealtimeWireObservationListener): () => void;
   /** Last provider acknowledgement, detached and frozen; null before readiness. */
   readonly sessionConfigurationAcknowledgement?: SessionConfigurationAcknowledgement | null;
+  /** Independently derived non-treatment transport hash for provider-native server-VAD sessions. */
+  readonly serverVadTransportParitySha256?: string | null;
   appendInputAudio(audio: Pcm16Audio): void;
   /** Must precede commitInputAudio for providers where commit starts generation. */
   prepareResponse(preparation: RealtimeResponsePreparation): void;
+  /**
+   * Optional provider-native server-VAD barrier. It must resolve on the exact
+   * `session.updated` acknowledgement before caller audio is appended.
+   */
+  prepareServerVadTurn?(
+    preparation: RealtimeServerVadTurnPreparation,
+    timeoutMs?: number,
+  ): Promise<RealtimeServerVadTurnAcknowledgement>;
   commitInputAudio(): void;
   /**
    * Optional provider acknowledgement barrier. Call only after commitInputAudio;

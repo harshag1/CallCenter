@@ -815,7 +815,7 @@ describe("LC4-DEV live runner", () => {
               async exchangeCanonical({ opportunity, caller_pcm }) {
                 calls += 1;
                 throw new Lc4DevFailureEvidenceError(createLc4DevFailureEvidence({
-                  schema_version: 1,
+                  schema_version: 2,
                   evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
                   redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
                   failure_role: "primary_exchange",
@@ -828,7 +828,8 @@ describe("LC4-DEV live runner", () => {
                   model: episode.model,
                   playback_kind: "canonical",
                   operation_order: [
-                    "caller_pcm_appended",
+                    "caller_pcm_delivery_started",
+                    "caller_pcm_delivery_completed",
                     "response_plan_prepared",
                     "caller_pcm_committed",
                     "response_generation_requested",

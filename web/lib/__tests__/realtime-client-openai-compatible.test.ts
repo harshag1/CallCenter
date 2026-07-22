@@ -11,10 +11,12 @@ import {
   buildSessionConfigurationAcknowledgement,
   createOpenAIRealtimeClient,
   createXaiRealtimeClient,
+  realtimeToolFrontierSha256,
   validateManualPcmSessionAcknowledgement,
   withManualPcmSession,
 } from "../realtime/client/openai-compatible";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+import { assertRealtimeTransportFailureDiagnostic } from "../realtime/client/transport-diagnostics";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
   LOCAL_TOOL_PROXY_FUNCTION,
@@ -40,7 +42,7 @@ const baseSession = {
       },
       output: { format: { type: "audio/pcmu" }, voice: "marin" },
     },
-    turn_detection: { type: "server_vad" },
+    turn_detection: { type: null },
   },
 };
 
@@ -1575,6 +1577,149 @@ describe("OpenAI-compatible realtime client", () => {
     ]);
   });
 
+  it("binds xAI server-VAD control acknowledgement before audio and accepts only the provider-native turn order", async () => {
+    const serverVadSession = {
+      type: "session.update",
+      session: {
+        instructions: "immutable base",
+        audio: {
+          input: { format: { type: "audio/pcm", rate: 24_000 } },
+          output: { format: { type: "audio/pcm", rate: 24_000 } },
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.85,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 333,
+          idle_timeout_ms: null,
+        },
+      },
+    };
+    const { client, socket } = fakeClient("xai", { sessionUpdate: serverVadSession });
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    client.onWireObservation(() => undefined);
+    const connecting = client.connect();
+    socket.emit("open");
+    const initialUpdate = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_server_vad", ...initialUpdate.session },
+    }));
+    await connecting;
+    socket.sent.length = 0;
+
+    const additionalInstructions = "Classify and invoke only the current closed frontier.";
+    await expect(client.prepareServerVadTurn!({
+      additionalInstructions,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools: [LOCAL_TOOL_PROXY_FUNCTION],
+      toolFrontierSha256: realtimeToolFrontierSha256([LOCAL_TOOL_PROXY_FUNCTION]),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100)).rejects.toThrow("frozen matched-pair gateway schema");
+    const tools: readonly Readonly<Record<string, unknown>>[] = [];
+    const preparation = client.prepareServerVadTurn!({
+      additionalInstructions,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools,
+      toolFrontierSha256: realtimeToolFrontierSha256(tools),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100);
+    expect(() => client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) }))
+      .toThrow("acknowledged before audio");
+    const perTurnUpdate = JSON.parse(socket.sent.at(-1)!);
+    expect(perTurnUpdate).toMatchObject({
+      type: "session.update",
+      session: {
+        instructions: `immutable base\n${additionalInstructions}`,
+        tools: [],
+        tool_choice: "auto",
+        turn_detection: { type: "server_vad" },
+      },
+    });
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_server_vad", ...perTurnUpdate.session },
+    }));
+    const acknowledgement = await preparation;
+    expect(acknowledgement).toMatchObject({
+      provider: "xai",
+      status: "acknowledged",
+      turnOrdinal: 1,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      outboundObservation: { availability: "observed" },
+      inboundObservation: { availability: "observed" },
+    });
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0, 2, 0]) });
+    expect(() => client.commitInputAudio()).toThrow("forbidden");
+    expect(() => client.createResponse()).toThrow("Initial response.create is forbidden");
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_started", event_id: "vad-start-1" }));
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_stopped", event_id: "vad-stop-1" }));
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.committed", event_id: "vad-commit-1", item_id: "item-1" }));
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      event_id: "response-start-1",
+      response: { id: "response-1", status: "in_progress", output: [] },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      event_id: "response-done-1",
+      response: { id: "response-1", status: "completed", output: [], usage: { total_tokens: 1 } },
+    }));
+
+    expect(client.state).toBe("ready");
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.speech_activity", phase: "started" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.speech_activity", phase: "stopped" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.audio_committed", commitOrdinal: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.started",
+      responseId: "response-1",
+      causalBinding: expect.objectContaining({
+        trigger: "server_vad_speech_stopped",
+        turnOrdinal: 1,
+      }),
+    }));
+    const outboundTypes = socket.sent.map((frame) => JSON.parse(frame).type);
+    expect(outboundTypes.filter((type) => type === "input_audio_buffer.commit")).toHaveLength(0);
+    expect(outboundTypes.filter((type) => type === "response.create")).toHaveLength(0);
+  });
+
+  it("fails closed when xAI server-VAD stops speech before it starts", async () => {
+    const { client, socket } = fakeClient("xai", {
+      sessionUpdate: {
+        type: "session.update",
+        session: {
+          audio: { input: {}, output: {} },
+          turn_detection: { type: "server_vad", threshold: 0.85, silence_duration_ms: 500, prefix_padding_ms: 333, idle_timeout_ms: null },
+        },
+      },
+    });
+    const connecting = client.connect();
+    socket.emit("open");
+    const initialUpdate = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({ type: "session.updated", session: { id: "sess_bad_order", ...initialUpdate.session } }));
+    await connecting;
+    const control = "Use only this turn's exact frontier.";
+    const pending = client.prepareServerVadTurn!({
+      additionalInstructions: control,
+      contextSha256: createHash("sha256").update(control).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools: [],
+      toolFrontierSha256: realtimeToolFrontierSha256([]),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100);
+    const update = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({ type: "session.updated", session: { id: "sess_bad_order", ...update.session } }));
+    await pending;
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_stopped", event_id: "bad-stop" }));
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
   it("offers an opt-in ordered commit acknowledgement barrier without blocking ordinary turns", async () => {
     const { client, socket } = fakeClient("xai");
     const events: NormalizedRealtimeEvent[] = [];
@@ -2686,6 +2831,86 @@ describe("OpenAI-compatible realtime client", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("normalizes provider wire failures without retaining provider plaintext", async () => {
+    const { client, socket } = fakeClient();
+    const observed: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => observed.push(event));
+    await connect(client, socket);
+    client.sendTextTurn("diagnostic request");
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "response-diagnostic", status: "in_progress" },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "error",
+      error: {
+        code: "insufficient_quota",
+        message: "sensitive provider prose account@example.test secret-marker",
+      },
+    }));
+    const event = observed.findLast((candidate) => candidate.type === "error");
+    expect(event).toMatchObject({
+      type: "error",
+      transportDiagnostic: {
+        schemaVersion: 1,
+        origin: "provider_wire",
+        category: "provider_quota",
+        safeRawCode: "insufficient_quota",
+        responseGenerationRequested: true,
+        responseGenerationStarted: true,
+        responseTerminalObserved: false,
+      },
+    });
+    if (event?.type !== "error" || !event.transportDiagnostic) throw new Error("missing diagnostic");
+    assertRealtimeTransportFailureDiagnostic(event.transportDiagnostic);
+    expect(JSON.stringify(event.transportDiagnostic)).not.toContain("account@example.test");
+    expect(JSON.stringify(event.transportDiagnostic)).not.toContain("secret-marker");
+    expect(event.transportDiagnostic.messageSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("distinguishes WebSocket error and close origins with content-free evidence", async () => {
+    const errored = fakeClient();
+    const errorEvents: NormalizedRealtimeEvent[] = [];
+    errored.client.onEvent((event) => errorEvents.push(event));
+    await connect(errored.client, errored.socket);
+    errored.client.sendTextTurn("diagnostic request");
+    errored.socket.emit("error", Object.assign(new Error("private network path"), { code: "ECONNRESET" }));
+    const error = errorEvents.findLast((event) => event.type === "error");
+    expect(error).toMatchObject({
+      type: "error",
+      transportDiagnostic: {
+        origin: "websocket_error",
+        category: "network",
+        safeRawCode: "ECONNRESET",
+        responseGenerationRequested: true,
+        responseGenerationStarted: false,
+        responseTerminalObserved: false,
+      },
+    });
+
+    const closed = fakeClient("xai");
+    const closeEvents: NormalizedRealtimeEvent[] = [];
+    closed.client.onEvent((event) => closeEvents.push(event));
+    await connect(closed.client, closed.socket);
+    closed.socket.emit("close", 1011, Buffer.from("private close reason"));
+    const close = closeEvents.findLast((event) => event.type === "connection.closed");
+    expect(close).toMatchObject({
+      type: "connection.closed",
+      transportDiagnostic: {
+        origin: "websocket_close",
+        category: "server_close",
+        closeCodeClass: "server_error",
+        responseGenerationRequested: false,
+        responseGenerationStarted: false,
+        responseTerminalObserved: false,
+      },
+    });
+    if (close?.type !== "connection.closed" || !close.transportDiagnostic) throw new Error("missing close diagnostic");
+    assertRealtimeTransportFailureDiagnostic(close.transportDiagnostic);
+    expect(JSON.stringify(close.transportDiagnostic)).not.toContain("private close reason");
+    expect(close.transportDiagnostic.reasonSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 

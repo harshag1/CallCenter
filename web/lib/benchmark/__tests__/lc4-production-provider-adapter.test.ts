@@ -52,8 +52,10 @@ import type {
   RealtimeEventListener,
   RealtimeResponsePreparation,
   RealtimeToolResult,
+  RealtimeWireObservation,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
+import { LC4_XAI_SERVER_VAD_SHA256 } from "../xai-server-vad";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
   LOCAL_TOOL_PROXY_FUNCTION,
@@ -324,6 +326,10 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   #toolRoundtrip: boolean;
   readonly #terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled";
   #responseOrdinal = 0;
+  #serverVadAutoResponse = false;
+  #serverVadSpeechStarted = false;
+  #serverVadTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly #emitVadStartDuringFirstAppend: boolean;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
@@ -333,22 +339,89 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     events: string[],
     toolRoundtrip = false,
     terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled" = "completed",
+    emitVadStartDuringFirstAppend = false,
   ) {
     this.provider = provider;
     this.events = events;
     this.#toolRoundtrip = toolRoundtrip;
     this.#terminalStatus = terminalStatus;
+    this.#emitVadStartDuringFirstAppend = emitVadStartDuringFirstAppend;
+  }
+
+  get serverVadTransportParitySha256() {
+    return this.provider === "xai" ? LC4_XAI_SERVER_VAD_SHA256 : undefined;
   }
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
-  close() { this.events.push("close"); this.state = "closed"; }
+  close() {
+    if (this.#serverVadTimer !== null) clearTimeout(this.#serverVadTimer);
+    this.events.push("close");
+    this.state = "closed";
+  }
   onEvent(listener: RealtimeEventListener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio(audio: Pcm16Audio) {
     this.events.push("append");
     this.appendedAudio.push(Object.freeze({ ...audio, data: Uint8Array.from(audio.data) }));
-    this.wire("input_audio", { plaintext: ORACLE_SECRET });
+    this.wire(this.provider === "xai" ? "input_audio_buffer.append" : "input_audio", { plaintext: ORACLE_SECRET });
+    if (this.provider !== "xai") return;
+    if (this.#emitVadStartDuringFirstAppend && !this.#serverVadSpeechStarted) {
+      this.#emitServerVadSpeechStarted();
+    }
+    if (this.#serverVadTimer !== null) clearTimeout(this.#serverVadTimer);
+    this.#serverVadTimer = setTimeout(() => {
+      this.#serverVadTimer = null;
+      if (!this.#serverVadSpeechStarted) this.#emitServerVadSpeechStarted();
+      const stopped = this.wire("input_audio_buffer.speech_stopped", {}, "inbound");
+      this.emit({
+        type: "input.speech_activity", provider: "xai", receivedAtMs: 2,
+        wireType: stopped.wireType, phase: "stopped", wireObservation: wireReference(stopped),
+      });
+      const committed = this.wire("input_audio_buffer.committed", {}, "inbound");
+      this.emit({
+        type: "input.audio_committed", provider: "xai", receivedAtMs: 3,
+        wireType: committed.wireType, connectionEpoch: 1, commitOrdinal: 1,
+        wireObservation: wireReference(committed),
+      });
+      this.#serverVadAutoResponse = true;
+      this.createResponse();
+      this.#serverVadSpeechStarted = false;
+    }, 0);
+  }
+  #emitServerVadSpeechStarted() {
+    this.#serverVadSpeechStarted = true;
+    const started = this.wire("input_audio_buffer.speech_started", {}, "inbound");
+    this.emit({
+      type: "input.speech_activity", provider: "xai", receivedAtMs: 1,
+      wireType: started.wireType, phase: "started", wireObservation: wireReference(started),
+    });
+  }
+  async prepareServerVadTurn(preparation: Parameters<NonNullable<NormalizedRealtimeClient["prepareServerVadTurn"]>>[0]) {
+    if (this.provider !== "xai") throw new Error("server VAD is xAI-only in this fixture");
+    this.events.push("session-update");
+    const outbound = this.wire("session.update", {
+      dynamicControl: {
+        sha256: preparation.contextSha256,
+        authority: preparation.contextAuthority,
+        toolFrontierSha256: preparation.toolFrontierSha256,
+        transportParitySha256: preparation.transportParitySha256,
+      },
+    });
+    this.events.push("session-updated");
+    const inbound = this.wire("session.updated", {}, "inbound");
+    return Object.freeze({
+      provider: "xai" as const,
+      connectionEpoch: 1,
+      turnOrdinal: 1,
+      status: "acknowledged" as const,
+      contextSha256: preparation.contextSha256,
+      toolFrontierSha256: preparation.toolFrontierSha256,
+      transportParitySha256: preparation.transportParitySha256,
+      configuration: exactServerVadAcknowledgement(),
+      outboundObservation: wireReference(outbound),
+      inboundObservation: wireReference(inbound),
+    });
   }
   prepareResponse(preparation: RealtimeResponsePreparation) {
     this.events.push("prepare");
@@ -407,14 +480,29 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     }
   }
   createResponse() {
-    this.events.push("create");
-    this.wire("response.create", {});
+    const serverVadAutoResponse = this.#serverVadAutoResponse;
+    this.#serverVadAutoResponse = false;
+    if (!serverVadAutoResponse) {
+      this.events.push("create");
+      this.wire("response.create", {});
+    }
     if (this.provider === "gemini" && this.#toolRoundtrip && this.#responseOrdinal > 0) return;
     queueMicrotask(() => {
       this.#responseOrdinal += 1;
       if (this.#toolRoundtrip && this.#responseOrdinal === 1) {
         const responseId = "provider-tool-response-plaintext";
-        this.emit({ type: "response.started", provider: this.provider, receivedAtMs: 1, wireType: "response.created", responseId });
+        this.wire("response.created", {}, "inbound");
+        this.emit({
+          type: "response.started", provider: this.provider, receivedAtMs: 1,
+          wireType: "response.created", responseId,
+          ...(serverVadAutoResponse ? {
+            causalBinding: {
+              trigger: "server_vad_speech_stopped" as const,
+              turnOrdinal: 1,
+              triggerObservationSha256: this.#latestWireHash("input_audio_buffer.speech_stopped"),
+            },
+          } : {}),
+        });
         if (this.provider === "gemini") {
           this.emit({
             type: "tool.calls",
@@ -469,7 +557,18 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         return;
       }
       const responseId = "provider-response-plaintext";
-      this.emit({ type: "response.started", provider: this.provider, receivedAtMs: 1, wireType: "response.created", responseId });
+      this.wire("response.created", {}, "inbound");
+      this.emit({
+        type: "response.started", provider: this.provider, receivedAtMs: 1,
+        wireType: "response.created", responseId,
+        ...(serverVadAutoResponse ? {
+          causalBinding: {
+            trigger: "server_vad_speech_stopped" as const,
+            turnOrdinal: 1,
+            triggerObservationSha256: this.#latestWireHash("input_audio_buffer.speech_stopped"),
+          },
+        } : {}),
+      });
       this.emit({
         type: "output.audio",
         provider: this.provider,
@@ -491,27 +590,70 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   }
 
   protected emit(event: NormalizedRealtimeEvent) { for (const listener of this.#listeners) listener(event); }
-  protected wire(wireType: string, projection: Record<string, unknown>) {
+  readonly #wireHistory: Array<Readonly<{ wireType: string; observationSha256: string }>> = [];
+  #latestWireHash(wireType: string): string {
+    return this.#wireHistory.findLast((item) => item.wireType === wireType)?.observationSha256 ?? "0".repeat(64);
+  }
+  protected wire(wireType: string, projection: Record<string, unknown>, direction: "inbound" | "outbound" = "outbound") {
     this.#wireSequence += 1;
-    const observation = {
+    const payloadSha256 = sha256Hex(canonicalJson({ wireType, direction, projection, sequence: this.#wireSequence }));
+    const previousObservationSha256 = this.#wireHistory.at(-1)?.observationSha256 ?? null;
+    const observationSha256 = sha256Hex(canonicalJson({
+      provider: this.provider, wireType, direction, sequence: this.#wireSequence,
+      payloadSha256, previousObservationSha256,
+    }));
+    const observation = Object.freeze({
       schemaVersion: 1 as const,
       provider: this.provider,
-      direction: "outbound" as const,
+      direction,
       connectionEpoch: 1,
       sequence: this.#wireSequence,
       observedAtMs: this.#wireSequence,
       observedAtMonotonicMs: this.#wireSequence,
       wireType,
-      payloadSha256: String(this.#wireSequence).repeat(64).slice(0, 64),
+      payloadSha256,
       payloadBytes: 10,
-      projectionSha256: "a".repeat(64),
-      previousObservationSha256: this.#wireSequence === 1 ? null : "b".repeat(64),
-      observationSha256: "c".repeat(64),
+      projectionSha256: sha256Hex(canonicalJson(projection)),
+      previousObservationSha256,
+      observationSha256,
       identities: {},
       projection,
-    };
+    });
+    this.#wireHistory.push({ wireType, observationSha256 });
     for (const listener of this.#wire) listener(observation);
+    return observation;
   }
+}
+
+function wireReference(observation: RealtimeWireObservation) {
+  return Object.freeze({
+    availability: "observed" as const,
+    connectionEpoch: observation.connectionEpoch,
+    sequence: observation.sequence,
+    observationSha256: observation.observationSha256,
+    payloadSha256: observation.payloadSha256,
+    projectionSha256: observation.projectionSha256,
+  });
+}
+
+function exactServerVadAcknowledgement() {
+  const verified = Object.freeze({
+    status: "verified" as const,
+    requestedSha256: "a".repeat(64),
+    acknowledgedSha256: "a".repeat(64),
+    acknowledgedBy: "session.updated" as const,
+  });
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    strictParityVerified: true,
+    paidBenchmarkReady: true,
+    session: verified,
+    fields: Object.freeze({
+      model: verified, voice: verified, instructions: verified, tools: verified,
+      tool_choice: verified, input_audio: verified, output_audio: verified,
+      turn_detection: verified,
+    }),
+  });
 }
 
 class ProviderFatalRealtimeClient extends FakeRealtimeClient {
@@ -933,7 +1075,8 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     expect(events).toEqual(["connect", "append", "prepare", "commit", "create", "listener"]);
     expect(evidence.operation_order).toEqual([
-      "caller_pcm_appended",
+      "caller_pcm_delivery_started",
+      "caller_pcm_delivery_completed",
       "response_plan_prepared",
       "caller_pcm_committed",
       "response_generation_requested",
@@ -969,7 +1112,7 @@ describe("LC4 production realtime adapter bridge", () => {
     let monotonicMs = 0;
     let fake: FakeRealtimeClient | null = null;
     const bridge = new Lc4RealtimeProviderBridge((clientProvider) => {
-      fake = new FakeRealtimeClient(clientProvider, events);
+      fake = new FakeRealtimeClient(clientProvider, events, false, "completed", clientProvider === "xai");
       return fake;
     }, {
       monotonicNowMs: () => monotonicMs,
@@ -1018,12 +1161,34 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(evidence.input_audio_delivery.chunks.map((chunk) => chunk.appended_at_offset_ms)).toEqual(
       Array.from({ length: chunkCount }, (_, index) => index * 20),
     );
-    expect(events.slice(1, chunkCount + 1)).toEqual(Array.from({ length: chunkCount }, () => "append"));
-    expect(events.slice(chunkCount + 1)).toEqual(provider === "xai"
-      ? ["prepare", "commit", "commit-ack", "create", "listener"]
+    const appendStart = provider === "xai" ? 3 : 1;
+    expect(events.slice(appendStart, appendStart + chunkCount)).toEqual(
+      Array.from({ length: chunkCount }, () => "append"),
+    );
+    expect(events.slice(appendStart + chunkCount)).toEqual(provider === "xai"
+      ? ["listener"]
       : ["prepare", "commit", "create", "listener"]);
-    expect(events.filter((event) => event === "commit")).toHaveLength(1);
-    expect(events.filter((event) => event === "create")).toHaveLength(1);
+    if (provider === "xai") {
+      expect(events.slice(1, 3)).toEqual(["session-update", "session-updated"]);
+      expect(events.filter((event) => event === "commit")).toHaveLength(0);
+      expect(events.filter((event) => event === "create")).toHaveLength(0);
+      expect(evidence.transport_mode).toBe("provider_native_server_vad");
+      expect(evidence.operation_order).toEqual([
+        "response_plan_session_update_sent",
+        "response_plan_session_update_acknowledged",
+        "caller_pcm_delivery_started",
+        "server_vad_speech_started",
+        "caller_pcm_delivery_completed",
+        "server_vad_speech_stopped",
+        "caller_pcm_auto_committed",
+        "response_generation_auto_started",
+        "assistant_pcm_captured",
+        "listener_evidence_handed_off",
+      ]);
+    } else {
+      expect(events.filter((event) => event === "commit")).toHaveLength(1);
+      expect(events.filter((event) => event === "create")).toHaveLength(1);
+    }
     await session.close();
   }, 15_000);
 
@@ -1113,7 +1278,9 @@ describe("LC4 production realtime adapter bridge", () => {
         input_committed: false,
         response_requested: false,
       });
-      expect(events).toEqual(["connect", "append", "close"]);
+      expect(events).toEqual(provider === "xai"
+        ? ["connect", "session-update", "session-updated", "append", "close"]
+        : ["connect", "append", "close"]);
       await expect(session.exchange({
         opportunity_id: "op-01",
         caller_pcm: pcm,

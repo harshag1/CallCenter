@@ -11,6 +11,7 @@ import {
   createXaiRealtimeClient,
 } from "../realtime/client/openai-compatible";
 import type { NormalizedRealtimeClient } from "../realtime/client/types";
+import { LC4_XAI_SERVER_VAD } from "./xai-server-vad";
 
 function parseEnv(text: string): Record<string, string> {
   const values: Record<string, string> = {};
@@ -105,7 +106,7 @@ export function createProductionRealtimeClient(
         session: {
           voice: spec.voice,
           instructions: configuration.instructions,
-          turn_detection: { type: null },
+          turn_detection: LC4_XAI_SERVER_VAD,
           audio: { input: { transcription: null }, output: {} },
           tools: configuration.providerTools,
           tool_choice: "auto",
@@ -126,8 +127,8 @@ export function createProductionRealtimeClient(
         connectTimeoutMs: 15_000,
         enableResumption: false,
         requireStrictSessionConfigurationParity: false,
-        // xAI may omit turn_detection.type from session.updated. Conditional
-        // qualification therefore relies on runtime behavioral enforcement.
-        unexpectedManualTurnDetectionPolicy: "fail",
+        // Provider-native server VAD owns initial commit/response creation.
+        // LC4 additionally requires the ordered behavioral lifecycle per turn.
+        unexpectedManualTurnDetectionPolicy: "diagnose",
       });
 }

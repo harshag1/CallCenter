@@ -12,6 +12,7 @@ import {
   realtimeWireObservationSha256,
   realtimeWireProjectionSha256,
 } from "./wire-evidence";
+import { createRealtimeTransportFailureDiagnostic } from "./transport-diagnostics";
 import type { RealtimeWireIdentityKind } from "./wire-evidence";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
@@ -32,6 +33,8 @@ import type {
   RealtimeInputAudioCommitAcknowledgement,
   RealtimeResponseCancelTarget,
   RealtimeResponsePreparation,
+  RealtimeServerVadTurnAcknowledgement,
+  RealtimeServerVadTurnPreparation,
   RealtimeToolCall,
   RealtimeToolResult,
   RealtimeWebSocket,
@@ -118,6 +121,23 @@ type PendingInputCommit = {
   }>;
 };
 
+type PendingServerVadTurn = {
+  connectionEpoch: number;
+  turnOrdinal: number;
+  requestedUpdate: Record<string, unknown>;
+  preparation: RealtimeServerVadTurnPreparation;
+  outboundObservation?: RealtimeWireObservation;
+  resolve: (value: RealtimeServerVadTurnAcknowledgement) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  phase: "awaiting_session_ack" | "ready_for_audio" | "speech_started" | "speech_stopped" | "auto_committed" | "response_started" | "terminal";
+  initialResponseId?: string;
+  activeResponseId?: string;
+  speechStartObservationSha256?: string;
+  speechStopObservationSha256?: string;
+  autoCommitObservationSha256?: string;
+};
+
 /**
  * Server-side client for the realtime wire protocol shared by OpenAI and xAI.
  * `connect()` does not resolve on TCP/WebSocket open: it resolves only after the
@@ -150,6 +170,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private readonly maximumTrackedIdentities: number;
   private readonly requireStrictSessionConfigurationParity: boolean;
   private readonly unexpectedManualTurnDetectionPolicy: "diagnose" | "fail";
+  private readonly turnDetectionMode: "manual" | "server_vad";
   private readonly requestedModel?: string;
   private readonly localToolProxyEnabled: boolean;
   private readonly baseInstructions: string;
@@ -168,14 +189,21 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private pendingToolBatch: Set<string> | null = null;
   private pendingToolBatchResponseId: string | null = null;
   private pendingToolContinuationResponseId: string | null = null;
+  private awaitingServerVadContinuationOriginId: string | null = null;
+  private awaitingServerVadContinuationObservationSha256: string | null = null;
   private inputCommitOrdinal = 0;
   private readonly pendingInputCommits: PendingInputCommit[] = [];
+  private pendingServerVadTurn: PendingServerVadTurn | null = null;
+  private serverVadTurnOrdinal = 0;
   private discardedInputCommitAcknowledgements = 0;
   private submittingToolResults = false;
   private connectionEpoch = 0;
   private wireSequence = 0;
   private wireObservationChainHead: string | null = null;
   private lastSessionConfigurationAcknowledgement: SessionConfigurationAcknowledgement | null = null;
+  private responseGenerationRequested = false;
+  private responseGenerationStarted = false;
+  private responseTerminalObserved = false;
 
   constructor(options: OpenAICompatibleRealtimeClientOptions) {
     if (options.provider !== "openai" && options.provider !== "xai") {
@@ -253,6 +281,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.requireStrictSessionConfigurationParity = options.requireStrictSessionConfigurationParity === true;
     this.unexpectedManualTurnDetectionPolicy = options.unexpectedManualTurnDetectionPolicy
       ?? (this.requireStrictSessionConfigurationParity ? "fail" : "diagnose");
+    this.turnDetectionMode = requestedTurnDetectionMode(this.provider, sessionUpdateSnapshot);
     this.requestedModel = queryModel ?? sessionModel;
     const configuredTools = Array.isArray(record(sessionUpdateSnapshot.session).tools)
       ? record(sessionUpdateSnapshot.session).tools as unknown[]
@@ -282,12 +311,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     assertPcm16Format(this.outputAudioFormat);
     assertProviderPcmFormat(options.provider, this.inputAudioFormat, "input");
     assertProviderPcmFormat(options.provider, this.outputAudioFormat, "output");
-    this.sessionUpdate = withManualPcmSession(
-      options.provider,
-      sessionUpdateSnapshot,
-      this.inputAudioFormat,
-      this.outputAudioFormat,
-    );
+    this.sessionUpdate = this.turnDetectionMode === "server_vad"
+      ? withXaiServerVadPcmSession(sessionUpdateSnapshot, this.inputAudioFormat, this.outputAudioFormat)
+      : withManualPcmSession(options.provider, sessionUpdateSnapshot, this.inputAudioFormat, this.outputAudioFormat);
     this.socketFactory = options.socketFactory ?? defaultSocketFactory;
     this.now = options.now ?? Date.now;
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
@@ -314,6 +340,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     return this.lastSessionConfigurationAcknowledgement === null
       ? null
       : observerSnapshot(this.lastSessionConfigurationAcknowledgement);
+  }
+
+  get serverVadTransportParitySha256(): string | null {
+    return this.turnDetectionMode === "server_vad"
+      ? xaiServerVadTransportParitySha256(this.sessionUpdate, this.requestedModel)
+      : null;
   }
 
   connect(): Promise<void> {
@@ -373,6 +405,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   appendInputAudio(audio: Pcm16Audio): void {
     this.assertNoPendingToolBatch();
+    if (this.turnDetectionMode === "server_vad"
+      && (!this.pendingServerVadTurn
+        || (this.pendingServerVadTurn.phase !== "ready_for_audio"
+          && this.pendingServerVadTurn.phase !== "speech_started"))) {
+      throw new Error("A server-VAD turn must be acknowledged before audio and cannot receive audio after speech stopped");
+    }
     if (this.pendingResponsePreparation) {
       throw new Error("Cannot append audio after preparing the next realtime response");
     }
@@ -389,6 +427,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   }
 
   prepareResponse(preparation: RealtimeResponsePreparation): void {
+    if (this.turnDetectionMode === "server_vad") {
+      throw new Error("Use prepareServerVadTurn before audio in provider-native server-VAD mode");
+    }
     this.assertNoPendingToolBatch();
     if (this.currentState !== "ready") throw new Error("Realtime client is not ready");
     if (this.inputPhase !== "buffered") {
@@ -408,7 +449,109 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.pendingResponsePreparation = Object.freeze({ ...preparation });
   }
 
+  prepareServerVadTurn(
+    preparation: RealtimeServerVadTurnPreparation,
+    timeoutMs = this.connectTimeoutMs,
+  ): Promise<RealtimeServerVadTurnAcknowledgement> {
+    if (this.provider !== "xai" || this.turnDetectionMode !== "server_vad") {
+      return Promise.reject(new Error("Provider-native server-VAD turn preparation is available only for xAI server_vad sessions"));
+    }
+    this.assertNoPendingToolBatch();
+    if (this.currentState !== "ready") return Promise.reject(new Error("Realtime client is not ready"));
+    if (this.inputPhase !== "empty" || this.pendingResponsePreparation || this.pendingServerVadTurn) {
+      return Promise.reject(new Error("A prior realtime turn is still active"));
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new Error("Server-VAD session acknowledgement timeout must be positive"));
+    }
+    if (!preparation.additionalInstructions.trim()
+      || preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced"
+      || !/^[a-f0-9]{64}$/.test(preparation.contextSha256)
+      || sha256Text(preparation.additionalInstructions) !== preparation.contextSha256
+      || !/^[a-f0-9]{64}$/.test(preparation.toolFrontierSha256)
+      || !/^[a-f0-9]{64}$/.test(preparation.transportParitySha256)) {
+      return Promise.reject(new Error("Server-VAD turn preparation integrity failed"));
+    }
+    let tools: unknown;
+    try {
+      tools = structuredClone(preparation.tools);
+    } catch {
+      return Promise.reject(new Error("Server-VAD tool frontier must be structured-cloneable"));
+    }
+    if (!Array.isArray(tools)
+      || tools.length > 1
+      || tools.some((tool) => !isSafeLocalToolProxyFunction(tool))) {
+      return Promise.reject(new Error("Server-VAD turn requires zero or one exact closed local capability gateway"));
+    }
+    const expectedFrontierSha256 = realtimeToolFrontierSha256(tools);
+    if (preparation.toolFrontierSha256 !== expectedFrontierSha256) {
+      return Promise.reject(new Error("Server-VAD tool frontier hash mismatch"));
+    }
+    const baseSession = record(this.sessionUpdate.session);
+    const frozenTools = Array.isArray(baseSession.tools) ? baseSession.tools : [];
+    if (canonicalJson(tools) !== canonicalJson(frozenTools)) {
+      return Promise.reject(new Error("Server-VAD tool frontier must equal the frozen matched-pair gateway schema"));
+    }
+    const expectedTransportParitySha256 = xaiServerVadTransportParitySha256(
+      this.sessionUpdate,
+      this.requestedModel,
+    );
+    if (preparation.transportParitySha256 !== expectedTransportParitySha256) {
+      return Promise.reject(new Error("Server-VAD transport parity hash mismatch"));
+    }
+    const requestedUpdate = {
+      type: "session.update",
+      session: {
+        ...baseSession,
+        instructions: [this.baseInstructions, preparation.additionalInstructions].filter(Boolean).join("\n"),
+        tools,
+        tool_choice: "auto",
+      },
+    };
+    // Start a fresh diagnostic lifecycle. In provider-native VAD mode the
+    // provider, rather than an outbound response.create, initiates generation;
+    // responseGenerationRequested is promoted when response.started arrives.
+    this.responseGenerationRequested = false;
+    this.responseGenerationStarted = false;
+    this.responseTerminalObserved = false;
+    const turnOrdinal = ++this.serverVadTurnOrdinal;
+    return new Promise<RealtimeServerVadTurnAcknowledgement>((resolve, reject) => {
+      const pending: PendingServerVadTurn = {
+        connectionEpoch: this.connectionEpoch,
+        turnOrdinal,
+        requestedUpdate,
+        preparation: Object.freeze({ ...preparation, tools: Object.freeze(tools) }),
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingServerVadTurn !== pending) return;
+          this.pendingServerVadTurn = null;
+          reject(new Error(`Server-VAD session acknowledgement timed out after ${timeoutMs} ms`));
+        }, timeoutMs),
+        phase: "awaiting_session_ack",
+      };
+      this.pendingServerVadTurn = pending;
+      try {
+        pending.outboundObservation = this.sendReady(requestedUpdate, {
+          sha256: preparation.contextSha256,
+          byteLength: Buffer.byteLength(preparation.additionalInstructions, "utf8"),
+          authority: preparation.contextAuthority,
+          toolFrontierSha256: preparation.toolFrontierSha256,
+          transportParitySha256: preparation.transportParitySha256,
+          delivery: "session.update_before_audio",
+        });
+      } catch (error) {
+        clearTimeout(pending.timer);
+        this.pendingServerVadTurn = null;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
   commitInputAudio(): void {
+    if (this.turnDetectionMode === "server_vad") {
+      throw new Error("input_audio_buffer.commit is forbidden in provider-native server-VAD mode");
+    }
     this.assertNoPendingToolBatch();
     if (this.inputPhase !== "buffered") throw new Error("Realtime input audio is not buffered for commit");
     const pendingCommit: PendingInputCommit = {
@@ -471,6 +614,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   createResponse(overrides: Record<string, unknown> = {}): void {
     this.assertNoPendingToolBatch();
+    if (this.turnDetectionMode === "server_vad" && !this.pendingToolContinuationResponseId) {
+      throw new Error("Initial response.create is forbidden in provider-native server-VAD mode");
+    }
     if (this.pendingResponsePreparation && Object.prototype.hasOwnProperty.call(overrides, "instructions")) {
       throw new Error("Prepared response instructions cannot be overridden");
     }
@@ -482,7 +628,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           instructions: [this.baseInstructions, preparation.additionalInstructions].filter(Boolean).join("\n"),
         }
       : overrides;
-    this.sendReady({
+    const continuationOrigin = this.pendingToolContinuationResponseId;
+    const responseCreateObservation = this.sendReady({
       type: "response.create",
       ...(Object.keys(response).length ? { response } : {}),
     }, preparation ? {
@@ -490,6 +637,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       byteLength: Buffer.byteLength(preparation.additionalInstructions, "utf8"),
       authority: preparation.contextAuthority,
     } : undefined);
+    this.responseGenerationRequested = true;
+    this.responseGenerationStarted = false;
+    this.responseTerminalObserved = false;
     if (this.pendingToolContinuationResponseId) {
       this.emit({
         type: "tool.continuation.requested",
@@ -501,6 +651,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         wireObservation: CLIENT_GENERATED_WIRE_ATTRIBUTION,
       });
       this.pendingToolContinuationResponseId = null;
+      if (this.turnDetectionMode === "server_vad") {
+        this.awaitingServerVadContinuationOriginId = continuationOrigin;
+        this.awaitingServerVadContinuationObservationSha256 = responseCreateObservation?.observationSha256 ?? null;
+      }
     }
     if (preparation) this.pendingResponsePreparation = null;
     if (this.inputPhase === "committed") this.inputPhase = "empty";
@@ -538,6 +692,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   /** Appends exact PCM bytes, explicitly commits the turn, then requests one response. */
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void {
+    if (this.turnDetectionMode === "server_vad") {
+      throw new Error("sendTurn cannot bypass the asynchronous server-VAD preparation barrier");
+    }
     this.assertNoPendingToolBatch();
     if (this.inputPhase !== "empty" || this.pendingResponsePreparation) {
       throw new Error("A prior realtime input turn is still active");
@@ -658,6 +815,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.pendingToolBatch = null;
     this.pendingToolBatchResponseId = null;
     this.pendingToolContinuationResponseId = null;
+    this.awaitingServerVadContinuationOriginId = null;
+    this.awaitingServerVadContinuationObservationSha256 = null;
+    this.rejectPendingServerVadTurn("Realtime socket closed before the server-VAD turn completed");
     this.rejectInputCommitWaiters("Realtime client closed before input audio commit acknowledgement");
     this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
@@ -805,16 +965,20 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       parsed.event.type === "session.updated"
       && (this.currentState === "connecting" || this.currentState === "ready")
     ) {
-      const acknowledgement = validateManualPcmSessionAcknowledgement(
+      const requestedUpdate = this.pendingServerVadTurn?.phase === "awaiting_session_ack"
+        ? this.pendingServerVadTurn.requestedUpdate
+        : this.sessionUpdate;
+      const acknowledgement = validatePcmSessionAcknowledgement(
         this.provider,
         parsed.event,
         this.inputAudioFormat,
         this.outputAudioFormat,
         this.xaiResumptionEnabled,
+        requestedTurnDetectionMode(this.provider, requestedUpdate),
       );
       configurationAcknowledgement = buildSessionConfigurationAcknowledgement({
         provider: this.provider,
-        requestedUpdate: this.sessionUpdate,
+        requestedUpdate,
         acknowledgedEvent: parsed.event,
         requestedModel: this.requestedModel,
         acknowledgedModel: updatedModel !== undefined
@@ -833,7 +997,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       const mismatches = acknowledgement.ok
         ? identityMismatches
         : [...acknowledgement.mismatches, ...identityMismatches];
-      mismatches.push(...unexpectedProviderCapabilityWidening(this.sessionUpdate, parsed.event));
+      mismatches.push(...unexpectedProviderCapabilityWidening(requestedUpdate, parsed.event));
       if (mismatches.length) {
         const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
         const message = `Provider session acknowledgement mismatch: ${mismatches.join("; ")}`;
@@ -898,8 +1062,55 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     // protocol input that drives session state.
     const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
 
+    if (parsed.event.type === "session.updated"
+      && this.pendingServerVadTurn?.phase === "awaiting_session_ack"
+      && configurationAcknowledgement) {
+      const pending = this.pendingServerVadTurn;
+      clearTimeout(pending.timer);
+      pending.phase = "ready_for_audio";
+      const acknowledgement = Object.freeze({
+        provider: "xai" as const,
+        connectionEpoch: pending.connectionEpoch,
+        turnOrdinal: pending.turnOrdinal,
+        status: "acknowledged" as const,
+        contextSha256: pending.preparation.contextSha256,
+        toolFrontierSha256: pending.preparation.toolFrontierSha256,
+        transportParitySha256: pending.preparation.transportParitySha256,
+        configuration: observerSnapshot(configurationAcknowledgement),
+        ...optional(
+          "outboundObservation",
+          pending.outboundObservation === undefined
+            ? undefined
+            : realtimeWireObservationReference(pending.outboundObservation),
+        ),
+        ...optional(
+          "inboundObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      pending.resolve(acknowledgement);
+    }
+
     for (const normalizedEvent of normalized) {
       let event = withWireObservation(normalizedEvent, wireObservation);
+      if (event.type === "response.started") {
+        if (this.turnDetectionMode === "server_vad") this.responseGenerationRequested = true;
+        this.responseGenerationStarted = true;
+      }
+      if (event.type === "response.completed") this.responseTerminalObserved = true;
+      if (event.type === "error") {
+        event = {
+          ...event,
+          transportDiagnostic: createRealtimeTransportFailureDiagnostic({
+            origin: "provider_wire",
+            rawCode: event.code,
+            message: event.message,
+            responseGenerationRequested: this.responseGenerationRequested,
+            responseGenerationStarted: this.responseGenerationStarted,
+            responseTerminalObserved: this.responseTerminalObserved,
+          }),
+        };
+      }
       if (event.type === "tool.calls") {
         event = {
           ...event,
@@ -910,10 +1121,64 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         event = { ...event, configuration: configurationAcknowledgement };
       }
       if (event.type === "input.audio_commit_acknowledgement") {
-        this.acknowledgeInputAudioCommit(wireObservation);
+        if (this.turnDetectionMode === "server_vad") {
+          const turn = this.pendingServerVadTurn;
+          if (!turn || turn.phase !== "speech_stopped" || !wireObservation) {
+            const message = "xAI server-VAD auto-commit was not bound to one stopped-speech turn";
+            this.emit({
+              type: "error", provider: this.provider, receivedAtMs: this.now(),
+              wireType: event.wireType, code: "server_vad_auto_commit_unbound", message, fatal: true,
+              ...optional("wireObservation", event.wireObservation),
+            });
+            this.failConnection(message, "server_vad_auto_commit_unbound", false);
+            return;
+          }
+          turn.phase = "auto_committed";
+          turn.autoCommitObservationSha256 = wireObservation.observationSha256;
+          this.inputPhase = "empty";
+          this.emit({
+            type: "input.audio_committed",
+            provider: "xai",
+            receivedAtMs: event.receivedAtMs,
+            wireType: event.wireType,
+            connectionEpoch: turn.connectionEpoch,
+            commitOrdinal: turn.turnOrdinal,
+            ...optional("wireObservation", event.wireObservation),
+          });
+        } else {
+          this.acknowledgeInputAudioCommit(wireObservation);
+        }
         continue;
       }
       if (event.type === "input.speech_activity") {
+        if (this.turnDetectionMode === "server_vad") {
+          const turn = this.pendingServerVadTurn;
+          const observed = event.wireObservation?.availability === "observed"
+            ? event.wireObservation.observationSha256
+            : undefined;
+          const valid = turn !== null && observed !== undefined && (
+            event.phase === "started"
+              ? turn.phase === "ready_for_audio"
+              : turn.phase === "speech_started"
+          );
+          if (!valid || !turn) {
+            const message = `xAI server-VAD ${event.phase} event violated the frozen turn lifecycle`;
+            this.emit({
+              type: "error", provider: this.provider, receivedAtMs: event.receivedAtMs,
+              wireType: event.wireType, code: "server_vad_event_order_invalid", message, fatal: true,
+              ...optional("wireObservation", event.wireObservation),
+            });
+            this.failConnection(message, "server_vad_event_order_invalid", false);
+            return;
+          }
+          if (event.phase === "started") {
+            turn.phase = "speech_started";
+            turn.speechStartObservationSha256 = observed;
+          } else {
+            turn.phase = "speech_stopped";
+            turn.speechStopObservationSha256 = observed;
+          }
+        } else {
         const fatal = this.unexpectedManualTurnDetectionPolicy === "fail";
         const message = `Provider emitted ${event.wireType} while manual turn detection was requested`;
         this.emit({
@@ -936,6 +1201,68 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           return;
         }
         continue;
+        }
+      }
+
+      if (this.turnDetectionMode === "server_vad" && event.type === "response.started") {
+        const turn = this.pendingServerVadTurn;
+        if (!turn || !turn.speechStopObservationSha256) {
+          const message = "xAI response started without an active server-VAD caller turn";
+          this.failConnection(message, "server_vad_auto_response_unbound");
+          return;
+        }
+        if (turn.initialResponseId === undefined) {
+          if (turn.phase !== "auto_committed") {
+            const message = "xAI initial response started before the server-VAD auto-commit";
+            this.failConnection(message, "server_vad_response_before_auto_commit");
+            return;
+          }
+          turn.phase = "response_started";
+          turn.initialResponseId = event.responseId;
+          turn.activeResponseId = event.responseId;
+          event = {
+            ...event,
+            causalBinding: {
+              trigger: "server_vad_speech_stopped",
+              turnOrdinal: turn.turnOrdinal,
+              triggerObservationSha256: turn.speechStopObservationSha256,
+            },
+          };
+        } else {
+          const origin = this.awaitingServerVadContinuationOriginId;
+          if (!origin || origin === event.responseId) {
+            const message = "xAI emitted a duplicate or unrequested response for one server-VAD turn";
+            this.failConnection(message, "server_vad_duplicate_response");
+            return;
+          }
+          const continuationObservation = this.awaitingServerVadContinuationObservationSha256;
+          if (!continuationObservation) {
+            const message = "xAI tool continuation response lacks its outbound trigger binding";
+            this.failConnection(message, "server_vad_continuation_unbound");
+            return;
+          }
+          event = {
+            ...event,
+            causalBinding: {
+              trigger: "tool_continuation",
+              turnOrdinal: turn.turnOrdinal,
+              triggerObservationSha256: continuationObservation,
+              originResponseId: origin,
+            },
+          };
+          turn.activeResponseId = event.responseId;
+          this.awaitingServerVadContinuationOriginId = null;
+          this.awaitingServerVadContinuationObservationSha256 = null;
+        }
+      }
+      if (this.turnDetectionMode === "server_vad"
+        && (event.type === "turn.interrupted"
+          || (event.type === "provider.event" && event.wireType === "input_audio_buffer.timeout_triggered"))) {
+        const message = event.type === "turn.interrupted"
+          ? "Interruptions are prohibited in the frozen xAI server-VAD benchmark transport"
+          : "xAI server-VAD idle timeout created an unplanned caller turn";
+        this.failConnection(message, event.type === "turn.interrupted" ? "server_vad_interruption" : "server_vad_idle_timeout");
+        return;
       }
       if (
         event.type === "session.ready"
@@ -1095,6 +1422,23 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           }
         }
       }
+      if (this.turnDetectionMode === "server_vad" && event.type === "response.completed") {
+        const turn = this.pendingServerVadTurn;
+        if (!turn || turn.activeResponseId !== event.responseId) {
+          const message = "xAI response terminal was not bound to the active server-VAD response";
+          this.failConnection(message, "server_vad_terminal_unbound");
+          return;
+        }
+        if (event.status !== "completed") {
+          const message = `xAI server-VAD response ended with ${event.status}`;
+          this.failConnection(message, "server_vad_terminal_failed");
+          return;
+        }
+        if (!this.pendingToolBatch?.size) {
+          turn.phase = "terminal";
+          this.pendingServerVadTurn = null;
+        }
+      }
       if (event.type === "session.ready" && this.currentState === "connecting") {
         this.currentState = "ready";
         this.clearConnectTimer();
@@ -1121,7 +1465,15 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   private onSocketError(error: unknown): void {
     if (this.currentState === "closing" || this.currentState === "closed") return;
-    this.failConnection(errorMessage(error) || "Realtime WebSocket failed", "transport_error");
+    const message = errorMessage(error) || "Realtime WebSocket failed";
+    this.failConnection(message, "transport_error", true, createRealtimeTransportFailureDiagnostic({
+      origin: "websocket_error",
+      rawCode: errorCode(error),
+      message,
+      responseGenerationRequested: this.responseGenerationRequested,
+      responseGenerationStarted: this.responseGenerationStarted,
+      responseTerminalObserved: this.responseTerminalObserved,
+    }));
   }
 
   private onSocketClose(code?: number, reason?: unknown): void {
@@ -1131,6 +1483,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.pendingToolBatch = null;
     this.pendingToolBatchResponseId = null;
     this.pendingToolContinuationResponseId = null;
+    this.awaitingServerVadContinuationOriginId = null;
+    this.awaitingServerVadContinuationObservationSha256 = null;
+    this.rejectPendingServerVadTurn("Realtime socket closed before the server-VAD turn completed");
     this.rejectInputCommitWaiters("Realtime socket closed before input audio commit acknowledgement");
     this.pendingInputCommits.length = 0;
     this.pendingResponsePreparation = null;
@@ -1147,11 +1502,31 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       ...optional("code", code),
       ...optional("reason", closeReason(reason)),
       ...optional("clean", code === undefined ? undefined : code === 1000),
+      transportDiagnostic: createRealtimeTransportFailureDiagnostic({
+        origin: "websocket_close",
+        closeCode: code,
+        reason,
+        responseGenerationRequested: this.responseGenerationRequested,
+        responseGenerationStarted: this.responseGenerationStarted,
+        responseTerminalObserved: this.responseTerminalObserved,
+      }),
       wireObservation: TRANSPORT_GENERATED_WIRE_ATTRIBUTION,
     });
   }
 
-  private failConnection(message: string, code: string, emit = true): void {
+  private failConnection(
+    message: string,
+    code: string,
+    emit = true,
+    transportDiagnostic = createRealtimeTransportFailureDiagnostic({
+      origin: "client_transport",
+      rawCode: code,
+      message,
+      responseGenerationRequested: this.responseGenerationRequested,
+      responseGenerationStarted: this.responseGenerationStarted,
+      responseTerminalObserved: this.responseTerminalObserved,
+    }),
+  ): void {
     if (this.currentState === "failed" || this.currentState === "closed") return;
     this.currentState = "failed";
     this.pendingResponsePreparation = null;
@@ -1160,6 +1535,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.pendingToolBatch = null;
     this.pendingToolBatchResponseId = null;
     this.pendingToolContinuationResponseId = null;
+    this.awaitingServerVadContinuationOriginId = null;
+    this.awaitingServerVadContinuationObservationSha256 = null;
+    this.rejectPendingServerVadTurn(message);
     this.rejectInputCommitWaiters(message);
     this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
@@ -1174,6 +1552,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         code,
         message,
         fatal: true,
+        transportDiagnostic,
         wireObservation: TRANSPORT_GENERATED_WIRE_ATTRIBUTION,
       });
     }
@@ -1188,6 +1567,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.connectReject?.(error);
     this.connectResolve = null;
     this.connectReject = null;
+  }
+
+  private rejectPendingServerVadTurn(reason: string): void {
+    const pending = this.pendingServerVadTurn;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingServerVadTurn = null;
+    pending.reject(new Error(reason));
   }
 
   private clearConnectTimer(): void {
@@ -1284,11 +1671,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private sendReady(
     event: Record<string, unknown>,
     dynamicControl?: WireDynamicControlEvidence,
-  ): void {
+  ): RealtimeWireObservation | undefined {
     if (this.currentState !== "ready") {
       throw new Error(`Realtime session is not ready (state: ${this.currentState})`);
     }
-    this.sendRaw(event, dynamicControl);
+    return this.sendRaw(event, dynamicControl);
   }
 
   private assertNoPendingToolBatch(): void {
@@ -1391,11 +1778,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     return undefined;
   }
 
-  private sendRaw(event: Record<string, unknown>, dynamicControl?: WireDynamicControlEvidence): void {
+  private sendRaw(
+    event: Record<string, unknown>,
+    dynamicControl?: WireDynamicControlEvidence,
+  ): RealtimeWireObservation | undefined {
     if (!this.socket) throw new Error("Realtime WebSocket is not connected");
     const serialized = JSON.stringify(event);
     this.socket.send(serialized);
-    this.notifyWireObservation("outbound", event, serialized, dynamicControl);
+    return this.notifyWireObservation("outbound", event, serialized, dynamicControl);
   }
 
   private emit(event: NormalizedRealtimeEvent): void {
@@ -1515,6 +1905,9 @@ type WireDynamicControlEvidence = Readonly<{
   sha256: string;
   byteLength: number;
   authority: RealtimeResponsePreparation["contextAuthority"];
+  toolFrontierSha256?: string;
+  transportParitySha256?: string;
+  delivery?: "session.update_before_audio";
 }>;
 
 const SAFE_WIRE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -1522,6 +1915,7 @@ const SAFE_PROVIDER_ERROR_CODES = new Set([
   "authentication_error",
   "connection_error",
   "content_filter",
+  "insufficient_quota",
   "invalid_request",
   "invalid_request_error",
   "input_audio_buffer_commit_empty",
@@ -1530,6 +1924,7 @@ const SAFE_PROVIDER_ERROR_CODES = new Set([
   "permission_denied",
   "rate_limit",
   "rate_limit_exceeded",
+  "response_generation_failed",
   "safety_violation",
   "server_error",
   "service_unavailable",
@@ -1611,7 +2006,9 @@ function buildRedactedWireProjection(
   const providerError = providerErrorWireProjection(input.event, wireType);
   if (providerError !== undefined) projection.error = providerError;
 
-  if (input.direction === "outbound" && wireType === "response.create" && input.dynamicControl) {
+  if (input.direction === "outbound"
+    && (wireType === "response.create" || wireType === "session.update")
+    && input.dynamicControl) {
     projection.dynamicControl = input.dynamicControl;
   }
 
@@ -1824,15 +2221,21 @@ function providerErrorWireProjection(
 ): Record<string, unknown> | undefined {
   if (wireType !== "error" && !wireType.endsWith(".error")) return undefined;
   const code = stringValue(record(event.error).code) ?? stringValue(event.code);
-  const safeCode = code !== undefined && SAFE_PROVIDER_ERROR_CODES.has(code) ? code : "provider_error";
-  const category = code?.startsWith("input_audio_buffer")
-    ? "input_audio_commit_rejected"
-    : code?.includes("rate_limit")
-      ? "rate_limited"
-      : code?.includes("auth") || code === "permission_denied"
-        ? "authentication_or_permission"
-        : "provider_error";
-  return { code: safeCode, category };
+  const message = stringValue(record(event.error).message) ?? stringValue(event.message);
+  const diagnostic = createRealtimeTransportFailureDiagnostic({
+    origin: "provider_wire",
+    rawCode: code,
+    message,
+    responseGenerationRequested: false,
+    responseGenerationStarted: false,
+    responseTerminalObserved: false,
+  });
+  return {
+    code: code !== undefined && SAFE_PROVIDER_ERROR_CODES.has(code) ? code : "provider_error",
+    category: diagnostic.category,
+    ...optional("rawCodeSha256", diagnostic.rawCodeSha256),
+    ...optional("messageSha256", diagnostic.messageSha256),
+  };
 }
 
 function buildWireIdentityProjection(event: Record<string, unknown>): RealtimeWireObservation["identities"] {
@@ -2004,6 +2407,85 @@ function assertProviderDirectMcpGate(
   }
 }
 
+function requestedTurnDetectionMode(
+  provider: OpenAICompatibleProvider,
+  update: Record<string, unknown>,
+): "manual" | "server_vad" {
+  const session = record(update.session);
+  // OpenAI-compatible inputs are compiled into the provider's documented
+  // manual-PCM shape below. Only xAI's session-level server_vad opt-in changes
+  // the transport state machine; stale/nested input fields never do.
+  if (provider === "openai") return "manual";
+  const requested = session.turn_detection;
+  if (requested === undefined || requested === null) return "manual";
+  if (isRecord(requested) && requested.type === null) return "manual";
+  if (provider === "xai" && isRecord(requested) && requested.type === "server_vad") return "server_vad";
+  throw new Error(`${provider} realtime session must explicitly request manual turns${provider === "xai" ? " or documented server_vad" : ""}`);
+}
+
+/** Clones and pins the documented xAI provider-native server-VAD PCM mode. */
+export function withXaiServerVadPcmSession(
+  update: Record<string, unknown>,
+  input: Pcm16Format = PCM16_MONO_24KHZ,
+  output: Pcm16Format = PCM16_MONO_24KHZ,
+): Record<string, unknown> {
+  assertPcm16Format(input);
+  assertPcm16Format(output);
+  assertProviderPcmFormat("xai", input, "input");
+  assertProviderPcmFormat("xai", output, "output");
+  const sourceSession = record(update.session);
+  const sourceDetection = record(sourceSession.turn_detection);
+  if (sourceDetection.type !== "server_vad") {
+    throw new Error("xAI provider-native turn handling requires turn_detection.type server_vad");
+  }
+  const sourceAudio = record(sourceSession.audio);
+  const sourceInput = record(sourceAudio.input);
+  const sourceOutput = record(sourceAudio.output);
+  const sourceInputWithoutTurnDetection = { ...sourceInput };
+  delete sourceInputWithoutTurnDetection.turn_detection;
+  return {
+    ...update,
+    type: "session.update",
+    session: {
+      ...sourceSession,
+      turn_detection: { ...sourceDetection, type: "server_vad" },
+      audio: {
+        ...sourceAudio,
+        input: { ...sourceInputWithoutTurnDetection, format: { type: "audio/pcm", rate: input.sampleRateHz } },
+        output: { ...sourceOutput, format: { type: "audio/pcm", rate: output.sampleRateHz } },
+      },
+    },
+  };
+}
+
+export function xaiServerVadTransportParitySha256(
+  update: Record<string, unknown>,
+  requestedModel?: string,
+): string {
+  const session = record(update.session);
+  const audio = record(session.audio);
+  const projection = {
+    provider: "xai",
+    model: requestedModel ?? null,
+    voice: session.voice ?? null,
+    turn_detection: session.turn_detection ?? null,
+    input_audio: record(audio.input),
+    output_audio: record(audio.output),
+    tool_choice: session.tool_choice ?? null,
+    tools: Array.isArray(session.tools) ? session.tools : [],
+    resumption: session.resumption ?? null,
+  };
+  return sha256Text(
+    `harshas-amazing-call-center/xai-server-vad-transport-parity/v1\n${canonicalJson(projection)}`,
+  );
+}
+
+export function realtimeToolFrontierSha256(tools: readonly unknown[]): string {
+  return sha256Text(
+    `harshas-amazing-call-center/realtime-tool-frontier/v1\n${canonicalJson(tools)}`,
+  );
+}
+
 /** Clones and pins the provider payload to PCM with explicit client commits. */
 export function withManualPcmSession(
   provider: OpenAICompatibleProvider,
@@ -2058,6 +2540,17 @@ export function validateManualPcmSessionAcknowledgement(
   output: Pcm16Format = PCM16_MONO_24KHZ,
   expectXaiResumption = false,
 ): ManualPcmAcknowledgement {
+  return validatePcmSessionAcknowledgement(provider, event, input, output, expectXaiResumption, "manual");
+}
+
+export function validatePcmSessionAcknowledgement(
+  provider: OpenAICompatibleProvider,
+  event: Record<string, unknown>,
+  input: Pcm16Format = PCM16_MONO_24KHZ,
+  output: Pcm16Format = PCM16_MONO_24KHZ,
+  expectXaiResumption = false,
+  turnDetectionMode: "manual" | "server_vad" = "manual",
+): ManualPcmAcknowledgement {
   assertPcm16Format(input);
   assertPcm16Format(output);
   assertProviderPcmFormat(provider, input, "input");
@@ -2078,7 +2571,7 @@ export function validateManualPcmSessionAcknowledgement(
     if (session.turn_detection !== undefined && session.turn_detection !== null) {
       mismatches.push("OpenAI returned an active session-level turn detector");
     }
-  } else {
+  } else if (turnDetectionMode === "manual") {
     const xaiTurnDetection = session.turn_detection;
     if (!isRecord(xaiTurnDetection) || (
       Object.keys(xaiTurnDetection).length > 0
@@ -2091,6 +2584,20 @@ export function validateManualPcmSessionAcknowledgement(
     }
     if (acknowledgedInput.turn_detection !== undefined && acknowledgedInput.turn_detection !== null) {
       mismatches.push("xAI returned an active audio.input turn detector");
+    }
+    if (expectXaiResumption && record(session.resumption).enabled !== true) {
+      mismatches.push("xAI resumption.enabled was not acknowledged");
+    }
+  } else {
+    const xaiTurnDetection = session.turn_detection;
+    if (!isRecord(xaiTurnDetection) || (
+      Object.keys(xaiTurnDetection).length > 0
+      && xaiTurnDetection.type !== "server_vad"
+    )) {
+      mismatches.push("xAI session.turn_detection.type is not server_vad");
+    }
+    if (acknowledgedInput.turn_detection !== undefined && acknowledgedInput.turn_detection !== null) {
+      mismatches.push("xAI returned an unexpected audio.input turn detector");
     }
     if (expectXaiResumption && record(session.resumption).enabled !== true) {
       mismatches.push("xAI resumption.enabled was not acknowledged");
@@ -2910,6 +3417,11 @@ function closeReason(reason: unknown): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!isRecord(error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
 }
 
 function safelyNotify(notify: () => void): void {

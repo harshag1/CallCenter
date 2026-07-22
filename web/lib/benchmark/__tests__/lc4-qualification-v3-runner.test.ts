@@ -11,6 +11,7 @@ import {
   LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
   LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
   LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD,
+  LC4_XAI_SERVER_VAD_SETTING_SHA256,
   assertLc4QualificationV3PlanArtifact,
   createLc4QualificationV3AuthorizationArtifact,
   loadLc4QualificationV3ExplicitCredentials,
@@ -24,6 +25,7 @@ import {
   LC4_S2S_COMPACT_CONTROL_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_SOURCE_TEXT,
+  LC4_S2S_TOOL,
   LC4_S2S_TOOL_SCHEMA_SHA256,
   type Lc4S2sAudioRenderer,
   type Lc4S2sRoundtripExecution,
@@ -37,9 +39,12 @@ import type {
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
 import {
+  realtimeWireIdentitySha256,
   realtimeWireObservationSha256,
   realtimeWireProjectionSha256,
 } from "../../realtime/client/wire-evidence";
+import { realtimeToolFrontierSha256 } from "../../realtime/client/openai-compatible";
+import { LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 } from "../xai-server-vad";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -85,7 +90,7 @@ const renderer: Lc4S2sAudioRenderer = Object.freeze({
   },
 });
 
-function acknowledgement(provider: LiveStsProvider, conditionalXaiManualTurn = false): SessionConfigurationAcknowledgement {
+function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = false): SessionConfigurationAcknowledgement {
   const verified = Object.freeze({ status: "verified" as const, requestedSha256: "1".repeat(64), acknowledgedSha256: "1".repeat(64), acknowledgedBy: "session.updated" as const });
   const unverifiable = Object.freeze({ status: "unverifiable" as const, requestedSha256: "2".repeat(64), reason: "provider does not echo this field" });
   if (provider === "gemini") return Object.freeze({
@@ -97,15 +102,21 @@ function acknowledgement(provider: LiveStsProvider, conditionalXaiManualTurn = f
     fields: Object.freeze({
       model: verified, voice: unverifiable, instructions: verified, tools: unverifiable,
       tool_choice: verified, input_audio: unverifiable, output_audio: verified,
-      turn_detection: conditionalXaiManualTurn ? Object.freeze({
+      turn_detection: conditionalXaiServerVad ? Object.freeze({
         status: "unverifiable" as const,
         requestedSha256: "3".repeat(64),
         acknowledgedSha256: "4".repeat(64),
         acknowledgedBy: "session.updated" as const,
-        reason: "Provider session.updated omitted requested path(s): turn_detection.type",
+        reason: "Provider session.updated returned an empty turn_detection object",
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
-          paths: Object.freeze(["turn_detection.type"]),
+          paths: Object.freeze([
+            "turn_detection.type",
+            "turn_detection.threshold",
+            "turn_detection.silence_duration_ms",
+            "turn_detection.prefix_padding_ms",
+            "turn_detection.idle_timeout_ms",
+          ]),
           acknowledgedShape: "empty_object" as const,
         }),
       }) : verified,
@@ -122,9 +133,9 @@ class SetupClient implements NormalizedRealtimeClient {
   state: "idle" | "ready" | "closed" = "idle";
   readonly sessionConfigurationAcknowledgement;
   readonly #listeners = new Set<RealtimeEventListener>();
-  constructor(provider: LiveStsProvider, conditionalXaiManualTurn = false) {
+  constructor(provider: LiveStsProvider, conditionalXaiServerVad = false) {
     this.provider = provider;
-    this.sessionConfigurationAcknowledgement = acknowledgement(provider, conditionalXaiManualTurn);
+    this.sessionConfigurationAcknowledgement = acknowledgement(provider, conditionalXaiServerVad);
   }
   async connect() {
     this.state = "ready";
@@ -148,7 +159,11 @@ class SetupClient implements NormalizedRealtimeClient {
 
 function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4QualificationV3>[0]["dependencies"]>["executeRoundtrip"]>[0]): Lc4S2sRoundtripExecution {
   const wire: RealtimeWireObservation[] = [];
-  const observe = (direction: "inbound" | "outbound", wireType: string) => {
+  const observe = (
+    direction: "inbound" | "outbound",
+    wireType: string,
+    identities: RealtimeWireObservation["identities"] = Object.freeze({}),
+  ) => {
     const sequence = wire.length + 1;
     const projection = Object.freeze({ direction, wireType, sequence });
     const core = Object.freeze({
@@ -157,17 +172,35 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
       payloadSha256: sha256Hex(canonicalJson(projection)), payloadBytes: 64,
       projectionSha256: realtimeWireProjectionSha256(projection),
       previousObservationSha256: wire.at(-1)?.observationSha256 ?? null,
-      identities: Object.freeze({}), projection,
+      identities, projection,
     });
     const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
     wire.push(observation);
     return observation;
   };
-  const commit = input.provider === "xai" ? observe("inbound", "input_audio_buffer.committed") : null;
-  const trigger = input.provider === "xai" ? observe("outbound", "response.create") : null;
+  const xaiWire = input.provider === "xai" ? (() => {
+    const control = observe("outbound", "session.update");
+    const ack = observe("inbound", "session.updated");
+    observe("outbound", "input_audio_buffer.append");
+    const speechStart = observe("inbound", "input_audio_buffer.speech_started");
+    const speechStop = observe("inbound", "input_audio_buffer.speech_stopped");
+    const commit = observe("inbound", "input_audio_buffer.committed");
+    const rootResponse = observe("inbound", "response.created", {
+      responseIdSha256: realtimeWireIdentitySha256("response", "xai-root"),
+    });
+    observe("inbound", "response.function_call_arguments.done", {
+      responseIdSha256: realtimeWireIdentitySha256("response", "xai-root"),
+      callIdSha256: realtimeWireIdentitySha256("call", "xai-call"),
+    });
+    observe("outbound", "conversation.item.create", {
+      callIdSha256: realtimeWireIdentitySha256("call", "xai-call"),
+    });
+    const continuation = observe("outbound", "response.create");
+    return { control, ack, speechStart, speechStop, commit, rootResponse, continuation };
+  })() : null;
   const body = Object.freeze({
-    schema_version: 1 as const,
-    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v3" as const,
+    schema_version: 2 as const,
+    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v4" as const,
     provider: input.provider,
     model: input.model,
     attempted_at: NOW.toISOString(),
@@ -187,9 +220,22 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     }),
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
-    response_generation_requested: true,
-    manual_turn_commit_observation_sha256: commit?.observationSha256 ?? null,
-    response_trigger_observation_sha256: trigger?.observationSha256 ?? null,
+    response_generation_requested: input.provider !== "xai",
+    provider_auto_response_observed: input.provider === "xai",
+    transport_failure_diagnostic: null,
+    turn_boundary_mode: input.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+    server_vad_setting_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_SETTING_SHA256 : null,
+    server_vad_transport_disclosure_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 : null,
+    transport_parity_sha256: input.provider === "xai" ? "b".repeat(64) : null,
+    tool_frontier_sha256: input.provider === "xai" ? realtimeToolFrontierSha256([LC4_S2S_TOOL]) : "c".repeat(64),
+    per_turn_session_update_observation_sha256: xaiWire?.control.observationSha256 ?? null,
+    per_turn_session_ack_observation_sha256: xaiWire?.ack.observationSha256 ?? null,
+    server_vad_speech_start_observation_sha256: xaiWire?.speechStart.observationSha256 ?? null,
+    server_vad_speech_stop_observation_sha256: xaiWire?.speechStop.observationSha256 ?? null,
+    server_vad_auto_commit_observation_sha256: xaiWire?.commit.observationSha256 ?? null,
+    server_vad_auto_response_observation_sha256: xaiWire?.rootResponse.observationSha256 ?? null,
+    manual_turn_commit_observation_sha256: input.provider === "xai" ? null : null,
+    response_trigger_observation_sha256: input.provider === "xai" ? xaiWire?.speechStop.observationSha256 ?? null : null,
     tool_call_observed: true,
     tool_result_submitted: true,
     tool_result_event_observed: true,
@@ -203,13 +249,13 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
     operation_order: Object.freeze(input.provider === "xai"
-      ? ["session_ready", "caller_audio_commit_acknowledged", "response_generation_requested", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]
+      ? ["session_ready", "server_vad_control_updated", "server_vad_control_acknowledged", "server_vad_speech_started", "server_vad_speech_stopped", "server_vad_auto_commit_observed", "provider_auto_response_observed", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_continuation_requested", "post_tool_terminal_observed"]
       : ["session_ready", "response_generation_requested", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]),
     failure_evidence_sha256: "6".repeat(64),
   });
   return Object.freeze({
     ...body,
-    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v3\n${canonicalJson(body)}`),
+    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v4\n${canonicalJson(body)}`),
   });
 }
 
@@ -305,9 +351,9 @@ describe("LC4 qualification v3 signed runner", () => {
       generation_phases_attempted: 6,
       tool_roundtrips_attempted: 3,
       paid_retries_attempted: 0,
-      manual_turn_mode_qualification: {
-        gate_a_classification: "acknowledged_unverifiable_manual_turn",
-        retained_risk: "provider_omitted_turn_detection_type",
+      server_vad_qualification: {
+        gate_a_classification: "acknowledged_unverifiable_server_vad",
+        retained_risk: "provider_omitted_turn_detection_fields",
         gate_b_required: true,
         gate_b_status: "behaviorally_verified",
         gate_b_evidence_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -327,8 +373,8 @@ describe("LC4 qualification v3 signed runner", () => {
       partial_attempts: 0,
       gate_c_qualification_gate: false,
       latest: {
-        manual_turn_mode_qualification: {
-          gate_a_classification: "acknowledged_unverifiable_manual_turn",
+        server_vad_qualification: {
+          gate_a_classification: "acknowledged_unverifiable_server_vad",
           gate_b_status: "behaviorally_verified",
           benchmark_ready: true,
         },

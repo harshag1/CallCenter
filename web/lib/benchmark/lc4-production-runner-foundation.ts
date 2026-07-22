@@ -46,7 +46,7 @@ export type Lc4ProviderExecutionProfile = Readonly<{
   voice: string;
   input_sample_rate_hz: number;
   output_sample_rate_hz: number;
-  manual_turn_boundary: string;
+  turn_boundary: string;
   context_authority: string;
   provider_profile_sha256: string;
 }>;
@@ -150,9 +150,9 @@ function profileFor(provider: LiveStsProvider): Lc4ProviderExecutionProfile {
     voice: profile.voice,
     input_sample_rate_hz: profile.input_sample_rate_hz,
     output_sample_rate_hz: profile.output_sample_rate_hz,
-    manual_turn_boundary: profile.manual_turn_boundary,
+    turn_boundary: profile.turn_boundary,
     context_authority: profile.context_delivery.authority,
-    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v1\n${canonicalJson(profile)}`),
+    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v2\n${canonicalJson(profile)}`),
   });
 }
 

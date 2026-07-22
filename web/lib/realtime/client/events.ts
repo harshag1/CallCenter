@@ -639,15 +639,16 @@ export class OpenAICompatibleEventNormalizer {
           details: event,
         }];
       }
-      case "rate_limits.updated":
-      case "session.created":
-      case "conversation.item.created":
       case "input_audio_buffer.committed":
         return [{
           ...base,
           type: "input.audio_commit_acknowledgement",
           ...optional("itemId", string(event.item_id)),
         }];
+      case "rate_limits.updated":
+      case "session.created":
+      case "conversation.item.created":
+        return this.providerEvent(event, base);
       case "input_audio_buffer.speech_started":
         return [{
           ...base,

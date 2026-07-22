@@ -2,13 +2,14 @@ import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
 import type { Lc4DevReplayArtifactReference } from "./lc4-development-evidence-retention";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 
-export const LC4_DEV_FAILURE_EVIDENCE_VERSION = "lc4-dev-failure-evidence-v1" as const;
-export const LC4_DEV_FAILURE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-failure-evidence/v1\n";
+export const LC4_DEV_FAILURE_EVIDENCE_VERSION = "lc4-dev-failure-evidence-v2" as const;
+export const LC4_DEV_FAILURE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-failure-evidence/v2\n";
 
 export type Lc4DevFailureStage =
   | "pre_send_contract"
   | "audio_append"
   | "response_prepare"
+  | "server_vad_control_ack"
   | "audio_commit"
   | "response_request"
   | "provider_wait"
@@ -22,6 +23,8 @@ export type Lc4DevFailureCode =
   | "invalid_contract"
   | "audio_delivery_failed"
   | "response_request_failed"
+  | "server_vad_control_ack_failed"
+  | "server_vad_protocol_failure"
   | "provider_fatal"
   | "provider_terminal_failed"
   | "provider_response_timeout"
@@ -57,17 +60,25 @@ export type Lc4DevTerminalWireType =
   | "other";
 
 export type Lc4DevFailureOperation =
-  | "caller_pcm_appended"
+  | "response_plan_session_update_sent"
+  | "response_plan_session_update_acknowledged"
+  | "caller_pcm_delivery_started"
+  | "caller_pcm_delivery_completed"
   | "response_plan_prepared"
   | "caller_pcm_committed"
+  | "caller_pcm_commit_acknowledged"
+  | "server_vad_speech_started"
+  | "server_vad_speech_stopped"
+  | "caller_pcm_auto_committed"
   | "response_generation_requested"
+  | "response_generation_auto_started"
   | "response_generation_started"
   | "response_terminal_observed"
   | "assistant_pcm_captured"
   | "listener_evidence_handed_off";
 
 export type Lc4DevFailureEvidenceBody = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   evidence_version: typeof LC4_DEV_FAILURE_EVIDENCE_VERSION;
   redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids";
   failure_role: "primary_exchange" | "cleanup";
@@ -118,12 +129,13 @@ export function lc4DevFailureEvidenceBody(evidence: Lc4DevFailureEvidence): Lc4D
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const STAGES = new Set<Lc4DevFailureStage>([
-  "pre_send_contract", "audio_append", "response_prepare", "audio_commit",
+  "pre_send_contract", "audio_append", "response_prepare", "server_vad_control_ack", "audio_commit",
   "response_request", "provider_wait", "gateway_dispatch", "response_validate",
   "listener_handoff", "exchange_evidence", "segment_close",
 ]);
 const CODES = new Set<Lc4DevFailureCode>([
-  "invalid_contract", "audio_delivery_failed", "response_request_failed", "provider_fatal",
+  "invalid_contract", "audio_delivery_failed", "response_request_failed", "server_vad_control_ack_failed",
+  "server_vad_protocol_failure", "provider_fatal",
   "provider_terminal_failed", "provider_response_timeout", "gateway_fatal",
   "missing_terminal_response", "invalid_output_audio", "missing_output_audio",
   "listener_failed", "evidence_assembly_failed", "segment_close_failed", "adapter_failure",
@@ -140,8 +152,11 @@ const GATEWAY_FATAL_CLASSES = new Set<Lc4DevFailureEvidenceBody["gateway_fatal_c
   "none", "parse", "provenance", "execution", "delivery", "unknown",
 ]);
 const OPERATIONS: readonly Lc4DevFailureOperation[] = Object.freeze([
-  "caller_pcm_appended", "response_plan_prepared", "caller_pcm_committed",
-  "response_generation_requested", "response_generation_started",
+  "response_plan_session_update_sent", "response_plan_session_update_acknowledged",
+  "caller_pcm_delivery_started", "caller_pcm_delivery_completed", "response_plan_prepared", "caller_pcm_committed",
+  "caller_pcm_commit_acknowledged",
+  "server_vad_speech_started", "server_vad_speech_stopped", "caller_pcm_auto_committed",
+  "response_generation_requested", "response_generation_auto_started", "response_generation_started",
   "response_terminal_observed", "assistant_pcm_captured", "listener_evidence_handed_off",
 ]);
 
@@ -166,7 +181,7 @@ export function classifyLc4DevTerminalWireType(wireType: string | null): Lc4DevT
 }
 
 export function createLc4DevFailureEvidence(input: Lc4DevFailureEvidenceBody): Lc4DevFailureEvidence {
-  if (input.schema_version !== 1 || input.evidence_version !== LC4_DEV_FAILURE_EVIDENCE_VERSION
+  if (input.schema_version !== 2 || input.evidence_version !== LC4_DEV_FAILURE_EVIDENCE_VERSION
     || input.redaction !== "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids") {
     throw new Error("LC4-DEV failure evidence version or redaction boundary is invalid");
   }
@@ -207,10 +222,40 @@ export function createLc4DevFailureEvidence(input: Lc4DevFailureEvidenceBody): L
   })) requireHashOrNull(value, label);
   const operationIndexes = input.operation_order.map((operation) => OPERATIONS.indexOf(operation));
   if (operationIndexes.some((index) => index < 0)
-    || new Set(input.operation_order).size !== input.operation_order.length
-    || operationIndexes.some((index, position) => position > 0 && index <= operationIndexes[position - 1]!)) {
+    || new Set(input.operation_order).size !== input.operation_order.length) {
     throw new Error("LC4-DEV failure evidence operation order is not a unique allowlisted progression");
   }
+  const operationIndex = (operation: Lc4DevFailureOperation) => input.operation_order.indexOf(operation);
+  const requireBefore = (before: Lc4DevFailureOperation, after: Lc4DevFailureOperation) => {
+    const beforeIndex = operationIndex(before);
+    const afterIndex = operationIndex(after);
+    if (afterIndex >= 0 && (beforeIndex < 0 || beforeIndex >= afterIndex)) {
+      throw new Error(`LC4-DEV failure evidence operation progression requires ${before} before ${after}`);
+    }
+  };
+  requireBefore("response_plan_session_update_sent", "response_plan_session_update_acknowledged");
+  requireBefore("response_plan_session_update_acknowledged", "server_vad_speech_started");
+  requireBefore("caller_pcm_delivery_started", "caller_pcm_delivery_completed");
+  requireBefore("caller_pcm_delivery_started", "server_vad_speech_started");
+  requireBefore("server_vad_speech_started", "server_vad_speech_stopped");
+  requireBefore("server_vad_speech_stopped", "caller_pcm_auto_committed");
+  requireBefore("caller_pcm_auto_committed", "response_generation_auto_started");
+  requireBefore("caller_pcm_delivery_completed", "response_plan_prepared");
+  requireBefore("response_plan_prepared", "caller_pcm_committed");
+  requireBefore("caller_pcm_committed", "caller_pcm_commit_acknowledged");
+  requireBefore("caller_pcm_committed", "response_generation_requested");
+  if (operationIndex("response_generation_started") >= 0) {
+    const requestIndex = operationIndex("response_generation_requested");
+    const autoIndex = operationIndex("response_generation_auto_started");
+    const startedIndex = operationIndex("response_generation_started");
+    if ((requestIndex < 0 || requestIndex >= startedIndex)
+      && (autoIndex < 0 || autoIndex >= startedIndex)) {
+      throw new Error("LC4-DEV failure evidence operation progression lacks a causal response trigger");
+    }
+  }
+  requireBefore("response_generation_started", "response_terminal_observed");
+  requireBefore("response_terminal_observed", "assistant_pcm_captured");
+  requireBefore("assistant_pcm_captured", "listener_evidence_handed_off");
   const booleans = [
     input.response_generation_requested,
     input.response_generation_started,
@@ -220,8 +265,12 @@ export function createLc4DevFailureEvidence(input: Lc4DevFailureEvidenceBody): L
   if (booleans.some((value) => typeof value !== "boolean")) {
     throw new Error("LC4-DEV failure evidence response flags must be boolean");
   }
-  if ((input.response_generation_started && !input.response_generation_requested)
-    || (input.response_terminal_observed && !input.response_generation_requested)
+  const providerAutoStarted = input.operation_order.includes("response_generation_auto_started");
+  const generationTriggered = input.response_generation_requested || providerAutoStarted;
+  if ((input.response_generation_started
+      && !input.response_generation_requested
+      && !providerAutoStarted)
+    || (input.response_terminal_observed && !generationTriggered)
     || (input.response_completed && (!input.response_generation_started || !input.response_terminal_observed))) {
     throw new Error("LC4-DEV failure evidence response lifecycle is inconsistent");
   }

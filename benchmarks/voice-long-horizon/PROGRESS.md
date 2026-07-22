@@ -409,3 +409,25 @@ The live MCP gateway still uses the legacy Flow reservation and `launch_task` ro
 - Auxiliary review spend delta: **$0.495064**
 - Cumulative auxiliary review spend: **$3.807615**
 - Total recorded program cash spend: **$3.807615**
+
+## 2026-07-22 — xAI LC4 transport corrected to provider-native server VAD
+
+The xAI LC4 path no longer tries to impose OpenAI-style manual commits on a
+provider-native VAD session. The frozen xAI arm now sends a hash-bound per-turn
+`session.update` containing compact control plus the exact closed tool frontier,
+waits for `session.updated`, then paces the same caller PCM used by its matched
+arm. It requires ordered speech start, speech stop, automatic input commit, and
+automatic initial response evidence. Manual commit and the initial
+`response.create` are forbidden; one explicit `response.create` is allowed only
+after the exact tool-result batch. Interruption and duplicate/unbound responses
+fail closed.
+
+OpenAI and Gemini retain their provider-specific explicit boundaries. Gate A
+now distinguishes exact xAI server-VAD echo from the provider's exact empty
+object omission; the latter cannot promote without spoken Gate B evidence. The
+production adapter, signed qualification runner, failure taxonomy, and retained
+wire assertions bind the new mode and invalidate stale v3/manual artifacts.
+
+No provider socket was opened and provider spend was **$0.00** for this change.
+The test evidence is implementation/qualification-mechanism evidence only; it
+does not produce or authorize a model-quality or HACC-superiority score.

@@ -64,15 +64,20 @@ import type {
   RealtimeWireObservation,
 } from "../realtime/client/types";
 import { isLocalToolProxyFunction } from "../realtime/client/types";
+import { realtimeToolFrontierSha256 } from "../realtime/client/openai-compatible";
+import {
+  LC4_XAI_SERVER_VAD_SHA256,
+  LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
+} from "./xai-server-vad";
 
-export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v1" as const;
+export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v2" as const;
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-continuity-packet/v1\n";
 const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-rotation-state-packet/v1\n";
 const ROTATION_FACT_SET_DOMAIN = "harshas-amazing-call-center/lc4-rotation-fact-set/v1\n";
-const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n";
+const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v2\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
 const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v1\n";
 const NATIVE_CONTINUITY_SOURCES = new Set([
@@ -354,7 +359,7 @@ export type Lc4SanitizedWireObservation = Readonly<{
 }>;
 
 export type Lc4ProviderExchangeEvidence = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   adapter_version: typeof LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION;
   run_id: string;
   opportunity_id: string;
@@ -389,15 +394,14 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
     profile_sha256: string;
     pcm_sha256: string;
   }>;
-  operation_order: readonly [
-    "caller_pcm_appended",
-    "response_plan_prepared",
-    "caller_pcm_committed",
-    ...(readonly ["caller_pcm_commit_acknowledged"] | readonly []),
-    "response_generation_requested",
-    "assistant_pcm_captured",
-    "listener_evidence_handed_off",
-  ];
+  transport_mode: "manual_commit" | "provider_native_server_vad";
+  transport_parity_sha256: string;
+  tool_frontier_sha256: string;
+  server_vad_setting_sha256: string | null;
+  server_vad_transport_disclosure_sha256: string | null;
+  per_turn_session_update_observation_sha256: string | null;
+  per_turn_session_ack_observation_sha256: string | null;
+  operation_order: readonly Lc4ProviderExchangeOperation[];
   evidence_sha256: string;
   /** DEV-only phase binding; absent from frozen confirmatory artifacts. */
   playback_kind?: "canonical" | "repair";
@@ -405,6 +409,22 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   dev_listener_result?: Awaited<ReturnType<Lc4DevelopmentListenerSink["accept"]>> | null;
   replay_projection: JsonValue;
 }>;
+
+export type Lc4ProviderExchangeOperation =
+  | "response_plan_session_update_sent"
+  | "response_plan_session_update_acknowledged"
+  | "caller_pcm_delivery_started"
+  | "caller_pcm_delivery_completed"
+  | "response_plan_prepared"
+  | "caller_pcm_committed"
+  | "caller_pcm_commit_acknowledged"
+  | "server_vad_speech_started"
+  | "server_vad_speech_stopped"
+  | "caller_pcm_auto_committed"
+  | "response_generation_requested"
+  | "response_generation_auto_started"
+  | "assistant_pcm_captured"
+  | "listener_evidence_handed_off";
 
 export type Lc4ListenerEvidenceHandoff = Readonly<{
   accept(input: Readonly<{
@@ -694,8 +714,11 @@ export class Lc4RealtimeProviderBridge {
     const waiters = new Map<string, () => void>();
     let currentOpportunity: string | null = null;
     let activeResponseId: string | null = null;
+    let rootResponseId: string | null = null;
+    let currentOperationOrder: Lc4ProviderExchangeOperation[] | null = null;
+    let serverVadPhase: "none" | "started" | "stopped" | "committed" | "responding" = "none";
     let terminalError: Error | null = null;
-    let terminalFailureCode: "provider_fatal" | "provider_terminal_failed" | "invalid_output_audio" | null = null;
+    let terminalFailureCode: "provider_fatal" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
           client,
@@ -709,7 +732,46 @@ export class Lc4RealtimeProviderBridge {
     const unsubscribeWire = client.onWireObservation?.((observation) => wire.push(sanitizeWireObservation(observation)));
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
       devGateway?.observe(event);
-      if (event.type === "response.started") activeResponseId = event.responseId;
+      if (event.type === "input.speech_activity" && client.provider === "xai") {
+        if (event.phase === "started" && serverVadPhase === "none") {
+          serverVadPhase = "started";
+          currentOperationOrder?.push("server_vad_speech_started");
+        } else if (event.phase === "stopped" && serverVadPhase === "started") {
+          serverVadPhase = "stopped";
+          currentOperationOrder?.push("server_vad_speech_stopped");
+        } else {
+          terminalError = new Error("xAI server-VAD lifecycle event order is invalid");
+          terminalFailureCode = "server_vad_protocol_failure";
+        }
+      }
+      if (event.type === "input.audio_committed" && client.provider === "xai") {
+        if (serverVadPhase !== "stopped") {
+          terminalError = new Error("xAI server-VAD auto-commit is unbound");
+          terminalFailureCode = "server_vad_protocol_failure";
+        } else {
+          serverVadPhase = "committed";
+          currentOperationOrder?.push("caller_pcm_auto_committed");
+        }
+      }
+      if (event.type === "response.started") {
+        activeResponseId = event.responseId;
+        if (client.provider === "xai" && rootResponseId === null) {
+          if (serverVadPhase !== "committed"
+            || event.causalBinding?.trigger !== "server_vad_speech_stopped") {
+            terminalError = new Error("xAI root response is not causally bound to the server-VAD speech stop");
+            terminalFailureCode = "server_vad_protocol_failure";
+          } else {
+            rootResponseId = event.responseId;
+            serverVadPhase = "responding";
+            currentOperationOrder?.push("response_generation_auto_started");
+          }
+        }
+      }
+      if (event.type === "turn.interrupted" && client.provider === "xai") {
+        terminalError = new Error("xAI interruption is prohibited by the frozen LC4 transport");
+        terminalFailureCode = "server_vad_protocol_failure";
+        waiters.get(currentOpportunity ?? "")?.();
+      }
       if (event.type === "output.audio") {
         activeResponseId = event.responseId;
         const priorFormat = outputFormatByResponse.get(event.responseId);
@@ -829,21 +891,18 @@ export class Lc4RealtimeProviderBridge {
         : outputByResponse.get(activeResponseId) ?? [];
       const outputPcm = concatenate(outputChunks);
       const responseRequested = failureInput.operation_order.includes("response_generation_requested");
-      const responseStarted = responseRequested && activeResponseId !== null;
+      const responseAutoStarted = failureInput.operation_order.includes("response_generation_auto_started");
+      const responseStarted = (responseRequested || responseAutoStarted) && activeResponseId !== null;
       const terminalObserved = responseStarted && terminalByResponse.has(activeResponseId!);
       const responseCompleted = terminalObserved && completedByResponse.has(activeResponseId!) && terminalError === null;
       const deliveryDiagnostic = failureInput.error instanceof Lc4ProviderInputAudioDeliveryError
         ? failureInput.error.diagnostic
         : null;
       const failureOperations: Lc4DevFailureOperation[] = [];
-      for (const operation of [
-        "caller_pcm_appended",
-        "response_plan_prepared",
-        "caller_pcm_committed",
-        "response_generation_requested",
-      ] as const) {
-        if (failureInput.operation_order.includes(operation)
-          || (operation === "caller_pcm_appended" && (deliveryDiagnostic?.appended_chunk_count ?? 0) > 0)) {
+      for (const operation of failureInput.operation_order) {
+        if (operation !== "assistant_pcm_captured"
+          && operation !== "listener_evidence_handed_off"
+          && !failureOperations.includes(operation)) {
           failureOperations.push(operation);
         }
       }
@@ -866,9 +925,14 @@ export class Lc4RealtimeProviderBridge {
         failureClass = "gateway";
       } else if (terminalFailureCode !== null) {
         failureCode = terminalFailureCode;
-        failureClass = terminalFailureCode === "invalid_output_audio" ? "adapter_contract" : "provider_external";
+        failureClass = terminalFailureCode === "invalid_output_audio" || terminalFailureCode === "server_vad_protocol_failure"
+          ? "adapter_contract"
+          : "provider_external";
       } else if (failureInput.stage === "pre_send_contract") {
         failureCode = "invalid_contract";
+        failureClass = "adapter_contract";
+      } else if (failureInput.stage === "server_vad_control_ack") {
+        failureCode = "server_vad_control_ack_failed";
         failureClass = "adapter_contract";
       } else if (failureInput.stage === "response_prepare" || failureInput.stage === "audio_commit") {
         failureCode = "audio_delivery_failed";
@@ -898,11 +962,11 @@ export class Lc4RealtimeProviderBridge {
       const frameBytes = input.profile.input_sample_rate_hz * input.configuration.audioDeliveryProfile.chunkMs / 1_000 * 2;
       const plannedChunks = callerBytes === 0 ? 0 : Math.ceil(callerBytes / frameBytes);
       const appendedChunks = deliveryDiagnostic?.appended_chunk_count
-        ?? (failureInput.operation_order.includes("caller_pcm_appended") ? plannedChunks : 0);
+        ?? (failureInput.operation_order.includes("caller_pcm_delivery_completed") ? plannedChunks : 0);
       const appendedBytes = deliveryDiagnostic?.appended_pcm_byte_length
-        ?? (failureInput.operation_order.includes("caller_pcm_appended") ? callerBytes : 0);
+        ?? (failureInput.operation_order.includes("caller_pcm_delivery_completed") ? callerBytes : 0);
       return createLc4DevFailureEvidence({
-        schema_version: 1,
+        schema_version: 2,
         evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
         redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
         failure_role: "primary_exchange",
@@ -946,7 +1010,7 @@ export class Lc4RealtimeProviderBridge {
           fatal_class: "none" as const,
         });
         return createLc4DevFailureEvidence({
-          schema_version: 1,
+          schema_version: 2,
           evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
           redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
           failure_role: "cleanup",
@@ -1058,6 +1122,9 @@ export class Lc4RealtimeProviderBridge {
         const wireStart = wire.length;
         currentOpportunity = opportunityId;
         activeResponseId = null;
+        rootResponseId = null;
+        serverVadPhase = "none";
+        currentOperationOrder = operationOrder;
         terminalError = null;
         terminalFailureCode = null;
         if (devGateway && input.dev_gateway) {
@@ -1067,8 +1134,47 @@ export class Lc4RealtimeProviderBridge {
         }
         const exchangeSignal = linkedAbortSignal(segmentAbort.signal, exchangeInput.signal);
         let providerInputAppended = false;
+        // The provider-visible gateway schema is a matched-pair invariant.
+        // HACC narrows logical authority in the response plan and host gateway,
+        // never by changing the provider function schema relative to Native.
+        const toolFrontier = input.configuration.providerTools;
+        const toolFrontierSha256 = realtimeToolFrontierSha256(toolFrontier);
+        const transportParitySha256 = client.provider === "xai"
+          ? client.serverVadTransportParitySha256
+          : input.profile.provider_profile_sha256;
+        if (!transportParitySha256 || !SHA256.test(transportParitySha256)) {
+          throw new Error("LC4 provider transport parity hash is unavailable");
+        }
+        let perTurnSessionUpdateObservationSha256: string | null = null;
+        let perTurnSessionAckObservationSha256: string | null = null;
+        const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
         try {
+          if (client.provider === "xai") {
+            diagnosticStage = "server_vad_control_ack";
+            if (typeof client.prepareServerVadTurn !== "function") {
+              throw new Error("xAI provider-native server-VAD preparation barrier is unavailable");
+            }
+            const acknowledgement = await client.prepareServerVadTurn({
+              additionalInstructions: renderedControl,
+              contextSha256: sha256Hex(renderedControl),
+              contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+              tools: toolFrontier,
+              toolFrontierSha256,
+              transportParitySha256,
+            }, 5_000);
+            perTurnSessionUpdateObservationSha256 = acknowledgement.outboundObservation?.availability === "observed"
+              ? acknowledgement.outboundObservation.observationSha256
+              : null;
+            perTurnSessionAckObservationSha256 = acknowledgement.inboundObservation?.availability === "observed"
+              ? acknowledgement.inboundObservation.observationSha256
+              : null;
+            if (!perTurnSessionUpdateObservationSha256 || !perTurnSessionAckObservationSha256) {
+              throw new Error("xAI server-VAD control acknowledgement lacks wire evidence");
+            }
+            operationOrder.push("response_plan_session_update_sent", "response_plan_session_update_acknowledged");
+          }
           diagnosticStage = "audio_append";
+          operationOrder.push("caller_pcm_delivery_started");
           let inputAudioDelivery: RealtimeAudioDeliveryReceipt;
           try {
             inputAudioDelivery = await deliverRealtimePcm16({
@@ -1102,28 +1208,22 @@ export class Lc4RealtimeProviderBridge {
           }
           providerInputAppended = true;
           assertExchangeActive(exchangeSignal.signal);
-          operationOrder.push("caller_pcm_appended");
-          diagnosticStage = "response_prepare";
-          client.prepareResponse({
-            additionalInstructions: renderedControl,
-            contextSha256: sha256Hex(renderedControl),
-            contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
-          });
-          operationOrder.push("response_plan_prepared");
-          diagnosticStage = "audio_commit";
-          client.commitInputAudio();
-          operationOrder.push("caller_pcm_committed");
-          if (client.provider === "xai") {
-            if (typeof client.waitForInputAudioCommit !== "function") {
-              throw new Error("LC4 provider commit acknowledgement barrier is unavailable");
-            }
-            await client.waitForInputAudioCommit(5_000);
-            operationOrder.push("caller_pcm_commit_acknowledged");
+          operationOrder.push("caller_pcm_delivery_completed");
+          if (client.provider !== "xai") {
+            diagnosticStage = "response_prepare";
+            client.prepareResponse({
+              additionalInstructions: renderedControl,
+              contextSha256: sha256Hex(renderedControl),
+              contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+            });
+            operationOrder.push("response_plan_prepared");
+            diagnosticStage = "audio_commit";
+            client.commitInputAudio();
+            operationOrder.push("caller_pcm_committed");
+            diagnosticStage = "response_request";
+            client.createResponse();
+            operationOrder.push("response_generation_requested");
           }
-          const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
-          diagnosticStage = "response_request";
-          client.createResponse();
-          operationOrder.push("response_generation_requested");
           diagnosticStage = "provider_wait";
           let responseTimer: ReturnType<typeof setTimeout> | null = null;
           const aborted = abortWait(exchangeSignal.signal);
@@ -1187,7 +1287,7 @@ export class Lc4RealtimeProviderBridge {
           }
           diagnosticStage = "exchange_evidence";
           const body = Object.freeze({
-            schema_version: 1 as const,
+            schema_version: 2 as const,
             adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
             run_id: input.manifest.run_id,
             opportunity_id: opportunityId,
@@ -1225,6 +1325,15 @@ export class Lc4RealtimeProviderBridge {
               profile_sha256: input.configuration.audioDeliveryProfileHash,
               pcm_sha256: sha256Hex(callerPcm),
             }),
+            transport_mode: client.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+            transport_parity_sha256: transportParitySha256,
+            tool_frontier_sha256: toolFrontierSha256,
+            server_vad_setting_sha256: client.provider === "xai" ? LC4_XAI_SERVER_VAD_SHA256 : null,
+            server_vad_transport_disclosure_sha256: client.provider === "xai"
+              ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256
+              : null,
+            per_turn_session_update_observation_sha256: perTurnSessionUpdateObservationSha256,
+            per_turn_session_ack_observation_sha256: perTurnSessionAckObservationSha256,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
             ...(input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? {
               playback_kind: playbackKind,
@@ -1239,7 +1348,7 @@ export class Lc4RealtimeProviderBridge {
           const evidence = Object.freeze({
             ...body,
             evidence_sha256: sha256Hex(
-              `harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n${canonicalJson(replayProjection)}`,
+              `${PROVIDER_EXCHANGE_EVIDENCE_DOMAIN}${canonicalJson(replayProjection)}`,
             ),
             replay_projection: replayProjection,
           });
@@ -1257,6 +1366,7 @@ export class Lc4RealtimeProviderBridge {
           exchangeSignal.dispose();
           waiters.delete(opportunityId);
           currentOpportunity = null;
+          currentOperationOrder = null;
         }
         } catch (error) {
           if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" || isLc4DevFailureEvidenceError(error)) throw error;
@@ -1406,9 +1516,9 @@ function devProfile(episode: Lc4DevLiveEpisodePlan): Lc4ProviderExecutionProfile
     voice: profile.voice,
     input_sample_rate_hz: profile.input_sample_rate_hz,
     output_sample_rate_hz: profile.output_sample_rate_hz,
-    manual_turn_boundary: profile.manual_turn_boundary,
+    turn_boundary: profile.turn_boundary,
     context_authority: profile.context_delivery.authority,
-    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v1\n${canonicalJson(profile)}`),
+    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v2\n${canonicalJson(profile)}`),
   });
 }
 

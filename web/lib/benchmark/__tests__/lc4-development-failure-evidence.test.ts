@@ -15,7 +15,7 @@ const HASH = "a".repeat(64);
 
 function body(overrides: Partial<Lc4DevFailureEvidenceBody> = {}): Lc4DevFailureEvidenceBody {
   return {
-    schema_version: 1,
+    schema_version: 2,
     evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
     redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
     failure_role: "primary_exchange",
@@ -28,7 +28,8 @@ function body(overrides: Partial<Lc4DevFailureEvidenceBody> = {}): Lc4DevFailure
     model: "gpt-realtime-1.5",
     playback_kind: "canonical",
     operation_order: [
-      "caller_pcm_appended",
+      "caller_pcm_delivery_started",
+      "caller_pcm_delivery_completed",
       "response_plan_prepared",
       "caller_pcm_committed",
       "response_generation_requested",
@@ -96,14 +97,15 @@ describe("LC4-DEV failure evidence", () => {
     expect(() => createLc4DevFailureEvidence(body({
       response_generation_started: true,
       operation_order: [
-        "caller_pcm_appended",
+        "caller_pcm_delivery_started",
+        "caller_pcm_delivery_completed",
         "response_plan_prepared",
         "caller_pcm_committed",
         "response_generation_requested",
       ],
     }))).toThrow(/operation progression/u);
     expect(() => createLc4DevFailureEvidence(body({
-      operation_order: ["response_generation_requested", "caller_pcm_appended"],
+      operation_order: ["response_generation_requested", "caller_pcm_delivery_started"],
     }))).toThrow(/progression/u);
     expect(() => createLc4DevFailureEvidence(body({
       wire_observation_count: 0,
@@ -116,6 +118,34 @@ describe("LC4-DEV failure evidence", () => {
       failure_role: "cleanup",
       failure_stage: "provider_wait",
     }))).toThrow(/cleanup classification/u);
+  });
+
+  it("accepts provider-native auto-response evidence without a client response request", () => {
+    expect(createLc4DevFailureEvidence(body({
+      provider: "xai",
+      model: "grok-3-fast",
+      operation_order: [
+        "response_plan_session_update_sent",
+        "response_plan_session_update_acknowledged",
+        "caller_pcm_delivery_started",
+        "server_vad_speech_started",
+        "caller_pcm_delivery_completed",
+        "server_vad_speech_stopped",
+        "caller_pcm_auto_committed",
+        "response_generation_auto_started",
+        "response_generation_started",
+        "response_terminal_observed",
+      ],
+      response_generation_requested: false,
+      response_generation_started: true,
+      response_terminal_observed: true,
+      response_completed: true,
+    }))).toMatchObject({
+      response_generation_requested: false,
+      response_generation_started: true,
+      response_terminal_observed: true,
+      response_completed: true,
+    });
   });
 
   it("maps raw wire types to a closed non-plaintext vocabulary", () => {

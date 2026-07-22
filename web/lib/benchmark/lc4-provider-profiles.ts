@@ -4,12 +4,17 @@ import {
   type LiveStsProvider,
 } from "./live-sts-development-experiment";
 import { LOCAL_TOOL_PROXY_FUNCTION_NAME } from "../realtime/client/types";
+import {
+  LC4_XAI_SERVER_VAD,
+  LC4_XAI_SERVER_VAD_SHA256,
+  LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
+} from "./xai-server-vad";
 
-export const LC4_PROVIDER_PROFILE_ID = "HACC-LC4-provider-profiles-v1" as const;
-export const LC4_PROVIDER_PROFILE_VERIFIED_AT = "2026-07-21" as const;
+export const LC4_PROVIDER_PROFILE_ID = "HACC-LC4-provider-profiles-v2" as const;
+export const LC4_PROVIDER_PROFILE_VERIFIED_AT = "2026-07-22" as const;
 
 const PROFILE_HASH_DOMAIN =
-  "harshas-amazing-call-center/lc4-provider-profile-manifest/v1\n";
+  "harshas-amazing-call-center/lc4-provider-profile-manifest/v2\n";
 
 export const LC4_PROVIDER_PRIMARY_SOURCES = Object.freeze({
   openai: Object.freeze([
@@ -39,7 +44,7 @@ export const LC4_MATCHED_PAIR_INVARIANTS = Object.freeze([
   "response_modality_audio",
   "input_pcm_encoding_rate_channels",
   "output_pcm_encoding_rate_channels",
-  "manual_turn_boundary_mode",
+  "turn_boundary_mode",
   "single_static_capability_gateway_function_schema",
   "tool_choice_auto_or_provider_equivalent",
   "temperature_omitted",
@@ -70,7 +75,7 @@ const profiles = Object.freeze({
     ...common,
     input_sample_rate_hz: 24_000,
     output_sample_rate_hz: 24_000,
-    manual_turn_boundary: "input_audio_buffer.commit_then_response.create" as const,
+    turn_boundary: "input_audio_buffer.commit_then_response.create" as const,
     context_delivery: Object.freeze({
       wire_field: "response.create.response.instructions" as const,
       authority: "per_response_instructions_override_session_instructions" as const,
@@ -86,7 +91,7 @@ const profiles = Object.freeze({
     ...common,
     input_sample_rate_hz: 16_000,
     output_sample_rate_hz: 24_000,
-    manual_turn_boundary: "activityStart_audio_activityEnd" as const,
+    turn_boundary: "activityStart_audio_activityEnd" as const,
     context_delivery: Object.freeze({
       wire_field: "realtimeInput.text_before_activityEnd" as const,
       authority: "advisory_user_realtime_input_not_system_equivalent" as const,
@@ -104,10 +109,13 @@ const profiles = Object.freeze({
     ...common,
     input_sample_rate_hz: 24_000,
     output_sample_rate_hz: 24_000,
-    manual_turn_boundary: "input_audio_buffer.commit_then_response.create" as const,
+    turn_boundary: "server_vad_speech_stop_auto_commit_auto_response" as const,
+    turn_detection: LC4_XAI_SERVER_VAD,
+    turn_detection_sha256: LC4_XAI_SERVER_VAD_SHA256,
+    transport_disclosure_sha256: LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
     context_delivery: Object.freeze({
-      wire_field: "response.create.response.instructions" as const,
-      authority: "per_response_instructions_override_session_instructions" as const,
+      wire_field: "session.update.instructions_before_first_audio" as const,
+      authority: "per_turn_session_update_ack_barrier_field_echo_may_be_unverifiable" as const,
       composition: "base_session_instructions_then_condition_specific_context" as const,
     }),
     function_calling: "provider_native_function_call_via_static_gateway" as const,

@@ -35,7 +35,7 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
     const tamperedBody: Record<string, unknown> = { ...tampered };
     delete tamperedBody.manifest_sha256;
     tampered.manifest_sha256 = sha256Hex(
-      `harshas-amazing-call-center/lc4-provider-profile-manifest/v1\n${canonicalJson(tamperedBody)}`,
+      `harshas-amazing-call-center/lc4-provider-profile-manifest/v2\n${canonicalJson(tamperedBody)}`,
     );
     expect(() => assertLc4ProviderProfileManifest(tampered)).toThrow(/differs from the frozen profile/);
   });

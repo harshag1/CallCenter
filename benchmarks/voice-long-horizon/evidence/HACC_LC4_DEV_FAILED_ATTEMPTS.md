@@ -148,6 +148,15 @@ yields `evidence_invalid` and cannot enter a benchmark denominator.
 
 ## Current release boundary
 
+The earlier xAI manual-turn qualification path is superseded in source as of
+2026-07-22. LC4 now freezes xAI's documented provider-native `server_vad`,
+requires the per-turn compact control and exact tool frontier to be sent before audio behind a `session.updated` ordering barrier; the exact outbound frontier is hash-bound, while any provider field echo is retained separately and may remain unverifiable
+before caller PCM, records ordered speech-start/speech-stop/automatic-commit/
+automatic-response observations, prohibits interruption, and permits only the
+single post-tool continuation request. This is a code and provider-free test
+correction, not new live evidence; all previously retained xAI attempts remain
+historical and unmodified.
+
 The next admissible provider run requires a fresh clean-source qualification
 and fresh signed execution root. Fresh zero-audio probes against the current
 OpenAI realtime target still fail before response creation with zero usage; the

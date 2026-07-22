@@ -86,7 +86,7 @@ function xaiAcknowledgement(): SessionConfigurationAcknowledgement {
   });
 }
 
-function xaiEmptyManualTurnAcknowledgement(): SessionConfigurationAcknowledgement {
+function xaiEmptyServerVadAcknowledgement(): SessionConfigurationAcknowledgement {
   const base = xaiAcknowledgement();
   return Object.freeze({
     ...base,
@@ -97,10 +97,16 @@ function xaiEmptyManualTurnAcknowledgement(): SessionConfigurationAcknowledgemen
         requestedSha256: H("c"),
         acknowledgedSha256: H("d"),
         acknowledgedBy: "session.updated" as const,
-        reason: "Provider session.updated omitted requested path(s): turn_detection.type",
+        reason: "Provider session.updated returned an empty turn_detection object",
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
-          paths: Object.freeze(["turn_detection.type"]),
+          paths: Object.freeze([
+            "turn_detection.type",
+            "turn_detection.threshold",
+            "turn_detection.silence_duration_ms",
+            "turn_detection.prefix_padding_ms",
+            "turn_detection.idle_timeout_ms",
+          ]),
           acknowledgedShape: "empty_object" as const,
         }),
       }),
@@ -244,7 +250,7 @@ describe("provider qualification", () => {
     })).resolves.toMatchObject({ artifactSha256: artifact.artifactSha256 });
   });
 
-  it("admits only xAI's exact empty manual-turn echo to the paid behavioral gate", async () => {
+  it("admits only xAI's exact empty server-VAD echo to the paid behavioral gate", async () => {
     const prepared = await setup();
     const artifact = await qualifyProviders({
       ...prepared.input,
@@ -253,15 +259,15 @@ describe("provider qualification", () => {
         target,
         null,
         true,
-        target.provider === "xai" ? xaiEmptyManualTurnAcknowledgement() : undefined,
+        target.provider === "xai" ? xaiEmptyServerVadAcknowledgement() : undefined,
       ),
     });
     expect(artifact.status).toBe("conditional");
     expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "passed",
-      code: "acknowledged_unverifiable_manual_turn",
-      acknowledgementMode: "conditional_manual_turn_echo",
-      manualTurnModeVerification: "requires_paid_behavioral_canary",
+      code: "acknowledged_unverifiable_server_vad",
+      acknowledgementMode: "conditional_server_vad_echo",
+      turnBoundaryVerification: "requires_paid_behavioral_canary",
     });
     await expect(assertRecentPassingProviderQualification({
       root: prepared.root,
@@ -271,9 +277,9 @@ describe("provider qualification", () => {
       targets: prepared.input.targets,
       credentials: prepared.input.credentials,
       now: prepared.input.now,
-    })).rejects.toThrow("spoken manual-turn behavioral qualification");
+    })).rejects.toThrow("spoken server-VAD behavioral qualification");
 
-    const missingField = xaiEmptyManualTurnAcknowledgement();
+    const missingField = xaiEmptyServerVadAcknowledgement();
     const failed = await qualifyProviders({
       ...prepared.input,
       qualificationId: "xai-generic-missing-manual-turn",
@@ -302,7 +308,7 @@ describe("provider qualification", () => {
     expect(failed.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "failed",
       code: "acknowledgement_incomplete",
-      manualTurnModeVerification: "not_verified",
+      turnBoundaryVerification: "not_verified",
     });
 
     const inconsistentTopLevelParity = await qualifyProviders({
@@ -330,7 +336,7 @@ describe("provider qualification", () => {
     expect(inconsistentTopLevelParity.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "failed",
       code: "acknowledgement_incomplete",
-      manualTurnModeVerification: "not_verified",
+      turnBoundaryVerification: "not_verified",
     });
 
     const contradictory = await qualifyProviders({
@@ -358,7 +364,7 @@ describe("provider qualification", () => {
     expect(contradictory.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "failed",
       code: "configuration_rejected",
-      manualTurnModeVerification: "not_verified",
+      turnBoundaryVerification: "not_verified",
     });
   });
 

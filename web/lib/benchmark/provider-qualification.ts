@@ -9,16 +9,22 @@ import type {
   NormalizedRealtimeEvent,
   SessionConfigurationAcknowledgement,
 } from "../realtime/client/types";
+import { LC4_XAI_SERVER_VAD_SHA256 } from "./xai-server-vad";
 
-export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 1 as const;
+export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 2 as const;
 export const PROVIDER_QUALIFICATION_MAX_AGE_MS = 30 * 60_000;
 const MAX_CLOCK_SKEW_MS = 2 * 60_000;
-const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v1";
+const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v2";
 const MATRIX_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification-matrix/v1";
 const RESPONSE_CANARY_HASH_DOMAIN = "harshas-amazing-call-center/provider-response-tool-canary/v1";
-export const XAI_MANUAL_TURN_SETTING_SHA256 = sha256Hex(
-  `harshas-amazing-call-center/lc4-xai-manual-turn-setting/v1\n${canonicalJson({ turn_detection: { type: null } })}`,
-);
+export const XAI_SERVER_VAD_SETTING_SHA256 = LC4_XAI_SERVER_VAD_SHA256;
+const XAI_SERVER_VAD_OMITTED_PATHS = Object.freeze([
+  "turn_detection.type",
+  "turn_detection.threshold",
+  "turn_detection.silence_duration_ms",
+  "turn_detection.prefix_padding_ms",
+  "turn_detection.idle_timeout_ms",
+]);
 
 export type ProviderQualificationTarget = Readonly<{
   provider: LiveStsProvider;
@@ -29,7 +35,7 @@ export type ProviderQualificationTarget = Readonly<{
 export type ProviderQualificationCode =
   | "configuration_echo_verified"
   | "configuration_accepted_partial_echo"
-  | "acknowledged_unverifiable_manual_turn"
+  | "acknowledged_unverifiable_server_vad"
   | "setup_accepted_without_field_echo"
   | "credential_missing"
   | "unauthenticated"
@@ -49,12 +55,12 @@ export type ProviderQualificationResult = Readonly<{
   completedAt: string;
   status: "passed" | "failed";
   code: ProviderQualificationCode;
-  acknowledgementMode: "exact_provider_echo" | "partial_provider_echo" | "conditional_manual_turn_echo" | "setup_complete_no_field_echo" | "none";
+  acknowledgementMode: "exact_provider_echo" | "partial_provider_echo" | "conditional_server_vad_echo" | "setup_complete_no_field_echo" | "none";
   acknowledgementSha256: string | null;
   toolSchemaVerification: "verified_by_provider_echo" | "requires_paid_response_canary" | "not_requested";
-  manualTurnModeVerification: "verified_by_provider_echo" | "requires_paid_behavioral_canary" | "not_verified" | "not_applicable";
-  manualTurnModeEvidence?: Readonly<{
-    requestedSettingSha256: typeof XAI_MANUAL_TURN_SETTING_SHA256;
+  turnBoundaryVerification: "verified_by_provider_echo" | "requires_paid_behavioral_canary" | "not_verified" | "not_applicable";
+  turnBoundaryEvidence?: Readonly<{
+    requestedSettingSha256: typeof XAI_SERVER_VAD_SETTING_SHA256;
     acknowledgement: "verified_echo" | "exact_empty_object_omission";
     omittedPaths: readonly string[];
     acknowledgedShape: "verified_value" | "empty_object";
@@ -200,22 +206,22 @@ function acknowledgementResult(
   target: ProviderQualificationTarget,
   readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null,
   fallback: SessionConfigurationAcknowledgement | null | undefined,
-): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256" | "toolSchemaVerification" | "manualTurnModeVerification" | "manualTurnModeEvidence"> {
+): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256" | "toolSchemaVerification" | "turnBoundaryVerification" | "turnBoundaryEvidence"> {
   const toolSchemaVerification = target.configuration.providerTools.length === 0
     ? "not_requested" as const
     : "requires_paid_response_canary" as const;
-  const unverifiedManualTurnMode = target.provider === "gemini" ? "not_applicable" as const : "not_verified" as const;
+  const unverifiedTurnBoundary = target.provider === "gemini" ? "not_applicable" as const : "not_verified" as const;
   if (readyEvent?.provider !== target.provider) {
-    return { status: "failed", code: "provider_identity_mismatch", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification, manualTurnModeVerification: unverifiedManualTurnMode };
+    return { status: "failed", code: "provider_identity_mismatch", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   const acknowledgement = readyEvent.configuration ?? fallback ?? null;
   if (!acknowledgement) {
-    return { status: "failed", code: "acknowledgement_missing", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification, manualTurnModeVerification: unverifiedManualTurnMode };
+    return { status: "failed", code: "acknowledgement_missing", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   const digest = acknowledgementSha256(acknowledgement);
   const fields = Object.values(acknowledgement.fields);
   if (fields.some((field) => field.status === "mismatch")) {
-    return { status: "failed", code: "configuration_rejected", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, manualTurnModeVerification: unverifiedManualTurnMode };
+    return { status: "failed", code: "configuration_rejected", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   if (target.provider === "gemini") {
     const allowed = fields.every((field) => field.status === "unverifiable" || field.status === "not_requested");
@@ -225,7 +231,7 @@ function acknowledgementResult(
       || acknowledgement.paidBenchmarkReady
       || !allowed
     ) {
-      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, manualTurnModeVerification: "not_applicable" };
+      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: "not_applicable" };
     }
     return {
       status: "passed",
@@ -233,7 +239,7 @@ function acknowledgementResult(
       acknowledgementMode: "setup_complete_no_field_echo",
       acknowledgementSha256: digest,
       toolSchemaVerification,
-      manualTurnModeVerification: "not_applicable",
+      turnBoundaryVerification: "not_applicable",
     };
   }
   if (target.provider === "xai") {
@@ -243,35 +249,35 @@ function acknowledgementResult(
       acknowledgement.fields.tool_choice,
       acknowledgement.fields.output_audio,
     ];
-    const manualTurnProof = acknowledgement.fields.turn_detection;
-    const exactEmptyManualTurnOmission = manualTurnProof.status === "unverifiable"
-      && manualTurnProof.omission?.kind === "requested_paths_omitted"
-      && manualTurnProof.omission.acknowledgedShape === "empty_object"
-      && canonicalJson(manualTurnProof.omission.paths) === canonicalJson(["turn_detection.type"]);
+    const turnBoundaryProof = acknowledgement.fields.turn_detection;
+    const exactEmptyServerVadOmission = turnBoundaryProof.status === "unverifiable"
+      && turnBoundaryProof.omission?.kind === "requested_paths_omitted"
+      && turnBoundaryProof.omission.acknowledgedShape === "empty_object"
+      && canonicalJson(turnBoundaryProof.omission.paths) === canonicalJson(XAI_SERVER_VAD_OMITTED_PATHS);
     const acceptedStatuses = fields.every((field) => (
       field.status === "verified" || field.status === "unverifiable" || field.status === "not_requested"
     ));
     if (
       readyEvent.wireType !== "session.updated"
       || requiredEchoes.some((field) => field.status !== "verified")
-      || (manualTurnProof.status !== "verified" && !exactEmptyManualTurnOmission)
+      || (turnBoundaryProof.status !== "verified" && !exactEmptyServerVadOmission)
       || !acceptedStatuses
       || (acknowledgement.session?.status !== "verified" && acknowledgement.session?.status !== "unverifiable")
     ) {
-      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, manualTurnModeVerification: "not_verified" };
+      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: "not_verified" };
     }
-    if (exactEmptyManualTurnOmission) {
+    if (exactEmptyServerVadOmission) {
       return {
         status: "passed",
-        code: "acknowledged_unverifiable_manual_turn",
-        acknowledgementMode: "conditional_manual_turn_echo",
+        code: "acknowledged_unverifiable_server_vad",
+        acknowledgementMode: "conditional_server_vad_echo",
         acknowledgementSha256: digest,
         toolSchemaVerification,
-        manualTurnModeVerification: "requires_paid_behavioral_canary",
-        manualTurnModeEvidence: Object.freeze({
-          requestedSettingSha256: XAI_MANUAL_TURN_SETTING_SHA256,
+        turnBoundaryVerification: "requires_paid_behavioral_canary",
+        turnBoundaryEvidence: Object.freeze({
+          requestedSettingSha256: XAI_SERVER_VAD_SETTING_SHA256,
           acknowledgement: "exact_empty_object_omission" as const,
-          omittedPaths: Object.freeze(["turn_detection.type"]),
+          omittedPaths: XAI_SERVER_VAD_OMITTED_PATHS,
           acknowledgedShape: "empty_object" as const,
         }),
       };
@@ -290,9 +296,9 @@ function acknowledgementResult(
         : acknowledgement.fields.tools.status === "verified"
           ? "verified_by_provider_echo"
           : "requires_paid_response_canary",
-      manualTurnModeVerification: "verified_by_provider_echo",
-      manualTurnModeEvidence: Object.freeze({
-        requestedSettingSha256: XAI_MANUAL_TURN_SETTING_SHA256,
+      turnBoundaryVerification: "verified_by_provider_echo",
+      turnBoundaryEvidence: Object.freeze({
+        requestedSettingSha256: XAI_SERVER_VAD_SETTING_SHA256,
         acknowledgement: "verified_echo" as const,
         omittedPaths: Object.freeze([]),
         acknowledgedShape: "verified_value" as const,
@@ -300,7 +306,7 @@ function acknowledgementResult(
     };
   }
   if (!acknowledgement.strictParityVerified || !acknowledgement.paidBenchmarkReady) {
-    return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, manualTurnModeVerification: unverifiedManualTurnMode };
+    return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   return {
     status: "passed",
@@ -312,7 +318,7 @@ function acknowledgementResult(
       : acknowledgement.fields.tools.status === "verified"
         ? "verified_by_provider_echo"
         : "requires_paid_response_canary",
-    manualTurnModeVerification: acknowledgement.fields.turn_detection.status === "verified"
+    turnBoundaryVerification: acknowledgement.fields.turn_detection.status === "verified"
       ? "verified_by_provider_echo"
       : "not_verified",
   };
@@ -349,7 +355,7 @@ async function qualifyTarget(
       acknowledgementMode: "none",
       acknowledgementSha256: null,
       toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
-      manualTurnModeVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
+      turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
     });
   }
   let client: NormalizedRealtimeClient | null = null;
@@ -373,7 +379,7 @@ async function qualifyTarget(
         acknowledgementMode: "none",
         acknowledgementSha256: null,
         toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
-        manualTurnModeVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
+        turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
       });
     }
     const outcome = acknowledgementResult(target, readyEvent, client.sessionConfigurationAcknowledgement);
@@ -397,7 +403,7 @@ async function qualifyTarget(
       acknowledgementMode: "none",
       acknowledgementSha256: null,
       toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
-      manualTurnModeVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
+      turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
     });
   } finally {
     unsubscribe?.();
@@ -412,7 +418,7 @@ function qualificationArtifactSha256(body: Omit<ProviderQualificationArtifact, "
 function expectedQualificationStatus(results: readonly ProviderQualificationResult[]): ProviderQualificationArtifact["status"] {
   if (results.some((result) => result.status === "failed")) return "failed";
   return results.some((result) => result.toolSchemaVerification === "requires_paid_response_canary"
-    || result.manualTurnModeVerification === "requires_paid_behavioral_canary")
+    || result.turnBoundaryVerification === "requires_paid_behavioral_canary")
     ? "conditional"
     : "passed";
 }
@@ -428,24 +434,24 @@ export function assertProviderQualificationArtifactIntegrity(
     throw new Error("provider qualification aggregate status is inconsistent");
   }
   for (const result of artifact.results) {
-    const conditionalManualTurn = result.code === "acknowledged_unverifiable_manual_turn";
-    if (conditionalManualTurn !== (result.provider === "xai"
+    const conditionalServerVad = result.code === "acknowledged_unverifiable_server_vad";
+    if (conditionalServerVad !== (result.provider === "xai"
       && result.status === "passed"
-      && result.acknowledgementMode === "conditional_manual_turn_echo"
-      && result.manualTurnModeVerification === "requires_paid_behavioral_canary")) {
-      throw new Error("provider qualification manual-turn classification is inconsistent");
+      && result.acknowledgementMode === "conditional_server_vad_echo"
+      && result.turnBoundaryVerification === "requires_paid_behavioral_canary")) {
+      throw new Error("provider qualification server-VAD classification is inconsistent");
     }
-    if (conditionalManualTurn && (
-      result.manualTurnModeEvidence?.requestedSettingSha256 !== XAI_MANUAL_TURN_SETTING_SHA256
-      || result.manualTurnModeEvidence.acknowledgement !== "exact_empty_object_omission"
-      || result.manualTurnModeEvidence.acknowledgedShape !== "empty_object"
-      || canonicalJson(result.manualTurnModeEvidence.omittedPaths) !== canonicalJson(["turn_detection.type"])
-    )) throw new Error("provider qualification manual-turn omission evidence is inconsistent");
+    if (conditionalServerVad && (
+      result.turnBoundaryEvidence?.requestedSettingSha256 !== XAI_SERVER_VAD_SETTING_SHA256
+      || result.turnBoundaryEvidence.acknowledgement !== "exact_empty_object_omission"
+      || result.turnBoundaryEvidence.acknowledgedShape !== "empty_object"
+      || canonicalJson(result.turnBoundaryEvidence.omittedPaths) !== canonicalJson(XAI_SERVER_VAD_OMITTED_PATHS)
+    )) throw new Error("provider qualification server-VAD omission evidence is inconsistent");
     if (result.provider === "xai"
       && result.status === "passed"
-      && result.manualTurnModeVerification !== "verified_by_provider_echo"
-      && result.manualTurnModeVerification !== "requires_paid_behavioral_canary") {
-      throw new Error("passing xAI provider qualification lacks manual-turn verification");
+      && result.turnBoundaryVerification !== "verified_by_provider_echo"
+      && result.turnBoundaryVerification !== "requires_paid_behavioral_canary") {
+      throw new Error("passing xAI provider qualification lacks server-VAD verification");
     }
   }
 }
@@ -703,9 +709,9 @@ export async function assertRecentPassingProviderQualificationBundle(input: Gate
 }>> {
   const qualification = await assertRecentProviderHandshakeQualification(input);
   if (qualification.results.some((result) => (
-    result.manualTurnModeVerification === "requires_paid_behavioral_canary"
+    result.turnBoundaryVerification === "requires_paid_behavioral_canary"
   ))) {
-    throw new Error("paid run requires a spoken manual-turn behavioral qualification; a no-audio tool canary cannot discharge this risk");
+    throw new Error("paid run requires a spoken server-VAD behavioral qualification; a no-audio tool canary cannot discharge this risk");
   }
   const responseToolCanary = qualification.status === "conditional"
     ? await assertRecentPassingResponseToolCanary(input)
