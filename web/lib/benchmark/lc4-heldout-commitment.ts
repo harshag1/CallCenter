@@ -8,7 +8,7 @@ export const LC4_HELDOUT_TEMPLATE_COUNT = 24 as const;
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[a-z][a-z0-9_.-]{1,95}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const MAX_CANONICAL_CORPUS_BYTES = 16 * 1024 * 1024;
 const MAX_JSON_DEPTH = 64;
 const MAX_JSON_NODES = 200_000;
