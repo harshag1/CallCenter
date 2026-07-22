@@ -669,6 +669,7 @@ function buildGeminiWireObservation(input: GeminiWireObservationBuildInput): Rea
 
 function geminiWireType(event: Readonly<Record<string, unknown>>): string {
   if (own(event, "setup")) return "setup";
+  if (own(event, "clientContent")) return "clientContent";
   if (isRecord(event.realtimeInput)) {
     if (own(event.realtimeInput, "activityStart")) return "realtimeInput.activityStart";
     if (own(event.realtimeInput, "audio")) return "realtimeInput.audio";
@@ -1286,6 +1287,29 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.startActivity();
     for (const chunk of chunks) this.appendInputAudio(chunk);
     this.commitInputAudio();
+  }
+
+  sendTextTurn(text: string): void {
+    this.requireReady();
+    if (this.inputOpen || this.responsePrepared) {
+      throw new Error("Gemini text turn requires no open audio activity or prepared response");
+    }
+    if (!text.trim() || Buffer.byteLength(text, "utf8") > 16 * 1024) {
+      throw new Error("Gemini text turn must be non-empty and at most 16384 UTF-8 bytes");
+    }
+    this.inputTranscriptAttributionAmbiguous = this.inputTurn > 0 && !this.inputProviderTranscriptFinished;
+    this.inputProviderTranscriptFinished = false;
+    this.inputTurn += 1;
+    this.inputTranscript.reset();
+    // Official Live API text-turn shape. Unlike realtimeInput.text inside an
+    // activityStart/activityEnd pair, turnComplete reliably triggers model
+    // generation without sending any caller-audio bytes.
+    this.sendReady({
+      clientContent: {
+        turns: [{ role: "user", parts: [{ text }] }],
+        turnComplete: true,
+      },
+    });
   }
 
   submitToolResults(results: readonly RealtimeToolResult[], createResponse = false): void {

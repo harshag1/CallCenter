@@ -452,6 +452,8 @@ export interface NormalizedRealtimeClient {
   /** Optional because not every provider can reconcile unheard assistant audio. */
   truncateOutputAudio?(target: RealtimeOutputAudioTruncation): void;
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void;
+  /** Optional provider-native text turn used by explicitly zero-audio probes. */
+  sendTextTurn?(text: string): void;
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean): void;
 }
 

@@ -338,6 +338,24 @@ describe("GeminiLiveClient", () => {
     ]);
   });
 
+  it("sends an official clientContent text turn without opening an audio activity", async () => {
+    const test = harness();
+    await connectReady(test);
+    test.socket.sent.length = 0;
+
+    test.client.sendTextTurn("Call capability_gateway exactly once.");
+
+    expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([{
+      clientContent: {
+        turns: [{ role: "user", parts: [{ text: "Call capability_gateway exactly once." }] }],
+        turnComplete: true,
+      },
+    }]);
+    expect(test.socket.sent.some((message) => message.includes("activityStart"))).toBe(false);
+    expect(test.socket.sent.some((message) => message.includes("activityEnd"))).toBe(false);
+    expect(test.socket.sent.some((message) => message.includes("realtimeInput"))).toBe(false);
+  });
+
   it("cannot serialize provider transcription through an extra canary option", () => {
     const setup = buildGeminiLiveSetup({
       model: "gemini-3.1-flash-live-preview",

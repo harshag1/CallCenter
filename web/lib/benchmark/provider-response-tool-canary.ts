@@ -6,6 +6,11 @@ import type {
   NormalizedRealtimeUsage,
   RealtimeWireObservation,
 } from "../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../realtime/client/types";
 
 export const RESPONSE_TOOL_CANARY_PROMPT = [
   "This is a provider tool-path canary, not a caller conversation.",
@@ -35,10 +40,6 @@ type Input = Readonly<{
   now?: () => Date;
 }>;
 
-type GeminiActivityClient = NormalizedRealtimeClient & Readonly<{
-  startActivity(): void;
-}>;
-
 function sanitizedEvent(event: NormalizedRealtimeEvent): Readonly<Record<string, unknown>> {
   if (event.type === "response.started" || event.type === "response.completed") {
     return Object.freeze({
@@ -59,7 +60,43 @@ function sanitizedEvent(event: NormalizedRealtimeEvent): Readonly<Record<string,
 }
 
 function controlledGatewayCall(event: NormalizedRealtimeEvent): Readonly<Record<string, unknown>> | null {
+  if (event.type === "tool.dispatch") {
+    if (event.wireObservation?.availability !== "observed") return null;
+    if (event.gateway !== LOCAL_TOOL_PROXY_FUNCTION_NAME || event.dispatches.length !== 1) return null;
+    const dispatch = event.dispatches[0]!;
+    const request = dispatch.request;
+    const providerCallId = request.params._meta[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY];
+    const provenance = request.params._meta[PROVIDER_PROVENANCE_META_KEY];
+    if (
+      request.method !== "tools/call"
+      || request.params.name !== "flow.get_state"
+      || request.params.arguments === null
+      || typeof request.params.arguments !== "object"
+      || Array.isArray(request.params.arguments)
+      || Object.keys(request.params.arguments).length !== 0
+      || providerCallId !== dispatch.callId
+      || provenance !== dispatch.provenance
+      || dispatch.provenance.nativeCallId !== dispatch.callId
+      || dispatch.provenance.nativeResponseId !== event.responseId
+    ) return null;
+    return Object.freeze({
+      evidenceKind: "provenance_bound_tool_dispatch",
+      provider: event.provider,
+      responseIdSha256: sha256Hex(event.responseId),
+      callIdSha256: sha256Hex(dispatch.callId),
+      gateway: event.gateway,
+      target: request.params.name,
+      argumentsSha256: sha256Hex(canonicalJson(request.params.arguments)),
+      terminalWireType: dispatch.provenance.terminalWireType,
+      wireObservationSha256: event.wireObservation.observationSha256,
+      provenanceSha256: sha256Hex(canonicalJson(dispatch.provenance)),
+    });
+  }
   if (event.type !== "tool.calls") return null;
+  // OpenAI-compatible adapters emit a stronger, host-authored tool.dispatch
+  // immediately after their raw normalized call. Waiting for it proves that
+  // provider IDs and the exact gateway request were bound before success.
+  if (event.provider === "openai" || event.provider === "xai") return null;
   if (event.wireObservation?.availability !== "observed") return null;
   const matching = event.calls.filter((call) => {
     if (call.name !== "capability_gateway" || call.argumentsJson === null || typeof call.argumentsJson !== "object") return false;
@@ -73,6 +110,7 @@ function controlledGatewayCall(event: NormalizedRealtimeEvent): Readonly<Record<
   if (matching.length !== 1 || event.calls.length !== 1) return null;
   const call = matching[0]!;
   return Object.freeze({
+    evidenceKind: "provider_tool_calls_without_dispatch_adapter",
     provider: event.provider,
     responseIdSha256: sha256Hex(event.responseId),
     callIdSha256: sha256Hex(call.callId),
@@ -85,16 +123,11 @@ function controlledGatewayCall(event: NormalizedRealtimeEvent): Readonly<Record<
 
 function triggerZeroAudioResponse(provider: LiveStsProvider, client: NormalizedRealtimeClient): void {
   if (provider === "gemini") {
-    const gemini = client as GeminiActivityClient;
-    if (typeof gemini.startActivity !== "function") throw new Error("Gemini canary requires explicit text-only activity support");
-    gemini.startActivity();
-    client.prepareResponse({
-      additionalInstructions: RESPONSE_TOOL_CANARY_PROMPT,
-      contextSha256: sha256Hex(RESPONSE_TOOL_CANARY_PROMPT),
-      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
-    });
-    // Gemini begins generation on activityEnd. No appendInputAudio call occurs.
-    client.commitInputAudio();
+    if (typeof client.sendTextTurn !== "function") throw new Error("Gemini canary requires provider-native text-turn support");
+    // clientContent.turnComplete is the official zero-audio text generation
+    // trigger. realtimeInput.text inside an empty audio activity can remain
+    // silent and therefore must not be used for this canary.
+    client.sendTextTurn(RESPONSE_TOOL_CANARY_PROMPT);
     return;
   }
   client.createResponse({
@@ -132,7 +165,12 @@ export async function executeProviderResponseToolCanary(input: Input): Promise<R
         evidenceSha256: sha256Hex(canonicalJson(controlled)),
       }));
       finish?.();
-    } else if (event.type === "tool.calls" || event.type === "response.completed" || (event.type === "error" && event.fatal)) {
+    } else if (
+      event.type === "tool.dispatch"
+      || (event.type === "tool.calls" && event.provider === "gemini")
+      || event.type === "response.completed"
+      || (event.type === "error" && event.fatal)
+    ) {
       terminalFailure = true;
       finish?.();
     }

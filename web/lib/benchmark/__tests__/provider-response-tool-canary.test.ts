@@ -6,6 +6,11 @@ import type {
   RealtimeEventListener,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../../realtime/client/types";
 
 class FakeCanaryClient implements NormalizedRealtimeClient {
   readonly provider;
@@ -13,15 +18,18 @@ class FakeCanaryClient implements NormalizedRealtimeClient {
   readonly #events = new Set<RealtimeEventListener>();
   readonly #wire = new Set<RealtimeWireObservationListener>();
   readonly #controlled: boolean;
+  readonly #emitDispatch: boolean;
   appendCalls = 0;
   createCalls = 0;
   startCalls = 0;
   prepareCalls = 0;
   commitCalls = 0;
+  textTurnCalls = 0;
 
-  constructor(provider: "openai" | "gemini" | "xai", controlled = true) {
+  constructor(provider: "openai" | "gemini" | "xai", controlled = true, emitDispatch = provider !== "gemini") {
     this.provider = provider;
     this.#controlled = controlled;
+    this.#emitDispatch = emitDispatch;
   }
 
   async connect(): Promise<void> { this.state = "ready"; }
@@ -36,6 +44,7 @@ class FakeCanaryClient implements NormalizedRealtimeClient {
   prepareResponse(): void { this.prepareCalls += 1; }
   commitInputAudio(): void { this.commitCalls += 1; this.emitCall(); }
   createResponse(): void { this.createCalls += 1; this.emitCall(); }
+  sendTextTurn(): void { this.textTurnCalls += 1; this.emitCall(); }
 
   private emitCall(): void {
     queueMicrotask(() => {
@@ -85,6 +94,47 @@ class FakeCanaryClient implements NormalizedRealtimeClient {
           terminalWireType: "response.function_call_arguments.done",
         }],
       } as NormalizedRealtimeEvent);
+      if (this.provider !== "gemini" && this.#emitDispatch) {
+        const provenance = Object.freeze({
+          schemaVersion: 1 as const,
+          provider: this.provider,
+          nativeCallId: "provider-call-secret",
+          nativeResponseId: "provider-response-secret",
+          terminalWireType: "response.function_call_arguments.done",
+        });
+        for (const listener of this.#events) listener({
+          type: "tool.dispatch",
+          provider: this.provider,
+          receivedAtMs: 1,
+          wireType: "response.function_call_arguments.done",
+          responseId: "provider-response-secret",
+          wireObservation: {
+            availability: "observed",
+            connectionEpoch: 1,
+            sequence: 1,
+            observationSha256: observation.observationSha256,
+            payloadSha256: observation.payloadSha256,
+            projectionSha256: observation.projectionSha256,
+            callIdSha256: observation.identities.callIdSha256,
+          },
+          gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          dispatches: [{
+            callId: "provider-call-secret",
+            provenance,
+            request: {
+              method: "tools/call",
+              params: {
+                name: this.#controlled ? "flow.get_state" : "world.place_order",
+                arguments: {},
+                _meta: {
+                  [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "provider-call-secret",
+                  [PROVIDER_PROVENANCE_META_KEY]: provenance,
+                },
+              },
+            },
+          }],
+        } as NormalizedRealtimeEvent);
+      }
     });
   }
 }
@@ -107,7 +157,7 @@ describe("paid response/tool-call canary executor", () => {
     expect(JSON.stringify(result)).not.toContain("provider-response-secret");
   });
 
-  it("uses Gemini text-only activity preparation and never appends audio", async () => {
+  it("uses Gemini provider-native clientContent text turn and never opens an audio activity", async () => {
     const client = new FakeCanaryClient("gemini");
     const result = await executeProviderResponseToolCanary({
       provider: "gemini",
@@ -116,11 +166,18 @@ describe("paid response/tool-call canary executor", () => {
       timeoutMs: 1_000,
     });
     expect(result.status).toBe("passed");
-    expect(client).toMatchObject({ startCalls: 1, prepareCalls: 1, commitCalls: 1, appendCalls: 0, createCalls: 0 });
+    expect(client).toMatchObject({
+      textTurnCalls: 1,
+      startCalls: 0,
+      prepareCalls: 0,
+      commitCalls: 0,
+      appendCalls: 0,
+      createCalls: 0,
+    });
   });
 
   it("fails closed on a different gateway target", async () => {
-    const client = new FakeCanaryClient("openai", false);
+    const client = new FakeCanaryClient("openai", false, true);
     const result = await executeProviderResponseToolCanary({
       provider: "openai",
       model: "openai-model",
@@ -128,6 +185,18 @@ describe("paid response/tool-call canary executor", () => {
       timeoutMs: 1_000,
     });
     expect(result).toMatchObject({ status: "failed", code: "response_generation_failed", callerAudioBytes: 0 });
+    expect(result.providerToolCallEvidenceSha256).toBeNull();
+  });
+
+  it("does not accept an OpenAI-compatible raw tool.calls view without provenance-bound dispatch", async () => {
+    const client = new FakeCanaryClient("openai", true, false);
+    const result = await executeProviderResponseToolCanary({
+      provider: "openai",
+      model: "openai-model",
+      client,
+      timeoutMs: 1_000,
+    });
+    expect(result).toMatchObject({ status: "failed", code: "tool_call_not_observed", callerAudioBytes: 0 });
     expect(result.providerToolCallEvidenceSha256).toBeNull();
   });
 });
