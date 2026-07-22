@@ -1,4 +1,8 @@
 import type { BrowserRealtimeConnection } from "@/lib/realtime/types";
+import type {
+  OutboundSpeechGate,
+  OutboundSpeechGateDecision,
+} from "@/lib/realtime/outbound-speech-gate";
 
 export const BROWSER_REALTIME_LIMITS = Object.freeze({
   providerEventBytes: 1024 * 1024,
@@ -20,12 +24,53 @@ export type RealtimeTransportHandlers = {
   onClose: () => void;
 };
 
+export type BrowserOutboundSpeechPlayoutRange = Readonly<{
+  /** Byte offsets into the exact aggregate whose SHA-256 is on the gate decision. */
+  byteStart: number;
+  byteEnd: number;
+  sampleRateHz: number;
+  audioContextStartSeconds: number;
+  audioContextEndSeconds: number;
+}>;
+
+export type BrowserOutboundSpeechGateEvidence = Readonly<{
+  schemaVersion: 1;
+  provider: "openai" | "xai" | "gemini";
+  responseId: string;
+  /** This copy deliberately excludes quarantined audio bytes. */
+  decision: Omit<OutboundSpeechGateDecision, "audio">;
+  playout:
+    | Readonly<{
+      status: "released_to_audio_context";
+      /** Exact ranges scheduled; this is not a claim that a physical speaker rendered them. */
+      evidenceLevel: "audio_context_schedule";
+      audioSha256: string;
+      audioBytes: number;
+      ranges: readonly BrowserOutboundSpeechPlayoutRange[];
+    }>
+    | Readonly<{
+      status: "suppressed_before_playout";
+      regenerationRequested: boolean;
+    }>;
+}>;
+
+export type BrowserOutboundSpeechGateConfig = Readonly<{
+  gate: OutboundSpeechGate;
+  onEvidence: (evidence: BrowserOutboundSpeechGateEvidence) => void;
+  /** Host-owned repair path; receives hashes/rule IDs only, never held audio or transcript text. */
+  onRegenerationRequired?: (
+    decision: Omit<OutboundSpeechGateDecision, "audio">,
+  ) => void | Promise<void>;
+}>;
+
 export type RealtimeTransportStart = {
   connection: BrowserRealtimeConnection;
   mic: MediaStream;
   audioContext: AudioContext;
   /** Present only after the caller explicitly consents to local recording. */
   recordingDestination?: MediaStreamAudioDestinationNode;
+  /** When present, provider speech must pass this quarantine before browser playout. */
+  outboundSpeechGate?: BrowserOutboundSpeechGateConfig;
   handlers: RealtimeTransportHandlers;
 };
 
@@ -259,7 +304,7 @@ export function resampleMono(samples: Float32Array, sourceRate: number, targetRa
   return output;
 }
 
-function decodePcm16Base64(base64: string): Int16Array {
+export function decodePcm16Base64(base64: string): Uint8Array {
   if (!base64 || base64.length > BROWSER_REALTIME_LIMITS.base64AudioCharacters || base64.length % 4 !== 0) {
     throw new Error("provider audio base64 has an invalid length");
   }
@@ -275,19 +320,30 @@ function decodePcm16Base64(base64: string): Int16Array {
   if (binary.length === 0 || binary.length % 2 !== 0) {
     throw new Error("provider PCM16 audio must contain a positive even number of bytes");
   }
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
-export function playPcm16(
-  base64: string,
+export type ScheduledPcm16Playback = Readonly<{
+  byteLength: number;
+  sampleRateHz: number;
+  audioContextStartSeconds: number;
+  audioContextEndSeconds: number;
+}>;
+
+export function playPcm16Bytes(
+  bytes: Uint8Array,
   context: AudioContext,
   destination: MediaStreamAudioDestinationNode | undefined,
   state: PlaybackState,
   sampleRate = 24_000,
-) {
+): ScheduledPcm16Playback {
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new Error("provider audio sample rate must be positive");
-  const pcm = decodePcm16Base64(base64);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength % 2 !== 0) {
+    throw new Error("provider PCM16 audio must contain a positive even number of bytes");
+  }
+  const copied = new Uint8Array(bytes.byteLength);
+  copied.set(bytes);
+  const pcm = new Int16Array(copied.buffer);
   const floats = Float32Array.from(pcm, (value) => value / 32768);
   const buffer = context.createBuffer(1, floats.length, sampleRate);
   buffer.copyToChannel(floats, 0);
@@ -296,7 +352,8 @@ export function playPcm16(
   source.connect(context.destination);
   if (destination) source.connect(destination);
   state.playhead = Math.max(state.playhead, context.currentTime + 0.05);
-  source.start(state.playhead);
+  const audioContextStartSeconds = state.playhead;
+  source.start(audioContextStartSeconds);
   state.playhead += buffer.duration;
   while (state.scheduled.length >= BROWSER_REALTIME_LIMITS.playbackSources) {
     const oldest = state.scheduled.shift();
@@ -304,6 +361,22 @@ export function playPcm16(
   }
   state.scheduled.push(source);
   source.onended = () => { state.scheduled = state.scheduled.filter((candidate) => candidate !== source); };
+  return Object.freeze({
+    byteLength: copied.byteLength,
+    sampleRateHz: sampleRate,
+    audioContextStartSeconds,
+    audioContextEndSeconds: state.playhead,
+  });
+}
+
+export function playPcm16(
+  base64: string,
+  context: AudioContext,
+  destination: MediaStreamAudioDestinationNode | undefined,
+  state: PlaybackState,
+  sampleRate = 24_000,
+): ScheduledPcm16Playback {
+  return playPcm16Bytes(decodePcm16Base64(base64), context, destination, state, sampleRate);
 }
 
 export function interruptPlayback(context: AudioContext, state: PlaybackState) {

@@ -10,6 +10,11 @@ import {
   type BrowserCapabilityGatewayResult,
 } from "./capability-gateway";
 import {
+  BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT,
+  finalizeQuarantinedSpeech,
+  pushQuarantinedPcm16Base64,
+} from "./outbound-speech";
+import {
   boundedProviderText,
   interruptPlayback,
   parseBoundedProviderEvent,
@@ -221,6 +226,12 @@ export class GeminiWebSocketTransport implements BrowserRealtimeTransport {
   private readiness: GeminiBrowserSetupReadinessEvidence | null = null;
   private starting = false;
   private stopped = false;
+  private speechResponseSequence = 0;
+  private activeSpeechResponseId: string | null = null;
+  private speechFinalizationTail: Promise<void> = Promise.resolve();
+  private gatedSpeechTranscripts = new Map<string, string>();
+
+  readonly outboundSpeechGateSupport = BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT.gemini;
 
   get setupReadinessEvidence(): GeminiBrowserSetupReadinessEvidence | null {
     if (!this.readiness) return null;
@@ -392,7 +403,20 @@ export class GeminiWebSocketTransport implements BrowserRealtimeTransport {
         if (isRecord(server?.outputTranscription) && server.outputTranscription.text !== undefined) {
           try {
             const text = boundedProviderText(server.outputTranscription.text, "Gemini output transcript");
-            if (text !== undefined) args.handlers.onTranscript("agent", text);
+            if (text !== undefined) {
+              if (args.outboundSpeechGate) {
+                this.activeSpeechResponseId ??= `gemini-browser-response-${++this.speechResponseSequence}`;
+                this.gatedSpeechTranscripts.set(this.activeSpeechResponseId, text);
+                args.outboundSpeechGate.gate.pushProviderTranscript(
+                  "gemini",
+                  this.activeSpeechResponseId,
+                  text,
+                  server?.turnComplete === true,
+                );
+              } else {
+                args.handlers.onTranscript("agent", text);
+              }
+            }
           } catch (error) { args.handlers.onError(new Error(safeMessage(error))); }
         }
         const modelTurn = isRecord(server?.modelTurn) ? server.modelTurn : undefined;
@@ -405,10 +429,48 @@ export class GeminiWebSocketTransport implements BrowserRealtimeTransport {
             continue;
           }
           try {
-            playPcm16(inline.data, args.audioContext, args.recordingDestination, this.playback);
+            if (args.outboundSpeechGate) {
+              this.activeSpeechResponseId ??= `gemini-browser-response-${++this.speechResponseSequence}`;
+              pushQuarantinedPcm16Base64(
+                args.outboundSpeechGate,
+                "gemini",
+                this.activeSpeechResponseId,
+                inline.data,
+              );
+            } else {
+              playPcm16(inline.data, args.audioContext, args.recordingDestination, this.playback);
+            }
           } catch (error) {
             args.handlers.onError(new Error(safeMessage(error)));
           }
+        }
+        if (args.outboundSpeechGate && this.activeSpeechResponseId
+          && (server?.turnComplete === true || server?.interrupted === true)) {
+          const responseId = this.activeSpeechResponseId;
+          this.activeSpeechResponseId = null;
+          const pending = this.speechFinalizationTail.then(async () => {
+            const evidence = await finalizeQuarantinedSpeech({
+              config: args.outboundSpeechGate!,
+              provider: "gemini",
+              responseId,
+              terminalStatus: server?.interrupted === true ? "interrupted" : "completed",
+              audioContext: args.audioContext,
+              recordingDestination: args.recordingDestination,
+              playback: this.playback,
+              isTransportActive: () => !this.stopped && this.socket === socket,
+            });
+            const transcript = this.gatedSpeechTranscripts.get(responseId);
+            this.gatedSpeechTranscripts.delete(responseId);
+            if (evidence.decision.action === "release" && transcript !== undefined) {
+              args.handlers.onTranscript("agent", transcript);
+            }
+          });
+          this.speechFinalizationTail = pending.catch(() => undefined);
+          void pending.catch((error) => {
+            if (this.stopped || this.socket !== socket) return;
+            args.handlers.onError(new Error(safeMessage(error)));
+            try { socket.close(1002, "Gemini outbound speech gate failed"); } catch { /* already closed */ }
+          });
         }
         if (isRecord(event.toolCall) && own(event.toolCall, "functionCalls")) {
           let calls: GeminiFunctionCall[];
@@ -518,6 +580,8 @@ export class GeminiWebSocketTransport implements BrowserRealtimeTransport {
     this.source = null;
     this.mute = null;
     this.audioContext = null;
+    this.activeSpeechResponseId = null;
+    this.gatedSpeechTranscripts.clear();
     if (this.socket) {
       this.socket.onopen = null;
       this.socket.onmessage = null;

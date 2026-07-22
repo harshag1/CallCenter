@@ -154,6 +154,21 @@ afterEach(() => {
 });
 
 describe("OpenAI browser WebRTC transport", () => {
+  it("fails closed before network or WebRTC side effects when PCM quarantine is requested", async () => {
+    const network = installFetch(async () => new Response("v=0\r\no=answer"));
+    const test = harness();
+    test.args.outboundSpeechGate = {
+      gate: {} as NonNullable<RealtimeTransportStart["outboundSpeechGate"]>["gate"],
+      onEvidence: vi.fn(),
+    };
+    const transport = new OpenAIWebRtcTransport();
+
+    await expect(transport.start(test.args)).rejects.toThrow("remote audio bypasses PCM quarantine");
+    expect(network.fetchMock).not.toHaveBeenCalled();
+    expect(FakePeer.instances).toHaveLength(0);
+    expect(transport.outboundSpeechGateSupport.supported).toBe(false);
+  });
+
   it("bounds SDP, waits for the data channel, and validates transcript events", async () => {
     vi.stubGlobal("RTCPeerConnection", FakePeer);
     vi.stubGlobal("window", { setTimeout, clearTimeout });

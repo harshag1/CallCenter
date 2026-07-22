@@ -5,6 +5,7 @@ import {
   XaiWebSocketTransport,
 } from "./xai-websocket";
 import type { RealtimeTransportStart } from "./types";
+import { OutboundSpeechGate, createOutboundSpeechGatePolicy } from "@/lib/realtime/outbound-speech-gate";
 
 const INITIAL_CATALOG_DIGEST = "a".repeat(64);
 const RESULT_CATALOG_DIGEST = "3abcd5265643ebb4c444771637530b52cde40c255231d25e0dd15f267a971154";
@@ -324,6 +325,64 @@ describe("xAI browser transport", () => {
     }));
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("xai-live-secret");
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("alice@example.test");
+  });
+
+  it("quarantines xAI PCM until the terminal response passes the configured gate", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const source = { buffer: null, connect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null };
+    const createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
+      duration: length / rate,
+      copyToChannel: vi.fn(),
+    }));
+    Object.assign(test.audioContext, {
+      createBuffer,
+      createBufferSource: vi.fn(() => source),
+    });
+    const onEvidence = vi.fn();
+    test.args.outboundSpeechGate = {
+      gate: new OutboundSpeechGate({
+        policy: createOutboundSpeechGatePolicy({ evidencePolicy: "provider_transcript_allowed" }),
+      }),
+      onEvidence,
+    };
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(acknowledged());
+    await started;
+
+    socket.receive({ type: "response.created", response: { id: "speech-1" } });
+    socket.receive({
+      type: "response.audio.delta",
+      response_id: "speech-1",
+      delta: Buffer.from([1, 0, 2, 0]).toString("base64"),
+    });
+    expect(createBuffer).not.toHaveBeenCalled();
+    socket.receive({
+      type: "response.audio_transcript.done",
+      response_id: "speech-1",
+      transcript: "The safe answer",
+    });
+    expect(test.handlers.onTranscript).not.toHaveBeenCalled();
+    socket.receive({
+      type: "response.done",
+      response: { id: "speech-1", status: "completed", output: [] },
+    });
+
+    await vi.waitFor(() => expect(onEvidence).toHaveBeenCalledTimes(1));
+    expect(createBuffer).toHaveBeenCalledTimes(1);
+    expect(onEvidence.mock.calls[0][0]).toMatchObject({
+      provider: "xai",
+      responseId: "speech-1",
+      decision: { action: "release", evidenceCoverage: "provider_transcript_unbound" },
+      playout: { status: "released_to_audio_context", audioBytes: 4 },
+    });
+    expect(test.handlers.onTranscript).toHaveBeenCalledWith("agent", "The safe answer");
+    await transport.stop();
   });
 
   it("rejects start promptly when stopped while waiting for session acknowledgement", async () => {

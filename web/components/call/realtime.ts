@@ -11,6 +11,7 @@ import {
   BoundedQueue,
   BROWSER_REALTIME_LIMITS,
   utf8Bytes,
+  type BrowserOutboundSpeechGateConfig,
   type BrowserRealtimeTransport,
 } from "./providers/types";
 
@@ -106,6 +107,8 @@ export class RealtimeCall {
     flowId?: string | null;
     /** Must come from an affirmative user action after displaying the named notice. */
     recordingConsent?: RecordingConsent;
+    /** Optional host-owned outbound speech quarantine; unsupported transports fail closed. */
+    outboundSpeechGate?: BrowserOutboundSpeechGateConfig;
   } = {}): Promise<void> {
     if (this.callId || this.context || this.transport || this.stopPromise || this.stopping) {
       throw new Error("realtime call is already started or ended");
@@ -198,6 +201,15 @@ export class RealtimeCall {
         mic: this.mic,
         audioContext: this.context,
         recordingDestination,
+        ...(opts.outboundSpeechGate ? {
+          outboundSpeechGate: {
+            ...opts.outboundSpeechGate,
+            onEvidence: (evidence) => {
+              this.queueEvent("outbound_speech_gate", evidence);
+              opts.outboundSpeechGate!.onEvidence(evidence);
+            },
+          },
+        } : {}),
         handlers: {
           onTranscript: (who, text) => {
             if (!text.trim()) return;

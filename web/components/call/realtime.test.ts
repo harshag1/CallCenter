@@ -15,7 +15,11 @@ vi.mock("./providers", () => ({
 vi.mock("@/lib/recording-privacy", async () => import("../../lib/recording-privacy"));
 
 import { RealtimeCall } from "./realtime";
-import type { RealtimeTransportStart } from "./providers/types";
+import { OutboundSpeechGate, createOutboundSpeechGatePolicy } from "@/lib/realtime/outbound-speech-gate";
+import type {
+  BrowserOutboundSpeechGateEvidence,
+  RealtimeTransportStart,
+} from "./providers/types";
 
 const CALL_ID = "00000000-0000-4000-8000-000000000021";
 const CONSENT_ID = "00000000-0000-4000-8000-000000000022";
@@ -157,6 +161,64 @@ describe("browser realtime call privacy and lifecycle", () => {
 
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/recording"))).toBe(false);
     expect(handlers.onState.mock.calls.map(([state]) => state)).toEqual(["connecting", "live", "ended"]);
+  });
+
+  it("forwards the host gate and persists its content-free playout evidence", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const onEvidence = vi.fn();
+    const gate = new OutboundSpeechGate({
+      policy: createOutboundSpeechGatePolicy({ evidencePolicy: "provider_transcript_allowed" }),
+    });
+    const call = new RealtimeCall({ onTranscript: vi.fn(), onState: vi.fn() });
+    await call.start("agent-id", { outboundSpeechGate: { gate, onEvidence } });
+    const start = mocks.transport.start.mock.calls[0][0] as RealtimeTransportStart;
+    expect(start.outboundSpeechGate?.gate).toBe(gate);
+    const evidence = {
+      schemaVersion: 1,
+      provider: "xai",
+      responseId: "response-1",
+      decision: {
+        schemaVersion: 1,
+        responseId: "response-1",
+        provider: "xai",
+        action: "release",
+        reason: "policy_pass",
+        evidenceCoverage: "exact_buffered_pcm",
+        audioSha256: "a".repeat(64),
+        audioBytes: 4,
+        audioDurationMs: 1,
+        providerTranscriptSha256: null,
+        independentAsrTranscriptSha256: "b".repeat(64),
+        independentAsrReceiptSha256: "c".repeat(64),
+        violations: [],
+        collectionLatencyMs: 2,
+        decisionLatencyMs: 3,
+      },
+      playout: {
+        status: "released_to_audio_context",
+        evidenceLevel: "audio_context_schedule",
+        audioSha256: "a".repeat(64),
+        audioBytes: 4,
+        ranges: [{
+          byteStart: 0,
+          byteEnd: 4,
+          sampleRateHz: 24_000,
+          audioContextStartSeconds: 1,
+          audioContextEndSeconds: 1.001,
+        }],
+      },
+    } satisfies BrowserOutboundSpeechGateEvidence;
+    start.outboundSpeechGate?.onEvidence(evidence);
+    await call.stop();
+
+    expect(onEvidence).toHaveBeenCalledWith(evidence);
+    const events = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/events"))
+      .flatMap(([, init]) => (JSON.parse(String(init?.body)) as {
+        events: { type: string; payload: unknown }[];
+      }).events);
+    expect(events).toContainEqual({ type: "outbound_speech_gate", payload: evidence });
   });
 
   it("binds opted-in capture and upload to the exact consent receipt", async () => {

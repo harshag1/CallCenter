@@ -5,6 +5,12 @@ import {
 } from "./capability-gateway";
 import { OpenAICompatibleBrowserToolLoop } from "./openai-compatible-tools";
 import {
+  BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT,
+  boundedSpeechResponseId,
+  finalizeQuarantinedSpeech,
+  pushQuarantinedPcm16Base64,
+} from "./outbound-speech";
+import {
   BROWSER_REALTIME_LIMITS,
   boundedProviderBase64,
   boundedProviderEventType,
@@ -34,6 +40,19 @@ function safeError(error: unknown): Error {
 
 function record(value: unknown): Record<string, unknown> {
   return isPlainRecord(value) ? value : {};
+}
+
+function xaiSpeechResponseId(event: Record<string, unknown>, fallback?: string): string {
+  const response = record(event.response);
+  return boundedSpeechResponseId(event.response_id ?? response.id ?? fallback, "xAI speech response id");
+}
+
+function xaiTerminalStatus(event: Record<string, unknown>): "completed" | "cancelled" | "failed" | "incomplete" {
+  const status = record(event.response).status ?? event.status;
+  if (status === "completed" || status === "cancelled" || status === "failed" || status === "incomplete") {
+    return status;
+  }
+  throw new Error("xAI speech response had an unknown terminal status");
 }
 
 function validatedConnection(value: RealtimeTransportStart["connection"]): XaiBrowserConnection {
@@ -129,6 +148,11 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
   private cancelPendingStart: ((error: Error) => void) | null = null;
   private starting = false;
   private stopped = false;
+  private activeSpeechResponseId: string | null = null;
+  private speechFinalizationTail: Promise<void> = Promise.resolve();
+  private gatedSpeechTranscripts = new Map<string, string>();
+
+  readonly outboundSpeechGateSupport = BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT.xai;
 
   get sessionReadinessEvidence(): XaiBrowserSessionReadinessEvidence | null {
     return this.readiness ? Object.freeze({ ...this.readiness }) : null;
@@ -279,11 +303,67 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
           }
           return;
         }
+        if (args.outboundSpeechGate) {
+          try {
+            if (type === "response.created") {
+              const responseId = xaiSpeechResponseId(event);
+              if (this.activeSpeechResponseId && this.activeSpeechResponseId !== responseId) {
+                throw new Error("xAI started overlapping speech responses");
+              }
+              args.outboundSpeechGate.gate.beginResponse("xai", responseId);
+              this.activeSpeechResponseId = responseId;
+            } else if (type === "response.output_audio.delta" || type === "response.audio.delta") {
+              const responseId = xaiSpeechResponseId(event, this.activeSpeechResponseId ?? undefined);
+              const delta = boundedProviderBase64(event.delta, "xAI output audio delta");
+              if (delta) pushQuarantinedPcm16Base64(args.outboundSpeechGate, "xai", responseId, delta);
+            } else if (type === "response.output_audio_transcript.done" || type === "response.audio_transcript.done") {
+              const responseId = xaiSpeechResponseId(event, this.activeSpeechResponseId ?? undefined);
+              const transcript = boundedProviderText(event.transcript, "xAI output transcript");
+              if (transcript !== undefined) {
+                args.outboundSpeechGate.gate.pushProviderTranscript("xai", responseId, transcript, true);
+                this.gatedSpeechTranscripts.set(responseId, transcript);
+              }
+            } else if (type === "response.done") {
+              const responseId = xaiSpeechResponseId(event, this.activeSpeechResponseId ?? undefined);
+              const terminalStatus = xaiTerminalStatus(event);
+              this.activeSpeechResponseId = null;
+              const pending = this.speechFinalizationTail.then(async () => {
+                const evidence = await finalizeQuarantinedSpeech({
+                  config: args.outboundSpeechGate!,
+                  provider: "xai",
+                  responseId,
+                  terminalStatus,
+                  audioContext: args.audioContext,
+                  recordingDestination: args.recordingDestination,
+                  playback: this.playback,
+                  isTransportActive: () => !this.stopped && this.socket === socket,
+                });
+                const transcript = this.gatedSpeechTranscripts.get(responseId);
+                this.gatedSpeechTranscripts.delete(responseId);
+                if (evidence.decision.action === "release" && transcript !== undefined) {
+                  args.handlers.onTranscript("agent", transcript);
+                }
+              });
+              this.speechFinalizationTail = pending.catch(() => undefined);
+              void pending.catch((error) => {
+                if (this.stopped || this.socket !== socket) return;
+                args.handlers.onError(safeError(error));
+                try { socket.close(1002, "xAI outbound speech gate failed"); } catch { /* already closed */ }
+              });
+            }
+          } catch (error) {
+            args.handlers.onError(safeError(error));
+            try { socket.close(1002, "xAI outbound speech gate rejected provider output"); } catch { /* already closed */ }
+            return;
+          }
+        }
         if (type === "response.output_audio.delta" || type === "response.audio.delta") {
           if (event.delta === undefined) return;
           try {
             const delta = boundedProviderBase64(event.delta, "xAI output audio delta");
-            if (delta) playPcm16(delta, args.audioContext, args.recordingDestination, this.playback);
+            if (delta && !args.outboundSpeechGate) {
+              playPcm16(delta, args.audioContext, args.recordingDestination, this.playback);
+            }
           } catch (error) { args.handlers.onError(safeError(error)); }
         } else if (type === "input_audio_buffer.speech_started") {
           interruptPlayback(args.audioContext, this.playback);
@@ -295,7 +375,9 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
         } else if (type === "response.output_audio_transcript.done" || type === "response.audio_transcript.done") {
           try {
             const transcript = boundedProviderText(event.transcript, "xAI output transcript");
-            if (transcript !== undefined) args.handlers.onTranscript("agent", transcript);
+            if (transcript !== undefined && !args.outboundSpeechGate) {
+              args.handlers.onTranscript("agent", transcript);
+            }
           } catch (error) { args.handlers.onError(safeError(error)); }
         } else if (type === "error") {
           // Never surface provider-controlled text: upstream failures may contain caller PII
@@ -341,6 +423,8 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
     this.source = null;
     this.mute = null;
     this.audioContext = null;
+    this.activeSpeechResponseId = null;
+    this.gatedSpeechTranscripts.clear();
     if (this.socket) {
       this.socket.onopen = null;
       this.socket.onmessage = null;

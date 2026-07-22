@@ -35,7 +35,7 @@ Decisions contain hashes, safe rule IDs, and secret fingerprints. They never
 contain provider/ASR transcript text or raw configured secrets. Callers must
 also avoid logging the in-memory policy object, ASR input, or raw ASR receipt.
 
-## Current provider integration gaps
+## Browser integration status
 
 - The server-side OpenAI/xAI normalized client emits `output.audio`, final
   `output.transcript`, and `response.completed`. It is structurally compatible,
@@ -43,18 +43,31 @@ also avoid logging the in-memory policy object, ASR input, or raw ASR receipt.
 - The server-side Gemini client emits the same normalized event classes.
   Provider transcription is disabled by default, so independent played-PCM ASR
   is the required evidence source.
-- The browser xAI adapter calls `playPcm16` immediately on every output-audio
-  delta. That direct call must be replaced by response-scoped quarantine.
-- The browser Gemini adapter likewise calls `playPcm16` on every inline PCM
-  part before its independently ordered output transcript is complete.
+- The browser xAI and Gemini adapters support response-scoped quarantine when
+  `RealtimeTransportStart.outboundSpeechGate` is present. They buffer every PCM
+  chunk, finalize only at `response.done` / `turnComplete`, and schedule only
+  released bytes. Agent output transcripts are held on the same response
+  boundary, so rejected speech is not copied into the UI or `agent_said` audit
+  event first. `RealtimeCall` persists the content-free gate evidence in its
+  existing audit event stream.
+- Each release receipt binds the decision's aggregate audio SHA-256 and byte
+  count to exact byte offsets and `AudioContext` scheduled time ranges. Its
+  evidence level is deliberately `audio_context_schedule`: a browser cannot
+  prove that a physical speaker rendered sound or that a human heard it.
+- A `suppress_and_regenerate` decision invokes the optional host-owned repair
+  callback with hashes and safe rule IDs only; the rejected audio is never
+  exposed to that callback or playout.
 - The browser OpenAI WebRTC adapter connects the remote media source directly
-  to `AudioContext.destination`. A real enforcement integration must replace
-  that connection with a capture/worklet buffer or use a server WebSocket audio
-  path. Observing the data-channel transcript while the media track remains
-  connected is not enforcement.
+  to `AudioContext.destination`. It therefore rejects startup before gateway,
+  WebRTC, or network side effects whenever an outbound gate is requested. A
+  real enforcement integration must replace that connection with a
+  capture/worklet buffer or use a server WebSocket audio path. Observing the
+  data-channel transcript while the media track remains connected is not
+  enforcement.
 
-Until those paths are rewired and integration-tested, the module is an isolated
-primitive and the product must not claim that caller playout is guarded.
+The option is not enabled by default because the product must supply an
+independent ASR implementation and policy. Calls without the option retain the
+legacy direct-playout behavior and must not be described as speech-guarded.
 
 ## Security boundary
 

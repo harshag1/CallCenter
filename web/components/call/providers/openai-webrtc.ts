@@ -1,6 +1,7 @@
 import type { OpenAIBrowserConnection } from "@/lib/realtime/types";
 import { BrowserCapabilityGateway } from "./capability-gateway";
 import { OpenAICompatibleBrowserToolLoop } from "./openai-compatible-tools";
+import { BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT } from "./outbound-speech";
 import {
   BROWSER_REALTIME_LIMITS,
   boundedProviderEventType,
@@ -57,11 +58,20 @@ export class OpenAIWebRtcTransport implements BrowserRealtimeTransport {
   private stopped = false;
   private closeReported = false;
 
+  readonly outboundSpeechGateSupport = BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT.openai;
+
   async start(args: RealtimeTransportStart) {
     if (this.starting || this.peer || this.channel || this.gateway) {
       throw new Error("OpenAI WebRTC transport is already started");
     }
     const connection = validatedConnection(args.connection);
+    if (args.outboundSpeechGate) {
+      // The remote MediaStream currently reaches AudioContext directly. Observing the
+      // provider transcript on the data channel cannot prove coverage of those bytes.
+      throw new Error(
+        "OpenAI WebRTC outbound speech gate is unsupported: remote audio bypasses PCM quarantine",
+      );
+    }
     const gateway = new BrowserCapabilityGateway({
       provider: "openai",
       url: connection.toolProxyUrl,
