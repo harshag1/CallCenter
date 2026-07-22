@@ -10,7 +10,8 @@ type SkipInventoryEntry = Readonly<{
   condition: string;
   reason_category:
     | "missing_postgresql_integration_environment"
-    | "missing_postgresql_admin_integration_environment";
+    | "missing_postgresql_admin_integration_environment"
+    | "missing_local_asr_integration_environment";
   gate0_disposition: "must_run";
 }>;
 
