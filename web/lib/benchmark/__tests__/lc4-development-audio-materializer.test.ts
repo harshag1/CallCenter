@@ -13,13 +13,20 @@ import {
   createLc4DevCallerAudioLoader,
   createPinnedMacOsLc4DevAudioRenderer,
   materializeLc4DevelopmentAudio,
+  type Lc4DevAudioManifest,
   type Lc4DevAudioRenderer,
+  type Lc4DevRepairAudioManifest,
 } from "../lc4-development-audio-materializer";
 import {
   LC4_DEV_CALLER_BRANCH_SOURCE_MATRIX_SHA256,
   LC4_DEV_PRIOR_MUTATION_OUTCOMES,
   createLc4DevCallerBranchMatrixArtifact,
 } from "../lc4-development-caller-branch";
+import {
+  LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+  LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
+  LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+} from "../lc4-development-audio-contract";
 const roots: string[] = [];
 
 function pcm(sampleRate: 16_000 | 24_000 | 48_000, seed: number): Uint8Array {
@@ -71,6 +78,12 @@ describe("LC4-DEV audio materializer", () => {
     const outputRoot = join(parent, "published");
     const result = await materializeLc4DevelopmentAudio({ outputRoot, renderer: renderer() });
     expect(() => assertLc4DevAudioArtifacts(result)).not.toThrow();
+    expect(result.manifest).toMatchObject({
+      schema_version: 2,
+      audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+      audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+      audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
+    });
     expect(result.manifest.canonical_sources).toHaveLength(60);
     expect(result.manifest.caller_audio_bindings).toHaveLength(180);
     expect(result.manifest.branch_sources).toHaveLength(4);
@@ -162,5 +175,60 @@ describe("LC4-DEV audio materializer", () => {
       ffmpeg_path: "/usr/bin/false",
       ffmpeg_sha256: "0".repeat(64),
     })).rejects.toThrow("macOS say executable hash mismatch");
+  }, 30_000);
+
+  it("rejects internally rehashed stale provider, delivery, packetizer, and rendition commitments", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-stale-contract-"));
+    roots.push(parent);
+    const result = await materializeLc4DevelopmentAudio({ outputRoot: join(parent, "published"), renderer: renderer() });
+    type MutableManifest = {
+      manifest_sha256: string;
+      repair_manifest_sha256: string;
+      provider_profile_manifest_sha256: string;
+      audio_delivery_profile_sha256: string;
+      audio_packetizer_contract_sha256: string;
+      canonical_sources: Array<{ provider_renditions: { openai: { provider_profile_sha256: string } } }>;
+      [key: string]: unknown;
+    };
+    type MutableRepairs = {
+      repair_manifest_sha256: string;
+      provider_profile_manifest_sha256: string;
+      audio_delivery_profile_sha256: string;
+      audio_packetizer_contract_sha256: string;
+      [key: string]: unknown;
+    };
+    const mutateAndRehash = (mutate: (manifest: MutableManifest, repairs: MutableRepairs) => void) => {
+      const manifest = JSON.parse(canonicalJson(result.manifest)) as MutableManifest;
+      const repairs = JSON.parse(canonicalJson(result.repairManifest)) as MutableRepairs;
+      mutate(manifest, repairs);
+      const manifestBody = Object.fromEntries(Object.entries(manifest).filter(([key]) => key !== "manifest_sha256"));
+      manifest.manifest_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-audio-manifest/v2\n${canonicalJson(manifestBody)}`);
+      const repairBody = Object.fromEntries(Object.entries(repairs).filter(([key]) => key !== "repair_manifest_sha256"));
+      repairs.repair_manifest_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-repair-audio-manifest/v2\n${canonicalJson(repairBody)}`);
+      // Keep the root-to-repair link valid so the targeted current-contract
+      // check, rather than a generic hash error, is what rejects the artifact.
+      manifest.repair_manifest_sha256 = repairs.repair_manifest_sha256;
+      const linkedBody = Object.fromEntries(Object.entries(manifest).filter(([key]) => key !== "manifest_sha256"));
+      manifest.manifest_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-audio-manifest/v2\n${canonicalJson(linkedBody)}`);
+      return {
+        manifest: manifest as unknown as Lc4DevAudioManifest,
+        repairManifest: repairs as unknown as Lc4DevRepairAudioManifest,
+      };
+    };
+    expect(() => assertLc4DevAudioArtifacts(mutateAndRehash((manifest, repairs) => {
+      manifest.provider_profile_manifest_sha256 = "0".repeat(64);
+      repairs.provider_profile_manifest_sha256 = "0".repeat(64);
+    }))).toThrow("stale provider_profile_manifest_sha256");
+    expect(() => assertLc4DevAudioArtifacts(mutateAndRehash((manifest, repairs) => {
+      manifest.audio_delivery_profile_sha256 = "1".repeat(64);
+      repairs.audio_delivery_profile_sha256 = "1".repeat(64);
+    }))).toThrow("stale audio_delivery_profile_sha256");
+    expect(() => assertLc4DevAudioArtifacts(mutateAndRehash((manifest, repairs) => {
+      manifest.audio_packetizer_contract_sha256 = "2".repeat(64);
+      repairs.audio_packetizer_contract_sha256 = "2".repeat(64);
+    }))).toThrow("stale audio_packetizer_contract_sha256");
+    expect(() => assertLc4DevAudioArtifacts(mutateAndRehash((manifest) => {
+      manifest.canonical_sources[0].provider_renditions.openai.provider_profile_sha256 = "3".repeat(64);
+    }))).toThrow("caller binding differs");
   }, 30_000);
 });

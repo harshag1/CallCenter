@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_DEV_ADAPTER_BOUNDARY,
+  assertLc4DevLivePrepareArtifact,
   createLc4DevLivePreflightArtifact,
   createLc4DevLivePrepareArtifact,
   createLc4DevRetainedQualificationReceipt,
@@ -68,6 +69,10 @@ import {
   providerQualificationMatrixSha256,
   type ProviderQualificationArtifact,
 } from "../provider-qualification";
+import {
+  realtimeWireObservationSha256,
+  realtimeWireProjectionSha256,
+} from "../../realtime/client/wire-evidence";
 import {
   LC4_S2S_AUDIO_FIXTURE_VERSION,
   LC4_S2S_COMPACT_CONTROL_SHA256,
@@ -334,7 +339,37 @@ function qualificationFixture() {
     artifactDomain: "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n",
   }) as Lc4QualificationV3AuthorizationArtifact;
 
-  const setupResults: ProviderQualificationArtifact["results"] = setupTargets.map((target) => ({
+  const setupResults: ProviderQualificationArtifact["results"] = setupTargets.map((target) => {
+    let predecessor: string | null = null;
+    const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string) => {
+      const projection = Object.freeze({ direction, wireType });
+      const core = Object.freeze({
+        schemaVersion: 1 as const,
+        provider: target.provider,
+        direction,
+        connectionEpoch: 1,
+        sequence,
+        observedAtMs: Date.parse("2026-07-21T20:01:00.000Z") + sequence,
+        observedAtMonotonicMs: sequence,
+        wireType,
+        payloadSha256: sha256Hex(`setup-wire:${target.provider}:${direction}`),
+        payloadBytes: 1,
+        projectionSha256: realtimeWireProjectionSha256(projection),
+        previousObservationSha256: predecessor,
+        identities: Object.freeze({}),
+        projection,
+      });
+      const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+      predecessor = observation.observationSha256;
+      return observation;
+    };
+    const requestWireType = target.provider === "gemini" ? "setup" as const : "session.update" as const;
+    const acknowledgementWireType = target.provider === "gemini" ? "setupComplete" as const : "session.updated" as const;
+    const observations = Object.freeze([
+      wire("outbound", 1, requestWireType),
+      wire("inbound", 2, acknowledgementWireType),
+    ]);
+    return ({
     provider: target.provider,
     model: target.model,
     requestedConfigurationSha256: sha256Hex(`harshas-amazing-call-center/provider-session-configuration/v1\n${canonicalJson({
@@ -350,7 +385,17 @@ function qualificationFixture() {
     acknowledgementSha256: sha256Hex(`qualification-v3-ack:${target.provider}`),
     toolSchemaVerification: "verified_by_provider_echo" as const,
     turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" as const : "verified_by_provider_echo" as const,
-  }));
+    setupWireEvidence: Object.freeze({
+      provider: target.provider,
+      connectionEpoch: 1,
+      requestWireType,
+      acknowledgementWireType,
+      requestObservationSha256: observations[0]!.observationSha256,
+      acknowledgementObservationSha256: observations[1]!.observationSha256,
+      observations,
+    }),
+  });
+  });
   const setupBody = {
     schemaVersion: 2 as const,
     qualificationId: "lc4-dev-v3-setup",
@@ -524,7 +569,7 @@ function qualificationFixture() {
 function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareArtifact>, credentialIdentity = "2".repeat(64)) {
   const qualification = qualificationFixture();
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     purpose: "six_public_development_episodes_only" as const,
     execution_id: prepare.execution_id,
@@ -536,6 +581,13 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
     credential_identity_set_sha256: credentialIdentity,
     control_plane_manifest_sha256: "3".repeat(64),
     listener_evidence_manifest_sha256: "4".repeat(64),
+    runtime_config_sha256: "6".repeat(64),
+    asr_evaluator_build_sha256: "7".repeat(64),
+    asr_evaluator_toolchain_sha256: "9".repeat(64),
+    provider_profile_manifest_sha256: prepare.provider_profile_manifest_sha256,
+    audio_delivery_profile_sha256: prepare.audio_delivery_profile_sha256,
+    audio_packetizer_contract_sha256: prepare.audio_packetizer_contract_sha256,
+    audio_execution_contract_sha256: prepare.audio_execution_contract_sha256,
     immutable_ledger_genesis_sha256: "5".repeat(64),
     authorization_nonce_sha256: "8".repeat(64),
     not_before: "2026-07-21T21:00:00.000Z",
@@ -559,6 +611,9 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
     credential_identity_set_sha256: credentialIdentity,
     control_plane_manifest_sha256: "3".repeat(64),
     listener_evidence_manifest_sha256: "4".repeat(64),
+    runtime_config_sha256: "6".repeat(64),
+    asr_evaluator_build_sha256: "7".repeat(64),
+    asr_evaluator_toolchain_sha256: "9".repeat(64),
     immutable_ledger_genesis_sha256: "5".repeat(64),
     audio_manifest_sha256: prepare.audio_manifest_sha256,
     authorization,
@@ -774,6 +829,12 @@ describe("LC4-DEV live runner", () => {
     expect(prepare.maximum_total_micro_usd).toBe(15_000_000);
     expect(prepare.episodes.reduce((sum, episode) => sum + episode.maximum_micro_usd, 0)).toBeLessThanOrEqual(15_000_000);
     expect(prepare.evidence_boundary.efficacy_claim_eligible).toBe(false);
+    expect(prepare.schema_version).toBe(2);
+    const stale = JSON.parse(canonicalJson(prepare));
+    stale.audio_execution_contract_sha256 = "0".repeat(64);
+    const staleBody = Object.fromEntries(Object.entries(stale).filter(([key]) => key !== "prepare_sha256"));
+    stale.prepare_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-live-prepare/v2\n${canonicalJson(staleBody)}`);
+    expect(() => assertLc4DevLivePrepareArtifact(stale)).toThrow("not canonical or internally consistent");
   });
 
   it("executes the exact closed loop and emits an immutable evidence-complete report", async () => {
@@ -1322,6 +1383,9 @@ describe("LC4-DEV live runner", () => {
       credential_identity_set_sha256: valid.credential_identity_set_sha256,
       control_plane_manifest_sha256: valid.control_plane_manifest_sha256,
       listener_evidence_manifest_sha256: valid.listener_evidence_manifest_sha256,
+      runtime_config_sha256: valid.runtime_config_sha256,
+      asr_evaluator_build_sha256: valid.asr_evaluator_build_sha256,
+      asr_evaluator_toolchain_sha256: valid.asr_evaluator_toolchain_sha256,
       immutable_ledger_genesis_sha256: valid.immutable_ledger_genesis_sha256,
       audio_manifest_sha256: prepare.audio_manifest_sha256,
       authorization: valid.authorization,
@@ -1342,6 +1406,18 @@ describe("LC4-DEV live runner", () => {
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       credential_identity_set_sha256: "9".repeat(64),
+    })).toThrow(/authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      runtime_config_sha256: "0".repeat(64),
+    })).toThrow(/authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_evaluator_build_sha256: "0".repeat(64),
+    })).toThrow(/authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_evaluator_toolchain_sha256: "0".repeat(64),
     })).toThrow(/authorization differs/);
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,

@@ -28,9 +28,14 @@ import {
   type Lc4PublicDevelopmentCorpus,
 } from "./lc4-public-development-corpus";
 import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
+import {
+  LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+  LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
+  LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+} from "./lc4-development-audio-contract";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 
-export const LC4_DEV_AUDIO_MATERIALIZER_ID = "HACC-LC4-DEV-AUDIO-v1" as const;
+export const LC4_DEV_AUDIO_MATERIALIZER_ID = "HACC-LC4-DEV-AUDIO-v2" as const;
 export const LC4_DEV_SOURCE_SAMPLE_RATE_HZ = 48_000 as const;
 export const LC4_DEV_PINNED_VOICE = Object.freeze({
   name: "Samantha" as const,
@@ -44,11 +49,11 @@ const MAX_UTTERANCE_SECONDS = 60;
 const MIN_UTTERANCE_SECONDS = 0.1;
 const MIN_RMS = 32;
 const MAX_CLIPPED_SAMPLE_RATIO = 0.001;
-const MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-manifest/v1\n";
-const REPAIR_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-audio-manifest/v1\n";
+const MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-manifest/v2\n";
+const REPAIR_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-audio-manifest/v2\n";
 const TOOLCHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-toolchain/v1\n";
 const RENDITION_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-rendition/v1\n";
-const PREPARE_FRAGMENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-prepare-fragment/v1\n";
+const PREPARE_FRAGMENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-prepare-fragment/v2\n";
 const BRANCH_BINDING_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-audio-binding-set/v1\n";
 
 type SampleRate = 16_000 | 24_000 | 48_000;
@@ -147,11 +152,14 @@ export type Lc4DevRepairAudioBinding = Readonly<{
 }>;
 
 export type Lc4DevRepairAudioManifest = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: "HACC-LC4-DEV-v1";
   materializer_id: typeof LC4_DEV_AUDIO_MATERIALIZER_ID;
   source_corpus_sha256: string;
   provider_profile_manifest_sha256: string;
+  audio_delivery_profile_sha256: string;
+  audio_packetizer_contract_sha256: string;
+  audio_execution_contract_sha256: string;
   repair_sources: readonly Lc4DevRepairAudioSource[];
   repair_audio_bindings: readonly Lc4DevRepairAudioBinding[];
   source_count: 24;
@@ -163,7 +171,7 @@ export type Lc4DevRepairAudioManifest = Readonly<{
 }>;
 
 export type Lc4DevAudioManifest = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: "HACC-LC4-DEV-v1";
   materializer_id: typeof LC4_DEV_AUDIO_MATERIALIZER_ID;
   provider_calls_made: false;
@@ -171,6 +179,9 @@ export type Lc4DevAudioManifest = Readonly<{
   source_corpus_sha256: string;
   public_corpus_artifact_sha256: string;
   provider_profile_manifest_sha256: string;
+  audio_delivery_profile_sha256: string;
+  audio_packetizer_contract_sha256: string;
+  audio_execution_contract_sha256: string;
   renderer_identity: Lc4DevAudioRendererIdentity;
   canonical_sources: readonly Lc4DevCanonicalAudioSource[];
   caller_audio_bindings: readonly Lc4DevCallerAudioBinding[];
@@ -192,7 +203,7 @@ export type Lc4DevAudioManifest = Readonly<{
 }>;
 
 export type Lc4DevAudioPrepareFragment = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: "HACC-LC4-DEV-v1";
   audio_manifest_sha256: string;
   audio_bindings: readonly Lc4DevCallerAudioBinding[];
@@ -335,11 +346,14 @@ function repairManifest(input: Readonly<{
     });
   }));
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     materializer_id: LC4_DEV_AUDIO_MATERIALIZER_ID,
     source_corpus_sha256: input.corpus.audio_plan.source_text_corpus_sha256,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+    audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+    audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
     repair_sources: Object.freeze([...input.sources]),
     repair_audio_bindings: Object.freeze(bindings),
     source_count: 24 as const,
@@ -504,7 +518,7 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
     const callerBranchAudioBindings = branchAudioBindings({ canonicalSources, branchSources });
     const branchAudioBindingSetSha256 = branchBindingSetSha256(callerBranchAudioBindings);
     const body = {
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       protocol_id: "HACC-LC4-DEV-v1" as const,
       materializer_id: LC4_DEV_AUDIO_MATERIALIZER_ID,
       provider_calls_made: false as const,
@@ -512,6 +526,9 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
       source_corpus_sha256: corpus.audio_plan.source_text_corpus_sha256,
       public_corpus_artifact_sha256: corpus.artifact_sha256,
       provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+      audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+      audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
       renderer_identity: input.renderer.identity,
       canonical_sources: Object.freeze(canonicalSources),
       caller_audio_bindings: Object.freeze(callerAudioBindings),
@@ -532,7 +549,7 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
     };
     const manifest = freeze({ ...body, manifest_sha256: sha256Hex(`${MANIFEST_DOMAIN}${canonicalJson(body)}`) });
     const fragmentBody = {
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       protocol_id: "HACC-LC4-DEV-v1" as const,
       audio_manifest_sha256: manifest.manifest_sha256,
       audio_bindings: manifest.caller_audio_bindings,
@@ -568,8 +585,24 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
   const { repair_manifest_sha256: repairHash, ...repairBody } = input.repairManifest;
   requireHash(repairHash, "LC4-DEV repair manifest");
   if (repairHash !== sha256Hex(`${REPAIR_MANIFEST_DOMAIN}${canonicalJson(repairBody)}`)) throw new Error("LC4-DEV repair manifest hash mismatch");
-  if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" || input.manifest.provider_calls_made !== false || input.manifest.plaintext_retained !== false) {
+  if (input.manifest.schema_version !== 2 || input.repairManifest.schema_version !== 2
+    || input.manifest.materializer_id !== LC4_DEV_AUDIO_MATERIALIZER_ID
+    || input.repairManifest.materializer_id !== LC4_DEV_AUDIO_MATERIALIZER_ID
+    || input.manifest.protocol_id !== "HACC-LC4-DEV-v1" || input.repairManifest.protocol_id !== "HACC-LC4-DEV-v1"
+    || input.manifest.provider_calls_made !== false || input.manifest.plaintext_retained !== false) {
     throw new Error("LC4-DEV audio manifest crossed its evidence boundary");
+  }
+  const expectedContract = {
+    provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+    audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+    audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
+  };
+  for (const [label, expected] of Object.entries(expectedContract)) {
+    if (input.manifest[label as keyof typeof expectedContract] !== expected
+      || input.repairManifest[label as keyof typeof expectedContract] !== expected) {
+      throw new Error(`LC4-DEV audio artifacts use a stale ${label}`);
+    }
   }
   if (input.manifest.public_corpus_artifact_sha256 !== corpus.artifact_sha256
     || input.manifest.source_corpus_sha256 !== corpus.audio_plan.source_text_corpus_sha256
@@ -609,10 +642,12 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
         throw new Error("LC4-DEV canonical source order or commitment drifted");
       }
       const rendition = source.provider_renditions[provider];
+      const expectedProviderProfileSha256 = sha256Hex(canonicalJson(LC4_PROVIDER_PROFILE_MANIFEST.providers[provider]));
       if (!binding || binding.provider !== provider || binding.opportunity_id !== opportunity.id
         || binding.source_text_sha256 !== opportunity.canonical_caller_text_sha256
         || binding.pcm_sha256 !== rendition.sha256 || binding.pcm_byte_length !== rendition.byte_length
-        || binding.sample_rate_hz !== LC4_PROVIDER_PROFILE_MANIFEST.providers[provider].input_sample_rate_hz) {
+        || binding.sample_rate_hz !== LC4_PROVIDER_PROFILE_MANIFEST.providers[provider].input_sample_rate_hz
+        || rendition.provider_profile_sha256 !== expectedProviderProfileSha256) {
         throw new Error("LC4-DEV caller binding differs from its committed rendition");
       }
     });
@@ -639,7 +674,8 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
         || binding.opportunity_id !== LC4_DEV_BRANCH_OPPORTUNITY_ID || binding.source_id !== expected.source_id
         || binding.source_text_sha256 !== expected.canonical_caller_text_sha256
         || binding.pcm_sha256 !== rendition.sha256 || binding.pcm_byte_length !== rendition.byte_length
-        || binding.sample_rate_hz !== rendition.sample_rate_hz || binding.channels !== 1 || binding.encoding !== "pcm16le") {
+        || binding.sample_rate_hz !== rendition.sample_rate_hz || binding.channels !== 1 || binding.encoding !== "pcm16le"
+        || rendition.provider_profile_sha256 !== sha256Hex(canonicalJson(LC4_PROVIDER_PROFILE_MANIFEST.providers[provider]))) {
         throw new Error("LC4-DEV caller branch binding differs from its exact provider rendition");
       }
     });
@@ -651,7 +687,8 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
       const binding = input.repairManifest.repair_audio_bindings[offset + index];
       if (!source || source.source_id !== repair.id || source.source_text_sha256 !== repair.canonical_caller_text_sha256
         || !binding || binding.provider !== provider || binding.repair_id !== repair.id
-        || binding.pcm_sha256 !== source.provider_renditions[provider].sha256) {
+        || binding.pcm_sha256 !== source.provider_renditions[provider].sha256
+        || source.provider_renditions[provider].provider_profile_sha256 !== sha256Hex(canonicalJson(LC4_PROVIDER_PROFILE_MANIFEST.providers[provider]))) {
         throw new Error("LC4-DEV repair binding differs from its committed source");
       }
     });

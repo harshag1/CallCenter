@@ -63,14 +63,14 @@ const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const QUALIFICATION_CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const QUALIFICATION_CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
 const OPERATOR_INTENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-operator-intent/v1\n";
-const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v1\n";
+const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v2\n";
 const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_ENV_BYTES = 1024 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
 
-export const LC4_DEV_OPERATOR_VERSION = "HACC-LC4-DEV-OPERATOR-v1" as const;
+export const LC4_DEV_OPERATOR_VERSION = "HACC-LC4-DEV-OPERATOR-v2" as const;
 export const LC4_DEV_OPERATOR_FILENAMES = Object.freeze({
   intent: "operator-intent.json",
   prepare: "prepare.json",
@@ -99,6 +99,9 @@ export type Lc4DevOperatorSigner = Readonly<{
 export type Lc4DevOperatorRuntimeRoots = Readonly<{
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
+  runtime_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
 }>;
 
 /**
@@ -353,7 +356,7 @@ function authorization(input: Readonly<{
   assertHash(input.authorization_nonce_sha256, "LC4-DEV authorization nonce");
   assertHash(input.immutable_ledger_genesis_sha256, "LC4-DEV ledger genesis");
   const body: Lc4DevLiveAuthorizationBody = Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     protocol_id: "HACC-LC4-DEV-v1",
     purpose: "six_public_development_episodes_only",
     execution_id: input.prepare.execution_id,
@@ -365,6 +368,13 @@ function authorization(input: Readonly<{
     credential_identity_set_sha256: input.credentials_sha256,
     control_plane_manifest_sha256: input.roots.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: input.roots.listener_evidence_manifest_sha256,
+    runtime_config_sha256: input.roots.runtime_config_sha256,
+    asr_evaluator_build_sha256: input.roots.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.roots.asr_evaluator_toolchain_sha256,
+    provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
+    audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
+    audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
     authorization_nonce_sha256: input.authorization_nonce_sha256,
     not_before: input.not_before,
@@ -412,7 +422,7 @@ function authorizationBodyWithoutGenesis(input: Readonly<{
   expires_at: string;
 }>): AuthorizationBodyWithoutLedgerGenesis {
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     protocol_id: "HACC-LC4-DEV-v1",
     purpose: "six_public_development_episodes_only",
     execution_id: input.prepare.execution_id,
@@ -424,6 +434,13 @@ function authorizationBodyWithoutGenesis(input: Readonly<{
     credential_identity_set_sha256: input.credentials_sha256,
     control_plane_manifest_sha256: input.roots.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: input.roots.listener_evidence_manifest_sha256,
+    runtime_config_sha256: input.roots.runtime_config_sha256,
+    asr_evaluator_build_sha256: input.roots.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.roots.asr_evaluator_toolchain_sha256,
+    provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
+    audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
+    audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
     authorization_nonce_sha256: input.nonce_sha256,
     not_before: input.not_before,
     expires_at: input.expires_at,
@@ -580,7 +597,10 @@ export async function runLc4DevelopmentOperatorCli(
           if (evidenceState === "preflighted" || evidenceState === "terminal") {
             const preflight = await readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(parsed["--evidence-root"]!, "preflight"), "LC4-DEV preflight artifact");
             if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256
-              || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256) {
+              || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256
+              || roots.runtime_config_sha256 !== preflight.runtime_config_sha256
+              || roots.asr_evaluator_build_sha256 !== preflight.asr_evaluator_build_sha256
+              || roots.asr_evaluator_toolchain_sha256 !== preflight.asr_evaluator_toolchain_sha256) {
               throw new Error("LC4-DEV status runtime roots differ from preflight");
             }
           }
@@ -711,6 +731,9 @@ export async function runLc4DevelopmentOperatorCli(
         credential_identity_set_sha256: credentialIdentity,
         control_plane_manifest_sha256: roots.control_plane_manifest_sha256,
         listener_evidence_manifest_sha256: roots.listener_evidence_manifest_sha256,
+        runtime_config_sha256: roots.runtime_config_sha256,
+        asr_evaluator_build_sha256: roots.asr_evaluator_build_sha256,
+        asr_evaluator_toolchain_sha256: roots.asr_evaluator_toolchain_sha256,
         immutable_ledger_genesis_sha256: ledgerGenesisSha256,
         audio_manifest_sha256: audio.manifest.manifest_sha256,
         authorization: finalAuthorization,
@@ -753,7 +776,13 @@ export async function runLc4DevelopmentOperatorCli(
       if (signer.public_key_fingerprint_sha256 !== preflight.authority_trust_root_sha256) throw new Error("LC4-DEV run signer differs from preflight trust root");
       const roots = await runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
       assertLc4DevOperatorAuthorizationDag({ preflight, expected_authority_public_key_fingerprint_sha256: signer.public_key_fingerprint_sha256 });
-      if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256 || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256) throw new Error("LC4-DEV executable runtime roots differ from preflight");
+      if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256
+        || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256
+        || roots.runtime_config_sha256 !== preflight.runtime_config_sha256
+        || roots.asr_evaluator_build_sha256 !== preflight.asr_evaluator_build_sha256
+        || roots.asr_evaluator_toolchain_sha256 !== preflight.asr_evaluator_toolchain_sha256) {
+        throw new Error("LC4-DEV executable runtime, ASR evaluator build, or toolchain roots differ from preflight");
+      }
       const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer });
       let run: Lc4DevLiveRunArtifact;
       try {

@@ -69,6 +69,7 @@ import {
   LC4_XAI_SERVER_VAD_SHA256,
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
+import { LC4_DEV_AUDIO_DELIVERY_PROFILE } from "./lc4-development-audio-contract";
 
 export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v2" as const;
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
@@ -1542,7 +1543,7 @@ function devConfiguration(episode: Lc4DevLiveEpisodePlan, preflightSha256: strin
     "Never claim an external action completed without an authoritative tool receipt. Use capability_gateway for every tool request.",
     "This is development mechanism evidence only, never confirmatory efficacy evidence.",
   ].join(" ");
-  const delivery = Object.freeze({ schemaVersion: 1 as const, chunkMs: 20, pace: "realtime" as const });
+  const delivery = LC4_DEV_AUDIO_DELIVERY_PROFILE;
   const body = Object.freeze({
     provider: episode.provider,
     model: episode.model,

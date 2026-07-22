@@ -126,6 +126,10 @@ function fixtures() {
     prepare_sha256: "1".repeat(64),
     maximum_total_micro_usd: 15_000_000,
     audio_manifest_sha256: "2".repeat(64),
+    provider_profile_manifest_sha256: "a".repeat(64),
+    audio_delivery_profile_sha256: "b".repeat(64),
+    audio_packetizer_contract_sha256: "c".repeat(64),
+    audio_execution_contract_sha256: "d".repeat(64),
   } as Lc4DevLivePrepareArtifact;
   const qualification = {
     terminal_root_sha256: "3".repeat(64),
@@ -135,6 +139,9 @@ function fixtures() {
   const runtimeRoots = {
     control_plane_manifest_sha256: "5".repeat(64),
     listener_evidence_manifest_sha256: "6".repeat(64),
+    runtime_config_sha256: "e".repeat(64),
+    asr_evaluator_build_sha256: "f".repeat(64),
+    asr_evaluator_toolchain_sha256: "0".repeat(64),
   };
   const input = {
     prepare,
@@ -183,6 +190,8 @@ describe("LC4-DEV operator custody", () => {
       { ...input, credential_identity_set_sha256: "9".repeat(64) },
       { ...input, roots: { ...input.roots, control_plane_manifest_sha256: "b".repeat(64) } },
       { ...input, roots: { ...input.roots, listener_evidence_manifest_sha256: "c".repeat(64) } },
+      { ...input, roots: { ...input.roots, asr_evaluator_build_sha256: "1".repeat(64) } },
+      { ...input, roots: { ...input.roots, asr_evaluator_toolchain_sha256: "2".repeat(64) } },
       { ...input, authorization_nonce_sha256: "d".repeat(64) },
       { ...input, expires_at: "2026-07-22T06:31:00.000Z" },
     ];

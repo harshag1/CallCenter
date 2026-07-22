@@ -40,6 +40,11 @@ import {
   type Lc4DevCallerBranchDecision,
   type Lc4DevCallerBranchMatrixArtifact,
 } from "./lc4-development-caller-branch";
+import {
+  LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+  LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
+  LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+} from "./lc4-development-audio-contract";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -47,7 +52,7 @@ export type {
   Lc4DevelopmentRealtimeSession,
 } from "./lc4-development-realtime-contract";
 
-export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v1" as const;
+export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v2" as const;
 export const LC4_DEV_LIVE_EPISODES = 6 as const;
 export const LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE = 60 as const;
 export const LC4_DEV_LIVE_TOTAL_OPPORTUNITIES = 360 as const;
@@ -66,10 +71,10 @@ export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
 const HASH = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
-const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v1\n";
-const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v1\n";
-const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v1\n";
-const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v1\n";
+const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v2\n";
+const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v2\n";
+const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v2\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v2\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
@@ -122,7 +127,7 @@ export type Lc4DevLiveEpisodePlan = Readonly<{
 }>;
 
 export type Lc4DevLivePrepareArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   runner_version: typeof LC4_DEV_LIVE_RUNNER_VERSION;
   protocol_id: "HACC-LC4-DEV-v1";
   execution_id: string;
@@ -131,6 +136,9 @@ export type Lc4DevLivePrepareArtifact = Readonly<{
   source_tree_sha256: string;
   corpus_sha256: string;
   provider_profile_manifest_sha256: string;
+  audio_delivery_profile_sha256: string;
+  audio_packetizer_contract_sha256: string;
+  audio_execution_contract_sha256: string;
   audio_manifest_sha256: string;
   audio_bindings: readonly Lc4DevCallerAudioBinding[];
   episodes: readonly Lc4DevLiveEpisodePlan[];
@@ -218,7 +226,7 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     throw new Error("LC4-DEV episode reservations exceed the execution ceiling");
   }
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     runner_version: LC4_DEV_LIVE_RUNNER_VERSION,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     execution_id: input.execution_id,
@@ -227,6 +235,9 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     source_tree_sha256: input.source_tree_sha256,
     corpus_sha256: corpus.artifact_sha256,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+    audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
+    audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
     audio_manifest_sha256: input.audio_manifest_sha256,
     audio_bindings: Object.freeze([...input.audio_bindings]),
     episodes: Object.freeze(episodes),
@@ -244,7 +255,7 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
 }
 
 export type Lc4DevLivePreflightArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   execution_id: string;
   checked_at: string;
   prepare_sha256: string;
@@ -254,6 +265,13 @@ export type Lc4DevLivePreflightArtifact = Readonly<{
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
+  runtime_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
+  provider_profile_manifest_sha256: string;
+  audio_delivery_profile_sha256: string;
+  audio_packetizer_contract_sha256: string;
+  audio_execution_contract_sha256: string;
   immutable_ledger_genesis_sha256: string;
   adapter_contract: "lc4-development-realtime-v1";
   adapter_boundary: "dev_factory_unlocked_confirmatory_factory_still_frozen";
@@ -272,7 +290,7 @@ export type Lc4DevLivePreflightArtifact = Readonly<{
 }>;
 
 export type Lc4DevLiveAuthorizationBody = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: "HACC-LC4-DEV-v1";
   purpose: "six_public_development_episodes_only";
   execution_id: string;
@@ -284,6 +302,13 @@ export type Lc4DevLiveAuthorizationBody = Readonly<{
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
+  runtime_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
+  provider_profile_manifest_sha256: string;
+  audio_delivery_profile_sha256: string;
+  audio_packetizer_contract_sha256: string;
+  audio_execution_contract_sha256: string;
   immutable_ledger_genesis_sha256: string;
   authorization_nonce_sha256: string;
   not_before: string;
@@ -324,6 +349,9 @@ function verifyDevAuthorization(input: Readonly<{
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
+  runtime_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
   immutable_ledger_genesis_sha256: string;
 }>): void {
   const { artifact, prepare, qualification } = input;
@@ -335,7 +363,7 @@ function verifyDevAuthorization(input: Readonly<{
     qualification_terminal_root_sha256: qualification.terminal_root_sha256,
     qualification_retained_artifact_sha256: qualification.retained_artifact_sha256,
   })) requireHash(digest, label);
-  if (body.schema_version !== 1 || body.protocol_id !== "HACC-LC4-DEV-v1" || body.purpose !== "six_public_development_episodes_only") {
+  if (body.schema_version !== 2 || body.protocol_id !== "HACC-LC4-DEV-v1" || body.purpose !== "six_public_development_episodes_only") {
     throw new Error("LC4-DEV authorization has the wrong protocol or purpose");
   }
   assertIso(body.not_before, "LC4-DEV authorization start");
@@ -359,6 +387,13 @@ function verifyDevAuthorization(input: Readonly<{
     || body.credential_identity_set_sha256 !== input.credential_identity_set_sha256
     || body.control_plane_manifest_sha256 !== input.control_plane_manifest_sha256
     || body.listener_evidence_manifest_sha256 !== input.listener_evidence_manifest_sha256
+    || body.runtime_config_sha256 !== input.runtime_config_sha256
+    || body.asr_evaluator_build_sha256 !== input.asr_evaluator_build_sha256
+    || body.asr_evaluator_toolchain_sha256 !== input.asr_evaluator_toolchain_sha256
+    || body.provider_profile_manifest_sha256 !== prepare.provider_profile_manifest_sha256
+    || body.audio_delivery_profile_sha256 !== prepare.audio_delivery_profile_sha256
+    || body.audio_packetizer_contract_sha256 !== prepare.audio_packetizer_contract_sha256
+    || body.audio_execution_contract_sha256 !== prepare.audio_execution_contract_sha256
     || body.immutable_ledger_genesis_sha256 !== input.immutable_ledger_genesis_sha256) {
     throw new Error("LC4-DEV authorization differs from the prepared plan, retained qualification, credentials, audio, or evidence roots");
   }
@@ -399,6 +434,9 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
+  runtime_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
   immutable_ledger_genesis_sha256: string;
   audio_manifest_sha256: string;
   authorization: Lc4DevLiveAuthorizationArtifact;
@@ -411,6 +449,9 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     credential_identity_set_sha256: input.credential_identity_set_sha256,
     control_plane_manifest_sha256: input.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: input.listener_evidence_manifest_sha256,
+    runtime_config_sha256: input.runtime_config_sha256,
+    asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
   })) requireHash(digest, label);
   if (input.audio_manifest_sha256 !== input.prepare.audio_manifest_sha256) throw new Error("LC4-DEV preflight audio manifest differs from prepare");
@@ -426,10 +467,13 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     credential_identity_set_sha256: input.credential_identity_set_sha256,
     control_plane_manifest_sha256: input.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: input.listener_evidence_manifest_sha256,
+    runtime_config_sha256: input.runtime_config_sha256,
+    asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
   });
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     execution_id: input.prepare.execution_id,
     checked_at: input.checked_at,
     prepare_sha256: input.prepare.prepare_sha256,
@@ -439,6 +483,13 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     credential_identity_set_sha256: input.credential_identity_set_sha256,
     control_plane_manifest_sha256: input.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: input.listener_evidence_manifest_sha256,
+    runtime_config_sha256: input.runtime_config_sha256,
+    asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
+    provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
+    audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
+    audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
     adapter_contract: "lc4-development-realtime-v1" as const,
     adapter_boundary: "dev_factory_unlocked_confirmatory_factory_still_frozen" as const,
@@ -493,6 +544,9 @@ export function assertLc4DevLivePreflightArtifact(value: Lc4DevLivePreflightArti
     credential_identity_set_sha256: value.credential_identity_set_sha256,
     control_plane_manifest_sha256: value.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: value.listener_evidence_manifest_sha256,
+    runtime_config_sha256: value.runtime_config_sha256,
+    asr_evaluator_build_sha256: value.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: value.asr_evaluator_toolchain_sha256,
     immutable_ledger_genesis_sha256: value.immutable_ledger_genesis_sha256,
     audio_manifest_sha256: prepare.audio_manifest_sha256,
     authorization: value.authorization,

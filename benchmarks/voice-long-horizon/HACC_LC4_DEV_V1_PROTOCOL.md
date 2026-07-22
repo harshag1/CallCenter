@@ -55,13 +55,25 @@ The artifact schedules exactly one Native/HACC pair for each of `openai`,
 source-corpus root, and caller voice slot. Arm order alternates by provider; it
 does not change scenario content.
 
-Before a live canary, render all 60 opportunity utterances and all 24 possible
-CRP-1 repair utterances from the exact committed source strings: 84 source
-masters total. The source format is mono 24 kHz signed 16-bit little-endian
-PCM. Bind every source PCM hash and all 180 canonical plus 72 repair logical
-provider-rendition bindings before the first provider episode. Both arms
-receive the same rendition for the same caller state. An ASR mismatch, missing
-binding, or post-outcome re-render invalidates the canary.
+Before a live canary, render all 60 opportunity utterances, the four closed-loop
+branch utterances, and all 24 possible CRP-1 repair utterances from the exact
+committed source strings: 88 source masters total. The source format is mono
+signed 16-bit little-endian PCM, with each provider rendition fixed to the
+current provider-profile input rate. Bind every source PCM hash and all 180
+canonical, 15 closed-loop branch, and 72 repair logical provider-rendition
+bindings before the first provider episode. Both arms receive the same
+rendition for the same caller state.
+
+The public audio artifact is `HACC-LC4-DEV-AUDIO-v2` / schema 2. It binds the
+current provider-profile manifest, per-provider execution profiles, the exact
+20 ms realtime delivery profile, the production PCM packetizer contract, and a
+combined source-independent audio-execution contract. Prepare, authorization,
+and preflight retain those commitments. Preflight also signs the exact ASR
+evaluator build, external toolchain, and complete runtime-composition root.
+Any stale or internally rehashed substitution must fail before authorization
+or provider-client construction. An ASR mismatch, missing binding,
+post-outcome re-render, provider-profile drift, packetizer drift, evaluator
+build drift, or evaluator-toolchain drift invalidates the canary.
 
 This protocol file and corpus do not authorize provider calls or spend. The
 separate operator gate must still prove credentials, exact model identities,

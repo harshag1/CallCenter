@@ -23,15 +23,17 @@ describe("LC4-DEV default operator runtime", () => {
       calibration_sha256: "4".repeat(64),
       asr_contract_sha256: "5".repeat(64),
       whisper_config_sha256: "6".repeat(64),
-      runner_public_key_sha256: "7".repeat(64),
-      criterion_binding_set_sha256: "8".repeat(64),
+      asr_evaluator_build_sha256: "7".repeat(64),
+      asr_evaluator_toolchain_sha256: "8".repeat(64),
+      runner_public_key_sha256: "9".repeat(64),
+      criterion_binding_set_sha256: "a".repeat(64),
       caller_binding_count: 180 as const,
       repair_binding_count: 72 as const,
     };
     const first = createLc4DevelopmentDefaultRuntimeComposition(input);
     expect(first).toEqual(createLc4DevelopmentDefaultRuntimeComposition(input));
     expect(first).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       runtime_kind: "lc4-dev-default-operator-runtime",
       caller_binding_count: 180,
       repair_binding_count: 72,
@@ -41,6 +43,12 @@ describe("LC4-DEV default operator runtime", () => {
       createLc4DevelopmentDefaultRuntimeComposition({
         ...input,
         calibration_sha256: "9".repeat(64),
+      }).runtime_config_sha256,
+    ).not.toBe(first.runtime_config_sha256);
+    expect(
+      createLc4DevelopmentDefaultRuntimeComposition({
+        ...input,
+        asr_evaluator_toolchain_sha256: "b".repeat(64),
       }).runtime_config_sha256,
     ).not.toBe(first.runtime_config_sha256);
     expect(() =>

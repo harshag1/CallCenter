@@ -49,7 +49,8 @@ import {
 
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
-const RUNTIME_CONFIG_DOMAIN = "harshas-amazing-call-center/lc4-dev-default-runtime/v1\n";
+const RUNTIME_CONFIG_DOMAIN = "harshas-amazing-call-center/lc4-dev-default-runtime/v2\n";
+const ASR_TOOLCHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-asr-evaluator-toolchain/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 
 export type Lc4DevDefaultRuntimeConfig = Readonly<{
@@ -62,7 +63,7 @@ export type Lc4DevDefaultRuntimeConfig = Readonly<{
 }>;
 
 export type Lc4DevDefaultRuntimeComposition = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   runtime_kind: "lc4-dev-default-operator-runtime";
   audio_manifest_sha256: string;
   repair_manifest_sha256: string;
@@ -70,6 +71,8 @@ export type Lc4DevDefaultRuntimeComposition = Readonly<{
   calibration_sha256: string;
   asr_contract_sha256: string;
   whisper_config_sha256: string;
+  asr_evaluator_build_sha256: string;
+  asr_evaluator_toolchain_sha256: string;
   runner_public_key_sha256: string;
   criterion_binding_set_sha256: string;
   caller_binding_count: 180;
@@ -88,6 +91,8 @@ export function createLc4DevelopmentDefaultRuntimeComposition(
     calibration_sha256: input.calibration_sha256,
     asr_contract_sha256: input.asr_contract_sha256,
     whisper_config_sha256: input.whisper_config_sha256,
+    asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
     runner_public_key_sha256: input.runner_public_key_sha256,
     criterion_binding_set_sha256: input.criterion_binding_set_sha256,
   })) {
@@ -97,7 +102,7 @@ export function createLc4DevelopmentDefaultRuntimeComposition(
     throw new Error("LC4-DEV runtime composition requires exactly 180 caller and 72 repair bindings");
   }
   const body = Object.freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     runtime_kind: "lc4-dev-default-operator-runtime" as const,
     ...input,
   });
@@ -227,12 +232,21 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
     throw new Error("LC4-DEV runtime ASR identity differs from the verified calibration artifact");
   }
   const criteria = lc4DevelopmentListenerCriterionBindings();
+  const asrEvaluatorToolchainSha256 = sha256Hex(`${ASR_TOOLCHAIN_DOMAIN}${canonicalJson({
+    whisper_cli_sha256: LC4_DEV_WHISPER_CPP_EXECUTABLE_SHA256,
+    whisper_model_sha256: LC4_DEV_WHISPER_LARGE_V3_MODEL_SHA256,
+    ffmpeg_sha256: LC4_DEV_FFMPEG_SHA256,
+    whisper_config_sha256: whisper.whisper_config_sha256,
+    asr_contract_sha256: whisper.contract_sha256,
+  })}`);
   let runtimeComposition: Lc4DevDefaultRuntimeComposition | null = null;
   const baseRuntimeComposition = {
     calibration_artifact_sha256: artifact.artifact_sha256,
     calibration_sha256: artifact.calibration_sha256,
     asr_contract_sha256: whisper.contract_sha256,
     whisper_config_sha256: whisper.whisper_config_sha256,
+    asr_evaluator_build_sha256: calibration.summary.evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256: asrEvaluatorToolchainSha256,
     runner_public_key_sha256: asrRunnerSigner.publicKeySha256,
     criterion_binding_set_sha256: sha256Hex(canonicalJson(criteria)),
   };
@@ -318,6 +332,8 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         control_plane_manifest_sha256: built.control.manifest_sha256,
         listener_evidence_manifest_sha256: built.listener_manifest_sha256,
         runtime_config_sha256: composition.runtime_config_sha256,
+        asr_evaluator_build_sha256: composition.asr_evaluator_build_sha256,
+        asr_evaluator_toolchain_sha256: composition.asr_evaluator_toolchain_sha256,
       });
     },
     build: async ({
@@ -333,7 +349,10 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       if (resolve(audio_root) !== audioRoot) throw new Error("LC4-DEV build audio root differs from the inspected runtime root");
       const built = mechanism({ audio_manifest, repair_manifest, signer });
       if (built.control.manifest_sha256 !== preflight.control_plane_manifest_sha256
-        || built.listener_manifest_sha256 !== preflight.listener_evidence_manifest_sha256) {
+        || built.listener_manifest_sha256 !== preflight.listener_evidence_manifest_sha256
+        || runtimeComposition?.runtime_config_sha256 !== preflight.runtime_config_sha256
+        || calibration.summary.evaluator_build_sha256 !== preflight.asr_evaluator_build_sha256
+        || asrEvaluatorToolchainSha256 !== preflight.asr_evaluator_toolchain_sha256) {
         throw new Error("LC4-DEV default runtime roots differ from signed preflight");
       }
       const casRoot = resolve(evidence_root, "cas");
