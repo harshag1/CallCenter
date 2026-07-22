@@ -19,7 +19,15 @@ describe("LC4 public provider-free development replay", () => {
       provider_calls_made: 0,
       efficacy_claim_eligible: false,
       caller_automaton: { canonical_horizon: 60, completed: true },
-      caller_audio_placeholders: { source_count: 72, acoustic_claim_eligible: false },
+      caller_audio_placeholders: {
+        canonical_source_count: 60,
+        repair_source_count: 24,
+        source_count: 84,
+        provider_count: 3,
+        logical_canonical_provider_binding_count: 180,
+        logical_repair_provider_binding_count: 72,
+        acoustic_claim_eligible: false,
+      },
       crp: { canonical_horizon: 60, canonical_horizon_extended: false, repair_count: 4 },
       fault_coverage: {
         committed_after_error_count: 1,
@@ -40,6 +48,8 @@ describe("LC4 public provider-free development replay", () => {
     });
     expect(replay.episodes).toHaveLength(6);
     expect(replay.listener_evidence).toHaveLength(6);
+    expect(replay.caller_audio_placeholders.sources.filter((source) => source.kind === "canonical")).toHaveLength(60);
+    expect(replay.caller_audio_placeholders.sources.filter((source) => source.kind === "repair")).toHaveLength(24);
     expect(replay.listener_evidence.every((item) => item.artifact.coverage.listener_semantics_verified === 60)).toBe(true);
     expect(replay.listener_evidence.every((item) => item.artifact.final_scorer.all_required_semantic_criteria_pass)).toBe(true);
     expect(replay.episodes.every((episode) => episode.common_artifact_sha256 === replay.arm_common_artifact.artifact_sha256)).toBe(true);
@@ -67,6 +77,17 @@ describe("LC4 public provider-free development replay", () => {
       ["audio", (copy) => {
         (copy as { caller_audio_placeholders: { sources: Array<{ pcm_sha256: string }> } })
           .caller_audio_placeholders.sources[0]!.pcm_sha256 = "f".repeat(64);
+      }],
+      ["repair inventory", (copy) => {
+        const manifest = (copy as {
+          caller_audio_placeholders: { repair_source_count: number; sources: Array<{ kind: string }> };
+        }).caller_audio_placeholders;
+        manifest.sources.splice(manifest.sources.findIndex((source) => source.kind === "repair"), 1);
+        manifest.repair_source_count -= 1;
+      }],
+      ["repair provider bindings", (copy) => {
+        (copy as { caller_audio_placeholders: { logical_repair_provider_binding_count: number } })
+          .caller_audio_placeholders.logical_repair_provider_binding_count = 36;
       }],
       ["common", (copy) => {
         (copy as { arm_common_artifact: { fault_coverage_sha256: string } })

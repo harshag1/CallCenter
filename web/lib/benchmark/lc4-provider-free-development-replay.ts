@@ -145,18 +145,17 @@ function callerAutomaton(corpus: Lc4PublicDevelopmentCorpus) {
 }
 
 function audioManifest(corpus: Lc4PublicDevelopmentCorpus) {
-  const sources = [
-    ...corpus.opportunities.map((opportunity) => ({
+  const canonicalSources = corpus.opportunities.map((opportunity) => ({
       source_id: opportunity.id,
       kind: "canonical" as const,
       source_text_sha256: opportunity.canonical_caller_text_sha256,
-    })),
-    ...corpus.repair_policy.library.map((repair) => ({
+    }));
+  const repairSources = corpus.repair_policy.library.map((repair) => ({
       source_id: repair.id,
       kind: "repair" as const,
       source_text_sha256: repair.canonical_caller_text_sha256,
-    })),
-  ].map((source) => {
+    }));
+  const sources = [...canonicalSources, ...repairSources].map((source) => {
     const pcm = deterministicPcm(`lc4-dev-source-pcm\n${source.source_text_sha256}`);
     return freeze({
       ...source,
@@ -170,7 +169,12 @@ function audioManifest(corpus: Lc4PublicDevelopmentCorpus) {
     schema_version: 1 as const,
     corpus_sha256: corpus.artifact_sha256,
     acoustic_claim_eligible: false as const,
-    source_count: 72 as const,
+    canonical_source_count: canonicalSources.length,
+    repair_source_count: repairSources.length,
+    source_count: sources.length,
+    provider_count: 3 as const,
+    logical_canonical_provider_binding_count: canonicalSources.length * 3,
+    logical_repair_provider_binding_count: repairSources.length * 3,
     sources,
   });
 }
@@ -800,8 +804,31 @@ export function assertLc4ProviderFreeDevelopmentReplay(value: unknown): asserts 
   checkBound(replay.fault_coverage, FAULT_DOMAIN, "fault coverage");
   checkBound(replay.arm_common_artifact, COMMON_DOMAIN, "arm-common artifact");
   checkBound(replay.report, REPORT_DOMAIN, "blinded result report");
+  const canonicalAudioSources = replay.caller_audio_placeholders.sources.filter((source) => source.kind === "canonical");
+  const repairAudioSources = replay.caller_audio_placeholders.sources.filter((source) => source.kind === "repair");
+  const expectedAudioSources = [
+    ...replay.corpus.opportunities.map((opportunity) => ({
+      source_id: opportunity.id,
+      source_text_sha256: opportunity.canonical_caller_text_sha256,
+    })),
+    ...replay.corpus.repair_policy.library.map((repair) => ({
+      source_id: repair.id,
+      source_text_sha256: repair.canonical_caller_text_sha256,
+    })),
+  ];
+  const actualAudioSources = replay.caller_audio_placeholders.sources.map((source) => ({
+    source_id: source.source_id,
+    source_text_sha256: source.source_text_sha256,
+  }));
   if (replay.caller_automaton.canonical_horizon !== 60 || replay.caller_automaton.states.length !== 60
-    || replay.caller_audio_placeholders.source_count !== 72 || replay.caller_audio_placeholders.sources.length !== 72
+    || replay.caller_audio_placeholders.canonical_source_count !== 60 || canonicalAudioSources.length !== 60
+    || replay.caller_audio_placeholders.repair_source_count !== 24 || repairAudioSources.length !== 24
+    || replay.caller_audio_placeholders.source_count !== 84 || replay.caller_audio_placeholders.sources.length !== 84
+    || replay.caller_audio_placeholders.provider_count !== 3
+    || replay.caller_audio_placeholders.logical_canonical_provider_binding_count !== 180
+    || replay.caller_audio_placeholders.logical_repair_provider_binding_count !== 72
+    || new Set(replay.caller_audio_placeholders.sources.map((source) => source.source_id)).size !== 84
+    || canonicalJson(actualAudioSources) !== canonicalJson(expectedAudioSources)
     || replay.fault_coverage.session_rotation_count !== 3 || replay.fault_coverage.session_count !== 4
     || replay.fault_coverage.cancelled_job_count !== 1
     || !replay.fault_coverage.all_declared_fault_branches_passed

@@ -56,11 +56,12 @@ source-corpus root, and caller voice slot. Arm order alternates by provider; it
 does not change scenario content.
 
 Before a live canary, render all 60 opportunity utterances and all 24 possible
-CRP-1 repair utterances from the exact committed source strings. The source
-format is mono 24 kHz signed 16-bit little-endian PCM. Bind every source PCM
-hash and deterministic provider-rendition hash before the first provider
-episode. Both arms receive the same rendition for the same caller state. An ASR
-mismatch, missing binding, or post-outcome re-render invalidates the canary.
+CRP-1 repair utterances from the exact committed source strings: 84 source
+masters total. The source format is mono 24 kHz signed 16-bit little-endian
+PCM. Bind every source PCM hash and all 180 canonical plus 72 repair logical
+provider-rendition bindings before the first provider episode. Both arms
+receive the same rendition for the same caller state. An ASR mismatch, missing
+binding, or post-outcome re-render invalidates the canary.
 
 This protocol file and corpus do not authorize provider calls or spend. The
 separate operator gate must still prove credentials, exact model identities,
@@ -68,10 +69,11 @@ transport/tool canaries, budget reservation, and complete audio commitments.
 
 ## Repair and final oracle
 
-The public repair library contains exactly two prewritten repairs for each of
-six stages. CRP-1 selects the earliest unmet blocker in the frozen precedence
-order and then the next unused repair ordinal for that stage. The episode limit
-is four repairs; the stage limit is two. Repairs never renumber, replace,
+The public repair library contains two prewritten repair ordinals for each of
+two registered blockers in each of six stages: four sources per stage and 24
+total. CRP-1 selects the earliest unmet blocker in the frozen precedence order
+and then the next unused repair ordinal for that blocker and stage. The episode
+limit is four repairs; the stage limit is two. Repairs never renumber, replace,
 postpone, or extend the 60 canonical opportunities.
 
 The final oracle requires all four corrections to govern state, stale values
