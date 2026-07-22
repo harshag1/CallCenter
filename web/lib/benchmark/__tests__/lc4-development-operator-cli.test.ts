@@ -1,26 +1,108 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   assertLc4DevOperatorAuthorizationDag,
   createLc4DevOperatorAuthorizationDag,
   lc4DevOperatorAuthorizationBindingSha256,
   loadLc4DevExplicitCredentials,
+  runLc4DevelopmentOperatorCli,
   type Lc4DevOperatorSigner,
 } from "../lc4-development-operator-cli";
 import type {
   Lc4DevLivePreflightArtifact,
   Lc4DevLivePrepareArtifact,
+  Lc4DevLiveRunArtifact,
   Lc4DevRetainedQualificationReceipt,
 } from "../lc4-development-live-runner";
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
+const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
+
+function reportRun(completed = true): Lc4DevLiveRunArtifact {
+  const body = {
+    schema_version: 1 as const,
+    execution_id: "lc4-dev-operator-test",
+    prepare_sha256: "1".repeat(64),
+    preflight_sha256: "2".repeat(64),
+    started_at: "2026-07-22T06:00:00.000Z",
+    completed_at: "2026-07-22T06:10:00.000Z",
+    status: completed ? "completed" as const : "failed" as const,
+    episodes_started: completed ? 6 : 3,
+    episodes_completed: completed ? 6 : 2,
+    opportunities_submitted: completed ? 360 : 120,
+    opportunities_completed: completed ? 360 : 119,
+    provider_calls_made: completed ? 360 : 120,
+    repair_playbacks: 0,
+    total_response_generations: completed ? 360 : 120,
+    paid_retry_count: 0 as const,
+    maximum_total_micro_usd: 15_000_000,
+    retained_caller_audio: completed ? 360 : 120,
+    retained_assistant_audio: completed ? 360 : 119,
+    listener_evidence_count: completed ? 360 : 119,
+    mechanism_receipt_count: completed ? 360 : 120,
+    episode_finalization_count: completed ? 6 : 2,
+    replay_evidence_reference_count: completed ? 1_000 : 300,
+    failure_class: completed ? null : "evidence" as const,
+    failure_message_sha256: completed ? null : sha256Hex("incomplete"),
+    ledger: Object.freeze([]),
+    ledger_head_sha256: null,
+  };
+  return Object.freeze({ ...body, run_sha256: sha256Hex(`${RUN_DOMAIN}${canonicalJson(body)}`) });
+}
+
+type AuthorityReport = Readonly<{
+  status: "scorable" | "unscorable_missing_authority_evidence" | "unscorable_invalid_authority_evidence";
+  passed: number | null;
+  evaluated: number | null;
+  evidence_invalid: number;
+  episode_replay_sha256s: readonly string[];
+  errors: readonly string[];
+}>;
+
+async function runReportCase(run: Lc4DevLiveRunArtifact, authority: AuthorityReport) {
+  const root = await mkdtemp(join(tmpdir(), "lc4-dev-report-cli-"));
+  roots.push(root);
+  const custody = fixtures();
+  const dag = createLc4DevOperatorAuthorizationDag(custody.input);
+  const preflight = {
+    execution_id: custody.prepare.execution_id,
+    prepare_sha256: custody.prepare.prepare_sha256,
+    preflight_sha256: "2".repeat(64),
+    immutable_ledger_genesis_sha256: dag.immutable_ledger_genesis_sha256,
+    authority_trust_root_sha256: custody.authority.public_key_fingerprint_sha256,
+    authorization: dag.authorization,
+  } as Lc4DevLivePreflightArtifact;
+  await Promise.all([
+    writeFile(join(root, "prepare.json"), `${canonicalJson(custody.prepare)}\n`, { mode: 0o400 }),
+    writeFile(join(root, "run.json"), `${canonicalJson(run)}\n`, { mode: 0o400 }),
+    writeFile(join(root, "preflight.json"), `${canonicalJson(preflight)}\n`, { mode: 0o400 }),
+  ]);
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const calls: unknown[] = [];
+  const code = await runLc4DevelopmentOperatorCli(
+    ["report", "--evidence-root", root],
+    { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value), now: () => new Date("2026-07-22T06:20:00.000Z") },
+    {
+      async inspect_source() { throw new Error("report must not inspect source or call providers"); },
+      async replay_authority_report(value) { calls.push(value); return authority; },
+    },
+  );
+  return {
+    code,
+    stdout,
+    stderr,
+    calls,
+    report: JSON.parse(await readFile(join(root, "report.json"), "utf8")) as Record<string, unknown>,
+  };
+}
 
 function signer(): Lc4DevOperatorSigner {
   const pair = generateKeyPairSync("ed25519");
@@ -137,5 +219,93 @@ describe("LC4-DEV operator custody", () => {
     await writeFile(repository, "OPENAI_API_KEY=different-openai-secret\nXAI_API_KEY=xai-test-secret-value\n");
     const overridden = await loadLc4DevExplicitCredentials({ provider_env_file: provider, repository_env_file: repository });
     expect(overridden.openai).toBe("different-openai-secret");
+  });
+
+  it("publishes a complete six-episode authority replay separately from execution counters", async () => {
+    const replayHashes = Object.freeze(Array.from({ length: 6 }, (_, index) => sha256Hex(`cli-authority-${index}`)));
+    const result = await runReportCase(reportRun(), {
+      status: "scorable",
+      passed: 6,
+      evaluated: 6,
+      evidence_invalid: 0,
+      episode_replay_sha256s: replayHashes,
+      errors: Object.freeze([]),
+    });
+    expect(result).toMatchObject({ code: 0, stderr: [], calls: [expect.any(Object)] });
+    expect(result.report).toMatchObject({
+      completed: true,
+      execution_evidence_complete: true,
+      authority_scoreability: "scorable",
+      authority_passed: 6,
+      authority_evaluated: 6,
+      task_results_available: true,
+      evidence_complete: true,
+      efficacy_claim_eligible: false,
+    });
+    expect(JSON.parse(result.stdout[0]!)).toEqual(result.report);
+  });
+
+  it("writes a null-denominator report and returns 2 when an authority CAS object is missing", async () => {
+    const result = await runReportCase(reportRun(), {
+      status: "unscorable_missing_authority_evidence",
+      passed: null,
+      evaluated: null,
+      evidence_invalid: 1,
+      episode_replay_sha256s: Object.freeze([]),
+      errors: Object.freeze(["ENOENT: authority artifact missing"]),
+    });
+    expect(result.code).toBe(2);
+    expect(result.report).toMatchObject({
+      completed: true,
+      execution_evidence_complete: true,
+      authority_scoreability: "unscorable_missing_authority_evidence",
+      authority_passed: null,
+      authority_evaluated: null,
+      task_results_available: false,
+      evidence_complete: false,
+    });
+  });
+
+  it("writes a null-denominator report and returns 2 when an authority CAS object is tampered", async () => {
+    const result = await runReportCase(reportRun(), {
+      status: "unscorable_invalid_authority_evidence",
+      passed: null,
+      evaluated: null,
+      evidence_invalid: 1,
+      episode_replay_sha256s: Object.freeze([]),
+      errors: Object.freeze(["authority artifact hash mismatch"]),
+    });
+    expect(result.code).toBe(2);
+    expect(result.report).toMatchObject({
+      execution_evidence_complete: true,
+      authority_scoreability: "unscorable_invalid_authority_evidence",
+      authority_passed: null,
+      authority_evaluated: null,
+      task_results_available: false,
+      efficacy_claim_eligible: false,
+    });
+  });
+
+  it("never publishes a denominator for an incomplete execution, even with six replay objects", async () => {
+    const result = await runReportCase(reportRun(false), {
+      status: "scorable",
+      passed: 5,
+      evaluated: 6,
+      evidence_invalid: 0,
+      episode_replay_sha256s: Object.freeze(Array.from({ length: 6 }, (_, index) => sha256Hex(`incomplete-authority-${index}`))),
+      errors: Object.freeze([]),
+    });
+    expect(result.code).toBe(2);
+    expect(result.report).toMatchObject({
+      completed: false,
+      exact_six_episode_horizon: false,
+      execution_evidence_complete: false,
+      authority_scoreability: "scorable",
+      authority_passed: null,
+      authority_evaluated: null,
+      task_results_available: false,
+      evidence_complete: false,
+    });
+    expect(result.report).not.toMatchObject({ authority_passed: 0, authority_evaluated: 5 });
   });
 });

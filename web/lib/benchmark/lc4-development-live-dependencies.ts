@@ -1066,9 +1066,14 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
   const evidence = createLc4DevReplayEvidenceStore(cas);
   const errors: string[] = [];
   const replayHashes: string[] = [];
+  const invalidEpisodes = new Set<string>();
   let passed = 0;
   const terminalEvents = input.run.ledger.filter((event) => event.event_type === "episode_terminal");
-  if (terminalEvents.length !== 6) errors.push("authority_episode_terminal_set_missing");
+  if (terminalEvents.length < 6) errors.push("authority_episode_terminal_set_missing");
+  if (terminalEvents.length > 6) errors.push("authority_episode_terminal_set_has_extras");
+  if (new Set(terminalEvents.map((event) => event.episode_id)).size !== terminalEvents.length) {
+    errors.push("authority_episode_terminal_ids_are_not_unique");
+  }
   try {
     const fullReplay = await verifyLc4DevReplayLedger(input.run.ledger as readonly Lc4DevReplayLedgerEvent[], evidence);
     if (fullReplay.ledger_head_sha256 !== input.run.ledger_head_sha256) errors.push("authority_full_ledger_head_mismatch");
@@ -1084,6 +1089,7 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
   if (benchmarkKernelAttestationPublicKeyFingerprint(publicKeyPem) !== input.preflight.authority_trust_root_sha256) {
     errors.push("authority_report_public_key_differs_from_preflight");
   }
+  let sharedRegistryEvidenceSha256: string | null = null;
   for (const terminal of terminalEvents) {
     try {
       const terminalIndex = input.run.ledger.findIndex((event) => event.event_sha256 === terminal.event_sha256);
@@ -1093,7 +1099,13 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
       );
       const finalizationReference = terminal.evidence_references.find((reference) => reference.kind === "episode_finalization");
       if (!finalizationReference) throw new Error("authority episode finalization reference missing");
+      const terminalPayload = objectValue(await evidence.resolveJson(terminal.payload_evidence), "LC4-DEV episode terminal payload");
+      if (terminalPayload.episode_finalization_sha256 !== finalizationReference.evidence_sha256) {
+        throw new Error("authority terminal payload differs from its finalization edge");
+      }
       const finalization = objectValue(await evidence.resolveJson(finalizationReference), "LC4-DEV episode finalization");
+      const finalizedEpisode = objectValue(finalization.episode, "LC4-DEV finalized episode");
+      if (finalizedEpisode.episode_id !== terminal.episode_id) throw new Error("authority finalization episode differs from terminal");
       const registryReference = finalization.authority_manifest_registry as unknown as Lc4DevReplayArtifactReference;
       const checkpointReference = finalization.authority_source_checkpoint as unknown as Lc4DevReplayArtifactReference;
       const artifactReference = finalization.authority_episode_artifact as unknown as Lc4DevReplayArtifactReference;
@@ -1102,10 +1114,17 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
         || artifactReference?.kind !== "authority_episode_artifact") {
         throw new Error("authority finalization DAG references are missing or mistyped");
       }
+      if (sharedRegistryEvidenceSha256 === null) sharedRegistryEvidenceSha256 = registryReference.evidence_sha256;
+      else if (sharedRegistryEvidenceSha256 !== registryReference.evidence_sha256) {
+        throw new Error("authority episodes do not share one frozen manifest registry");
+      }
       const registry = await evidence.resolveJson(registryReference) as unknown as Lc4AuthorityManifestRegistry;
       const checkpoint = objectValue(await evidence.resolveJson(checkpointReference), "LC4-DEV authority source checkpoint");
       const artifactJson = await evidence.resolveJson(artifactReference);
       const artifact = artifactJson as unknown as Lc4AuthoritativeObligationEpisodeArtifact;
+      if (registry.assignments.length !== 6 || checkpoint.episode_subject_sha256 !== artifact.episode_subject_sha256) {
+        throw new Error("authority registry or checkpoint episode assignment mismatch");
+      }
       if (artifact.authority_roots.retained_ledger_head_sha256 !== preterminal.ledger_head_sha256
         || artifact.authority_roots.ledger_replay_sha256 !== preterminal.replay_sha256
         || artifact.authority_roots.source_checkpoint_evidence_sha256 !== checkpointReference.evidence_sha256
@@ -1127,16 +1146,17 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
       replayHashes.push(reportReplay.replaySha256);
       if (reportReplay.derivation.authorityVerdict === "pass") passed += 1;
     } catch (error) {
+      invalidEpisodes.add(terminal.episode_id);
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
   if (errors.length > 0) {
-    const missing = errors.some((error) => /missing|ENOENT|no such file/iu.test(error));
+    const missing = errors.some((error) => /_missing|ENOENT|no such file|reference missing/iu.test(error));
     return Object.freeze({
       status: missing ? "unscorable_missing_authority_evidence" : "unscorable_invalid_authority_evidence",
       passed: null,
       evaluated: null,
-      evidence_invalid: Math.max(errors.length, 6 - terminalEvents.length),
+      evidence_invalid: Math.min(6, Math.max(invalidEpisodes.size, 6 - terminalEvents.length, 1)),
       episode_replay_sha256s: Object.freeze(replayHashes),
       errors: Object.freeze([...new Set(errors)].sort()),
     });

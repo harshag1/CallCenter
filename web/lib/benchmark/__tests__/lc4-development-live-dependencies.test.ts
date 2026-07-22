@@ -7,6 +7,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
+  compileLc4AuthoritativeObligationManifest,
+  createLc4AuthoritativeObligationEpisodeArtifact,
+  createLc4AuthorityEvents,
+  createLc4AuthorityManifestRegistry,
+  type Lc4AuthoritativeObligationManifest,
+  type Lc4AuthorityEventType,
+  type Lc4AuthorityOutcome,
+} from "../lc4-authoritative-obligation-evidence";
+import {
   auditLc4PublicDevLiveReadiness,
   createLc4HashChainedLedgerWriter,
   createLc4ImmutableCas,
@@ -20,18 +29,30 @@ import {
   createLc4DevReplayEvidenceStore,
   verifyLc4DevReplayLedger,
   type Lc4DevReplayEvidenceStore,
+  type Lc4DevReplayArtifactReference,
+  type Lc4DevReplayLedgerEvent,
 } from "../lc4-development-evidence-retention";
 import {
   createLc4DevArmBlindRepairProjection,
   createLc4HeadlessListenerPlaybackAuthority,
 } from "../lc4-development-headless-listener-authority";
-import type { Lc4DevImmutableLedgerEvent, Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import type {
+  Lc4DevImmutableLedgerEvent,
+  Lc4DevLiveEpisodePlan,
+  Lc4DevLivePreflightArtifact,
+  Lc4DevLiveRunArtifact,
+} from "../lc4-development-live-runner";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
   createBenchmarkKernelAttestationSigner,
 } from "../kernel-attestation";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import {
+  LC4_DEVELOPMENT_TEST_SEED_BYTES,
+  createLc4GenericHeldoutGenerator,
+  type Lc4GenericScenarioPayload,
+} from "../lc4-heldout-generator";
 
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const HASH = "a".repeat(64);
@@ -82,6 +103,117 @@ async function ledgerEvent(
   });
 }
 
+function passingAuthorityEntries(manifest: Lc4AuthoritativeObligationManifest) {
+  return manifest.obligations.flatMap((entry) => {
+    if (entry.kind === "reconciliation_after_ambiguous_commit" || entry.kind === "invalidated_confirmation_never_used") return [];
+    const event_type: Lc4AuthorityEventType = entry.kind === "tool_outcome_exact" ? "tool_receipt"
+      : entry.kind === "worker_disposition_exact" ? "worker_disposition"
+        : entry.kind === "latest_fact_revision" ? "fact_revision" : "terminal_world";
+    return [{
+      event_type,
+      subject_id: entry.subject_id,
+      opportunity_index: entry.not_before_opportunity ?? 60,
+      outcome: entry.expected_outcome as Lc4AuthorityOutcome,
+      value_sha256: entry.expected_value_sha256,
+      source_receipt_sha256: sha256Hex(`authority-source:${entry.obligation_id}`),
+    }];
+  }).sort((left, right) => left.opportunity_index - right.opportunity_index
+    || left.subject_id.localeCompare(right.subject_id));
+}
+
+async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
+  if (!Number.isSafeInteger(terminalCount) || terminalCount < 0 || terminalCount > 6) throw new Error("invalid terminal fixture count");
+  const cas = await createLc4ImmutableCas(join(root, "cas"));
+  const evidence = createLc4DevReplayEvidenceStore(cas);
+  const payload = createLc4GenericHeldoutGenerator({
+    executionMode: "development-test-only",
+    generatorSourceSha256: sha256Hex("lc4-report-fixture-generator"),
+    corpusSchemaSha256: sha256Hex("lc4-report-fixture-schema"),
+  }).generate(new Uint8Array(LC4_DEVELOPMENT_TEST_SEED_BYTES))[0]!.payload as Lc4GenericScenarioPayload;
+  const manifest = compileLc4AuthoritativeObligationManifest(payload);
+  const keys = generateKeyPairSync("ed25519");
+  const publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const signer = createBenchmarkKernelAttestationSigner({
+    keyId: "lc4-report-fixture-key",
+    privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    publicKeyPem,
+  });
+  const subjects = Array.from({ length: 6 }, (_, index) => sha256Hex(`authority-report-episode-${index + 1}`));
+  const registry = createLc4AuthorityManifestRegistry({
+    manifests: [manifest],
+    assignments: subjects.map((episodeSubjectSha256) => ({ episode_subject_sha256: episodeSubjectSha256, manifest_sha256: manifest.manifest_sha256 })),
+  });
+  const registryReference = await evidence.retainJson({ kind: "authority_obligation_manifest", body: registry as never });
+  const ledger: Lc4DevReplayLedgerEvent[] = [];
+  const artifactReferences: Lc4DevReplayArtifactReference[] = [];
+  const append = async (eventType: "episode_opened" | "episode_terminal", episodeId: string, payloadBody: Record<string, unknown>, references: readonly Lc4DevReplayArtifactReference[] = []) => {
+    const payloadEvidence = await evidence.retainJson({ kind: "ledger_payload", body: payloadBody as never });
+    const body = {
+      sequence: ledger.length + 1,
+      observed_at: "2026-07-22T06:00:00.000Z",
+      event_type: eventType,
+      episode_id: episodeId,
+      opportunity_id: null,
+      payload_sha256: payloadEvidence.evidence_sha256,
+      payload_evidence: payloadEvidence,
+      evidence_references: Object.freeze([...references]),
+      previous_event_sha256: ledger.at(-1)?.event_sha256 ?? null,
+    };
+    ledger.push(Object.freeze({ ...body, event_sha256: sha256Hex(`${LEDGER_EVENT_DOMAIN}${canonicalJson(body)}`) }));
+  };
+  for (const [index, episodeSubjectSha256] of subjects.slice(0, terminalCount).entries()) {
+    const episodeId = `authority-report-episode-${index + 1}`;
+    await append("episode_opened", episodeId, { episode_id: episodeId });
+    const preterminal = await verifyLc4DevReplayLedger(ledger, evidence);
+    const authorityEvents = createLc4AuthorityEvents(passingAuthorityEntries(manifest));
+    const checkpointReference = await evidence.retainJson({
+      kind: "authority_source_checkpoint",
+      body: {
+        episode_subject_sha256: episodeSubjectSha256,
+        normalized_events: authorityEvents,
+        normalized_event_set_sha256: sha256Hex(canonicalJson(authorityEvents)),
+      },
+    });
+    const artifact = createLc4AuthoritativeObligationEpisodeArtifact({
+      manifest,
+      episodeSubjectSha256,
+      events: authorityEvents,
+      signer,
+      authorityRoots: {
+        retained_ledger_head_sha256: preterminal.ledger_head_sha256,
+        ledger_replay_sha256: preterminal.replay_sha256,
+        normalized_event_set_sha256: sha256Hex(canonicalJson(authorityEvents)),
+        source_checkpoint_evidence_sha256: checkpointReference.evidence_sha256,
+        manifest_registry_sha256: registry.registry_sha256,
+        episode_subject_assignment_sha256: registry.assignment_sha256,
+      },
+    });
+    const artifactReference = await evidence.retainJson({ kind: "authority_episode_artifact", body: artifact as never });
+    artifactReferences.push(artifactReference);
+    const finalizationReference = await evidence.retainJson({
+      kind: "episode_finalization",
+      body: {
+        episode: { episode_id: episodeId },
+        authority_manifest_registry: registryReference,
+        authority_source_checkpoint: checkpointReference,
+        authority_episode_artifact: artifactReference,
+      },
+    });
+    await append("episode_terminal", episodeId, { episode_finalization_sha256: finalizationReference.evidence_sha256 }, [finalizationReference]);
+  }
+  const run = {
+    ledger: Object.freeze(ledger),
+    ledger_head_sha256: ledger.at(-1)!.event_sha256,
+  } as unknown as Lc4DevLiveRunArtifact;
+  const preflight = {
+    authority_trust_root_sha256: benchmarkKernelAttestationPublicKeyFingerprint(publicKeyPem),
+    authorization: {
+      authority_public_key_spki_base64: keys.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+    },
+  } as unknown as Lc4DevLivePreflightArtifact;
+  return { cas, run, preflight, artifactReferences };
+}
+
 describe("LC4-DEV concrete live dependencies", () => {
   it("keeps a retained run with no authority terminal DAG unscorable, never 0/N", async () => {
     const root = await temporaryDirectory();
@@ -104,6 +236,73 @@ describe("LC4-DEV concrete live dependencies", () => {
       evaluated: null,
     });
   });
+
+  it("replays six complete signed authority terminal DAGs from CAS as 6/6", async () => {
+    const root = await temporaryDirectory();
+    const fixture = await completeAuthorityReportFixture(root);
+    await expect(replayLc4DevAuthorityReport({
+      run: fixture.run,
+      preflight: fixture.preflight,
+      cas_root_dir: fixture.cas.root_dir,
+    })).resolves.toMatchObject({
+      status: "scorable",
+      passed: 6,
+      evaluated: 6,
+      evidence_invalid: 0,
+      episode_replay_sha256s: expect.arrayContaining([expect.stringMatching(/^[a-f0-9]{64}$/u)]),
+    });
+  }, 30_000);
+
+  it("returns a null denominator when one nested authority artifact is missing", async () => {
+    const root = await temporaryDirectory();
+    const fixture = await completeAuthorityReportFixture(root);
+    const missing = fixture.artifactReferences[2]!;
+    await rm(join(fixture.cas.root_dir, missing.evidence_sha256.slice(0, 2), missing.evidence_sha256));
+    await expect(replayLc4DevAuthorityReport({
+      run: fixture.run,
+      preflight: fixture.preflight,
+      cas_root_dir: fixture.cas.root_dir,
+    })).resolves.toMatchObject({
+      status: "unscorable_missing_authority_evidence",
+      passed: null,
+      evaluated: null,
+      evidence_invalid: 1,
+    });
+  }, 30_000);
+
+  it("returns a null denominator when one nested authority artifact is tampered", async () => {
+    const root = await temporaryDirectory();
+    const fixture = await completeAuthorityReportFixture(root);
+    const tampered = fixture.artifactReferences[4]!;
+    const path = join(fixture.cas.root_dir, tampered.evidence_sha256.slice(0, 2), tampered.evidence_sha256);
+    await chmod(path, 0o600);
+    await writeFile(path, Buffer.from("tampered-authority-artifact"));
+    await expect(replayLc4DevAuthorityReport({
+      run: fixture.run,
+      preflight: fixture.preflight,
+      cas_root_dir: fixture.cas.root_dir,
+    })).resolves.toMatchObject({
+      status: "unscorable_invalid_authority_evidence",
+      passed: null,
+      evaluated: null,
+      evidence_invalid: 1,
+    });
+  }, 30_000);
+
+  it("keeps a five-terminal authority run unscorable instead of fabricating 0/5", async () => {
+    const root = await temporaryDirectory();
+    const fixture = await completeAuthorityReportFixture(root, 5);
+    await expect(replayLc4DevAuthorityReport({
+      run: fixture.run,
+      preflight: fixture.preflight,
+      cas_root_dir: fixture.cas.root_dir,
+    })).resolves.toMatchObject({
+      status: "unscorable_missing_authority_evidence",
+      passed: null,
+      evaluated: null,
+      evidence_invalid: 1,
+    });
+  }, 30_000);
   it("reports every schema and transport gap instead of treating corpus prose as executable control", () => {
     const audit = auditLc4PublicDevLiveReadiness();
     expect(audit.ready).toBe(false);

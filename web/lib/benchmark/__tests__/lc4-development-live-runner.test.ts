@@ -62,6 +62,13 @@ import {
 
 const HASH = "a".repeat(64);
 const NOW = "2026-07-21T22:00:00.000Z";
+const COMPLETE_AUTHORITY = Object.freeze({
+  status: "scorable" as const,
+  passed: 6,
+  evaluated: 6,
+  evidence_invalid: 0,
+  episode_replay_sha256s: Object.freeze(Array.from({ length: 6 }, (_, index) => sha256Hex(`authority-replay-${index}`))),
+});
 const branchKeys = generateKeyPairSync("ed25519");
 const branchIdentity = Object.freeze({
   key_id: "lc4-dev-live-runner-branch-test",
@@ -560,12 +567,14 @@ describe("LC4-DEV live runner", () => {
       event_count: 1_098,
       ledger_head_sha256: run.ledger_head_sha256,
     });
-    expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
+    expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY)).toMatchObject({
       completed: true,
       exact_six_episode_horizon: true,
       exact_opportunity_horizon: true,
       exact_playback_accounting: true,
       evidence_complete: true,
+      task_results_available: true,
+      authority_evaluated: 6,
       efficacy_claim_eligible: false,
     });
   });
@@ -718,7 +727,7 @@ describe("LC4-DEV live runner", () => {
         event_count: 1_100,
         ledger_head_sha256: run.ledger_head_sha256,
       });
-      expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
+      expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY)).toMatchObject({
         completed: true,
         exact_six_episode_horizon: true,
         exact_opportunity_horizon: true,

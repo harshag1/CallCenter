@@ -1132,15 +1132,70 @@ export type Lc4DevLiveReportArtifact = Readonly<{
   exact_opportunity_horizon: boolean;
   exact_playback_accounting: boolean;
   evidence_complete: boolean;
+  execution_evidence_complete: boolean;
+  authority_scoreability: "scorable" | "unscorable_missing_authority_evidence" | "unscorable_invalid_authority_evidence";
+  authority_passed: number | null;
+  authority_evaluated: number | null;
+  authority_evidence_invalid: number;
+  authority_replay_set_sha256: string | null;
+  task_results_available: boolean;
   paid_retry_count: 0;
   efficacy_claim_eligible: false;
   interpretation: "development mechanism evidence only; not confirmatory provider efficacy evidence";
   report_sha256: string;
 }>;
 
-export function createLc4DevLiveReportArtifact(run: Lc4DevLiveRunArtifact): Lc4DevLiveReportArtifact {
+export type Lc4DevAuthorityReportInput = Readonly<{
+  status: Lc4DevLiveReportArtifact["authority_scoreability"];
+  passed: number | null;
+  evaluated: number | null;
+  evidence_invalid: number;
+  episode_replay_sha256s: readonly string[];
+}>;
+
+export function createLc4DevLiveReportArtifact(
+  run: Lc4DevLiveRunArtifact,
+  authority: Lc4DevAuthorityReportInput = Object.freeze({
+    status: "unscorable_missing_authority_evidence",
+    passed: null,
+    evaluated: null,
+    evidence_invalid: 6,
+    episode_replay_sha256s: Object.freeze([]),
+  }),
+): Lc4DevLiveReportArtifact {
   const { run_sha256: claimed, ...runBody } = run;
   if (hash(RUN_DOMAIN, runBody) !== claimed) throw new Error("LC4-DEV run artifact hash mismatch");
+  const replayHashesValid = authority.episode_replay_sha256s.every((digest) => HASH.test(digest))
+    && new Set(authority.episode_replay_sha256s).size === authority.episode_replay_sha256s.length;
+  const scorableShapeValid = authority.status === "scorable"
+    && Number.isSafeInteger(authority.passed) && Number.isSafeInteger(authority.evaluated)
+    && authority.passed !== null && authority.evaluated !== null
+    && authority.passed >= 0 && authority.passed <= authority.evaluated
+    && authority.evaluated === 6 && authority.evidence_invalid === 0
+    && authority.episode_replay_sha256s.length === 6 && replayHashesValid;
+  const unscorableShapeValid = authority.status !== "scorable"
+    && authority.passed === null && authority.evaluated === null
+    && Number.isSafeInteger(authority.evidence_invalid) && authority.evidence_invalid >= 1
+    && replayHashesValid;
+  if (!scorableShapeValid && !unscorableShapeValid) {
+    throw new Error("LC4-DEV authority report summary is internally inconsistent");
+  }
+  const executionEvidenceComplete = run.retained_caller_audio === 360 + run.repair_playbacks
+    && run.retained_assistant_audio === 360 + run.repair_playbacks
+    && run.listener_evidence_count === 360 + run.repair_playbacks
+    && run.mechanism_receipt_count === 360
+    && run.episode_finalization_count === 6
+    && run.replay_evidence_reference_count >= run.ledger.length;
+  const authorityScorable = authority.status === "scorable"
+    && authority.evaluated === 6
+    && authority.passed !== null
+    && authority.evidence_invalid === 0
+    && authority.episode_replay_sha256s.length === 6;
+  const executionComplete = run.status === "completed"
+    && run.episodes_completed === 6
+    && run.opportunities_completed === 360
+    && run.episode_finalization_count === 6;
+  const taskResultsAvailable = authorityScorable && executionComplete;
   const body = {
     schema_version: 1 as const,
     execution_id: run.execution_id,
@@ -1150,12 +1205,16 @@ export function createLc4DevLiveReportArtifact(run: Lc4DevLiveRunArtifact): Lc4D
     exact_opportunity_horizon: run.opportunities_completed === 360,
     exact_playback_accounting: run.total_response_generations === 360 + run.repair_playbacks
       && run.provider_calls_made === run.total_response_generations,
-    evidence_complete: run.retained_caller_audio === 360 + run.repair_playbacks
-      && run.retained_assistant_audio === 360 + run.repair_playbacks
-      && run.listener_evidence_count === 360 + run.repair_playbacks
-      && run.mechanism_receipt_count === 360
-      && run.episode_finalization_count === 6
-      && run.replay_evidence_reference_count >= run.ledger.length,
+    evidence_complete: executionEvidenceComplete && taskResultsAvailable,
+    execution_evidence_complete: executionEvidenceComplete,
+    authority_scoreability: authority.status,
+    authority_passed: taskResultsAvailable ? authority.passed : null,
+    authority_evaluated: taskResultsAvailable ? authority.evaluated : null,
+    authority_evidence_invalid: authority.evidence_invalid,
+    authority_replay_set_sha256: taskResultsAvailable
+      ? sha256Hex(canonicalJson(authority.episode_replay_sha256s))
+      : null,
+    task_results_available: taskResultsAvailable,
     paid_retry_count: 0 as const,
     efficacy_claim_eligible: false as const,
     interpretation: "development mechanism evidence only; not confirmatory provider efficacy evidence" as const,

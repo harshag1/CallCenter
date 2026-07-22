@@ -44,7 +44,10 @@ import {
   type Lc4DevLiveRunArtifact,
   type Lc4DevRetainedQualificationReceipt,
 } from "./lc4-development-live-runner";
-import type { Lc4DevLiveDependencyBundle } from "./lc4-development-live-dependencies";
+import {
+  replayLc4DevAuthorityReport,
+  type Lc4DevLiveDependencyBundle,
+} from "./lc4-development-live-dependencies";
 import {
   inspectLc4QualificationGitSource,
   type Lc4QualificationGitSource,
@@ -129,12 +132,14 @@ export type Lc4DevOperatorRuntime = Readonly<{
 
 export type Lc4DevOperatorDependencies = Readonly<{
   inspect_source(repositoryRoot: string): Promise<Lc4QualificationGitSource>;
+  replay_authority_report?: typeof replayLc4DevAuthorityReport;
   runtime?: Lc4DevOperatorRuntime;
   create_runtime?(config: Lc4DevDefaultRuntimeConfig): Promise<Lc4DevOperatorRuntime>;
 }>;
 
 const DEFAULT_DEPS: Lc4DevOperatorDependencies = Object.freeze({
   inspect_source: inspectLc4QualificationGitSource,
+  replay_authority_report: replayLc4DevAuthorityReport,
   create_runtime: createLc4DevelopmentDefaultOperatorRuntime,
 });
 
@@ -776,12 +781,34 @@ export async function runLc4DevelopmentOperatorCli(
     if (command === "report") {
       exact(parsed, ["--evidence-root"]);
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
-      const run = await readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV run artifact");
-      const report = createLc4DevLiveReportArtifact(run);
+      const [prepare, run, preflight] = await Promise.all([
+        readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
+        readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV run artifact"),
+        readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+      ]);
+      assertHash(prepare.prepare_sha256, "LC4-DEV report prepare");
+      assertHash(preflight.preflight_sha256, "LC4-DEV report preflight");
+      if (preflight.execution_id !== prepare.execution_id || preflight.prepare_sha256 !== prepare.prepare_sha256) {
+        throw new Error("LC4-DEV report preflight differs from prepare");
+      }
+      assertLc4DevOperatorAuthorizationDag({
+        preflight,
+        expected_authority_public_key_fingerprint_sha256: preflight.authority_trust_root_sha256,
+      });
+      if (run.execution_id !== prepare.execution_id || run.prepare_sha256 !== prepare.prepare_sha256
+        || run.preflight_sha256 !== preflight.preflight_sha256) {
+        throw new Error("LC4-DEV report run differs from its prepare/preflight custody chain");
+      }
+      const authority = await (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
+        run,
+        preflight,
+        cas_root_dir: resolve(evidenceRoot, "cas"),
+      });
+      const report = createLc4DevLiveReportArtifact(run, authority);
       await assertAbsent(artifactPath(evidenceRoot, "report"), "LC4-DEV report artifact");
       await writeImmutableJson(artifactPath(evidenceRoot, "report"), report);
       io.stdout(canonicalJson(report));
-      return 0;
+      return report.task_results_available ? 0 : 2;
     }
     throw new Error("usage: lc4-development-live <status|prepare|preflight|run|report>");
   } catch (error) {
