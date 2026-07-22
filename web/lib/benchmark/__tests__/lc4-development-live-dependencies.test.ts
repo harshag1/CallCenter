@@ -104,7 +104,8 @@ describe("LC4-DEV concrete live dependencies", () => {
     const genesis = lc4DevLedgerGenesisSha256({
       execution_id: "lc4-dev-test",
       prepare_sha256: "1".repeat(64),
-      preflight_sha256: "2".repeat(64),
+      authorization_binding_sha256: "2".repeat(64),
+      authority_public_key_fingerprint_sha256: "3".repeat(64),
     });
     const writer = await createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis });
     const first = ledgerEvent(1, null);

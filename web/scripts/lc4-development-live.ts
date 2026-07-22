@@ -1,5 +1,5 @@
-import { runLc4DevelopmentLiveCli } from "../lib/benchmark/lc4-development-live-cli";
+import { runLc4DevelopmentOperatorCli } from "../lib/benchmark/lc4-development-operator-cli";
 
-void runLc4DevelopmentLiveCli(process.argv.slice(2)).then((code) => {
+void runLc4DevelopmentOperatorCli(process.argv.slice(2)).then((code) => {
   process.exitCode = code;
 });

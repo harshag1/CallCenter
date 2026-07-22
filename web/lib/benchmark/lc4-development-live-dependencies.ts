@@ -16,6 +16,7 @@ import type {
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
+import type { Lc4DevGatewayExecutor } from "./lc4-development-gateway-bridge";
 import type {
   Lc4ListenerPlaybackAuthority,
   Lc4PinnedListenerEvaluator,
@@ -32,7 +33,9 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
 const CAS_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
-const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v1\n";
+const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v1\n";
+const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n";
+const LEDGER_INTENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-intent/v1\n";
 const LISTENER_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const DEPENDENCY_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-dependencies/v1\n";
 
@@ -206,16 +209,53 @@ export async function createLc4ImmutableCas(rootDir: string): Promise<Lc4Immutab
 export function lc4DevLedgerGenesisSha256(input: Readonly<{
   execution_id: string;
   prepare_sha256: string;
-  preflight_sha256: string;
+  authorization_binding_sha256: string;
+  authority_public_key_fingerprint_sha256: string;
 }>): string {
   requireSafeId(input.execution_id, "LC4-DEV ledger execution ID");
   requireSha256(input.prepare_sha256, "LC4-DEV ledger prepare hash");
-  requireSha256(input.preflight_sha256, "LC4-DEV ledger preflight hash");
+  requireSha256(input.authorization_binding_sha256, "LC4-DEV ledger authorization binding");
+  requireSha256(input.authority_public_key_fingerprint_sha256, "LC4-DEV ledger authority fingerprint");
   return hash(LEDGER_GENESIS_DOMAIN, {
-    schema_version: 1,
-    dependency_version: LC4_DEV_LIVE_DEPENDENCY_VERSION,
+    schema_version: 2,
+    operator_version: "HACC-LC4-DEV-OPERATOR-v1",
     ...input,
   });
+}
+
+function authorizationBindingSha256(preflight: Lc4DevLivePreflightArtifact): string {
+  const { immutable_ledger_genesis_sha256: _excluded, ...body } = preflight.authorization.body;
+  void _excluded;
+  return hash(AUTHORIZATION_BINDING_DOMAIN, body);
+}
+
+async function writeLedgerIntent(input: Readonly<{
+  path: string;
+  preflight: Lc4DevLivePreflightArtifact;
+  authorization_binding_sha256: string;
+  genesis_sha256: string;
+}>): Promise<void> {
+  const body = {
+    schema_version: 1 as const,
+    execution_id: input.preflight.execution_id,
+    prepare_sha256: input.preflight.prepare_sha256,
+    preflight_sha256: input.preflight.preflight_sha256,
+    authorization_artifact_sha256: input.preflight.authorization_artifact_sha256,
+    authorization_binding_sha256: input.authorization_binding_sha256,
+    ledger_genesis_sha256: input.genesis_sha256,
+    provider_open_permitted_after_intent_fsync: true as const,
+  };
+  const intent = freeze({ ...body, intent_sha256: hash(LEDGER_INTENT_DOMAIN, body) });
+  const path = resolve(input.path);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await open(path, "wx", 0o400);
+  try {
+    await handle.writeFile(`${canonicalJson(intent)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await chmod(path, 0o400);
 }
 
 export type Lc4HashChainedLedgerWriter = Readonly<{
@@ -441,6 +481,7 @@ export function createLc4PinnedListenerSink(input: Readonly<{
 export type Lc4DevExecutableMechanismControl = Readonly<{
   kind: "gateway-flow-toolworld-crp-workers-v1";
   manifest_sha256: string;
+  gateway_executor: Lc4DevGatewayExecutor;
   next(input: Readonly<{
     episode: Lc4DevLiveEpisodePlan;
     opportunity: Lc4PublicDevOpportunity;
@@ -467,12 +508,16 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   corpus?: Lc4PublicDevelopmentCorpus;
   cas_root_dir: string;
   ledger_path: string;
+  caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
   control: Lc4DevExecutableMechanismControl;
   criteria: readonly Lc4DevListenerCriterionBinding[];
   evaluator: Lc4PinnedListenerEvaluator;
   playback_authority: Lc4ListenerPlaybackAuthority;
   playback_authority_manifest_sha256: string;
-  create_adapter(listener: Lc4DevelopmentListenerSink): Lc4DevelopmentRealtimeAdapter;
+  create_adapter(
+    listener: Lc4DevelopmentListenerSink,
+    gatewayExecutor: Lc4DevGatewayExecutor,
+  ): Lc4DevelopmentRealtimeAdapter;
   now?: () => Date;
 }>): Promise<Lc4DevLiveDependencyBundle> {
   const corpus = input.corpus ?? createLc4PublicDevelopmentCorpus();
@@ -491,15 +536,23 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   if (listenerManifest !== input.preflight.listener_evidence_manifest_sha256) {
     throw new Error("LC4-DEV pinned listener dependencies differ from preflight");
   }
+  const authorizationBinding = authorizationBindingSha256(input.preflight);
   const genesis = lc4DevLedgerGenesisSha256({
     execution_id: input.prepare.execution_id,
     prepare_sha256: input.prepare.prepare_sha256,
-    preflight_sha256: input.preflight.preflight_sha256,
+    authorization_binding_sha256: authorizationBinding,
+    authority_public_key_fingerprint_sha256: input.preflight.authority_trust_root_sha256,
   });
   if (genesis !== input.preflight.immutable_ledger_genesis_sha256) {
-    throw new Error("LC4-DEV ledger genesis differs from preflight");
+    throw new Error("LC4-DEV authorization binding or ledger genesis differs from preflight");
   }
   const cas = await createLc4ImmutableCas(input.cas_root_dir);
+  await writeLedgerIntent({
+    path: `${resolve(input.ledger_path)}.intent.json`,
+    preflight: input.preflight,
+    authorization_binding_sha256: authorizationBinding,
+    genesis_sha256: genesis,
+  });
   const ledger = await createLc4HashChainedLedgerWriter({ path: input.ledger_path, genesis_sha256: genesis });
   const listener = createLc4PinnedListenerSink({
     corpus,
@@ -510,13 +563,15 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     playback_authority_manifest_sha256: input.playback_authority_manifest_sha256,
     cas,
   });
-  const adapter = input.create_adapter(listener);
+  const adapter = input.create_adapter(listener, input.control.gateway_executor);
   const dependencies: Lc4DevLiveRunnerDependencies = Object.freeze({
     adapter,
     caller_audio: Object.freeze({
       load: async (binding: Lc4DevCallerAudioBinding) => {
-        const pcm = await cas.get(binding.pcm_sha256);
-        if (pcm.byteLength !== binding.pcm_byte_length) throw new Error("LC4-DEV caller PCM CAS byte length differs from prepare");
+        const pcm = await input.caller_audio.load(binding);
+        if (pcm.byteLength !== binding.pcm_byte_length || sha256Hex(pcm) !== binding.pcm_sha256) {
+          throw new Error("LC4-DEV caller PCM source differs from the prepare-bound audio CAS object");
+        }
         return pcm;
       },
     }),

@@ -45,6 +45,7 @@
     "benchmark:long-call:output-asr-calibrate": "tsx scripts/long-call-output-voice-asr-calibration.ts",
     "benchmark:long-call:audio": "tsx scripts/long-call-audio-postprocess.ts",
     "benchmark:lc4:statistics:generate": "tsx scripts/generate-lc4-statistical-artifacts.ts",
+    "benchmark:lc4:dev": "tsx scripts/lc4-development-live.ts",
     "benchmark:lc4:seal": "tsx scripts/lc4-seal-heldout.ts"
   },
   "dependencies": {
