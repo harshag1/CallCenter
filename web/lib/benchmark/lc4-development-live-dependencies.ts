@@ -2,7 +2,11 @@ import { constants } from "node:fs";
 import { access, chmod, lstat, mkdir, open, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
+import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artifacts";
+import {
+  createLc4DevReplayEvidenceStore,
+  type Lc4DevReplayEvidenceStore,
+} from "./lc4-development-evidence-retention";
 import type {
   Lc4DevCallerAudioBinding,
   Lc4DevControlReceipt,
@@ -39,6 +43,8 @@ const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesi
 const LEDGER_INTENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-intent/v1\n";
 const LISTENER_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const DEPENDENCY_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-dependencies/v1\n";
+const CONTROL_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n";
+const EPISODE_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-episode-finalization/v1\n";
 
 export const LC4_DEV_LIVE_DEPENDENCY_VERSION = "lc4-dev-live-dependencies-v1" as const;
 
@@ -270,6 +276,7 @@ export type Lc4HashChainedLedgerWriter = Readonly<{
 export async function createLc4HashChainedLedgerWriter(input: Readonly<{
   path: string;
   genesis_sha256: string;
+  evidence: Lc4DevReplayEvidenceStore;
 }>): Promise<Lc4HashChainedLedgerWriter> {
   requireSha256(input.genesis_sha256, "LC4-DEV ledger genesis");
   const path = resolve(input.path);
@@ -294,6 +301,11 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
       if (event.sequence !== sequence + 1 || event.previous_event_sha256 !== previous) {
         throw new Error("LC4-DEV ledger event forks, repeats, or skips the hash chain");
       }
+      if (event.payload_sha256 !== event.payload_evidence.evidence_sha256) {
+        throw new Error("LC4-DEV ledger payload hash is not its retained CAS address");
+      }
+      await input.evidence.assertResolvable(event.payload_evidence);
+      for (const reference of event.evidence_references) await input.evidence.assertResolvable(reference);
       await handle.writeFile(`${canonicalJson(event)}\n`);
       await handle.sync();
       sequence = event.sequence;
@@ -393,6 +405,7 @@ export function createLc4PinnedListenerSink(input: Readonly<{
     || input.playback_authority.authority_manifest_sha256 !== input.playback_authority_manifest_sha256) {
     throw new Error("LC4-DEV listener authority is not the pinned headless evaluator handoff");
   }
+  const replayEvidence = createLc4DevReplayEvidenceStore(input.cas);
 
   return Object.freeze({
     accept: async ({ episode, opportunity, capture, response_plan_sha256, wire_observation_set_sha256 }) => {
@@ -474,11 +487,17 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         listener_manifest_sha256: input.listener_manifest_sha256,
       };
       const listenerEvidenceSha256 = hash(LISTENER_RECEIPT_DOMAIN, body);
-      await input.cas.put(Buffer.from(canonicalJson({ ...body, listener_evidence_sha256: listenerEvidenceSha256 })), "application/json");
+      const listenerEvidence = await replayEvidence.retainJson({
+        kind: "listener_evidence",
+        body: body as unknown as JsonValue,
+        domain_prefix: LISTENER_RECEIPT_DOMAIN,
+        expected_evidence_sha256: listenerEvidenceSha256,
+      });
       return Object.freeze({
         listener_evidence_sha256: listenerEvidenceSha256,
         repair_projection: evaluation.repair_projection,
         playback_authority_receipt_sha256: handoff.authority_receipt.receipt_sha256,
+        listener_evidence: listenerEvidence,
       });
     },
   });
@@ -500,6 +519,7 @@ export type Lc4DevLiveDependencyBundle = Readonly<{
   cas: Lc4ImmutableCas;
   ledger: Lc4HashChainedLedgerWriter;
   listener: Lc4DevelopmentListenerSink;
+  evidence: Lc4DevReplayEvidenceStore;
   finalize(): Promise<void>;
 }>;
 
@@ -515,7 +535,20 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   cas_root_dir: string;
   ledger_path: string;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
-  control: Lc4DevExecutableMechanismControl;
+  control: Lc4DevExecutableMechanismControl & Readonly<{
+    snapshot(episodeId: string): Readonly<{
+      episode_id: string;
+      arm: "native" | "hacc";
+      opportunities: number;
+      common_state_sha256: string;
+      world: unknown;
+      worker: unknown;
+      repair_state: unknown;
+      gateway_transcript_sha256: string;
+      pending_gateway_actions: number;
+      pending_gateway_obligations: readonly unknown[];
+    }>;
+  }>;
   repair: Readonly<Record<"openai" | "gemini" | "xai", Lc4DevRepairPlaybackController>>;
   criteria: readonly Lc4DevListenerCriterionBinding[];
   evaluator: Lc4PinnedListenerEvaluator;
@@ -524,6 +557,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   create_adapter(
     listener: Lc4DevelopmentListenerSink,
     gatewayExecutor: Lc4DevGatewayExecutor,
+    evidence: Lc4DevReplayEvidenceStore,
   ): Lc4DevelopmentRealtimeAdapter;
   now?: () => Date;
 }>): Promise<Lc4DevLiveDependencyBundle> {
@@ -554,13 +588,18 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     throw new Error("LC4-DEV authorization binding or ledger genesis differs from preflight");
   }
   const cas = await createLc4ImmutableCas(input.cas_root_dir);
+  const replayEvidence = createLc4DevReplayEvidenceStore(cas);
   await writeLedgerIntent({
     path: `${resolve(input.ledger_path)}.intent.json`,
     preflight: input.preflight,
     authorization_binding_sha256: authorizationBinding,
     genesis_sha256: genesis,
   });
-  const ledger = await createLc4HashChainedLedgerWriter({ path: input.ledger_path, genesis_sha256: genesis });
+  const ledger = await createLc4HashChainedLedgerWriter({
+    path: input.ledger_path,
+    genesis_sha256: genesis,
+    evidence: replayEvidence,
+  });
   const listener = createLc4PinnedListenerSink({
     corpus,
     listener_manifest_sha256: listenerManifest,
@@ -570,7 +609,54 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     playback_authority_manifest_sha256: input.playback_authority_manifest_sha256,
     cas,
   });
-  const adapter = input.create_adapter(listener, input.control.gateway_executor);
+  const adapter = input.create_adapter(listener, input.control.gateway_executor, replayEvidence);
+  const finalizeEpisode: Lc4DevLiveRunnerDependencies["finalization"]["finalizeEpisode"] = async ({
+    episode,
+    completed_opportunities,
+    response_generations,
+    repair_playbacks,
+    ledger_head_before_terminal_sha256,
+    segment_finalizations,
+  }) => {
+    if (completed_opportunities !== 60 || segment_finalizations.length !== 3) {
+      throw new Error("LC4-DEV episode finalization requires 60 opportunities and three retained segments");
+    }
+    requireSha256(ledger_head_before_terminal_sha256, "LC4-DEV pre-terminal ledger head");
+    for (const segment of segment_finalizations) await replayEvidence.assertResolvable(segment);
+    const snapshot = freeze(input.control.snapshot(episode.episode_id));
+    if (snapshot.episode_id !== episode.episode_id
+      || snapshot.arm !== episode.arm
+      || snapshot.opportunities !== 60
+      || snapshot.pending_gateway_actions !== snapshot.pending_gateway_obligations.length) {
+      throw new Error("LC4-DEV final control snapshot is incomplete or differs from the episode");
+    }
+    requireSha256(snapshot.common_state_sha256, "LC4-DEV final common state");
+    requireSha256(snapshot.gateway_transcript_sha256, "LC4-DEV final gateway transcript");
+    const body = freeze({
+      schema_version: 1 as const,
+      dependency_version: LC4_DEV_LIVE_DEPENDENCY_VERSION,
+      execution_id: input.prepare.execution_id,
+      prepare_sha256: input.prepare.prepare_sha256,
+      preflight_sha256: input.preflight.preflight_sha256,
+      control_plane_manifest_sha256: input.control.manifest_sha256,
+      episode,
+      completed_opportunities,
+      response_generations,
+      repair_playbacks,
+      ledger_head_before_terminal_sha256,
+      segment_finalizations,
+      final_control_snapshot: snapshot,
+      final_world: snapshot.world,
+      pending_obligations: snapshot.pending_gateway_obligations,
+      final_worker_state: snapshot.worker,
+      final_repair_state: snapshot.repair_state,
+    });
+    return replayEvidence.retainJson({
+      kind: "episode_finalization",
+      body: body as unknown as JsonValue,
+      domain_prefix: EPISODE_FINALIZATION_DOMAIN,
+    });
+  };
   const dependencies: Lc4DevLiveRunnerDependencies = Object.freeze({
     adapter,
     caller_audio: Object.freeze({
@@ -583,14 +669,39 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       },
     }),
     retention: Object.freeze({
-      retain: async ({ pcm }: { pcm: Uint8Array }) => {
+      retain: async ({ direction, pcm }: { direction: "caller_input" | "caller_repair" | "assistant_output" | "assistant_repair_output"; pcm: Uint8Array }) => {
         const receipt = await cas.put(pcm, "audio/pcm");
-        return Object.freeze({ artifact_sha256: receipt.artifact_sha256, byte_length: receipt.byte_length });
+        const kind = direction === "caller_repair"
+          ? "repair_pcm" as const
+          : direction === "caller_input"
+            ? "caller_pcm" as const
+            : "assistant_pcm" as const;
+        const evidence = await replayEvidence.retainBytes({
+          kind,
+          bytes: pcm,
+          expected_evidence_sha256: receipt.artifact_sha256,
+          media_type: "audio/pcm",
+        });
+        return Object.freeze({ artifact_sha256: receipt.artifact_sha256, byte_length: receipt.byte_length, evidence });
       },
     }),
-    control: input.control,
+    control: Object.freeze({
+      next: async (request: Parameters<Lc4DevExecutableMechanismControl["next"]>[0]) => {
+        const receipt = await input.control.next(request);
+        const { control_receipt_sha256: claimed, ...body } = receipt;
+        const evidence = await replayEvidence.retainJson({
+          kind: "control_authority",
+          body: body as unknown as JsonValue,
+          domain_prefix: CONTROL_RECEIPT_DOMAIN,
+          expected_evidence_sha256: claimed,
+        });
+        return Object.freeze({ receipt, evidence });
+      },
+    }),
     repair: input.repair,
     ledger,
+    evidence: replayEvidence,
+    finalization: Object.freeze({ finalizeEpisode }),
     now: input.now ?? (() => new Date()),
   });
   return Object.freeze({
@@ -598,6 +709,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     cas,
     ledger,
     listener,
+    evidence: replayEvidence,
     finalize: async () => ledger.close(),
   });
 }

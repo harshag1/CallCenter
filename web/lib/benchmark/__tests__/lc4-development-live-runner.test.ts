@@ -36,6 +36,12 @@ import {
 import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
 import type { HaccResponsePlan } from "../response-plan";
 import {
+  createLc4DevReplayEvidenceStore,
+  verifyLc4DevReplayLedger,
+  type Lc4DevReplayArtifactKind,
+  type Lc4DevReplayEvidenceStore,
+} from "../lc4-development-evidence-retention";
+import {
   LC4_QUALIFICATION_RUNNER_VERSION,
   createLc4QualificationTargets,
 } from "../lc4-qualification-runner";
@@ -95,11 +101,14 @@ function noRepairDependencies(): Lc4DevLiveRunnerDependencies["repair"] {
         decision_sha256: sha256Hex(`decision:${episode.episode_id}:${opportunity.id}`),
         selection: null,
       };
+      const receiptBody = {
+        canonical_control_receipt_sha256: control_receipt.control_receipt_sha256,
+        decision,
+      };
       return {
         receipt: {
-          decision_receipt_sha256: sha256Hex(`decision-receipt:${episode.episode_id}:${opportunity.id}`),
-          canonical_control_receipt_sha256: control_receipt.control_receipt_sha256,
-          decision,
+          ...receiptBody,
+          decision_receipt_sha256: sha256Hex(`harshas-amazing-call-center/lc4-dev-repair-decision-receipt/v1\n${canonicalJson(receiptBody)}`),
         },
         playback: null,
       } as Awaited<ReturnType<Lc4DevLiveRunnerDependencies["repair"]["openai"]["decide"]>>;
@@ -282,15 +291,95 @@ function control(arm: "native" | "hacc"): Lc4DevControlReceipt {
     worker_state_sha256: HASH,
     repair_state_sha256: HASH,
     native_continuity_state_sha256: HASH,
-    control_receipt_sha256: HASH,
   };
+  let response_control: Lc4DevControlReceipt["response_control"];
   if (arm === "native") {
     const instructions = "Continue the public development conversation using only information available so far.";
-    return { ...common, response_control: { kind: "native_context", instructions, instructions_sha256: sha256Hex(instructions) } };
+    response_control = { kind: "native_context", instructions, instructions_sha256: sha256Hex(instructions) };
+  } else {
+    // The dev adapter owns full HaccResponsePlan validation. This coordinator
+    // test uses an opaque sentinel because it verifies lifecycle, not compiler output.
+    response_control = { kind: "hacc_response_plan", plan: Object.freeze({}) as HaccResponsePlan };
   }
-  // The dev adapter owns full HaccResponsePlan validation. This coordinator
-  // test uses an opaque sentinel because it verifies lifecycle, not compiler output.
-  return { ...common, response_control: { kind: "hacc_response_plan", plan: Object.freeze({}) as HaccResponsePlan } };
+  const body = { ...common, response_control };
+  return {
+    ...body,
+    control_receipt_sha256: sha256Hex(`harshas-amazing-call-center/lc4-dev-control-receipt/v1\n${canonicalJson(body)}`),
+  };
+}
+
+function memoryEvidence(): Lc4DevReplayEvidenceStore {
+  const objects = new Map<string, Uint8Array>();
+  return createLc4DevReplayEvidenceStore({
+    async put(bytes) {
+      const copy = Uint8Array.from(bytes);
+      const artifact = sha256Hex(copy);
+      objects.set(artifact, copy);
+      return {
+        artifact_sha256: artifact,
+        byte_length: copy.byteLength,
+        receipt_sha256: sha256Hex(`memory-cas:${artifact}:${copy.byteLength}`),
+      };
+    },
+    async get(hash) {
+      const bytes = objects.get(hash);
+      if (!bytes) throw new Error("missing test replay evidence");
+      return Uint8Array.from(bytes);
+    },
+  });
+}
+
+async function testJsonEvidence(
+  evidence: Lc4DevReplayEvidenceStore,
+  kind: Exclude<Lc4DevReplayArtifactKind, "caller_pcm" | "assistant_pcm" | "repair_pcm">,
+  body: Record<string, unknown>,
+) {
+  return evidence.retainJson({ kind, body: body as never });
+}
+
+function retainedDependencies(input: Readonly<{
+  evidence: Lc4DevReplayEvidenceStore;
+  pcm: Map<string, Uint8Array>;
+  repair: Lc4DevLiveRunnerDependencies["repair"];
+}>): Pick<Lc4DevLiveRunnerDependencies, "caller_audio" | "retention" | "control" | "repair" | "evidence" | "finalization"> {
+  return {
+    evidence: input.evidence,
+    caller_audio: { async load(binding) { return input.pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
+    retention: {
+      async retain({ direction, pcm }) {
+        const kind = direction === "caller_repair" ? "repair_pcm" : direction === "caller_input" ? "caller_pcm" : "assistant_pcm";
+        const retained = await input.evidence.retainBytes({
+          kind,
+          bytes: pcm,
+          expected_evidence_sha256: sha256Hex(pcm),
+          media_type: "audio/pcm",
+        });
+        return { artifact_sha256: retained.evidence_sha256, byte_length: pcm.byteLength, evidence: retained };
+      },
+    },
+    control: {
+      async next({ episode }) {
+        const receipt = control(episode.arm);
+        const { control_receipt_sha256: claimed, ...body } = receipt;
+        const retained = await input.evidence.retainJson({
+          kind: "control_authority",
+          body: body as never,
+          domain_prefix: "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n",
+          expected_evidence_sha256: claimed,
+        });
+        return { receipt, evidence: retained };
+      },
+    },
+    repair: input.repair,
+    finalization: {
+      async finalizeEpisode({ episode, segment_finalizations }) {
+        return testJsonEvidence(input.evidence, "episode_finalization", {
+          episode_id: episode.episode_id,
+          segment_finalizations,
+        });
+      },
+    },
+  };
 }
 
 describe("LC4-DEV live runner", () => {
@@ -307,6 +396,7 @@ describe("LC4-DEV live runner", () => {
 
   it("executes the exact closed loop and emits an immutable evidence-complete report", async () => {
     const { pcm, prepare, preflight } = fixtures();
+    const evidence = memoryEvidence();
     let opens = 0;
     let exchanges = 0;
     const adapter: Lc4DevelopmentRealtimeAdapter = {
@@ -323,19 +413,30 @@ describe("LC4-DEV live runner", () => {
             expect(control_receipt.response_control.kind).toBe(episode.arm === "native" ? "native_context" : "hacc_response_plan");
             expect(caller_pcm).toEqual(pcm.get(`${episode.provider}:${opportunity.id}`));
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
+            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
+            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
             return {
               playback_kind: "canonical" as const,
               opportunity_id: opportunity.id,
               assistant_pcm: assistant,
-              provider_exchange_sha256: sha256Hex(`${episode.episode_id}:${opportunity.id}`),
-              listener_evidence_sha256: sha256Hex(`listener:${episode.episode_id}:${opportunity.id}`),
+              provider_exchange_sha256: providerEvidence.evidence_sha256,
+              listener_evidence_sha256: listenerEvidence.evidence_sha256,
               repair_projection: repairProjection(opportunity.id),
               playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              provider_exchange_projection: { episode_id: episode.episode_id, opportunity_id: opportunity.id },
+              provider_exchange_evidence: providerEvidence,
+              listener_evidence: listenerEvidence,
             };
           },
           async exchangeRepair() { throw new Error("no-repair fixture selected a repair"); },
-          async finalizeOpportunity({ opportunity_id }) { return { opportunity_receipt_sha256: sha256Hex(`finalize:${episode.episode_id}:${opportunity_id}`) }; },
-          async close() { return { rotation_receipt_sha256: sha256Hex(`${episode.episode_id}:rotation:${segment_ordinal}`) }; },
+          async finalizeOpportunity({ opportunity_id }) {
+            const retained = await testJsonEvidence(evidence, "opportunity_finalization", { episode_id: episode.episode_id, opportunity_id });
+            return { opportunity_receipt_sha256: retained.evidence_sha256, opportunity_finalization: retained };
+          },
+          async close() {
+            const retained = await testJsonEvidence(evidence, "segment_finalization", { episode_id: episode.episode_id, segment_ordinal });
+            return { rotation_receipt_sha256: retained.evidence_sha256, segment_finalization: retained };
+          },
         };
       },
     };
@@ -345,10 +446,7 @@ describe("LC4-DEV live runner", () => {
       preflight,
       dependencies: {
         adapter,
-        caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
-        retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
-        control: { async next({ episode }) { return control(episode.arm); } },
-        repair: noRepairDependencies(),
+        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies() }),
         ledger: { async append(event) { ledger.push(event.event_sha256); } },
         now: () => new Date(NOW),
       },
@@ -361,8 +459,14 @@ describe("LC4-DEV live runner", () => {
     expect(run.provider_calls_made).toBe(360);
     expect(run.total_response_generations).toBe(360);
     expect(run.repair_playbacks).toBe(0);
+    expect(run.episode_finalization_count).toBe(6);
+    expect(run.replay_evidence_reference_count).toBeGreaterThan(run.ledger.length);
     expect(run.ledger).toHaveLength(1_092); // 6 opened + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
+    await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+      event_count: 1_092,
+      ledger_head_sha256: run.ledger_head_sha256,
+    });
     expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
       completed: true,
       exact_six_episode_horizon: true,
@@ -382,6 +486,7 @@ describe("LC4-DEV live runner", () => {
         renderer: repairAudioRenderer,
       });
       const { pcm, prepare, preflight } = fixtures();
+      const evidence = memoryEvidence();
       const realRepair = Object.fromEntries(((["openai", "gemini", "xai"] as const)).map((provider) => [
         provider,
         createLc4DevRepairPlaybackController({
@@ -419,12 +524,14 @@ describe("LC4-DEV live runner", () => {
               canonicalExchanges += 1;
               const shouldRepair = episode.episode_id === targetEpisodeId && opportunity.index === 10;
               const semanticResultSha256 = sha256Hex(`semantic-result:${episode.episode_id}:${opportunity.id}`);
+              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id });
+              const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id });
               return {
                 playback_kind: "canonical" as const,
                 opportunity_id: opportunity.id,
                 assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
-                provider_exchange_sha256: sha256Hex(`canonical:${episode.episode_id}:${opportunity.id}`),
-                listener_evidence_sha256: sha256Hex(`canonical-listener:${episode.episode_id}:${opportunity.id}`),
+                provider_exchange_sha256: providerEvidence.evidence_sha256,
+                listener_evidence_sha256: listenerEvidence.evidence_sha256,
                 repair_projection: createLc4DevArmBlindRepairProjection({
                   opportunity_id: opportunity.id,
                   listener_status: "verified",
@@ -434,6 +541,9 @@ describe("LC4-DEV live runner", () => {
                   final_required_criteria_pass: !shouldRepair,
                 }),
                 playback_authority_receipt_sha256: sha256Hex(`canonical-authority:${episode.episode_id}:${opportunity.id}`),
+                provider_exchange_projection: { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id },
+                provider_exchange_evidence: providerEvidence,
+                listener_evidence: listenerEvidence,
               };
             },
             async exchangeRepair({ opportunity, repair, decision_receipt }) {
@@ -447,14 +557,19 @@ describe("LC4-DEV live runner", () => {
               repairExchanges += 1;
               repairedCanonicalOrdinal = opportunity.index;
               pending = { opportunity_id: opportunity.id, repair_played: true };
+              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id });
+              const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id });
               return {
                 playback_kind: "repair" as const,
                 opportunity_id: opportunity.id,
                 assistant_pcm: Uint8Array.from([opportunity.index, 6, 10, 14]),
-                provider_exchange_sha256: sha256Hex(`repair:${episode.episode_id}:${opportunity.id}`),
-                listener_evidence_sha256: sha256Hex(`repair-listener:${episode.episode_id}:${opportunity.id}`),
+                provider_exchange_sha256: providerEvidence.evidence_sha256,
+                listener_evidence_sha256: listenerEvidence.evidence_sha256,
                 repair_projection: repairProjection(opportunity.id),
                 playback_authority_receipt_sha256: sha256Hex(`repair-authority:${episode.episode_id}:${opportunity.id}`),
+                provider_exchange_projection: { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id },
+                provider_exchange_evidence: providerEvidence,
+                listener_evidence: listenerEvidence,
               };
             },
             async finalizeOpportunity({ opportunity_id, repair_played }) {
@@ -462,12 +577,14 @@ describe("LC4-DEV live runner", () => {
               pending = null;
               expectedCanonicalOrdinal += 1;
               finalizations += 1;
-              return { opportunity_receipt_sha256: sha256Hex(`finalize:${episode.episode_id}:${opportunity_id}`) };
+              const retained = await testJsonEvidence(evidence, "opportunity_finalization", { episode_id: episode.episode_id, opportunity_id, repair_played });
+              return { opportunity_receipt_sha256: retained.evidence_sha256, opportunity_finalization: retained };
             },
             async close() {
               expect(pending).toBeNull();
               expect(expectedCanonicalOrdinal).toBe((segment_ordinal * 20) + 1);
-              return { rotation_receipt_sha256: sha256Hex(`rotation:${episode.episode_id}:${segment_ordinal}`) };
+              const retained = await testJsonEvidence(evidence, "segment_finalization", { episode_id: episode.episode_id, segment_ordinal });
+              return { rotation_receipt_sha256: retained.evidence_sha256, segment_finalization: retained };
             },
           };
         },
@@ -478,10 +595,7 @@ describe("LC4-DEV live runner", () => {
         preflight,
         dependencies: {
           adapter,
-          caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
-          retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
-          control: { async next({ episode }) { return control(episode.arm); } },
-          repair: realRepair,
+          ...retainedDependencies({ evidence, pcm, repair: realRepair }),
           ledger: { async append() {} },
           now: () => new Date(NOW),
         },
@@ -507,6 +621,10 @@ describe("LC4-DEV live runner", () => {
       expect(run.ledger.filter((event) => event.event_type === "repair_audio_submitted")).toHaveLength(1);
       expect(run.ledger.filter((event) => event.event_type === "repair_completed")).toHaveLength(1);
       expect(run.ledger).toHaveLength(1_094);
+      await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+        event_count: 1_094,
+        ledger_head_sha256: run.ledger_head_sha256,
+      });
       expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
         completed: true,
         exact_six_episode_horizon: true,
@@ -521,6 +639,7 @@ describe("LC4-DEV live runner", () => {
 
   it("does not retry once audio was submitted", async () => {
     const { pcm, prepare, preflight } = fixtures();
+    const evidence = memoryEvidence();
     let calls = 0;
     const run = await executeLc4DevLiveRun({
       prepare,
@@ -540,10 +659,7 @@ describe("LC4-DEV live runner", () => {
             };
           },
         },
-        caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
-        retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
-        control: { async next({ episode }) { return control(episode.arm); } },
-        repair: noRepairDependencies(),
+        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies() }),
         ledger: { async append() {} },
         now: () => new Date(NOW),
       },
@@ -563,10 +679,12 @@ describe("LC4-DEV live runner", () => {
     }));
   });
 
-  it("constructs only the preflight-bound DEV factory while confirmatory execution remains frozen", () => {
+  it("constructs only the preflight-bound DEV factory while confirmatory execution remains frozen", async () => {
     const { prepare } = fixtures();
     const credentials = { openai: "test-openai-secret", gemini: "test-gemini-secret", xai: "test-xai-secret" } as const;
     const preflight = authorizedPreflight(prepare, lc4DevCredentialIdentitySetSha256(credentials));
+    const evidence = memoryEvidence();
+    const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { fixture: "factory-construction" });
     const gatewayExecutor: Lc4DevGatewayExecutor = {
       kind: "lc4-dev-arm-aware-gateway-v1",
       manifest_sha256: preflight.control_plane_manifest_sha256,
@@ -577,12 +695,14 @@ describe("LC4-DEV live runner", () => {
       preflight,
       credentials,
       gateway_executor: gatewayExecutor,
+      evidence,
       listener: {
         async accept({ opportunity }) {
           return {
             listener_evidence_sha256: HASH,
             repair_projection: repairProjection(opportunity.id),
             playback_authority_receipt_sha256: HASH,
+            listener_evidence: listenerEvidence,
           };
         },
       },
@@ -600,12 +720,14 @@ describe("LC4-DEV live runner", () => {
       preflight,
       credentials: { ...credentials, xai: "different-xai-secret" },
       gateway_executor: gatewayExecutor,
+      evidence,
       listener: {
         async accept({ opportunity }) {
           return {
             listener_evidence_sha256: HASH,
             repair_projection: repairProjection(opportunity.id),
             playback_authority_receipt_sha256: HASH,
+            listener_evidence: listenerEvidence,
           };
         },
       },

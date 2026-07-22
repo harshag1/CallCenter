@@ -10,6 +10,10 @@ import {
 import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import type { HaccResponsePlan } from "./response-plan";
+import type {
+  Lc4DevReplayArtifactReference,
+  Lc4DevReplayEvidenceStore,
+} from "./lc4-development-evidence-retention";
 import {
   LC4_QUALIFICATION_RUNNER_VERSION,
   assertLc4QualificationPlan,
@@ -22,6 +26,7 @@ import {
   type ProviderResponseToolCanaryArtifact,
 } from "./provider-qualification";
 import type {
+  Lc4DevExchangeEvidence,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
 import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-playback";
@@ -57,6 +62,8 @@ const QUALIFICATION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retain
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
+const REPAIR_DECISION_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-decision-receipt/v1\n";
+const REPAIR_PLAYBACK_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-playback-receipt/v1\n";
 
 type Arm = "native" | "hacc";
 
@@ -592,6 +599,8 @@ export type Lc4DevImmutableLedgerEvent = Readonly<{
   episode_id: string;
   opportunity_id: string | null;
   payload_sha256: string;
+  payload_evidence: Lc4DevReplayArtifactReference;
+  evidence_references: readonly Lc4DevReplayArtifactReference[];
   previous_event_sha256: string | null;
   event_sha256: string;
 }>;
@@ -617,6 +626,8 @@ export type Lc4DevLiveRunArtifact = Readonly<{
   retained_assistant_audio: number;
   listener_evidence_count: number;
   mechanism_receipt_count: number;
+  episode_finalization_count: number;
+  replay_evidence_reference_count: number;
   failure_class: "pre-open" | "transport" | "timeout" | "evidence" | null;
   failure_message_sha256: string | null;
   ledger: readonly Lc4DevImmutableLedgerEvent[];
@@ -627,10 +638,21 @@ export type Lc4DevLiveRunArtifact = Readonly<{
 export type Lc4DevLiveRunnerDependencies = Readonly<{
   adapter: Lc4DevelopmentRealtimeAdapter;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
-  retention: Readonly<{ retain(input: Readonly<{ episode_id: string; opportunity_id: string; direction: "caller_input" | "caller_repair" | "assistant_output" | "assistant_repair_output"; pcm: Uint8Array }>): Promise<Readonly<{ artifact_sha256: string; byte_length: number }>> }>;
-  control: Readonly<{ next(input: Readonly<{ episode: Lc4DevLiveEpisodePlan; opportunity: Lc4PublicDevOpportunity; previous_exchange_sha256: string | null }>): Promise<Lc4DevControlReceipt> }>;
+  retention: Readonly<{ retain(input: Readonly<{ episode_id: string; opportunity_id: string; direction: "caller_input" | "caller_repair" | "assistant_output" | "assistant_repair_output"; pcm: Uint8Array }>): Promise<Readonly<{ artifact_sha256: string; byte_length: number; evidence: Lc4DevReplayArtifactReference }>> }>;
+  control: Readonly<{ next(input: Readonly<{ episode: Lc4DevLiveEpisodePlan; opportunity: Lc4PublicDevOpportunity; previous_exchange_sha256: string | null }>): Promise<Readonly<{ receipt: Lc4DevControlReceipt; evidence: Lc4DevReplayArtifactReference }>> }>;
   repair: Readonly<Record<LiveStsProvider, Lc4DevRepairPlaybackController>>;
   ledger: Readonly<{ append(event: Lc4DevImmutableLedgerEvent): Promise<void> }>;
+  evidence: Lc4DevReplayEvidenceStore;
+  finalization: Readonly<{
+    finalizeEpisode(input: Readonly<{
+      episode: Lc4DevLiveEpisodePlan;
+      completed_opportunities: number;
+      response_generations: number;
+      repair_playbacks: number;
+      ledger_head_before_terminal_sha256: string;
+      segment_finalizations: readonly Lc4DevReplayArtifactReference[];
+    }>): Promise<Lc4DevReplayArtifactReference>;
+  }>;
   now(): Date;
 }>;
 
@@ -699,18 +721,31 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   let listenerEvidence = 0;
   let mechanismReceipts = 0;
   let repairPlaybacks = 0;
+  let episodeFinalizations = 0;
   let totalResponseGenerations = 0;
   let failureClass: Lc4DevLiveRunArtifact["failure_class"] = null;
   let failureMessage: string | null = null;
 
-  const append = async (eventType: Lc4DevImmutableLedgerEvent["event_type"], episodeId: string, opportunityId: string | null, payload: JsonValue) => {
+  const append = async (
+    eventType: Lc4DevImmutableLedgerEvent["event_type"],
+    episodeId: string,
+    opportunityId: string | null,
+    payload: JsonValue,
+    evidenceReferences: readonly Lc4DevReplayArtifactReference[] = [],
+  ) => {
+    const payloadEvidence = await input.dependencies.evidence.retainJson({ kind: "ledger_payload", body: payload });
+    for (const reference of [payloadEvidence, ...evidenceReferences]) {
+      await input.dependencies.evidence.assertResolvable(reference);
+    }
     const body = {
       sequence: ++sequence,
       observed_at: input.dependencies.now().toISOString(),
       event_type: eventType,
       episode_id: episodeId,
       opportunity_id: opportunityId,
-      payload_sha256: sha256Hex(canonicalJson(payload)),
+      payload_sha256: payloadEvidence.evidence_sha256,
+      payload_evidence: payloadEvidence,
+      evidence_references: Object.freeze([...evidenceReferences]),
       previous_event_sha256: previousEvent,
     };
     const event = freeze({ ...body, event_sha256: hash(LEDGER_EVENT_DOMAIN, body) });
@@ -719,11 +754,29 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     previousEvent = event.event_sha256;
   };
 
+  const assertExchangeReplayBinding = async (exchange: Lc4DevExchangeEvidence): Promise<void> => {
+    requireHash(exchange.provider_exchange_sha256, "LC4-DEV provider exchange");
+    requireHash(exchange.listener_evidence_sha256, "LC4-DEV listener evidence");
+    if (exchange.provider_exchange_evidence.evidence_sha256 !== exchange.provider_exchange_sha256
+      || exchange.listener_evidence.evidence_sha256 !== exchange.listener_evidence_sha256) {
+      throw new Error("LC4-DEV provider or listener evidence is not retained under its ledger hash");
+    }
+    const retainedProjection = await input.dependencies.evidence.resolveJson(exchange.provider_exchange_evidence);
+    if (canonicalJson(retainedProjection) !== canonicalJson(exchange.provider_exchange_projection)) {
+      throw new Error("LC4-DEV provider exchange projection differs from its retained replay bytes");
+    }
+    await input.dependencies.evidence.assertResolvable(exchange.listener_evidence);
+  };
+
   try {
     for (const episode of input.prepare.episodes) {
       const providerBindings = input.prepare.audio_bindings.filter((binding) => binding.provider === episode.provider);
       let previousRotationReceipt: string | null = null;
       let priorExchange: string | null = null;
+      const segmentFinalizations: Lc4DevReplayArtifactReference[] = [];
+      const episodeOpportunityStart = opportunitiesCompleted;
+      const episodeResponseStart = totalResponseGenerations;
+      const episodeRepairStart = repairPlaybacks;
       episodesStarted += 1;
       await append("episode_opened", episode.episode_id, null, { provider: episode.provider, arm: episode.arm, model: episode.model });
       for (const segmentOrdinal of [1, 2, 3] as const) {
@@ -753,18 +806,29 @@ export async function executeLc4DevLiveRun(input: Readonly<{
             if (callerReceipt.artifact_sha256 !== binding.pcm_sha256 || callerReceipt.byte_length !== callerPcm.byteLength) {
               throw new Error("LC4-DEV caller retention receipt is invalid");
             }
+            if (callerReceipt.evidence.evidence_sha256 !== binding.pcm_sha256) throw new Error("LC4-DEV caller PCM is not replay-addressable");
             retainedCaller += 1;
             failureClass = "evidence";
-            const control = await bounded("control", LC4_DEV_LIVE_TIMEOUTS.control_ms, () => input.dependencies.control.next({
+            const retainedControl = await bounded("control", LC4_DEV_LIVE_TIMEOUTS.control_ms, () => input.dependencies.control.next({
               episode,
               opportunity,
               previous_exchange_sha256: priorExchange,
             }));
+            const control = retainedControl.receipt;
             assertControl(control, episode.arm);
+            if (retainedControl.evidence.evidence_sha256 !== control.control_receipt_sha256) {
+              throw new Error("LC4-DEV control authority body is not retained under its receipt hash");
+            }
             mechanismReceipts += 1;
             failureClass = "transport";
             opportunitiesSubmitted += 1;
-            await append("audio_submitted", episode.episode_id, opportunity.id, { caller_pcm_sha256: binding.pcm_sha256, control_receipt_sha256: control.control_receipt_sha256 });
+            await append(
+              "audio_submitted",
+              episode.episode_id,
+              opportunity.id,
+              { caller_pcm_sha256: binding.pcm_sha256, control_receipt_sha256: control.control_receipt_sha256 },
+              [callerReceipt.evidence, retainedControl.evidence],
+            );
             const exchange = await bounded("opportunity-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeCanonical({
               opportunity,
               caller_pcm: callerPcm,
@@ -774,8 +838,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
             if (exchange.playback_kind !== "canonical" || exchange.opportunity_id !== opportunity.id || exchange.assistant_pcm.byteLength < 2 || exchange.assistant_pcm.byteLength % 2 !== 0) {
               throw new Error("LC4-DEV provider exchange evidence is incomplete");
             }
-            requireHash(exchange.provider_exchange_sha256, "LC4-DEV provider exchange");
-            requireHash(exchange.listener_evidence_sha256, "LC4-DEV listener evidence");
+            await assertExchangeReplayBinding(exchange);
             failureClass = "evidence";
             const assistantReceipt = await bounded("assistant-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
               episode_id: episode.episode_id,
@@ -796,11 +859,18 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               canonical_listener_evidence_sha256: exchange.listener_evidence_sha256,
               listener_projection: exchange.repair_projection,
             });
+            const { decision_receipt_sha256: claimedDecision, ...decisionBody } = repairDecision.receipt;
+            const repairDecisionEvidence = await input.dependencies.evidence.retainJson({
+              kind: "repair_decision",
+              body: decisionBody as unknown as JsonValue,
+              domain_prefix: REPAIR_DECISION_DOMAIN,
+              expected_evidence_sha256: claimedDecision,
+            });
             await append("repair_decided", episode.episode_id, opportunity.id, {
               decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
               decision_sha256: repairDecision.receipt.decision.decision_sha256,
               repair_selected: repairDecision.playback !== null,
-            });
+            }, [repairDecisionEvidence]);
             let effectiveExchangeSha256 = exchange.provider_exchange_sha256;
             let effectiveListenerEvidenceSha256 = exchange.listener_evidence_sha256;
             if (repairDecision.playback) {
@@ -819,7 +889,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 decision_receipt_sha256: repair.decision_receipt_sha256,
                 repair_pcm_sha256: repair.pcm_sha256,
                 advances_canonical_horizon: false,
-              });
+              }, [repairDecisionEvidence, repairCallerReceipt.evidence]);
               const repairExchange = await bounded("repair-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeRepair({
                 opportunity,
                 repair,
@@ -831,6 +901,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 || repairExchange.assistant_pcm.byteLength < 2 || repairExchange.assistant_pcm.byteLength % 2 !== 0) {
                 throw new Error("LC4-DEV repair exchange evidence is incomplete");
               }
+              await assertExchangeReplayBinding(repairExchange);
               const repairAssistantReceipt = await bounded("repair-assistant-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
                 episode_id: episode.episode_id,
                 opportunity_id: opportunity.id,
@@ -848,6 +919,13 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 playback_authority_receipt_sha256: repairExchange.playback_authority_receipt_sha256,
                 recursive_repair_observation: null,
               });
+              const { playback_receipt_sha256: claimedPlayback, ...playbackBody } = playbackReceipt;
+              const playbackEvidence = await input.dependencies.evidence.retainJson({
+                kind: "repair_playback",
+                body: playbackBody as unknown as JsonValue,
+                domain_prefix: REPAIR_PLAYBACK_DOMAIN,
+                expected_evidence_sha256: claimedPlayback,
+              });
               retainedAssistant += 1;
               listenerEvidence += 1;
               repairPlaybacks += 1;
@@ -858,7 +936,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 repair_exchange_sha256: repairExchange.provider_exchange_sha256,
                 repair_listener_evidence_sha256: repairExchange.listener_evidence_sha256,
                 advances_canonical_horizon: false,
-              });
+              }, [playbackEvidence, repairExchange.provider_exchange_evidence, repairExchange.listener_evidence]);
             }
             const finalized = await session.finalizeOpportunity({
               opportunity_id: opportunity.id,
@@ -866,6 +944,9 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               repair_played: repairDecision.playback !== null,
             });
             requireHash(finalized.opportunity_receipt_sha256, "LC4-DEV opportunity finalize receipt");
+            if (finalized.opportunity_finalization.evidence_sha256 !== finalized.opportunity_receipt_sha256) {
+              throw new Error("LC4-DEV opportunity finalization is not retained under its receipt hash");
+            }
             opportunitiesCompleted += 1;
             priorExchange = effectiveExchangeSha256;
             await append("opportunity_completed", episode.episode_id, opportunity.id, {
@@ -876,7 +957,13 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
               opportunity_receipt_sha256: finalized.opportunity_receipt_sha256,
               assistant_pcm_sha256: assistantReceipt.artifact_sha256,
-            });
+            }, [
+              exchange.provider_exchange_evidence,
+              exchange.listener_evidence,
+              repairDecisionEvidence,
+              finalized.opportunity_finalization,
+              assistantReceipt.evidence,
+            ]);
           }
         } catch (error) {
           segmentBodyFailed = true;
@@ -887,7 +974,11 @@ export async function executeLc4DevLiveRun(input: Readonly<{
           try {
             const closed = await bounded("segment-close", LC4_DEV_LIVE_TIMEOUTS.segment_close_ms, () => session.close());
             requireHash(closed.rotation_receipt_sha256, "LC4-DEV segment rotation receipt");
+            if (closed.segment_finalization.evidence_sha256 !== closed.rotation_receipt_sha256) {
+              throw new Error("LC4-DEV segment finalization is not retained under its rotation hash");
+            }
             previousRotationReceipt = closed.rotation_receipt_sha256;
+            segmentFinalizations.push(closed.segment_finalization);
           } catch (closeError) {
             // Cleanup failure is terminal when it is the first failure. When
             // the opportunity body already failed, retain that original error
@@ -900,7 +991,23 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         }
       }
       episodesCompleted += 1;
-      await append("episode_terminal", episode.episode_id, null, { status: "completed", canonical_opportunities: 60 });
+      if (previousEvent === null) throw new Error("LC4-DEV episode cannot finalize without a ledger head");
+      const episodeFinalization = await input.dependencies.finalization.finalizeEpisode({
+        episode,
+        completed_opportunities: opportunitiesCompleted - episodeOpportunityStart,
+        response_generations: totalResponseGenerations - episodeResponseStart,
+        repair_playbacks: repairPlaybacks - episodeRepairStart,
+        ledger_head_before_terminal_sha256: previousEvent,
+        segment_finalizations: segmentFinalizations,
+      });
+      episodeFinalizations += 1;
+      await append(
+        "episode_terminal",
+        episode.episode_id,
+        null,
+        { status: "completed", canonical_opportunities: 60, episode_finalization_sha256: episodeFinalization.evidence_sha256 },
+        [episodeFinalization, ...segmentFinalizations],
+      );
     }
   } catch (error) {
     failureMessage = error instanceof Error ? error.message : "LC4-DEV live run failed";
@@ -929,6 +1036,8 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     retained_assistant_audio: retainedAssistant,
     listener_evidence_count: listenerEvidence,
     mechanism_receipt_count: mechanismReceipts,
+    episode_finalization_count: episodeFinalizations,
+    replay_evidence_reference_count: ledger.reduce((total, event) => total + 1 + event.evidence_references.length, 0),
     failure_class: completed ? null : failureClass,
     failure_message_sha256: failureMessage === null ? null : sha256Hex(failureMessage),
     ledger: Object.freeze(ledger),
@@ -967,7 +1076,9 @@ export function createLc4DevLiveReportArtifact(run: Lc4DevLiveRunArtifact): Lc4D
     evidence_complete: run.retained_caller_audio === 360 + run.repair_playbacks
       && run.retained_assistant_audio === 360 + run.repair_playbacks
       && run.listener_evidence_count === 360 + run.repair_playbacks
-      && run.mechanism_receipt_count === 360,
+      && run.mechanism_receipt_count === 360
+      && run.episode_finalization_count === 6
+      && run.replay_evidence_reference_count >= run.ledger.length,
     paid_retry_count: 0 as const,
     efficacy_claim_eligible: false as const,
     interpretation: "development mechanism evidence only; not confirmatory provider efficacy evidence" as const,

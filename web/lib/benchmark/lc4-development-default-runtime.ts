@@ -344,12 +344,13 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         evaluator,
         playback_authority: built.playback_authority,
         playback_authority_manifest_sha256: built.playback_authority_manifest_sha256,
-        create_adapter: (listener, gatewayExecutor) => createLc4DevelopmentRealtimeAdapter({
+        create_adapter: (listener, gatewayExecutor, evidence) => createLc4DevelopmentRealtimeAdapter({
           prepare,
           preflight,
           credentials,
           listener,
           gateway_executor: gatewayExecutor,
+          evidence,
         }),
       });
     },

@@ -16,6 +16,11 @@ import {
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
 import {
+  createLc4DevReplayEvidenceStore,
+  verifyLc4DevReplayLedger,
+  type Lc4DevReplayEvidenceStore,
+} from "../lc4-development-evidence-retention";
+import {
   createLc4DevArmBlindRepairProjection,
   createLc4HeadlessListenerPlaybackAuthority,
 } from "../lc4-development-headless-listener-authority";
@@ -49,14 +54,22 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-function ledgerEvent(sequence: number, previous: string | null): Lc4DevImmutableLedgerEvent {
+async function ledgerEvent(
+  evidence: Lc4DevReplayEvidenceStore,
+  sequence: number,
+  previous: string | null,
+): Promise<Lc4DevImmutableLedgerEvent> {
+  const payload = { fixture: `payload-${sequence}` };
+  const payloadEvidence = await evidence.retainJson({ kind: "ledger_payload", body: payload });
   const body = {
     sequence,
     observed_at: "2026-07-21T22:00:00.000Z",
     event_type: sequence === 1 ? "episode_opened" as const : "audio_submitted" as const,
     episode_id: "lc4-dev-openai-native",
     opportunity_id: sequence === 1 ? null : "lc4-dev-op-01",
-    payload_sha256: sha256Hex(`payload-${sequence}`),
+    payload_sha256: payloadEvidence.evidence_sha256,
+    payload_evidence: payloadEvidence,
+    evidence_references: Object.freeze([]),
     previous_event_sha256: previous,
   };
   return Object.freeze({
@@ -104,22 +117,78 @@ describe("LC4-DEV concrete live dependencies", () => {
   it("fsyncs one new hash chain and rejects forks, skips, tampering, and path reuse", async () => {
     const root = await temporaryDirectory();
     const path = join(root, "evidence", "ledger.jsonl");
+    const cas = await createLc4ImmutableCas(join(root, "cas"));
+    const evidence = createLc4DevReplayEvidenceStore(cas);
     const genesis = lc4DevLedgerGenesisSha256({
       execution_id: "lc4-dev-test",
       prepare_sha256: "1".repeat(64),
       authorization_binding_sha256: "2".repeat(64),
       authority_public_key_fingerprint_sha256: "3".repeat(64),
     });
-    const writer = await createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis });
-    const first = ledgerEvent(1, null);
-    const second = ledgerEvent(2, first.event_sha256);
+    const writer = await createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis, evidence });
+    const first = await ledgerEvent(evidence, 1, null);
+    const second = await ledgerEvent(evidence, 2, first.event_sha256);
     await writer.append(first);
-    await expect(writer.append(ledgerEvent(3, first.event_sha256))).rejects.toThrow("forks, repeats, or skips");
+    await expect(ledgerEvent(evidence, 3, first.event_sha256).then((event) => writer.append(event))).rejects.toThrow("forks, repeats, or skips");
     await expect(writer.append({ ...second, event_sha256: HASH })).rejects.toThrow("event hash is invalid");
     await writer.append(second);
     await writer.close();
+    await expect(verifyLc4DevReplayLedger([first, second], evidence)).resolves.toMatchObject({
+      event_count: 2,
+      ledger_head_sha256: second.event_sha256,
+    });
     expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(2);
-    await expect(createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis })).rejects.toThrow("already exists");
+    await expect(createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis, evidence })).rejects.toThrow("already exists");
+  });
+
+  it("refuses to append a ledger event when any referenced CAS object is missing or tampered", async () => {
+    const root = await temporaryDirectory();
+    const cas = await createLc4ImmutableCas(join(root, "cas"));
+    const evidence = createLc4DevReplayEvidenceStore(cas);
+    const genesis = lc4DevLedgerGenesisSha256({
+      execution_id: "lc4-dev-replay-closure",
+      prepare_sha256: "1".repeat(64),
+      authorization_binding_sha256: "2".repeat(64),
+      authority_public_key_fingerprint_sha256: "3".repeat(64),
+    });
+    const tamperedWriter = await createLc4HashChainedLedgerWriter({
+      path: join(root, "tampered.jsonl"),
+      genesis_sha256: genesis,
+      evidence,
+    });
+    const tampered = await ledgerEvent(evidence, 1, null);
+    const retainedPath = join(cas.root_dir, tampered.payload_sha256.slice(0, 2), tampered.payload_sha256);
+    await chmod(retainedPath, 0o600);
+    await writeFile(retainedPath, Buffer.from("tampered"));
+    await expect(tamperedWriter.append(tampered)).rejects.toThrow(/does not match its address|tampered/);
+    await expect(verifyLc4DevReplayLedger([tampered], evidence)).rejects.toThrow(/does not match its address|tampered/);
+    await tamperedWriter.close();
+
+    const healthyCas = await createLc4ImmutableCas(join(root, "healthy-cas"));
+    const healthyEvidence = createLc4DevReplayEvidenceStore(healthyCas);
+    const missingWriter = await createLc4HashChainedLedgerWriter({
+      path: join(root, "missing.jsonl"),
+      genesis_sha256: genesis,
+      evidence: healthyEvidence,
+    });
+    const valid = await ledgerEvent(healthyEvidence, 1, null);
+    const missingReference = {
+      ...valid.payload_evidence,
+      evidence_sha256: "f".repeat(64),
+    };
+    const body = {
+      ...valid,
+      payload_sha256: missingReference.evidence_sha256,
+      payload_evidence: missingReference,
+    };
+    delete (body as Partial<typeof body>).event_sha256;
+    const missing = {
+      ...body,
+      event_sha256: sha256Hex(`${LEDGER_EVENT_DOMAIN}${canonicalJson(body)}`),
+    } as Lc4DevImmutableLedgerEvent;
+    await expect(missingWriter.append(missing)).rejects.toThrow(/ENOENT|no such file|missing/i);
+    await expect(verifyLc4DevReplayLedger([missing], healthyEvidence)).rejects.toThrow(/ENOENT|no such file|missing/i);
+    await missingWriter.close();
   });
 
   it("binds listener evidence to the signed complete-capture handoff and pinned evaluator identity", async () => {
