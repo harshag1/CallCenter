@@ -833,9 +833,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   private onSocketOpen(): void {
     if (this.currentState !== "connecting") return;
-    // xAI creates the session before accepting its initial configuration.
-    // OpenAI accepts session.update as soon as the socket opens.
-    if (this.provider === "openai") this.sendInitialSessionUpdate();
+    // Both documented OpenAI-compatible transports accept session.update as
+    // the first client event.  Do not wait for a provider-created snapshot:
+    // xAI deployments may acknowledge the update without emitting one, and
+    // withholding configuration leaves the socket in provider defaults.
+    this.sendInitialSessionUpdate();
   }
 
   private onSocketMessage(data: unknown): void {
@@ -885,31 +887,6 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       return;
     }
 
-    if (
-      this.provider === "xai"
-      && this.currentState === "connecting"
-      && parsed.event.type === "session.updated"
-      && !this.initialSessionUpdateSent
-    ) {
-      const message = "xAI emitted session.updated before session.created initialized the session";
-      const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
-      this.emit({
-        type: "error",
-        provider: "xai",
-        receivedAtMs: this.now(),
-        wireType: "session.updated",
-        code: "session_ack_before_session_created",
-        message,
-        fatal: true,
-        ...optional(
-          "wireObservation",
-          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
-        ),
-      });
-      this.failConnection(message, "session_ack_before_session_created", false);
-      return;
-    }
-
     const wireIdentityError = providerRedundantIdentityError(parsed.event)
       ?? this.admitProviderWireToolCallIdentities(parsed.event);
     if (wireIdentityError) {
@@ -935,14 +912,6 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (parsed.event.type === "session.created" || parsed.event.type === "session.updated") {
       try {
         const providerSessionId = acknowledgedSessionId(parsed.event);
-        if (
-          this.provider === "xai"
-          && parsed.event.type === "session.created"
-          && this.currentState === "connecting"
-          && providerSessionId === undefined
-        ) {
-          throw new Error("Provider xAI session.created omitted the session identity");
-        }
         if (
           providerSessionId !== undefined
           && this.providerSessionId !== undefined
@@ -1097,15 +1066,6 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       exactSerialized,
       configurationAcknowledgement,
     );
-
-    if (
-      this.provider === "xai"
-      && parsed.event.type === "session.created"
-      && this.currentState === "connecting"
-      && !this.initialSessionUpdateSent
-    ) {
-      if (!this.sendInitialSessionUpdate()) return;
-    }
 
     if (parsed.event.type === "session.updated"
       && this.pendingServerVadTurn?.phase === "awaiting_session_ack"

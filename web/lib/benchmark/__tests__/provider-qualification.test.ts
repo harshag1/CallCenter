@@ -244,7 +244,6 @@ class QualificationClient implements NormalizedRealtimeClient {
   }
 
   async connect(): Promise<void> {
-    if (this.#error) throw this.#error;
     if (this.#markReady) this.state = "ready";
     let predecessor: string | null = null;
     const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string): RealtimeWireObservation => {
@@ -292,20 +291,40 @@ class QualificationClient implements NormalizedRealtimeClient {
       predecessor = observation.observationSha256;
       return observation;
     };
+    if (this.#error) {
+      for (const listener of this.#wireListeners) listener(wire(
+        "outbound",
+        1,
+        this.provider === "gemini" ? "setup" : "session.update",
+      ));
+      for (const listener of this.#wireListeners) listener(wire("inbound", 2, "error"));
+      const fatal: NormalizedRealtimeEvent = Object.freeze({
+        type: "error" as const,
+        provider: this.provider,
+        receivedAtMs: 2,
+        wireType: "error",
+        code: "provider_authentication_failed",
+        message: this.#error.message,
+        fatal: true,
+        details: Object.freeze({ category: "authentication" }),
+      });
+      for (const listener of this.#listeners) listener(fatal);
+      throw this.#error;
+    }
     let sequence = 1;
-    if (this.provider === "xai") {
-      for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.created"));
+    if (this.provider === "xai" && this.#wireProjection.preRequestUpdated) {
+      for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.updated"));
       sequence += 1;
-      if (this.#wireProjection.preRequestUpdated) {
-        for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.updated"));
-        sequence += 1;
-      }
     }
     for (const listener of this.#wireListeners) listener(wire(
       "outbound",
       sequence,
       this.provider === "gemini" ? "setup" : "session.update",
     ));
+    if (this.provider === "xai") {
+      sequence += 1;
+      for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.created"));
+    }
     if (this.provider === "xai" && this.#wireProjection.duplicateUpdated) {
       sequence += 1;
       for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.updated"));
@@ -817,7 +836,21 @@ describe("provider qualification", () => {
       ),
     });
     expect(artifact.status).toBe("failed");
-    expect(artifact.results.find((result) => result.provider === "openai")?.code).toBe("unauthenticated");
+    const failedOpenAi = artifact.results.find((result) => result.provider === "openai");
+    expect(failedOpenAi?.code).toBe("unauthenticated");
+    expect(failedOpenAi?.setupFailureEvidence).toMatchObject({
+      provider: "openai",
+      connectionEpoch: 1,
+      observationCount: 2,
+      fatal: {
+        code: "provider_authentication_failed",
+        wireType: "error",
+        messageSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        detailsSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+    });
+    expect(failedOpenAi?.setupFailureEvidence?.observations.map((observation) => observation.wireType))
+      .toEqual(["session.update", "error"]);
     await expect(assertRecentPassingProviderQualification({
       root: prepared.root,
       protocolId: prepared.input.protocolId,
@@ -830,6 +863,7 @@ describe("provider qualification", () => {
     const names = await readdir(join(prepared.root, "qualifications"));
     expect(names).toHaveLength(1);
     const original = await readFile(join(prepared.root, "qualifications", names[0]!), "utf8");
+    expect(original).not.toContain("invalid API key");
     await expect(qualifyProviders({
       ...prepared.input,
       qualificationId: "failed-auth-attempt",

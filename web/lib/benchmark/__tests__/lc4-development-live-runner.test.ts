@@ -392,8 +392,8 @@ function qualificationFixture() {
     const acknowledgementWireType = target.provider === "gemini" ? "setupComplete" as const : "session.updated" as const;
     const observations = Object.freeze(target.provider === "xai"
       ? [
-          wire("inbound", 1, "session.created"),
-          wire("outbound", 2, requestWireType),
+          wire("outbound", 1, requestWireType),
+          wire("inbound", 2, "session.created"),
           wire("inbound", 3, acknowledgementWireType),
         ]
       : [

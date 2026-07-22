@@ -244,10 +244,10 @@ class SetupClient implements NormalizedRealtimeClient {
     };
     if (this.provider === "xai") {
       const sessionIdSha256 = "8".repeat(64);
-      observe("inbound", "session.created", 1, { sessionIdSha256 }, {
+      observe("outbound", "session.update", 1);
+      observe("inbound", "session.created", 2, { sessionIdSha256 }, {
         session: { fieldSha256: { turn_detection: "3".repeat(64), voice: "1".repeat(64) } },
       });
-      observe("outbound", "session.update", 2);
       observe("inbound", "session.updated", 3, { sessionIdSha256 }, {
         session: { configurationEvidence: this.sessionConfigurationAcknowledgement, toolCount: 1 },
       });

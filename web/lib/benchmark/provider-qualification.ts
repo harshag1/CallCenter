@@ -19,6 +19,7 @@ const MAX_CLOCK_SKEW_MS = 2 * 60_000;
 const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v3";
 const MATRIX_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification-matrix/v1";
 const RESPONSE_CANARY_HASH_DOMAIN = "harshas-amazing-call-center/provider-response-tool-canary/v1";
+const SETUP_FAILURE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/provider-setup-failure-evidence/v1\n";
 export const XAI_SERVER_VAD_SETTING_SHA256 = LC4_XAI_SERVER_VAD_SHA256;
 export const XAI_SERVER_VAD_OMITTED_PATHS = Object.freeze([
   "turn_detection.type",
@@ -59,6 +60,28 @@ export type ProviderSetupWireEvidence = Readonly<{
     status: "verified" | "unverifiable";
   }>;
   observations: readonly RealtimeWireObservation[];
+}>;
+
+export type ProviderSetupFailureEvidence = Readonly<{
+  schemaVersion: 1;
+  provider: LiveStsProvider;
+  connectionEpoch: number | null;
+  requestObservationSha256: string | null;
+  terminalObservationSha256: string | null;
+  observationCount: number;
+  observations: readonly RealtimeWireObservation[];
+  sessionIdentity: Readonly<{
+    createdSessionIdSha256: string | null;
+    updatedSessionIdSha256: string | null;
+    status: "verified" | "unverifiable";
+  }>;
+  fatal: Readonly<{
+    code: string;
+    wireType: string;
+    messageSha256: string;
+    detailsSha256: string | null;
+  }>;
+  evidenceSha256: string;
 }>;
 
 export type ProviderQualificationTarget = Readonly<{
@@ -117,6 +140,7 @@ export type ProviderQualificationResult = Readonly<{
   }>;
   configurationEvidence?: SessionConfigurationAcknowledgement;
   setupWireEvidence?: ProviderSetupWireEvidence;
+  setupFailureEvidence?: ProviderSetupFailureEvidence;
 }>;
 
 export type ProviderQualificationArtifact = Readonly<{
@@ -296,7 +320,7 @@ function setupWireEvidence(observations: readonly RealtimeWireObservation[]): Pr
     ));
     if (createdCandidates.length !== 1) return null;
     const created = createdCandidates[0]!;
-    if (created.sequence >= outbound.sequence) return null;
+    if (created.sequence <= outbound.sequence || created.sequence >= inbound.sequence) return null;
     const createdSessionIdSha256 = created.identities.sessionIdSha256 ?? null;
     const updatedSessionIdSha256 = inbound.identities.sessionIdSha256 ?? null;
     if (createdSessionIdSha256 !== null
@@ -348,7 +372,8 @@ function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
     const updatedId = inbound.identities.sessionIdSha256 ?? null;
     const status = createdId !== null && updatedId !== null ? "verified" : "unverifiable";
     return created[0]!.connectionEpoch === evidence.connectionEpoch
-      && created[0]!.sequence < outbound.sequence
+      && outbound.sequence < created[0]!.sequence
+      && created[0]!.sequence < inbound.sequence
       && (createdId === null || updatedId === null || createdId === updatedId)
       && evidence.sessionIdentity?.createdSessionIdSha256 === createdId
       && evidence.sessionIdentity?.updatedSessionIdSha256 === updatedId
@@ -368,6 +393,90 @@ function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
     && outbound.connectionEpoch === evidence.connectionEpoch
     && inbound.connectionEpoch === evidence.connectionEpoch
     && outbound.sequence < inbound.sequence;
+}
+
+function safeFailureToken(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9_.:-]{0,127}$/iu.test(value)
+    ? value.toLowerCase()
+    : fallback;
+}
+
+function createSetupFailureEvidence(input: Readonly<{
+  provider: LiveStsProvider;
+  observations: readonly RealtimeWireObservation[];
+  error: unknown;
+  fatalEvent: Extract<NormalizedRealtimeEvent, { type: "error" }> | null;
+}>): ProviderSetupFailureEvidence {
+  const observations = Object.freeze([...input.observations]);
+  const chain = verifyRealtimeWireObservationChain(observations);
+  if (observations.length > 0 && !chain.valid) throw new Error("provider setup failure wire chain failed integrity");
+  if (observations.some((observation) => observation.provider !== input.provider)) {
+    throw new Error("provider setup failure wire chain crossed providers");
+  }
+  const epochs = [...new Set(observations.map((observation) => observation.connectionEpoch))];
+  if (epochs.length > 1) throw new Error("provider setup failure crossed connection epochs");
+  const requestWireType = input.provider === "gemini" ? "setup" : "session.update";
+  const request = observations.find((observation) => observation.direction === "outbound" && observation.wireType === requestWireType);
+  const created = observations.find((observation) => observation.direction === "inbound" && observation.wireType === "session.created");
+  const updated = [...observations].reverse().find((observation) => observation.direction === "inbound" && observation.wireType === "session.updated");
+  const createdSessionIdSha256 = created?.identities.sessionIdSha256 ?? null;
+  const updatedSessionIdSha256 = updated?.identities.sessionIdSha256 ?? null;
+  const message = input.fatalEvent?.message ?? (input.error instanceof Error ? input.error.message : String(input.error));
+  const fatal = Object.freeze({
+    code: safeFailureToken(input.fatalEvent?.code, classifiedFailure(input.error)),
+    wireType: safeFailureToken(input.fatalEvent?.wireType, "client.connect"),
+    messageSha256: sha256Hex(`harshas-amazing-call-center/provider-setup-failure-message/v1\n${message}`),
+    detailsSha256: input.fatalEvent?.details === undefined
+      ? null
+      : sha256Hex(`harshas-amazing-call-center/provider-setup-failure-details/v1\n${canonicalJson(input.fatalEvent.details)}`),
+  });
+  const withoutHash = Object.freeze({
+    schemaVersion: 1 as const,
+    provider: input.provider,
+    connectionEpoch: epochs[0] ?? null,
+    requestObservationSha256: request?.observationSha256 ?? null,
+    terminalObservationSha256: observations.at(-1)?.observationSha256 ?? null,
+    observationCount: observations.length,
+    observations,
+    sessionIdentity: Object.freeze({
+      createdSessionIdSha256,
+      updatedSessionIdSha256,
+      status: createdSessionIdSha256 !== null && updatedSessionIdSha256 !== null && createdSessionIdSha256 === updatedSessionIdSha256
+        ? "verified" as const
+        : "unverifiable" as const,
+    }),
+    fatal,
+  });
+  return Object.freeze({
+    ...withoutHash,
+    evidenceSha256: sha256Hex(`${SETUP_FAILURE_EVIDENCE_DOMAIN}${canonicalJson(withoutHash)}`),
+  });
+}
+
+function validSetupFailureEvidence(evidence: ProviderSetupFailureEvidence): boolean {
+  const { evidenceSha256, ...body } = evidence;
+  const chain = verifyRealtimeWireObservationChain(evidence.observations);
+  const epochs = [...new Set(evidence.observations.map((observation) => observation.connectionEpoch))];
+  const created = evidence.observations.find((observation) => observation.direction === "inbound" && observation.wireType === "session.created");
+  const updated = [...evidence.observations].reverse().find((observation) => observation.direction === "inbound" && observation.wireType === "session.updated");
+  const createdId = created?.identities.sessionIdSha256 ?? null;
+  const updatedId = updated?.identities.sessionIdSha256 ?? null;
+  const expectedIdentity = createdId !== null && updatedId !== null && createdId === updatedId ? "verified" : "unverifiable";
+  return evidence.schemaVersion === 1
+    && /^[a-f0-9]{64}$/u.test(evidence.fatal.messageSha256)
+    && (evidence.fatal.detailsSha256 === null || /^[a-f0-9]{64}$/u.test(evidence.fatal.detailsSha256))
+    && /^[a-z0-9][a-z0-9_.:-]{0,127}$/u.test(evidence.fatal.code)
+    && /^[a-z0-9][a-z0-9_.:-]{0,127}$/u.test(evidence.fatal.wireType)
+    && evidence.observationCount === evidence.observations.length
+    && (evidence.observations.length === 0 || chain.valid)
+    && evidence.observations.every((observation) => observation.provider === evidence.provider)
+    && epochs.length <= 1
+    && evidence.connectionEpoch === (epochs[0] ?? null)
+    && evidence.terminalObservationSha256 === (evidence.observations.at(-1)?.observationSha256 ?? null)
+    && evidence.sessionIdentity.createdSessionIdSha256 === createdId
+    && evidence.sessionIdentity.updatedSessionIdSha256 === updatedId
+    && evidence.sessionIdentity.status === expectedIdentity
+    && evidenceSha256 === sha256Hex(`${SETUP_FAILURE_EVIDENCE_DOMAIN}${canonicalJson(body)}`);
 }
 
 type SessionWireProjection = Readonly<{
@@ -664,6 +773,7 @@ async function qualifyTarget(
   }
   let client: NormalizedRealtimeClient | null = null;
   let readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null = null;
+  let fatalEvent: Extract<NormalizedRealtimeEvent, { type: "error" }> | null = null;
   let unsubscribe: (() => void) | undefined;
   let unsubscribeWire: (() => void) | undefined;
   const wireObservations: RealtimeWireObservation[] = [];
@@ -671,12 +781,19 @@ async function qualifyTarget(
     client = await createClient(target, apiKey);
     unsubscribe = client.onEvent((event) => {
       if (event.type === "session.ready") readyEvent = event;
+      if (event.type === "error" && event.fatal) fatalEvent = event;
     });
     unsubscribeWire = client.onWireObservation?.((observation) => {
       wireObservations.push(observation);
     });
     await client.connect();
     if (client.state !== "ready") {
+      const failureEvidence = createSetupFailureEvidence({
+        provider: target.provider,
+        observations: wireObservations,
+        error: new Error("realtime client did not reach ready state"),
+        fatalEvent,
+      });
       return Object.freeze({
         provider: target.provider,
         model: target.model,
@@ -689,6 +806,7 @@ async function qualifyTarget(
         acknowledgementSha256: null,
         toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
         turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
+        setupFailureEvidence: failureEvidence,
       });
     }
     const outcome = acknowledgementResult(
@@ -706,6 +824,12 @@ async function qualifyTarget(
       ...outcome,
     });
   } catch (error) {
+    const failureEvidence = createSetupFailureEvidence({
+      provider: target.provider,
+      observations: wireObservations,
+      error,
+      fatalEvent,
+    });
     return Object.freeze({
       provider: target.provider,
       model: target.model,
@@ -718,6 +842,7 @@ async function qualifyTarget(
       acknowledgementSha256: null,
       toolSchemaVerification: target.configuration.providerTools.length === 0 ? "not_requested" : "requires_paid_response_canary",
       turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
+      setupFailureEvidence: failureEvidence,
     });
   } finally {
     unsubscribe?.();
@@ -821,6 +946,14 @@ export function assertProviderQualificationArtifactIntegrity(
       || !validSetupWireEvidence(result.setupWireEvidence)
     )) {
       throw new Error("passing provider qualification lacks one replayable setup session");
+    }
+    if (result.setupFailureEvidence !== undefined && (
+      result.status !== "failed"
+      || result.setupWireEvidence !== undefined
+      || result.setupFailureEvidence.provider !== result.provider
+      || !validSetupFailureEvidence(result.setupFailureEvidence)
+    )) {
+      throw new Error("provider qualification setup failure evidence is inconsistent");
     }
   }
 }

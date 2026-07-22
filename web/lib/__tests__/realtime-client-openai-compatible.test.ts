@@ -949,41 +949,42 @@ describe("OpenAI-compatible realtime client", () => {
     expect(client.state).toBe("ready");
   });
 
-  it("waits for xAI session.created before sending the initial session.update", async () => {
+  it("sends xAI session.update first and waits for the provider acknowledgement", async () => {
     const { client, socket } = fakeClient("xai");
     const pending = client.connect();
     socket.emit("open");
-    expect(socket.sent).toEqual([]);
+    expect(socket.sent.map((frame) => JSON.parse(frame))).toEqual([
+      expect.objectContaining({ type: "session.update" }),
+    ]);
 
     socket.emit("message", JSON.stringify({
       type: "session.created",
       session: { id: "sess_1" },
     }));
-    expect(socket.sent.map((frame) => JSON.parse(frame))).toEqual([
-      expect.objectContaining({ type: "session.update" }),
-    ]);
+    expect(client.state).toBe("connecting");
     socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
     await pending;
   });
 
-  it("fails closed when xAI session.created omits its session identity", async () => {
+  it("keeps an omitted xAI created-session identity unverifiable without blocking the update", async () => {
     const { client, socket } = fakeClient("xai");
     const pending = client.connect();
     socket.emit("open");
     socket.emit("message", JSON.stringify({ type: "session.created", session: {} }));
-    await expect(pending).rejects.toThrow("session.created omitted the session identity");
-    expect(socket.sent).toEqual([]);
-    expect(client.state).toBe("failed");
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+    expect(socket.sent).toHaveLength(1);
+    expect(client.state).toBe("ready");
   });
 
-  it("rejects xAI session.updated if no created-session handshake preceded it", async () => {
+  it("accepts xAI session.updated without treating session.created as a transport prerequisite", async () => {
     const { client, socket } = fakeClient("xai");
     const pending = client.connect();
     socket.emit("open");
     socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
-    await expect(pending).rejects.toThrow("before session.created initialized the session");
-    expect(socket.sent).toEqual([]);
-    expect(client.state).toBe("failed");
+    await pending;
+    expect(socket.sent).toHaveLength(1);
+    expect(client.state).toBe("ready");
   });
 
   it("records omitted acknowledgement fields as unverifiable instead of provider proof", async () => {
@@ -3556,7 +3557,7 @@ describe("manual PCM session compilation", () => {
     client.onEvent((event) => events.push(event));
     const pending = client.connect();
     socket.emit("open");
-    expect(socket.sent).toEqual([]);
+    expect(socket.sent).toHaveLength(1);
     socket.emit("message", JSON.stringify({
       type: "session.created",
       session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },

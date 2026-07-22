@@ -414,6 +414,7 @@ export type Lc4XaiServerVadGateARiskArtifact = Readonly<{
     mismatched_paths: readonly string[];
   }>[];
   setup_wire_evidence: NonNullable<ProviderQualificationArtifact["results"][number]["setupWireEvidence"]> | null;
+  setup_failure_evidence: NonNullable<ProviderQualificationArtifact["results"][number]["setupFailureEvidence"]> | null;
   transcription_policy: Readonly<{
     requested: false;
     host_consumed: false;
@@ -762,6 +763,7 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
     mismatched_paths: freeze(mismatchedPaths),
     field_status_inventory: freeze(fieldStatusInventory),
     setup_wire_evidence: input.setup.setupWireEvidence ?? null,
+    setup_failure_evidence: input.setup.setupFailureEvidence ?? null,
     transcription_policy: freeze({
       requested: false as const,
       host_consumed: false as const,
@@ -792,6 +794,7 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
 function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskArtifact): void {
   const { risk_sha256, ...body } = artifact;
   const setupWire = artifact.setup_wire_evidence;
+  const setupFailure = artifact.setup_failure_evidence;
   const inbound = setupWire?.observations.find((observation) => (
     observation.observationSha256 === setupWire.acknowledgementObservationSha256
   ));
@@ -825,6 +828,13 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
       || !verifyRealtimeWireObservationChain(setupWire.observations).valid
       || inbound?.connectionEpoch !== setupWire.connectionEpoch
       || canonicalJson(projectedFieldEvidence) !== canonicalJson(artifact.field_evidence)
+    ))
+    || (setupFailure !== null && (
+      setupWire !== null
+      || setupFailure.provider !== "xai"
+      || setupFailure.observationCount !== setupFailure.observations.length
+      || (setupFailure.observations.length > 0
+        && !verifyRealtimeWireObservationChain(setupFailure.observations).valid)
     ))) {
     throw new Error("LC4 xAI server-VAD Gate A risk artifact failed integrity");
   }
@@ -2037,7 +2047,9 @@ export async function runLc4QualificationV3(input: Readonly<{
   const gateBConnectionEpoch = xaiExecution?.wire_observations.find((observation) => (
     observation.direction === "outbound" && observation.wireType === "session.update"
   ))?.connectionEpoch ?? null;
-  const gateAConnectionEpoch = xaiGateARisk.setup_wire_evidence?.connectionEpoch ?? null;
+  const gateAConnectionEpoch = xaiGateARisk.setup_wire_evidence?.connectionEpoch
+    ?? xaiGateARisk.setup_failure_evidence?.connectionEpoch
+    ?? null;
   const serverVadQualification = freeze({
     provider: "xai" as const,
     requested_setting_sha256: LC4_XAI_SERVER_VAD_SETTING_SHA256,
@@ -2096,10 +2108,15 @@ export async function runLc4QualificationV3(input: Readonly<{
   }
   const setupWire = LC4_QUALIFICATION_V3_PROVIDER_ORDER.flatMap((provider) => {
     const result = setupArtifact!.results.find((candidate) => candidate.provider === provider);
-    return result?.setupWireEvidence === undefined ? [] : [result.setupWireEvidence];
+    if (result?.setupWireEvidence !== undefined) return [result.setupWireEvidence];
+    if (result?.setupFailureEvidence !== undefined) return [{ observations: result.setupFailureEvidence.observations }];
+    return [];
   });
   const replayHeads = [
-    ...setupWire.map((evidence) => evidence.observations.at(-1)?.observationSha256 ?? null),
+    ...setupWire.flatMap((evidence) => {
+      const head = evidence.observations.at(-1)?.observationSha256;
+      return head === undefined ? [] : [head];
+    }),
     ...executions.map((execution) => execution.wire_observations.at(-1)?.observationSha256 ?? null),
   ];
   const reconnectCount = [
@@ -2122,7 +2139,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     setup_qualification_artifact_sha256: setupArtifact!.artifactSha256,
     budget_evidence_sha256: budgetEvidence!.evidence_sha256,
     budget_final_head_sha256: budgetEvidence!.final_head_sha256,
-    provider_session_count: setupWire.length + executions.length,
+    provider_session_count: providerSessionsOpened,
     paid_session_count: executions.length,
     generation_phase_count: executions.length * 2,
     tool_roundtrip_count: executions.length,
@@ -2387,9 +2404,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
     )) throw new Error("LC4 qualification terminal lacks three replay-derived roundtrip bindings");
     const paidReplayHeads: string[] = [];
     let paidReplayEventCount = 0;
-    for (const [providerIndex, provider] of (terminal.body.status === "passed"
-      ? LC4_QUALIFICATION_V3_PROVIDER_ORDER.entries()
-      : [])) {
+    for (const [providerIndex, provider] of terminal.body.results.map((result, index) => (
+      [index, result.provider] as const
+    ))) {
       const [summary, retainedWire, retainedUsage] = await Promise.all([
         readJson<RetainedRoundtripSummary>(resolve(directory, `${provider}-spoken-roundtrip.json`)),
         readJsonLines<RealtimeWireObservation>(resolve(directory, `${provider}-spoken-roundtrip-wire.jsonl`)),
@@ -2444,10 +2461,17 @@ export async function reportLc4QualificationV3(input: Readonly<{
         observation_count: evidence?.observations.length ?? 0,
         observation_epochs: evidence?.observations.map((observation) => observation.connectionEpoch) ?? [],
       })}`);
-      return evidence === undefined ? [] : [evidence];
+      if (evidence !== undefined) return [{ provider: evidence.provider, observations: evidence.observations }];
+      if (result.setupFailureEvidence !== undefined) {
+        return [{ provider: result.setupFailureEvidence.provider, observations: result.setupFailureEvidence.observations }];
+      }
+      return [];
     });
-    if (terminal.body.status === "passed") {
-      const setupReplayHeads = setupWireEvidence.map((evidence) => evidence.observations.at(-1)?.observationSha256 ?? null);
+    {
+      const setupReplayHeads = setupWireEvidence.flatMap((evidence) => {
+        const head = evidence.observations.at(-1)?.observationSha256;
+        return head === undefined ? [] : [head];
+      });
       const replayHeads = [...setupReplayHeads, ...paidReplayHeads];
       const replayEventCount = setupWireEvidence.reduce(
         (total, evidence) => total + evidence.observations.length,
@@ -2456,9 +2480,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
       const replayChainHeadSha256 = replayHeads.some((head) => head === null)
         ? null
         : sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`);
-      if (setupWireEvidence.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
-        || paidReplayHeads.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
-        || packageBindings.provider_session_count !== setupWireEvidence.length + paidReplayHeads.length
+      if (setupWireEvidence.length !== terminal.body.provider_sessions_opened - terminal.body.paid_sessions_opened
+        || paidReplayHeads.length !== terminal.body.paid_sessions_opened
+        || packageBindings.provider_session_count !== terminal.body.provider_sessions_opened
         || packageBindings.replay_event_count !== replayEventCount
         || packageBindings.replay_chain_head_sha256 !== replayChainHeadSha256) {
         throw new Error("LC4 qualification signed replay chain, session count, or event count differs from retained evidence");
@@ -2477,7 +2501,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || gateARisk.provider_profile_manifest_sha256 !== plan.body.provider_profile_manifest_sha256
       || gateARisk.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
       || gateARisk.acknowledgement_sha256 !== retainedXaiSetup.acknowledgementSha256
-      || gateARisk.setup_wire_evidence?.connectionEpoch !== serverVad.gate_a_connection_epoch
+      || (gateARisk.setup_wire_evidence?.connectionEpoch
+        ?? gateARisk.setup_failure_evidence?.connectionEpoch
+        ?? null) !== serverVad.gate_a_connection_epoch
       || serverVad.exact_setting_verified !== (serverVad.gate_a_classification === "verified_by_provider_echo")
       || serverVad.operational_vad_verified !== (serverVad.gate_b_status === "behaviorally_verified")
       || serverVad.gate_a_classification !== (retainedXaiSetup.turnBoundaryVerification === "verified_by_provider_echo"

@@ -168,10 +168,10 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
     const requestWireType = this.provider === "gemini" ? "setup" : "session.update";
     const acknowledgementWireType = this.provider === "gemini" ? "setupComplete" : "session.updated";
     if (this.provider === "xai") {
-      // xAI is server-first: the client must bind one created session before it
-      // sends its sole setup update and accepts the corresponding acknowledgement.
-      for (const listener of this.#wireListeners) listener(wire("inbound", 1, "session.created"));
-      for (const listener of this.#wireListeners) listener(wire("outbound", 2, requestWireType));
+      // xAI accepts the client's sole setup update, creates the bound session,
+      // then acknowledges the effective configuration.
+      for (const listener of this.#wireListeners) listener(wire("outbound", 1, requestWireType));
+      for (const listener of this.#wireListeners) listener(wire("inbound", 2, "session.created"));
       for (const listener of this.#wireListeners) listener(wire("inbound", 3, acknowledgementWireType));
     } else {
       for (const listener of this.#wireListeners) listener(wire("outbound", 1, requestWireType));
