@@ -82,7 +82,10 @@ class FakeSocket implements RealtimeWebSocket {
   }
 }
 
-function fakeClient(provider: "openai" | "xai" = "openai") {
+function fakeClient(
+  provider: "openai" | "xai" = "openai",
+  overrides: Partial<ConstructorParameters<typeof OpenAICompatibleRealtimeClient>[0]> = {},
+) {
   const socket = new FakeSocket();
   let factoryArgs: Parameters<RealtimeWebSocketFactory> | undefined;
   const factory: RealtimeWebSocketFactory = (...args) => {
@@ -96,6 +99,7 @@ function fakeClient(provider: "openai" | "xai" = "openai") {
     sessionUpdate: baseSession,
     socketFactory: factory,
     connectTimeoutMs: 1_000,
+    ...overrides,
   });
   return { client, socket, factoryArgs: () => factoryArgs };
 }
@@ -847,6 +851,8 @@ describe("OpenAI-compatible realtime client", () => {
         socketFactory: () => socket,
         connectTimeoutMs: 1_000,
       });
+      const observations: RealtimeWireObservation[] = [];
+      client.onWireObservation((observation) => observations.push(observation));
       await connect(client, socket);
       socket.sent.length = 0;
       const dynamic = "<hacc_response_plan>\n{\"revision\":19}\n</hacc_response_plan>";
@@ -873,6 +879,18 @@ describe("OpenAI-compatible realtime client", () => {
           instructions: `BASE SAFETY AND FLOW GUARDRAILS\n${dynamic}`,
         },
       });
+      const responseObservation = observations.find((entry) => (
+        entry.direction === "outbound" && entry.wireType === "response.create"
+      ));
+      expect(responseObservation?.projection).toMatchObject({
+        dynamicControl: {
+          sha256: createHash("sha256").update(dynamic).digest("hex"),
+          byteLength: Buffer.byteLength(dynamic, "utf8"),
+          authority: "advisory_only_gateway_and_speech_gate_enforced",
+        },
+      });
+      expect(JSON.stringify(responseObservation?.projection)).not.toContain(dynamic);
+      expect(JSON.stringify(responseObservation?.projection)).not.toContain("BASE SAFETY");
     },
   );
 
@@ -1557,6 +1575,76 @@ describe("OpenAI-compatible realtime client", () => {
     ]);
   });
 
+  it("offers an opt-in ordered commit acknowledgement barrier without blocking ordinary turns", async () => {
+    const { client, socket } = fakeClient("xai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+    socket.emit("message", JSON.stringify({
+      type: "input_audio_buffer.committed",
+      event_id: "evt_commit_1",
+      item_id: "item_audio_1",
+    }));
+    const acknowledgement = await client.waitForInputAudioCommit(100);
+    expect(acknowledgement).toMatchObject({
+      provider: "xai",
+      connectionEpoch: 1,
+      commitOrdinal: 1,
+      status: "acknowledged",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "input.audio_committed",
+      commitOrdinal: 1,
+    }));
+
+    // No acknowledgement is required to keep the default, non-barrier path usable.
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([2, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([3, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+  });
+
+  it("classifies manual-mode provider VAD activity and deduplicates native event replays", async () => {
+    const diagnostic = fakeClient("xai");
+    const observed: NormalizedRealtimeEvent[] = [];
+    diagnostic.client.onEvent((event) => observed.push(event));
+    await connect(diagnostic.client, diagnostic.socket);
+    const speechStarted = {
+      type: "input_audio_buffer.speech_started",
+      event_id: "evt_speech_1",
+      item_id: "item_audio_1",
+      audio_start_ms: 0,
+    };
+    diagnostic.socket.emit("message", JSON.stringify(speechStarted));
+    diagnostic.socket.emit("message", JSON.stringify(speechStarted));
+    expect(observed.filter(
+      (event) => event.type === "error" && event.code === "unexpected_manual_turn_detection_event",
+    )).toHaveLength(1);
+    expect(diagnostic.client.state).toBe("ready");
+
+    const strict = fakeClient("xai", { unexpectedManualTurnDetectionPolicy: "fail" });
+    const strictEvents: NormalizedRealtimeEvent[] = [];
+    strict.client.onEvent((event) => strictEvents.push(event));
+    await connect(strict.client, strict.socket);
+    strict.socket.emit("message", JSON.stringify({
+      ...speechStarted,
+      event_id: "evt_speech_strict",
+    }));
+    expect(strict.client.state).toBe("failed");
+    expect(strictEvents).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "unexpected_manual_turn_detection_event",
+      fatal: true,
+      details: expect.objectContaining({ classification: "manual_mode_provider_vad_activity" }),
+    }));
+  });
+
   it("requires explicit response and item targets for cancel/truncate repair", async () => {
     const { client, socket } = fakeClient();
     await connect(client, socket);
@@ -1658,6 +1746,8 @@ describe("OpenAI-compatible realtime client", () => {
 
   it("submits every tool result before one continuation response", async () => {
     const { client, socket } = fakeClient("xai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
     await connect(client, socket);
     deliverToolBatch(socket, [
       { callId: "call_1", name: "lookup" },
@@ -1679,6 +1769,31 @@ describe("OpenAI-compatible realtime client", () => {
       },
       { type: "response.create" },
     ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool.results.submitted",
+      responseId: "r_tools",
+      responseIdSource: "provider",
+      callIds: ["call_1", "call_2"],
+      continuationRequested: true,
+    }));
+
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "r_post_tool", status: "in_progress" },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      response: { id: "r_post_tool", status: "completed", output: [] },
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.started",
+      responseId: "r_post_tool",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.completed",
+      responseId: "r_post_tool",
+      status: "completed",
+    }));
   });
 
   it("requires the exact local gateway declaration before enabling authoritative dispatch", () => {
@@ -2698,7 +2813,7 @@ describe("manual PCM session compilation", () => {
       });
   });
 
-  it("normalizes xAI's empty manual-turn acknowledgement to the requested null type", () => {
+  it("keeps xAI's empty manual-turn acknowledgement explicitly unverifiable", () => {
     const requested = withManualPcmSession("xai", baseSession);
     const acknowledged = sessionAcknowledgement("xai") as Record<string, unknown>;
     recordForTest(acknowledged.session).turn_detection = {};
@@ -2714,7 +2829,12 @@ describe("manual PCM session compilation", () => {
       },
       acknowledgedEvent: acknowledged,
     });
-    expect(proof.fields.turn_detection).toMatchObject({ status: "verified" });
+    expect(proof.fields.turn_detection).toMatchObject({
+      status: "unverifiable",
+      reason: expect.stringContaining("turn_detection.type"),
+    });
+    expect(proof.strictParityVerified).toBe(false);
+    expect(proof.paidBenchmarkReady).toBe(false);
   });
 
   it("enforces each hosted provider's documented PCM rates", () => {

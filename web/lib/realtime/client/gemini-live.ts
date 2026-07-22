@@ -42,6 +42,8 @@ export const GEMINI_LIVE_DEFAULT_ENDPOINT =
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_TOOL_RESPONSE_BYTES = 1024 * 1024;
+const DEFAULT_MAX_DYNAMIC_CONTROL_BYTES = 4 * 1024;
+const HARD_MAX_DYNAMIC_CONTROL_BYTES = 16 * 1024;
 const MAX_FUNCTION_CALLS_PER_BATCH = 64;
 const MAX_TRACKED_FUNCTION_CALL_IDS = 10_000;
 const CLIENT_GENERATED_WIRE_ATTRIBUTION = Object.freeze({
@@ -90,6 +92,8 @@ export type GeminiLiveClientOptions = {
   connectTimeoutMs?: number;
   maxIncomingMessageBytes?: number;
   maxToolResponseBytes?: number;
+  /** Compact advisory context sent through clientContent, never realtimeInput.text. */
+  maxDynamicControlBytes?: number;
   /** Defaults to the hard 10k replay ledger; tests/apps may choose a shorter fail-closed bound. */
   maximumTrackedToolCallIdentities?: number;
   /** Hard wall-clock kill; may be shortened but never exceed Gemini's audio-only limit. */
@@ -122,6 +126,16 @@ type ActiveToolBatch = {
   responseId: string;
   callIds: Set<string>;
 };
+
+type GeminiGenerationTrigger = Readonly<{
+  localResponseId: string;
+  connectionEpoch: number;
+  inputTurn: number;
+  trigger: "audio_activity_end" | "client_content" | "tool_response";
+  clientMessageOrdinal: number;
+  triggerObservationSha256?: string;
+  phase: "awaiting_provider" | "awaiting_tool_result" | "awaiting_post_tool" | "terminal";
+}>;
 
 type ResumptionState = {
   handle?: string;
@@ -698,6 +712,21 @@ function geminiRedactedWireProjection(
   if (gatewayCalls.length) projection.gatewayCalls = gatewayCalls;
   const gatewayResults = geminiGatewayResultWireProjection(event);
   if (gatewayResults.length) projection.gatewayResults = gatewayResults;
+  const clientContent = isRecord(event.clientContent) ? event.clientContent : {};
+  if (clientContent.turnComplete === false && Array.isArray(clientContent.turns)) {
+    const texts = clientContent.turns.flatMap((turn) => (
+      isRecord(turn) && Array.isArray(turn.parts)
+        ? turn.parts.flatMap((part) => isRecord(part) && typeof part.text === "string" ? [part.text] : [])
+        : []
+    ));
+    if (texts.length === 1) {
+      projection.dynamicControl = {
+        sha256: sha256(texts[0]!),
+        byteLength: textBytes(texts[0]!),
+        authority: "advisory_only_gateway_and_speech_gate_enforced",
+      };
+    }
+  }
   const text = geminiTextWireProjection(event);
   if (text.length) projection.text = text;
   const usage = geminiUsageWireProjection(event);
@@ -872,6 +901,20 @@ function geminiTextWireProjection(
 ): Record<string, unknown>[] {
   const content = isRecord(event.serverContent) ? event.serverContent : {};
   const values: Array<{ kind: string; value: string }> = [];
+  const clientContent = isRecord(event.clientContent) ? event.clientContent : {};
+  if (Array.isArray(clientContent.turns)) {
+    for (const turn of clientContent.turns) {
+      if (!isRecord(turn) || !Array.isArray(turn.parts)) continue;
+      for (const part of turn.parts) {
+        if (isRecord(part) && typeof part.text === "string") {
+          values.push({
+            kind: clientContent.turnComplete === true ? "client_text_turn" : "client_context",
+            value: part.text,
+          });
+        }
+      }
+    }
+  }
   for (const [key, kind] of [
     ["inputTranscription", "input_transcript"],
     ["interimInputTranscription", "input_transcript"],
@@ -963,6 +1006,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private readonly connectTimeoutMs: number;
   private readonly maxIncomingMessageBytes: number;
   private readonly maxToolResponseBytes: number;
+  private readonly maxDynamicControlBytes: number;
   private readonly maximumTrackedToolCallIdentities: number;
   private readonly maximumSessionDurationMs: number;
   private readonly providerTools: readonly ProviderFunctionTool[];
@@ -990,6 +1034,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private inputTurn = 0;
   private responseCounter = 0;
   private currentResponseId: string | null = null;
+  private responseStarted = false;
   private responseFinished = false;
   private currentResponseInterrupted = false;
   private inputTranscript = new TranscriptAssembler();
@@ -1014,6 +1059,8 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private setupReadiness: GeminiSetupReadinessEvidence | null = null;
   private submittingToolResults = false;
   private responsePrepared = false;
+  private clientMessageOrdinal = 0;
+  private generationTrigger: GeminiGenerationTrigger | null = null;
 
   constructor(options: GeminiLiveClientOptions) {
     if (!options.model.trim()) throw new Error("Gemini Live model is required");
@@ -1045,6 +1092,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.maxIncomingMessageBytes = options.maxIncomingMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.maxToolResponseBytes = options.maxToolResponseBytes ?? DEFAULT_MAX_TOOL_RESPONSE_BYTES;
+    this.maxDynamicControlBytes = options.maxDynamicControlBytes ?? DEFAULT_MAX_DYNAMIC_CONTROL_BYTES;
     this.maximumTrackedToolCallIdentities = options.maximumTrackedToolCallIdentities
       ?? MAX_TRACKED_FUNCTION_CALL_IDS;
     this.maximumSessionDurationMs = options.maximumSessionDurationMs ?? GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS;
@@ -1056,6 +1104,13 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
     if (!Number.isInteger(this.maxToolResponseBytes) || this.maxToolResponseBytes <= 0) {
       throw new Error("Gemini maxToolResponseBytes must be a positive integer");
+    }
+    if (!Number.isInteger(this.maxDynamicControlBytes)
+      || this.maxDynamicControlBytes <= 0
+      || this.maxDynamicControlBytes > HARD_MAX_DYNAMIC_CONTROL_BYTES) {
+      throw new Error(
+        `Gemini maxDynamicControlBytes must be from 1 to ${HARD_MAX_DYNAMIC_CONTROL_BYTES}`,
+      );
     }
     if (!Number.isInteger(this.maximumTrackedToolCallIdentities)
       || this.maximumTrackedToolCallIdentities < 1
@@ -1142,6 +1197,11 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.activeToolBatch = null;
     this.toolBatchCounter = 0;
     this.conflictedToolCallIds.clear();
+    this.clientMessageOrdinal = 0;
+    this.generationTrigger = null;
+    this.currentResponseId = null;
+    this.responseStarted = false;
+    this.responseFinished = false;
     const epoch = ++this.connectionEpoch;
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
@@ -1209,6 +1269,9 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   startActivity(): void {
     this.requireReady();
     if (this.inputOpen) throw new Error("Gemini input activity is already open");
+    if (this.generationTrigger && this.generationTrigger.phase !== "terminal") {
+      throw new Error("Gemini cannot start a new caller turn before the prior turn is terminal");
+    }
     this.inputTranscriptAttributionAmbiguous = this.inputTurn > 0 && !this.inputProviderTranscriptFinished;
     this.inputProviderTranscriptFinished = false;
     this.inputOpen = true;
@@ -1250,10 +1313,22 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         || sha256(preparation.additionalInstructions) !== preparation.contextSha256) {
       throw new Error("Gemini response preparation hash mismatch");
     }
-    // Gemini has immutable setup instructions and no response.create frame.
-    // Realtime text is therefore appended to this still-open user activity;
-    // the following activityEnd is the first frame that may start generation.
-    this.sendReady({ realtimeInput: { text: preparation.additionalInstructions } });
+    const controlBytes = textBytes(preparation.additionalInstructions);
+    if (controlBytes > this.maxDynamicControlBytes) {
+      throw new Error(
+        `Gemini dynamic response control exceeded ${this.maxDynamicControlBytes} UTF-8 bytes`,
+      );
+    }
+    // Live setup is immutable. Dynamic advisory context travels through the
+    // provider's ordered clientContent channel with turnComplete:false; caller
+    // audio remains exclusively realtimeInput PCM and activityEnd is the only
+    // generation trigger for this turn.
+    this.sendReady({
+      clientContent: {
+        turns: [{ role: "user", parts: [{ text: preparation.additionalInstructions }] }],
+        turnComplete: false,
+      },
+    });
     this.responsePrepared = true;
   }
 
@@ -1261,7 +1336,8 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.requireReady();
     if (!this.inputOpen) throw new Error("Gemini input activity is not open");
     this.inputOpen = false;
-    this.sendReady({ realtimeInput: { activityEnd: {} } });
+    const sent = this.sendReady({ realtimeInput: { activityEnd: {} } });
+    this.armGenerationTrigger("audio_activity_end", sent);
     this.responsePrepared = false;
   }
 
@@ -1304,12 +1380,13 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     // Official Live API text-turn shape. Unlike realtimeInput.text inside an
     // activityStart/activityEnd pair, turnComplete reliably triggers model
     // generation without sending any caller-audio bytes.
-    this.sendReady({
+    const sent = this.sendReady({
       clientContent: {
         turns: [{ role: "user", parts: [{ text }] }],
         turnComplete: true,
       },
     });
+    this.armGenerationTrigger("client_content", sent);
   }
 
   submitToolResults(results: readonly RealtimeToolResult[], createResponse = false): void {
@@ -1359,8 +1436,9 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       }
       const socket = this.socket!;
       const binding = { socket, epoch: this.connectionEpoch } satisfies ConnectionBinding;
+      let sent: Readonly<{ clientMessageOrdinal: number; observation?: RealtimeWireObservation }>;
       try {
-        this.sendReady(message);
+        sent = this.sendReady(message);
       } catch {
         const failure = new Error("Gemini tool result batch send had an indeterminate outcome");
         this.failActiveConnection(binding, failure, "tool_response_send_failed");
@@ -1371,6 +1449,16 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         this.completedToolResponses.set(response.id, response);
       }
       if (this.activeToolBatch?.key === activeBatch.key) this.activeToolBatch = null;
+      this.armGenerationTrigger("tool_response", sent);
+      this.emit({
+        type: "tool.results.submitted",
+        responseId: activeBatch.responseId,
+        responseIdSource: "client_local",
+        callIds: responses.map((response) => response.id),
+        continuationRequested: true,
+      }, "toolResponse", sent.observation
+        ? realtimeWireObservationReference(sent.observation)
+        : CLIENT_GENERATED_WIRE_ATTRIBUTION);
       if (createResponse) this.createResponse();
     } finally {
       this.submittingToolResults = false;
@@ -1729,6 +1817,14 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
 
     if (content.turnComplete === true) {
+      if (this.activeToolBatch?.callIds.size || this.generationTrigger?.phase === "awaiting_tool_result") {
+        this.failActiveConnection(
+          binding,
+          new Error("Gemini ended a turn before the blocking tool-call batch received its results"),
+          "turn_completed_before_tool_results",
+        );
+        return;
+      }
       this.finalizeTranscript("input");
       this.finalizeTranscript("output");
       const reason = typeof content.turnCompleteReason === "string" ? content.turnCompleteReason : undefined;
@@ -1988,10 +2084,20 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
 
     const responseId = this.ensureResponseStarted();
+    const trigger = this.generationTrigger!;
+    if (trigger.phase !== "awaiting_provider" && trigger.phase !== "awaiting_post_tool") {
+      this.failActiveConnection(
+        binding,
+        new Error(`Gemini tool call arrived during invalid lifecycle phase ${trigger.phase}`),
+        "tool_call_lifecycle_phase_mismatch",
+      );
+      return;
+    }
     const batchKey = `${binding.epoch}:${++this.toolBatchCounter}`;
     const callIds = fresh.map((call) => call.id as string);
     this.toolCallBatches.set(batchKey, Object.freeze([...callIds]));
     this.activeToolBatch = { key: batchKey, responseId, callIds: new Set(callIds) };
+    this.generationTrigger = Object.freeze({ ...trigger, phase: "awaiting_tool_result" });
     for (const call of fresh) {
       const id = call.id as string;
       call.responseId = responseId;
@@ -2014,6 +2120,18 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         argumentsText: JSON.stringify(argumentsJson ?? null),
         argumentsJson,
         responseId,
+        responseIdSource: "client_local" as const,
+        causalBinding: Object.freeze({
+          connectionEpoch: trigger.connectionEpoch,
+          inputTurn: trigger.inputTurn,
+          trigger: trigger.trigger,
+          clientMessageOrdinal: trigger.clientMessageOrdinal,
+          ...(trigger.triggerObservationSha256
+            ? { triggerObservationSha256: trigger.triggerObservationSha256 }
+            : {}),
+          providerCallId: id,
+          localResponseId: responseId,
+        }),
         terminalWireType: "toolCall",
         ...(argumentsError ? { argumentsError } : {}),
       };
@@ -2103,8 +2221,11 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       );
       return;
     }
+    let sent: Readonly<{ clientMessageOrdinal: number; observation?: RealtimeWireObservation }>;
     try {
-      if (!this.sendReadyFor(binding, message)) return;
+      const delivered = this.sendReadyFor(binding, message);
+      if (!delivered) return;
+      sent = delivered;
     } catch {
       this.failActiveConnection(
         binding,
@@ -2118,6 +2239,16 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       this.completedToolResponses.set(response.id, response);
     }
     if (this.activeToolBatch?.key === batchKey) this.activeToolBatch = null;
+    this.armGenerationTrigger("tool_response", sent);
+    this.emit({
+      type: "tool.results.submitted",
+      responseId: activeBatch.responseId,
+      responseIdSource: "client_local",
+      callIds: unique.map((response) => response.id),
+      continuationRequested: true,
+    }, "toolResponse", sent.observation
+      ? realtimeWireObservationReference(sent.observation)
+      : CLIENT_GENERATED_WIRE_ATTRIBUTION);
   }
 
   private executeToolCall(call: FunctionCall): Promise<FunctionResponse | null> {
@@ -2321,16 +2452,25 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   }
 
   private ensureResponseStarted(): string {
-    if (this.currentResponseId && !this.responseFinished) return this.currentResponseId;
+    const trigger = this.generationTrigger;
+    if (!trigger || trigger.phase === "terminal" || trigger.connectionEpoch !== this.connectionEpoch) {
+      throw new Error("Gemini provider response had no matching local generation trigger");
+    }
+    if (this.currentResponseId && !this.responseFinished && this.responseStarted) return this.currentResponseId;
     const hadPreviousResponse = this.currentResponseId !== null;
     this.outputTranscriptAttributionAmbiguous = hadPreviousResponse && !this.outputProviderTranscriptFinished;
     this.outputProviderTranscriptFinished = false;
     this.responseCounter += 1;
-    this.currentResponseId = `gemini-response-${this.responseCounter}`;
+    this.currentResponseId = trigger.localResponseId;
+    this.responseStarted = true;
     this.responseFinished = false;
     this.currentResponseInterrupted = false;
     this.outputTranscript.reset();
-    this.emit({ type: "response.started", responseId: this.currentResponseId }, "serverContent");
+    this.emit({
+      type: "response.started",
+      responseId: this.currentResponseId,
+      responseIdSource: "client_local",
+    }, "serverContent");
     return this.currentResponseId;
   }
 
@@ -2342,29 +2482,83 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   ) {
     if (!this.currentResponseId || this.responseFinished) return;
     this.responseFinished = true;
+    if (this.generationTrigger) {
+      this.generationTrigger = Object.freeze({ ...this.generationTrigger, phase: "terminal" });
+    }
     this.emit({
       type: "response.completed",
       responseId: this.currentResponseId,
+      responseIdSource: "client_local",
       status,
       ...(reason && reason !== "turn_complete" ? { reason } : {}),
     }, wireType, syntheticAttribution);
   }
 
-  private sendReady(message: Record<string, unknown>) {
+  private sendReady(message: Record<string, unknown>): Readonly<{
+    clientMessageOrdinal: number;
+    observation?: RealtimeWireObservation;
+  }> {
     this.requireReady();
     const encoded = JSON.stringify(message);
     this.socket!.send(encoded);
-    this.notifyWireObservation("outbound", message, encoded);
+    const observation = this.notifyWireObservation("outbound", message, encoded);
+    return Object.freeze({
+      clientMessageOrdinal: ++this.clientMessageOrdinal,
+      ...(observation ? { observation } : {}),
+    });
   }
 
-  private sendReadyFor(binding: ConnectionBinding, message: Record<string, unknown>): boolean {
+  private armGenerationTrigger(
+    trigger: GeminiGenerationTrigger["trigger"],
+    sent: Readonly<{ clientMessageOrdinal: number; observation?: RealtimeWireObservation }>,
+  ): void {
+    const active = this.generationTrigger;
+    if (trigger === "tool_response") {
+      if (!active || active.phase !== "awaiting_tool_result") {
+        throw new Error("Gemini tool response has no causally pending provider tool call");
+      }
+      this.generationTrigger = Object.freeze({
+        ...active,
+        trigger,
+        clientMessageOrdinal: sent.clientMessageOrdinal,
+        ...(sent.observation ? { triggerObservationSha256: sent.observation.observationSha256 } : {}),
+        phase: "awaiting_post_tool",
+      });
+      return;
+    }
+    if (active && active.phase !== "terminal") {
+      throw new Error("Gemini generation trigger overlaps a non-terminal turn");
+    }
+    const localResponseId = `gemini-local-response-${this.connectionEpoch}-${this.inputTurn}`;
+    this.currentResponseId = localResponseId;
+    this.responseStarted = false;
+    this.responseFinished = false;
+    this.currentResponseInterrupted = false;
+    this.generationTrigger = Object.freeze({
+      localResponseId,
+      connectionEpoch: this.connectionEpoch,
+      inputTurn: this.inputTurn,
+      trigger,
+      clientMessageOrdinal: sent.clientMessageOrdinal,
+      ...(sent.observation ? { triggerObservationSha256: sent.observation.observationSha256 } : {}),
+      phase: "awaiting_provider",
+    });
+  }
+
+  private sendReadyFor(
+    binding: ConnectionBinding,
+    message: Record<string, unknown>,
+  ): false | Readonly<{ clientMessageOrdinal: number; observation?: RealtimeWireObservation }> {
     if (!this.isCurrentConnection(binding) || this.clientState !== "ready" || binding.socket.readyState !== WebSocket.OPEN) {
       return false;
     }
     const encoded = JSON.stringify(message);
     binding.socket.send(encoded);
-    this.notifyWireObservation("outbound", message, encoded);
-    return true;
+    const observation = this.notifyWireObservation("outbound", message, encoded);
+    return Object.freeze({
+      clientMessageOrdinal: ++this.clientMessageOrdinal,
+      ...(observation ? { observation } : {}),
+    });
   }
 
   private requireReady() {

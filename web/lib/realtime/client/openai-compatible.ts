@@ -29,6 +29,7 @@ import type {
   RealtimeClientState,
   RealtimeEventListener,
   RealtimeOutputAudioTruncation,
+  RealtimeInputAudioCommitAcknowledgement,
   RealtimeResponseCancelTarget,
   RealtimeResponsePreparation,
   RealtimeToolCall,
@@ -61,6 +62,11 @@ export type OpenAICompatibleRealtimeClientOptions = {
   maximumTrackedIdentities?: number;
   /** Paid benchmarks can require complete provider-echo parity before readiness. */
   requireStrictSessionConfigurationParity?: boolean;
+  /**
+   * Manual-mode VAD events are always surfaced as diagnostics. Strict
+   * qualification may additionally fail the connection on the first event.
+   */
+  unexpectedManualTurnDetectionPolicy?: "diagnose" | "fail";
   /** Both grants are required before provider-hosted MCP may leave the local authority boundary. */
   experimentalProviderDirectMcp?: Readonly<{
     enabled?: boolean;
@@ -99,6 +105,18 @@ const TRANSPORT_GENERATED_WIRE_ATTRIBUTION = Object.freeze({
   availability: "unavailable" as const,
   reason: "transport_generated" as const,
 });
+const MAX_PENDING_INPUT_COMMITS = 128;
+
+type PendingInputCommit = {
+  connectionEpoch: number;
+  commitOrdinal: number;
+  acknowledgement: RealtimeInputAudioCommitAcknowledgement | null;
+  waiters: Set<{
+    resolve: (value: RealtimeInputAudioCommitAcknowledgement) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>;
+};
 
 /**
  * Server-side client for the realtime wire protocol shared by OpenAI and xAI.
@@ -131,6 +149,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private readonly xaiResumptionEnabled: boolean;
   private readonly maximumTrackedIdentities: number;
   private readonly requireStrictSessionConfigurationParity: boolean;
+  private readonly unexpectedManualTurnDetectionPolicy: "diagnose" | "fail";
   private readonly requestedModel?: string;
   private readonly localToolProxyEnabled: boolean;
   private readonly baseInstructions: string;
@@ -147,6 +166,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private meteredBillableTextInputEvents = 0;
   private pendingXaiResumption: Extract<NormalizedRealtimeEvent, { type: "session.resumption" }> | null = null;
   private pendingToolBatch: Set<string> | null = null;
+  private pendingToolBatchResponseId: string | null = null;
+  private pendingToolContinuationResponseId: string | null = null;
+  private inputCommitOrdinal = 0;
+  private readonly pendingInputCommits: PendingInputCommit[] = [];
+  private discardedInputCommitAcknowledgements = 0;
   private submittingToolResults = false;
   private connectionEpoch = 0;
   private wireSequence = 0;
@@ -227,6 +251,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.maximumWireEventBytes = options.maximumWireEventBytes;
     this.maximumTrackedIdentities = options.maximumTrackedIdentities ?? MAX_PROVIDER_TOOL_CALL_IDS;
     this.requireStrictSessionConfigurationParity = options.requireStrictSessionConfigurationParity === true;
+    this.unexpectedManualTurnDetectionPolicy = options.unexpectedManualTurnDetectionPolicy
+      ?? (this.requireStrictSessionConfigurationParity ? "fail" : "diagnose");
     this.requestedModel = queryModel ?? sessionModel;
     const configuredTools = Array.isArray(record(sessionUpdateSnapshot.session).tools)
       ? record(sessionUpdateSnapshot.session).tools as unknown[]
@@ -385,8 +411,56 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   commitInputAudio(): void {
     this.assertNoPendingToolBatch();
     if (this.inputPhase !== "buffered") throw new Error("Realtime input audio is not buffered for commit");
-    this.sendReady({ type: "input_audio_buffer.commit" });
-    this.inputPhase = "committed";
+    const pendingCommit: PendingInputCommit = {
+      connectionEpoch: this.connectionEpoch,
+      commitOrdinal: ++this.inputCommitOrdinal,
+      acknowledgement: null,
+      waiters: new Set(),
+    };
+    while (this.pendingInputCommits.length >= MAX_PENDING_INPUT_COMMITS) {
+      const oldest = this.pendingInputCommits[0]!;
+      if (oldest.waiters.size > 0) {
+        throw new Error(`Input audio commit acknowledgement queue exceeded ${MAX_PENDING_INPUT_COMMITS} entries`);
+      }
+      this.pendingInputCommits.shift();
+      if (!oldest.acknowledgement) this.discardedInputCommitAcknowledgements += 1;
+    }
+    this.pendingInputCommits.push(pendingCommit);
+    try {
+      this.sendReady({ type: "input_audio_buffer.commit" });
+      this.inputPhase = "committed";
+    } catch (error) {
+      this.pendingInputCommits.pop();
+      throw error;
+    }
+  }
+
+  waitForInputAudioCommit(timeoutMs = this.connectTimeoutMs): Promise<RealtimeInputAudioCommitAcknowledgement> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new Error("Input audio commit acknowledgement timeout must be positive"));
+    }
+    const pending = this.pendingInputCommits.at(-1);
+    if (!pending || pending.connectionEpoch !== this.connectionEpoch) {
+      return Promise.reject(new Error("No input audio commit is awaiting acknowledgement"));
+    }
+    if (pending.acknowledgement) {
+      this.pendingInputCommits.splice(this.pendingInputCommits.indexOf(pending), 1);
+      return Promise.resolve(observerSnapshot(pending.acknowledgement));
+    }
+    return new Promise<RealtimeInputAudioCommitAcknowledgement>((resolve, reject) => {
+      const waiter = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          pending.waiters.delete(waiter);
+          reject(new Error(
+            `Input audio commit acknowledgement timed out after ${timeoutMs} ms `
+            + `(provider=${this.provider}; commit=${pending.commitOrdinal})`,
+          ));
+        }, timeoutMs),
+      };
+      pending.waiters.add(waiter);
+    });
   }
 
   clearInputAudio(): void {
@@ -411,7 +485,23 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.sendReady({
       type: "response.create",
       ...(Object.keys(response).length ? { response } : {}),
-    });
+    }, preparation ? {
+      sha256: preparation.contextSha256,
+      byteLength: Buffer.byteLength(preparation.additionalInstructions, "utf8"),
+      authority: preparation.contextAuthority,
+    } : undefined);
+    if (this.pendingToolContinuationResponseId) {
+      this.emit({
+        type: "tool.continuation.requested",
+        provider: this.provider,
+        receivedAtMs: this.now(),
+        wireType: "response.create",
+        originResponseId: this.pendingToolContinuationResponseId,
+        responseIdSource: "provider",
+        wireObservation: CLIENT_GENERATED_WIRE_ATTRIBUTION,
+      });
+      this.pendingToolContinuationResponseId = null;
+    }
     if (preparation) this.pendingResponsePreparation = null;
     if (this.inputPhase === "committed") this.inputPhase = "empty";
   }
@@ -494,6 +584,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     try {
       const pending = this.pendingToolBatch;
       if (!pending) throw new Error("No completed provider tool-call batch is awaiting results");
+      const responseId = this.pendingToolBatchResponseId;
+      if (!responseId) throw new Error("Provider tool-call batch is missing its response identity");
       const serialized = snapshotToolResultBatch(results);
       if (!serialized.length) throw new Error("submitToolResults requires at least one result");
       const seen = new Set<string>();
@@ -526,7 +618,23 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           });
         }
         this.pendingToolBatch = null;
-        if (createResponse) this.sendReady({ type: "response.create" });
+        this.pendingToolBatchResponseId = null;
+        if (createResponse) {
+          this.sendReady({ type: "response.create" });
+        } else {
+          this.pendingToolContinuationResponseId = responseId;
+        }
+        this.emit({
+          type: "tool.results.submitted",
+          provider: this.provider,
+          receivedAtMs: this.now(),
+          wireType: "client.tool_results.submitted",
+          responseId,
+          responseIdSource: "provider",
+          callIds: serialized.map((result) => result.callId),
+          continuationRequested: createResponse,
+          wireObservation: CLIENT_GENERATED_WIRE_ATTRIBUTION,
+        });
       } catch (error) {
         const message = `Tool result batch delivery became indeterminate: ${errorMessage(error)}`;
         this.failConnection(message, "tool_result_batch_send_failed");
@@ -548,6 +656,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
+    this.pendingToolBatchResponseId = null;
+    this.pendingToolContinuationResponseId = null;
+    this.rejectInputCommitWaiters("Realtime client closed before input audio commit acknowledgement");
+    this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
     this.rejectPendingConnect(new Error("Realtime client closed before session acknowledgement"));
     this.emitPendingXaiMeter("client.close");
@@ -788,8 +900,42 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
     for (const normalizedEvent of normalized) {
       let event = withWireObservation(normalizedEvent, wireObservation);
+      if (event.type === "tool.calls") {
+        event = {
+          ...event,
+          calls: event.calls.map((call) => ({ ...call, responseIdSource: "provider" as const })),
+        };
+      }
       if (event.type === "session.ready" && configurationAcknowledgement) {
         event = { ...event, configuration: configurationAcknowledgement };
+      }
+      if (event.type === "input.audio_commit_acknowledgement") {
+        this.acknowledgeInputAudioCommit(wireObservation);
+        continue;
+      }
+      if (event.type === "input.speech_activity") {
+        const fatal = this.unexpectedManualTurnDetectionPolicy === "fail";
+        const message = `Provider emitted ${event.wireType} while manual turn detection was requested`;
+        this.emit({
+          type: "error",
+          provider: this.provider,
+          receivedAtMs: event.receivedAtMs,
+          wireType: event.wireType,
+          code: "unexpected_manual_turn_detection_event",
+          message,
+          fatal,
+          details: {
+            classification: "manual_mode_provider_vad_activity",
+            phase: event.phase,
+            policy: this.unexpectedManualTurnDetectionPolicy,
+          },
+          ...optional("wireObservation", event.wireObservation),
+        });
+        if (fatal) {
+          this.failConnection(message, "unexpected_manual_turn_detection_event", false);
+          return;
+        }
+        continue;
       }
       if (
         event.type === "session.ready"
@@ -916,6 +1062,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           break;
         }
         this.pendingToolBatch = new Set(event.calls.map((call) => call.callId));
+        this.pendingToolBatchResponseId = event.responseId;
         if (localDispatch?.ok) {
           // Local proxy mode has one authoritative dispatch surface. Emitting
           // both this event and the raw provider call batch would let two
@@ -942,7 +1089,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         }
         if (this.pendingToolBatch) {
           for (const callId of event.callIds) this.pendingToolBatch.delete(callId);
-          if (this.pendingToolBatch.size === 0) this.pendingToolBatch = null;
+          if (this.pendingToolBatch.size === 0) {
+            this.pendingToolBatch = null;
+            this.pendingToolBatchResponseId = null;
+          }
         }
       }
       if (event.type === "session.ready" && this.currentState === "connecting") {
@@ -979,6 +1129,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     const wasFailed = this.currentState === "failed";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
+    this.pendingToolBatchResponseId = null;
+    this.pendingToolContinuationResponseId = null;
+    this.rejectInputCommitWaiters("Realtime socket closed before input audio commit acknowledgement");
+    this.pendingInputCommits.length = 0;
     this.pendingResponsePreparation = null;
     this.inputPhase = "empty";
     if (!wasFailed) this.currentState = "closed";
@@ -1004,6 +1158,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
+    this.pendingToolBatchResponseId = null;
+    this.pendingToolContinuationResponseId = null;
+    this.rejectInputCommitWaiters(message);
+    this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
     this.rejectPendingConnect(new Error(message));
     this.emitPendingXaiMeter("client.failure");
@@ -1037,11 +1195,100 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.connectTimer = null;
   }
 
-  private sendReady(event: Record<string, unknown>): void {
+  private acknowledgeInputAudioCommit(wireObservation?: RealtimeWireObservation): void {
+    if (this.discardedInputCommitAcknowledgements > 0) {
+      this.discardedInputCommitAcknowledgements -= 1;
+      this.emit({
+        type: "error",
+        provider: this.provider,
+        receivedAtMs: this.now(),
+        wireType: "input_audio_buffer.committed",
+        code: "input_audio_commit_acknowledgement_unverifiable",
+        message: "Provider commit acknowledgement arrived after its bounded FIFO correlation record was discarded",
+        fatal: false,
+        details: { classification: "bounded_fifo_correlation_lost" },
+        ...optional(
+          "wireObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      return;
+    }
+    const pending = this.pendingInputCommits.find((candidate) => (
+      candidate.connectionEpoch === this.connectionEpoch && candidate.acknowledgement === null
+    ));
+    if (!pending || pending.connectionEpoch !== this.connectionEpoch || pending.acknowledgement) {
+      const message = "Provider acknowledged an input audio commit without one matching pending commit";
+      this.emit({
+        type: "error",
+        provider: this.provider,
+        receivedAtMs: this.now(),
+        wireType: "input_audio_buffer.committed",
+        code: "unexpected_input_audio_commit_acknowledgement",
+        message,
+        fatal: false,
+        details: { classification: "unmatched_commit_acknowledgement" },
+        ...optional(
+          "wireObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      return;
+    }
+    const acknowledgement = Object.freeze({
+      provider: this.provider,
+      connectionEpoch: this.connectionEpoch,
+      commitOrdinal: pending.commitOrdinal,
+      status: "acknowledged" as const,
+      ...optional(
+        "wireObservation",
+        wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+      ),
+    });
+    pending.acknowledgement = acknowledgement;
+    const hadWaiters = pending.waiters.size > 0;
+    for (const waiter of pending.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(observerSnapshot(acknowledgement));
+    }
+    pending.waiters.clear();
+    if (hadWaiters) {
+      const index = this.pendingInputCommits.indexOf(pending);
+      if (index >= 0) this.pendingInputCommits.splice(index, 1);
+    }
+    this.emit({
+      type: "input.audio_committed",
+      provider: this.provider,
+      receivedAtMs: this.now(),
+      wireType: "input_audio_buffer.committed",
+      connectionEpoch: this.connectionEpoch,
+      commitOrdinal: pending.commitOrdinal,
+      ...optional(
+        "wireObservation",
+        wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+      ),
+    });
+  }
+
+  private rejectInputCommitWaiters(reason: string): void {
+    for (const pending of this.pendingInputCommits) {
+      if (pending.acknowledgement) continue;
+      for (const waiter of pending.waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error(reason));
+      }
+      pending.waiters.clear();
+    }
+  }
+
+  private sendReady(
+    event: Record<string, unknown>,
+    dynamicControl?: WireDynamicControlEvidence,
+  ): void {
     if (this.currentState !== "ready") {
       throw new Error(`Realtime session is not ready (state: ${this.currentState})`);
     }
-    this.sendRaw(event);
+    this.sendRaw(event, dynamicControl);
   }
 
   private assertNoPendingToolBatch(): void {
@@ -1144,11 +1391,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     return undefined;
   }
 
-  private sendRaw(event: Record<string, unknown>): void {
+  private sendRaw(event: Record<string, unknown>, dynamicControl?: WireDynamicControlEvidence): void {
     if (!this.socket) throw new Error("Realtime WebSocket is not connected");
     const serialized = JSON.stringify(event);
     this.socket.send(serialized);
-    this.notifyWireObservation("outbound", event, serialized);
+    this.notifyWireObservation("outbound", event, serialized, dynamicControl);
   }
 
   private emit(event: NormalizedRealtimeEvent): void {
@@ -1171,6 +1418,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     direction: "inbound" | "outbound",
     event: Record<string, unknown>,
     exactSerialized?: string,
+    dynamicControl?: WireDynamicControlEvidence,
   ): RealtimeWireObservation | undefined {
     if (!this.wireObservationListeners.size) return undefined;
     const sequence = this.wireSequence + 1;
@@ -1188,6 +1436,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       outputAudioFormat: this.outputAudioFormat,
       localToolProxyEnabled: this.localToolProxyEnabled,
       previousObservationSha256: this.wireObservationChainHead,
+      ...(dynamicControl ? { dynamicControl } : {}),
     });
     this.wireSequence = sequence;
     this.wireObservationChainHead = observation.observationSha256;
@@ -1259,6 +1508,13 @@ type WireObservationBuildInput = Readonly<{
   outputAudioFormat: Pcm16Format;
   localToolProxyEnabled: boolean;
   previousObservationSha256: string | null;
+  dynamicControl?: WireDynamicControlEvidence;
+}>;
+
+type WireDynamicControlEvidence = Readonly<{
+  sha256: string;
+  byteLength: number;
+  authority: RealtimeResponsePreparation["contextAuthority"];
 }>;
 
 const SAFE_WIRE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -1268,6 +1524,9 @@ const SAFE_PROVIDER_ERROR_CODES = new Set([
   "content_filter",
   "invalid_request",
   "invalid_request_error",
+  "input_audio_buffer_commit_empty",
+  "input_audio_buffer_commit_audio_too_short",
+  "input_audio_buffer_too_small",
   "permission_denied",
   "rate_limit",
   "rate_limit_exceeded",
@@ -1351,6 +1610,10 @@ function buildRedactedWireProjection(
 
   const providerError = providerErrorWireProjection(input.event, wireType);
   if (providerError !== undefined) projection.error = providerError;
+
+  if (input.direction === "outbound" && wireType === "response.create" && input.dynamicControl) {
+    projection.dynamicControl = input.dynamicControl;
+  }
 
   const terminalStatus = safeTerminalStatus(record(input.event.response).status ?? input.event.status);
   if (terminalStatus !== undefined) projection.terminal = { status: terminalStatus };
@@ -1561,7 +1824,15 @@ function providerErrorWireProjection(
 ): Record<string, unknown> | undefined {
   if (wireType !== "error" && !wireType.endsWith(".error")) return undefined;
   const code = stringValue(record(event.error).code) ?? stringValue(event.code);
-  return { code: code !== undefined && SAFE_PROVIDER_ERROR_CODES.has(code) ? code : "provider_error" };
+  const safeCode = code !== undefined && SAFE_PROVIDER_ERROR_CODES.has(code) ? code : "provider_error";
+  const category = code?.startsWith("input_audio_buffer")
+    ? "input_audio_commit_rejected"
+    : code?.includes("rate_limit")
+      ? "rate_limited"
+      : code?.includes("auth") || code === "permission_denied"
+        ? "authentication_or_permission"
+        : "provider_error";
+  return { code: safeCode, category };
 }
 
 function buildWireIdentityProjection(event: Record<string, unknown>): RealtimeWireObservation["identities"] {
@@ -1809,14 +2080,14 @@ export function validateManualPcmSessionAcknowledgement(
     }
   } else {
     const xaiTurnDetection = session.turn_detection;
-    if (
-      !isRecord(xaiTurnDetection)
-      || (
-        Object.keys(xaiTurnDetection).length > 0
-        && xaiTurnDetection.type !== null
-      )
-    ) {
+    if (!isRecord(xaiTurnDetection) || (
+      Object.keys(xaiTurnDetection).length > 0
+      && xaiTurnDetection.type !== null
+    )) {
       mismatches.push("xAI session.turn_detection.type is not null");
+    } else if (Object.keys(xaiTurnDetection).length === 0) {
+      // Non-contradictory transport acknowledgement only. The independent
+      // configuration proof keeps the missing `type:null` echo unverifiable.
     }
     if (acknowledgedInput.turn_detection !== undefined && acknowledgedInput.turn_detection !== null) {
       mismatches.push("xAI returned an active audio.input turn detector");
@@ -1929,12 +2200,7 @@ function sessionIdentityFields(
     output_audio: outputAudio,
     turn_detection: provider === "openai"
       ? record(inputAudio).turn_detection
-      // xAI currently echoes an accepted `{ type: null }` manual-turn request
-      // as `{}`. Canonicalize only that exact empty-object wire shape; any
-      // populated detector still has to match byte-for-byte below.
-      : isRecord(session.turn_detection) && Object.keys(session.turn_detection).length === 0
-        ? { type: null }
-        : session.turn_detection,
+      : session.turn_detection,
   };
 }
 

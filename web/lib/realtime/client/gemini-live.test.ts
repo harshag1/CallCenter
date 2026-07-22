@@ -142,6 +142,11 @@ async function connectReady(test: ReturnType<typeof harness>) {
   await connected;
 }
 
+/** Every provider response fixture must have an observed outbound generation trigger. */
+function triggerProviderTurn(test: ReturnType<typeof harness>) {
+  test.client.sendTextTurn("Fixture caller requests the next provider response.");
+}
+
 function inputAudio(...bytes: number[]) {
   return {
     encoding: "pcm16" as const,
@@ -333,9 +338,15 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([
       { realtimeInput: { activityStart: {} } },
       { realtimeInput: { audio: { data: "AQA=", mimeType: "audio/pcm;rate=16000" } } },
-      { realtimeInput: { text: control } },
+      {
+        clientContent: {
+          turns: [{ role: "user", parts: [{ text: control }] }],
+          turnComplete: false,
+        },
+      },
       { realtimeInput: { activityEnd: {} } },
     ]);
+    expect(test.socket.sent.some((message) => message.includes('"realtimeInput":{"text"'))).toBe(false);
   });
 
   it("sends an official clientContent text turn without opening an audio activity", async () => {
@@ -354,6 +365,142 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent.some((message) => message.includes("activityStart"))).toBe(false);
     expect(test.socket.sent.some((message) => message.includes("activityEnd"))).toBe(false);
     expect(test.socket.sent.some((message) => message.includes("realtimeInput"))).toBe(false);
+  });
+
+  it("rejects oversized dynamic control before wire delivery", async () => {
+    const test = harness();
+    await connectReady(test);
+    test.client.appendInputAudio(inputAudio(1, 0));
+    const sentBefore = test.socket.sent.length;
+    const control = "x".repeat(4_097);
+    expect(() => test.client.prepareResponse({
+      additionalInstructions: control,
+      contextSha256: createHash("sha256").update(control).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    })).toThrow("exceeded 4096");
+    expect(test.socket.sent).toHaveLength(sentBefore);
+  });
+
+  it("binds a real wire-shaped tool round trip to one local triggered response", async () => {
+    const observations: RealtimeWireObservation[] = [];
+    const test = harness({ executeCapabilityGateway: undefined });
+    test.client.onWireObservation((observation) => observations.push(observation));
+    await connectReady(test);
+    const control = "Call capability_gateway exactly once, then continue from its receipt.";
+    test.client.appendInputAudio(inputAudio(1, 0, 2, 0));
+    test.client.prepareResponse({
+      additionalInstructions: control,
+      contextSha256: createHash("sha256").update(control).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    test.client.commitInputAudio();
+    test.socket.receive({
+      toolCall: {
+        functionCalls: [{
+          id: "provider-call-roundtrip",
+          name: GEMINI_CAPABILITY_GATEWAY_NAME,
+          args: { tool_name: "lookup_member", arguments: { member_id: "M-1" } },
+        }],
+      },
+    });
+    await settle();
+    const callEvent = test.events.find((event) => event.type === "tool.calls");
+    const call = callEvent?.type === "tool.calls" ? callEvent.calls[0] : undefined;
+    expect(call).toMatchObject({
+      callId: "provider-call-roundtrip",
+      responseIdSource: "client_local",
+      causalBinding: {
+        connectionEpoch: 1,
+        inputTurn: 1,
+        trigger: "audio_activity_end",
+        providerCallId: "provider-call-roundtrip",
+        localResponseId: expect.stringMatching(/^gemini-local-response-1-1$/),
+      },
+    });
+    const toolCallObservation = observations.find((entry) => entry.wireType === "toolCall")!;
+    expect(toolCallObservation.identities).toHaveProperty("callIdSha256");
+    expect(toolCallObservation.identities).not.toHaveProperty("responseIdSha256");
+    const controlObservation = observations.find((entry) => (
+      entry.direction === "outbound" && entry.wireType === "clientContent"
+    ));
+    expect(controlObservation?.projection).toMatchObject({
+      dynamicControl: {
+        sha256: createHash("sha256").update(control).digest("hex"),
+        byteLength: Buffer.byteLength(control, "utf8"),
+        authority: "advisory_only_gateway_and_speech_gate_enforced",
+      },
+    });
+    expect(JSON.stringify(controlObservation?.projection)).not.toContain(control);
+
+    test.client.submitToolResults([{
+      callId: "provider-call-roundtrip",
+      output: { ok: true, membership: "active" },
+    }]);
+    test.socket.receive({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=24000" } }],
+        },
+        generationComplete: true,
+      },
+    });
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    await settle();
+
+    const localResponseId = call?.responseId;
+    expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "tool.results.submitted",
+      responseId: localResponseId,
+      responseIdSource: "client_local",
+      callIds: ["provider-call-roundtrip"],
+      continuationRequested: true,
+    }));
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "output.audio",
+      responseId: localResponseId,
+    }));
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "response.completed",
+      responseId: localResponseId,
+      responseIdSource: "client_local",
+      status: "completed",
+    }));
+    expect(observations.map((entry) => `${entry.direction}:${entry.wireType}`)).toEqual([
+      "outbound:setup",
+      "inbound:setupComplete",
+      "outbound:realtimeInput.activityStart",
+      "outbound:realtimeInput.audio",
+      "outbound:clientContent",
+      "outbound:realtimeInput.activityEnd",
+      "inbound:toolCall",
+      "outbound:toolResponse",
+      "inbound:serverContent",
+      "inbound:serverContent",
+    ]);
+  });
+
+  it("fails closed when Gemini terminalizes before a blocking tool result", async () => {
+    const test = harness({ executeCapabilityGateway: undefined });
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      toolCall: {
+        functionCalls: [{
+          id: "blocking-call",
+          name: GEMINI_CAPABILITY_GATEWAY_NAME,
+          args: {},
+        }],
+      },
+    });
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    await settle();
+    expect(test.client.state).toBe("failed");
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "turn_completed_before_tool_results",
+      fatal: true,
+    }));
   });
 
   it("cannot serialize provider transcription through an extra canary option", () => {
@@ -783,6 +930,7 @@ describe("GeminiLiveClient", () => {
       if (event.type === "output.audio") secondListenerFirstByte = event.audio[0];
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({
       serverContent: {
         modelTurn: { parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=24000" } }] },
@@ -798,6 +946,7 @@ describe("GeminiLiveClient", () => {
   it("keeps late, independently delivered transcription on the completed Gemini response", async () => {
     const test = harness();
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({ serverContent: { outputTranscription: { text: "Good" } } });
     test.socket.receive({ serverContent: { generationComplete: true, turnComplete: true } });
     test.socket.receive({
@@ -810,10 +959,9 @@ describe("GeminiLiveClient", () => {
     const late = transcripts.at(-1);
     expect(late?.type === "output.transcript" ? late : undefined).toMatchObject({
       text: "Good afternoon",
-      delta: " afternoon",
+      delta: "Good afternoon",
       phase: "final",
       responseId: firstResponseId,
-      revised: true,
     });
     expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
   });
@@ -890,6 +1038,7 @@ describe("GeminiLiveClient", () => {
       },
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     const sentBefore = test.socket.sent.length;
     test.socket.receive({
       toolCall: {
@@ -995,6 +1144,7 @@ describe("GeminiLiveClient", () => {
       executeCapabilityGateway: async () => ({ execution: ++executions }),
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({
       toolCall: {
         functionCalls: [{
@@ -1062,6 +1212,7 @@ describe("GeminiLiveClient", () => {
       }),
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({
       toolCall: {
         functionCalls: [{
@@ -1079,6 +1230,7 @@ describe("GeminiLiveClient", () => {
     test.socket.open();
     test.socket.receive({ setupComplete: {} });
     await reconnect;
+    triggerProviderTurn(test);
     test.socket.receive({
       toolCall: {
         functionCalls: [{
@@ -1140,6 +1292,7 @@ describe("GeminiLiveClient", () => {
       mutate(message);
     });
     await connectReady(test);
+    triggerProviderTurn(test);
 
     test.socket.receive({
       toolCall: {
@@ -1161,7 +1314,8 @@ describe("GeminiLiveClient", () => {
       callId: "immutable-1",
       name: GEMINI_CAPABILITY_GATEWAY_NAME,
       argumentsJson: { operation: "original_operation", arguments: {} },
-      responseId: expect.stringMatching(/^gemini-response-/),
+      responseId: expect.stringMatching(/^gemini-local-response-/),
+      responseIdSource: "client_local",
       terminalWireType: "toolCall",
     });
     const response = JSON.parse(test.socket.sent.at(-1)!);
@@ -1174,6 +1328,7 @@ describe("GeminiLiveClient", () => {
   it("supports an external gateway executor through the normalized tool-result API", async () => {
     const test = harness({ executeCapabilityGateway: undefined });
     await connectReady(test);
+    triggerProviderTurn(test);
     const sentBefore = test.socket.sent.length;
     test.socket.receive({
       toolCall: {
@@ -1206,6 +1361,7 @@ describe("GeminiLiveClient", () => {
   it("requires one exact external result batch before admitting another tool batch", async () => {
     const complete = harness({ executeCapabilityGateway: undefined });
     await connectReady(complete);
+    triggerProviderTurn(complete);
     complete.socket.receive({
       toolCall: {
         functionCalls: [
@@ -1229,6 +1385,7 @@ describe("GeminiLiveClient", () => {
 
     const overlapping = harness({ executeCapabilityGateway: undefined });
     await connectReady(overlapping);
+    triggerProviderTurn(overlapping);
     overlapping.socket.receive({
       toolCall: {
         functionCalls: [{ id: "pending-a", name: GEMINI_CAPABILITY_GATEWAY_NAME, args: {} }],
@@ -1253,6 +1410,7 @@ describe("GeminiLiveClient", () => {
   it("snapshots external result identity once and fails closed on an indeterminate send", async () => {
     const accessors = harness({ executeCapabilityGateway: undefined });
     await connectReady(accessors);
+    triggerProviderTurn(accessors);
     accessors.socket.receive({
       toolCall: {
         functionCalls: [{ id: "snapshot-call", name: GEMINI_CAPABILITY_GATEWAY_NAME, args: {} }],
@@ -1271,6 +1429,7 @@ describe("GeminiLiveClient", () => {
 
     const uncertain = harness({ executeCapabilityGateway: undefined });
     await connectReady(uncertain);
+    triggerProviderTurn(uncertain);
     uncertain.socket.receive({
       toolCall: {
         functionCalls: [{ id: "uncertain-call", name: GEMINI_CAPABILITY_GATEWAY_NAME, args: {} }],
@@ -1293,6 +1452,7 @@ describe("GeminiLiveClient", () => {
 
     const internal = harness({ executeCapabilityGateway: async () => ({ ok: true }) });
     await connectReady(internal);
+    triggerProviderTurn(internal);
     internal.socket.failNextSend = true;
     internal.socket.receive({
       toolCall: {
@@ -1318,6 +1478,7 @@ describe("GeminiLiveClient", () => {
       },
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     const batch = {
       toolCall: {
         functionCalls: [
@@ -1351,6 +1512,7 @@ describe("GeminiLiveClient", () => {
 
     const oversized = harness();
     await connectReady(oversized);
+    triggerProviderTurn(oversized);
     oversized.socket.receive({
       toolCall: {
         functionCalls: Array.from({ length: 65 }, (_, index) => ({
@@ -1374,6 +1536,7 @@ describe("GeminiLiveClient", () => {
       maximumTrackedToolCallIdentities: 1,
     });
     await connectReady(capacity);
+    triggerProviderTurn(capacity);
     capacity.socket.receive({
       toolCall: {
         functionCalls: [{ id: "ledger-one", name: GEMINI_CAPABILITY_GATEWAY_NAME, args: {} }],
@@ -1401,6 +1564,7 @@ describe("GeminiLiveClient", () => {
       executeCapabilityGateway: async () => ({ execution: ++executions }),
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({
       toolCall: {
         functionCalls: [
@@ -1437,6 +1601,7 @@ describe("GeminiLiveClient", () => {
 
     const external = harness({ executeCapabilityGateway: undefined, maxToolResponseBytes: 180 });
     await connectReady(external);
+    triggerProviderTurn(external);
     external.socket.receive({
       toolCall: {
         functionCalls: [
@@ -1465,6 +1630,7 @@ describe("GeminiLiveClient", () => {
       },
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     const sentBefore = test.socket.sent.length;
     test.socket.receive({
       toolCall: {
@@ -1484,7 +1650,7 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent).toHaveLength(sentBefore);
     expect(test.events.some(
       (event) => event.type === "tool.cancelled"
-        && event.responseId.startsWith("gemini-response-")
+        && event.responseId.startsWith("gemini-local-response-")
         && event.callIds[0] === "cancel-1",
     )).toBe(true);
   });
@@ -1525,6 +1691,7 @@ describe("GeminiLiveClient", () => {
       },
     });
     await connectReady(test);
+    triggerProviderTurn(test);
     const firstSocket = test.socket;
     firstSocket.receive({
       toolCall: {
@@ -1698,7 +1865,7 @@ describe("GeminiLiveClient", () => {
     expect(usage?.type === "usage" ? usage : undefined).toMatchObject({
       scope: "response",
       turnId: "gemini-turn-1",
-      responseId: expect.stringMatching(/^gemini-response-/),
+      responseId: expect.stringMatching(/^gemini-local-response-/),
       usage: { raw: { promptTokenCount: 10, responseTokenCount: 2, totalTokenCount: 12 } },
     });
   });
@@ -1706,6 +1873,7 @@ describe("GeminiLiveClient", () => {
   it("treats missing or non-24k raw PCM MIME as fatal and emits no mislabeled audio", async () => {
     const test = harness();
     await connectReady(test);
+    triggerProviderTurn(test);
     test.socket.receive({
       serverContent: {
         modelTurn: { parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=16000" } }] },
@@ -1723,6 +1891,7 @@ describe("GeminiLiveClient", () => {
   it("preserves terminal semantics for zero-content rejection and post-generation interruption", async () => {
     const rejected = harness();
     await connectReady(rejected);
+    triggerProviderTurn(rejected);
     rejected.socket.receive({
       serverContent: { turnComplete: true, turnCompleteReason: "RESPONSE_REJECTED" },
     });
@@ -1737,6 +1906,7 @@ describe("GeminiLiveClient", () => {
 
     const interrupted = harness();
     await connectReady(interrupted);
+    triggerProviderTurn(interrupted);
     interrupted.socket.receive({ serverContent: { generationComplete: true } });
     interrupted.socket.receive({ serverContent: { interrupted: true } });
     interrupted.socket.receive({ serverContent: { turnComplete: true } });

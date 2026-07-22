@@ -643,6 +643,27 @@ export class OpenAICompatibleEventNormalizer {
       case "session.created":
       case "conversation.item.created":
       case "input_audio_buffer.committed":
+        return [{
+          ...base,
+          type: "input.audio_commit_acknowledgement",
+          ...optional("itemId", string(event.item_id)),
+        }];
+      case "input_audio_buffer.speech_started":
+        return [{
+          ...base,
+          type: "input.speech_activity",
+          phase: "started",
+          ...optional("itemId", string(event.item_id)),
+          ...optional("audioOffsetMs", number(event.audio_start_ms)),
+        }];
+      case "input_audio_buffer.speech_stopped":
+        return [{
+          ...base,
+          type: "input.speech_activity",
+          phase: "stopped",
+          ...optional("itemId", string(event.item_id)),
+          ...optional("audioOffsetMs", number(event.audio_end_ms)),
+        }];
       case "input_audio_buffer.cleared":
       case "response.output_audio.done":
       case "response.audio.done":

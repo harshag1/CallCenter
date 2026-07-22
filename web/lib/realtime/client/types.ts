@@ -153,6 +153,22 @@ export type RealtimeToolCall = {
   itemId?: string;
   /** Immutable response provenance established before this call becomes executable. */
   responseId: string;
+  /** Gemini has no provider response ID; its adapter labels the local correlation ID explicitly. */
+  responseIdSource?: "provider" | "client_local";
+  /**
+   * Provider-neutral causal join for calls emitted by transports without a
+   * provider response identity. The provider call ID remains authoritative;
+   * the trigger and turn fields only bind it to this client's exact turn.
+   */
+  causalBinding?: Readonly<{
+    connectionEpoch: number;
+    inputTurn: number;
+    trigger: "audio_activity_end" | "client_content" | "tool_response";
+    clientMessageOrdinal: number;
+    triggerObservationSha256?: string;
+    providerCallId: string;
+    localResponseId: string;
+  }>;
   /** Provider event that made the call terminal/executable, when the provider supplies one. */
   terminalEventId?: string;
   terminalWireType: string;
@@ -228,6 +244,14 @@ export type RealtimeToolResult = {
   callId: string;
   output: unknown;
 };
+
+export type RealtimeInputAudioCommitAcknowledgement = Readonly<{
+  provider: Extract<ServerRealtimeProvider, "openai" | "xai">;
+  connectionEpoch: number;
+  commitOrdinal: number;
+  status: "acknowledged";
+  wireObservation?: RealtimeWireObservationAttribution;
+}>;
 
 export type NormalizedRealtimeUsage = {
   inputTextTokens?: number;
@@ -324,10 +348,12 @@ export type NormalizedRealtimeEvent =
   | (EventBase & {
       type: "response.started";
       responseId: string;
+      responseIdSource?: "provider" | "client_local";
     })
   | (EventBase & {
       type: "response.completed";
       responseId: string;
+      responseIdSource?: "provider" | "client_local";
       status: RealtimeResponseTerminalStatus;
       /** Provider terminal detail kept separate so `status` remains enumerable. */
       reason?: string;
@@ -337,6 +363,38 @@ export type NormalizedRealtimeEvent =
       type: "tool.calls";
       responseId: string;
       calls: RealtimeToolCall[];
+    })
+  | (EventBase & {
+      /** A complete provider call batch was returned to the provider. */
+      type: "tool.results.submitted";
+      responseId: string;
+      responseIdSource: "provider" | "client_local";
+      callIds: string[];
+      continuationRequested: boolean;
+    })
+  | (EventBase & {
+      /** Explicit post-tool generation trigger for a previously returned batch. */
+      type: "tool.continuation.requested";
+      originResponseId: string;
+      responseIdSource: "provider" | "client_local";
+    })
+  | (EventBase & {
+      /** Explicit acknowledgement of a prior manual input-buffer commit. */
+      type: "input.audio_committed";
+      connectionEpoch: number;
+      commitOrdinal: number;
+    })
+  | (EventBase & {
+      /** Provider wire acknowledgement before client-side FIFO correlation. */
+      type: "input.audio_commit_acknowledgement";
+      itemId?: string;
+    })
+  | (EventBase & {
+      /** Provider VAD activity observed despite the requested manual-turn mode. */
+      type: "input.speech_activity";
+      phase: "started" | "stopped";
+      itemId?: string;
+      audioOffsetMs?: number;
     })
   | (EventBase & {
       /**
@@ -483,6 +541,13 @@ export interface NormalizedRealtimeClient {
   /** Must precede commitInputAudio for providers where commit starts generation. */
   prepareResponse(preparation: RealtimeResponsePreparation): void;
   commitInputAudio(): void;
+  /**
+   * Optional provider acknowledgement barrier. Call only after commitInputAudio;
+   * clients that do not expose an acknowledgement leave this method absent.
+   */
+  waitForInputAudioCommit?(
+    timeoutMs?: number,
+  ): Promise<RealtimeInputAudioCommitAcknowledgement>;
   createResponse(overrides?: Record<string, unknown>): void;
   /** Optional because not every provider exposes response-targeted cancellation. */
   cancelResponse?(target: RealtimeResponseCancelTarget): void;
