@@ -25,6 +25,12 @@ The default policy requires an independent ASR receipt bound to the SHA-256,
 byte length, format, and duration of the exact concatenated held PCM. A provider
 transcript may corroborate that result, but it is not exact PCM coverage.
 
+This strong mode adds at least the full generated-utterance duration plus ASR
+time before first playout. The defaults cap collection at 150 seconds, buffered
+audio at 120 seconds, and post-generation evidence at 15 seconds. A future
+streaming/lookahead gate can reduce latency, but cannot claim whole-response
+coverage unless it retains every chunk until the terminal policy decision.
+
 Decisions contain hashes, safe rule IDs, and secret fingerprints. They never
 contain provider/ASR transcript text or raw configured secrets. Callers must
 also avoid logging the in-memory policy object, ASR input, or raw ASR receipt.
