@@ -1284,7 +1284,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
 }
 
 export type Lc4DevLiveReportArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   execution_id: string;
   run_sha256: string;
   completed: boolean;
@@ -1298,6 +1298,11 @@ export type Lc4DevLiveReportArtifact = Readonly<{
   authority_evaluated: number | null;
   authority_evidence_invalid: number;
   authority_replay_set_sha256: string | null;
+  run_package_sha256: string | null;
+  budget_lease_sha256: string | null;
+  budget_evidence_sha256: string | null;
+  budget_terminal_ledger_head_sha256: string | null;
+  budget_replay_verified: boolean;
   task_results_available: boolean;
   paid_retry_count: 0;
   efficacy_claim_eligible: false;
@@ -1313,6 +1318,14 @@ export type Lc4DevAuthorityReportInput = Readonly<{
   episode_replay_sha256s: readonly string[];
 }>;
 
+export type Lc4DevBudgetReportInput = Readonly<{
+  run_package_sha256: string;
+  budget_lease_sha256: string;
+  budget_evidence_sha256: string;
+  budget_terminal_ledger_head_sha256: string;
+  budget_replay_verified: true;
+}>;
+
 export function createLc4DevLiveReportArtifact(
   run: Lc4DevLiveRunArtifact,
   authority: Lc4DevAuthorityReportInput = Object.freeze({
@@ -1322,6 +1335,7 @@ export function createLc4DevLiveReportArtifact(
     evidence_invalid: 6,
     episode_replay_sha256s: Object.freeze([]),
   }),
+  budget: Lc4DevBudgetReportInput | null = null,
 ): Lc4DevLiveReportArtifact {
   const { run_sha256: claimed, ...runBody } = run;
   if (hash(RUN_DOMAIN, runBody) !== claimed) throw new Error("LC4-DEV run artifact hash mismatch");
@@ -1340,6 +1354,13 @@ export function createLc4DevLiveReportArtifact(
   if (!scorableShapeValid && !unscorableShapeValid) {
     throw new Error("LC4-DEV authority report summary is internally inconsistent");
   }
+  if (budget !== null && (!budget.budget_replay_verified
+    || !HASH.test(budget.run_package_sha256)
+    || !HASH.test(budget.budget_lease_sha256)
+    || !HASH.test(budget.budget_evidence_sha256)
+    || !HASH.test(budget.budget_terminal_ledger_head_sha256))) {
+    throw new Error("LC4-DEV budget report summary is invalid or was not independently replayed");
+  }
   const executionEvidenceComplete = run.retained_caller_audio === 360 + run.repair_playbacks
     && run.retained_assistant_audio === 360 + run.repair_playbacks
     && run.listener_evidence_count === 360 + run.repair_playbacks
@@ -1355,9 +1376,10 @@ export function createLc4DevLiveReportArtifact(
     && run.episodes_completed === 6
     && run.opportunities_completed === 360
     && run.episode_finalization_count === 6;
-  const taskResultsAvailable = authorityScorable && executionComplete;
+  const budgetComplete = budget !== null && budget.budget_replay_verified;
+  const taskResultsAvailable = authorityScorable && executionComplete && budgetComplete;
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     execution_id: run.execution_id,
     run_sha256: run.run_sha256,
     completed: run.status === "completed",
@@ -1377,6 +1399,11 @@ export function createLc4DevLiveReportArtifact(
     authority_replay_set_sha256: taskResultsAvailable
       ? sha256Hex(canonicalJson(authority.episode_replay_sha256s))
       : null,
+    run_package_sha256: budget?.run_package_sha256 ?? null,
+    budget_lease_sha256: budget?.budget_lease_sha256 ?? null,
+    budget_evidence_sha256: budget?.budget_evidence_sha256 ?? null,
+    budget_terminal_ledger_head_sha256: budget?.budget_terminal_ledger_head_sha256 ?? null,
+    budget_replay_verified: budgetComplete,
     task_results_available: taskResultsAvailable,
     paid_retry_count: 0 as const,
     efficacy_claim_eligible: false as const,

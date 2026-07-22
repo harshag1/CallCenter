@@ -21,6 +21,11 @@ import type {
   Lc4DevLiveRunArtifact,
   Lc4DevRetainedQualificationReceipt,
 } from "../lc4-development-live-runner";
+import {
+  createLc4DevRunPackage,
+  type Lc4DevBudgetEvidence,
+  type Lc4DevRunLease,
+} from "../lc4-development-budget";
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
@@ -83,10 +88,28 @@ async function runReportCase(run: Lc4DevLiveRunArtifact, authority: AuthorityRep
     authority_trust_root_sha256: custody.authority.public_key_fingerprint_sha256,
     authorization: dag.authorization,
   } as Lc4DevLivePreflightArtifact;
+  const budgetLease = {
+    execution_id: run.execution_id,
+    prepare_sha256: run.prepare_sha256,
+    preflight_sha256: run.preflight_sha256,
+    lease_sha256: sha256Hex("operator-test-budget-lease"),
+  } as Lc4DevRunLease;
+  const budgetEvidence = {
+    execution_id: run.execution_id,
+    lease_sha256: budgetLease.lease_sha256,
+    run_sha256: run.run_sha256,
+    evidence_sha256: sha256Hex("operator-test-budget-evidence"),
+    terminal_ledger_head_sha256: sha256Hex("operator-test-budget-head"),
+    ledger_public_key_fingerprint_sha256: sha256Hex("operator-test-budget-key"),
+  } as Lc4DevBudgetEvidence;
+  const runPackage = createLc4DevRunPackage({ lease: budgetLease, evidence: budgetEvidence, run });
   await Promise.all([
     writeFile(join(root, "prepare.json"), `${canonicalJson(custody.prepare)}\n`, { mode: 0o400 }),
     writeFile(join(root, "run.json"), `${canonicalJson(run)}\n`, { mode: 0o400 }),
     writeFile(join(root, "preflight.json"), `${canonicalJson(preflight)}\n`, { mode: 0o400 }),
+    writeFile(join(root, "budget-run-lease.json"), `${canonicalJson(budgetLease)}\n`, { mode: 0o400 }),
+    writeFile(join(root, "budget-terminal-evidence.json"), `${canonicalJson(budgetEvidence)}\n`, { mode: 0o400 }),
+    writeFile(join(root, "run-package.json"), `${canonicalJson(runPackage)}\n`, { mode: 0o400 }),
   ]);
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -97,6 +120,7 @@ async function runReportCase(run: Lc4DevLiveRunArtifact, authority: AuthorityRep
     {
       async inspect_source() { throw new Error("report must not inspect source or call providers"); },
       async replay_authority_report(value) { calls.push(value); return authority; },
+      async replay_budget_evidence() {},
     },
   );
   return {

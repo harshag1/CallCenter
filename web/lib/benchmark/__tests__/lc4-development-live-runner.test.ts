@@ -107,6 +107,13 @@ const COMPLETE_AUTHORITY = Object.freeze({
   evidence_invalid: 0,
   episode_replay_sha256s: Object.freeze(Array.from({ length: 6 }, (_, index) => sha256Hex(`authority-replay-${index}`))),
 });
+const COMPLETE_RUN_BUDGET = Object.freeze({
+  run_package_sha256: sha256Hex("run-package"),
+  budget_lease_sha256: sha256Hex("budget-lease"),
+  budget_evidence_sha256: sha256Hex("budget-evidence"),
+  budget_terminal_ledger_head_sha256: sha256Hex("budget-ledger-head"),
+  budget_replay_verified: true as const,
+});
 const branchKeys = generateKeyPairSync("ed25519");
 const branchIdentity = Object.freeze({
   key_id: "lc4-dev-live-runner-branch-test",
@@ -386,12 +393,9 @@ function qualificationFixture() {
     toolSchemaVerification: "verified_by_provider_echo" as const,
     turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" as const : "verified_by_provider_echo" as const,
     setupWireEvidence: Object.freeze({
-      provider: target.provider,
       connectionEpoch: 1,
-      requestWireType,
-      acknowledgementWireType,
-      requestObservationSha256: observations[0]!.observationSha256,
-      acknowledgementObservationSha256: observations[1]!.observationSha256,
+      sessionUpdateObservationSha256: observations[0]!.observationSha256,
+      sessionUpdatedObservationSha256: observations[1]!.observationSha256,
       observations,
     }),
   });
@@ -921,7 +925,7 @@ describe("LC4-DEV live runner", () => {
       event_count: 1_098,
       ledger_head_sha256: run.ledger_head_sha256,
     });
-    expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY)).toMatchObject({
+    expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({
       completed: true,
       exact_six_episode_horizon: true,
       exact_opportunity_horizon: true,
@@ -1084,7 +1088,7 @@ describe("LC4-DEV live runner", () => {
         event_count: 1_100,
         ledger_head_sha256: run.ledger_head_sha256,
       });
-      expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY)).toMatchObject({
+      expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({
         completed: true,
         exact_six_episode_horizon: true,
         exact_opportunity_horizon: true,
@@ -1189,7 +1193,7 @@ describe("LC4-DEV live runner", () => {
       event_count: run.ledger.length,
       ledger_head_sha256: run.ledger_head_sha256,
     });
-    expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY)).toMatchObject({
+    expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({
       completed: false,
       evidence_complete: false,
       exact_playback_accounting: false,
@@ -1327,12 +1331,20 @@ describe("LC4-DEV live runner", () => {
       manifest_sha256: preflight.control_plane_manifest_sha256,
       async execute() { throw new Error("factory construction test must not execute the gateway"); },
     };
+    const budgetAuthority = {
+      assertProviderConstructionAuthorized() {},
+      assertWithinHardDeadline() {},
+      assertOperationWindow() {},
+      async beforeEpisodeSocketOpen() {},
+      async afterEpisodeSocketOpen() {},
+    };
     const adapter = createLc4DevelopmentRealtimeAdapter({
       prepare,
       preflight,
       credentials,
       gateway_executor: gatewayExecutor,
       evidence,
+      budget_authority: budgetAuthority,
       listener: {
         async accept({ opportunity }) {
           return {
@@ -1358,6 +1370,7 @@ describe("LC4-DEV live runner", () => {
       credentials: { ...credentials, xai: "different-xai-secret" },
       gateway_executor: gatewayExecutor,
       evidence,
+      budget_authority: budgetAuthority,
       listener: {
         async accept({ opportunity }) {
           return {

@@ -37,6 +37,7 @@ const EPISODE_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-episode-s
 const ENVELOPE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-envelope/v1\n";
 const LEASE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-run-lease/v1\n";
 const EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-evidence/v1\n";
+const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-dev-run-package/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
 
 export type Lc4DevBudgetBinding = Readonly<{
@@ -111,6 +112,20 @@ export type Lc4DevBudgetEvidence = Readonly<{
   conservative_settled_micro_usd: number;
   maximum_total_micro_usd: typeof LC4_DEV_BUDGET_MAXIMUM_MICRO_USD;
   evidence_sha256: string;
+}>;
+
+export type Lc4DevRunPackage = Readonly<{
+  schema_version: 1;
+  package_version: "HACC-LC4-DEV-RUN-PACKAGE-v1";
+  execution_id: string;
+  prepare_sha256: string;
+  preflight_sha256: string;
+  run_sha256: string;
+  budget_lease_sha256: string;
+  budget_terminal_evidence_sha256: string;
+  budget_terminal_ledger_head_sha256: string;
+  budget_ledger_public_key_fingerprint_sha256: string;
+  package_sha256: string;
 }>;
 
 function missingOnly(error: unknown): null {
@@ -375,6 +390,14 @@ export class Lc4DevBudgetLifecycle {
     assertLc4DevRunLease({ lease: this.#lease, binding: this.#binding, now: this.#now() });
   }
 
+  assertOperationWindow(maximumDurationMs: number): void {
+    if (!Number.isSafeInteger(maximumDurationMs) || maximumDurationMs <= 0) throw new Error("LC4-DEV operation duration bound is invalid");
+    this.assertWithinHardDeadline();
+    if (this.#now().getTime() + maximumDurationMs > Date.parse(this.#lease.hard_deadline_at)) {
+      throw new Error("LC4-DEV hard overall run deadline cannot admit another bounded provider operation");
+    }
+  }
+
   async beforeEpisodeSocketOpen(episode: Lc4DevLiveEpisodePlan): Promise<void> {
     this.assertWithinHardDeadline();
     const reference = this.#lease.reservations.find((candidate) => candidate.episode_id === episode.episode_id);
@@ -537,4 +560,40 @@ export async function replayLc4DevBudgetEvidence(input: Readonly<{
   for (const digest of [input.evidence.lease_sha256, input.evidence.terminal_ledger_head_sha256, input.evidence.run_sha256]) {
     if (!HASH.test(digest)) throw new Error("LC4-DEV budget evidence contains an invalid hash");
   }
+}
+
+export function createLc4DevRunPackage(input: Readonly<{
+  lease: Lc4DevRunLease;
+  evidence: Lc4DevBudgetEvidence;
+  run: Lc4DevLiveRunArtifact;
+}>): Lc4DevRunPackage {
+  if (input.run.execution_id !== input.lease.execution_id
+    || input.run.run_sha256 !== input.evidence.run_sha256
+    || input.evidence.lease_sha256 !== input.lease.lease_sha256
+    || input.evidence.execution_id !== input.lease.execution_id) {
+    throw new Error("LC4-DEV run package inputs do not share one execution authority");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    package_version: "HACC-LC4-DEV-RUN-PACKAGE-v1" as const,
+    execution_id: input.run.execution_id,
+    prepare_sha256: input.run.prepare_sha256,
+    preflight_sha256: input.run.preflight_sha256,
+    run_sha256: input.run.run_sha256,
+    budget_lease_sha256: input.lease.lease_sha256,
+    budget_terminal_evidence_sha256: input.evidence.evidence_sha256,
+    budget_terminal_ledger_head_sha256: input.evidence.terminal_ledger_head_sha256,
+    budget_ledger_public_key_fingerprint_sha256: input.evidence.ledger_public_key_fingerprint_sha256,
+  });
+  return Object.freeze({ ...body, package_sha256: sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(body)}`) });
+}
+
+export function assertLc4DevRunPackage(input: Readonly<{
+  package: Lc4DevRunPackage;
+  lease: Lc4DevRunLease;
+  evidence: Lc4DevBudgetEvidence;
+  run: Lc4DevLiveRunArtifact;
+}>): void {
+  const expected = createLc4DevRunPackage(input);
+  if (canonicalJson(expected) !== canonicalJson(input.package)) throw new Error("LC4-DEV run package hash or binding mismatch");
 }

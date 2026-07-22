@@ -58,6 +58,17 @@ import {
   createLc4DevelopmentDefaultOperatorRuntime,
   type Lc4DevDefaultRuntimeConfig,
 } from "./lc4-development-default-runtime";
+import {
+  Lc4DevBudgetLifecycle,
+  assertLc4DevRunPackage,
+  createLc4DevRunPackage,
+  finalizeLc4DevRunBudget,
+  replayLc4DevBudgetEvidence,
+  reserveLc4DevRunBudget,
+  type Lc4DevBudgetEvidence,
+  type Lc4DevRunLease,
+  type Lc4DevRunPackage,
+} from "./lc4-development-budget";
 
 const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const QUALIFICATION_CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
@@ -77,6 +88,9 @@ export const LC4_DEV_OPERATOR_FILENAMES = Object.freeze({
   authorization: "authorization.json",
   preflight: "preflight.json",
   run: "run.json",
+  budget_lease: "budget-run-lease.json",
+  budget_evidence: "budget-terminal-evidence.json",
+  run_package: "run-package.json",
   report: "report.json",
   ledger: "ledger.jsonl",
   cas: "cas",
@@ -127,12 +141,14 @@ export type Lc4DevOperatorRuntime = Readonly<{
     evidence_root: string;
     credentials: Readonly<Record<LiveStsProvider, string>>;
     signer: Lc4DevOperatorSigner;
+    budget_authority: Lc4DevBudgetLifecycle;
   }>): Promise<Lc4DevLiveDependencyBundle>;
 }>;
 
 export type Lc4DevOperatorDependencies = Readonly<{
   inspect_source(repositoryRoot: string): Promise<Lc4QualificationGitSource>;
   replay_authority_report?: typeof replayLc4DevAuthorityReport;
+  replay_budget_evidence?: typeof replayLc4DevBudgetEvidence;
   runtime?: Lc4DevOperatorRuntime;
   create_runtime?(config: Lc4DevDefaultRuntimeConfig): Promise<Lc4DevOperatorRuntime>;
 }>;
@@ -140,6 +156,7 @@ export type Lc4DevOperatorDependencies = Readonly<{
 const DEFAULT_DEPS: Lc4DevOperatorDependencies = Object.freeze({
   inspect_source: inspectLc4QualificationGitSource,
   replay_authority_report: replayLc4DevAuthorityReport,
+  replay_budget_evidence: replayLc4DevBudgetEvidence,
   create_runtime: createLc4DevelopmentDefaultOperatorRuntime,
 });
 
@@ -757,6 +774,9 @@ export async function runLc4DevelopmentOperatorCli(
       await Promise.all([
         assertAbsent(artifactPath(evidenceRoot, "run"), "LC4-DEV terminal run artifact"),
         assertAbsent(artifactPath(evidenceRoot, "ledger"), "LC4-DEV immutable ledger"),
+        assertAbsent(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV one-shot budget lease"),
+        assertAbsent(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV terminal budget evidence"),
+        assertAbsent(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),
       ]);
       const [prepare, preflight, source, audio, qualification, credentials, signer] = await Promise.all([
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
@@ -783,25 +803,43 @@ export async function runLc4DevelopmentOperatorCli(
         || roots.asr_evaluator_toolchain_sha256 !== preflight.asr_evaluator_toolchain_sha256) {
         throw new Error("LC4-DEV executable runtime, ASR evaluator build, or toolchain roots differ from preflight");
       }
-      const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer });
+      const budgetLease = await reserveLc4DevRunBudget({
+        root: evidenceRoot,
+        binding: { prepare, preflight },
+        now: io.now,
+      });
+      await writeImmutableJson(artifactPath(evidenceRoot, "budget_lease"), budgetLease);
+      const budgetAuthority = new Lc4DevBudgetLifecycle({ lease: budgetLease, binding: { prepare, preflight }, now: io.now });
+      budgetAuthority.assertProviderConstructionAuthorized();
+      const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer, budget_authority: budgetAuthority });
       let run: Lc4DevLiveRunArtifact;
       try {
         run = await executeLc4DevLiveRun({ prepare, preflight, dependencies: bundle.dependencies });
       } finally {
         await bundle.finalize();
       }
-      await writeImmutableJson(artifactPath(evidenceRoot, "run"), run);
-      io.stdout(canonicalJson({ command: "run", execution_id: run.execution_id, status: run.status, run_sha256: run.run_sha256, provider_calls_made: run.provider_calls_made, paid_retry_count: run.paid_retry_count }));
+      const budgetEvidence = await finalizeLc4DevRunBudget({ lease: budgetLease, binding: { prepare, preflight }, run, now: io.now });
+      await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({ lease: budgetLease, binding: { prepare, preflight }, evidence: budgetEvidence, now: io.now });
+      const runPackage = createLc4DevRunPackage({ lease: budgetLease, evidence: budgetEvidence, run });
+      await Promise.all([
+        writeImmutableJson(artifactPath(evidenceRoot, "run"), run),
+        writeImmutableJson(artifactPath(evidenceRoot, "budget_evidence"), budgetEvidence),
+        writeImmutableJson(artifactPath(evidenceRoot, "run_package"), runPackage),
+      ]);
+      io.stdout(canonicalJson({ command: "run", execution_id: run.execution_id, status: run.status, run_sha256: run.run_sha256, run_package_sha256: runPackage.package_sha256, budget_terminal_ledger_head_sha256: budgetEvidence.terminal_ledger_head_sha256, provider_calls_made: run.provider_calls_made, paid_retry_count: run.paid_retry_count }));
       return run.status === "completed" ? 0 : 2;
     }
 
     if (command === "report") {
       exact(parsed, ["--evidence-root"]);
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
-      const [prepare, run, preflight] = await Promise.all([
+      const [prepare, run, preflight, budgetLease, budgetEvidence, runPackage] = await Promise.all([
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
         readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV run artifact"),
         readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+        readBoundedJson<Lc4DevRunLease>(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV budget lease"),
+        readBoundedJson<Lc4DevBudgetEvidence>(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV budget evidence"),
+        readBoundedJson<Lc4DevRunPackage>(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),
       ]);
       assertHash(prepare.prepare_sha256, "LC4-DEV report prepare");
       assertHash(preflight.preflight_sha256, "LC4-DEV report preflight");
@@ -816,12 +854,20 @@ export async function runLc4DevelopmentOperatorCli(
         || run.preflight_sha256 !== preflight.preflight_sha256) {
         throw new Error("LC4-DEV report run differs from its prepare/preflight custody chain");
       }
+      await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({ lease: budgetLease, binding: { prepare, preflight }, evidence: budgetEvidence, now: io.now });
+      assertLc4DevRunPackage({ package: runPackage, lease: budgetLease, evidence: budgetEvidence, run });
       const authority = await (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
         run,
         preflight,
         cas_root_dir: resolve(evidenceRoot, "cas"),
       });
-      const report = createLc4DevLiveReportArtifact(run, authority);
+      const report = createLc4DevLiveReportArtifact(run, authority, {
+        run_package_sha256: runPackage.package_sha256,
+        budget_lease_sha256: budgetLease.lease_sha256,
+        budget_evidence_sha256: budgetEvidence.evidence_sha256,
+        budget_terminal_ledger_head_sha256: budgetEvidence.terminal_ledger_head_sha256,
+        budget_replay_verified: true,
+      });
       await assertAbsent(artifactPath(evidenceRoot, "report"), "LC4-DEV report artifact");
       await writeImmutableJson(artifactPath(evidenceRoot, "report"), report);
       io.stdout(canonicalJson(report));

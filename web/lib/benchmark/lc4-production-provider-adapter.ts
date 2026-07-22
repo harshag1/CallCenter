@@ -49,6 +49,7 @@ import {
 } from "./lc4-public-development-corpus";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import { createProductionRealtimeClient } from "./production-realtime-provider";
+import type { Lc4DevBudgetLifecycle } from "./lc4-development-budget";
 import { assertHaccResponsePlan, renderHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
@@ -1629,11 +1630,14 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   listener: Lc4DevelopmentListenerSink;
   gateway_executor: Lc4DevGatewayExecutor;
   evidence: Lc4DevReplayEvidenceStore;
+  budget_authority: Pick<Lc4DevBudgetLifecycle,
+    "assertProviderConstructionAuthorized" | "assertWithinHardDeadline" | "assertOperationWindow" | "beforeEpisodeSocketOpen" | "afterEpisodeSocketOpen">;
   now?: () => Date;
 }>): Lc4DevelopmentRealtimeAdapter {
   const now = input.now ?? (() => new Date());
   assertLc4DevLivePrepareArtifact(input.prepare);
   assertLc4DevLivePreflightArtifact(input.preflight, input.prepare, now());
+  input.budget_authority.assertProviderConstructionAuthorized();
   if (input.prepare.maximum_total_micro_usd > 15_000_000
     || input.prepare.episodes.length !== 6
     || input.prepare.total_opportunities !== 360) {
@@ -1656,7 +1660,12 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
     preflight_sha256: input.preflight.preflight_sha256,
     maximum_total_micro_usd: input.prepare.maximum_total_micro_usd,
     openSegment: async ({ episode, segment_ordinal, previous_rotation_receipt_sha256 }) => {
-      assertLc4DevLivePreflightArtifact(input.preflight, input.prepare, now());
+      // Preflight freshness controls one-shot admission. Once consumed, the
+      // exact planned rotations continue under the immutable run lease until
+      // its provider-independent hard deadline; expiry cannot re-arm a new
+      // run, retry, reconnect, or seventh cell.
+      input.budget_authority.assertWithinHardDeadline();
+      input.budget_authority.assertOperationWindow(20_000);
       const preparedEpisode = input.prepare.episodes.find((candidate) => candidate.episode_id === episode.episode_id);
       if (!preparedEpisode || canonicalJson(preparedEpisode) !== canonicalJson(episode)) {
         throw new Error("LC4-DEV adapter episode differs from its prepared schedule");
@@ -1664,6 +1673,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
       let runtime = runtimes.get(episode.episode_id);
       if (segment_ordinal === 1) {
         if (runtime || previous_rotation_receipt_sha256 !== null) throw new Error("LC4-DEV first segment cannot resume an existing runtime");
+        await input.budget_authority.beforeEpisodeSocketOpen(episode);
         runtime = {
           bridge: new Lc4RealtimeProviderBridge((provider, configuration) => (
             createProductionRealtimeClient(provider, configuration, input.credentials[provider])
@@ -1751,6 +1761,18 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           executor: input.gateway_executor,
         },
       });
+      if (segment_ordinal === 1) {
+        try {
+          await input.budget_authority.afterEpisodeSocketOpen(episode);
+        } catch (error) {
+          // A socket without a durable opened transition must never continue.
+          // The reservation remains in ambiguous `opening` state and is later
+          // settled at its full pessimistic maximum.
+          await bridgeSession.close().catch(() => undefined);
+          runtimes.delete(episode.episode_id);
+          throw error;
+        }
+      }
       let closed = false;
       let pendingOpportunity: Readonly<{
         opportunity: Lc4PublicDevOpportunity;
@@ -1771,6 +1793,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           sample_rate_hz: 16_000 | 24_000;
         }>;
       }>) => {
+        input.budget_authority.assertOperationWindow(50_000);
         if (closed) throw new Error("LC4-DEV adapter session is closed");
         if (exchangeInput.playback_kind === "canonical") {
           if (pendingOpportunity !== null) throw new Error("LC4-DEV prior canonical opportunity is not finalized");
@@ -1876,6 +1899,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           });
         },
         finalizeOpportunity: async ({ opportunity_id, decision_receipt_sha256, repair_played }) => {
+          input.budget_authority.assertOperationWindow(10_000);
           if (!pendingOpportunity || pendingOpportunity.opportunity.id !== opportunity_id || pendingOpportunity.repair_played !== repair_played) {
             throw new Error("LC4-DEV opportunity finalize differs from the adapter FSM");
           }

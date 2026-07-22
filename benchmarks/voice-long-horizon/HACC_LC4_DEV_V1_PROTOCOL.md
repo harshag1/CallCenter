@@ -79,6 +79,31 @@ This protocol file and corpus do not authorize provider calls or spend. The
 separate operator gate must still prove credentials, exact model identities,
 transport/tool canaries, budget reservation, and complete audio commitments.
 
+## One-shot spend and run lease
+
+The official six-episode operator consumes one filesystem-backed aggregate
+authority before constructing the realtime adapter or any provider client. It
+atomically anchors the exact prepare, signed preflight, source commit/tree,
+credential identities, provider models, audio manifest, and ordered six-cell
+schedule. Six provider/arm-tagged pessimistic reservations must exist before
+execution, and their sum may not exceed **$15.00**. A crash can strand this
+authority; it cannot re-arm it.
+
+The consumed lease authorizes exactly six episodes and 18 preregistered segment
+rotations, with zero paid retries, zero reconnects, and no seventh session. The
+preflight expiry controls admission. A run admitted before expiry may continue
+its exact planned rotations under the consumed lease, but may not admit a new
+run. The provider-independent hard run deadline is **7,200,000 ms (two hours)**;
+the adapter refuses to begin any bounded provider operation that could cross
+that deadline.
+
+Every opened or ambiguous-opening episode settles at its full pessimistic
+reservation until provider billing is reconciled. Never-opened reservations
+are cancelled. The terminal evidence binds usage counters, conservative cost,
+the signed hash-chained ledger head, and its signing-key fingerprint. An
+independent ledger replay is required before producing the immutable run
+package or report; without that replay, task results remain unavailable.
+
 ## Repair and final oracle
 
 The public repair library contains two prewritten repair ordinals for each of

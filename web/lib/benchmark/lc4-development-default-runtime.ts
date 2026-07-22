@@ -345,6 +345,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       evidence_root,
       credentials,
       signer,
+      budget_authority,
     }) => {
       if (resolve(audio_root) !== audioRoot) throw new Error("LC4-DEV build audio root differs from the inspected runtime root");
       const built = mechanism({ audio_manifest, repair_manifest, signer });
@@ -404,6 +405,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
           listener,
           gateway_executor: gatewayExecutor,
           evidence,
+          budget_authority,
         }),
       });
     },
