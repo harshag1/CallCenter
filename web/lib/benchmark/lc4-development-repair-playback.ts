@@ -7,9 +7,9 @@ import {
 } from "./lc4-development-audio-materializer";
 import type { Lc4DevControlReceipt, Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import {
-  verifyLc4DevelopmentListenerReplayArtifact,
-  type Lc4DevelopmentListenerReplayArtifact,
-} from "./lc4-development-listener-semantics";
+  assertLc4DevArmBlindRepairProjection,
+  type Lc4DevArmBlindRepairProjection,
+} from "./lc4-development-headless-listener-authority";
 import {
   assertLc4PublicDevelopmentCorpus,
   createLc4PublicDevelopmentCorpus,
@@ -151,7 +151,7 @@ export type Lc4DevRepairPlaybackController = Readonly<{
     control_receipt: Lc4DevControlReceipt;
     canonical_exchange_sha256: string;
     canonical_listener_evidence_sha256: string;
-    listener_replay: Lc4DevelopmentListenerReplayArtifact;
+    listener_projection: Lc4DevArmBlindRepairProjection;
   }>): Promise<Readonly<{
     receipt: Lc4DevRepairDecisionReceipt;
     playback: Lc4DevRepairPlayback | null;
@@ -199,7 +199,7 @@ export function createLc4DevRepairPlaybackController(input: Readonly<{
     provider: input.provider,
     repair_manifest_sha256: input.repair_manifest.repair_manifest_sha256,
     plan_sha256: plan.plan_sha256,
-    decide: async ({ episode, opportunity, control_receipt, canonical_exchange_sha256, canonical_listener_evidence_sha256, listener_replay }) => {
+    decide: async ({ episode, opportunity, control_receipt, canonical_exchange_sha256, canonical_listener_evidence_sha256, listener_projection }) => {
       if (episode.provider !== input.provider) throw new Error("LC4-DEV repair controller provider differs from episode");
       if (pending.has(episode.episode_id)) throw new Error("LC4-DEV selected repair must complete before the next canonical opportunity");
       const expectedOrdinal = nextCanonical.get(episode.episode_id) ?? 1;
@@ -209,15 +209,12 @@ export function createLc4DevRepairPlaybackController(input: Readonly<{
       requireHash(control_receipt.control_receipt_sha256, "LC4-DEV canonical control receipt");
       requireHash(canonical_exchange_sha256, "LC4-DEV canonical exchange");
       requireHash(canonical_listener_evidence_sha256, "LC4-DEV canonical listener evidence");
-      const replayVerification = verifyLc4DevelopmentListenerReplayArtifact({ artifact: listener_replay });
-      if (!replayVerification.valid) throw new Error(`LC4-DEV repair listener replay is invalid: ${replayVerification.errors.join(", ")}`);
-      if (listener_replay.opportunity_id !== opportunity.id
-        || listener_replay.semantic_replay.listener_status !== "verified"
-        || listener_replay.semantic_replay.listener_evidence_sha256 !== listener_replay.observation_evidence_sha256) {
+      assertLc4DevArmBlindRepairProjection(listener_projection);
+      if (listener_projection.opportunity_id !== opportunity.id) {
         throw new Error("LC4-DEV repair requires exact verified listener semantics for the canonical response");
       }
       const deadlineReached = opportunity.expected_oracle.repair_stage_id === opportunity.stage_id;
-      const earliest = listener_replay.semantic_replay.earliest_unmet_crp_blocker;
+      const earliest = listener_projection.unmet_blocker_codes[0] ?? null;
       const state = states.get(episode.episode_id) ?? createConversationalRepairState(plan, episode.episode_id);
       const facts = corpus.opportunities.slice(0, opportunity.index).flatMap((item) =>
         item.fact_bindings.map((binding) => `${binding.fact_key}.v${binding.version}`)
@@ -233,7 +230,7 @@ export function createLc4DevRepairPlaybackController(input: Readonly<{
           stage_id: opportunity.stage_id,
           deadline_reached: deadlineReached,
           common_state_sha256: control_receipt.native_continuity_state_sha256,
-          listener_heard_semantics_sha256: listener_replay.semantic_replay.replay_sha256,
+          listener_heard_semantics_sha256: listener_projection.semantic_replay_sha256,
           spoken_caller_fact_ids: [...new Set(facts)].sort(),
           visible_receipt_ids: [`control.${control_receipt.control_receipt_sha256}`, `exchange.${canonical_exchange_sha256}`],
           visible_worker_result_ids: [`worker.${control_receipt.worker_state_sha256}`],
@@ -254,7 +251,7 @@ export function createLc4DevRepairPlaybackController(input: Readonly<{
         canonical_control_receipt_sha256: control_receipt.control_receipt_sha256,
         canonical_exchange_sha256,
         canonical_listener_evidence_sha256,
-        semantic_replay_sha256: listener_replay.semantic_replay.replay_sha256,
+        semantic_replay_sha256: listener_projection.semantic_replay_sha256,
         plan_sha256: plan.plan_sha256,
         plan_binding_sha256: planBindingSha256,
         decision: result.decision,

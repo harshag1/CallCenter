@@ -12,6 +12,7 @@ import {
   type Lc4DevAudioRenderer,
 } from "../lc4-development-audio-materializer";
 import { createLc4DevRepairPlaybackController } from "../lc4-development-repair-playback";
+import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
   LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256,
   LC4_DEV_LISTENER_SEMANTIC_BUNDLE,
@@ -86,6 +87,18 @@ function replay(opportunityId: string, transcript: string) {
   });
 }
 
+function projection(opportunityId: string, transcript: string) {
+  const artifact = replay(opportunityId, transcript);
+  return createLc4DevArmBlindRepairProjection({
+    opportunity_id: opportunityId,
+    listener_status: "verified",
+    semantic_result_sha256: artifact.artifact_sha256,
+    semantic_replay_sha256: artifact.semantic_replay.replay_sha256,
+    unmet_blocker_codes: artifact.semantic_replay.earliest_unmet_crp_blocker === null ? [] : [artifact.semantic_replay.earliest_unmet_crp_blocker],
+    final_required_criteria_pass: artifact.final_required_criteria_pass,
+  });
+}
+
 function control(index: number): Lc4DevControlReceipt {
   const instructions = `native context ${index}`;
   return {
@@ -136,7 +149,7 @@ describe("LC4-DEV same-opportunity repair playback", () => {
         control_receipt: control(opportunity.index),
         canonical_exchange_sha256: sha256Hex(`exchange:${opportunity.index}`),
         canonical_listener_evidence_sha256: sha256Hex(`listener:${opportunity.index}`),
-        listener_replay: replay(opportunity.id, transcript),
+        listener_projection: projection(opportunity.id, transcript),
       });
       expect(result.playback).toBeNull();
     }
@@ -148,7 +161,7 @@ describe("LC4-DEV same-opportunity repair playback", () => {
       control_receipt: control(10),
       canonical_exchange_sha256: sha256Hex("exchange:10"),
       canonical_listener_evidence_sha256: sha256Hex("listener:10"),
-      listener_replay: replay(opportunity.id, "I am not sure."),
+      listener_projection: projection(opportunity.id, "I am not sure."),
     });
     expect(selected.playback).toMatchObject({
       kind: "repair",
@@ -165,7 +178,7 @@ describe("LC4-DEV same-opportunity repair playback", () => {
       control_receipt: control(11),
       canonical_exchange_sha256: sha256Hex("exchange:11"),
       canonical_listener_evidence_sha256: sha256Hex("listener:11"),
-      listener_replay: replay("lc4-dev-op-11", "not verified"),
+      listener_projection: projection("lc4-dev-op-11", "not verified"),
     })).rejects.toThrow("must complete");
 
     const playback = selected.playback!;

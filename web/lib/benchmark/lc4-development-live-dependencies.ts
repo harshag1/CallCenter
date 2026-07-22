@@ -16,6 +16,7 @@ import type {
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
+import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-playback";
 import type { Lc4DevGatewayExecutor } from "./lc4-development-gateway-bridge";
 import type {
   Lc4ListenerPlaybackAuthority,
@@ -415,6 +416,7 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         evaluator: input.evaluator,
       });
       const evaluation = handoff.evaluation;
+      if (!evaluation.repair_projection) throw new Error("LC4-DEV listener evaluator omitted its arm-blind repair projection");
       for (const digest of [
         evaluation.evaluator_contract_sha256,
         evaluation.evaluator_build_sha256,
@@ -473,7 +475,11 @@ export function createLc4PinnedListenerSink(input: Readonly<{
       };
       const listenerEvidenceSha256 = hash(LISTENER_RECEIPT_DOMAIN, body);
       await input.cas.put(Buffer.from(canonicalJson({ ...body, listener_evidence_sha256: listenerEvidenceSha256 })), "application/json");
-      return Object.freeze({ listener_evidence_sha256: listenerEvidenceSha256 });
+      return Object.freeze({
+        listener_evidence_sha256: listenerEvidenceSha256,
+        repair_projection: evaluation.repair_projection,
+        playback_authority_receipt_sha256: handoff.authority_receipt.receipt_sha256,
+      });
     },
   });
 }
@@ -510,6 +516,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   ledger_path: string;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
   control: Lc4DevExecutableMechanismControl;
+  repair: Readonly<Record<"openai" | "gemini" | "xai", Lc4DevRepairPlaybackController>>;
   criteria: readonly Lc4DevListenerCriterionBinding[];
   evaluator: Lc4PinnedListenerEvaluator;
   playback_authority: Lc4ListenerPlaybackAuthority;
@@ -582,6 +589,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       },
     }),
     control: input.control,
+    repair: input.repair,
     ledger,
     now: input.now ?? (() => new Date()),
   });

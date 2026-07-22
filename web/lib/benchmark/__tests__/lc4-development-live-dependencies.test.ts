@@ -15,7 +15,10 @@ import {
   lc4DevLedgerGenesisSha256,
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
-import { createLc4HeadlessListenerPlaybackAuthority } from "../lc4-development-headless-listener-authority";
+import {
+  createLc4DevArmBlindRepairProjection,
+  createLc4HeadlessListenerPlaybackAuthority,
+} from "../lc4-development-headless-listener-authority";
 import type { Lc4DevImmutableLedgerEvent, Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createBenchmarkKernelAttestationSigner } from "../kernel-attestation";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
@@ -132,6 +135,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       evaluator_build_sha256: "2".repeat(64),
       calibration_sha256: "3".repeat(64),
       async evaluate({ pcm }) {
+        const semanticResultSha256 = "5".repeat(64);
         return {
           source_pcm_sha256: sha256Hex(pcm),
           source_pcm_byte_length: pcm.byteLength,
@@ -139,8 +143,16 @@ describe("LC4-DEV concrete live dependencies", () => {
           evaluator_build_sha256: "2".repeat(64),
           calibration_sha256: "3".repeat(64),
           transcript_sha256: "4".repeat(64),
-          semantic_result_sha256: "5".repeat(64),
+          semantic_result_sha256: semanticResultSha256,
           signed_invocation_receipt_sha256: "6".repeat(64),
+          repair_projection: createLc4DevArmBlindRepairProjection({
+            opportunity_id: corpus.opportunities[0]!.id,
+            listener_status: "verified",
+            semantic_result_sha256: semanticResultSha256,
+            semantic_replay_sha256: "7".repeat(64),
+            unmet_blocker_codes: [],
+            final_required_criteria_pass: true,
+          }),
         };
       },
     };

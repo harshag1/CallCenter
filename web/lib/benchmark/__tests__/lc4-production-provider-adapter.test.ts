@@ -18,6 +18,7 @@ import {
 import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
   compileLc4ProductionScheduleShape,
   createLc4EpisodeManifest,
@@ -489,7 +490,23 @@ describe("LC4 production realtime adapter bridge", () => {
       profile: base.episode_shape.provider_profile,
       configuration: configuration(base),
       rotation_context: null,
-      listener: { accept() { events.push("listener"); } },
+      listener: {
+        async accept() {
+          events.push("listener");
+          return {
+            listener_evidence_sha256: sha256Hex("dev-listener-evidence"),
+            repair_projection: createLc4DevArmBlindRepairProjection({
+              opportunity_id: corpus.opportunities[0]!.id,
+              listener_status: "verified",
+              semantic_result_sha256: sha256Hex("dev-semantic-result"),
+              semantic_replay_sha256: sha256Hex("dev-semantic-replay"),
+              unmet_blocker_codes: [],
+              final_required_criteria_pass: true,
+            }),
+            playback_authority_receipt_sha256: sha256Hex("dev-playback-authority"),
+          };
+        },
+      },
       dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
     });
     const evidence = await session.exchange({
@@ -505,6 +522,11 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(1);
     expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-17");
     expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-RESULT");
+    await session.finalizeOpportunity!({
+      opportunity_id: corpus.opportunities[0]!.id,
+      decision_receipt_sha256: sha256Hex("dev-no-repair-decision"),
+      repair_played: false,
+    });
     await session.close();
   });
 

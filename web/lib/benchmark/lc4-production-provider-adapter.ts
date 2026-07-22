@@ -12,6 +12,7 @@ import type {
 import {
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
+  type Lc4DevControlReceipt,
   type Lc4DevLiveEpisodePlan,
   type Lc4DevLivePreflightArtifact,
   type Lc4DevLivePrepareArtifact,
@@ -355,6 +356,10 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
     "listener_evidence_handed_off",
   ];
   evidence_sha256: string;
+  /** DEV-only phase binding; absent from frozen confirmatory artifacts. */
+  playback_kind?: "canonical" | "repair";
+  repair_decision_receipt_sha256?: string | null;
+  dev_listener_result?: Awaited<ReturnType<Lc4DevelopmentListenerSink["accept"]>> | null;
 }>;
 
 export type Lc4ListenerEvidenceHandoff = Readonly<{
@@ -362,7 +367,7 @@ export type Lc4ListenerEvidenceHandoff = Readonly<{
     capture: Lc4CapturedOutput;
     response_plan_sha256: string | null;
     wire_observation_set_sha256: string;
-  }>): void | Promise<void>;
+  }>): void | Promise<void | Awaited<ReturnType<Lc4DevelopmentListenerSink["accept"]>>>;
 }>;
 
 export type Lc4RealtimeClientFactory = (
@@ -393,7 +398,20 @@ export type Lc4RealtimeSegmentSession = Readonly<{
     response_control:
       | Readonly<{ kind: "hacc_response_plan"; plan: HaccResponsePlan }>
       | Readonly<{ kind: "native_context"; instructions: string; instructions_sha256: string }>;
+    playback_kind?: "canonical" | "repair";
+    repair_binding?: Readonly<{
+      decision_receipt_sha256: string;
+      repair_pcm_id: string;
+      pcm_sha256: string;
+      pcm_byte_length: number;
+      sample_rate_hz: 16_000 | 24_000;
+    }>;
   }>): Promise<Lc4ProviderExchangeEvidence>;
+  finalizeOpportunity?(input: Readonly<{
+    opportunity_id: string;
+    decision_receipt_sha256: string;
+    repair_played: boolean;
+  }>): Promise<Readonly<{ opportunity_receipt_sha256: string }>>;
   close(): Promise<Readonly<{
     session_ordinal: number;
     segment_ordinal: 1 | 2 | 3;
@@ -621,6 +639,11 @@ export class Lc4RealtimeProviderBridge {
     const sessionOrdinal = ++this.#sessionOrdinal;
     let closed = false;
     let opportunityOrdinal = 0;
+    let pendingDevOpportunity: Readonly<{
+      opportunity_id: string;
+      canonical_evidence_sha256: string;
+      repair_played: boolean;
+    }> | null = null;
     const openedWireIndex = wire.length;
 
     return Object.freeze({
@@ -628,6 +651,7 @@ export class Lc4RealtimeProviderBridge {
         if (closed || !this.#active || client.state !== "ready") throw new Error("LC4 realtime segment session is not open");
         if (currentOpportunity !== null) throw new Error("LC4 realtime segment allows only one in-flight opportunity");
         const opportunityId = safeId(exchangeInput.opportunity_id, "LC4 opportunity ID");
+        const playbackKind = exchangeInput.playback_kind ?? "canonical";
         if (!(exchangeInput.caller_pcm instanceof Uint8Array)
           || exchangeInput.caller_pcm.byteLength < 2
           || exchangeInput.caller_pcm.byteLength % 2 !== 0) {
@@ -635,13 +659,27 @@ export class Lc4RealtimeProviderBridge {
         }
         const binding = input.manifest.opportunities.find((candidate) => candidate.opportunity_id === opportunityId);
         const expectedOrdinal = input.segment.opportunity_start + opportunityOrdinal;
-        if (
-          !binding
-          || binding.segment_ordinal !== input.segment.ordinal
-          || binding.ordinal !== expectedOrdinal
-          || binding.caller_pcm_byte_length !== exchangeInput.caller_pcm.byteLength
-          || binding.caller_pcm_sha256 !== sha256Hex(exchangeInput.caller_pcm)
-        ) throw new Error("LC4 caller PCM or opportunity order differs from the frozen manifest");
+        if (playbackKind === "canonical") {
+          if (pendingDevOpportunity !== null
+            || !binding
+            || binding.segment_ordinal !== input.segment.ordinal
+            || binding.ordinal !== expectedOrdinal
+            || binding.caller_pcm_byte_length !== exchangeInput.caller_pcm.byteLength
+            || binding.caller_pcm_sha256 !== sha256Hex(exchangeInput.caller_pcm)
+            || exchangeInput.repair_binding !== undefined) {
+            throw new Error("LC4 caller PCM or opportunity order differs from the frozen manifest");
+          }
+        } else if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1"
+          || pendingDevOpportunity?.opportunity_id !== opportunityId
+          || pendingDevOpportunity.repair_played
+          || !exchangeInput.repair_binding
+          || !SHA256.test(exchangeInput.repair_binding.decision_receipt_sha256)
+          || !SAFE_ID.test(exchangeInput.repair_binding.repair_pcm_id)
+          || exchangeInput.repair_binding.pcm_sha256 !== sha256Hex(exchangeInput.caller_pcm)
+          || exchangeInput.repair_binding.pcm_byte_length !== exchangeInput.caller_pcm.byteLength
+          || exchangeInput.repair_binding.sample_rate_hz !== input.profile.input_sample_rate_hz) {
+          throw new Error("LC4-DEV repair playback differs from the pending same-opportunity decision");
+        }
         let responsePlan: HaccResponsePlan | null = null;
         let renderedControl: string;
         if (exchangeInput.response_control.kind === "hacc_response_plan") {
@@ -722,12 +760,15 @@ export class Lc4RealtimeProviderBridge {
           const wireObservationSetSha256 = sha256Hex(
             `harshas-amazing-call-center/lc4-wire-observation-set/v1\n${canonicalJson(opportunityWire)}`,
           );
-          await input.listener.accept({
+          const listenerResult = await input.listener.accept({
             capture,
             response_plan_sha256: responsePlan?.plan_sha256 ?? null,
             wire_observation_set_sha256: wireObservationSetSha256,
           });
           operationOrder.push("listener_evidence_handed_off");
+          if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !listenerResult) {
+            throw new Error("LC4-DEV exchange completed without signed listener semantic evidence");
+          }
           const body = Object.freeze({
             schema_version: 1 as const,
             adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
@@ -749,9 +790,13 @@ export class Lc4RealtimeProviderBridge {
             wire_observation_set_sha256: wireObservationSetSha256,
             dev_gateway_receipt_set: devGatewayReceiptSet,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
+            ...(input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? {
+              playback_kind: playbackKind,
+              repair_decision_receipt_sha256: exchangeInput.repair_binding?.decision_receipt_sha256 ?? null,
+              dev_listener_result: listenerResult ?? null,
+            } : {}),
           });
-          opportunityOrdinal += 1;
-          return Object.freeze({
+          const evidence = Object.freeze({
             ...body,
             evidence_sha256: sha256Hex(
               `harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n${canonicalJson({
@@ -760,13 +805,38 @@ export class Lc4RealtimeProviderBridge {
               })}`,
             ),
           });
+          if (input.manifest.protocol_id === "HACC-LC4-DEV-v1") {
+            pendingDevOpportunity = playbackKind === "canonical"
+              ? Object.freeze({ opportunity_id: opportunityId, canonical_evidence_sha256: evidence.evidence_sha256, repair_played: false })
+              : Object.freeze({ ...pendingDevOpportunity!, repair_played: true });
+          } else opportunityOrdinal += 1;
+          return evidence;
         } finally {
           waiters.delete(opportunityId);
           currentOpportunity = null;
         }
       },
+      finalizeOpportunity: input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? async (finalizeInput) => {
+        if (!pendingDevOpportunity || pendingDevOpportunity.opportunity_id !== finalizeInput.opportunity_id) {
+          throw new Error("LC4-DEV opportunity finalize has no matching canonical exchange");
+        }
+        if (!SHA256.test(finalizeInput.decision_receipt_sha256)
+          || finalizeInput.repair_played !== pendingDevOpportunity.repair_played) {
+          throw new Error("LC4-DEV opportunity finalize differs from the repair decision or playback phase");
+        }
+        const opportunityReceiptSha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n${canonicalJson({
+          opportunity_id: finalizeInput.opportunity_id,
+          canonical_evidence_sha256: pendingDevOpportunity.canonical_evidence_sha256,
+          decision_receipt_sha256: finalizeInput.decision_receipt_sha256,
+          repair_played: finalizeInput.repair_played,
+        })}`);
+        opportunityOrdinal += 1;
+        pendingDevOpportunity = null;
+        return Object.freeze({ opportunity_receipt_sha256: opportunityReceiptSha256 });
+      } : undefined,
       close: async () => {
         if (closed) throw new Error("LC4 realtime segment session is already closed");
+        if (pendingDevOpportunity !== null) throw new Error("LC4-DEV segment cannot close with an unfinalized canonical opportunity");
         closed = true;
         client.close(1000, "LC4 segment rotation");
         unsubscribeEvent();
@@ -1058,7 +1128,6 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           ? Object.freeze({ kind: "strong_native" as const, packet: native })
           : Object.freeze({ kind: "hacc_structured_state" as const, packet: hacc });
       }
-      const listenerReceipts = new Map<string, string>();
       const manifest = devManifest(input.prepare, episode);
       const bridgeSession = await runtime.bridge.openSegment({
         manifest,
@@ -1072,7 +1141,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             if (!opportunity) throw new Error("LC4-DEV listener handoff references an unknown opportunity");
             const receipt = await input.listener.accept({ episode, opportunity, ...handoff });
             if (!SHA256.test(receipt.listener_evidence_sha256)) throw new Error("LC4-DEV listener sink returned an invalid evidence hash");
-            listenerReceipts.set(opportunity.id, receipt.listener_evidence_sha256);
+            return receipt;
           },
         },
         dev_gateway: {
@@ -1082,33 +1151,109 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         },
       });
       let closed = false;
-      return Object.freeze({
-        exchange: async ({ opportunity, caller_pcm, control_receipt }) => {
-          if (closed) throw new Error("LC4-DEV adapter session is closed");
-          runtime!.flow_state_sha256 = control_receipt.flow_state_sha256;
+      let pendingOpportunity: Readonly<{
+        opportunity: Lc4PublicDevOpportunity;
+        control_receipt: Lc4DevControlReceipt;
+        canonical_exchange_sha256: string;
+        repair_played: boolean;
+      }> | null = null;
+      const exchangePlayback = async (exchangeInput: Readonly<{
+        opportunity: Lc4PublicDevOpportunity;
+        caller_pcm: Uint8Array;
+        control_receipt: Lc4DevControlReceipt;
+        playback_kind: "canonical" | "repair";
+        repair_binding?: Readonly<{
+          decision_receipt_sha256: string;
+          repair_pcm_id: string;
+          pcm_sha256: string;
+          pcm_byte_length: number;
+          sample_rate_hz: 16_000 | 24_000;
+        }>;
+      }>) => {
+        if (closed) throw new Error("LC4-DEV adapter session is closed");
+        if (exchangeInput.playback_kind === "canonical") {
+          if (pendingOpportunity !== null) throw new Error("LC4-DEV prior canonical opportunity is not finalized");
+          runtime!.flow_state_sha256 = exchangeInput.control_receipt.flow_state_sha256;
           runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
             previous: runtime!.response_plan_chain_head_sha256,
-            control_receipt_sha256: control_receipt.control_receipt_sha256,
-            response_plan_sha256: control_receipt.response_control.kind === "hacc_response_plan"
-              ? control_receipt.response_control.plan.plan_sha256
-              : control_receipt.response_control.instructions_sha256,
+            control_receipt_sha256: exchangeInput.control_receipt.control_receipt_sha256,
+            response_plan_sha256: exchangeInput.control_receipt.response_control.kind === "hacc_response_plan"
+              ? exchangeInput.control_receipt.response_control.plan.plan_sha256
+              : exchangeInput.control_receipt.response_control.instructions_sha256,
           })}`);
-          const evidence = await bridgeSession.exchange({
-            opportunity_id: opportunity.id,
-            caller_pcm,
-            response_control: control_receipt.response_control,
+        } else if (!pendingOpportunity
+          || pendingOpportunity.opportunity.id !== exchangeInput.opportunity.id
+          || pendingOpportunity.control_receipt.control_receipt_sha256 !== exchangeInput.control_receipt.control_receipt_sha256
+          || pendingOpportunity.repair_played) {
+          throw new Error("LC4-DEV repair is not attached to the pending canonical opportunity and control receipt");
+        }
+        const evidence = await bridgeSession.exchange({
+          opportunity_id: exchangeInput.opportunity.id,
+          caller_pcm: exchangeInput.caller_pcm,
+          response_control: exchangeInput.control_receipt.response_control,
+          playback_kind: exchangeInput.playback_kind,
+          ...(exchangeInput.repair_binding ? { repair_binding: exchangeInput.repair_binding } : {}),
+        });
+        const listenerResult = evidence.dev_listener_result;
+        if (!listenerResult || evidence.playback_kind !== exchangeInput.playback_kind) {
+          throw new Error("LC4-DEV exchange completed without phase-bound listener evidence");
+        }
+        if (exchangeInput.playback_kind === "canonical") {
+          pendingOpportunity = Object.freeze({
+            opportunity: exchangeInput.opportunity,
+            control_receipt: exchangeInput.control_receipt,
+            canonical_exchange_sha256: evidence.evidence_sha256,
+            repair_played: false,
           });
-          const listenerEvidenceSha256 = listenerReceipts.get(opportunity.id);
-          if (!listenerEvidenceSha256) throw new Error("LC4-DEV exchange completed without listener evidence");
-          return Object.freeze({
-            opportunity_id: opportunity.id,
-            assistant_pcm: concatenateDevPcm(evidence.output_capture.chunks),
-            provider_exchange_sha256: evidence.evidence_sha256,
-            listener_evidence_sha256: listenerEvidenceSha256,
+        } else pendingOpportunity = Object.freeze({ ...pendingOpportunity!, repair_played: true });
+        return Object.freeze({
+          playback_kind: exchangeInput.playback_kind,
+          opportunity_id: exchangeInput.opportunity.id,
+          assistant_pcm: concatenateDevPcm(evidence.output_capture.chunks),
+          provider_exchange_sha256: evidence.evidence_sha256,
+          listener_evidence_sha256: listenerResult.listener_evidence_sha256,
+          repair_projection: listenerResult.repair_projection,
+          playback_authority_receipt_sha256: listenerResult.playback_authority_receipt_sha256,
+        });
+      };
+      return Object.freeze({
+        exchangeCanonical: ({ opportunity, caller_pcm, control_receipt }) => exchangePlayback({ opportunity, caller_pcm, control_receipt, playback_kind: "canonical" }),
+        exchangeRepair: ({ opportunity, repair, decision_receipt, control_receipt }) => {
+          if (repair.opportunity_id !== opportunity.id
+            || repair.episode_id !== episode.episode_id
+            || repair.provider !== episode.provider
+            || repair.decision_receipt_sha256 !== decision_receipt.decision_receipt_sha256
+            || decision_receipt.canonical_opportunity_id !== opportunity.id
+            || decision_receipt.canonical_control_receipt_sha256 !== control_receipt.control_receipt_sha256
+            || decision_receipt.decision.selection?.repair_pcm_id !== repair.repair_pcm_id
+            || decision_receipt.decision.selection?.pcm_sha256 !== repair.pcm_sha256) {
+            throw new Error("LC4-DEV repair playback differs from its exact decision receipt");
+          }
+          return exchangePlayback({
+            opportunity,
+            caller_pcm: repair.pcm,
+            control_receipt,
+            playback_kind: "repair",
+            repair_binding: {
+              decision_receipt_sha256: decision_receipt.decision_receipt_sha256,
+              repair_pcm_id: repair.repair_pcm_id,
+              pcm_sha256: repair.pcm_sha256,
+              pcm_byte_length: repair.pcm_byte_length,
+              sample_rate_hz: repair.sample_rate_hz,
+            },
           });
+        },
+        finalizeOpportunity: async ({ opportunity_id, decision_receipt_sha256, repair_played }) => {
+          if (!pendingOpportunity || pendingOpportunity.opportunity.id !== opportunity_id || pendingOpportunity.repair_played !== repair_played) {
+            throw new Error("LC4-DEV opportunity finalize differs from the adapter FSM");
+          }
+          const receipt = await bridgeSession.finalizeOpportunity!({ opportunity_id, decision_receipt_sha256, repair_played });
+          pendingOpportunity = null;
+          return receipt;
         },
         close: async () => {
           if (closed) throw new Error("LC4-DEV adapter session is already closed");
+          if (pendingOpportunity) throw new Error("LC4-DEV adapter cannot close with an unfinalized opportunity");
           closed = true;
           const receipt = await bridgeSession.close();
           runtime!.previous_rotation_receipt_sha256 = receipt.rotation_receipt_sha256;

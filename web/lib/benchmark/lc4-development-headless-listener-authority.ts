@@ -8,6 +8,7 @@ import type {
 import {
   assertLc4CapturedOutputIntegrity,
   type Lc4CapturedOutput,
+  type Lc4CrpBlockerCode,
 } from "./lc4-listener-evidence";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -16,6 +17,7 @@ const MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev/headless-listener-a
 const RECEIPT_BODY_DOMAIN = "harshas-amazing-call-center/lc4-dev/headless-listener-handoff-receipt/v1\n";
 const SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev/headless-listener-handoff-signature/v1\n";
 const ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev/headless-listener-handoff-artifact/v1\n";
+const REPAIR_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev/arm-blind-repair-projection/v1\n";
 
 export const LC4_HEADLESS_LISTENER_AUTHORITY_VERSION = "lc4-dev-headless-listener-authority-v1" as const;
 
@@ -58,7 +60,42 @@ export type Lc4PinnedListenerEvaluation = Readonly<{
   transcript_sha256: string;
   semantic_result_sha256: string;
   signed_invocation_receipt_sha256: string;
+  repair_projection?: Lc4DevArmBlindRepairProjection;
 }>;
+
+export type Lc4DevArmBlindRepairProjection = Readonly<{
+  schema_version: 1;
+  opportunity_id: string;
+  listener_status: "verified";
+  semantic_result_sha256: string;
+  semantic_replay_sha256: string;
+  unmet_blocker_codes: readonly Lc4CrpBlockerCode[];
+  final_required_criteria_pass: boolean;
+  projection_sha256: string;
+}>;
+
+export function createLc4DevArmBlindRepairProjection(input: Omit<Lc4DevArmBlindRepairProjection, "schema_version" | "projection_sha256">): Lc4DevArmBlindRepairProjection {
+  requireSafeId(input.opportunity_id, "LC4 repair projection opportunity ID");
+  requireHash(input.semantic_result_sha256, "LC4 repair projection semantic result");
+  requireHash(input.semantic_replay_sha256, "LC4 repair projection semantic replay");
+  if (input.listener_status !== "verified" || new Set(input.unmet_blocker_codes).size !== input.unmet_blocker_codes.length) {
+    throw new Error("LC4 repair projection must contain unique blockers from verified listener evidence");
+  }
+  const body = freeze({ schema_version: 1 as const, ...input, unmet_blocker_codes: [...input.unmet_blocker_codes] });
+  return freeze({ ...body, projection_sha256: hash(REPAIR_PROJECTION_DOMAIN, body) });
+}
+
+export function assertLc4DevArmBlindRepairProjection(projection: Lc4DevArmBlindRepairProjection): void {
+  const rebuilt = createLc4DevArmBlindRepairProjection({
+    opportunity_id: projection.opportunity_id,
+    listener_status: projection.listener_status,
+    semantic_result_sha256: projection.semantic_result_sha256,
+    semantic_replay_sha256: projection.semantic_replay_sha256,
+    unmet_blocker_codes: projection.unmet_blocker_codes,
+    final_required_criteria_pass: projection.final_required_criteria_pass,
+  });
+  if (canonicalJson(rebuilt) !== canonicalJson(projection)) throw new Error("LC4 repair projection hash or shape mismatch");
+}
 
 export type Lc4PinnedListenerEvaluator = Readonly<{
   evaluator_contract_sha256: string;
@@ -183,11 +220,14 @@ function validateEvaluation(
     semantic_result_sha256: evaluation.semantic_result_sha256,
     signed_invocation_receipt_sha256: evaluation.signed_invocation_receipt_sha256,
   })) requireHash(digest, `LC4 listener evaluation ${label}`);
+  if (evaluation.repair_projection) assertLc4DevArmBlindRepairProjection(evaluation.repair_projection);
   if (evaluation.source_pcm_sha256 !== expectedPcmSha256
     || evaluation.source_pcm_byte_length !== expectedByteLength
     || evaluation.evaluator_contract_sha256 !== evaluator.evaluator_contract_sha256
     || evaluation.evaluator_build_sha256 !== evaluator.evaluator_build_sha256
-    || evaluation.calibration_sha256 !== evaluator.calibration_sha256) {
+    || evaluation.calibration_sha256 !== evaluator.calibration_sha256
+    || (evaluation.repair_projection !== undefined
+      && evaluation.repair_projection.semantic_result_sha256 !== evaluation.semantic_result_sha256)) {
     throw new Error("LC4 headless evaluator did not attest consumption of the exact complete captured PCM");
   }
 }

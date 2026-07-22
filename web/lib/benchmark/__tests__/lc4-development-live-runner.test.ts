@@ -1,4 +1,7 @@
 import { generateKeyPairSync, sign } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
@@ -13,8 +16,16 @@ import {
   lc4DevLiveAuthorizationSigningBytes,
   type Lc4DevCallerAudioBinding,
   type Lc4DevControlReceipt,
+  type Lc4DevLiveRunnerDependencies,
   type Lc4DevelopmentRealtimeAdapter,
 } from "../lc4-development-live-runner";
+import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
+import {
+  LC4_DEV_PINNED_VOICE,
+  materializeLc4DevelopmentAudio,
+  type Lc4DevAudioRenderer,
+} from "../lc4-development-audio-materializer";
+import { createLc4DevRepairPlaybackController } from "../lc4-development-repair-playback";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import { LC4_PROVIDER_PROFILE_MANIFEST } from "../lc4-provider-profiles";
 import {
@@ -35,6 +46,68 @@ import {
 
 const HASH = "a".repeat(64);
 const NOW = "2026-07-21T22:00:00.000Z";
+
+function repairProjection(opportunityId: string) {
+  return createLc4DevArmBlindRepairProjection({
+    opportunity_id: opportunityId,
+    listener_status: "verified",
+    semantic_result_sha256: sha256Hex(`semantic-result:${opportunityId}`),
+    semantic_replay_sha256: sha256Hex(`semantic-replay:${opportunityId}`),
+    unmet_blocker_codes: [],
+    final_required_criteria_pass: true,
+  });
+}
+
+function renderedPcm(sampleRate: 16_000 | 24_000 | 48_000, seed: number): Uint8Array {
+  const samples = Math.floor(sampleRate * 0.1);
+  const bytes = new Uint8Array(samples * 2);
+  const view = new DataView(bytes.buffer);
+  for (let index = 0; index < samples; index += 1) {
+    view.setInt16(index * 2, Math.round(Math.sin((index + seed) / 7) * 7_000), true);
+  }
+  return bytes;
+}
+
+const repairAudioRenderer: Lc4DevAudioRenderer = Object.freeze({
+  identity: Object.freeze({
+    renderer: "injected-test-renderer",
+    identity_sha256: "a".repeat(64),
+    toolchain: null,
+    voice: LC4_DEV_PINNED_VOICE,
+    normalization: "ffmpeg-loudnorm-I-20-LRA-7-TP-3",
+  }),
+  assertReady() {},
+  assertUnchanged() {},
+  async render({ sourceTextSha256 }) {
+    const seed = Number.parseInt(sourceTextSha256.slice(0, 4), 16);
+    return {
+      master48k: renderedPcm(48_000, seed),
+      pcm16k: renderedPcm(16_000, seed),
+      pcm24k: renderedPcm(24_000, seed),
+    };
+  },
+});
+
+function noRepairDependencies(): Lc4DevLiveRunnerDependencies["repair"] {
+  const controller = {
+    async decide({ episode, opportunity, control_receipt }: Parameters<Lc4DevLiveRunnerDependencies["repair"]["openai"]["decide"]>[0]) {
+      const decision = {
+        decision_sha256: sha256Hex(`decision:${episode.episode_id}:${opportunity.id}`),
+        selection: null,
+      };
+      return {
+        receipt: {
+          decision_receipt_sha256: sha256Hex(`decision-receipt:${episode.episode_id}:${opportunity.id}`),
+          canonical_control_receipt_sha256: control_receipt.control_receipt_sha256,
+          decision,
+        },
+        playback: null,
+      } as Awaited<ReturnType<Lc4DevLiveRunnerDependencies["repair"]["openai"]["decide"]>>;
+    },
+    complete() { throw new Error("no-repair fixture cannot complete repair playback"); },
+  } as unknown as Lc4DevLiveRunnerDependencies["repair"]["openai"];
+  return { openai: controller, gemini: controller, xai: controller };
+}
 
 function qualificationFixture() {
   const targets = createLc4QualificationTargets();
@@ -245,18 +318,23 @@ describe("LC4-DEV live runner", () => {
         opens += 1;
         expect(previous_rotation_receipt_sha256 === null).toBe(segment_ordinal === 1);
         return {
-          async exchange({ opportunity, caller_pcm, control_receipt }) {
+          async exchangeCanonical({ opportunity, caller_pcm, control_receipt }) {
             exchanges += 1;
             expect(control_receipt.response_control.kind).toBe(episode.arm === "native" ? "native_context" : "hacc_response_plan");
             expect(caller_pcm).toEqual(pcm.get(`${episode.provider}:${opportunity.id}`));
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
             return {
+              playback_kind: "canonical" as const,
               opportunity_id: opportunity.id,
               assistant_pcm: assistant,
               provider_exchange_sha256: sha256Hex(`${episode.episode_id}:${opportunity.id}`),
               listener_evidence_sha256: sha256Hex(`listener:${episode.episode_id}:${opportunity.id}`),
+              repair_projection: repairProjection(opportunity.id),
+              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
             };
           },
+          async exchangeRepair() { throw new Error("no-repair fixture selected a repair"); },
+          async finalizeOpportunity({ opportunity_id }) { return { opportunity_receipt_sha256: sha256Hex(`finalize:${episode.episode_id}:${opportunity_id}`) }; },
           async close() { return { rotation_receipt_sha256: sha256Hex(`${episode.episode_id}:rotation:${segment_ordinal}`) }; },
         };
       },
@@ -270,6 +348,7 @@ describe("LC4-DEV live runner", () => {
         caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
         retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
         control: { async next({ episode }) { return control(episode.arm); } },
+        repair: noRepairDependencies(),
         ledger: { async append(event) { ledger.push(event.event_sha256); } },
         now: () => new Date(NOW),
       },
@@ -279,16 +358,166 @@ describe("LC4-DEV live runner", () => {
     expect(run.status).toBe("completed");
     expect(run.opportunities_completed).toBe(360);
     expect(run.paid_retry_count).toBe(0);
-    expect(run.ledger).toHaveLength(732); // 6 opened + 360 submitted + 360 completed + 6 terminal
+    expect(run.provider_calls_made).toBe(360);
+    expect(run.total_response_generations).toBe(360);
+    expect(run.repair_playbacks).toBe(0);
+    expect(run.ledger).toHaveLength(1_092); // 6 opened + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
     expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
       completed: true,
       exact_six_episode_horizon: true,
       exact_opportunity_horizon: true,
+      exact_playback_accounting: true,
       evidence_complete: true,
       efficacy_claim_eligible: false,
     });
   });
+
+  it("inserts one real same-opportunity repair without consuming the next canonical ordinal", async () => {
+    const audioRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-live-repair-"));
+    try {
+      const materializedRoot = join(audioRoot, "audio");
+      const audio = await materializeLc4DevelopmentAudio({
+        outputRoot: materializedRoot,
+        renderer: repairAudioRenderer,
+      });
+      const { pcm, prepare, preflight } = fixtures();
+      const realRepair = Object.fromEntries(((["openai", "gemini", "xai"] as const)).map((provider) => [
+        provider,
+        createLc4DevRepairPlaybackController({
+          provider,
+          audio_manifest: audio.manifest,
+          repair_manifest: audio.repairManifest,
+          async load_repair_pcm(binding) {
+            return new Uint8Array(await readFile(join(materializedRoot, binding.pcm_path)));
+          },
+        }),
+      ])) as Lc4DevLiveRunnerDependencies["repair"];
+
+      let canonicalExchanges = 0;
+      let repairExchanges = 0;
+      let finalizations = 0;
+      let repairedCanonicalOrdinal: number | null = null;
+      let canonicalAfterRepair: number | null = null;
+      const targetEpisodeId = prepare.episodes[0]!.episode_id;
+      const adapter: Lc4DevelopmentRealtimeAdapter = {
+        kind: "lc4-development-realtime-v1",
+        factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+        preflight_sha256: preflight.preflight_sha256,
+        maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+        async openSegment({ episode, segment_ordinal }) {
+          let expectedCanonicalOrdinal = ((segment_ordinal - 1) * 20) + 1;
+          let pending: Readonly<{ opportunity_id: string; repair_played: boolean }> | null = null;
+          return {
+            async exchangeCanonical({ opportunity }) {
+              expect(pending).toBeNull();
+              expect(opportunity.index).toBe(expectedCanonicalOrdinal);
+              if (repairedCanonicalOrdinal !== null && episode.episode_id === targetEpisodeId && opportunity.index > repairedCanonicalOrdinal && canonicalAfterRepair === null) {
+                canonicalAfterRepair = opportunity.index;
+              }
+              pending = { opportunity_id: opportunity.id, repair_played: false };
+              canonicalExchanges += 1;
+              const shouldRepair = episode.episode_id === targetEpisodeId && opportunity.index === 10;
+              const semanticResultSha256 = sha256Hex(`semantic-result:${episode.episode_id}:${opportunity.id}`);
+              return {
+                playback_kind: "canonical" as const,
+                opportunity_id: opportunity.id,
+                assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+                provider_exchange_sha256: sha256Hex(`canonical:${episode.episode_id}:${opportunity.id}`),
+                listener_evidence_sha256: sha256Hex(`canonical-listener:${episode.episode_id}:${opportunity.id}`),
+                repair_projection: createLc4DevArmBlindRepairProjection({
+                  opportunity_id: opportunity.id,
+                  listener_status: "verified",
+                  semantic_result_sha256: semanticResultSha256,
+                  semantic_replay_sha256: sha256Hex(`semantic-replay:${episode.episode_id}:${opportunity.id}`),
+                  unmet_blocker_codes: shouldRepair ? ["subject_or_goal_unresolved"] : [],
+                  final_required_criteria_pass: !shouldRepair,
+                }),
+                playback_authority_receipt_sha256: sha256Hex(`canonical-authority:${episode.episode_id}:${opportunity.id}`),
+              };
+            },
+            async exchangeRepair({ opportunity, repair, decision_receipt }) {
+              expect(pending).toEqual({ opportunity_id: opportunity.id, repair_played: false });
+              expect(opportunity.index).toBe(expectedCanonicalOrdinal);
+              expect(repair.canonical_ordinal).toBe(expectedCanonicalOrdinal);
+              expect(repair.advances_canonical_horizon).toBe(false);
+              expect(repair.recursive_repair_allowed).toBe(false);
+              expect(repair.decision_receipt_sha256).toBe(decision_receipt.decision_receipt_sha256);
+              expect(repair.pcm_sha256).toBe(sha256Hex(repair.pcm));
+              repairExchanges += 1;
+              repairedCanonicalOrdinal = opportunity.index;
+              pending = { opportunity_id: opportunity.id, repair_played: true };
+              return {
+                playback_kind: "repair" as const,
+                opportunity_id: opportunity.id,
+                assistant_pcm: Uint8Array.from([opportunity.index, 6, 10, 14]),
+                provider_exchange_sha256: sha256Hex(`repair:${episode.episode_id}:${opportunity.id}`),
+                listener_evidence_sha256: sha256Hex(`repair-listener:${episode.episode_id}:${opportunity.id}`),
+                repair_projection: repairProjection(opportunity.id),
+                playback_authority_receipt_sha256: sha256Hex(`repair-authority:${episode.episode_id}:${opportunity.id}`),
+              };
+            },
+            async finalizeOpportunity({ opportunity_id, repair_played }) {
+              expect(pending).toEqual({ opportunity_id, repair_played });
+              pending = null;
+              expectedCanonicalOrdinal += 1;
+              finalizations += 1;
+              return { opportunity_receipt_sha256: sha256Hex(`finalize:${episode.episode_id}:${opportunity_id}`) };
+            },
+            async close() {
+              expect(pending).toBeNull();
+              expect(expectedCanonicalOrdinal).toBe((segment_ordinal * 20) + 1);
+              return { rotation_receipt_sha256: sha256Hex(`rotation:${episode.episode_id}:${segment_ordinal}`) };
+            },
+          };
+        },
+      };
+
+      const run = await executeLc4DevLiveRun({
+        prepare,
+        preflight,
+        dependencies: {
+          adapter,
+          caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
+          retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
+          control: { async next({ episode }) { return control(episode.arm); } },
+          repair: realRepair,
+          ledger: { async append() {} },
+          now: () => new Date(NOW),
+        },
+      });
+
+      expect(run).toMatchObject({
+        status: "completed",
+        opportunities_submitted: 360,
+        opportunities_completed: 360,
+        provider_calls_made: 361,
+        repair_playbacks: 1,
+        total_response_generations: 361,
+        paid_retry_count: 0,
+        retained_caller_audio: 361,
+        retained_assistant_audio: 361,
+        listener_evidence_count: 361,
+      });
+      expect(canonicalExchanges).toBe(360);
+      expect(repairExchanges).toBe(1);
+      expect(finalizations).toBe(360);
+      expect(repairedCanonicalOrdinal).toBe(10);
+      expect(canonicalAfterRepair).toBe(11);
+      expect(run.ledger.filter((event) => event.event_type === "repair_audio_submitted")).toHaveLength(1);
+      expect(run.ledger.filter((event) => event.event_type === "repair_completed")).toHaveLength(1);
+      expect(run.ledger).toHaveLength(1_094);
+      expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
+        completed: true,
+        exact_six_episode_horizon: true,
+        exact_opportunity_horizon: true,
+        exact_playback_accounting: true,
+        evidence_complete: true,
+      });
+    } finally {
+      await rm(audioRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("does not retry once audio was submitted", async () => {
     const { pcm, prepare, preflight } = fixtures();
@@ -304,7 +533,9 @@ describe("LC4-DEV live runner", () => {
           maximum_total_micro_usd: prepare.maximum_total_micro_usd,
           async openSegment() {
             return {
-              async exchange() { calls += 1; throw new Error("transport disconnected"); },
+              async exchangeCanonical() { calls += 1; throw new Error("transport disconnected"); },
+              async exchangeRepair() { throw new Error("repair must not run after canonical transport failure"); },
+              async finalizeOpportunity() { throw new Error("failed canonical opportunity cannot finalize"); },
               async close() { return { rotation_receipt_sha256: HASH }; },
             };
           },
@@ -312,6 +543,7 @@ describe("LC4-DEV live runner", () => {
         caller_audio: { async load(binding) { return pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
         retention: { async retain({ pcm: bytes }) { return { artifact_sha256: sha256Hex(bytes), byte_length: bytes.byteLength }; } },
         control: { async next({ episode }) { return control(episode.arm); } },
+        repair: noRepairDependencies(),
         ledger: { async append() {} },
         now: () => new Date(NOW),
       },
@@ -344,7 +576,15 @@ describe("LC4-DEV live runner", () => {
       preflight,
       credentials,
       gateway_executor: gatewayExecutor,
-      listener: { async accept() { return { listener_evidence_sha256: HASH }; } },
+      listener: {
+        async accept({ opportunity }) {
+          return {
+            listener_evidence_sha256: HASH,
+            repair_projection: repairProjection(opportunity.id),
+            playback_authority_receipt_sha256: HASH,
+          };
+        },
+      },
       now: () => new Date(NOW),
     });
     expect(adapter).toMatchObject({
@@ -359,7 +599,15 @@ describe("LC4-DEV live runner", () => {
       preflight,
       credentials: { ...credentials, xai: "different-xai-secret" },
       gateway_executor: gatewayExecutor,
-      listener: { async accept() { return { listener_evidence_sha256: HASH }; } },
+      listener: {
+        async accept({ opportunity }) {
+          return {
+            listener_evidence_sha256: HASH,
+            repair_projection: repairProjection(opportunity.id),
+            playback_authority_receipt_sha256: HASH,
+          };
+        },
+      },
       now: () => new Date(NOW),
     })).toThrow(/credentials differ/);
   });

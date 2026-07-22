@@ -13,7 +13,8 @@ import {
   type PreparedIndependentAsrCalibration,
 } from "./audible-evidence";
 import type { BenchmarkKernelAttestationSigner } from "./kernel-attestation";
-import type {
+import {
+  createLc4DevArmBlindRepairProjection,
   Lc4PinnedListenerEvaluation,
   Lc4PinnedListenerEvaluator,
 } from "./lc4-development-headless-listener-authority";
@@ -598,6 +599,16 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         transcript_sha256: replay.transcript_sha256,
         semantic_result_sha256: replay.artifact_sha256,
         signed_invocation_receipt_sha256: invocation.receipt.receipt_sha256,
+        repair_projection: createLc4DevArmBlindRepairProjection({
+          opportunity_id: replay.opportunity_id,
+          listener_status: "verified",
+          semantic_result_sha256: replay.artifact_sha256,
+          semantic_replay_sha256: replay.semantic_replay.replay_sha256,
+          unmet_blocker_codes: replay.semantic_replay.earliest_unmet_crp_blocker === null
+            ? []
+            : [replay.semantic_replay.earliest_unmet_crp_blocker],
+          final_required_criteria_pass: replay.final_required_criteria_pass,
+        }),
       });
     },
   });
