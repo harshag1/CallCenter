@@ -17,6 +17,7 @@ import {
   proveIndeterminateFlowActionAbsent,
   promoteIndeterminateFlowAction,
   reserveFlowAction,
+  resolveFlowBoundArguments,
   selectFlowTopic,
   settleFlowAction,
   type FlowExecutionState,
@@ -51,7 +52,15 @@ function evidenceFlow(bindingOverrides: Partial<FlowOutputBinding> = {}): AgentF
           }],
           action_policies: [
             { tool: CASE_TOOL, max_calls: 1, idempotency: "per_step" },
-            { tool: "tag_case", max_calls: 3, idempotency: "per_arguments" },
+            {
+              tool: "tag_case",
+              max_calls: 3,
+              idempotency: "per_arguments",
+              bound_arguments: [{
+                argument: "case_id",
+                source: { kind: "receipt_result", tool: CASE_TOOL, result_path: "$.data.case.id" },
+              }],
+            },
             { tool: "notify_case", max_calls: 1, idempotency: "none" },
           ],
         }],
@@ -120,6 +129,54 @@ function settle(
 }
 
 describe("flow action evidence", () => {
+  it("resolves host-bound arguments only from one successful current-step receipt", () => {
+    const flow = evidenceFlow();
+    const reserved = reserve(flow, activeStep(flow), "case-source", CASE_TOOL, { customer: "C-7" });
+    const succeeded = settle(reserved.state, "case-source", "succeeded", {
+      data: { case: { id: "CASE-42" } },
+    });
+    const resolved = resolveFlowBoundArguments(flow, succeeded.state, "tag_case", { tag: "urgent" });
+    if ("error" in resolved) throw new Error(`${resolved.code}: ${resolved.error}`);
+    expect(resolved.modelArguments).toEqual({ tag: "urgent" });
+    expect(resolved.effectiveArguments).toEqual({ tag: "urgent", case_id: "CASE-42" });
+    expect(resolved.evidence).toEqual([expect.objectContaining({
+      argument: "case_id",
+      source_kind: "receipt_result",
+      source_tool: CASE_TOOL,
+      source_step: STEP,
+      source_receipt_id: "case-source",
+      result_path: "$.data.case.id",
+      source_receipt_result_hash: succeeded.receipt.resultHash,
+    })]);
+    expect(resolveFlowBoundArguments(flow, succeeded.state, "tag_case", {
+      tag: "urgent",
+      case_id: "MODEL-OVERRIDE",
+    })).toMatchObject({ code: "bound_argument_override" });
+  });
+
+  it("fails closed for missing, failed, and stale receipt authorities", () => {
+    const flow = evidenceFlow();
+    const active = activeStep(flow);
+    expect(resolveFlowBoundArguments(flow, active, "tag_case", { tag: "urgent" }))
+      .toMatchObject({ code: "missing_bound_argument_source" });
+
+    const failedReservation = reserve(flow, active, "case-failed", CASE_TOOL, { customer: "C-7" });
+    const failed = settle(failedReservation.state, "case-failed", "failed");
+    expect(resolveFlowBoundArguments(flow, failed.state, "tag_case", { tag: "urgent" }))
+      .toMatchObject({ code: "missing_bound_argument_source" });
+
+    const successReservation = reserve(flow, active, "case-stale", CASE_TOOL, { customer: "C-7" });
+    const succeeded = settle(successReservation.state, "case-stale", "succeeded", {
+      data: { case: { id: "CASE-42" } },
+    });
+    const staleState = FlowExecutionStateSchema.parse({
+      ...succeeded.state,
+      capabilityEpoch: succeeded.state.capabilityEpoch + 1,
+    });
+    expect(resolveFlowBoundArguments(flow, staleState, "tag_case", { tag: "urgent" }))
+      .toMatchObject({ code: "stale_bound_argument_source" });
+  });
+
   it("rejects oversized action payloads before mutating durable state", () => {
     const state = createFlowExecutionState();
     expect(reserveFlowAction(storageFlow, state, {

@@ -101,6 +101,43 @@ const crossTopicFlow = AgentFlowSchema.parse({
   ],
 });
 describe("flow v2 validation", () => {
+  it("accepts only receipt-result binding authority and rejects unsafe source paths", () => {
+    const candidate = (kind: string, resultPath = "$.case_id") => ({
+      schema_version: 2,
+      always_tools: [],
+      nodes: [
+        { id: "entry", label: "Incoming call", kind: "incoming_call" },
+        {
+          id: "work",
+          label: "Work",
+          kind: "topic",
+          steps: [{
+            id: "execute",
+            label: "Execute",
+            instructions: "Resolve then mutate.",
+            tools: ["resolve_case", "mutate_case"],
+            action_policies: [{
+              tool: "mutate_case",
+              bound_arguments: [{
+                argument: "case_id",
+                source: { kind, tool: "resolve_case", result_path: resultPath },
+              }],
+            }],
+          }],
+        },
+      ],
+      edges: [{ from: "entry", to: "work" }],
+    });
+    expect(AgentFlowSchema.safeParse(candidate("private")).success).toBe(false);
+    expect(AgentFlowSchema.safeParse(candidate("oracle")).success).toBe(false);
+
+    const unsafe = AgentFlowSchema.parse(candidate("receipt_result", "$.constructor.case_id"));
+    expect(validateAgentFlow(unsafe).diagnostics).toContainEqual(expect.objectContaining({
+      level: "error",
+      message: expect.stringContaining("unsafe receipt result path"),
+    }));
+  });
+
   it("accepts arbitrarily nested, explicitly transitioned steps", () => {
     const result = validateAgentFlow(deepFlow);
     expect(result.flow).toBeDefined();
