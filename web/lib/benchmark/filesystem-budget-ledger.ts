@@ -43,6 +43,9 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
 const MAX_LEDGER_BYTES = 128 * 1024 * 1024;
 const MAX_EVENT_BYTES = 1024 * 1024;
 const PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD = 5_000_000;
+const LC4_QUALIFICATION_V2_MAXIMUM_MICRO_USD = 3_000_000;
+const LC4_QUALIFICATION_V2_RESPONSE_GENERATIONS = 6;
+const LC4_QUALIFICATION_V2_PAID_GENERATION_SESSIONS = 6;
 const LOCK_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const BIGINT_ZERO = BigInt(0);
@@ -102,6 +105,8 @@ export type BudgetJournalReservation = Readonly<{
   provider_reported_micro_usd: number | null;
   reconciled_micro_usd: number | null;
   reconciliation_evidence_sha256: string | null;
+  usage_event_count: number | null;
+  usage_evidence_sha256: string | null;
 }>;
 
 export type BudgetJournalSnapshot = Readonly<{
@@ -173,6 +178,11 @@ type CostObservedPayload = Readonly<{
   reservation_id: string;
   provider_reported_micro_usd: number;
 }>;
+type UsageObservedPayload = Readonly<{
+  reservation_id: string;
+  usage_event_count: number;
+  usage_evidence_sha256: string;
+}>;
 type ReconciledPayload = Readonly<{
   reservation_id: string;
   reconciled_micro_usd: number;
@@ -192,6 +202,7 @@ type BudgetEventPayload =
   | TerminalPayload
   | SettlementPayload
   | CostObservedPayload
+  | UsageObservedPayload
   | ReconciledPayload
   | CeilingPayload
   | PausePayload;
@@ -207,6 +218,7 @@ export type BudgetJournalEventType =
   | "reservation.terminal"
   | "reservation.settled"
   | "reservation.provider_cost_observed"
+  | "reservation.usage_observed"
   | "reservation.reconciled"
   | "reservation.cancelled_before_open"
   | "reservation.expired";
@@ -269,6 +281,36 @@ export type BudgetLedgerMutationResult = Readonly<{
   event: BudgetJournalEvent;
   idempotent_replay: boolean;
 }>;
+
+export type Gate1PaidPlanConsumption = Readonly<{
+  /** Omitted by historical callers; omission remains the exact legacy $5 contract. */
+  kind?: "gate1_paid_plan";
+  consumptionId: string;
+  planSha256: string;
+  maximumMicroUsd: number;
+}>;
+
+export type Lc4QualificationV2PlanConsumption = Readonly<{
+  kind: "lc4_qualification_v2";
+  consumptionId: string;
+  planSha256: string;
+  maximumMicroUsd: number;
+  authorizationArtifactSha256: string;
+  authorizationId: string;
+  attemptId: string;
+  sourceCommit: string;
+  sourceTreeSha256: string;
+  credentialSetSha256: string;
+  providerProfileManifestSha256: string;
+  configurationMatrixSha256: string;
+  devConfigurationMatrixSha256: string;
+  providersModelsSha256: string;
+  maximumResponseGenerations: number;
+  maximumPaidGenerationSessions: number;
+  paidRetryAllowed: false;
+}>;
+
+export type BudgetPlanConsumption = Gate1PaidPlanConsumption | Lc4QualificationV2PlanConsumption;
 
 export class FilesystemBudgetLedgerError extends Error {
   readonly code:
@@ -712,6 +754,8 @@ function applyPayload(state: MutableState, eventType: BudgetJournalEventType, pa
       provider_reported_micro_usd: null,
       reconciled_micro_usd: null,
       reconciliation_evidence_sha256: null,
+      usage_event_count: null,
+      usage_evidence_sha256: null,
     }));
     return;
   }
@@ -763,6 +807,23 @@ function applyPayload(state: MutableState, eventType: BudgetJournalEventType, pa
           prior.provider_reported_micro_usd ?? 0,
           value.provider_reported_micro_usd
         ),
+      };
+    });
+  } else if (eventType === "reservation.usage_observed") {
+    const value = payload as UsageObservedPayload;
+    if (!Number.isSafeInteger(value.usage_event_count) || value.usage_event_count < 0) {
+      fail("invalid_input", "usage_event_count must be a non-negative safe integer");
+    }
+    assertHash(value.usage_evidence_sha256, "usage_evidence_sha256");
+    updateReservation(state, value.reservation_id, (prior) => {
+      expectStatus(prior, ["opening", "opened"], eventType);
+      if (prior.usage_event_count !== null || prior.usage_evidence_sha256 !== null) {
+        fail("invalid_transition", "reservation usage evidence was already recorded");
+      }
+      return {
+        ...prior,
+        usage_event_count: value.usage_event_count,
+        usage_evidence_sha256: value.usage_evidence_sha256,
       };
     });
   } else if (eventType === "reservation.reconciled") {
@@ -1580,11 +1641,7 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
   expectedLedgerId?: string;
   requiredAncestorHeadSha256?: string;
   requiredCurrentHeadSha256?: string;
-  planConsumption?: Readonly<{
-    consumptionId: string;
-    planSha256: string;
-    maximumMicroUsd: number;
-  }>;
+  planConsumption?: BudgetPlanConsumption;
 }>): Promise<BudgetLedgerMutationResult> {
   const normalized = normalizeEnvelope(input.costEnvelope);
   if (input.expectedLedgerId !== undefined) {
@@ -1600,13 +1657,41 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
     assertHash(input.requiredCurrentHeadSha256, "requiredCurrentHeadSha256");
   }
   if (input.planConsumption !== undefined) {
+    if (input.planConsumption.kind !== undefined
+      && input.planConsumption.kind !== "gate1_paid_plan"
+      && input.planConsumption.kind !== "lc4_qualification_v2") {
+      fail("invalid_input", "plan consumption kind is unsupported");
+    }
     assertIdentifier(input.planConsumption.consumptionId, "planConsumption.consumptionId");
     assertHash(input.planConsumption.planSha256, "planConsumption.planSha256");
     assertMicroUsd(input.planConsumption.maximumMicroUsd, "planConsumption.maximumMicroUsd", true);
     if (input.planConsumption.maximumMicroUsd !== normalized.maximum) {
       fail("invalid_input", "plan consumption maximum differs from the cost envelope");
     }
-    if (input.planConsumption.maximumMicroUsd !== PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD) {
+    if (input.planConsumption.kind === "lc4_qualification_v2") {
+      const value = input.planConsumption;
+      for (const [label, hash] of [
+        ["authorizationArtifactSha256", value.authorizationArtifactSha256],
+        ["sourceTreeSha256", value.sourceTreeSha256],
+        ["credentialSetSha256", value.credentialSetSha256],
+        ["providerProfileManifestSha256", value.providerProfileManifestSha256],
+        ["configurationMatrixSha256", value.configurationMatrixSha256],
+        ["devConfigurationMatrixSha256", value.devConfigurationMatrixSha256],
+        ["providersModelsSha256", value.providersModelsSha256],
+      ] as const) assertHash(hash, `planConsumption.${label}`);
+      assertIdentifier(value.authorizationId, "planConsumption.authorizationId");
+      assertIdentifier(value.attemptId, "planConsumption.attemptId");
+      assertIdentifier(value.sourceCommit, "planConsumption.sourceCommit");
+      if (value.authorizationId !== value.attemptId) {
+        fail("invalid_input", "qualification authorization and attempt IDs must match");
+      }
+      if (value.maximumMicroUsd !== LC4_QUALIFICATION_V2_MAXIMUM_MICRO_USD
+        || value.maximumResponseGenerations !== LC4_QUALIFICATION_V2_RESPONSE_GENERATIONS
+        || value.maximumPaidGenerationSessions !== LC4_QUALIFICATION_V2_PAID_GENERATION_SESSIONS
+        || value.paidRetryAllowed !== false) {
+        fail("invalid_input", "qualification consumption weakened the exact v2 budget or no-retry contract");
+      }
+    } else if (input.planConsumption.maximumMicroUsd !== PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD) {
       fail("invalid_input", "paid plan consumption must bind the exact $5 maximum");
     }
   }
@@ -1646,9 +1731,14 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
       // it. An owner able to delete or roll back the entire local directory can
       // still remove both stores; closing that threat requires external
       // monotonic or WORM authority.
+      const qualificationConsumption = input.planConsumption.kind === "lc4_qualification_v2"
+        ? input.planConsumption
+        : null;
       const body = Object.freeze({
         schema_version: 1,
-        kind: "hacc_paid_plan_consumption",
+        kind: qualificationConsumption === null
+          ? "hacc_paid_plan_consumption"
+          : "hacc_lc4_qualification_v2_consumption",
         ledger_id: state.ledgerId,
         ledger_open_head_sha256: input.requiredCurrentHeadSha256,
         consumption_id: input.planConsumption.consumptionId,
@@ -1658,11 +1748,37 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
         reservation_id: input.reservationId,
         operation_id: input.operationId,
         consumed_at: occurredAt,
+        ...(qualificationConsumption === null ? {} : {
+          authorization_artifact_sha256: qualificationConsumption.authorizationArtifactSha256,
+          authorization_id: qualificationConsumption.authorizationId,
+          attempt_id: qualificationConsumption.attemptId,
+          source_commit: qualificationConsumption.sourceCommit,
+          source_tree_sha256: qualificationConsumption.sourceTreeSha256,
+          credential_set_sha256: qualificationConsumption.credentialSetSha256,
+          provider_profile_manifest_sha256: qualificationConsumption.providerProfileManifestSha256,
+          configuration_matrix_sha256: qualificationConsumption.configurationMatrixSha256,
+          dev_configuration_matrix_sha256: qualificationConsumption.devConfigurationMatrixSha256,
+          providers_models_sha256: qualificationConsumption.providersModelsSha256,
+          maximum_response_generations: qualificationConsumption.maximumResponseGenerations,
+          maximum_paid_generation_sessions: qualificationConsumption.maximumPaidGenerationSessions,
+          paid_retry_allowed: qualificationConsumption.paidRetryAllowed,
+        }),
       });
-      const identity = sha256Hex(`${PLAN_CONSUMPTION_DOMAIN}${canonicalJson({
-        ledger_id: body.ledger_id,
-        ledger_open_head_sha256: body.ledger_open_head_sha256,
-      })}`);
+      const identity = sha256Hex(`${PLAN_CONSUMPTION_DOMAIN}${canonicalJson(
+        qualificationConsumption === null
+          ? {
+              ledger_id: body.ledger_id,
+              ledger_open_head_sha256: body.ledger_open_head_sha256,
+            }
+          : {
+              ledger_id: body.ledger_id,
+              kind: body.kind,
+              authorization_artifact_sha256: qualificationConsumption.authorizationArtifactSha256,
+              authorization_id: qualificationConsumption.authorizationId,
+              attempt_id: qualificationConsumption.attemptId,
+              plan_sha256: qualificationConsumption.planSha256,
+            },
+      )}`);
       return await createPlanConsumptionCommitGuard({ paths, identity, body });
     }
     return undefined;
@@ -1715,6 +1831,23 @@ export async function recordFilesystemProviderCost(input: BudgetLedgerStoreOptio
   return mutate(input, input.operationId, "reservation.provider_cost_observed", () => Object.freeze({
     reservation_id: input.reservationId,
     provider_reported_micro_usd: usdToMicroUsd(input.providerReportedUsd),
+  }));
+}
+
+export async function recordFilesystemBudgetUsage(input: BudgetLedgerStoreOptions & Readonly<{
+  operationId: string;
+  reservationId: string;
+  usageEventCount: number;
+  usageEvidenceSha256: string;
+}>): Promise<BudgetLedgerMutationResult> {
+  if (!Number.isSafeInteger(input.usageEventCount) || input.usageEventCount < 0) {
+    fail("invalid_input", "usageEventCount must be a non-negative safe integer");
+  }
+  assertHash(input.usageEvidenceSha256, "usageEvidenceSha256");
+  return mutate(input, input.operationId, "reservation.usage_observed", () => Object.freeze({
+    reservation_id: input.reservationId,
+    usage_event_count: input.usageEventCount,
+    usage_evidence_sha256: input.usageEvidenceSha256,
   }));
 }
 

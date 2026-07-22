@@ -52,6 +52,18 @@ import {
   type NormalizedRealtimeUsage,
   type RealtimeWireObservation,
 } from "../realtime/client/types";
+import {
+  assertLc4QualificationBudgetEvidence,
+  finalizeLc4QualificationBudget,
+  lc4QualificationBudgetLedgerPath,
+  reserveLc4QualificationBudget,
+  type Lc4QualificationBudgetEvidence,
+  type Lc4QualificationBudgetBinding,
+} from "./lc4-qualification-budget";
+import {
+  filesystemBudgetLedgerContainsHead,
+  inspectFilesystemBudgetLedger,
+} from "./filesystem-budget-ledger";
 
 export const LC4_QUALIFICATION_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v2" as const;
 export const LC4_QUALIFICATION_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-DEVELOPMENT-AUTHORIZATION-v2" as const;
@@ -797,6 +809,35 @@ export async function runLc4Qualification(input: Readonly<{
     throw new Error("LC4 qualification attempt ID must equal the signed one-shot authorization ID");
   }
   const credentials = await exactSourceAndCredentials({ plan, repositoryRoot, dependencies });
+  const providersModels = Object.freeze(Object.fromEntries(plan.targets.map((target) => [
+    target.provider,
+    target.model,
+  ])) as Record<LiveStsProvider, string>);
+  const budgetBinding: Lc4QualificationBudgetBinding = Object.freeze({
+    attemptId,
+    authorizationId: input.authorization.body.authorization_id,
+    authorizationArtifactSha256: input.authorization.artifact_sha256,
+    planSha256: plan.plan_sha256,
+    sourceCommit: plan.source_commit,
+    sourceTreeSha256: plan.source_tree_sha256,
+    credentialSetSha256: plan.credential_set_sha256,
+    providerProfileManifestSha256: plan.provider_profile_manifest_sha256,
+    configurationMatrixSha256: plan.configuration_matrix_sha256,
+    devConfigurationMatrixSha256: plan.dev_configuration_matrix_sha256,
+    providersModels,
+    expiresAt: input.authorization.body.expires_at,
+  });
+  // The aggregate $3 authority is durably consumed, opened, and bound to the
+  // exact signed attempt before any provider client can be constructed.
+  const budgetReservation = await reserveLc4QualificationBudget({ root, binding: budgetBinding, now });
+  const budgetUsage: Array<Readonly<{
+    provider: LiveStsProvider;
+    phase: "zero_audio" | "dev_audio";
+    count: number;
+    evidence_sha256: string;
+  }>> = [];
+  let budgetOutcome: "completed" | "failed" = "failed";
+  try {
   const attemptsRoot = resolve(root, "attempts");
   const partial = resolve(attemptsRoot, `${attemptId}.partial`);
   const complete = resolve(attemptsRoot, `${attemptId}.complete`);
@@ -869,6 +910,7 @@ export async function runLc4Qualification(input: Readonly<{
     const terminal = Object.freeze({ ...body, terminal_sha256: terminalSha256(body) });
     await writeImmutableJson(resolve(partial, "terminal.json"), terminal);
     await rename(partial, complete);
+    budgetOutcome = "failed";
     return terminal;
   }
   const requirements = providerResponseToolCanaryRequirements(targets);
@@ -906,6 +948,12 @@ export async function runLc4Qualification(input: Readonly<{
       throw new Error(`LC4 ${provider} canary execution identity or zero-audio contract failed`);
     }
     const retained = await retainCanaryEvidence(partial, execution);
+    budgetUsage.push(Object.freeze({
+      provider,
+      phase: "zero_audio",
+      count: retained.usage_event_count,
+      evidence_sha256: retained.usage_evidence_sha256,
+    }));
     canaryResults.push(Object.freeze({
       provider,
       model: target.model,
@@ -1022,6 +1070,12 @@ export async function runLc4Qualification(input: Readonly<{
     await retainDevAudioFailureEvidence(partial, execution);
     await retainDevAudioToolCallEvidence(partial, execution);
     const retained = await retainCanaryEvidence(partial, execution, "-dev-audio");
+    budgetUsage.push(Object.freeze({
+      provider,
+      phase: "dev_audio",
+      count: retained.usage_event_count,
+      evidence_sha256: retained.usage_evidence_sha256,
+    }));
     retainedDevResults.push(Object.freeze({
       provider,
       model: target.model,
@@ -1074,7 +1128,20 @@ export async function runLc4Qualification(input: Readonly<{
   const terminal = Object.freeze({ ...body, terminal_sha256: terminalSha256(body) });
   await writeImmutableJson(resolve(partial, "terminal.json"), terminal);
   await rename(partial, complete);
+  budgetOutcome = terminal.status === "passed" ? "completed" : "failed";
   return terminal;
+  } finally {
+    const usageEvidenceSha256 = sha256Hex(canonicalJson(Object.freeze([...budgetUsage])));
+    const budgetEvidence = await finalizeLc4QualificationBudget({
+      reservation: budgetReservation,
+      attemptId,
+      usageEventCount: budgetUsage.reduce((sum, item) => sum + item.count, 0),
+      usageEvidenceSha256,
+      outcome: budgetOutcome,
+      now,
+    });
+    await writeImmutableJson(resolve(root, "budget", `${attemptId}.settlement.json`), budgetEvidence);
+  }
 }
 
 function parseFlags(args: readonly string[]): Readonly<Record<string, string>> {
@@ -1106,6 +1173,7 @@ export async function reportLc4Qualification(root: string): Promise<Readonly<Rec
   const complete = names.filter((name) => name.endsWith(".complete")).sort();
   const partial = names.filter((name) => name.endsWith(".partial")).sort();
   const terminals: Lc4QualificationTerminalArtifact[] = [];
+  const budgetSettlements: Lc4QualificationBudgetEvidence[] = [];
   for (const name of complete) {
     const terminal = await readJson<Lc4QualificationTerminalArtifact>(resolve(attemptsRoot, name, "terminal.json"), "LC4 qualification terminal");
     const { terminal_sha256, ...body } = terminal;
@@ -1113,6 +1181,32 @@ export async function reportLc4Qualification(root: string): Promise<Readonly<Rec
       throw new Error(`LC4 qualification terminal ${name} failed integrity`);
     }
     terminals.push(terminal);
+    const budgetEvidence = await readJson<Lc4QualificationBudgetEvidence>(
+      resolve(root, "budget", `${terminal.attempt_id}.settlement.json`),
+      "LC4 qualification budget settlement",
+    );
+    assertLc4QualificationBudgetEvidence(budgetEvidence);
+    const budgetLedgerPath = lc4QualificationBudgetLedgerPath(root);
+    const [budget, containsSettlementHead] = await Promise.all([
+      inspectFilesystemBudgetLedger({ ledgerPath: budgetLedgerPath }),
+      filesystemBudgetLedgerContainsHead({
+        ledgerPath: budgetLedgerPath,
+        ancestorHeadSha256: budgetEvidence.final_head_sha256,
+      }),
+    ]);
+    const reservation = budget.reservations.find((candidate) => candidate.reservation_id === budgetEvidence.reservation_id);
+    const expectedOutcome = terminal.status === "passed" ? "completed" : "failed";
+    if (!reservation
+      || reservation.status !== "settled"
+      || reservation.terminal_outcome !== expectedOutcome
+      || budgetEvidence.terminal_outcome !== expectedOutcome
+      || reservation.estimated_micro_usd !== LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD
+      || reservation.usage_event_count !== budgetEvidence.usage_event_count
+      || reservation.usage_evidence_sha256 !== budgetEvidence.usage_evidence_sha256
+      || !containsSettlementHead) {
+      throw new Error(`LC4 qualification budget settlement ${name} failed integrity`);
+    }
+    budgetSettlements.push(budgetEvidence);
   }
   return Object.freeze({
     schema_version: 1,
@@ -1128,6 +1222,7 @@ export async function reportLc4Qualification(root: string): Promise<Readonly<Rec
     completed_attempts: terminals.length,
     incomplete_attempts: partial.length,
     paid_retry_allowed: false,
+    budget_settlement_evidence_sha256: Object.freeze(budgetSettlements.map((entry) => entry.evidence_sha256)),
     latest: terminals.at(-1) ?? null,
   });
 }

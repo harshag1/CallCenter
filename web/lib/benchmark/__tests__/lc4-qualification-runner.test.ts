@@ -1,4 +1,5 @@
 import { generateKeyPairSync, sign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +47,8 @@ import {
   realtimeWireObservationSha256,
   realtimeWireProjectionSha256,
 } from "../../realtime/client/wire-evidence";
+import { inspectFilesystemBudgetLedger } from "../filesystem-budget-ledger";
+import { lc4QualificationBudgetLedgerPath } from "../lc4-qualification-budget";
 
 const roots: string[] = [];
 const SOURCE: Lc4QualificationGitSource = Object.freeze({
@@ -478,11 +481,15 @@ describe("LC4 exact-model qualification runner", () => {
     });
     const valid = authorize(plan);
     const clients: ReadyQualificationClient[] = [];
+    let everyClientConstructedAfterBudgetOpen = true;
     const canaryProviders: LiveStsProvider[] = [];
     const devCanaryProviders: LiveStsProvider[] = [];
     const dependencies = {
       ...preparationDependencies,
       createClient: (provider: LiveStsProvider) => {
+        const ledgerEvents = readFileSync(lc4QualificationBudgetLedgerPath(evidenceRoot), "utf8")
+          .trim().split("\n").map((line) => JSON.parse(line) as { event_type: string });
+        everyClientConstructedAfterBudgetOpen &&= ledgerEvents.some((event) => event.event_type === "reservation.opened");
         const client = new ReadyQualificationClient(provider);
         clients.push(client);
         return client;
@@ -527,6 +534,7 @@ describe("LC4 exact-model qualification runner", () => {
     expect(canaryProviders).toEqual(["openai", "gemini", "xai"]);
     expect(devCanaryProviders).toEqual(["openai", "gemini", "xai"]);
     expect(clients).toHaveLength(9);
+    expect(everyClientConstructedAfterBudgetOpen).toBe(true);
     expect(clients.every((client) => client.forbiddenAudioCalls === 0)).toBe(true);
     const complete = join(evidenceRoot, "attempts", `${valid.authorization.body.authorization_id}.complete`);
     const retainedUsage = await readFile(join(complete, "openai-usage.jsonl"), "utf8");
@@ -571,5 +579,74 @@ describe("LC4 exact-model qualification runner", () => {
     for (const secret of Object.values(CREDENTIALS)) expect(encodedTerminal).not.toContain(secret);
     expect(canonicalJson(terminal)).toContain("gateway_tool_call_observed");
     expect(terminal.dev_audio_results.every((result) => result.delivery_complete && result.chunk_count === 2)).toBe(true);
+    const budget = await inspectFilesystemBudgetLedger({ ledgerPath: lc4QualificationBudgetLedgerPath(evidenceRoot) });
+    expect(budget.reservations[0]).toMatchObject({
+      status: "settled",
+      terminal_outcome: "completed",
+      maximum_micro_usd: 3_000_000,
+      estimated_micro_usd: 3_000_000,
+      usage_event_count: 3,
+    });
+    const budgetEvidence = JSON.parse(await readFile(
+      join(evidenceRoot, "budget", `${valid.authorization.body.authorization_id}.settlement.json`),
+      "utf8",
+    ));
+    expect(budgetEvidence).toMatchObject({
+      terminal_outcome: "completed",
+      conservative_settled_micro_usd: 3_000_000,
+      usage_event_count: 3,
+    });
+    for (const secret of Object.values(CREDENTIALS)) expect(canonicalJson(budgetEvidence)).not.toContain(secret);
+  });
+
+  it("consumes and settles the full reservation when qualification fails after provider start", async () => {
+    const { repositoryRoot, evidenceRoot } = await testRoots();
+    const plan = await prepareLc4Qualification({
+      root: evidenceRoot,
+      repositoryRoot,
+      now: () => NOW,
+      planId: "qualification-plan-partial-failure",
+      dependencies: preparationDependencies,
+    });
+    const valid = authorize(plan);
+    let providerConstructions = 0;
+    const terminal = await runLc4Qualification({
+      root: evidenceRoot,
+      repositoryRoot,
+      authorization: valid.authorization,
+      trustRoot: valid.trustRoot,
+      now: () => NOW,
+      dependencies: {
+        ...preparationDependencies,
+        createClient: () => {
+          providerConstructions += 1;
+          throw new Error("synthetic provider construction failure");
+        },
+        executeCanary: async () => { throw new Error("must not reach generated canary"); },
+        executeDevAudioCanary: async () => { throw new Error("must not reach DEV canary"); },
+      },
+    });
+    expect(providerConstructions).toBe(3);
+    expect(terminal.status).toBe("failed");
+    const budget = await inspectFilesystemBudgetLedger({ ledgerPath: lc4QualificationBudgetLedgerPath(evidenceRoot) });
+    expect(budget.reservations[0]).toMatchObject({
+      status: "settled",
+      terminal_outcome: "failed",
+      estimated_micro_usd: 3_000_000,
+      usage_event_count: 0,
+    });
+    await expect(runLc4Qualification({
+      root: evidenceRoot,
+      repositoryRoot,
+      authorization: valid.authorization,
+      trustRoot: valid.trustRoot,
+      now: () => NOW,
+      dependencies: {
+        ...preparationDependencies,
+        createClient: () => { throw new Error("replay must not construct a provider"); },
+        executeCanary: async () => { throw new Error("replay must not execute"); },
+        executeDevAudioCanary: async () => { throw new Error("replay must not execute"); },
+      },
+    })).rejects.toMatchObject({ code: "EEXIST" });
   });
 });
