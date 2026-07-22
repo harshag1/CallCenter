@@ -61,11 +61,7 @@ function exactJsonEqual(left: unknown, right: unknown): boolean {
   return hashFlowValue(left) === hashFlowValue(right);
 }
 
-/**
- * A readback may add fields (for example `status`) but it must carry every
- * field of the ambiguous action's prior result exactly. Arrays and scalar
- * values are exact, never fuzzy or model-interpreted.
- */
+/** A host-designated readback must contain every prior outcome field exactly. */
 function containsExactPriorResult(readback: JsonValue, prior: JsonValue): boolean {
   if (prior === null || typeof prior !== "object" || Array.isArray(prior)) {
     return exactJsonEqual(readback, prior);
@@ -214,7 +210,6 @@ function validateSuccessfulReadback(input: Readonly<{
     || flowReceipt.result === undefined
     || flowReceipt.resultHash !== hashFlowValue(flowReceipt.result)
     || !["succeeded", "deduplicated"].includes(worldReceipt.status)
-    || !worldReceipt.committed
     || worldReceipt.authoritative_result === undefined
     || !exactWorldFlowBinding(flowReceipt, worldReceipt)
     || !exactJsonEqual(flowReceipt.result, worldReceipt.authoritative_result)

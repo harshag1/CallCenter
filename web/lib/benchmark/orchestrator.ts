@@ -110,6 +110,7 @@ import {
   type ScheduledCallerOpportunity,
 } from "./caller-world-scheduler";
 import type { AdmissibilityFrontierEvidence } from "./admissibility-frontier";
+import { HACC_SPEECH_GUARDRAIL_PACKET_KEY } from "./speech-guardrail-packet";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -1645,6 +1646,15 @@ async function dispatchToolCall(input: Readonly<{
   const visibleOutput = outcome.providerVisibleOutput === undefined
     ? result
     : JsonValueSchema.parse(outcome.providerVisibleOutput);
+  const visibleEnvelope = visibleOutput !== null && typeof visibleOutput === "object" && !Array.isArray(visibleOutput)
+    ? visibleOutput as Record<string, JsonValue>
+    : null;
+  const speechGuardrailPacket = visibleEnvelope?.[HACC_SPEECH_GUARDRAIL_PACKET_KEY];
+  const gatewayVisibleOutput = visibleEnvelope !== null
+    && speechGuardrailPacket !== undefined
+    && Object.prototype.hasOwnProperty.call(visibleEnvelope, "gateway_result")
+    ? visibleEnvelope.gateway_result
+    : visibleOutput;
   let disclosure: Readonly<{ target: string; prompt: string; renderedSnapshot: string }> | null = null;
   let providerOutput: unknown = visibleOutput;
   if (outcome.disclosure) {
@@ -1686,7 +1696,10 @@ async function dispatchToolCall(input: Readonly<{
       : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: template.target, prompt: template.prompt, renderedSnapshot });
     providerOutput = {
-      gateway_result: visibleOutput,
+      gateway_result: gatewayVisibleOutput,
+      ...(speechGuardrailPacket === undefined
+        ? {}
+        : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
       progressive_disclosure: condition.behavior.progressiveDisclosure
         ? compactDisclosure(template)
         : template.prompt,
@@ -1704,7 +1717,10 @@ async function dispatchToolCall(input: Readonly<{
       : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: "$grant-rotation", prompt: "", renderedSnapshot });
     providerOutput = {
-      gateway_result: visibleOutput,
+      gateway_result: gatewayVisibleOutput,
+      ...(speechGuardrailPacket === undefined
+        ? {}
+        : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
       capability_snapshot: renderedSnapshot,
     };
   }

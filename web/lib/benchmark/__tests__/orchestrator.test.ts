@@ -861,6 +861,7 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
   const completedActions = new Set<string>();
   const disclosedTargets = new Set<string>();
   const refreshes: Array<Readonly<{ turn: number; snapshot: CanarySnapshot }>> = [];
+  const guardrailPackets: Array<Readonly<{ action: string; packet: Record<string, unknown> }>> = [];
   let selectedTopic = false;
   let currentSnapshot: CanarySnapshot | null = null;
   let pendingAction: string | null = null;
@@ -892,6 +893,13 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
       const gatewayResult = gatewayResultValue && typeof gatewayResultValue === "object" && !Array.isArray(gatewayResultValue)
         ? gatewayResultValue as Record<string, unknown>
         : null;
+      const guardrailPacket = outputRecord?.hacc_speech_guardrail_packet;
+      if (guardrailPacket && typeof guardrailPacket === "object" && !Array.isArray(guardrailPacket)) {
+        guardrailPackets.push(Object.freeze({
+          action: pendingAction,
+          packet: guardrailPacket as Record<string, unknown>,
+        }));
+      }
       const disclosure = outputRecord?.progressive_disclosure;
       if (disclosure && typeof disclosure === "object" && !Array.isArray(disclosure)) {
         const target = (disclosure as Record<string, unknown>).target;
@@ -960,6 +968,7 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
     completedActions,
     disclosedTargets,
     refreshes,
+    guardrailPackets,
     expectedStepTargets: Object.freeze(condition.disclosures
       .map((candidate) => candidate.target)
       .filter((target) => target.startsWith("step:"))),
@@ -1675,8 +1684,13 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(toolRound).toBe(3);
     expect(disclosure).toMatchObject({
       gateway_result: { ok: true, action: "lookup_loan_case" },
+      hacc_speech_guardrail_packet: {
+        packet_type: "hacc_state_conditioned_speech_guardrail",
+        terminal_directive: "do_not_claim_terminal_success_without_authoritative_receipt",
+      },
       progressive_disclosure: { target: "step:museum_case.verify_actor" },
     });
+    expect((disclosure as { gateway_result: unknown }).gateway_result).not.toHaveProperty("gateway_result");
     const rendered = (disclosure as { capability_snapshot: string }).capability_snapshot;
     expect(rendered).toContain('"name":"flow.get_state"');
     expect(rendered).not.toContain('"name":"verify_museum_registrar"');
@@ -1703,6 +1717,13 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       expect(canary.refreshes.every((refresh) =>
         !refresh.snapshot.actions.some((action) => action.name === "flow.complete_step")
       )).toBe(true);
+      const terminalStates = canary.guardrailPackets.map(({ packet }) => packet.terminal_directive);
+      const privacyStates = canary.guardrailPackets.map(({ packet }) => packet.privacy_directive);
+      expect(privacyStates).toContain("never_repeat_verification_secrets");
+      expect(terminalStates).toContain("ambiguity_quarantine_reconcile_before_terminal_claim");
+      expect(terminalStates).toContain("confirm_only_from_authoritative_reconciliation_receipt");
+      expect(terminalStates.indexOf("ambiguity_quarantine_reconcile_before_terminal_claim"))
+        .toBeLessThan(terminalStates.indexOf("confirm_only_from_authoritative_reconciliation_receipt"));
       expect(canary.journal.appended.filter((entry) =>
         entry.event_type === "caller.capability_refresh_required"
       )).toHaveLength(20);

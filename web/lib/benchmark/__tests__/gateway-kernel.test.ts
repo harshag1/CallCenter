@@ -88,6 +88,7 @@ type PublicInvokePayload = Readonly<{
   }>;
   outcome: Readonly<{
     result_class: string;
+    provider_visible_output_hmac_sha256: string;
   }>;
 }>;
 
@@ -214,24 +215,54 @@ describe("benchmark gateway kernel", () => {
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
 
-    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" });
+    const lookupGrant = grant(harness, "lookup_work_order");
+    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId: "host-managed-stable-lookup",
+      grant: lookupGrant,
+    });
     expectOk(lookup);
+    expect(lookup.providerVisibleOutput).toMatchObject({
+      gateway_result: { ok: true, action: "lookup_work_order" },
+      hacc_speech_guardrail_packet: {
+        packet_type: "hacc_state_conditioned_speech_guardrail",
+      },
+    });
     expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
+    const verified = invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" });
+    expectOk(verified);
+    expect(verified.providerVisibleOutput).toMatchObject({
+      hacc_speech_guardrail_packet: {
+        revision: 1,
+        privacy_directive: "never_repeat_verification_secrets",
+      },
+    });
+    const replay = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId: "host-managed-stable-lookup",
+      grant: lookupGrant,
+    });
+    expect(replay.result).toMatchObject({ ok: true, disposition: "replayed" });
+    expect(replay.providerVisibleOutput).toEqual(lookup.providerVisibleOutput);
     const staleCompletion = invoke(harness, "flow.complete_step", {
       path: "field_service.locate_work_order",
       outputs: {},
     }, { grant: "g1.invalid" });
     expect(staleCompletion.result).toMatchObject({ ok: false, code: "invalid_capability" });
-    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("record_diagnostic");
     const attestation = harness.kernel.attestFinal({
       runId: "run-auto-linear",
       condition: harness.condition,
       scenario,
       world: harness.world,
     });
+    const publicInvocations = harness.kernel.transcript().entries
+      .filter((entry) => entry.operation === "invoke")
+      .map(publicInvokePayload);
+    expect(publicInvocations.every((entry) =>
+      /^[a-f0-9]{64}$/.test(entry.outcome.provider_visible_output_hmac_sha256)
+    )).toBe(true);
     expect(verifyKernelTranscript({
       transcript: harness.kernel.encodedTranscript(),
       finalAttestation: attestation,
@@ -454,6 +485,14 @@ describe("benchmark gateway kernel", () => {
     expectOk(providerCall("flow.select_topic", { topic_id: "field_service" }));
     expect(snapshot.actions.map((action) => action.name)).toContain("flow.enter_step");
     expect(snapshot.actions.map((action) => action.name)).not.toContain("lookup_work_order");
+  });
+
+  it("does not add HACC speech guardrails to the native raw arm", () => {
+    const raw = createHarness("raw-memory", "run-raw-no-speech-packet");
+    const lookup = invoke(raw, "lookup_work_order", { work_order_id: "WO-2048" });
+    expectOk(lookup);
+    expect(lookup.providerVisibleOutput).toBeUndefined();
+    expect(raw.kernel.encodedTranscript()).not.toContain("hacc_speech_guardrail_packet");
   });
 
   it("cedes only a genuine branch choice to the model, then resumes host ownership", () => {
@@ -986,12 +1025,65 @@ describe("benchmark gateway kernel", () => {
 
     const close = invoke(harness, "close_work_order", { work_order_id: "WO-2048", confirmed: true });
     expect(close.result).toMatchObject({ ok: true, action: "close_work_order", disposition: "executed" });
-    expect(close.providerVisibleOutput).toMatchObject({ ok: false, code: "transport_timeout", retriable: true });
+    expect(close.providerVisibleOutput).toMatchObject({
+      ok: false,
+      code: "action_indeterminate",
+      retriable: false,
+    });
+
+    const quarantinedState = expectOk(invoke(harness, "flow.get_state", {}))
+      .authoritative_result as Record<string, unknown>;
+    expect(quarantinedState).not.toHaveProperty("available_tools");
+    expect(quarantinedState).not.toHaveProperty("released_outcomes");
+    expect(JSON.stringify(quarantinedState)).not.toContain("CLS-WO2048-AUTH-1");
+    expect(quarantinedState).toMatchObject({
+      action_receipts: expect.arrayContaining([
+        expect.objectContaining({
+          tool: "close_work_order",
+          status: "indeterminate",
+          reconciliation_required: true,
+          retry_authority: false,
+        }),
+      ]),
+      provider_visible_frontier: {
+        scope: "step:field_service.close_and_reconcile",
+        capability_epoch: harness.snapshot.capability_epoch,
+        actions: harness.snapshot.actions.map((action) => expect.objectContaining({
+          name: action.name,
+          semantic_hash: action.semantic_hash,
+        })),
+      },
+    });
+    expect(JSON.stringify(quarantinedState)).not.toContain("capability_grant");
 
     const closeReplay = invoke(harness, "close_work_order", { work_order_id: "WO-2048", confirmed: true });
-    expect(closeReplay.result).toMatchObject({ ok: true, disposition: "replayed" });
+    expect(closeReplay.result).toMatchObject({
+      ok: false,
+      code: "action_indeterminate",
+      retriable: false,
+    });
     expect(harness.world.facts.close_count).toBe(1);
     expectOk(invoke(harness, "get_work_order_status", { work_order_id: "WO-2048" }));
+    const reconciledState = expectOk(invoke(harness, "flow.get_state", {}))
+      .authoritative_result as Record<string, unknown>;
+    expect(reconciledState).toMatchObject({
+      action_receipts: expect.arrayContaining([
+        expect.objectContaining({
+          tool: "close_work_order",
+          status: "succeeded",
+          reconciliation_required: false,
+          retry_authority: false,
+        }),
+      ]),
+      released_outcomes: [{
+        status: "succeeded",
+        authoritative_result: {
+          status: "closed",
+          close_receipt: "CLS-WO2048-AUTH-1",
+          close_count: 1,
+        },
+      }],
+    });
     completeAndEnter(
       harness,
       "field_service.close_and_reconcile",

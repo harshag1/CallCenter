@@ -453,6 +453,7 @@
       "result": {
         "fields": [
           { "path": "status", "value": { "source": "world", "path": "close_status" } },
+          { "path": "close_receipt", "value": { "literal": "CLS-WO2048-AUTH-1" } },
           { "path": "close_count", "value": { "source": "world", "path": "close_count" } },
           { "path": "repair_recorded", "value": { "source": "world", "path": "repair_recorded" } }
         ]
