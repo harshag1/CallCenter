@@ -39,6 +39,8 @@ const HEAD_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/head/v
 const PLAN_CONSUMPTION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/plan-consumption/v1\n";
 const LC4_QUALIFICATION_V3_PLAN_CONSUMPTION_DOMAIN =
   "harshas-amazing-call-center/filesystem-budget-ledger/lc4-qualification-plan-consumption/v3\n";
+const LC4_DEV_SIX_EPISODE_PLAN_CONSUMPTION_DOMAIN =
+  "harshas-amazing-call-center/filesystem-budget-ledger/lc4-dev-six-episode-plan-consumption/v1\n";
 const EMPTY_HASH = "0".repeat(64);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
@@ -54,6 +56,11 @@ const LC4_QUALIFICATION_V3_PAID_GENERATION_SESSIONS = 3;
 const LC4_QUALIFICATION_V3_LOGICAL_GENERATION_PHASES = 6;
 const LC4_QUALIFICATION_V3_TOOL_ROUNDTRIPS = 3;
 const LC4_QUALIFICATION_V3_RETRIES = 0;
+const LC4_DEV_SIX_EPISODE_MAXIMUM_MICRO_USD = 15_000_000;
+const LC4_DEV_SIX_EPISODE_CELLS = 6;
+const LC4_DEV_SIX_EPISODE_SEGMENTS = 18;
+const LC4_DEV_SIX_EPISODE_RETRIES = 0;
+const LC4_DEV_SIX_EPISODE_RECONNECTS = 0;
 const LOCK_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const BIGINT_ZERO = BigInt(0);
@@ -340,10 +347,40 @@ export type Lc4QualificationV3PlanConsumption = Readonly<{
   maximumRetries: number;
 }>;
 
+/**
+ * One-shot aggregate authority for the public LC4-DEV six-cell execution.
+ * The authority is consumed by the first cell reservation, while the signed
+ * cell-set hash and aggregate maximum bind all six reservations that must be
+ * materialized before provider construction is permitted.
+ */
+export type Lc4DevSixEpisodePlanConsumption = Readonly<{
+  kind: "lc4_dev_six_episode";
+  consumptionId: string;
+  planSha256: string;
+  maximumMicroUsd: number;
+  authorizationArtifactSha256: string;
+  executionId: string;
+  prepareSha256: string;
+  preflightSha256: string;
+  sourceCommit: string;
+  sourceTreeSha256: string;
+  credentialSetSha256: string;
+  providerProfileManifestSha256: string;
+  audioManifestSha256: string;
+  qualificationReceiptSha256: string;
+  episodeSetSha256: string;
+  maximumEpisodeCount: number;
+  maximumSegmentCount: number;
+  maximumRetries: number;
+  maximumReconnects: number;
+  maximumRunDurationMs: number;
+}>;
+
 export type BudgetPlanConsumption =
   | Gate1PaidPlanConsumption
   | Lc4QualificationV2PlanConsumption
-  | Lc4QualificationV3PlanConsumption;
+  | Lc4QualificationV3PlanConsumption
+  | Lc4DevSixEpisodePlanConsumption;
 
 export class FilesystemBudgetLedgerError extends Error {
   readonly code:
@@ -1693,13 +1730,15 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
     if (input.planConsumption.kind !== undefined
       && input.planConsumption.kind !== "gate1_paid_plan"
       && input.planConsumption.kind !== "lc4_qualification_v2"
-      && input.planConsumption.kind !== "lc4_qualification_v3") {
+      && input.planConsumption.kind !== "lc4_qualification_v3"
+      && input.planConsumption.kind !== "lc4_dev_six_episode") {
       fail("invalid_input", "plan consumption kind is unsupported");
     }
     assertIdentifier(input.planConsumption.consumptionId, "planConsumption.consumptionId");
     assertHash(input.planConsumption.planSha256, "planConsumption.planSha256");
     assertMicroUsd(input.planConsumption.maximumMicroUsd, "planConsumption.maximumMicroUsd", true);
-    if (input.planConsumption.maximumMicroUsd !== normalized.maximum) {
+    if (input.planConsumption.kind !== "lc4_dev_six_episode"
+      && input.planConsumption.maximumMicroUsd !== normalized.maximum) {
       fail("invalid_input", "plan consumption maximum differs from the cost envelope");
     }
     if (input.planConsumption.kind === "lc4_qualification_v2") {
@@ -1750,6 +1789,33 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
         || value.maximumRetries !== LC4_QUALIFICATION_V3_RETRIES) {
         fail("invalid_input", "qualification consumption weakened the exact v3 budget, session, phase, roundtrip, or no-retry contract");
       }
+    } else if (input.planConsumption.kind === "lc4_dev_six_episode") {
+      const value = input.planConsumption;
+      for (const [label, digest] of [
+        ["authorizationArtifactSha256", value.authorizationArtifactSha256],
+        ["prepareSha256", value.prepareSha256],
+        ["preflightSha256", value.preflightSha256],
+        ["sourceTreeSha256", value.sourceTreeSha256],
+        ["credentialSetSha256", value.credentialSetSha256],
+        ["providerProfileManifestSha256", value.providerProfileManifestSha256],
+        ["audioManifestSha256", value.audioManifestSha256],
+        ["qualificationReceiptSha256", value.qualificationReceiptSha256],
+        ["episodeSetSha256", value.episodeSetSha256],
+      ] as const) assertHash(digest, `planConsumption.${label}`);
+      assertIdentifier(value.executionId, "planConsumption.executionId");
+      assertIdentifier(value.sourceCommit, "planConsumption.sourceCommit");
+      if (value.maximumMicroUsd !== LC4_DEV_SIX_EPISODE_MAXIMUM_MICRO_USD
+        || value.maximumEpisodeCount !== LC4_DEV_SIX_EPISODE_CELLS
+        || value.maximumSegmentCount !== LC4_DEV_SIX_EPISODE_SEGMENTS
+        || value.maximumRetries !== LC4_DEV_SIX_EPISODE_RETRIES
+        || value.maximumReconnects !== LC4_DEV_SIX_EPISODE_RECONNECTS
+        || !Number.isSafeInteger(value.maximumRunDurationMs)
+        || value.maximumRunDurationMs <= 0) {
+        fail("invalid_input", "LC4-DEV consumption weakened the exact aggregate budget, cell, segment, duration, no-retry, or no-reconnect contract");
+      }
+      if (normalized.maximum <= 0 || normalized.maximum > value.maximumMicroUsd) {
+        fail("invalid_input", "LC4-DEV first cell reservation exceeds aggregate authority");
+      }
     } else if (input.planConsumption.maximumMicroUsd !== PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD) {
       fail("invalid_input", "paid plan consumption must bind the exact $5 maximum");
     }
@@ -1794,9 +1860,14 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
         || input.planConsumption.kind === "lc4_qualification_v3"
         ? input.planConsumption
         : null;
+      const devConsumption = input.planConsumption.kind === "lc4_dev_six_episode"
+        ? input.planConsumption
+        : null;
       const body = Object.freeze({
         schema_version: 1,
-        kind: qualificationConsumption === null
+        kind: devConsumption !== null
+          ? "hacc_lc4_dev_six_episode_consumption"
+          : qualificationConsumption === null
           ? "hacc_paid_plan_consumption"
           : qualificationConsumption.kind === "lc4_qualification_v3"
             ? "hacc_lc4_qualification_v3_consumption"
@@ -1810,6 +1881,24 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
         reservation_id: input.reservationId,
         operation_id: input.operationId,
         consumed_at: occurredAt,
+        ...(devConsumption === null ? {} : {
+          authorization_artifact_sha256: devConsumption.authorizationArtifactSha256,
+          execution_id: devConsumption.executionId,
+          prepare_sha256: devConsumption.prepareSha256,
+          preflight_sha256: devConsumption.preflightSha256,
+          source_commit: devConsumption.sourceCommit,
+          source_tree_sha256: devConsumption.sourceTreeSha256,
+          credential_set_sha256: devConsumption.credentialSetSha256,
+          provider_profile_manifest_sha256: devConsumption.providerProfileManifestSha256,
+          audio_manifest_sha256: devConsumption.audioManifestSha256,
+          qualification_receipt_sha256: devConsumption.qualificationReceiptSha256,
+          episode_set_sha256: devConsumption.episodeSetSha256,
+          maximum_episode_count: devConsumption.maximumEpisodeCount,
+          maximum_segment_count: devConsumption.maximumSegmentCount,
+          maximum_retries: devConsumption.maximumRetries,
+          maximum_reconnects: devConsumption.maximumReconnects,
+          maximum_run_duration_ms: devConsumption.maximumRunDurationMs,
+        }),
         ...(qualificationConsumption === null ? {} : {
           authorization_artifact_sha256: qualificationConsumption.authorizationArtifactSha256,
           authorization_id: qualificationConsumption.authorizationId,
@@ -1833,11 +1922,22 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
           }),
         }),
       });
-      const identityDomain = qualificationConsumption?.kind === "lc4_qualification_v3"
+      const identityDomain = devConsumption !== null
+        ? LC4_DEV_SIX_EPISODE_PLAN_CONSUMPTION_DOMAIN
+        : qualificationConsumption?.kind === "lc4_qualification_v3"
         ? LC4_QUALIFICATION_V3_PLAN_CONSUMPTION_DOMAIN
         : PLAN_CONSUMPTION_DOMAIN;
       const identity = sha256Hex(`${identityDomain}${canonicalJson(
-        qualificationConsumption === null
+        devConsumption !== null
+          ? {
+              ledger_id: body.ledger_id,
+              kind: body.kind,
+              authorization_artifact_sha256: devConsumption.authorizationArtifactSha256,
+              execution_id: devConsumption.executionId,
+              plan_sha256: devConsumption.planSha256,
+              episode_set_sha256: devConsumption.episodeSetSha256,
+            }
+          : qualificationConsumption === null
           ? {
               ledger_id: body.ledger_id,
               ledger_open_head_sha256: body.ledger_open_head_sha256,
