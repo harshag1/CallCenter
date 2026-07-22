@@ -84,7 +84,7 @@ import type { NormalizedRealtimeClient } from "../lib/realtime/client/types";
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/hacc-lc3-v5");
+const DEFAULT_ROOT = resolve(REPOSITORY_ROOT, "benchmarks/voice-long-horizon/.local/hacc-lc3-v6");
 const PLAN_FILE = "experiment-plan.json";
 const LEDGER_FILE = "budget-ledger.jsonl";
 const PRIVATE_KEY_FILE = "operator-ed25519.private.pem";
@@ -956,7 +956,7 @@ async function report(root: string): Promise<void> {
   }));
   await atomicJson(resolve(root, "result.json"), result);
   const markdown = [
-    "# HACC-LC3-v5 admissibility-frontier mechanism validation",
+    "# HACC-LC3-v6 outcome-informed development replication",
     "",
     `- Result SHA-256: \`${result.resultSha256}\``,
     `- Scheduled episodes: **${result.scheduledEpisodes}** (${result.scheduledPairs} matched pairs)`,

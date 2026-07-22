@@ -22,7 +22,7 @@ import {
   type LongCallSummary,
 } from "../long-call-live-experiment";
 
-describe("HACC-LC3-v5 long-call live experiment", () => {
+describe("HACC-LC3-v6 long-call live experiment", () => {
   it("freezes 9 paired strata, 18 episodes, and 360 caller turns", () => {
     const pairs = createLongCallPairs();
     const cells = createLongCallCells();
@@ -33,7 +33,7 @@ describe("HACC-LC3-v5 long-call live experiment", () => {
     expect(new Set(pairs.map((pair) => pair.family))).toEqual(new Set(LONG_CALL_FAMILIES));
     expect(new Set(pairs.map((pair) => pair.ttsVoice))).toEqual(new Set(LONG_CALL_TTS_VOICES));
     for (const pair of pairs) {
-      expect(pair.pairId).toMatch(/^lc3v5-(?:openai|gemini|xai)-(?:museum|campus|water)-samantha$/);
+      expect(pair.pairId).toMatch(/^lc3v6-(?:openai|gemini|xai)-(?:museum|campus|water)-samantha$/);
       expect(new Set(pair.armOrder)).toEqual(new Set(["raw-memory", "host-managed-harness"]));
       const pairCells = cells.filter((cell) => cell.pairId === pair.pairId);
       expect(pairCells.every((cell) => cell.runId.startsWith(`${pair.pairId}-`))).toBe(true);

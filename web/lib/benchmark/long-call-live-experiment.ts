@@ -14,7 +14,7 @@ import type { PublicKernelTranscript } from "./kernel-transcript";
 import type { ToolWorldState } from "./tool-world";
 import type { CompiledBenchmarkCondition } from "./condition-compiler";
 
-export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v5" as const;
+export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v6" as const;
 export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v3";
 export const LONG_CALL_TTS_VOICES = Object.freeze(["Samantha"] as const);
 export const LONG_CALL_CONDITIONS = Object.freeze(["raw-memory", "host-managed-harness"] as const);
@@ -161,7 +161,7 @@ export function createLongCallPairs(): readonly LongCallPair[] {
   for (const provider of LONG_CALL_PROVIDERS) {
     for (const family of LONG_CALL_FAMILIES) {
       for (const ttsVoice of LONG_CALL_TTS_VOICES) {
-        const pairId = `lc3v5-${provider}-${family}-${ttsVoice.toLowerCase()}`;
+        const pairId = `lc3v6-${provider}-${family}-${ttsVoice.toLowerCase()}`;
         pairs.push(Object.freeze({
           ordinal: ++ordinal,
           pairId,
