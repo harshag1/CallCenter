@@ -1,26 +1,33 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+  LC4_QUALIFICATION_V3_MAXIMUM_AUTHORIZATION_TTL_MS,
   LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
   LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
   LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
   LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
   LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD,
   LC4_XAI_SERVER_VAD_SETTING_SHA256,
+  assertLc4QualificationV3Authorization,
   assertLc4QualificationV3PlanArtifact,
   createLc4QualificationV3AuthorizationArtifact,
   createLc4QualificationV3Targets,
+  loadLc4QualificationV3AuthorizationFile,
   loadLc4QualificationV3ExplicitCredentials,
+  loadLc4QualificationV3PrivateKeyFile,
   prepareLc4QualificationV3,
   reportLc4QualificationV3,
   runLc4QualificationV3,
+  runLc4QualificationV3Cli,
   type Lc4QualificationV3AuthorizationBody,
+  type Lc4QualificationV3AuthorizationArtifact,
   type Lc4QualificationV3GitSource,
+  type Lc4QualificationV3PlanArtifact,
 } from "../lc4-qualification-v3-runner";
 import { productionSessionPayloadParitySha256 } from "../production-realtime-provider";
 import {
@@ -98,6 +105,38 @@ const renderer: Lc4S2sAudioRenderer = Object.freeze({
     return Object.freeze({ pcm16k: pcm(16_000), pcm24k: pcm(24_000) });
   },
 });
+
+function authorizationFor(
+  plan: Lc4QualificationV3PlanArtifact,
+  authorityPrivateKeyPem: string,
+  terminalKey: ReturnType<typeof keys>,
+  authorizationId: string,
+): ReturnType<typeof createLc4QualificationV3AuthorizationArtifact> {
+  return createLc4QualificationV3AuthorizationArtifact({
+    body: Object.freeze({
+      schema_version: 1,
+      authorization_version: LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+      authorization_id: authorizationId,
+      authorization_nonce_sha256: sha256Hex(`nonce:${authorizationId}`),
+      plan_artifact_sha256: plan.artifact_sha256,
+      plan_sha256: plan.body.plan_sha256,
+      source_commit: plan.body.source.source_commit,
+      source_tree_sha256: plan.body.source.source_tree_sha256,
+      credential_set_sha256: plan.body.credential_set_sha256,
+      terminal_public_key_spki_base64: terminalKey.publicSpkiBase64,
+      terminal_public_key_fingerprint_sha256: terminalKey.fingerprint,
+      maximum_total_micro_usd: LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD,
+      maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+      maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+      maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+      maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+      paid_retry_allowed: false,
+      not_before: "2026-07-22T19:30:00.000Z",
+      expires_at: "2026-07-22T20:30:00.000Z",
+    }),
+    authorityPrivateKeyPem,
+  });
+}
 
 function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = false): SessionConfigurationAcknowledgement {
   const verified = Object.freeze({ status: "verified" as const, requestedSha256: "1".repeat(64), acknowledgedSha256: "1".repeat(64), acknowledgedBy: "session.updated" as const });
@@ -438,6 +477,132 @@ describe("LC4 qualification v3 signed runner", () => {
     }, authority.fingerprint)).toThrow("hash mismatch");
   });
 
+  it("creates only a fresh outside-repository 0700 evidence root", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-root-boundary-"));
+    roots.push(workspace);
+    const repositoryRoot = join(workspace, "repository");
+    await mkdir(repositoryRoot, { mode: 0o700 });
+    const authority = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const prepare = (root: string, planId: string) => prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId,
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+
+    const absent = join(workspace, "absent-evidence");
+    await expect(prepare(absent, "qualification-v3-absent-root")).resolves.toBeDefined();
+    expect((await lstat(absent)).mode & 0o777).toBe(0o700);
+
+    const safeEmpty = join(workspace, "safe-empty-evidence");
+    await mkdir(safeEmpty, { mode: 0o700 });
+    await expect(prepare(safeEmpty, "qualification-v3-safe-empty-root")).resolves.toBeDefined();
+
+    const nonempty = join(workspace, "nonempty-evidence");
+    await mkdir(nonempty, { mode: 0o700 });
+    await writeFile(join(nonempty, "foreign.txt"), "foreign", { mode: 0o600 });
+    await expect(prepare(nonempty, "qualification-v3-nonempty-root")).rejects.toThrow("fresh and empty");
+
+    const loose = join(workspace, "loose-evidence");
+    await mkdir(loose, { mode: 0o755 });
+    await expect(prepare(loose, "qualification-v3-loose-root")).rejects.toThrow("private 0700");
+
+    const linkTarget = join(workspace, "link-target");
+    const linked = join(workspace, "linked-evidence");
+    await mkdir(linkTarget, { mode: 0o700 });
+    await symlink(linkTarget, linked);
+    await expect(prepare(linked, "qualification-v3-linked-root")).rejects.toThrow("private 0700");
+
+    await expect(prepare(join(repositoryRoot, "inside"), "qualification-v3-inside-root"))
+      .rejects.toThrow("outside the repository");
+    await expect(prepare("relative-evidence", "qualification-v3-relative-root"))
+      .rejects.toThrow("absolute normalized path");
+  });
+
+  it("loads CLI keys and authorization only from stable private absolute files", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-secure-files-"));
+    roots.push(workspace);
+    const identity = keys();
+    const keyPath = join(workspace, "terminal.pem");
+    await writeFile(keyPath, identity.privatePem, { mode: 0o600 });
+    await expect(loadLc4QualificationV3PrivateKeyFile(keyPath, "test terminal key"))
+      .resolves.toBe(identity.privatePem);
+    await expect(loadLc4QualificationV3PrivateKeyFile("terminal.pem", "test terminal key"))
+      .rejects.toThrow("absolute normalized path");
+
+    const keyLink = join(workspace, "terminal-link.pem");
+    await symlink(keyPath, keyLink);
+    await expect(loadLc4QualificationV3PrivateKeyFile(keyLink, "test terminal key"))
+      .rejects.toThrow("private regular non-linked file");
+
+    const prepareStdout: string[] = [];
+    const prepareStderr: string[] = [];
+    const cliEvidenceRoot = join(workspace, "cli-evidence");
+    await expect(runLc4QualificationV3Cli([
+      "prepare",
+      "--root", cliEvidenceRoot,
+      "--repository-root", workspace,
+      "--authority-private-key", keyLink,
+      "--trust-root-fingerprint", identity.fingerprint,
+      "--provider-env-file", join(workspace, "provider.env"),
+      "--repo-env-file", join(workspace, "repo.env"),
+    ], {
+      stdout: (value) => prepareStdout.push(value),
+      stderr: (value) => prepareStderr.push(value),
+    })).resolves.toBe(1);
+    expect(prepareStdout).toEqual([]);
+    expect(prepareStderr.join("\n")).toContain('"code":"cli_input_invalid"');
+    await expect(lstat(cliEvidenceRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const looseKey = join(workspace, "loose.pem");
+    await writeFile(looseKey, identity.privatePem, { mode: 0o644 });
+    await expect(loadLc4QualificationV3PrivateKeyFile(looseKey, "test terminal key"))
+      .rejects.toThrow("private regular non-linked file");
+
+    const hardLink = join(workspace, "terminal-hardlink.pem");
+    await link(keyPath, hardLink);
+    await expect(loadLc4QualificationV3PrivateKeyFile(keyPath, "test terminal key"))
+      .rejects.toThrow("private regular non-linked file");
+
+    const authorizationPath = join(workspace, "authorization.json");
+    await writeFile(authorizationPath, "{}\n", { mode: 0o400 });
+    await expect(loadLc4QualificationV3AuthorizationFile(authorizationPath)).resolves.toEqual({});
+    const authorizationLink = join(workspace, "authorization-link.json");
+    await symlink(authorizationPath, authorizationLink);
+    const runStderr: string[] = [];
+    await expect(runLc4QualificationV3Cli([
+      "run",
+      "--root", workspace,
+      "--repository-root", workspace,
+      "--authorization", authorizationLink,
+      "--trust-root-fingerprint", identity.fingerprint,
+      "--terminal-private-key", keyPath,
+      "--provider-env-file", join(workspace, "provider.env"),
+      "--repo-env-file", join(workspace, "repo.env"),
+    ], {
+      stdout: () => undefined,
+      stderr: (value) => runStderr.push(value),
+    })).resolves.toBe(1);
+    expect(runStderr.join("\n")).toContain('"code":"cli_input_invalid"');
+    await chmod(authorizationPath, 0o444);
+    await expect(loadLc4QualificationV3AuthorizationFile(authorizationPath))
+      .rejects.toThrow("private regular non-linked file");
+
+    const malformedPath = join(workspace, "malformed-authorization.json");
+    await writeFile(malformedPath, "{\n", { mode: 0o400 });
+    await expect(loadLc4QualificationV3AuthorizationFile(malformedPath))
+      .rejects.toThrow("valid UTF-8 JSON");
+  });
+
   it("retains a signed replay-complete terminal and self-excluding package envelope", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-evidence-"));
     const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
@@ -473,10 +638,26 @@ describe("LC4 qualification v3 signed runner", () => {
       maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
       maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
       paid_retry_allowed: false,
-      not_before: "2026-07-22T19:00:00.000Z",
-      expires_at: "2026-07-22T21:00:00.000Z",
+      not_before: "2026-07-22T19:30:00.000Z",
+      expires_at: "2026-07-22T20:30:00.000Z",
     });
     const authorization = createLc4QualificationV3AuthorizationArtifact({ body: authBody, authorityPrivateKeyPem: authority.privatePem });
+    expect(LC4_QUALIFICATION_V3_MAXIMUM_AUTHORIZATION_TTL_MS).toBe(3_600_000);
+    const overlongAuthorization = createLc4QualificationV3AuthorizationArtifact({
+      body: Object.freeze({
+        ...authBody,
+        authorization_id: "qualification-v3-attempt-overlong",
+        authorization_nonce_sha256: "e".repeat(64),
+        not_before: "2026-07-22T19:00:00.000Z",
+      }),
+      authorityPrivateKeyPem: authority.privatePem,
+    });
+    expect(() => assertLc4QualificationV3Authorization({
+      artifact: overlongAuthorization,
+      plan,
+      trustRootFingerprint: authority.fingerprint,
+      now: NOW,
+    })).toThrow("maximum TTL");
     const terminal = await runLc4QualificationV3({
       root,
       repositoryRoot,
@@ -606,6 +787,153 @@ describe("LC4 qualification v3 signed runner", () => {
       providerEnvFile: providerLink,
       repoEnvFile: repository,
     })).rejects.toMatchObject({ stage: "credentials", code: "credential_source_invalid" });
+    await expect(loadLc4QualificationV3ExplicitCredentials({
+      providerEnvFile: `${root}/nested/../provider.env`,
+      repoEnvFile: repository,
+    })).rejects.toMatchObject({ stage: "credentials", code: "credential_source_invalid" });
+  });
+
+  it("re-checks authorization expiry before every provider admission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-expiry-"));
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
+    roots.push(root, repositoryRoot);
+    const authority = keys();
+    const terminalKey = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const plan = await prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId: "qualification-v3-expiry-plan",
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+    const authorization = createLc4QualificationV3AuthorizationArtifact({
+      body: Object.freeze({
+        schema_version: 1,
+        authorization_version: LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+        authorization_id: "qualification-v3-expiry-attempt",
+        authorization_nonce_sha256: "f".repeat(64),
+        plan_artifact_sha256: plan.artifact_sha256,
+        plan_sha256: plan.body.plan_sha256,
+        source_commit: plan.body.source.source_commit,
+        source_tree_sha256: plan.body.source.source_tree_sha256,
+        credential_set_sha256: plan.body.credential_set_sha256,
+        terminal_public_key_spki_base64: terminalKey.publicSpkiBase64,
+        terminal_public_key_fingerprint_sha256: terminalKey.fingerprint,
+        maximum_total_micro_usd: LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD,
+        maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+        maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+        maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+        maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+        paid_retry_allowed: false,
+        not_before: "2026-07-22T19:30:00.000Z",
+        expires_at: "2026-07-22T20:30:00.000Z",
+      }),
+      authorityPrivateKeyPem: authority.privatePem,
+    });
+    const mutableAuthorization = JSON.parse(canonicalJson(authorization)) as Lc4QualificationV3AuthorizationArtifact;
+    expect(Object.isFrozen(mutableAuthorization.body)).toBe(false);
+    let clock = NOW;
+    const providerAdmissions: Array<Readonly<{ provider: LiveStsProvider; admitted_at: string }>> = [];
+    let roundtrips = 0;
+    const terminal = await runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization: mutableAuthorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => clock,
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+        createClient: (provider) => {
+          providerAdmissions.push(Object.freeze({ provider, admitted_at: clock.toISOString() }));
+          clock = new Date("2026-07-22T20:30:00.000Z");
+          return new SetupClient(provider, true);
+        },
+        executeRoundtrip: async (input) => {
+          roundtrips += 1;
+          return passedExecution(input);
+        },
+      },
+    });
+    expect(terminal.body.status).toBe("failed");
+    expect(providerAdmissions).toEqual([{ provider: "openai", admitted_at: NOW.toISOString() }]);
+    expect(roundtrips).toBe(0);
+    expect(terminal.body.provider_sessions_opened).toBe(1);
+    expect(terminal.body.paid_sessions_opened).toBe(0);
+    expect(Object.isFrozen(mutableAuthorization)).toBe(true);
+    expect(Object.isFrozen(mutableAuthorization.body)).toBe(true);
+  });
+
+  it("rejects evidence-root replacement after invocation but before provider admission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-replaced-root-"));
+    const movedRoot = `${root}.moved`;
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
+    roots.push(root, movedRoot, repositoryRoot);
+    const authority = keys();
+    const terminalKey = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const plan = await prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId: "qualification-v3-root-replacement-plan",
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+    const authorization = authorizationFor(
+      plan,
+      authority.privatePem,
+      terminalKey,
+      "qualification-v3-root-replacement-attempt",
+    );
+    let credentialReads = 0;
+    let clientConstructions = 0;
+    await expect(runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => NOW,
+      dependencies: {
+        inspectGitSource: async () => {
+          await rename(root, movedRoot);
+          await mkdir(root, { mode: 0o700 });
+          return SOURCE;
+        },
+        loadCredentials: async () => {
+          credentialReads += 1;
+          return CREDENTIALS;
+        },
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+        createClient: (provider) => {
+          clientConstructions += 1;
+          return new SetupClient(provider, true);
+        },
+        executeRoundtrip: async (input) => passedExecution(input),
+      },
+    })).rejects.toMatchObject({ stage: "plan", code: "plan_validation_failed" });
+    expect(credentialReads).toBe(0);
+    expect(clientConstructions).toBe(0);
+    await expect(lstat(join(movedRoot, "attempts", `${authorization.body.authorization_id}.invoked.json`)))
+      .resolves.toMatchObject({ mode: expect.any(Number) });
+    await expect(lstat(join(root, "attempts"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("strands authority and retains a signed refusal before budget or provider construction", async () => {
@@ -647,8 +975,8 @@ describe("LC4 qualification v3 signed runner", () => {
       maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
       maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
       paid_retry_allowed: false,
-      not_before: "2026-07-22T19:00:00.000Z",
-      expires_at: "2026-07-22T21:00:00.000Z",
+      not_before: "2026-07-22T19:30:00.000Z",
+      expires_at: "2026-07-22T20:30:00.000Z",
     });
     const authorization = createLc4QualificationV3AuthorizationArtifact({
       body: authBody,
@@ -673,6 +1001,22 @@ describe("LC4 qualification v3 signed runner", () => {
       },
       executeRoundtrip: async (input: Parameters<typeof passedExecution>[0]) => passedExecution(input),
     };
+    await chmod(root, 0o755);
+    await expect(runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => NOW,
+      dependencies,
+    })).rejects.toMatchObject({ stage: "plan", code: "plan_validation_failed" });
+    expect(sourceInspections).toBe(0);
+    expect(credentialReads).toBe(0);
+    expect(clientConstructions).toBe(0);
+    await expect(lstat(join(root, "attempts"))).rejects.toMatchObject({ code: "ENOENT" });
+    await chmod(root, 0o700);
+
     await expect(runLc4QualificationV3({
       root,
       repositoryRoot,

@@ -15,12 +15,13 @@ import {
   open,
   readFile,
   readdir,
+  realpath,
   rename,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { canonicalJson, sha256Hex } from "./artifacts";
 import {
@@ -95,6 +96,7 @@ export const LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS = 6 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS = 3 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES = 6 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS = 3 as const;
+export const LC4_QUALIFICATION_V3_MAXIMUM_AUTHORIZATION_TTL_MS = 3_600_000 as const;
 export const LC4_QUALIFICATION_V3_PROVIDER_ORDER = Object.freeze(["openai", "gemini", "xai"] as const);
 export const LC4_XAI_SERVER_VAD_SETTING_SHA256 = XAI_SERVER_VAD_SETTING_SHA256;
 
@@ -120,6 +122,8 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
 const MAXIMUM_CREDENTIAL_ENV_BYTES = 1024 * 1024;
+const MAXIMUM_PRIVATE_KEY_BYTES = 64 * 1024;
+const MAXIMUM_AUTHORIZATION_JSON_BYTES = 16 * 1024 * 1024;
 
 export type Lc4QualificationV3GitSource = Readonly<{
   source_commit: string;
@@ -429,6 +433,181 @@ function requireIso(value: string, label: string): number {
   return epoch;
 }
 
+function absoluteNormalized(path: string, label: string): string {
+  if (!isAbsolute(path) || resolve(path) !== path) {
+    throw new Error(`${label} must be an absolute normalized path`);
+  }
+  return path;
+}
+
+function isOutside(parent: string, child: string): boolean {
+  const relation = relative(parent, child);
+  return relation === ".." || relation.startsWith(`..${sep}`);
+}
+
+async function readStablePrivateFile(path: string, label: string, maximumBytes: number): Promise<Buffer> {
+  const target = absoluteNormalized(path, label);
+  const before = await lstat(target);
+  if (!before.isFile()
+    || before.isSymbolicLink()
+    || before.nlink !== 1
+    || (before.mode & 0o077) !== 0
+    || before.size <= 0
+    || before.size > maximumBytes) {
+    throw new Error(`${label} must be one bounded private regular non-linked file`);
+  }
+  const handle = await open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+      || opened.nlink !== 1
+      || (opened.mode & 0o077) !== 0
+      || opened.size !== before.size) {
+      throw new Error(`${label} changed while it was opened`);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (bytes.byteLength !== opened.size
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.nlink !== 1
+      || (after.mode & 0o077) !== 0
+      || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function loadLc4QualificationV3PrivateKeyFile(path: string, label: string): Promise<string> {
+  const bytes = await readStablePrivateFile(path, label, MAXIMUM_PRIVATE_KEY_BYTES);
+  const pem = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  keyIdentity(pem);
+  return pem;
+}
+
+export async function loadLc4QualificationV3AuthorizationFile(
+  path: string,
+): Promise<Lc4QualificationV3AuthorizationArtifact> {
+  const bytes = await readStablePrivateFile(
+    path,
+    "LC4 qualification v3 authorization",
+    MAXIMUM_AUTHORIZATION_JSON_BYTES,
+  );
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Lc4QualificationV3AuthorizationArtifact;
+  } catch {
+    throw new Error("LC4 qualification v3 authorization must be valid UTF-8 JSON");
+  }
+}
+
+async function initializeLc4QualificationV3EvidenceRoot(rootPath: string, repositoryPath: string): Promise<string> {
+  const root = absoluteNormalized(rootPath, "LC4 qualification v3 evidence root");
+  const repositoryRoot = absoluteNormalized(repositoryPath, "LC4 qualification v3 repository root");
+  const physicalRepositoryRoot = await realpath(repositoryRoot);
+  const parent = dirname(root);
+  const physicalParent = await realpath(parent);
+  const physicalCandidate = resolve(physicalParent, basename(root));
+  if (!isOutside(physicalRepositoryRoot, physicalCandidate)) {
+    throw new Error("LC4 qualification v3 evidence root must be outside the repository");
+  }
+
+  let before: Awaited<ReturnType<typeof lstat>>;
+  try {
+    before = await lstat(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await mkdir(root, { mode: 0o700 });
+    before = await lstat(root);
+  }
+  if (!before.isDirectory() || before.isSymbolicLink() || (before.mode & 0o7777) !== 0o700) {
+    throw new Error("LC4 qualification v3 evidence root must be one private 0700 regular directory");
+  }
+  if ((await readdir(root)).length !== 0) {
+    throw new Error("LC4 qualification v3 evidence root must be fresh and empty");
+  }
+  const after = await lstat(root);
+  const physicalRoot = await realpath(root);
+  if (!after.isDirectory()
+    || after.isSymbolicLink()
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || (after.mode & 0o7777) !== 0o700
+    || physicalRoot !== physicalCandidate
+    || !isOutside(physicalRepositoryRoot, physicalRoot)
+    || (await readdir(root)).length !== 0) {
+    throw new Error("LC4 qualification v3 evidence root changed during validation");
+  }
+  return root;
+}
+
+async function validateLc4QualificationV3ExistingRoot(
+  rootPath: string,
+  repositoryPath?: string,
+): Promise<Readonly<{
+  path: string;
+  physical_path: string;
+  device: number;
+  inode: number;
+  physical_repository_path: string | null;
+}>> {
+  const root = absoluteNormalized(rootPath, "LC4 qualification v3 evidence root");
+  const before = await lstat(root);
+  const physicalRoot = await realpath(root);
+  if (!before.isDirectory()
+    || before.isSymbolicLink()
+    || (before.mode & 0o7777) !== 0o700) {
+    throw new Error("LC4 qualification v3 evidence root is not a physical private 0700 directory");
+  }
+  let physicalRepositoryRoot: string | null = null;
+  if (repositoryPath !== undefined) {
+    const repositoryRoot = absoluteNormalized(repositoryPath, "LC4 qualification v3 repository root");
+    physicalRepositoryRoot = await realpath(repositoryRoot);
+    if (!isOutside(physicalRepositoryRoot, physicalRoot)) {
+      throw new Error("LC4 qualification v3 evidence root is not physically outside the repository");
+    }
+  }
+  const after = await lstat(root);
+  if (!after.isDirectory()
+    || after.isSymbolicLink()
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || (after.mode & 0o7777) !== 0o700
+    || await realpath(root) !== physicalRoot) {
+    throw new Error("LC4 qualification v3 evidence root changed during validation");
+  }
+  return freeze({
+    path: root,
+    physical_path: physicalRoot,
+    device: before.dev,
+    inode: before.ino,
+    physical_repository_path: physicalRepositoryRoot,
+  });
+}
+
+async function reassertLc4QualificationV3ExistingRoot(root: Awaited<ReturnType<
+  typeof validateLc4QualificationV3ExistingRoot
+>>): Promise<void> {
+  const metadata = await lstat(root.path);
+  const physicalRoot = await realpath(root.path);
+  if (!metadata.isDirectory()
+    || metadata.isSymbolicLink()
+    || metadata.dev !== root.device
+    || metadata.ino !== root.inode
+    || (metadata.mode & 0o7777) !== 0o700
+    || physicalRoot !== root.physical_path
+    || (root.physical_repository_path !== null
+      && !isOutside(root.physical_repository_path, physicalRoot))) {
+    throw new Error("LC4 qualification v3 evidence root identity changed after validation");
+  }
+}
+
 async function writeImmutableJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -691,7 +870,7 @@ async function readExplicitCredentialEnvironment(path: string): Promise<Readonly
   inode: number;
   values: NodeJS.Dict<string>;
 }>> {
-  if (!isAbsolute(path)) throw boundaryError("credentials", "credential_source_invalid");
+  if (!isAbsolute(path) || resolve(path) !== path) throw boundaryError("credentials", "credential_source_invalid");
   const normalized = resolve(path);
   let before: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -699,7 +878,10 @@ async function readExplicitCredentialEnvironment(path: string): Promise<Readonly
   } catch {
     throw boundaryError("credentials", "credential_source_invalid");
   }
-  if (!before.isFile() || before.isSymbolicLink()) {
+  if (!before.isFile()
+    || before.isSymbolicLink()
+    || before.nlink !== 1
+    || (before.mode & 0o077) !== 0) {
     throw boundaryError("credentials", "credential_source_invalid");
   }
 
@@ -710,6 +892,8 @@ async function readExplicitCredentialEnvironment(path: string): Promise<Readonly
     if (!opened.isFile()
       || opened.dev !== before.dev
       || opened.ino !== before.ino
+      || opened.nlink !== 1
+      || (opened.mode & 0o077) !== 0
       || opened.size <= 0
       || opened.size > MAXIMUM_CREDENTIAL_ENV_BYTES) {
       throw boundaryError("credentials", "credential_source_invalid");
@@ -717,6 +901,10 @@ async function readExplicitCredentialEnvironment(path: string): Promise<Readonly
     const bytes = await handle.readFile();
     const after = await handle.stat();
     if (bytes.byteLength !== opened.size
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.nlink !== 1
+      || (after.mode & 0o077) !== 0
       || after.size !== opened.size
       || after.mtimeMs !== opened.mtimeMs
       || after.ctimeMs !== opened.ctimeMs) {
@@ -749,11 +937,14 @@ async function readExplicitCredentialEnvironment(path: string): Promise<Readonly
 export async function loadLc4QualificationV3ExplicitCredentials(
   files: Lc4QualificationV3CredentialFiles,
 ): Promise<Readonly<Record<LiveStsProvider, string>>> {
-  if (!isAbsolute(files.providerEnvFile) || !isAbsolute(files.repoEnvFile)) {
+  if (!isAbsolute(files.providerEnvFile)
+    || resolve(files.providerEnvFile) !== files.providerEnvFile
+    || !isAbsolute(files.repoEnvFile)
+    || resolve(files.repoEnvFile) !== files.repoEnvFile) {
     throw boundaryError("credentials", "credential_source_invalid");
   }
-  const providerPath = resolve(files.providerEnvFile);
-  const repoPath = resolve(files.repoEnvFile);
+  const providerPath = files.providerEnvFile;
+  const repoPath = files.repoEnvFile;
   if (providerPath === repoPath) throw boundaryError("credentials", "credential_source_invalid");
   const [providerSource, repoSource] = await Promise.all([
     readExplicitCredentialEnvironment(providerPath),
@@ -876,12 +1067,8 @@ export async function prepareLc4QualificationV3(input: Readonly<{
   audioRenderer?: Lc4S2sAudioRenderer;
   dependencies?: Pick<Dependencies, "inspectGitSource" | "loadCredentials" | "materializeAudio">;
 }>): Promise<Lc4QualificationV3PlanArtifact> {
-  const root = resolve(input.root);
-  const repositoryRoot = resolve(input.repositoryRoot);
-  const rootRelation = relative(repositoryRoot, root);
-  if (rootRelation === "" || (!rootRelation.startsWith("..") && !resolve(rootRelation).startsWith(".."))) {
-    throw new Error("LC4 qualification v3 evidence root must be outside the repository");
-  }
+  const repositoryRoot = absoluteNormalized(input.repositoryRoot, "LC4 qualification v3 repository root");
+  const root = await initializeLc4QualificationV3EvidenceRoot(input.root, repositoryRoot);
   const dependencies = input.dependencies ?? defaultDependencies;
   const [source, credentials] = await Promise.all([
     dependencies.inspectGitSource(repositoryRoot),
@@ -987,7 +1174,21 @@ export function assertLc4QualificationV3Authorization(input: Readonly<{
   }
   const start = requireIso(body.not_before, "authorization start");
   const end = requireIso(body.expires_at, "authorization expiry");
-  if (end <= start || input.now.getTime() < start || input.now.getTime() >= end) throw new Error("LC4 qualification v3 authorization is inactive");
+  if (end <= start
+    || end - start > LC4_QUALIFICATION_V3_MAXIMUM_AUTHORIZATION_TTL_MS
+    || input.now.getTime() < start
+    || input.now.getTime() >= end) {
+    throw new Error("LC4 qualification v3 authorization is inactive or exceeds its maximum TTL");
+  }
+}
+
+function assertLc4QualificationV3ProviderAdmission(
+  signedExpiresAt: number,
+  at: Date,
+): void {
+  if (!Number.isFinite(at.getTime()) || at.getTime() >= signedExpiresAt) {
+    throw new Error("LC4 qualification v3 authorization expired before provider admission");
+  }
 }
 
 async function retainRoundtrip(partial: string, execution: Lc4S2sRoundtripExecution): Promise<void> {
@@ -1227,12 +1428,14 @@ export async function runLc4QualificationV3(input: Readonly<{
   now?: () => Date;
   dependencies?: Dependencies;
 }>): Promise<Lc4QualificationV3TerminalArtifact> {
-  const root = resolve(input.root);
-  const repositoryRoot = resolve(input.repositoryRoot);
+  let root: string;
+  let rootIdentity: Awaited<ReturnType<typeof validateLc4QualificationV3ExistingRoot>>;
+  let repositoryRoot: string;
   let plan: Lc4QualificationV3PlanArtifact;
   try {
-    const rootMetadata = await lstat(root);
-    if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) throw new Error("invalid root");
+    repositoryRoot = absoluteNormalized(input.repositoryRoot, "LC4 qualification v3 repository root");
+    rootIdentity = await validateLc4QualificationV3ExistingRoot(input.root, repositoryRoot);
+    root = rootIdentity.path;
     plan = await readJson<Lc4QualificationV3PlanArtifact>(resolve(root, "lc4-qualification-v3-plan.json"));
     assertLc4QualificationV3PlanArtifact(plan, input.trustRootFingerprint);
   } catch {
@@ -1250,6 +1453,11 @@ export async function runLc4QualificationV3(input: Readonly<{
   } catch {
     throw boundaryError("authorization", "authorization_validation_failed");
   }
+  freeze(input.authorization);
+  const signedAuthorizationExpiresAt = requireIso(
+    input.authorization.body.expires_at,
+    "authorization expiry",
+  );
   try {
     const terminalKey = keyIdentity(input.terminalPrivateKeyPem);
     if (terminalKey.fingerprint !== input.authorization.body.terminal_public_key_fingerprint_sha256) {
@@ -1269,13 +1477,18 @@ export async function runLc4QualificationV3(input: Readonly<{
     terminalPrivateKeyPem: input.terminalPrivateKeyPem,
     invokedAt: validatedAt.toISOString(),
   });
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity);
   await writeInvocationTombstone(attemptsRoot, invocation);
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity);
 
   const dependencies = input.dependencies ?? defaultDependencies;
   let source: Lc4QualificationV3GitSource;
   try {
     source = await dependencies.inspectGitSource(repositoryRoot);
   } catch {
+    await reassertLc4QualificationV3ExistingRoot(rootIdentity).catch(() => {
+      throw boundaryError("plan", "plan_validation_failed");
+    });
     const refusal = boundaryError("source", "source_inspection_failed");
     await retainPreProviderRefusal({
       attemptsRoot,
@@ -1291,6 +1504,9 @@ export async function runLc4QualificationV3(input: Readonly<{
     });
     throw refusal;
   }
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity).catch(() => {
+    throw boundaryError("plan", "plan_validation_failed");
+  });
   if (canonicalJson(source) !== canonicalJson(plan.body.source)) {
     await retainPreProviderRefusal({
       attemptsRoot,
@@ -1313,6 +1529,9 @@ export async function runLc4QualificationV3(input: Readonly<{
       ? await loadLc4QualificationV3ExplicitCredentials(input.credentialFiles)
       : await dependencies.loadCredentials(repositoryRoot);
   } catch (error) {
+    await reassertLc4QualificationV3ExistingRoot(rootIdentity).catch(() => {
+      throw boundaryError("plan", "plan_validation_failed");
+    });
     const code = error instanceof Lc4QualificationV3BoundaryError
       && (error.code === "credential_missing" || error.code === "credential_source_invalid")
       ? error.code
@@ -1331,6 +1550,9 @@ export async function runLc4QualificationV3(input: Readonly<{
     });
     throw boundaryError("credentials", code);
   }
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity).catch(() => {
+    throw boundaryError("plan", "plan_validation_failed");
+  });
   let observedCredentialSetSha256: string;
   try {
     observedCredentialSetSha256 = credentialSetSha256(credentials);
@@ -1364,6 +1586,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     });
     throw boundaryError("credentials", "credential_set_mismatch");
   }
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity);
   await mkdir(partial, { mode: 0o700 });
   const attemptedAt = now().toISOString();
   const targets = createLc4QualificationV3Targets();
@@ -1381,6 +1604,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     providersModels: freeze(Object.fromEntries(plan.body.targets.map((target) => [target.provider, target.model])) as Record<LiveStsProvider, string>),
     expiresAt: input.authorization.body.expires_at,
   });
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity);
   const budgetReservation = await reserveLc4QualificationBudget({ root, binding: budgetBinding, now });
   let setupArtifact: ProviderQualificationArtifact;
   let providerSessionsOpened = 0;
@@ -1411,7 +1635,9 @@ export async function runLc4QualificationV3(input: Readonly<{
       sourceCommit: plan.body.source.source_commit,
       targets,
       credentials,
-      createClient: (target, apiKey) => {
+      createClient: async (target, apiKey) => {
+        await reassertLc4QualificationV3ExistingRoot(rootIdentity);
+        assertLc4QualificationV3ProviderAdmission(signedAuthorizationExpiresAt, now());
         providerSessionsOpened += 1;
         return dependencies.createClient(target.provider, target.configuration, apiKey);
       },
@@ -1438,6 +1664,8 @@ export async function runLc4QualificationV3(input: Readonly<{
         const target = targets.find((entry) => entry.provider === provider)!;
         const planned = plan.body.targets.find((entry) => entry.provider === provider)!;
         const audio = await loadLc4S2sPcm({ root, artifact: plan.body.audio_fixture, provider });
+        await reassertLc4QualificationV3ExistingRoot(rootIdentity);
+        assertLc4QualificationV3ProviderAdmission(signedAuthorizationExpiresAt, now());
         paidSessionsOpened += 1;
         providerSessionsOpened += 1;
         generationPhasesAttempted += 2;
@@ -1452,6 +1680,7 @@ export async function runLc4QualificationV3(input: Readonly<{
           timeoutMs: 45_000,
           now,
         });
+        await reassertLc4QualificationV3ExistingRoot(rootIdentity);
         if (execution.audio.sha256 !== planned.caller_audio_sha256
           || execution.audio.byte_length !== planned.caller_audio_bytes
           || execution.tool_schema_sha256 !== planned.gateway_schema_sha256) throw new Error(`LC4 qualification v3 ${provider} execution differs from plan`);
@@ -1480,6 +1709,7 @@ export async function runLc4QualificationV3(input: Readonly<{
       artifactSha256: sha256Hex(`runner-exception:${attemptId}`),
     });
   } finally {
+    await reassertLc4QualificationV3ExistingRoot(rootIdentity);
     const usageProjection = executions.flatMap((execution) => execution.sanitized_usage);
     budgetEvidence = await finalizeLc4QualificationBudget({
       reservation: budgetReservation,
@@ -1666,6 +1896,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     authorityPrivateKeyPem: input.terminalPrivateKeyPem,
   });
   await writeImmutableJson(resolve(partial, "qualification-package-envelope.json"), envelope);
+  await reassertLc4QualificationV3ExistingRoot(rootIdentity);
   await rename(partial, complete);
   return terminal;
 }
@@ -1674,7 +1905,7 @@ export async function reportLc4QualificationV3(input: Readonly<{
   root: string;
   trustRootFingerprint: string;
 }>): Promise<Readonly<Record<string, unknown>>> {
-  const root = resolve(input.root);
+  const root = (await validateLc4QualificationV3ExistingRoot(input.root)).path;
   const plan = await readJson<Lc4QualificationV3PlanArtifact>(resolve(root, "lc4-qualification-v3-plan.json"));
   assertLc4QualificationV3PlanArtifact(plan, input.trustRootFingerprint);
   const attemptsRoot = resolve(root, "attempts");
@@ -2009,13 +2240,24 @@ function exactFlags(actual: Readonly<Record<string, string>>, expected: readonly
   if (canonicalJson(Object.keys(actual).sort()) !== canonicalJson([...expected].sort())) throw new Error(`LC4 qualification v3 requires exactly ${[...expected].sort().join(", ")}`);
 }
 
-export async function runLc4QualificationV3Cli(args: readonly string[]): Promise<number> {
+type Lc4QualificationV3CliIo = Readonly<{
+  stdout(value: string): void;
+  stderr(value: string): void;
+}>;
+
+export async function runLc4QualificationV3Cli(
+  args: readonly string[],
+  io: Lc4QualificationV3CliIo = {
+    stdout: (value) => process.stdout.write(value),
+    stderr: (value) => process.stderr.write(value),
+  },
+): Promise<number> {
   try {
     const command = args[0];
     const parsed = flags(args.slice(1));
     if (command === "status") {
       exactFlags(parsed, []);
-      process.stdout.write(`${canonicalJson({
+      io.stdout(`${canonicalJson({
         runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
         execution_authorized_by_source: false,
         execution_requires: "authority_signed_plan_and_authorization_plus_pinned_terminal_key",
@@ -2047,15 +2289,21 @@ export async function runLc4QualificationV3Cli(args: readonly string[]): Promise
           providerEnvFile: parsed["--provider-env-file"],
           repoEnvFile: parsed["--repo-env-file"],
         },
-        authorityPrivateKeyPem: await readFile(resolve(parsed["--authority-private-key"]), "utf8"),
+        authorityPrivateKeyPem: await loadLc4QualificationV3PrivateKeyFile(
+          parsed["--authority-private-key"],
+          "LC4 qualification v3 authority private key",
+        ),
         trustRootFingerprint: parsed["--trust-root-fingerprint"],
       });
-      process.stdout.write(`${canonicalJson({ action: "lc4-qualification-v3-prepared", plan_artifact_sha256: artifact.artifact_sha256, provider_calls_made: 0 })}\n`);
+      io.stdout(`${canonicalJson({ action: "lc4-qualification-v3-prepared", plan_artifact_sha256: artifact.artifact_sha256, provider_calls_made: 0 })}\n`);
       return 0;
     }
     if (command === "report") {
       exactFlags(parsed, ["--root", "--trust-root-fingerprint"]);
-      process.stdout.write(`${canonicalJson(await reportLc4QualificationV3({ root: parsed["--root"], trustRootFingerprint: parsed["--trust-root-fingerprint"] }))}\n`);
+      io.stdout(`${canonicalJson(await reportLc4QualificationV3({
+        root: absoluteNormalized(parsed["--root"], "LC4 qualification v3 evidence root"),
+        trustRootFingerprint: parsed["--trust-root-fingerprint"],
+      }))}\n`);
       return 0;
     }
     if (command === "run") {
@@ -2069,17 +2317,20 @@ export async function runLc4QualificationV3Cli(args: readonly string[]): Promise
         "--repo-env-file",
       ]);
       const terminal = await runLc4QualificationV3({
-        root: parsed["--root"],
-        repositoryRoot: parsed["--repository-root"],
+        root: absoluteNormalized(parsed["--root"], "LC4 qualification v3 evidence root"),
+        repositoryRoot: absoluteNormalized(parsed["--repository-root"], "LC4 qualification v3 repository root"),
         credentialFiles: {
           providerEnvFile: parsed["--provider-env-file"],
           repoEnvFile: parsed["--repo-env-file"],
         },
-        authorization: await readJson(resolve(parsed["--authorization"])),
+        authorization: await loadLc4QualificationV3AuthorizationFile(parsed["--authorization"]),
         trustRootFingerprint: parsed["--trust-root-fingerprint"],
-        terminalPrivateKeyPem: await readFile(resolve(parsed["--terminal-private-key"]), "utf8"),
+        terminalPrivateKeyPem: await loadLc4QualificationV3PrivateKeyFile(
+          parsed["--terminal-private-key"],
+          "LC4 qualification v3 terminal private key",
+        ),
       });
-      process.stdout.write(`${canonicalJson({ action: "lc4-qualification-v3-retained", status: terminal.body.status, terminal_artifact_sha256: terminal.artifact_sha256 })}\n`);
+      io.stdout(`${canonicalJson({ action: "lc4-qualification-v3-retained", status: terminal.body.status, terminal_artifact_sha256: terminal.artifact_sha256 })}\n`);
       return terminal.body.status === "passed" ? 0 : 1;
     }
     throw new Error("usage: lc4-qualification-v3 <status|prepare|run|report>");
@@ -2087,7 +2338,7 @@ export async function runLc4QualificationV3Cli(args: readonly string[]): Promise
     const boundary = error instanceof Lc4QualificationV3BoundaryError
       ? error
       : boundaryError("cli", "cli_input_invalid");
-    process.stderr.write(`${canonicalJson({
+    io.stderr(`${canonicalJson({
       error: "lc4_qualification_v3_refused",
       stage: boundary.stage,
       code: boundary.code,

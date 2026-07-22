@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -67,19 +67,22 @@ const renderer: Lc4S2sAudioRenderer = Object.freeze({
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qv3-operator-"));
-  roots.push(root);
+  const workspace = await mkdtemp(join(tmpdir(), "hacc-lc4-qv3-operator-"));
+  roots.push(workspace);
+  const root = join(workspace, "evidence");
+  const repositoryRoot = join(workspace, "repository-placeholder");
+  await mkdir(repositoryRoot, { mode: 0o700 });
   const authority = keyPair();
   const terminal = keyPair();
-  const authorityPath = join(root, "authority.pem");
-  const terminalPath = join(root, "terminal.pem");
+  const authorityPath = join(workspace, "authority.pem");
+  const terminalPath = join(workspace, "terminal.pem");
   await Promise.all([
     writeFile(authorityPath, authority.privatePem, { mode: 0o600 }),
     writeFile(terminalPath, terminal.privatePem, { mode: 0o600 }),
   ]);
   const plan = await prepareLc4QualificationV3({
     root,
-    repositoryRoot: join(root, "repository-placeholder"),
+    repositoryRoot,
     authorityPrivateKeyPem: authority.privatePem,
     trustRootFingerprint: authority.fingerprint,
     audioRenderer: renderer,
@@ -121,6 +124,19 @@ async function invokeAuthorize(input: Awaited<ReturnType<typeof fixture>>, outpu
 }
 
 describe("LC4 qualification v3 operator authorization", () => {
+  it("exposes one explicit package command per reproducible operator phase", async () => {
+    const packageJson = JSON.parse(await readFile(resolve(process.cwd(), "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts).toMatchObject({
+      "benchmark:lc4:qualification:status": "tsx scripts/lc4-qualification.ts status",
+      "benchmark:lc4:qualification:prepare": "tsx scripts/lc4-qualification.ts prepare",
+      "benchmark:lc4:qualification:authorize": "tsx scripts/lc4-qualification-v3-operator.ts authorize",
+      "benchmark:lc4:qualification:run": "tsx scripts/lc4-qualification.ts run",
+      "benchmark:lc4:qualification:report": "tsx scripts/lc4-qualification.ts report",
+    });
+  });
+
   it("writes a self-validating one-shot authorization with a fixed 30-minute TTL and terminal-key binding", async () => {
     const input = await fixture();
     const outputA = join(input.root, "authorization-a.json");

@@ -111,6 +111,8 @@ async function readStableRegularFile(
     if (bytes.byteLength !== opened.size
       || after.dev !== opened.dev
       || after.ino !== opened.ino
+      || after.nlink !== 1
+      || (requirePrivateMode && (after.mode & 0o077) !== 0)
       || after.size !== opened.size
       || after.mtimeMs !== opened.mtimeMs
       || after.ctimeMs !== opened.ctimeMs) {
