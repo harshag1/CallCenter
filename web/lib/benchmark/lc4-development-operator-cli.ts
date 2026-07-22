@@ -54,6 +54,10 @@ import {
 import { lc4DevCredentialIdentitySetSha256 } from "./lc4-production-provider-adapter";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import type { ProviderResponseToolCanaryArtifact } from "./provider-qualification";
+import {
+  createLc4DevelopmentDefaultOperatorRuntime,
+  type Lc4DevDefaultRuntimeConfig,
+} from "./lc4-development-default-runtime";
 
 const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const QUALIFICATION_CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
@@ -126,11 +130,44 @@ export type Lc4DevOperatorRuntime = Readonly<{
 export type Lc4DevOperatorDependencies = Readonly<{
   inspect_source(repositoryRoot: string): Promise<Lc4QualificationGitSource>;
   runtime?: Lc4DevOperatorRuntime;
+  create_runtime?(config: Lc4DevDefaultRuntimeConfig): Promise<Lc4DevOperatorRuntime>;
 }>;
 
 const DEFAULT_DEPS: Lc4DevOperatorDependencies = Object.freeze({
   inspect_source: inspectLc4QualificationGitSource,
+  create_runtime: createLc4DevelopmentDefaultOperatorRuntime,
 });
+
+export const LC4_DEV_DEFAULT_RUNTIME_CLI_FLAGS = Object.freeze([
+  "--semantic-calibration-root",
+  "--asr-runner-private-key-source",
+  "--whisper-cli-path",
+  "--whisper-model-path",
+  "--ffmpeg-path",
+] as const);
+
+async function runtimeFromFlags(
+  parsed: Readonly<Record<string, string>>,
+  dependencies: Lc4DevOperatorDependencies,
+): Promise<Lc4DevOperatorRuntime | undefined> {
+  if (dependencies.runtime) return dependencies.runtime;
+  if (!dependencies.create_runtime) return undefined;
+  return dependencies.create_runtime({
+    audio_root: parsed["--audio-root"]!,
+    semantic_calibration_root: parsed["--semantic-calibration-root"]!,
+    asr_runner_private_key_source: parsed["--asr-runner-private-key-source"]!,
+    whisper_cli_path: parsed["--whisper-cli-path"]!,
+    whisper_model_path: parsed["--whisper-model-path"]!,
+    ffmpeg_path: parsed["--ffmpeg-path"]!,
+  });
+}
+
+function withRuntimeFlags(
+  dependencies: Lc4DevOperatorDependencies,
+  flags: readonly string[],
+): readonly string[] {
+  return dependencies.runtime ? flags : [...flags, ...LC4_DEV_DEFAULT_RUNTIME_CLI_FLAGS];
+}
 
 function assertHash(value: string, label: string): void {
   if (!SHA256.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
@@ -506,19 +543,25 @@ export async function runLc4DevelopmentOperatorCli(
     const command = args[0];
     const parsed = flags(args.slice(1));
     if (command === "status") {
-      exact(parsed, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file"]);
+      exact(parsed, withRuntimeFlags(dependencies, [
+        "--repository-root", "--audio-root", "--qualification-root", "--evidence-root",
+        "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
+      ]));
       const reasons: string[] = [];
       let source: Lc4QualificationGitSource | null = null;
       let audio: Awaited<ReturnType<typeof loadAudio>> | null = null;
       let qualification: Lc4DevRetainedQualificationReceipt | null = null;
       let credentials: Readonly<Record<LiveStsProvider, string>> | null = null;
+      let runtime: Lc4DevOperatorRuntime | null = null;
+      let signer: Lc4DevOperatorSigner | null = null;
       try { source = await dependencies.inspect_source(parsed["--repository-root"]!); } catch { reasons.push("repository_not_clean_or_unverifiable"); }
       try { audio = await loadAudio(parsed["--audio-root"]!); } catch { reasons.push("audio_manifest_or_cas_not_verified"); }
       try { qualification = await loadLc4DevRetainedQualification(parsed["--qualification-root"]!); } catch { reasons.push("retained_qualification_not_verified"); }
       try { credentials = await loadLc4DevExplicitCredentials({ provider_env_file: parsed["--provider-env-file"]!, repository_env_file: parsed["--repo-env-file"]! }); } catch { reasons.push("explicit_provider_credentials_not_verified"); }
+      try { runtime = (await runtimeFromFlags(parsed, dependencies)) ?? null; } catch { reasons.push("default_runtime_dependencies_not_verified"); }
+      try { signer = await loadSigner(parsed["--authority-private-key-source"]!); } catch { reasons.push("authority_signing_key_not_verified"); }
       if (source && qualification && (source.source_commit !== qualification.plan.source_commit || source.source_tree_sha256 !== qualification.plan.source_tree_sha256)) reasons.push("retained_qualification_source_is_stale");
       if (credentials && qualification && qualificationCredentialSetSha256(credentials) !== qualification.plan.credential_set_sha256) reasons.push("retained_qualification_credential_identity_is_stale");
-      if (!dependencies.runtime) reasons.push("executable_control_listener_crp_runtime_not_injected");
       let evidenceState: "absent" | "prepared" | "preflighted" | "terminal" | "occupied_invalid" = "absent";
       try {
         const names = await readdir(absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root"));
@@ -528,6 +571,34 @@ export async function runLc4DevelopmentOperatorCli(
         else evidenceState = "occupied_invalid";
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") reasons.push("evidence_root_not_inspectable");
+      }
+      let runtimeRootsVerified = false;
+      if (runtime && signer && audio && evidenceState !== "absent" && evidenceState !== "occupied_invalid") {
+        try {
+          const prepare = await readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(parsed["--evidence-root"]!, "prepare"), "LC4-DEV prepare artifact");
+          assertLc4DevLivePrepareArtifact(prepare);
+          const roots = await runtime.inspect({
+            prepare,
+            audio_manifest: audio.manifest,
+            repair_manifest: audio.repair_manifest,
+            signer,
+            evidence_root: parsed["--evidence-root"]!,
+          });
+          if (evidenceState === "preflighted" || evidenceState === "terminal") {
+            const preflight = await readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(parsed["--evidence-root"]!, "preflight"), "LC4-DEV preflight artifact");
+            if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256
+              || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256) {
+              throw new Error("LC4-DEV status runtime roots differ from preflight");
+            }
+          }
+          runtimeRootsVerified = true;
+        } catch {
+          reasons.push("executable_runtime_roots_not_verified");
+        }
+      } else if (runtime) {
+        reasons.push("executable_runtime_roots_require_prepared_evidence");
+      } else {
+        reasons.push("executable_control_listener_crp_runtime_not_injected");
       }
       io.stdout(canonicalJson({
         protocol_id: "HACC-LC4-DEV-v1",
@@ -541,7 +612,7 @@ export async function runLc4DevelopmentOperatorCli(
         qualification_verified: qualification !== null,
         credentials_verified_without_output: credentials !== null,
         source_verified_clean: source !== null,
-        runtime_injected: Boolean(dependencies.runtime),
+        runtime_injected: runtimeRootsVerified,
         evidence_state: evidenceState,
         execution_ready: reasons.length === 0 && evidenceState === "preflighted",
         blockers: Object.freeze(reasons),
@@ -592,8 +663,9 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "preflight") {
-      exact(parsed, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source", "--expires-minutes"]);
-      if (!dependencies.runtime) throw new Error("LC4-DEV preflight requires the executable control/listener/CRP runtime injection");
+      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source", "--expires-minutes"]));
+      const runtime = await runtimeFromFlags(parsed, dependencies);
+      if (!runtime) throw new Error("LC4-DEV preflight requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
       assertOutside(evidenceRoot, repositoryRoot);
@@ -623,8 +695,8 @@ export async function runLc4DevelopmentOperatorCli(
       const notBefore = checkedAt.toISOString();
       const expiresAt = new Date(checkedAt.getTime() + minutes * 60_000).toISOString();
       const nonceSha256 = sha256Hex(randomBytes(32));
-      const roots = await dependencies.runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
-      const stableRoots = await dependencies.runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
+      const roots = await runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
+      const stableRoots = await runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
       if (canonicalJson(stableRoots) !== canonicalJson(roots)) throw new Error("LC4-DEV executable runtime roots are nondeterministic");
       const authorizationDag = createLc4DevOperatorAuthorizationDag({
         prepare,
@@ -660,8 +732,9 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "run") {
-      exact(parsed, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source"]);
-      if (!dependencies.runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
+      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source"]));
+      const runtime = await runtimeFromFlags(parsed, dependencies);
+      if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
       assertOutside(evidenceRoot, repositoryRoot);
@@ -685,10 +758,10 @@ export async function runLc4DevelopmentOperatorCli(
       if (qualification.plan.source_commit !== source.source_commit || qualification.plan.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV run qualification is stale");
       if (qualificationCredentialSetSha256(credentials) !== qualification.plan.credential_set_sha256 || lc4DevCredentialIdentitySetSha256(credentials) !== preflight.credential_identity_set_sha256) throw new Error("LC4-DEV run credentials differ from qualification or preflight");
       if (signer.public_key_fingerprint_sha256 !== preflight.authority_trust_root_sha256) throw new Error("LC4-DEV run signer differs from preflight trust root");
-      const roots = await dependencies.runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
+      const roots = await runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
       assertLc4DevOperatorAuthorizationDag({ preflight, expected_authority_public_key_fingerprint_sha256: signer.public_key_fingerprint_sha256 });
       if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256 || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256) throw new Error("LC4-DEV executable runtime roots differ from preflight");
-      const bundle = await dependencies.runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer });
+      const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer });
       let run: Lc4DevLiveRunArtifact;
       try {
         run = await executeLc4DevLiveRun({ prepare, preflight, dependencies: bundle.dependencies });
