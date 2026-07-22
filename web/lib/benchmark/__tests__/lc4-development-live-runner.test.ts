@@ -797,6 +797,87 @@ describe("LC4-DEV live runner", () => {
     expect(opens).toBe(0);
   });
 
+  it("does not count the sixth episode complete when replay-valid finalization fails", async () => {
+    const { pcm, prepare, preflight } = fixtures();
+    const evidence = memoryEvidence();
+    const retained = retainedDependencies({ evidence, pcm, repair: noRepairDependencies() });
+    const finalEpisodeId = prepare.episodes.at(-1)!.episode_id;
+    const adapter: Lc4DevelopmentRealtimeAdapter = {
+      kind: "lc4-development-realtime-v1",
+      factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+      preflight_sha256: preflight.preflight_sha256,
+      maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+      async openSegment({ episode, segment_ordinal }) {
+        return {
+          async exchangeCanonical({ opportunity }) {
+            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+            });
+            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+            });
+            return {
+              playback_kind: "canonical" as const,
+              opportunity_id: opportunity.id,
+              assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+              provider_exchange_sha256: providerEvidence.evidence_sha256,
+              listener_evidence_sha256: listenerEvidence.evidence_sha256,
+              repair_projection: repairProjection(opportunity.id),
+              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              provider_exchange_projection: { episode_id: episode.episode_id, opportunity_id: opportunity.id },
+              provider_exchange_evidence: providerEvidence,
+              listener_evidence: listenerEvidence,
+            };
+          },
+          async exchangeRepair() { throw new Error("finalization fixture does not select repairs"); },
+          async finalizeOpportunity({ opportunity_id }) {
+            const finalization = await testJsonEvidence(evidence, "opportunity_finalization", {
+              episode_id: episode.episode_id,
+              opportunity_id,
+            });
+            return { opportunity_receipt_sha256: finalization.evidence_sha256, opportunity_finalization: finalization };
+          },
+          async close() {
+            const finalization = await testJsonEvidence(evidence, "segment_finalization", {
+              episode_id: episode.episode_id,
+              segment_ordinal,
+            });
+            return { rotation_receipt_sha256: finalization.evidence_sha256, segment_finalization: finalization };
+          },
+        };
+      },
+    };
+    const run = await executeLc4DevLiveRun({
+      prepare,
+      preflight,
+      dependencies: {
+        adapter,
+        ...retained,
+        finalization: {
+          async finalizeEpisode(input) {
+            if (input.episode.episode_id === finalEpisodeId) throw new Error("sixth finalization rejected");
+            return retained.finalization.finalizeEpisode(input);
+          },
+        },
+        ledger: { async append() {} },
+        now: () => new Date(NOW),
+      },
+    });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      episodes_started: 6,
+      episodes_completed: 5,
+      opportunities_completed: 360,
+      episode_finalization_count: 5,
+      failure_class: "evidence",
+      failure_message_sha256: sha256Hex("sixth finalization rejected"),
+    });
+    expect(run.ledger.filter((event) => event.event_type === "episode_terminal")).toHaveLength(5);
+  });
+
   it("documents the exact safe source unlock instead of casting DEV as confirmatory", () => {
     expect(LC4_DEV_ADAPTER_BOUNDARY).toEqual(expect.objectContaining({
       code: "dev_specific_adapter_unlocked",

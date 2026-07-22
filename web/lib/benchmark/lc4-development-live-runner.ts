@@ -1064,8 +1064,8 @@ export async function executeLc4DevLiveRun(input: Readonly<{
           }
         }
       }
-      episodesCompleted += 1;
       if (previousEvent === null) throw new Error("LC4-DEV episode cannot finalize without a ledger head");
+      failureClass = "evidence";
       const episodeFinalization = await input.dependencies.finalization.finalizeEpisode({
         episode,
         completed_opportunities: opportunitiesCompleted - episodeOpportunityStart,
@@ -1082,13 +1082,16 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         { status: "completed", canonical_opportunities: 60, episode_finalization_sha256: episodeFinalization.evidence_sha256 },
         [episodeFinalization, ...segmentFinalizations],
       );
+      episodesCompleted += 1;
     }
   } catch (error) {
     failureMessage = error instanceof Error ? error.message : "LC4-DEV live run failed";
     if (failureMessage.startsWith("timeout:")) failureClass = "timeout";
   }
   const completedAt = input.dependencies.now().toISOString();
-  const completed = episodesCompleted === 6 && opportunitiesCompleted === 360;
+  const completed = episodesCompleted === 6
+    && opportunitiesCompleted === 360
+    && episodeFinalizations === 6;
   const body = {
     schema_version: 1 as const,
     execution_id: input.prepare.execution_id,
