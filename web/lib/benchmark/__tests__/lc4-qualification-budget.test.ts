@@ -8,9 +8,16 @@ import {
   reserveFilesystemBudget,
   type BudgetCostEnvelope,
   type Lc4QualificationV2PlanConsumption,
+  type Lc4QualificationV3PlanConsumption,
 } from "../filesystem-budget-ledger";
 import {
+  LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES,
   LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD,
+  LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS,
+  LC4_QUALIFICATION_BUDGET_RETRIES,
+  LC4_QUALIFICATION_BUDGET_TOOL_ROUNDTRIPS,
+  LC4_QUALIFICATION_BUDGET_TOTAL_PROVIDER_SESSIONS,
+  LC4_QUALIFICATION_BUDGET_VERSION,
   assertLc4QualificationBudgetEvidence,
   finalizeLc4QualificationBudget,
   lc4QualificationBudgetLedgerPath,
@@ -52,7 +59,25 @@ function binding(attemptId = "qualification-attempt-001"): Lc4QualificationBudge
   });
 }
 
-describe("LC4 qualification v2 budget authority", () => {
+describe("LC4 qualification v3 budget authority", () => {
+  it("freezes the qualification authority at $3, 6/3 sessions, 6 phases, 3 roundtrips, and zero retries", () => {
+    expect({
+      maximumMicroUsd: LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD,
+      totalProviderSessions: LC4_QUALIFICATION_BUDGET_TOTAL_PROVIDER_SESSIONS,
+      paidGenerationSessions: LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS,
+      logicalGenerationPhases: LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES,
+      toolRoundtrips: LC4_QUALIFICATION_BUDGET_TOOL_ROUNDTRIPS,
+      retries: LC4_QUALIFICATION_BUDGET_RETRIES,
+    }).toEqual({
+      maximumMicroUsd: 3_000_000,
+      totalProviderSessions: 6,
+      paidGenerationSessions: 3,
+      logicalGenerationPhases: 6,
+      toolRoundtrips: 3,
+      retries: 0,
+    });
+  });
+
   it("reserves before execution and settles one exact aggregate $3 authority with usage evidence", async () => {
     const evidenceRoot = await root();
     const reservation = await reserveLc4QualificationBudget({
@@ -65,11 +90,29 @@ describe("LC4 qualification v2 budget authority", () => {
     expect(opened.reservations[0]).toMatchObject({
       reservation_id: reservation.reservationId,
       provider: "openai+gemini+xai",
-      model: "exact-model-matrix-v2",
+      model: "exact-model-matrix-v3",
       maximum_micro_usd: LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD,
       status: "opened",
       usage_event_count: null,
     });
+    expect(reservation.ledgerPath).toBe(join(evidenceRoot, "budget", "qualification-v3.jsonl"));
+    expect(reservation.reservationId).toBe(`lc4qv3:${binding().attemptId}`);
+    const [consumptionArtifact] = await readdir(`${reservation.ledgerPath}.plan-consumptions`);
+    const consumption = JSON.parse(await readFile(
+      join(`${reservation.ledgerPath}.plan-consumptions`, consumptionArtifact),
+      "utf8",
+    )) as Record<string, unknown>;
+    expect(consumption).toMatchObject({
+      kind: "hacc_lc4_qualification_v3_consumption",
+      maximum_micro_usd: 3_000_000,
+      maximum_provider_sessions: 6,
+      maximum_paid_generation_sessions: 3,
+      maximum_logical_generation_phases: 6,
+      maximum_tool_roundtrips: 3,
+      maximum_retries: 0,
+    });
+    expect(consumption).not.toHaveProperty("maximum_response_generations");
+    expect(consumption).not.toHaveProperty("paid_retry_allowed");
 
     const evidence = await finalizeLc4QualificationBudget({
       reservation,
@@ -80,6 +123,7 @@ describe("LC4 qualification v2 budget authority", () => {
       now: () => NOW,
     });
     expect(evidence).toMatchObject({
+      budget_version: LC4_QUALIFICATION_BUDGET_VERSION,
       terminal_outcome: "completed",
       usage_event_count: 6,
       usage_evidence_sha256: "3".repeat(64),
@@ -145,7 +189,7 @@ describe("LC4 qualification v2 budget authority", () => {
       .rejects.toMatchObject({ code: "integrity_failure" });
   });
 
-  it("does not weaken the legacy $5 contract and rejects altered qualification caps", async () => {
+  it("preserves v2 and legacy $5 contracts while rejecting altered v3 caps", async () => {
     const evidenceRoot = await root();
     const ledgerPath = lc4QualificationBudgetLedgerPath(evidenceRoot);
     await mkdir(join(evidenceRoot, "budget"), { mode: 0o700 });
@@ -165,7 +209,7 @@ describe("LC4 qualification v2 budget authority", () => {
       components: Object.freeze([Object.freeze({ name: "maximum", upper_bound_micro_usd: 3_000_000 })]),
       safety_margin_micro_usd: 0,
     });
-    const consumption: Lc4QualificationV2PlanConsumption = Object.freeze({
+    const v2Consumption: Lc4QualificationV2PlanConsumption = Object.freeze({
       kind: "lc4_qualification_v2",
       consumptionId: "cap-test",
       planSha256: "8".repeat(64),
@@ -195,7 +239,63 @@ describe("LC4 qualification v2 budget authority", () => {
       expiresAt: binding().expiresAt,
       costEnvelope: envelope,
       requiredCurrentHeadSha256: initialized.snapshot.head_sha256,
-      planConsumption: consumption,
+      planConsumption: v2Consumption,
+      now: () => NOW,
+    })).rejects.toMatchObject({ code: "invalid_input" });
+
+    const exactV2Consumption: Lc4QualificationV2PlanConsumption = Object.freeze({
+      ...v2Consumption,
+      consumptionId: "preserved-v2-cap-test",
+      maximumResponseGenerations: 6,
+    });
+    await expect(reserveFilesystemBudget({
+      ledgerPath,
+      operationId: "reserve-preserved-v2-cap-test",
+      reservationId: "preserved-v2-cap-test",
+      runId: "preserved-v2-cap-test",
+      provider: "openai+gemini+xai",
+      model: "matrix-v2",
+      condition: "qualification-v2",
+      expiresAt: binding().expiresAt,
+      costEnvelope: envelope,
+      requiredCurrentHeadSha256: initialized.snapshot.head_sha256,
+      planConsumption: exactV2Consumption,
+      now: () => NOW,
+    })).resolves.toMatchObject({ idempotent_replay: false });
+
+    const v3Consumption: Lc4QualificationV3PlanConsumption = Object.freeze({
+      kind: "lc4_qualification_v3",
+      consumptionId: "altered-v3-cap-test",
+      planSha256: "8".repeat(64),
+      maximumMicroUsd: 3_000_000,
+      authorizationArtifactSha256: "9".repeat(64),
+      authorizationId: "v3-cap-attempt",
+      attemptId: "v3-cap-attempt",
+      sourceCommit: "a".repeat(40),
+      sourceTreeSha256: "b".repeat(64),
+      credentialSetSha256: "c".repeat(64),
+      providerProfileManifestSha256: "d".repeat(64),
+      configurationMatrixSha256: "e".repeat(64),
+      devConfigurationMatrixSha256: "f".repeat(64),
+      providersModelsSha256: "1".repeat(64),
+      maximumProviderSessions: 6,
+      maximumPaidGenerationSessions: 3,
+      maximumLogicalGenerationPhases: 6,
+      maximumToolRoundtrips: 3,
+      maximumRetries: 1,
+    });
+    await expect(reserveFilesystemBudget({
+      ledgerPath,
+      operationId: "reserve-altered-v3-cap-test",
+      reservationId: "altered-v3-cap-test",
+      runId: "altered-v3-cap-test",
+      provider: "openai+gemini+xai",
+      model: "matrix-v3",
+      condition: "qualification-v3",
+      expiresAt: binding().expiresAt,
+      costEnvelope: envelope,
+      requiredCurrentHeadSha256: initialized.snapshot.head_sha256,
+      planConsumption: v3Consumption,
       now: () => NOW,
     })).rejects.toMatchObject({ code: "invalid_input" });
 

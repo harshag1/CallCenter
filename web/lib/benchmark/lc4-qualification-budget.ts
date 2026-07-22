@@ -13,18 +13,23 @@ import {
   type BudgetCostEnvelope,
   type BudgetJournalSnapshot,
   type BudgetJournalTerminalOutcome,
-  type Lc4QualificationV2PlanConsumption,
+  type Lc4QualificationV3PlanConsumption,
 } from "./filesystem-budget-ledger";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 
-export const LC4_QUALIFICATION_BUDGET_VERSION = "HACC-LC4-QUALIFICATION-BUDGET-v2" as const;
+export const LC4_QUALIFICATION_BUDGET_VERSION = "HACC-LC4-QUALIFICATION-BUDGET-v3" as const;
 export const LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD = 3_000_000 as const;
-export const LC4_QUALIFICATION_BUDGET_GENERATIONS = 6 as const;
-export const LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS = 6 as const;
+export const LC4_QUALIFICATION_BUDGET_TOTAL_PROVIDER_SESSIONS = 6 as const;
+export const LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS = 3 as const;
+export const LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES = 6 as const;
+export const LC4_QUALIFICATION_BUDGET_TOOL_ROUNDTRIPS = 3 as const;
+export const LC4_QUALIFICATION_BUDGET_RETRIES = 0 as const;
+/** Compatibility alias for callers that treated v2 response generations as logical phases. */
+export const LC4_QUALIFICATION_BUDGET_GENERATIONS = LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES;
 
-const BINDING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-binding/v2\n";
-const ENVELOPE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-envelope/v2\n";
-const EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-evidence/v2\n";
+const BINDING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-binding/v3\n";
+const ENVELOPE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-envelope/v3\n";
+const EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-budget-evidence/v3\n";
 
 export type Lc4QualificationBudgetBinding = Readonly<{
   attemptId: string;
@@ -110,7 +115,7 @@ export function assertLc4QualificationBudgetEvidence(
 }
 
 export function lc4QualificationBudgetLedgerPath(root: string): string {
-  return resolve(root, "budget", "qualification-v2.jsonl");
+  return resolve(root, "budget", "qualification-v3.jsonl");
 }
 
 function bindingBody(input: Lc4QualificationBudgetBinding) {
@@ -128,9 +133,11 @@ function bindingBody(input: Lc4QualificationBudgetBinding) {
     dev_configuration_matrix_sha256: input.devConfigurationMatrixSha256,
     providers_models: input.providersModels,
     maximum_micro_usd: LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD,
-    maximum_response_generations: LC4_QUALIFICATION_BUDGET_GENERATIONS,
+    maximum_provider_sessions: LC4_QUALIFICATION_BUDGET_TOTAL_PROVIDER_SESSIONS,
     maximum_paid_generation_sessions: LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS,
-    paid_retry_allowed: false,
+    maximum_logical_generation_phases: LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES,
+    maximum_tool_roundtrips: LC4_QUALIFICATION_BUDGET_TOOL_ROUNDTRIPS,
+    maximum_retries: LC4_QUALIFICATION_BUDGET_RETRIES,
   });
 }
 
@@ -144,7 +151,9 @@ function costEnvelope(input: Lc4QualificationBudgetBinding): BudgetCostEnvelope 
     schema_version: 1,
     kind: "hacc_provider_gate1_cost_envelope",
     pricing_snapshot_sha256: sha256Hex(`${ENVELOPE_DOMAIN}conservative-reservation\n${bindingSha256}`),
-    provider_hard_session_caps_sha256: sha256Hex(`${ENVELOPE_DOMAIN}six-paid-generation-sessions\n${canonicalJson(input.providersModels)}`),
+    provider_hard_session_caps_sha256: sha256Hex(
+      `${ENVELOPE_DOMAIN}six-provider-sessions-three-paid-generation-sessions-three-tool-roundtrips-zero-retries\n${canonicalJson(input.providersModels)}`,
+    ),
     runner_config_sha256: bindingSha256,
     formula_sha256: sha256Hex(`${ENVELOPE_DOMAIN}sum-three-provider-maxima\n`),
     components: Object.freeze(([
@@ -164,8 +173,8 @@ async function initializeOrInspectLedger(ledgerPath: string, now: () => Date): P
   if (existing.every((entry) => entry === null)) {
     return (await initializeFilesystemBudgetLedger({
       ledgerPath,
-      ledgerId: `lc4-qualification-v2-${sha256Hex(ledgerPath).slice(0, 24)}`,
-      operationId: "lc4-qualification-v2-initialize",
+      ledgerId: `lc4-qualification-v3-${sha256Hex(ledgerPath).slice(0, 24)}`,
+      operationId: "lc4-qualification-v3-initialize",
       operationalCeilingUsd: "3",
       now,
     })).snapshot;
@@ -196,10 +205,10 @@ export async function reserveLc4QualificationBudget(input: Readonly<{
     );
   }
   const bindingSha256 = lc4QualificationBudgetBindingSha256(input.binding);
-  const reservationId = `lc4qv2:${input.binding.attemptId}`;
-  const planConsumption: Lc4QualificationV2PlanConsumption = Object.freeze({
-    kind: "lc4_qualification_v2",
-    consumptionId: `lc4qv2:${input.binding.authorizationId}`,
+  const reservationId = `lc4qv3:${input.binding.attemptId}`;
+  const planConsumption: Lc4QualificationV3PlanConsumption = Object.freeze({
+    kind: "lc4_qualification_v3",
+    consumptionId: `lc4qv3:${input.binding.authorizationId}`,
     planSha256: input.binding.planSha256,
     maximumMicroUsd: LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD,
     authorizationArtifactSha256: input.binding.authorizationArtifactSha256,
@@ -212,18 +221,20 @@ export async function reserveLc4QualificationBudget(input: Readonly<{
     configurationMatrixSha256: input.binding.configurationMatrixSha256,
     devConfigurationMatrixSha256: input.binding.devConfigurationMatrixSha256,
     providersModelsSha256: sha256Hex(canonicalJson(input.binding.providersModels)),
-    maximumResponseGenerations: LC4_QUALIFICATION_BUDGET_GENERATIONS,
+    maximumProviderSessions: LC4_QUALIFICATION_BUDGET_TOTAL_PROVIDER_SESSIONS,
     maximumPaidGenerationSessions: LC4_QUALIFICATION_BUDGET_PAID_GENERATION_SESSIONS,
-    paidRetryAllowed: false,
+    maximumLogicalGenerationPhases: LC4_QUALIFICATION_BUDGET_LOGICAL_GENERATION_PHASES,
+    maximumToolRoundtrips: LC4_QUALIFICATION_BUDGET_TOOL_ROUNDTRIPS,
+    maximumRetries: LC4_QUALIFICATION_BUDGET_RETRIES,
   });
   const requested = await reserveFilesystemBudget({
     ledgerPath,
-    operationId: `lc4qv2-request:${input.binding.attemptId}`,
+    operationId: `lc4qv3-request:${input.binding.attemptId}`,
     reservationId,
-    runId: `lc4qv2:${input.binding.attemptId}`,
+    runId: `lc4qv3:${input.binding.attemptId}`,
     provider: "openai+gemini+xai",
-    model: "exact-model-matrix-v2",
-    condition: "qualification-v2",
+    model: "exact-model-matrix-v3",
+    condition: "qualification-v3",
     expiresAt: input.binding.expiresAt,
     costEnvelope: costEnvelope(input.binding),
     requiredCurrentHeadSha256: before.head_sha256,
@@ -232,13 +243,13 @@ export async function reserveLc4QualificationBudget(input: Readonly<{
   });
   const started = await markBudgetConnectionIntent({
     ledgerPath,
-    operationId: `lc4qv2-start:${input.binding.attemptId}`,
+    operationId: `lc4qv3-start:${input.binding.attemptId}`,
     reservationId,
     now: input.now,
   });
   const opened = await markBudgetSessionOpened({
     ledgerPath,
-    operationId: `lc4qv2-open:${input.binding.attemptId}`,
+    operationId: `lc4qv3-open:${input.binding.attemptId}`,
     reservationId,
     now: input.now,
   });
@@ -263,7 +274,7 @@ export async function finalizeLc4QualificationBudget(input: Readonly<{
 }>): Promise<Lc4QualificationBudgetEvidence> {
   await recordFilesystemBudgetUsage({
     ledgerPath: input.reservation.ledgerPath,
-    operationId: `lc4qv2-usage:${input.attemptId}`,
+    operationId: `lc4qv3-usage:${input.attemptId}`,
     reservationId: input.reservation.reservationId,
     usageEventCount: input.usageEventCount,
     usageEvidenceSha256: input.usageEvidenceSha256,
@@ -271,14 +282,14 @@ export async function finalizeLc4QualificationBudget(input: Readonly<{
   });
   await recordBudgetTerminal({
     ledgerPath: input.reservation.ledgerPath,
-    operationId: `lc4qv2-terminal:${input.attemptId}`,
+    operationId: `lc4qv3-terminal:${input.attemptId}`,
     reservationId: input.reservation.reservationId,
     outcome: input.outcome,
     now: input.now,
   });
   const settled = await settleFilesystemBudget({
     ledgerPath: input.reservation.ledgerPath,
-    operationId: `lc4qv2-settle:${input.attemptId}`,
+    operationId: `lc4qv3-settle:${input.attemptId}`,
     reservationId: input.reservation.reservationId,
     // Provider usage is retained separately. Until invoice reconciliation,
     // consume the full conservative reservation rather than claim a lower cost.

@@ -37,6 +37,8 @@ const STATE_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/state
 const OPERATION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/operation/v1\n";
 const HEAD_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/head/v1\n";
 const PLAN_CONSUMPTION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-ledger/plan-consumption/v1\n";
+const LC4_QUALIFICATION_V3_PLAN_CONSUMPTION_DOMAIN =
+  "harshas-amazing-call-center/filesystem-budget-ledger/lc4-qualification-plan-consumption/v3\n";
 const EMPTY_HASH = "0".repeat(64);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
@@ -46,6 +48,12 @@ const PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD = 5_000_000;
 const LC4_QUALIFICATION_V2_MAXIMUM_MICRO_USD = 3_000_000;
 const LC4_QUALIFICATION_V2_RESPONSE_GENERATIONS = 6;
 const LC4_QUALIFICATION_V2_PAID_GENERATION_SESSIONS = 6;
+const LC4_QUALIFICATION_V3_MAXIMUM_MICRO_USD = 3_000_000;
+const LC4_QUALIFICATION_V3_PROVIDER_SESSIONS = 6;
+const LC4_QUALIFICATION_V3_PAID_GENERATION_SESSIONS = 3;
+const LC4_QUALIFICATION_V3_LOGICAL_GENERATION_PHASES = 6;
+const LC4_QUALIFICATION_V3_TOOL_ROUNDTRIPS = 3;
+const LC4_QUALIFICATION_V3_RETRIES = 0;
 const LOCK_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const BIGINT_ZERO = BigInt(0);
@@ -310,7 +318,32 @@ export type Lc4QualificationV2PlanConsumption = Readonly<{
   paidRetryAllowed: false;
 }>;
 
-export type BudgetPlanConsumption = Gate1PaidPlanConsumption | Lc4QualificationV2PlanConsumption;
+export type Lc4QualificationV3PlanConsumption = Readonly<{
+  kind: "lc4_qualification_v3";
+  consumptionId: string;
+  planSha256: string;
+  maximumMicroUsd: number;
+  authorizationArtifactSha256: string;
+  authorizationId: string;
+  attemptId: string;
+  sourceCommit: string;
+  sourceTreeSha256: string;
+  credentialSetSha256: string;
+  providerProfileManifestSha256: string;
+  configurationMatrixSha256: string;
+  devConfigurationMatrixSha256: string;
+  providersModelsSha256: string;
+  maximumProviderSessions: number;
+  maximumPaidGenerationSessions: number;
+  maximumLogicalGenerationPhases: number;
+  maximumToolRoundtrips: number;
+  maximumRetries: number;
+}>;
+
+export type BudgetPlanConsumption =
+  | Gate1PaidPlanConsumption
+  | Lc4QualificationV2PlanConsumption
+  | Lc4QualificationV3PlanConsumption;
 
 export class FilesystemBudgetLedgerError extends Error {
   readonly code:
@@ -1659,7 +1692,8 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
   if (input.planConsumption !== undefined) {
     if (input.planConsumption.kind !== undefined
       && input.planConsumption.kind !== "gate1_paid_plan"
-      && input.planConsumption.kind !== "lc4_qualification_v2") {
+      && input.planConsumption.kind !== "lc4_qualification_v2"
+      && input.planConsumption.kind !== "lc4_qualification_v3") {
       fail("invalid_input", "plan consumption kind is unsupported");
     }
     assertIdentifier(input.planConsumption.consumptionId, "planConsumption.consumptionId");
@@ -1690,6 +1724,31 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
         || value.maximumPaidGenerationSessions !== LC4_QUALIFICATION_V2_PAID_GENERATION_SESSIONS
         || value.paidRetryAllowed !== false) {
         fail("invalid_input", "qualification consumption weakened the exact v2 budget or no-retry contract");
+      }
+    } else if (input.planConsumption.kind === "lc4_qualification_v3") {
+      const value = input.planConsumption;
+      for (const [label, hash] of [
+        ["authorizationArtifactSha256", value.authorizationArtifactSha256],
+        ["sourceTreeSha256", value.sourceTreeSha256],
+        ["credentialSetSha256", value.credentialSetSha256],
+        ["providerProfileManifestSha256", value.providerProfileManifestSha256],
+        ["configurationMatrixSha256", value.configurationMatrixSha256],
+        ["devConfigurationMatrixSha256", value.devConfigurationMatrixSha256],
+        ["providersModelsSha256", value.providersModelsSha256],
+      ] as const) assertHash(hash, `planConsumption.${label}`);
+      assertIdentifier(value.authorizationId, "planConsumption.authorizationId");
+      assertIdentifier(value.attemptId, "planConsumption.attemptId");
+      assertIdentifier(value.sourceCommit, "planConsumption.sourceCommit");
+      if (value.authorizationId !== value.attemptId) {
+        fail("invalid_input", "qualification authorization and attempt IDs must match");
+      }
+      if (value.maximumMicroUsd !== LC4_QUALIFICATION_V3_MAXIMUM_MICRO_USD
+        || value.maximumProviderSessions !== LC4_QUALIFICATION_V3_PROVIDER_SESSIONS
+        || value.maximumPaidGenerationSessions !== LC4_QUALIFICATION_V3_PAID_GENERATION_SESSIONS
+        || value.maximumLogicalGenerationPhases !== LC4_QUALIFICATION_V3_LOGICAL_GENERATION_PHASES
+        || value.maximumToolRoundtrips !== LC4_QUALIFICATION_V3_TOOL_ROUNDTRIPS
+        || value.maximumRetries !== LC4_QUALIFICATION_V3_RETRIES) {
+        fail("invalid_input", "qualification consumption weakened the exact v3 budget, session, phase, roundtrip, or no-retry contract");
       }
     } else if (input.planConsumption.maximumMicroUsd !== PAID_PLAN_CONSUMPTION_MAXIMUM_MICRO_USD) {
       fail("invalid_input", "paid plan consumption must bind the exact $5 maximum");
@@ -1732,13 +1791,16 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
       // still remove both stores; closing that threat requires external
       // monotonic or WORM authority.
       const qualificationConsumption = input.planConsumption.kind === "lc4_qualification_v2"
+        || input.planConsumption.kind === "lc4_qualification_v3"
         ? input.planConsumption
         : null;
       const body = Object.freeze({
         schema_version: 1,
         kind: qualificationConsumption === null
           ? "hacc_paid_plan_consumption"
-          : "hacc_lc4_qualification_v2_consumption",
+          : qualificationConsumption.kind === "lc4_qualification_v3"
+            ? "hacc_lc4_qualification_v3_consumption"
+            : "hacc_lc4_qualification_v2_consumption",
         ledger_id: state.ledgerId,
         ledger_open_head_sha256: input.requiredCurrentHeadSha256,
         consumption_id: input.planConsumption.consumptionId,
@@ -1759,12 +1821,22 @@ export async function reserveFilesystemBudget(input: BudgetLedgerStoreOptions & 
           configuration_matrix_sha256: qualificationConsumption.configurationMatrixSha256,
           dev_configuration_matrix_sha256: qualificationConsumption.devConfigurationMatrixSha256,
           providers_models_sha256: qualificationConsumption.providersModelsSha256,
-          maximum_response_generations: qualificationConsumption.maximumResponseGenerations,
           maximum_paid_generation_sessions: qualificationConsumption.maximumPaidGenerationSessions,
-          paid_retry_allowed: qualificationConsumption.paidRetryAllowed,
+          ...(qualificationConsumption.kind === "lc4_qualification_v2" ? {
+            maximum_response_generations: qualificationConsumption.maximumResponseGenerations,
+            paid_retry_allowed: qualificationConsumption.paidRetryAllowed,
+          } : {
+            maximum_provider_sessions: qualificationConsumption.maximumProviderSessions,
+            maximum_logical_generation_phases: qualificationConsumption.maximumLogicalGenerationPhases,
+            maximum_tool_roundtrips: qualificationConsumption.maximumToolRoundtrips,
+            maximum_retries: qualificationConsumption.maximumRetries,
+          }),
         }),
       });
-      const identity = sha256Hex(`${PLAN_CONSUMPTION_DOMAIN}${canonicalJson(
+      const identityDomain = qualificationConsumption?.kind === "lc4_qualification_v3"
+        ? LC4_QUALIFICATION_V3_PLAN_CONSUMPTION_DOMAIN
+        : PLAN_CONSUMPTION_DOMAIN;
+      const identity = sha256Hex(`${identityDomain}${canonicalJson(
         qualificationConsumption === null
           ? {
               ledger_id: body.ledger_id,
