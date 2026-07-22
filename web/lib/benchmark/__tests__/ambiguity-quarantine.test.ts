@@ -16,7 +16,23 @@ import {
   projectQuarantinedFlowState,
   quarantineCommittedAfterError,
   releaseAmbiguityQuarantine,
+  resolveAmbiguityInvocationArguments,
 } from "../ambiguity-quarantine";
+
+const reconciliation = {
+  queryTool: "read_order_status",
+  queryArguments: { invocation_id: { source: "invocation_id" as const } },
+  committedWhen: [
+    { resultPath: "invocation_id", equals: { source: "invocation_id" as const } },
+    { resultPath: "terminal", equals: { source: "literal" as const, value: "committed" } },
+  ],
+  absentWhen: [
+    { resultPath: "invocation_id", equals: { source: "invocation_id" as const } },
+    { resultPath: "terminal", equals: { source: "literal" as const, value: "absent" } },
+  ],
+  authoritativeResultPath: "result",
+  maxProofAttempts: 2,
+};
 
 const flow = AgentFlowSchema.parse({
   schema_version: 2,
@@ -37,7 +53,7 @@ const flow = AgentFlowSchema.parse({
           { output: "receipt", tool: "read_order_status", result_path: "receipt", value_type: "string" },
         ],
         action_policies: [
-          { tool: "commit_order", max_calls: 1, idempotency: "per_call_arguments" },
+          { tool: "commit_order", max_calls: 1, idempotency: "per_call_arguments", reconciliation },
           { tool: "read_order_status", max_calls: 3, idempotency: "per_call_arguments" },
         ],
       }],
@@ -179,6 +195,101 @@ function visibleSnapshot(state: FlowExecutionState) {
 }
 
 describe("provider-neutral ambiguity quarantine", () => {
+  it("rejects fabricated reconciliation without a mutation and leaves state unchanged", () => {
+    const state = activeState();
+    const before = JSON.stringify(state);
+    expect(resolveAmbiguityInvocationArguments(
+      flow,
+      state,
+      [],
+      "read_order_status",
+      { invocation_id: "fabricated-by-model" },
+    )).toMatchObject({ code: "reconciliation_source_missing" });
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("binds the original quarantined invocation across steps and rejects model overrides", () => {
+    const fixture = quarantinedFixture();
+    const original = fixture.state.actionReceipts.find((receipt) => receipt.id === fixture.flowReceiptId);
+    if (!original?.invocationId) throw new Error("fixture lacks its server-generated invocation identity");
+    const crossStepState: FlowExecutionState = {
+      ...fixture.state,
+      currentStep: "orders.follow_up",
+    };
+    const bound = resolveAmbiguityInvocationArguments(
+      flow,
+      crossStepState,
+      [fixture.quarantine],
+      "read_order_status",
+      {},
+    );
+    if (!bound || "error" in bound) throw new Error(bound?.error ?? "binding was not detected");
+    expect(bound.modelArguments).toEqual({});
+    expect(bound.effectiveArguments).toEqual({ invocation_id: original.invocationId });
+    expect(bound.evidence).toEqual([expect.objectContaining({
+      argument: "invocation_id",
+      source_kind: "ambiguity_original_invocation_id",
+      source_receipt_id: fixture.flowReceiptId,
+      quarantine_evidence_head_sha256: fixture.quarantine.evidenceHeadSha256,
+    })]);
+    expect(resolveAmbiguityInvocationArguments(
+      flow,
+      fixture.state,
+      [fixture.quarantine],
+      "read_order_status",
+      { invocation_id: "fabricated-by-model" },
+    )).toMatchObject({ code: "bound_argument_override" });
+  });
+
+  it("releases a real mutation through the exact host-bound reconciliation identity", () => {
+    const fixture = quarantinedFixture();
+    const bound = resolveAmbiguityInvocationArguments(
+      flow,
+      fixture.state,
+      [fixture.quarantine],
+      "read_order_status",
+      {},
+    );
+    if (!bound || "error" in bound) throw new Error(bound?.error ?? "binding was not detected");
+    const receiptId = "flow-host-bound-readback";
+    const dispatched = reserveAndDispatch(
+      fixture.state,
+      receiptId,
+      "read_order_status",
+      bound.effectiveArguments as Record<string, JsonValue>,
+      "2026-07-21T12:00:05.000Z",
+    );
+    const authoritativeResult: Record<string, JsonValue> = {
+      invocation_id: bound.effectiveArguments.invocation_id as JsonValue,
+      terminal: "committed",
+      receipt: "ORDER-RCPT-7",
+    };
+    const settled = settleFlowAction(dispatched, {
+      receiptId,
+      status: "succeeded",
+      result: authoritativeResult,
+    }, "2026-07-21T12:00:06.000Z");
+    if ("error" in settled) throw new Error(settled.error);
+    const released = releaseAmbiguityQuarantine({
+      state: settled.state,
+      quarantine: fixture.quarantine,
+      reconciliationFlowReceiptId: receiptId,
+      reconciliationWorldReceipt: worldReceipt({
+        receipt_id: "world-host-bound-readback",
+        tool: "read_order_status",
+        arguments: bound.effectiveArguments as Record<string, JsonValue>,
+        status: "succeeded",
+        committed: true,
+        authoritative_result: authoritativeResult,
+      }),
+      now: "2026-07-21T12:00:07.000Z",
+    });
+    if ("error" in released) throw new Error(released.error);
+    expect(released.quarantine.status).toBe("released");
+    expect(released.state.actionReceipts.find((receipt) => receipt.id === fixture.flowReceiptId))
+      .toMatchObject({ status: "succeeded", result: { receipt: "ORDER-RCPT-7" } });
+  });
+
   it("fails closed when an explicit reconciliation contract is malformed", () => {
     const invalid = structuredClone(flow);
     const node = invalid.nodes.find((candidate) => candidate.id === "orders");

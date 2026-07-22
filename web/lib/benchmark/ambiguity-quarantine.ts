@@ -5,6 +5,7 @@ import {
   hashFlowValue,
   promoteIndeterminateFlowAction,
   settleFlowAction,
+  type FlowAmbiguityInvocationArgumentEvidence,
   type FlowActionReceipt,
   type FlowExecutionState,
   type RuntimeError,
@@ -25,6 +26,8 @@ export type AmbiguityQuarantine = Readonly<{
   designatedReconciliationActions: readonly string[];
   authoritativeResult: JsonValue;
   authoritativeResultSha256: string;
+  /** Commitment to the server-generated identity required by designated readback. */
+  originalInvocationIdSha256: string;
   flowReceiptEvidenceSha256: string;
   worldReceiptEvidenceSha256: string;
   flowStateHeadSha256AtQuarantine: string;
@@ -43,6 +46,12 @@ export type QuarantineTransition = Readonly<{
   state: FlowExecutionState;
   quarantine: AmbiguityQuarantine;
   replayed: boolean;
+}>;
+
+export type AmbiguityInvocationArgumentResolution = Readonly<{
+  modelArguments: Readonly<Record<string, unknown>>;
+  effectiveArguments: Readonly<Record<string, unknown>>;
+  evidence: readonly FlowAmbiguityInvocationArgumentEvidence[];
 }>;
 
 const canonicalIso = (value: string): boolean => {
@@ -135,12 +144,91 @@ function quarantineIntegrityError(quarantine: AmbiguityQuarantine): RuntimeError
   if (
     evidenceHead(body) !== evidenceHeadSha256
     || hashFlowValue(quarantine.authoritativeResult) !== quarantine.authoritativeResultSha256
+    || !/^[a-f0-9]{64}$/.test(quarantine.originalInvocationIdSha256)
     || exactJsonEqual(actions, quarantine.designatedReconciliationActions) === false
     || !releasedShape
   ) {
     return fail("ambiguity quarantine evidence is corrupt", "quarantine_evidence_invalid");
   }
   return null;
+}
+
+/**
+ * Overlay the original server-generated invocation identity for a designated
+ * reconciliation readback. The model cannot select the quarantine, name its
+ * receipt, or provide/replace any invocation-derived argument.
+ */
+export function resolveAmbiguityInvocationArguments(
+  flow: AgentFlow,
+  state: FlowExecutionState,
+  quarantines: readonly AmbiguityQuarantine[],
+  tool: string,
+  modelArguments: Readonly<Record<string, unknown>>,
+): AmbiguityInvocationArgumentResolution | RuntimeError | null {
+  const activeStep = state.currentStep ? findStep(flow, state.currentStep)?.step : undefined;
+  const declaredInvocationBinding = (activeStep?.action_policies ?? []).some((policy) => {
+    const parsed = ActionReconciliationSpecSchema.safeParse(policy.reconciliation);
+    return parsed.success
+      && parsed.data.queryTool === tool
+      && Object.values(parsed.data.queryArguments).some((source) => source.source === "invocation_id");
+  });
+  const candidates = quarantines.flatMap((quarantine) => {
+    if (quarantine.status !== "reconciliation_required"
+      || !quarantine.designatedReconciliationActions.includes(tool)) return [];
+    const step = findStep(flow, quarantine.step)?.step;
+    const originalPolicy = step?.action_policies?.find((policy) => policy.tool === quarantine.action);
+    const parsed = ActionReconciliationSpecSchema.safeParse(originalPolicy?.reconciliation);
+    if (!parsed.success || parsed.data.queryTool !== tool) return [];
+    const arguments_ = Object.entries(parsed.data.queryArguments)
+      .filter(([, source]) => source.source === "invocation_id")
+      .map(([argument]) => argument)
+      .sort();
+    return arguments_.length ? [{ quarantine, arguments_ }] : [];
+  });
+  if (candidates.length === 0) {
+    return declaredInvocationBinding
+      ? fail("designated reconciliation has no active quarantined invocation identity", "reconciliation_source_missing")
+      : null;
+  }
+  if (candidates.length !== 1) {
+    return fail("designated reconciliation matches multiple active invocation identities", "ambiguous_reconciliation_source");
+  }
+  const { quarantine, arguments_ } = candidates[0];
+  const corrupt = quarantineIntegrityError(quarantine);
+  if (corrupt) return corrupt;
+  const receipt = state.actionReceipts.find((candidate) => candidate.id === quarantine.flowReceiptId);
+  if (
+    !receipt
+    || receipt.status !== "indeterminate"
+    || receipt.step !== quarantine.step
+    || receipt.tool !== quarantine.action
+    || !receipt.invocationId
+    || hashFlowValue(receipt.invocationId) !== quarantine.originalInvocationIdSha256
+  ) {
+    return fail("reconciliation source invocation differs from the quarantined Flow receipt", "reconciliation_source_invalid");
+  }
+  const overridden = arguments_.find((argument) => Object.prototype.hasOwnProperty.call(modelArguments, argument));
+  if (overridden) {
+    return fail(`model must not supply host-bound argument "${overridden}"`, "bound_argument_override");
+  }
+  const effectiveArguments = structuredClone(modelArguments) as Record<string, unknown>;
+  const evidence = arguments_.map((argument) => {
+    effectiveArguments[argument] = receipt.invocationId;
+    return Object.freeze({
+      argument,
+      source_kind: "ambiguity_original_invocation_id" as const,
+      source_tool: receipt.tool,
+      source_step: receipt.step,
+      source_receipt_id: receipt.id,
+      source_receipt_invocation_id_sha256: quarantine.originalInvocationIdSha256,
+      quarantine_evidence_head_sha256: quarantine.evidenceHeadSha256,
+    });
+  });
+  return Object.freeze({
+    modelArguments: Object.freeze(structuredClone(modelArguments)),
+    effectiveArguments: Object.freeze(effectiveArguments),
+    evidence: Object.freeze(evidence),
+  });
 }
 
 /**
@@ -158,6 +246,9 @@ export function quarantineCommittedAfterError(input: Readonly<{
   if (!canonicalIso(input.now)) return fail("quarantine time must be canonical ISO-8601", "invalid_quarantine_time");
   const receipt = input.state.actionReceipts.find((candidate) => candidate.id === input.flowReceiptId);
   if (!receipt) return fail("ambiguous Flow receipt was not found", "unknown_receipt");
+  if (!receipt.invocationId) {
+    return fail("ambiguous Flow receipt has no server-generated invocation identity", "ambiguous_invocation_identity_missing");
+  }
   const actions = [...new Set(input.designatedReconciliationActions)].sort();
   if (!actions.length || actions.some((action) => !action || action === receipt.tool)) {
     return fail("quarantine requires an explicit distinct reconciliation action", "reconciliation_not_designated");
@@ -188,6 +279,7 @@ export function quarantineCommittedAfterError(input: Readonly<{
     designatedReconciliationActions: Object.freeze(actions),
     authoritativeResult: structuredClone(input.worldReceipt.authoritative_result),
     authoritativeResultSha256: hashFlowValue(input.worldReceipt.authoritative_result),
+    originalInvocationIdSha256: hashFlowValue(receipt.invocationId),
     flowReceiptEvidenceSha256: hashFlowValue(receipt),
     worldReceiptEvidenceSha256: worldReceiptHash(input.worldReceipt),
     flowStateHeadSha256AtQuarantine: hashFlowValue(settled.state),
@@ -247,6 +339,15 @@ export function releaseAmbiguityQuarantine(input: Readonly<{
   if (!canonicalIso(input.now)) return fail("release time must be canonical ISO-8601", "invalid_quarantine_time");
   const corrupt = quarantineIntegrityError(input.quarantine);
   if (corrupt) return corrupt;
+  const originalReceipt = input.state.actionReceipts.find((receipt) => receipt.id === input.quarantine.flowReceiptId);
+  if (
+    !originalReceipt?.invocationId
+    || originalReceipt.step !== input.quarantine.step
+    || originalReceipt.tool !== input.quarantine.action
+    || hashFlowValue(originalReceipt.invocationId) !== input.quarantine.originalInvocationIdSha256
+  ) {
+    return fail("quarantine invocation identity differs from its original Flow receipt", "quarantine_invocation_identity_invalid");
+  }
   const evidence = validateSuccessfulReadback(input);
   if ("code" in evidence) return evidence;
   const q = input.quarantine;

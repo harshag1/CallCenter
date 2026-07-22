@@ -5,6 +5,7 @@ import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
 import type { AdmissibilityFrontierEvidence } from "./admissibility-frontier";
 import type { AmbiguityQuarantine } from "./ambiguity-quarantine";
 import type { ProviderCapabilitySnapshot } from "./capability-gateway";
+import { JsonValueSchema } from "./scenario-schema";
 import type { HaccSpeechGuardrailPacket } from "./speech-guardrail-packet";
 
 export const HACC_RESPONSE_PLAN_KEY = "hacc_response_plan" as const;
@@ -17,7 +18,7 @@ const PLAN_DOMAIN = "harshas-amazing-call-center/benchmark-response-plan-packet/
 const RESPONSE_PLAN_POLICY = Object.freeze({
   version: HACC_RESPONSE_PLAN_VERSION,
   derivation: "host_public_flow_frontier_and_receipt_presence_only",
-  value_exposure: "slot_and_action_names_only_no_values",
+  value_exposure: "public_slot_names_and_grant_free_callable_contracts_no_runtime_values",
   authority: "capability_snapshot_is_enforcing_boundary",
   provider_context_authority: "advisory_only_gateway_and_speech_gate_remain_enforcing",
   freshness: "caller_turn_revision_epoch_and_hash_bound",
@@ -36,6 +37,19 @@ const ProhibitedClaimSchema = z.enum([
   "retry_ambiguous_commit",
 ]);
 
+export const HaccCapabilityCatalogSchema = z.object({
+  scope: z.string().min(1),
+  capability_epoch: z.number().int().nonnegative(),
+  actions: z.array(z.object({
+    name: z.string().min(1),
+    description: z.string().min(1),
+    input_schema: z.record(z.string(), JsonValueSchema),
+    semantic_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict()),
+}).strict();
+
+export type HaccCapabilityCatalog = z.infer<typeof HaccCapabilityCatalogSchema>;
+
 export const HaccResponsePlanSchema = z.object({
   schema_version: z.literal(1),
   plan_type: z.literal(HACC_RESPONSE_PLAN_VERSION),
@@ -46,6 +60,7 @@ export const HaccResponsePlanSchema = z.object({
   previous_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   frontier_evidence_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   capability_catalog_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  capability_catalog: HaccCapabilityCatalogSchema,
   capability_epoch: z.number().int().nonnegative(),
   target: z.string().min(1),
   current_step: z.string().min(1).nullable(),
@@ -70,18 +85,19 @@ function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-function publicCapabilityCatalog(snapshot: ProviderCapabilitySnapshot): Readonly<{
-  scope: string;
-  capability_epoch: number;
-  actions: readonly Readonly<{ name: string; semantic_hash: string }>[];
-}> {
+function publicCapabilityCatalog(snapshot: ProviderCapabilitySnapshot): HaccCapabilityCatalog {
   return Object.freeze({
     scope: snapshot.scope,
     capability_epoch: snapshot.capability_epoch,
     actions: Object.freeze(snapshot.actions
-      .map((action) => Object.freeze({ name: action.name, semantic_hash: action.semantic_hash }))
+      .map((action) => Object.freeze({
+        name: action.name,
+        description: action.description,
+        input_schema: structuredClone(action.input_schema),
+        semantic_hash: action.semantic_hash,
+      }))
       .sort((left, right) => left.name.localeCompare(right.name))),
-  });
+  }) as HaccCapabilityCatalog;
 }
 
 function valueAtPath(value: unknown, path: string): unknown {
@@ -133,6 +149,7 @@ function stateBody(plan: Omit<HaccResponsePlan, "state_sha256" | "plan_sha256">)
     condition_sha256: plan.condition_sha256,
     frontier_evidence_sha256: plan.frontier_evidence_sha256,
     capability_catalog_sha256: plan.capability_catalog_sha256,
+    capability_catalog: plan.capability_catalog,
     capability_epoch: plan.capability_epoch,
     target: plan.target,
     current_step: plan.current_step,
@@ -191,6 +208,7 @@ export function createHaccResponsePlan(input: Readonly<{
     prohibited.add("retry_ambiguous_commit");
   }
   const slots = slotPresence(input.flow, input.state, currentStep);
+  const capabilityCatalog = publicCapabilityCatalog(input.snapshot);
   const bodyWithoutHashes = {
     schema_version: 1 as const,
     plan_type: HACC_RESPONSE_PLAN_VERSION,
@@ -199,7 +217,8 @@ export function createHaccResponsePlan(input: Readonly<{
     policy_sha256: HACC_RESPONSE_PLAN_POLICY_SHA256,
     previous_plan_sha256: input.previousPlanSha256,
     frontier_evidence_sha256: input.frontierEvidence.evidence_sha256,
-    capability_catalog_sha256: domainHash(STATE_DOMAIN, publicCapabilityCatalog(input.snapshot)),
+    capability_catalog_sha256: domainHash(STATE_DOMAIN, capabilityCatalog),
+    capability_catalog: capabilityCatalog,
     capability_epoch: input.snapshot.capability_epoch,
     target: input.target,
     current_step: currentStep,
@@ -257,6 +276,7 @@ export function assertHaccResponsePlan(
     previous_plan_sha256: plan.previous_plan_sha256,
     frontier_evidence_sha256: plan.frontier_evidence_sha256,
     capability_catalog_sha256: plan.capability_catalog_sha256,
+    capability_catalog: plan.capability_catalog,
     capability_epoch: plan.capability_epoch,
     target: plan.target,
     current_step: plan.current_step,
@@ -270,6 +290,23 @@ export function assertHaccResponsePlan(
     prohibited_claims: plan.prohibited_claims,
   };
   const expectedStateHash = domainHash(STATE_DOMAIN, stateBody(withoutHashes));
+  const catalog = HaccCapabilityCatalogSchema.parse(plan.capability_catalog);
+  if (catalog.capability_epoch !== plan.capability_epoch) {
+    throw new Error("response plan capability catalog epoch is stale");
+  }
+  if (catalog.scope !== plan.target) {
+    throw new Error("response plan capability catalog scope is stale");
+  }
+  if (canonicalJson(catalog.actions.map((action) => action.name))
+      !== canonicalJson(sortedUnique(catalog.actions.map((action) => action.name)))) {
+    throw new Error("response plan capability catalog actions are not sorted and unique");
+  }
+  if (canonicalJson(catalog.actions.map((action) => action.name)) !== canonicalJson(plan.eligible_actions)) {
+    throw new Error("response plan capability catalog differs from eligible actions");
+  }
+  if (plan.capability_catalog_sha256 !== domainHash(STATE_DOMAIN, catalog)) {
+    throw new Error("response plan capability catalog hash mismatch");
+  }
   if (plan.state_sha256 !== expectedStateHash) throw new Error("response plan state hash mismatch");
   const planBody = { ...withoutHashes, state_sha256: plan.state_sha256 };
   if (plan.plan_sha256 !== domainHash(PLAN_DOMAIN, planBody)) {

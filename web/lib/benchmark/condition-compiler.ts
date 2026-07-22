@@ -21,6 +21,7 @@ import {
   type ToolDefinition,
 } from "./scenario-schema";
 import { valueAtPath } from "./tool-world";
+import { ActionReconciliationSpecSchema } from "../action-reconciliation";
 
 export const CONDITION_COMPILER_VERSION = "voice-condition-compiler.v1" as const;
 
@@ -1063,7 +1064,17 @@ function capabilityAtTarget(
   ) return capability;
   const ref = findStep(flow, target.slice("step:".length));
   const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === capability.name);
-  return hostBoundCapability(capability, (policy?.bound_arguments ?? []).map((binding) => binding.argument));
+  const reconciliationBindings = (ref?.step.action_policies ?? []).flatMap((candidate) => {
+    const parsed = ActionReconciliationSpecSchema.safeParse(candidate.reconciliation);
+    if (!parsed.success || parsed.data.queryTool !== capability.name) return [];
+    return Object.entries(parsed.data.queryArguments)
+      .filter(([, source]) => source.source === "invocation_id")
+      .map(([argument]) => argument);
+  });
+  return hostBoundCapability(capability, [
+    ...(policy?.bound_arguments ?? []).map((binding) => binding.argument),
+    ...reconciliationBindings,
+  ]);
 }
 
 function flowControlsAtTarget(
@@ -1445,17 +1456,35 @@ function canonicalBoundArguments(
     if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return false;
     return (candidate as Record<string, JsonValue>).tool === tool;
   });
-  if (!policy || typeof policy !== "object" || Array.isArray(policy)) return [];
-  const bindings = (policy as Record<string, JsonValue>).bound_arguments;
-  if (!Array.isArray(bindings)) return [];
-  return bindings.flatMap((candidate) =>
+  const bindings = policy && typeof policy === "object" && !Array.isArray(policy)
+    ? (policy as Record<string, JsonValue>).bound_arguments
+    : [];
+  const receiptBound = Array.isArray(bindings) ? bindings.flatMap((candidate) =>
     candidate !== null
     && typeof candidate === "object"
     && !Array.isArray(candidate)
     && typeof (candidate as Record<string, JsonValue>).argument === "string"
       ? [(candidate as Record<string, JsonValue>).argument as string]
       : []
-  ).sort();
+  ) : [];
+  const reconciliationBound = policies.flatMap((candidate) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const reconciliation = (candidate as Record<string, JsonValue>).reconciliation;
+    if (reconciliation === null || typeof reconciliation !== "object" || Array.isArray(reconciliation)) return [];
+    const record = reconciliation as Record<string, JsonValue>;
+    if (record.queryTool !== tool) return [];
+    const queryArguments = record.queryArguments;
+    if (queryArguments === null || typeof queryArguments !== "object" || Array.isArray(queryArguments)) return [];
+    return Object.entries(queryArguments).flatMap(([argument, source]) =>
+      source !== null
+      && typeof source === "object"
+      && !Array.isArray(source)
+      && (source as Record<string, JsonValue>).source === "invocation_id"
+        ? [argument]
+        : []
+    );
+  });
+  return sortedUnique([...receiptBound, ...reconciliationBound]);
 }
 
 function unitSetHash(units: readonly CompiledInformationUnit[], kind?: CompiledInformationUnit["kind"]): string {

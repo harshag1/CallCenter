@@ -202,6 +202,43 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
 }
 
 describe("benchmark gateway kernel", () => {
+  it("compiles designated reconciliation with invocation identity omitted from the HACC schema", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const step = topic?.steps?.find((candidate) => candidate.id === "close_and_reconcile");
+    const closePolicy = step?.action_policies?.find((candidate) => candidate.tool === "close_work_order");
+    if (!closePolicy) throw new Error("test flow is missing close_work_order policy");
+    closePolicy.effect = "write";
+    closePolicy.reconciliation = {
+      queryTool: "get_work_order_status",
+      queryArguments: { work_order_id: { source: "invocation_id" } },
+      committedWhen: [
+        { resultPath: "close_receipt", equals: { source: "invocation_id" } },
+        { resultPath: "status", equals: { source: "literal", value: "closed" } },
+      ],
+      absentWhen: [
+        { resultPath: "close_receipt", equals: { source: "invocation_id" } },
+        { resultPath: "status", equals: { source: "literal", value: "absent" } },
+      ],
+      authoritativeResultPath: "$",
+      maxProofAttempts: 2,
+    };
+    const source = industrialFieldServiceCompilerInput(scenario);
+    const compiled = compileConditionSuite({ ...source, flow }).conditions["host-managed-harness"];
+    const disclosure = compiled.disclosures.find(
+      (candidate) => candidate.target === "step:field_service.close_and_reconcile"
+    );
+    const readback = disclosure?.visibleCapabilities.find(
+      (capability) => capability.name === "get_work_order_status"
+    );
+    const nativeContract = compiled.semanticLeafTools.find(
+      (tool) => tool.name === "get_work_order_status"
+    );
+    expect(readback?.description).toContain("Host-bound arguments (omit them): work_order_id");
+    expect(readback?.inputSchema).toMatchObject({ properties: {}, required: [] });
+    expect(readback?.semanticHash).toBe(nativeContract?.publicContractHash);
+  });
+
   it("omits and injects receipt-bound arguments before reservation and execution", () => {
     const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
     const topic = flow.nodes.find((node) => node.id === "field_service");

@@ -993,7 +993,7 @@ function valuesEqual(left: unknown, right: unknown): boolean {
   }
 }
 
-export type FlowBoundArgumentEvidence = Readonly<{
+export type FlowReceiptResultArgumentEvidence = Readonly<{
   argument: string;
   source_kind: "receipt_result";
   source_tool: string;
@@ -1002,6 +1002,20 @@ export type FlowBoundArgumentEvidence = Readonly<{
   source_receipt_result_hash: string;
   result_path: string;
 }>;
+
+export type FlowAmbiguityInvocationArgumentEvidence = Readonly<{
+  argument: string;
+  source_kind: "ambiguity_original_invocation_id";
+  source_tool: string;
+  source_step: string;
+  source_receipt_id: string;
+  source_receipt_invocation_id_sha256: string;
+  quarantine_evidence_head_sha256: string;
+}>;
+
+export type FlowBoundArgumentEvidence =
+  | FlowReceiptResultArgumentEvidence
+  | FlowAmbiguityInvocationArgumentEvidence;
 
 export type FlowBoundArgumentResolution = Readonly<{
   modelArguments: Readonly<Record<string, unknown>>;

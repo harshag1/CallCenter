@@ -41,6 +41,7 @@ import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   RealtimeEventListener,
+  RealtimeResponsePreparation,
   RealtimeToolResult,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
@@ -279,6 +280,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly #terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled";
   #responseOrdinal = 0;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
+  readonly preparations: RealtimeResponsePreparation[] = [];
 
   constructor(
     provider: "openai" | "gemini" | "xai",
@@ -298,7 +300,11 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio() { this.events.push("append"); this.wire("input_audio", { plaintext: ORACLE_SECRET }); }
-  prepareResponse() { this.events.push("prepare"); this.wire("response.plan", { oracle: ORACLE_SECRET }); }
+  prepareResponse(preparation: RealtimeResponsePreparation) {
+    this.events.push("prepare");
+    this.preparations.push(preparation);
+    this.wire("response.plan", { oracle: ORACLE_SECRET });
+  }
   commitInputAudio() { this.events.push("commit"); this.wire("input.commit", {}); }
   sendTurn() { throw new Error("bridge must use append/commit, not sendTurn"); }
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean) {
@@ -458,7 +464,12 @@ describe("LC4 production realtime adapter bridge", () => {
   it("delivers PCM, response plan, commit, generation, capture, and listener handoff in order", async () => {
     const value = manifest();
     const events: string[] = [];
-    const bridge = new Lc4RealtimeProviderBridge((provider) => new FakeRealtimeClient(provider, events));
+    const clients: FakeRealtimeClient[] = [];
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      const client = new FakeRealtimeClient(provider, events);
+      clients.push(client);
+      return client;
+    });
     const handoffs: unknown[] = [];
     const session = await bridge.openSegment({
       manifest: value,
@@ -484,6 +495,13 @@ describe("LC4 production realtime adapter bridge", () => {
     ]);
     expect(evidence.output_capture.generated_byte_length).toBe(4);
     expect(handoffs).toHaveLength(1);
+    const delivered = clients[0]?.preparations[0]?.additionalInstructions ?? "";
+    expect(delivered).toContain("\"capability_catalog\"");
+    for (const action of responsePlan().capability_catalog.actions) {
+      expect(delivered).toContain(`\"name\":\"${action.name}\"`);
+      expect(delivered).toContain(action.semantic_hash);
+    }
+    expect(delivered).not.toContain("test-grant-");
     const encoded = JSON.stringify(evidence);
     expect(encoded).not.toContain(ORACLE_SECRET);
     expect(encoded).not.toContain("provider-response-plaintext");

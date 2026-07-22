@@ -1,6 +1,9 @@
 import { createHmac } from "node:crypto";
-import type { FlowExecutionState } from "../flow-runtime";
-import type { FlowBoundArgumentEvidence } from "../flow-runtime";
+import {
+  hashFlowValue,
+  type FlowBoundArgumentEvidence,
+  type FlowExecutionState,
+} from "../flow-runtime";
 import {
   canonicalJson,
   immutableJson,
@@ -407,12 +410,21 @@ const INVOKE_INPUT_KEYS = Object.freeze([
   "turn",
 ].sort());
 const ARGUMENT_BINDING_KEYS = Object.freeze(["failure_code", "sources", "status"].sort());
-const ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
+const RECEIPT_RESULT_ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
   "argument",
   "result_path",
   "source_kind",
   "source_receipt_id",
   "source_receipt_result_hash",
+  "source_step",
+  "source_tool",
+].sort());
+const AMBIGUITY_INVOCATION_ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
+  "argument",
+  "quarantine_evidence_head_sha256",
+  "source_kind",
+  "source_receipt_id",
+  "source_receipt_invocation_id_sha256",
   "source_step",
   "source_tool",
 ].sort());
@@ -1551,15 +1563,27 @@ export function appendKernelTranscriptInvocation(
           throw new Error("resolved argument binding requires an active pre-invocation Flow step");
         }
         const receipt = input.preFlowState.actionReceipts.find((candidate) => candidate.id === source.source_receipt_id);
-        if (
+        if (source.source_kind === "receipt_result") {
+          const currentReceiptAuthority = receipt
+            && receipt.step === input.preFlowState.currentStep
+            && receipt.step === source.source_step
+            && receipt.tool === source.source_tool;
+          if (
+            !currentReceiptAuthority
+            || receipt.status !== "succeeded"
+            || receipt.capabilityEpoch !== input.preFlowState.capabilityEpoch
+            || receipt.resultHash !== source.source_receipt_result_hash
+          ) throw new Error(`bound argument ${source.argument} source receipt is not current successful Flow authority`);
+        } else if (
           !receipt
-          || receipt.status !== "succeeded"
-          || receipt.step !== input.preFlowState.currentStep
           || receipt.step !== source.source_step
-          || receipt.capabilityEpoch !== input.preFlowState.capabilityEpoch
           || receipt.tool !== source.source_tool
-          || receipt.resultHash !== source.source_receipt_result_hash
-        ) throw new Error(`bound argument ${source.argument} source receipt is not current successful Flow authority`);
+          || receipt.status !== "indeterminate"
+          || !receipt.invocationId
+          || hashFlowValue(receipt.invocationId) !== source.source_receipt_invocation_id_sha256
+        ) {
+          throw new Error(`bound argument ${source.argument} source receipt is not quarantined invocation authority`);
+        }
       }
     }
     if (input.outcome.result.ok) {
@@ -2011,17 +2035,37 @@ function parseArgumentBinding(
   }
   if (!Array.isArray(input.sources) || input.sources.length > 64) throw new Error(`${label}.sources is invalid`);
   const sources = input.sources.map((source, index) => {
-    exactKeys(source, ARGUMENT_BINDING_SOURCE_KEYS, `${label}.sources[${index}]`);
+    if (source === null || typeof source !== "object" || Array.isArray(source)) {
+      throw new Error(`${label}.sources[${index}] is invalid`);
+    }
+    const sourceKind = (source as Record<string, unknown>).source_kind;
+    exactKeys(
+      source,
+      sourceKind === "ambiguity_original_invocation_id"
+        ? AMBIGUITY_INVOCATION_ARGUMENT_BINDING_SOURCE_KEYS
+        : RECEIPT_RESULT_ARGUMENT_BINDING_SOURCE_KEYS,
+      `${label}.sources[${index}]`,
+    );
     if (typeof source.argument !== "string" || !/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u.test(source.argument)) {
       throw new Error(`${label}.sources[${index}].argument is invalid`);
     }
-    if (source.source_kind !== "receipt_result") throw new Error(`${label}.sources[${index}].source_kind is invalid`);
-    for (const key of ["source_tool", "source_step", "source_receipt_id", "result_path"] as const) {
+    if (source.source_kind !== "receipt_result" && source.source_kind !== "ambiguity_original_invocation_id") {
+      throw new Error(`${label}.sources[${index}].source_kind is invalid`);
+    }
+    for (const key of ["source_tool", "source_step", "source_receipt_id"] as const) {
       if (typeof source[key] !== "string" || source[key].length < 1 || source[key].length > 512) {
         throw new Error(`${label}.sources[${index}].${key} is invalid`);
       }
     }
-    assertSha(source.source_receipt_result_hash, `${label}.sources[${index}].source_receipt_result_hash`);
+    if (source.source_kind === "receipt_result") {
+      if (typeof source.result_path !== "string" || source.result_path.length < 1 || source.result_path.length > 512) {
+        throw new Error(`${label}.sources[${index}].result_path is invalid`);
+      }
+      assertSha(source.source_receipt_result_hash, `${label}.sources[${index}].source_receipt_result_hash`);
+    } else {
+      assertSha(source.source_receipt_invocation_id_sha256, `${label}.sources[${index}].source_receipt_invocation_id_sha256`);
+      assertSha(source.quarantine_evidence_head_sha256, `${label}.sources[${index}].quarantine_evidence_head_sha256`);
+    }
     return immutableJson(source) as unknown as FlowBoundArgumentEvidence;
   });
   if (new Set(sources.map((source) => source.argument)).size !== sources.length) {

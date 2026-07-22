@@ -113,6 +113,18 @@ describe("HACC state-derived response plan", () => {
     for (const forbidden of ["4826", "E-731", "ORACLE-DO-NOT-EXPOSE", "private_oracle_token"]) {
       expect(encoded).not.toContain(forbidden);
     }
+    expect(responsePlan.capability_catalog).toEqual({
+      scope: snapshot.scope,
+      capability_epoch: snapshot.capability_epoch,
+      actions: snapshot.actions.map((action) => ({
+        name: action.name,
+        description: action.description,
+        input_schema: action.input_schema,
+        semantic_hash: action.semantic_hash,
+      }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    });
+    expect(encoded).not.toContain("test-grant-");
   });
 
   it("rejects stale revisions, epochs, targets, frontier bindings, and chain substitutions", () => {
@@ -133,7 +145,7 @@ describe("HACC state-derived response plan", () => {
     expect(() => assertHaccResponsePlan({
       ...responsePlan,
       eligible_actions: [...responsePlan.eligible_actions, "zz_future_private_action"],
-    })).toThrow("state hash mismatch");
+    })).toThrow("capability catalog differs from eligible actions");
     expect(() => assertHaccResponsePlan({
       ...responsePlan,
       present_public_slots: [],
@@ -141,6 +153,12 @@ describe("HACC state-derived response plan", () => {
     })).toThrow("state hash mismatch");
     expect(() => assertHaccResponsePlan({ ...responsePlan, plan_sha256: "0".repeat(64) }))
       .toThrow("packet hash mismatch");
+    const tamperedCatalog = structuredClone(responsePlan.capability_catalog);
+    tamperedCatalog.actions[0]!.description = "A substituted model-visible contract.";
+    expect(() => assertHaccResponsePlan({
+      ...responsePlan,
+      capability_catalog: tamperedCatalog,
+    })).toThrow("capability catalog hash mismatch");
     const deleted = { ...responsePlan } as Record<string, unknown>;
     delete deleted.prohibited_claims;
     expect(() => assertHaccResponsePlan(deleted)).toThrow();

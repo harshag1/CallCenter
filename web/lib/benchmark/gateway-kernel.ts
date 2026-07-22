@@ -67,6 +67,7 @@ import {
   projectQuarantinedFlowState,
   quarantineCommittedAfterError,
   releaseAmbiguityQuarantine,
+  resolveAmbiguityInvocationArguments,
   type AmbiguityQuarantine,
 } from "./ambiguity-quarantine";
 import { JsonValueSchema, type BenchmarkScenario, type JsonValue } from "./scenario-schema";
@@ -972,12 +973,30 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           && condition.behavior.transitionOwnership === "host-managed-linear"
           && run.flowState
         ) {
-          const resolved = resolveFlowBoundArguments(
+          const receiptResolved = resolveFlowBoundArguments(
             this.#flow,
             run.flowState,
             action,
             input.call.arguments,
           );
+          const resolved = "error" in receiptResolved
+            ? receiptResolved
+            : (() => {
+              const ambiguityResolved = resolveAmbiguityInvocationArguments(
+                this.#flow,
+                run.flowState!,
+                [...run.ambiguityQuarantines.values()],
+                action,
+                receiptResolved.effectiveArguments,
+              );
+              if (ambiguityResolved === null) return receiptResolved;
+              if ("error" in ambiguityResolved) return ambiguityResolved;
+              return Object.freeze({
+                modelArguments: receiptResolved.modelArguments,
+                effectiveArguments: ambiguityResolved.effectiveArguments,
+                evidence: Object.freeze([...receiptResolved.evidence, ...ambiguityResolved.evidence]),
+              });
+            })();
           if ("error" in resolved) {
             argumentBinding = Object.freeze({
               status: "rejected" as const,
