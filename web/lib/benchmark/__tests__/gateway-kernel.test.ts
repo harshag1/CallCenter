@@ -137,7 +137,7 @@ function invoke(
   harness: Harness,
   action: string,
   args: Record<string, JsonValue>,
-  options: { grant?: string; preserveSnapshot?: boolean; providerCallId?: string } = {}
+  options: { grant?: string; preserveSnapshot?: boolean; providerCallId?: string; turn?: number } = {}
 ): BenchmarkGatewayOutcome {
   harness.sequence += 1;
   const providerCallId = options.providerCallId ?? `provider-call-${harness.sequence}`;
@@ -151,7 +151,7 @@ function invoke(
     },
     capabilityEpoch: harness.snapshot.capability_epoch,
     condition: harness.condition,
-    turn: harness.sequence,
+    turn: options.turn ?? harness.sequence,
     world: structuredClone(harness.world),
     executeLeaf: (request) => {
       const execution = executeTool(scenario, harness.world, {
@@ -208,7 +208,21 @@ describe("benchmark gateway kernel", () => {
       "flow.get_state",
       "flow.select_topic",
     ]);
-    const selected = invoke(harness, "flow.select_topic", { topic_id: "field_service" });
+    const turnPlan = harness.kernel.advanceCallerTurn({
+      runId: "run-auto-linear",
+      condition: harness.condition,
+      scenario,
+      turn: 1,
+      turnId: scenario.caller.turns[0].id,
+      world: harness.world,
+    });
+    harness.snapshot = turnPlan.capabilitySnapshot;
+    expect(turnPlan.responsePlan).toMatchObject({
+      revision: 1,
+      response_mode: "route",
+      eligible_actions: ["flow.get_state", "flow.select_topic"],
+    });
+    const selected = invoke(harness, "flow.select_topic", { topic_id: "field_service" }, { turn: 1 });
     expectOk(selected);
     expect(selected.disclosure?.target).toBe("step:field_service.locate_work_order");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("lookup_work_order");
@@ -219,6 +233,7 @@ describe("benchmark gateway kernel", () => {
     const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
       providerCallId: "host-managed-stable-lookup",
       grant: lookupGrant,
+      turn: 1,
     });
     expectOk(lookup);
     expect(lookup.providerVisibleOutput).toMatchObject({
@@ -226,12 +241,16 @@ describe("benchmark gateway kernel", () => {
       hacc_speech_guardrail_packet: {
         packet_type: "hacc_state_conditioned_speech_guardrail",
       },
+      hacc_response_plan: {
+        revision: 1,
+        plan_sha256: turnPlan.responsePlan.plan_sha256,
+      },
     });
     expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
     expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
-    const verified = invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" });
+    const verified = invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" }, { turn: 1 });
     expectOk(verified);
     expect(verified.providerVisibleOutput).toMatchObject({
       hacc_speech_guardrail_packet: {
@@ -242,13 +261,14 @@ describe("benchmark gateway kernel", () => {
     const replay = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
       providerCallId: "host-managed-stable-lookup",
       grant: lookupGrant,
+      turn: 1,
     });
     expect(replay.result).toMatchObject({ ok: true, disposition: "replayed" });
     expect(replay.providerVisibleOutput).toEqual(lookup.providerVisibleOutput);
     const staleCompletion = invoke(harness, "flow.complete_step", {
       path: "field_service.locate_work_order",
       outputs: {},
-    }, { grant: "g1.invalid" });
+    }, { grant: "g1.invalid", turn: 1 });
     expect(staleCompletion.result).toMatchObject({ ok: false, code: "invalid_capability" });
     expect(harness.snapshot.actions.map((action) => action.name)).toContain("record_diagnostic");
     const attestation = harness.kernel.attestFinal({
@@ -263,7 +283,7 @@ describe("benchmark gateway kernel", () => {
     expect(publicInvocations.every((entry) =>
       /^[a-f0-9]{64}$/.test(entry.outcome.provider_visible_output_hmac_sha256)
     )).toBe(true);
-    expect(verifyKernelTranscript({
+    const replayVerification = verifyKernelTranscript({
       transcript: harness.kernel.encodedTranscript(),
       finalAttestation: attestation,
       attestationExpectation: {
@@ -275,7 +295,9 @@ describe("benchmark gateway kernel", () => {
         evidenceBinding: TEST_EVIDENCE_BINDING,
         trust: TEST_TRUST,
       },
-    })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
+    });
+    expect(replayVerification.errors).toEqual([]);
+    expect(replayVerification).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
   });
 
   it("journals the first receipt in a real two-action long-call step before host auto-advance", () => {

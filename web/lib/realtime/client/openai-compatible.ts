@@ -30,6 +30,7 @@ import type {
   RealtimeEventListener,
   RealtimeOutputAudioTruncation,
   RealtimeResponseCancelTarget,
+  RealtimeResponsePreparation,
   RealtimeToolCall,
   RealtimeToolResult,
   RealtimeWebSocket,
@@ -132,6 +133,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private readonly requireStrictSessionConfigurationParity: boolean;
   private readonly requestedModel?: string;
   private readonly localToolProxyEnabled: boolean;
+  private readonly baseInstructions: string;
+  private pendingResponsePreparation: RealtimeResponsePreparation | null = null;
+  private inputPhase: "empty" | "buffered" | "committed" = "empty";
   private providerCreatedModel?: string;
   private providerSessionId?: string;
   private readonly providerToolCallIds = new Set<string>();
@@ -196,6 +200,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (queryModel !== undefined && sessionModel !== undefined && queryModel !== sessionModel) {
       throw new Error(`Realtime model identity conflict between URL (${queryModel}) and session (${sessionModel})`);
     }
+    const rawInstructions = record(sessionUpdateSnapshot.session).instructions;
+    if (rawInstructions !== undefined && typeof rawInstructions !== "string") {
+      throw new Error("Realtime session instructions must be a string");
+    }
+    this.baseInstructions = rawInstructions ?? "";
     if (options.connectTimeoutMs !== undefined && (!Number.isFinite(options.connectTimeoutMs) || options.connectTimeoutMs <= 0)) {
       throw new Error("connectTimeoutMs must be positive");
     }
@@ -338,29 +347,73 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   appendInputAudio(audio: Pcm16Audio): void {
     this.assertNoPendingToolBatch();
+    if (this.pendingResponsePreparation) {
+      throw new Error("Cannot append audio after preparing the next realtime response");
+    }
+    if (this.inputPhase === "committed") {
+      throw new Error("Cannot append audio until the committed realtime response is created or cleared");
+    }
     const encoded = pcm16ToBase64(audio, this.inputAudioFormat);
     this.sendReady({
       type: "input_audio_buffer.append",
       audio: encoded,
     });
+    this.inputPhase = "buffered";
     if (this.provider === "xai") this.meteredInputAudioBytes += audio.data.byteLength;
+  }
+
+  prepareResponse(preparation: RealtimeResponsePreparation): void {
+    this.assertNoPendingToolBatch();
+    if (this.currentState !== "ready") throw new Error("Realtime client is not ready");
+    if (this.inputPhase !== "buffered") {
+      throw new Error("Realtime response preparation requires buffered uncommitted audio");
+    }
+    if (this.pendingResponsePreparation) throw new Error("Realtime response is already prepared");
+    if (!preparation.additionalInstructions.trim()) {
+      throw new Error("Realtime response preparation instructions cannot be empty");
+    }
+    if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      throw new Error("Realtime response preparation authority boundary mismatch");
+    }
+    if (!/^[a-f0-9]{64}$/.test(preparation.contextSha256)
+        || createHash("sha256").update(preparation.additionalInstructions).digest("hex") !== preparation.contextSha256) {
+      throw new Error("Realtime response preparation hash mismatch");
+    }
+    this.pendingResponsePreparation = Object.freeze({ ...preparation });
   }
 
   commitInputAudio(): void {
     this.assertNoPendingToolBatch();
+    if (this.inputPhase !== "buffered") throw new Error("Realtime input audio is not buffered for commit");
     this.sendReady({ type: "input_audio_buffer.commit" });
+    this.inputPhase = "committed";
   }
 
   clearInputAudio(): void {
     this.sendReady({ type: "input_audio_buffer.clear" });
+    this.pendingResponsePreparation = null;
+    this.inputPhase = "empty";
   }
 
   createResponse(overrides: Record<string, unknown> = {}): void {
     this.assertNoPendingToolBatch();
+    if (this.pendingResponsePreparation && Object.prototype.hasOwnProperty.call(overrides, "instructions")) {
+      throw new Error("Prepared response instructions cannot be overridden");
+    }
+    if (this.inputPhase === "buffered") throw new Error("Commit realtime input audio before creating its response");
+    const preparation = this.pendingResponsePreparation;
+    const response = preparation
+      ? {
+          ...overrides,
+          instructions: [this.baseInstructions, preparation.additionalInstructions].filter(Boolean).join("\n"),
+        }
+      : overrides;
     this.sendReady({
       type: "response.create",
-      ...(Object.keys(overrides).length ? { response: overrides } : {}),
+      ...(Object.keys(response).length ? { response } : {}),
     });
+    if (preparation) this.pendingResponsePreparation = null;
+    if (this.inputPhase === "committed") this.inputPhase = "empty";
   }
 
   cancelResponse(target: RealtimeResponseCancelTarget): void {
@@ -396,6 +449,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   /** Appends exact PCM bytes, explicitly commits the turn, then requests one response. */
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void {
     this.assertNoPendingToolBatch();
+    if (this.inputPhase !== "empty" || this.pendingResponsePreparation) {
+      throw new Error("A prior realtime input turn is still active");
+    }
     const chunks = Array.isArray(audio) ? audio : [audio];
     if (!chunks.length) throw new Error("A realtime turn needs at least one PCM audio chunk");
     // Validate/encode the entire local batch before touching the provider buffer.
@@ -407,6 +463,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       this.sendReady({ type: "input_audio_buffer.append", audio: chunk.audio });
       if (this.provider === "xai") this.meteredInputAudioBytes += chunk.bytes;
     }
+    this.inputPhase = "buffered";
     this.commitInputAudio();
     this.createResponse();
   }
@@ -487,6 +544,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       return;
     }
     this.currentState = "closing";
+    this.pendingResponsePreparation = null;
+    this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
     this.clearConnectTimer();
@@ -920,6 +979,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     const wasFailed = this.currentState === "failed";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
+    this.pendingResponsePreparation = null;
+    this.inputPhase = "empty";
     if (!wasFailed) this.currentState = "closed";
     this.clearConnectTimer();
     if (wasConnecting) this.rejectPendingConnect(new Error("Realtime WebSocket closed before session acknowledgement"));
@@ -939,6 +1000,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private failConnection(message: string, code: string, emit = true): void {
     if (this.currentState === "failed" || this.currentState === "closed") return;
     this.currentState = "failed";
+    this.pendingResponsePreparation = null;
+    this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
     this.clearConnectTimer();

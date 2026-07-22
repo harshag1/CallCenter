@@ -144,6 +144,7 @@ class QualificationClient implements NormalizedRealtimeClient {
   onEvent(listener: RealtimeEventListener): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   onWireEvent(): () => void { return () => undefined; }
   appendInputAudio(): void { this.forbiddenCalls += 1; throw new Error("qualification sent caller audio"); }
+  prepareResponse(): void { this.forbiddenCalls += 1; throw new Error("qualification prepared a response"); }
   commitInputAudio(): void { this.forbiddenCalls += 1; throw new Error("qualification committed caller audio"); }
   createResponse(): void { this.forbiddenCalls += 1; throw new Error("qualification generated a response"); }
   sendTurn(): void { this.forbiddenCalls += 1; throw new Error("qualification sent a turn"); }

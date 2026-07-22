@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import {
   CAPABILITY_GATEWAY_TOOL,
   type ProviderFunctionTool,
@@ -299,6 +300,42 @@ describe("GeminiLiveClient", () => {
         provider_transcription_policy: { input: "disabled", output: "disabled" },
       }),
     }));
+  });
+
+  it("puts the response plan on wire before activityEnd can trigger generation", async () => {
+    const test = harness({ instructions: "BASE GEMINI SAFETY AND FLOW GUARDRAILS" });
+    await connectReady(test);
+    const setup = JSON.parse(test.socket.sent[0]);
+    expect(setup.setup.systemInstruction).toEqual({
+      parts: [{ text: "BASE GEMINI SAFETY AND FLOW GUARDRAILS" }],
+    });
+    test.socket.sent.length = 0;
+    const control = [
+      "<hacc_response_plan>",
+      "{\"revision\":19,\"response_mode\":\"reconcile\"}",
+      "</hacc_response_plan>",
+      "<capability_snapshot>",
+      "{\"actions\":[{\"name\":\"reconcile_booking\"}]}",
+      "</capability_snapshot>",
+    ].join("\n");
+
+    test.client.appendInputAudio(inputAudio(1, 0));
+    test.client.prepareResponse({
+      additionalInstructions: control,
+      contextSha256: createHash("sha256").update(control).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    expect(() => test.client.appendInputAudio(inputAudio(2, 0)))
+      .toThrow("after preparing the next Gemini response");
+    test.client.commitInputAudio();
+    test.client.createResponse();
+
+    expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([
+      { realtimeInput: { activityStart: {} } },
+      { realtimeInput: { audio: { data: "AQA=", mimeType: "audio/pcm;rate=16000" } } },
+      { realtimeInput: { text: control } },
+      { realtimeInput: { activityEnd: {} } },
+    ]);
   });
 
   it("cannot serialize provider transcription through an extra canary option", () => {

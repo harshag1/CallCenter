@@ -45,6 +45,10 @@ import {
   verifyAdmissibilityFrontierEvidence,
   type AdmissibilityFrontierEvidence,
 } from "./admissibility-frontier";
+import {
+  assertHaccResponsePlan,
+  type HaccResponsePlan,
+} from "./response-plan";
 
 const TRANSCRIPT_TYPE = "benchmark_kernel_replay_public_commitment" as const;
 const RESTRICTED_TRANSCRIPT_TYPE = "benchmark_kernel_replay_restricted_exact" as const;
@@ -240,6 +244,7 @@ export type KernelTranscriptCallerTurnPayload = Readonly<{
   post_state: KernelTranscriptStateHeads;
   frontier_evidence: AdmissibilityFrontierEvidence;
   capability_snapshot: KernelTranscriptCapabilitySnapshot;
+  response_plan: HaccResponsePlan;
 }>;
 
 export type KernelTranscriptCallerTurnEntry = KernelTranscriptEntryBase & Readonly<{
@@ -391,7 +396,7 @@ const INVOKE_INPUT_KEYS = Object.freeze([
   "turn",
 ].sort());
 const CALLER_TURN_PAYLOAD_KEYS = Object.freeze([
-  "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state",
+  "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state", "response_plan",
 ].sort());
 const CALLER_TURN_INPUT_KEYS = Object.freeze(["condition_hash", "turn", "turn_id"].sort());
 const STATE_HEAD_KEYS = Object.freeze([
@@ -1093,6 +1098,7 @@ function publicCallerTurnEntry(
       post_state: publicStateHeads(restricted.payload.post_state, shadow, durableMemory),
       frontier_evidence: restricted.payload.frontier_evidence,
       capability_snapshot: publicSnapshot(restricted.payload.capability_snapshot),
+      response_plan: restricted.payload.response_plan,
     }) as JsonValue,
     previous_entry_sha256: previousPublicHash,
   });
@@ -1546,6 +1552,7 @@ export function appendKernelTranscriptCallerTurn(
     postCapabilityHead: BenchmarkKernelCapabilityHead;
     frontierEvidence: AdmissibilityFrontierEvidence;
     capabilitySnapshot: ProviderCapabilitySnapshot;
+    responsePlan: HaccResponsePlan;
     durableMemoryState?: ReadonlyMap<string, JsonValue> | null;
   }>
 ): KernelTranscript {
@@ -1598,9 +1605,6 @@ export function appendKernelTranscriptCallerTurn(
   if (canonicalJson(pre) !== canonicalJson(prior.payload.post_state)) {
     throw new Error("caller-turn pre-state does not continue the prior transcript state");
   }
-  if (post.capability_head.catalog_mode !== "refresh_required") {
-    throw new Error("caller-turn boundary must enter refresh-required capability mode");
-  }
   const frontierMode = input.preCapabilityHead.target.startsWith("step:")
     ? "target"
     : input.preCapabilityHead.catalog_mode === "terminal"
@@ -1620,7 +1624,15 @@ export function appendKernelTranscriptCallerTurn(
     throw new Error("caller-turn admissibility evidence is not derived from authoritative state");
   }
   const snapshot = sanitizeSnapshot(input.capabilitySnapshot);
-  assertSnapshotMatchesHead(snapshot, post.capability_head, "caller-turn refresh-required snapshot");
+  assertSnapshotMatchesHead(snapshot, post.capability_head, "caller-turn response-plan snapshot");
+  const responsePlan = assertHaccResponsePlan(input.responsePlan, {
+    revision: input.turn,
+    capabilityEpoch: snapshot.capability_epoch,
+    target: snapshot.scope,
+    eligibleActions: snapshot.actions.map((action) => action.name),
+    frontierEvidenceSha256: input.frontierEvidence.evidence_sha256,
+    previousPlanSha256: priorTurns.at(-1)?.payload.response_plan.plan_sha256 ?? null,
+  });
   const entry = appendEntry<KernelTranscriptCallerTurnEntry>({
     schema_version: 1,
     transcript_type: RESTRICTED_TRANSCRIPT_TYPE,
@@ -1637,6 +1649,7 @@ export function appendKernelTranscriptCallerTurn(
       post_state: post,
       frontier_evidence: input.frontierEvidence,
       capability_snapshot: snapshot,
+      response_plan: responsePlan,
     },
     previous_entry_sha256: prior.entry_sha256,
   });
@@ -1962,6 +1975,7 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
       post_state: parseStateHeads(input.payload.post_state, `entry[${index}] caller post_state`),
       frontier_evidence: immutableJson(JsonValueSchema.parse(input.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence,
       capability_snapshot: parseSnapshot(input.payload.capability_snapshot, `entry[${index}] caller capability_snapshot`),
+      response_plan: assertHaccResponsePlan(input.payload.response_plan),
     });
     return immutableJson({ ...input, operation: "caller_turn", payload }) as unknown as KernelTranscriptCallerTurnEntry;
   }
@@ -2151,6 +2165,7 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
   const callFingerprints = new Map<string, string>();
   let committedTurn = 0;
   const committedTurnIds = new Set<string>();
+  let responsePlanSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== runId) errors.push(`entry ${index} changed run_id`);
@@ -2191,15 +2206,23 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
           heads.durable_memory_head,
           errors
         );
-        if (
-          entry.payload.post_state.capability_head.catalog_mode !== "refresh_required"
-          || entry.payload.post_state.capability_head.epoch !== heads.capability_head.epoch + 1
-        ) errors.push(`entry ${index} caller refresh-required epoch mismatch`);
+        if (entry.payload.post_state.capability_head.epoch !== heads.capability_head.epoch + 1) {
+          errors.push(`entry ${index} caller capability epoch mismatch`);
+        }
         assertSnapshotMatchesHead(
           entry.payload.capability_snapshot,
           entry.payload.post_state.capability_head,
           `entry ${index} caller capability snapshot`
         );
+        const responsePlan = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: entry.payload.input.turn,
+          capabilityEpoch: entry.payload.capability_snapshot.capability_epoch,
+          target: entry.payload.capability_snapshot.scope,
+          eligibleActions: entry.payload.capability_snapshot.actions.map((action) => action.name),
+          frontierEvidenceSha256: entry.payload.frontier_evidence.evidence_sha256,
+          previousPlanSha256: responsePlanSha256,
+        });
+        responsePlanSha256 = responsePlan.plan_sha256;
         committedTurn = entry.payload.input.turn;
         committedTurnIds.add(entry.payload.input.turn_id);
         heads = entry.payload.post_state;
@@ -2757,6 +2780,7 @@ export function verifyKernelTranscript(input: Readonly<{
   const callFingerprints = new Map<string, string>();
   let committedTurn = 0;
   const committedTurnIds = new Set<string>();
+  let responsePlanSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== initialize.run_id) errors.push(`public entry ${index} changed run_id`);
@@ -2782,10 +2806,9 @@ export function verifyKernelTranscript(input: Readonly<{
         compare(`public entry ${index} caller world head`, post.authoritative_world_head, pre.authoritative_world_head, errors);
         compare(`public entry ${index} caller shadow head`, post.public_shadow_world_sha256, pre.public_shadow_world_sha256, errors);
         compare(`public entry ${index} caller memory head`, post.durable_memory_head, pre.durable_memory_head, errors);
-        if (
-          post.capability_head.catalog_mode !== "refresh_required"
-          || post.capability_head.epoch !== pre.capability_head.epoch + 1
-        ) errors.push(`public entry ${index} caller refresh-required epoch mismatch`);
+        if (post.capability_head.epoch !== pre.capability_head.epoch + 1) {
+          errors.push(`public entry ${index} caller capability epoch mismatch`);
+        }
         const evidence = immutableJson(JsonValueSchema.parse(entry.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence;
         if (!verifyAdmissibilityFrontierEvidence(evidence)) {
           errors.push(`public entry ${index} caller frontier evidence hash mismatch`);
@@ -2801,6 +2824,15 @@ export function verifyKernelTranscript(input: Readonly<{
           `public entry ${index} caller capability snapshot`
         );
         assertPublicSnapshotMatchesHead(snapshot, post.capability_head, `public entry ${index} caller capability snapshot`);
+        const responsePlan = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: entry.payload.input.turn as number,
+          capabilityEpoch: snapshot.capability_epoch,
+          target: snapshot.scope,
+          eligibleActions: snapshot.actions.map((action) => action.name),
+          frontierEvidenceSha256: evidence.evidence_sha256,
+          previousPlanSha256: responsePlanSha256,
+        });
+        responsePlanSha256 = responsePlan.plan_sha256;
         committedTurn = entry.payload.input.turn as number;
         committedTurnIds.add(entry.payload.input.turn_id as string);
         heads = post;

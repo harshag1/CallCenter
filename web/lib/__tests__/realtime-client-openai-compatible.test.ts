@@ -833,6 +833,73 @@ describe("safe realtime event normalization", () => {
 });
 
 describe("OpenAI-compatible realtime client", () => {
+  it.each(["openai", "xai"] as const)(
+    "preserves immutable base instructions when preparing a %s response",
+    async (provider) => {
+      const socket = new FakeSocket();
+      const client = new OpenAICompatibleRealtimeClient({
+        provider,
+        url: `wss://${provider}.example/realtime`,
+        sessionUpdate: {
+          ...baseSession,
+          session: { ...baseSession.session, instructions: "BASE SAFETY AND FLOW GUARDRAILS" },
+        },
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      await connect(client, socket);
+      socket.sent.length = 0;
+      const dynamic = "<hacc_response_plan>\n{\"revision\":19}\n</hacc_response_plan>";
+      client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+      client.prepareResponse({
+        additionalInstructions: dynamic,
+        contextSha256: createHash("sha256").update(dynamic).digest("hex"),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+      expect(() => client.createResponse({ instructions: "unbound replacement" }))
+        .toThrow("Prepared response instructions cannot be overridden");
+      client.commitInputAudio();
+      client.createResponse();
+
+      const frames = socket.sent.map((value) => JSON.parse(value));
+      expect(frames.map((frame) => frame.type)).toEqual([
+        "input_audio_buffer.append",
+        "input_audio_buffer.commit",
+        "response.create",
+      ]);
+      expect(frames[2]).toEqual({
+        type: "response.create",
+        response: {
+          instructions: `BASE SAFETY AND FLOW GUARDRAILS\n${dynamic}`,
+        },
+      });
+    },
+  );
+
+  it("binds response preparation to buffered audio and clears stale preparation", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    socket.sent.length = 0;
+    const dynamic = "<hacc_response_plan>{\"revision\":1}</hacc_response_plan>";
+    const preparation = {
+      additionalInstructions: dynamic,
+      contextSha256: createHash("sha256").update(dynamic).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+    };
+
+    expect(() => client.prepareResponse(preparation)).toThrow("requires buffered uncommitted audio");
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+    client.prepareResponse(preparation);
+    expect(() => client.prepareResponse(preparation)).toThrow("already prepared");
+    client.clearInputAudio();
+    expect(() => client.commitInputAudio()).toThrow("not buffered for commit");
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+    client.commitInputAudio();
+    expect(() => client.prepareResponse(preparation)).toThrow("requires buffered uncommitted audio");
+    client.createResponse();
+    expect(socket.sent.map((frame) => JSON.parse(frame)).at(-1)).toEqual({ type: "response.create" });
+  });
   it("waits for session.updated before becoming ready", async () => {
     const { client, socket, factoryArgs } = fakeClient();
     let resolved = false;

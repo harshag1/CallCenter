@@ -14,6 +14,7 @@ import type {
   RealtimeClientState,
   RealtimeEventListener,
   RealtimeResponseTerminalStatus,
+  RealtimeResponsePreparation,
   RealtimeWireObservation,
   RealtimeWireObservationAttribution,
   RealtimeWireObservationListener,
@@ -671,6 +672,7 @@ function geminiWireType(event: Readonly<Record<string, unknown>>): string {
   if (isRecord(event.realtimeInput)) {
     if (own(event.realtimeInput, "activityStart")) return "realtimeInput.activityStart";
     if (own(event.realtimeInput, "audio")) return "realtimeInput.audio";
+    if (own(event.realtimeInput, "text")) return "realtimeInput.text";
     if (own(event.realtimeInput, "activityEnd")) return "realtimeInput.activityEnd";
     return "realtimeInput";
   }
@@ -1010,6 +1012,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private pendingSetupConfiguration: PendingSetupConfiguration | null = null;
   private setupReadiness: GeminiSetupReadinessEvidence | null = null;
   private submittingToolResults = false;
+  private responsePrepared = false;
 
   constructor(options: GeminiLiveClientOptions) {
     if (!options.model.trim()) throw new Error("Gemini Live model is required");
@@ -1215,6 +1218,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
 
   appendInputAudio(input: Pcm16Audio): void {
     this.requireReady();
+    if (this.responsePrepared) throw new Error("Cannot append audio after preparing the next Gemini response");
     assertPcm16Audio(input, {
       encoding: "pcm16",
       sampleRateHz: GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ,
@@ -1231,11 +1235,33 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     });
   }
 
+  prepareResponse(preparation: RealtimeResponsePreparation): void {
+    this.requireReady();
+    if (!this.inputOpen) throw new Error("Gemini response preparation requires an open input activity");
+    if (this.responsePrepared) throw new Error("Gemini response is already prepared");
+    if (!preparation.additionalInstructions.trim()) {
+      throw new Error("Gemini response preparation instructions cannot be empty");
+    }
+    if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      throw new Error("Gemini response preparation authority boundary mismatch");
+    }
+    if (!/^[a-f0-9]{64}$/.test(preparation.contextSha256)
+        || sha256(preparation.additionalInstructions) !== preparation.contextSha256) {
+      throw new Error("Gemini response preparation hash mismatch");
+    }
+    // Gemini has immutable setup instructions and no response.create frame.
+    // Realtime text is therefore appended to this still-open user activity;
+    // the following activityEnd is the first frame that may start generation.
+    this.sendReady({ realtimeInput: { text: preparation.additionalInstructions } });
+    this.responsePrepared = true;
+  }
+
   endActivity(): void {
     this.requireReady();
     if (!this.inputOpen) throw new Error("Gemini input activity is not open");
     this.inputOpen = false;
     this.sendReady({ realtimeInput: { activityEnd: {} } });
+    this.responsePrepared = false;
   }
 
   commitInputAudio(): void {
@@ -1244,6 +1270,9 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
 
   createResponse(overrides?: Record<string, unknown>): void {
     this.requireReady();
+    if (overrides && Object.keys(overrides).length > 0) {
+      throw new Error("Gemini per-response overrides cannot be delivered after activityEnd");
+    }
     // Gemini starts generation from activityEnd/toolResponse. It has no response.create frame.
     this.emit({
       type: "provider.event",
@@ -1330,6 +1359,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     const binding = { socket: this.socket, epoch: this.connectionEpoch } satisfies ConnectionBinding;
     this.clientState = "closing";
     this.inputOpen = false;
+    this.responsePrepared = false;
     this.clearConnectTimer();
     this.clearSessionTimer();
     if (wasConnecting) {
@@ -2326,6 +2356,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     if (!wasFailed) this.clientState = "closed";
     this.socket = null;
     this.inputOpen = false;
+    this.responsePrepared = false;
     this.clearConnectTimer();
     this.clearSessionTimer();
     this.abortPendingToolCalls("Gemini Live connection closed");
@@ -2414,6 +2445,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     const error = new Error("Gemini Live reached the 15-minute audio-only session limit");
     this.clientState = "closing";
     this.inputOpen = false;
+    this.responsePrepared = false;
     this.clearConnectTimer();
     this.clearSessionTimer();
     this.abortPendingToolCalls("Gemini Live session duration limit reached");

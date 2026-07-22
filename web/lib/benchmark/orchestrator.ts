@@ -69,6 +69,12 @@ import {
   type KernelTranscriptReference,
 } from "./kernel-transcript";
 import {
+  assertHaccResponsePlan,
+  HACC_RESPONSE_PLAN_KEY,
+  renderHaccResponsePlan,
+  type HaccResponsePlan,
+} from "./response-plan";
+import {
   buildProviderTransportEvidence,
   type ProviderNormalizedWireLink,
   type ProviderPcmEvidence,
@@ -96,6 +102,7 @@ import type {
   Pcm16Audio,
   RealtimeToolCall,
   RealtimeToolResult,
+  RealtimeResponsePreparation,
   RealtimeWireObservation,
   ServerRealtimeProvider,
   SessionConfigurationAcknowledgement,
@@ -162,11 +169,7 @@ export interface BenchmarkGatewayKernel {
     world: ToolWorldState;
   }>): ProviderCapabilitySnapshot | Promise<ProviderCapabilitySnapshot>;
   invoke(input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome | Promise<BenchmarkGatewayOutcome>;
-  /**
-   * Commit one response-eligible caller turn and invalidate the prior logical
-   * grants. Host-managed arms return a recovery-only snapshot; the model must
-   * pull the turn-aware catalog through flow.get_state.
-   */
+  /** Commit one caller turn and return its host-derived live plan and catalog. */
   advanceCallerTurn?(input: Readonly<{
     runId: string;
     condition: CompiledBenchmarkCondition;
@@ -177,9 +180,11 @@ export interface BenchmarkGatewayKernel {
   }>): Readonly<{
     capabilitySnapshot: ProviderCapabilitySnapshot;
     frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
   }> | Promise<Readonly<{
     capabilitySnapshot: ProviderCapabilitySnapshot;
     frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
   }>>;
   /**
    * Read-only final-state proof. Implementations must bind their exact internal
@@ -1650,8 +1655,9 @@ async function dispatchToolCall(input: Readonly<{
     ? visibleOutput as Record<string, JsonValue>
     : null;
   const speechGuardrailPacket = visibleEnvelope?.[HACC_SPEECH_GUARDRAIL_PACKET_KEY];
+  const responsePlan = visibleEnvelope?.[HACC_RESPONSE_PLAN_KEY];
   const gatewayVisibleOutput = visibleEnvelope !== null
-    && speechGuardrailPacket !== undefined
+    && (speechGuardrailPacket !== undefined || responsePlan !== undefined)
     && Object.prototype.hasOwnProperty.call(visibleEnvelope, "gateway_result")
     ? visibleEnvelope.gateway_result
     : visibleOutput;
@@ -1700,6 +1706,7 @@ async function dispatchToolCall(input: Readonly<{
       ...(speechGuardrailPacket === undefined
         ? {}
         : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
+      ...(responsePlan === undefined ? {} : { [HACC_RESPONSE_PLAN_KEY]: responsePlan }),
       progressive_disclosure: condition.behavior.progressiveDisclosure
         ? compactDisclosure(template)
         : template.prompt,
@@ -1721,6 +1728,7 @@ async function dispatchToolCall(input: Readonly<{
       ...(speechGuardrailPacket === undefined
         ? {}
         : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
+      ...(responsePlan === undefined ? {} : { [HACC_RESPONSE_PLAN_KEY]: responsePlan }),
       capability_snapshot: renderedSnapshot,
     };
   }
@@ -1757,7 +1765,7 @@ async function deliverCallerAudio(input: Readonly<{
   runtime: MutableRuntime;
   journal: TrialJournalCoordinator;
   record(type: string, payload: unknown): void;
-  afterCommitBeforeResponse?: () => void | Promise<void>;
+  prepareResponseBeforeCommit?: () => RealtimeResponsePreparation | Promise<RealtimeResponsePreparation>;
 }>): Promise<void> {
   const delivery = deliveryPlan(input.turn.material, input.profile);
   if (input.runtime.inputAudioBytes + input.turn.material.bytes.byteLength > input.limits.maxInputAudioBytes) {
@@ -1837,14 +1845,66 @@ async function deliverCallerAudio(input: Readonly<{
   });
   await input.journal.flush();
   try {
+    const wireObservationStart = input.runtime.wireObservations.length;
+    const responsePreparation = await input.prepareResponseBeforeCommit?.();
+    if (responsePreparation) {
+      input.record("caller.response_control_prepare_intent", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        byte_length: Buffer.byteLength(responsePreparation.additionalInstructions, "utf8"),
+        context_authority: responsePreparation.contextAuthority,
+      });
+      await input.journal.flush();
+      input.client.prepareResponse(responsePreparation);
+      input.record("caller.response_plan_prepared", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        context_authority: responsePreparation.contextAuthority,
+      });
+      await input.journal.flush();
+    }
     input.client.commitInputAudio();
-    await input.afterCommitBeforeResponse?.();
     // Open the response window only after caller audio is durably committed,
     // but before createResponse because test and provider adapters may emit
     // normalized response events synchronously from that call.
     input.runtime.responseWindowOpen = true;
     input.runtime.activeResponseId = null;
     input.client.createResponse();
+    if (responsePreparation) {
+      const expectedWireType = input.client.provider === "gemini"
+        ? "realtimeInput.text"
+        : "response.create";
+      const wireObservation = input.runtime.wireObservations
+        .slice(wireObservationStart)
+        .find((observation) => observation.direction === "outbound" && observation.wireType === expectedWireType);
+      input.record("caller.response_plan_delivery_submitted", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        context_authority: responsePreparation.contextAuthority,
+        provider_context_channel: input.client.provider === "gemini"
+          ? "unprivileged_realtime_input_text"
+          : "per_response_instructions_composed_with_base",
+        machine_enforcement_boundary: "capability_gateway_and_outbound_speech_gate",
+        provider_wire_evidence: wireObservation
+          ? {
+              status: "observed",
+              sequence: wireObservation.sequence,
+              wire_type: wireObservation.wireType,
+              observation_sha256: wireObservation.observationSha256,
+              payload_sha256: wireObservation.payloadSha256,
+            }
+          : {
+              status: "unavailable",
+              reason: input.client.onWireObservation
+                ? "expected_delivery_frame_not_observed"
+                : "client_has_no_wire_observation_stream",
+            },
+      });
+      await input.journal.flush();
+    }
   } catch (error) {
     input.runtime.responseWindowOpen = false;
     input.runtime.activeResponseId = null;
@@ -3091,7 +3151,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         runtime,
         journal,
         record,
-        afterCommitBeforeResponse: input.condition.behavior.transitionOwnership === "host-managed-linear"
+        prepareResponseBeforeCommit: input.condition.behavior.transitionOwnership === "host-managed-linear"
           ? async () => {
               if (!input.gatewayKernel.advanceCallerTurn) {
                 throw trialError(
@@ -3113,29 +3173,36 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
               const snapshot = assertSnapshotSubset(
                 advanced.capabilitySnapshot,
                 input.condition,
-                "caller-turn refresh-required"
+                "caller-turn response plan"
               );
-              if (
-                snapshot.actions.length !== 1
-                || snapshot.actions[0]?.name !== "flow.get_state"
-              ) {
-                throw trialError(
-                  "protocol_error",
-                  "caller_turn_frontier_not_refresh_only",
-                  "Caller-turn boundary must expose only flow.get_state until refresh",
-                  "turn",
-                  { fatal: true }
-                );
-              }
+              const responsePlan = assertHaccResponsePlan(advanced.responsePlan, {
+                revision: index + 1,
+                capabilityEpoch: snapshot.capability_epoch,
+                target: snapshot.scope,
+                eligibleActions: snapshot.actions.map((action) => action.name),
+                frontierEvidenceSha256: advanced.frontierEvidence.evidence_sha256,
+              });
               runtime.currentCapabilitySnapshot = snapshot;
-              record("caller.capability_refresh_required", {
+              const renderedSnapshot = input.condition.behavior.progressiveDisclosure
+                ? renderCompactProviderCapabilitySnapshot(snapshot)
+                : renderProviderCapabilitySnapshot(snapshot);
+              const controlContext = `${renderHaccResponsePlan(responsePlan)}\n${renderedSnapshot}`;
+              record("caller.response_plan_derived", {
                 turn: index + 1,
                 turn_id: turn.turnId,
                 capability_epoch: snapshot.capability_epoch,
                 scope: snapshot.scope,
                 frontier_evidence_sha256: advanced.frontierEvidence.evidence_sha256,
+                response_plan_revision: responsePlan.revision,
+                response_plan_sha256: responsePlan.plan_sha256,
+                eligible_action_count: responsePlan.eligible_actions.length,
               });
               await journal.flush();
+              return Object.freeze({
+                additionalInstructions: controlContext,
+                contextSha256: sha256Hex(controlContext),
+                contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+              });
             }
           : undefined,
       });

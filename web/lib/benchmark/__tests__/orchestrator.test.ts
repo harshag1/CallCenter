@@ -34,6 +34,7 @@ import {
   compiledConditionHash,
 } from "../condition-compiler";
 import { createInMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
+import { assertHaccResponsePlan, type HaccResponsePlan } from "../response-plan";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
@@ -58,6 +59,7 @@ import type {
   Pcm16Audio,
   RealtimeClientState,
   RealtimeEventListener,
+  RealtimeResponsePreparation,
   RealtimeToolResult,
   RealtimeWireEventListener,
 } from "../../realtime/client/types";
@@ -471,7 +473,11 @@ function runtimeBindings(
 
 type FakeHooks = Readonly<{
   onConnect?(client: FakeRealtimeClient): void;
-  onTurn?(client: FakeRealtimeClient, audio: Pcm16Audio | readonly Pcm16Audio[]): void;
+  onTurn?(
+    client: FakeRealtimeClient,
+    audio: Pcm16Audio | readonly Pcm16Audio[],
+    responseOverrides?: Record<string, unknown>,
+  ): void;
   onToolResults?(client: FakeRealtimeClient, results: readonly RealtimeToolResult[], createResponse: boolean): void;
 }>;
 
@@ -483,12 +489,15 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly turns: Array<Pcm16Audio | readonly Pcm16Audio[]> = [];
   readonly appendedChunks: Pcm16Audio[] = [];
   readonly resultBatches: Array<readonly RealtimeToolResult[]> = [];
+  readonly responsePreparations: RealtimeResponsePreparation[] = [];
+  readonly wireFrames: Readonly<Record<string, unknown>>[] = [];
   connectCalls = 0;
   closeCalls = 0;
   commitCalls = 0;
   createResponseCalls = 0;
   private pendingChunks: Pcm16Audio[] = [];
   private lastCommitted: Pcm16Audio | readonly Pcm16Audio[] | null = null;
+  private pendingResponsePreparation: RealtimeResponsePreparation | null = null;
 
   constructor(private readonly hooks: FakeHooks = {}) {}
 
@@ -539,10 +548,24 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.wire({ type: "input_audio_buffer.commit", turn: this.turns.length });
   }
 
+  prepareResponse(preparation: RealtimeResponsePreparation): void {
+    if (this.pendingChunks.length === 0 || this.pendingResponsePreparation !== null) {
+      throw new Error("response preparation must follow audio append and precede commit");
+    }
+    expect(preparation.contextAuthority).toBe("advisory_only_gateway_and_speech_gate_enforced");
+    this.pendingResponsePreparation = Object.freeze({ ...preparation });
+    this.responsePreparations.push(this.pendingResponsePreparation);
+    this.wire({ type: "response.prepared", context_sha256: preparation.contextSha256 });
+  }
+
   createResponse(): void {
     this.createResponseCalls += 1;
     if (!this.lastCommitted) throw new Error("no committed turn");
-    this.hooks.onTurn?.(this, this.lastCommitted);
+    const preparation = this.pendingResponsePreparation;
+    this.pendingResponsePreparation = null;
+    this.hooks.onTurn?.(this, this.lastCommitted, preparation
+      ? { instructions: preparation.additionalInstructions }
+      : undefined);
   }
 
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void {
@@ -568,6 +591,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
 
   wire(event: Record<string, unknown>): void {
     const frozen = Object.freeze(structuredClone(event));
+    this.wireFrames.push(frozen);
     for (const listener of this.wireListeners) listener(frozen);
   }
 
@@ -782,6 +806,18 @@ function renderedCanarySnapshot(output: unknown): CanarySnapshot | null {
   return parsed;
 }
 
+function renderedResponsePlan(overrides: Record<string, unknown> | undefined): HaccResponsePlan {
+  const instructions = overrides?.instructions;
+  if (typeof instructions !== "string") throw new Error("release canary did not receive response-plan instructions");
+  const lines = instructions.split("\n");
+  const start = lines.indexOf("<hacc_response_plan>");
+  const end = lines.indexOf("</hacc_response_plan>");
+  if (start < 0 || end !== start + 2) {
+    throw new Error("release canary received a malformed response-plan envelope");
+  }
+  return assertHaccResponsePlan(JSON.parse(lines[start + 1]));
+}
+
 function canaryArguments(
   action: string,
   task: ReturnType<typeof longUsefulnessTask>,
@@ -861,6 +897,7 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
   const completedActions = new Set<string>();
   const disclosedTargets = new Set<string>();
   const refreshes: Array<Readonly<{ turn: number; snapshot: CanarySnapshot }>> = [];
+  const responsePlans: Array<Readonly<{ turn: number; plan: HaccResponsePlan }>> = [];
   const guardrailPackets: Array<Readonly<{ action: string; packet: Record<string, unknown> }>> = [];
   let selectedTopic = false;
   let currentSnapshot: CanarySnapshot | null = null;
@@ -869,16 +906,41 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
   let responseOrdinal = 0;
   let toolRound = 0;
 
-  const client = new FakeRealtimeClient({
-    onTurn(fake) {
-      currentTurn += 1;
-      const responseId = `${runId}-turn-${currentTurn}`;
-      fake.emit(event("response.started", { responseId }));
-      pendingAction = "flow.get_state";
+  const emitNextAction = (fake: FakeRealtimeClient, responseId: string): void => {
+    const visible = new Set(currentSnapshot?.actions.map((action) => action.name) ?? []);
+    let nextAction: string | null = null;
+    let args: Record<string, string | number> = {};
+    if (!selectedTopic && visible.has("flow.select_topic")) {
+      nextAction = "flow.select_topic";
+      args = { topic_id: family === "museum" ? "museum_case" : family === "campus" ? "campus_case" : "water_case" };
+    } else if (currentSnapshot?.scope.startsWith("step:")) {
+      const order = orderedTools.get(currentSnapshot.scope);
+      if (!order) throw new Error(`${family} release canary reached unknown scope ${currentSnapshot.scope}`);
+      nextAction = order.find((action) => visible.has(action) && !completedActions.has(action)) ?? null;
+      if (nextAction) args = canaryArguments(nextAction, task);
+    }
+    pendingAction = nextAction;
+    if (nextAction) {
       fake.emit(event("tool.calls", {
         responseId,
-        calls: [gatewayCall(`${runId}-refresh-${currentTurn}`, "flow.get_state", {})],
+        calls: [gatewayCall(`${runId}-${nextAction}-${toolRound}`, nextAction, args)],
       }));
+    }
+  };
+
+  const client = new FakeRealtimeClient({
+    onTurn(fake, _audio, responseOverrides) {
+      currentTurn += 1;
+      const plan = renderedResponsePlan(responseOverrides);
+      responsePlans.push(Object.freeze({ turn: currentTurn, plan }));
+      currentSnapshot = Object.freeze({
+        scope: plan.target,
+        capability_epoch: plan.capability_epoch,
+        actions: Object.freeze(plan.eligible_actions.map((name) => Object.freeze({ name }))),
+      });
+      const responseId = `${runId}-turn-${currentTurn}`;
+      fake.emit(event("response.started", { responseId }));
+      emitNextAction(fake, responseId);
       fake.emit(event("response.completed", { responseId, status: "completed" }));
     },
     onToolResults(fake, results) {
@@ -920,25 +982,7 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
 
       const responseId = `${runId}-tool-${++responseOrdinal}`;
       fake.emit(event("response.started", { responseId }));
-      const visible = new Set(currentSnapshot?.actions.map((action) => action.name) ?? []);
-      let nextAction: string | null = null;
-      let args: Record<string, string | number> = {};
-      if (!selectedTopic && visible.has("flow.select_topic")) {
-        nextAction = "flow.select_topic";
-        args = { topic_id: family === "museum" ? "museum_case" : family === "campus" ? "campus_case" : "water_case" };
-      } else if (currentSnapshot?.scope.startsWith("step:")) {
-        const order = orderedTools.get(currentSnapshot.scope);
-        if (!order) throw new Error(`${family} release canary reached unknown scope ${currentSnapshot.scope}`);
-        nextAction = order.find((action) => visible.has(action) && !completedActions.has(action)) ?? null;
-        if (nextAction) args = canaryArguments(nextAction, task);
-      }
-      pendingAction = nextAction;
-      if (nextAction) {
-        fake.emit(event("tool.calls", {
-          responseId,
-          calls: [gatewayCall(`${runId}-${nextAction}-${toolRound}`, nextAction, args)],
-        }));
-      }
+      emitNextAction(fake, responseId);
       fake.emit(event("response.completed", { responseId, status: "completed" }));
     },
   });
@@ -968,6 +1012,8 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
     completedActions,
     disclosedTargets,
     refreshes,
+    responsePlans,
+    client,
     guardrailPackets,
     expectedStepTargets: Object.freeze(condition.disclosures
       .map((candidate) => candidate.target)
@@ -1708,14 +1754,40 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       ));
       expect([...canary.disclosedTargets].filter((target) => target.startsWith("step:")).sort())
         .toEqual([...canary.expectedStepTargets].sort());
-      expect(canary.refreshes.map((refresh) => refresh.turn)).toEqual(
+      expect(canary.responsePlans.map(({ turn }) => turn)).toEqual(
         Array.from({ length: 20 }, (_, index) => index + 1)
       );
-      expect(canary.refreshes.every((refresh) =>
-        refresh.snapshot.actions.some((action) => action.name === "flow.get_state")
+      expect(canary.responsePlans.map(({ plan }) => plan.revision)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1)
+      );
+      expect(canary.client.responsePreparations).toHaveLength(20);
+      expect(canary.client.responsePreparations.every((preparation) =>
+        preparation.additionalInstructions.includes("<hacc_response_plan>")
+        && preparation.additionalInstructions.includes("<capability_snapshot>")
+        && sha256Hex(preparation.additionalInstructions) === preparation.contextSha256
       )).toBe(true);
-      expect(canary.refreshes.every((refresh) =>
-        !refresh.snapshot.actions.some((action) => action.name === "flow.complete_step")
+      expect(canary.client.wireFrames
+        .map((frame) => frame.type)
+        .filter((type) => type === "response.prepared" || type === "input_audio_buffer.commit"))
+        .toEqual(Array.from({ length: 20 }, () => [
+          "response.prepared",
+          "input_audio_buffer.commit",
+        ]).flat());
+      expect(canary.responsePlans.every(({ plan }) =>
+        plan.eligible_actions.includes("flow.get_state")
+      )).toBe(true);
+      expect(canary.responsePlans.every(({ plan }) =>
+        !plan.eligible_actions.includes("flow.complete_step")
+      )).toBe(true);
+      expect(canary.refreshes).toEqual([]);
+      const turn19 = canary.responsePlans.find(({ turn }) => turn === 19)?.plan;
+      expect(turn19).toMatchObject({
+        response_mode: "reconcile",
+        recovery_state: "ambiguity_quarantine",
+      });
+      expect(turn19?.designated_reconciliation_actions.length).toBeGreaterThan(0);
+      expect(turn19?.designated_reconciliation_actions.every((action) =>
+        turn19.eligible_actions.includes(action)
       )).toBe(true);
       const terminalStates = canary.guardrailPackets.map(({ packet }) => packet.terminal_directive);
       const privacyStates = canary.guardrailPackets.map(({ packet }) => packet.privacy_directive);
@@ -1724,9 +1796,18 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       expect(terminalStates).toContain("confirm_only_from_authoritative_reconciliation_receipt");
       expect(terminalStates.indexOf("ambiguity_quarantine_reconcile_before_terminal_claim"))
         .toBeLessThan(terminalStates.indexOf("confirm_only_from_authoritative_reconciliation_receipt"));
-      expect(canary.journal.appended.filter((entry) =>
-        entry.event_type === "caller.capability_refresh_required"
-      )).toHaveLength(20);
+      const deliveryEvidence = canary.journal.appended.filter((entry) =>
+        entry.event_type === "caller.response_plan_delivery_submitted"
+      );
+      expect(deliveryEvidence).toHaveLength(20);
+      expect(deliveryEvidence.map((entry) => (
+        entry.payload as { payload: Record<string, unknown> }
+      ).payload)).toEqual(
+        Array.from({ length: 20 }, () => expect.objectContaining({
+          context_authority: "advisory_only_gateway_and_speech_gate_enforced",
+          machine_enforcement_boundary: "capability_gateway_and_outbound_speech_gate",
+        }))
+      );
       expect(evaluateScenarioWorld(longUsefulnessTask(family).scenario, canary.result.world).success
         .every((assertion) => assertion.passed)).toBe(true);
       expect(canary.result.artifacts.files.some((file) => file.path === "kernel-transcript.jsonl")).toBe(true);

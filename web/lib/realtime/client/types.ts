@@ -420,6 +420,17 @@ export type RealtimeClientState =
   | "closed"
   | "failed";
 
+/**
+ * Host-authored, provider-neutral control context for exactly the next model
+ * response. Adapters must deliver it before that provider can begin generation.
+ */
+export type RealtimeResponsePreparation = Readonly<{
+  additionalInstructions: string;
+  contextSha256: string;
+  /** Provider prompt context is advisory; host gateways remain authoritative. */
+  contextAuthority: "advisory_only_gateway_and_speech_gate_enforced";
+}>;
+
 export interface NormalizedRealtimeClient {
   readonly provider: ServerRealtimeProvider;
   readonly state: RealtimeClientState;
@@ -432,6 +443,8 @@ export interface NormalizedRealtimeClient {
   /** Last provider acknowledgement, detached and frozen; null before readiness. */
   readonly sessionConfigurationAcknowledgement?: SessionConfigurationAcknowledgement | null;
   appendInputAudio(audio: Pcm16Audio): void;
+  /** Must precede commitInputAudio for providers where commit starts generation. */
+  prepareResponse(preparation: RealtimeResponsePreparation): void;
   commitInputAudio(): void;
   createResponse(overrides?: Record<string, unknown>): void;
   /** Optional because not every provider exposes response-targeted cancellation. */

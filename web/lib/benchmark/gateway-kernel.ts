@@ -90,6 +90,11 @@ import {
   type HaccSpeechGuardrailPacket,
   type HaccSpeechGuardrailState,
 } from "./speech-guardrail-packet";
+import {
+  createHaccResponsePlan,
+  HACC_RESPONSE_PLAN_KEY,
+  type HaccResponsePlan,
+} from "./response-plan";
 
 const FLOW_CONTROL_ACTIONS = new Set([
   "flow.select_topic",
@@ -184,6 +189,8 @@ type KernelRun = {
   speechGuardrailState: HaccSpeechGuardrailState;
   speechGuardrailPacket: HaccSpeechGuardrailPacket;
   speechProcessedWorldReceiptCount: number;
+  responsePlan: HaccResponsePlan | null;
+  responsePlanRevision: number;
 };
 
 type KernelRunMutationCheckpoint = Readonly<{
@@ -205,6 +212,8 @@ type KernelRunMutationCheckpoint = Readonly<{
   speechGuardrailState: HaccSpeechGuardrailState;
   speechGuardrailPacket: HaccSpeechGuardrailPacket;
   speechProcessedWorldReceiptCount: number;
+  responsePlan: HaccResponsePlan | null;
+  responsePlanRevision: number;
 }>;
 
 function mutationCheckpoint(run: KernelRun): KernelRunMutationCheckpoint {
@@ -231,6 +240,8 @@ function mutationCheckpoint(run: KernelRun): KernelRunMutationCheckpoint {
     speechGuardrailState: run.speechGuardrailState,
     speechGuardrailPacket: run.speechGuardrailPacket,
     speechProcessedWorldReceiptCount: run.speechProcessedWorldReceiptCount,
+    responsePlan: run.responsePlan,
+    responsePlanRevision: run.responsePlanRevision,
   };
 }
 
@@ -253,6 +264,8 @@ function restoreMutationCheckpoint(run: KernelRun, checkpoint: KernelRunMutation
   run.speechGuardrailState = checkpoint.speechGuardrailState;
   run.speechGuardrailPacket = checkpoint.speechGuardrailPacket;
   run.speechProcessedWorldReceiptCount = checkpoint.speechProcessedWorldReceiptCount;
+  run.responsePlan = checkpoint.responsePlan;
+  run.responsePlanRevision = checkpoint.responsePlanRevision;
 }
 
 function defaultClock(): Clock {
@@ -568,6 +581,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       speechGuardrailState,
       speechGuardrailPacket,
       speechProcessedWorldReceiptCount: 0,
+      responsePlan: null,
+      responsePlanRevision: 0,
     };
     const snapshot = this.#snapshot(run, pinnedCondition.visibleCapabilities);
     run.transcript = createKernelTranscript({
@@ -597,6 +612,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
   }>): Readonly<{
     capabilitySnapshot: ProviderCapabilitySnapshot;
     frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
   }> {
     const run = this.#requireRun(input.condition);
     if (run.condition.behavior.transitionOwnership !== "host-managed-linear") {
@@ -634,11 +650,24 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       });
       if (!run.flowState) throw new Error("host-managed readiness rotation requires durable Flow state");
       run.flowState = rotateFlowCapabilityEpoch(run.flowState, this.#clock.nowIso());
-      run.refreshResumeMode = run.catalogMode === "refresh_required" ? run.refreshResumeMode : run.catalogMode;
-      run.catalogMode = "refresh_required";
-      const recovery = allCapabilities(run.condition)
-        .filter((capability) => capability.name === "flow.get_state");
-      const capabilitySnapshot = this.#snapshot(run, recovery);
+      if (run.catalogMode === "refresh_required") run.catalogMode = run.refreshResumeMode;
+      else run.refreshResumeMode = run.catalogMode;
+      const capabilitySnapshot = this.#snapshot(run, this.#capabilitiesForTarget(run));
+      const responsePlan = createHaccResponsePlan({
+        flow: this.#flow,
+        state: run.flowState,
+        conditionSha256: run.condition.conditionHash,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+        snapshot: capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+        quarantines: [...run.ambiguityQuarantines.values()],
+        speechGuardrailPacket: run.speechGuardrailPacket,
+        revision: run.responsePlanRevision + 1,
+        previousPlanSha256: run.responsePlan?.plan_sha256 ?? null,
+      });
+      run.responsePlan = responsePlan;
+      run.responsePlanRevision = responsePlan.revision;
       if (!run.transcript) throw new Error("benchmark gateway transcript was not initialized");
       run.transcript = appendKernelTranscriptCallerTurn(run.transcript, {
         condition: run.condition,
@@ -652,11 +681,13 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         postCapabilityHead: this.#capabilityHead(run),
         frontierEvidence: frontier.evidence,
         capabilitySnapshot,
+        responsePlan,
         durableMemoryState: run.condition.behavior.genericDurableMemory ? run.memory : null,
       });
       return Object.freeze({
         capabilitySnapshot,
         frontierEvidence: frontier.evidence,
+        responsePlan,
       });
     } catch (error) {
       restoreMutationCheckpoint(run, checkpoint);
@@ -1025,7 +1056,10 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     const envelope = record(asJson(candidate));
     const visible = envelope
       && Object.prototype.hasOwnProperty.call(envelope, "gateway_result")
-      && Object.prototype.hasOwnProperty.call(envelope, HACC_SPEECH_GUARDRAIL_PACKET_KEY)
+      && (
+        Object.prototype.hasOwnProperty.call(envelope, HACC_SPEECH_GUARDRAIL_PACKET_KEY)
+        || Object.prototype.hasOwnProperty.call(envelope, HACC_RESPONSE_PLAN_KEY)
+      )
       ? envelope.gateway_result
       : candidate;
     return Object.freeze({
@@ -1033,6 +1067,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       providerVisibleOutput: asJson({
         gateway_result: visible,
         [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: run.speechGuardrailPacket,
+        ...(run.responsePlan === null ? {} : { [HACC_RESPONSE_PLAN_KEY]: run.responsePlan }),
       }),
     });
   }

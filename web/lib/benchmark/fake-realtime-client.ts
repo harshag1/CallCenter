@@ -8,6 +8,7 @@ import type {
   Pcm16Format,
   RealtimeClientState,
   RealtimeEventListener,
+  RealtimeResponsePreparation,
   RealtimeToolCall,
   RealtimeToolResult,
   RealtimeWireEventListener,
@@ -128,6 +129,7 @@ export class ScriptedFakeRealtimeClient implements NormalizedRealtimeClient {
   #pendingCalls: readonly RealtimeToolCall[] = Object.freeze([]);
   #inputChunks: Pcm16Audio[] = [];
   #inputCommitted = false;
+  #responsePrepared = false;
   readonly observedToolResults: RealtimeToolResult[] = [];
 
   constructor(options: FakeRealtimeClientOptions) {
@@ -168,7 +170,23 @@ export class ScriptedFakeRealtimeClient implements NormalizedRealtimeClient {
     if (this.#state !== "ready") throw new Error("fake client is not ready");
     if (this.#pendingCalls.length > 0) throw new Error("cannot append fake input while tool calls are pending");
     if (this.#inputCommitted) throw new Error("fake input was already committed");
+    if (this.#responsePrepared) throw new Error("cannot append fake input after response preparation");
     this.#inputChunks.push(Object.freeze({ ...audio, data: Uint8Array.from(audio.data) }));
+  }
+
+  prepareResponse(preparation: RealtimeResponsePreparation): void {
+    if (this.#state !== "ready" || this.#inputChunks.length === 0 || this.#inputCommitted) {
+      throw new Error("fake response preparation requires uncommitted input audio");
+    }
+    if (this.#responsePrepared) throw new Error("fake response is already prepared");
+    if (sha256Hex(preparation.additionalInstructions) !== preparation.contextSha256) {
+      throw new Error("fake response preparation hash mismatch");
+    }
+    if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      throw new Error("fake response preparation authority mismatch");
+    }
+    this.#wire({ type: "fake.response.prepared", context_sha256: preparation.contextSha256 });
+    this.#responsePrepared = true;
   }
 
   commitInputAudio(): void {
@@ -190,6 +208,7 @@ export class ScriptedFakeRealtimeClient implements NormalizedRealtimeClient {
     if (!this.#inputCommitted) throw new Error("fake input must be committed before response creation");
     this.#inputChunks = [];
     this.#inputCommitted = false;
+    this.#responsePrepared = false;
     this.#roundIndex = 0;
     this.#emitRound();
   }
