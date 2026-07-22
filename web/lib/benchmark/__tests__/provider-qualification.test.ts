@@ -23,6 +23,7 @@ import type {
 } from "../../realtime/client/types";
 import type { TrialSessionConfiguration } from "../orchestrator";
 import { realtimeWireObservationSha256, realtimeWireProjectionSha256 } from "../../realtime/client/wire-evidence";
+import { XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256 } from "../../realtime/client/openai-compatible";
 
 const roots: string[] = [];
 const H = (character: string) => character.repeat(64);
@@ -797,6 +798,62 @@ describe("provider qualification", () => {
           "tools[0].parameters",
         ],
       },
+    });
+
+    const exactAlias = Object.freeze({
+      ...base,
+      fields: Object.freeze({
+        ...base.fields,
+        tools: Object.freeze({
+          status: "verified" as const,
+          requestedSha256: H("e"),
+          acknowledgedSha256: H("e"),
+          acknowledgedBy: "session.updated" as const,
+          aliasNormalization: Object.freeze({
+            kind: "xai_function_tool_wire_alias_v1" as const,
+            policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+            sourcePaths: Object.freeze(["tools[0]", "tools[0].function"]),
+            keyInventory: Object.freeze([
+              Object.freeze({ path: "tools[0]", keys: Object.freeze(["function", "type"]) }),
+              Object.freeze({ path: "tools[0].function", keys: Object.freeze(["description", "name", "parameters"]) }),
+            ]),
+            canonicalSha256: H("1"),
+            claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required" as const,
+          }),
+        }),
+      }),
+    });
+    const admittedAlias = await qualifyTool("xai-exact-tool-alias", exactAlias, 1);
+    expect(admittedAlias.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      toolSchemaVerification: "requires_paid_response_canary",
+      toolBoundaryEvidence: {
+        verification: "xai_function_wire_alias_requires_paid_exact_call",
+        omittedPaths: [],
+        aliasNormalization: {
+          policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+          canonicalSha256: H("1"),
+          claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+        },
+      },
+    });
+    const invalidAlias = Object.freeze({
+      ...exactAlias,
+      fields: Object.freeze({
+        ...exactAlias.fields,
+        tools: Object.freeze({
+          ...exactAlias.fields.tools,
+          aliasNormalization: Object.freeze({
+            ...exactAlias.fields.tools.aliasNormalization!,
+            policySha256: H("2"),
+          }),
+        }),
+      }),
+    });
+    const rejectedAliasPolicy = await qualifyTool("xai-invalid-tool-alias-policy", invalidAlias, 1);
+    expect(rejectedAliasPolicy.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
     });
 
     const widened = await qualifyTool("xai-tool-count-widened", boundedToolOmission, 2);

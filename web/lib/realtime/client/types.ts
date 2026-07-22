@@ -234,6 +234,22 @@ export type SessionConfigurationFieldProof = Readonly<{
     kind: "requested_paths_mismatched";
     paths: readonly string[];
   }>;
+  /**
+   * Safe evidence that xAI's documented nested function wrapper was reduced to
+   * the same canonical callable identity as the requested flat declaration.
+   * Values remain hashed; only structural key names and source paths are kept.
+   */
+  aliasNormalization?: Readonly<{
+    kind: "xai_function_tool_wire_alias_v1";
+    policySha256: string;
+    sourcePaths: readonly string[];
+    keyInventory: readonly Readonly<{
+      path: string;
+      keys: readonly string[];
+    }>[];
+    canonicalSha256: string;
+    claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required";
+  }>;
 }>;
 
 /**

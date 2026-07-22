@@ -2680,7 +2680,13 @@ export function buildSessionConfigurationAcknowledgement(
   input: SessionAcknowledgementInput,
 ): SessionConfigurationAcknowledgement {
   const requestedSession = record(input.requestedUpdate.session);
-  const acknowledgedSession = record(input.acknowledgedEvent.session);
+  const rawAcknowledgedSession = record(input.acknowledgedEvent.session);
+  const toolAliasNormalization = input.provider === "xai"
+    ? normalizeXaiFunctionToolAliases(requestedSession.tools, rawAcknowledgedSession.tools)
+    : null;
+  const acknowledgedSession = toolAliasNormalization?.accepted === true
+    ? { ...rawAcknowledgedSession, tools: toolAliasNormalization.canonicalAcknowledged }
+    : rawAcknowledgedSession;
   const requested = sessionIdentityFields(
     input.provider,
     requestedSession,
@@ -2700,6 +2706,9 @@ export function buildSessionConfigurationAcknowledgement(
       field === "model"
         ? input.acknowledgedModel?.wireType ?? "session.updated"
         : "session.updated",
+      field === "tools" && toolAliasNormalization?.accepted === true
+        ? toolAliasNormalization.evidence
+        : undefined,
     ),
   ])) as Record<SessionConfigurationField, SessionConfigurationFieldProof>;
   const session = configurationFieldProof("session", requestedSession, acknowledgedSession, "session.updated");
@@ -2743,6 +2752,7 @@ function configurationFieldProof(
   requestedRaw: unknown,
   acknowledgedRaw: unknown,
   acknowledgedBy: "session.created" | "session.updated",
+  aliasNormalization?: NonNullable<SessionConfigurationFieldProof["aliasNormalization"]>,
 ): SessionConfigurationFieldProof {
   const requested = wireJsonValue(requestedRaw);
   const acknowledged = wireJsonValue(acknowledgedRaw);
@@ -2792,6 +2802,7 @@ function configurationFieldProof(
                 : "partial_value" as const,
             }),
           }),
+      ...(aliasNormalization === undefined ? {} : { aliasNormalization }),
     });
   }
   if (projection.missing.length) {
@@ -2808,6 +2819,7 @@ function configurationFieldProof(
           ? "empty_object" as const
           : "partial_value" as const,
       }),
+      ...(aliasNormalization === undefined ? {} : { aliasNormalization }),
     });
   }
   return Object.freeze({
@@ -2818,6 +2830,7 @@ function configurationFieldProof(
     ...(requestedSha256 === acknowledgedSha256
       ? {}
       : { reason: "Provider explicitly acknowledged a different value" }),
+    ...(aliasNormalization === undefined ? {} : { aliasNormalization }),
   });
 }
 
@@ -2849,6 +2862,118 @@ function acknowledgedSessionId(event: Record<string, unknown>): string | undefin
 }
 
 type ProjectedAcknowledgement = { value: unknown; missing: string[]; mismatched: string[] };
+
+export const XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256 = sha256Text(
+  `harshas-amazing-call-center/xai-function-tool-wire-alias/v1\n${canonicalJson({
+    provider: "xai",
+    flatKeys: ["description", "name", "parameters"],
+    nestedWrapper: "function",
+    exactCardinalityAndOrder: true,
+    bothFormsRequireExactAgreement: true,
+    unknownKeysFatal: true,
+    schemaWideningFatal: true,
+    claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+  })}`,
+);
+
+type XaiToolAliasNormalization = Readonly<
+  | { accepted: false }
+  | {
+      accepted: true;
+      canonicalAcknowledged: readonly unknown[];
+      evidence: NonNullable<SessionConfigurationFieldProof["aliasNormalization"]>;
+    }
+>;
+
+const XAI_CALLABLE_KEYS = Object.freeze(["description", "name", "parameters"] as const);
+const XAI_CALLABLE_KEY_SET = new Set<string>(XAI_CALLABLE_KEYS);
+
+/**
+ * xAI currently acknowledges a guide-compatible flat function declaration as
+ * `{type:"function", function:{...}}`. This is a bijective wire alias only:
+ * it never changes tool count/order or drops unknown capability-bearing keys.
+ */
+function normalizeXaiFunctionToolAliases(
+  requestedRaw: unknown,
+  acknowledgedRaw: unknown,
+): XaiToolAliasNormalization | null {
+  if (!Array.isArray(requestedRaw) || !Array.isArray(acknowledgedRaw)) return null;
+  if (requestedRaw.length !== acknowledgedRaw.length) return { accepted: false };
+  const canonicalAcknowledged: unknown[] = [];
+  const sourcePaths: string[] = [];
+  const keyInventory: Array<Readonly<{ path: string; keys: readonly string[] }>> = [];
+  let usedAlias = false;
+  for (let index = 0; index < requestedRaw.length; index += 1) {
+    const requested = canonicalXaiFunctionTool(requestedRaw[index], `tools[${index}]`);
+    const acknowledged = canonicalXaiFunctionTool(acknowledgedRaw[index], `tools[${index}]`);
+    if (requested === null || acknowledged === null) return { accepted: false };
+    canonicalAcknowledged.push(acknowledged.canonical);
+    if (acknowledged.nested) {
+      usedAlias = true;
+      sourcePaths.push(...acknowledged.sourcePaths);
+      keyInventory.push(...acknowledged.keyInventory);
+    }
+  }
+  if (!usedAlias) return null;
+  // Canonical cardinality/order is inherited from the arrays above. Missing
+  // bounded metadata is deliberately left for the existing projection/Gate B.
+  const canonicalSha256 = sha256Text(
+    `harshas-amazing-call-center/xai-function-tool-canonical/v1\n${canonicalJson(canonicalAcknowledged)}`,
+  );
+  return Object.freeze({
+    accepted: true as const,
+    canonicalAcknowledged: Object.freeze(canonicalAcknowledged),
+    evidence: Object.freeze({
+      kind: "xai_function_tool_wire_alias_v1" as const,
+      policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+      sourcePaths: Object.freeze([...new Set(sourcePaths)].sort()),
+      keyInventory: Object.freeze(keyInventory
+        .map((entry) => Object.freeze({ path: entry.path, keys: Object.freeze([...entry.keys]) }))
+        .sort((left, right) => left.path.localeCompare(right.path))),
+      canonicalSha256,
+      claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required" as const,
+    }),
+  });
+}
+
+type CanonicalXaiFunctionTool = Readonly<{
+  canonical: Readonly<Record<string, unknown>>;
+  nested: boolean;
+  sourcePaths: readonly string[];
+  keyInventory: readonly Readonly<{ path: string; keys: readonly string[] }>[];
+}>;
+
+function canonicalXaiFunctionTool(raw: unknown, path: string): CanonicalXaiFunctionTool | null {
+  if (!isRecord(raw) || raw.type !== "function") return null;
+  const outerKeys = Object.keys(raw).sort();
+  const hasNested = Object.prototype.hasOwnProperty.call(raw, "function");
+  const flatKeys = XAI_CALLABLE_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(raw, key));
+  const allowedOuter = new Set(["type", ...(hasNested ? ["function"] : []), ...flatKeys]);
+  if (outerKeys.some((key) => !allowedOuter.has(key))) return null;
+  const flat = Object.fromEntries(flatKeys.map((key) => [key, raw[key]]));
+  let callable = flat;
+  const sourcePaths = [path];
+  const keyInventory: Array<Readonly<{ path: string; keys: readonly string[] }>> = [
+    Object.freeze({ path, keys: Object.freeze(outerKeys) }),
+  ];
+  if (hasNested) {
+    if (!isRecord(raw.function)) return null;
+    const nestedRecord = raw.function;
+    const nestedKeys = Object.keys(nestedRecord).sort();
+    if (nestedKeys.some((key) => !XAI_CALLABLE_KEY_SET.has(key))) return null;
+    const nested = Object.fromEntries(nestedKeys.map((key) => [key, nestedRecord[key]]));
+    if (flatKeys.length > 0 && canonicalJson(flat) !== canonicalJson(nested)) return null;
+    callable = nested;
+    sourcePaths.push(`${path}.function`);
+    keyInventory.push(Object.freeze({ path: `${path}.function`, keys: Object.freeze(nestedKeys) }));
+  }
+  return Object.freeze({
+    canonical: Object.freeze({ type: "function", ...callable }),
+    nested: hasNested,
+    sourcePaths: Object.freeze(sourcePaths),
+    keyInventory: Object.freeze(keyInventory),
+  });
+}
 
 function projectExactCapabilityAcknowledgement(
   requested: unknown,

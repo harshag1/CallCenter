@@ -12,6 +12,7 @@ import type {
 } from "../realtime/client/types";
 import { LC4_XAI_SERVER_VAD_SHA256 } from "./xai-server-vad";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+import { XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256 } from "../realtime/client/openai-compatible";
 
 export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 3 as const;
 export const PROVIDER_QUALIFICATION_MAX_AGE_MS = 30 * 60_000;
@@ -129,7 +130,8 @@ export type ProviderQualificationResult = Readonly<{
     acknowledgedToolCount: 1;
     exactFunctionTypeVerified: true;
     omittedPaths: readonly string[];
-    verification: "bounded_gateway_metadata_omission_requires_paid_exact_call";
+    verification: "bounded_gateway_metadata_omission_requires_paid_exact_call" | "xai_function_wire_alias_requires_paid_exact_call";
+    aliasNormalization?: NonNullable<SessionConfigurationAcknowledgement["fields"]["tools"]["aliasNormalization"]>;
   }>;
   initialConfigurationEvidence?: Readonly<{
     observationSha256: string;
@@ -528,6 +530,27 @@ function exactGatewayTarget(target: ProviderQualificationTarget): boolean {
     && (tool as Record<string, unknown>).name === "capability_gateway";
 }
 
+function validXaiToolAliasEvidence(
+  evidence: NonNullable<SessionConfigurationAcknowledgement["fields"]["tools"]["aliasNormalization"]> | undefined,
+): boolean {
+  if (evidence === undefined) return false;
+  const allowedPaths = new Set(["tools[0]", "tools[0].function"]);
+  const inventories = new Map(evidence.keyInventory.map((entry) => [entry.path, entry.keys]));
+  return evidence.kind === "xai_function_tool_wire_alias_v1"
+    && evidence.policySha256 === XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256
+    && /^[a-f0-9]{64}$/u.test(evidence.canonicalSha256)
+    && evidence.claimBoundary === "wire_alias_equivalence_only_paid_exact_call_still_required"
+    && evidence.sourcePaths.length === new Set(evidence.sourcePaths).size
+    && evidence.sourcePaths.every((path) => allowedPaths.has(path))
+    && evidence.sourcePaths.includes("tools[0].function")
+    && evidence.keyInventory.length === inventories.size
+    && evidence.keyInventory.every((entry) => allowedPaths.has(entry.path)
+      && entry.keys.length === new Set(entry.keys).size
+      && [...entry.keys].sort().join("\0") === entry.keys.join("\0")
+      && entry.keys.every((key) => ["type", "function", "name", "description", "parameters"].includes(key)))
+    && inventories.has("tools[0].function");
+}
+
 function acknowledgementResult(
   target: ProviderQualificationTarget,
   readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null,
@@ -610,6 +633,12 @@ function acknowledgementResult(
       && exactGatewayTarget(target)
       && acknowledgedToolCount === 1
       && toolProof.contradiction === undefined;
+    const xaiToolAlias = toolProof.aliasNormalization;
+    const boundedXaiToolAlias = xaiToolAlias !== undefined
+      && validXaiToolAliasEvidence(xaiToolAlias)
+      && exactGatewayTarget(target)
+      && acknowledgedToolCount === 1
+      && toolProof.contradiction === undefined;
     const conditionalServerVad = omittedTurnPaths !== null
       && turnBoundaryProof.contradiction === undefined;
     const initialEvidence = wireEvidence === null
@@ -622,7 +651,8 @@ function acknowledgementResult(
       || (voiceProof.status === "unverifiable"
         && initialVoiceExact
         && voiceProof.contradiction === undefined);
-    const toolAccepted = toolProof.status === "verified"
+    const toolAccepted = (toolProof.status === "verified"
+        && (xaiToolAlias === undefined || boundedXaiToolAlias))
       || (toolProof.status === "not_requested" && target.configuration.providerTools.length === 0)
       || boundedGatewayToolOmission;
     if (
@@ -645,12 +675,16 @@ function acknowledgementResult(
       };
     }
     const toolBoundaryEvidence = boundedGatewayToolOmission
+      || boundedXaiToolAlias
       ? Object.freeze({
           requestedToolCount: 1 as const,
           acknowledgedToolCount: 1 as const,
           exactFunctionTypeVerified: true as const,
-          omittedPaths: omittedToolPaths,
-          verification: "bounded_gateway_metadata_omission_requires_paid_exact_call" as const,
+          omittedPaths: omittedToolPaths ?? Object.freeze([]),
+          verification: boundedXaiToolAlias
+            ? "xai_function_wire_alias_requires_paid_exact_call" as const
+            : "bounded_gateway_metadata_omission_requires_paid_exact_call" as const,
+          ...(boundedXaiToolAlias ? { aliasNormalization: xaiToolAlias } : {}),
         })
       : undefined;
     if (conditionalServerVad || voiceProof.status !== "verified") {
@@ -664,7 +698,7 @@ function acknowledgementResult(
           ? "initial_snapshot_exact_only"
           : "conditional_server_vad_echo",
         acknowledgementSha256: digest,
-        toolSchemaVerification: boundedGatewayToolOmission
+        toolSchemaVerification: boundedGatewayToolOmission || boundedXaiToolAlias
           ? "requires_paid_response_canary"
           : target.configuration.providerTools.length === 0
             ? "not_requested"
@@ -705,7 +739,7 @@ function acknowledgementResult(
       ...(toolBoundaryEvidence === undefined ? {} : { toolBoundaryEvidence }),
       toolSchemaVerification: target.configuration.providerTools.length === 0
         ? "not_requested"
-        : toolProof.status === "verified"
+        : toolProof.status === "verified" && !boundedXaiToolAlias
           ? "verified_by_provider_echo"
           : "requires_paid_response_canary",
       turnBoundaryVerification: "verified_by_provider_echo",
@@ -911,6 +945,7 @@ export function assertProviderQualificationArtifactIntegrity(
       && retainedToolProof.omission?.kind === "requested_paths_omitted"
       ? boundedOmission(retainedToolProof.omission.paths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET)
       : null;
+    const retainedToolAlias = retainedToolProof?.aliasNormalization;
     const acknowledgementObservation = result.setupWireEvidence?.observations.find((observation) => (
       observation.observationSha256 === result.setupWireEvidence?.acknowledgementObservationSha256
     ));
@@ -921,15 +956,22 @@ export function assertProviderQualificationArtifactIntegrity(
       || result.toolBoundaryEvidence.requestedToolCount !== 1
       || result.toolBoundaryEvidence.acknowledgedToolCount !== 1
       || result.toolBoundaryEvidence.exactFunctionTypeVerified !== true
-      || result.toolBoundaryEvidence.verification !== "bounded_gateway_metadata_omission_requires_paid_exact_call"
+      || (result.toolBoundaryEvidence.verification !== "bounded_gateway_metadata_omission_requires_paid_exact_call"
+        && result.toolBoundaryEvidence.verification !== "xai_function_wire_alias_requires_paid_exact_call")
       || boundedOmission(result.toolBoundaryEvidence.omittedPaths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET) === null
-      || canonicalJson(result.toolBoundaryEvidence.omittedPaths) !== canonicalJson(retainedToolOmissions)
+      || (result.toolBoundaryEvidence.verification === "bounded_gateway_metadata_omission_requires_paid_exact_call"
+        && canonicalJson(result.toolBoundaryEvidence.omittedPaths) !== canonicalJson(retainedToolOmissions))
+      || (result.toolBoundaryEvidence.verification === "xai_function_wire_alias_requires_paid_exact_call"
+        && (retainedToolAlias === undefined
+          || !validXaiToolAliasEvidence(retainedToolAlias)
+          || canonicalJson(result.toolBoundaryEvidence.omittedPaths) !== canonicalJson(retainedToolOmissions ?? [])
+          || canonicalJson(result.toolBoundaryEvidence.aliasNormalization) !== canonicalJson(retainedToolAlias)))
       || sessionProjection(acknowledgementObservation)?.toolCount !== 1
       || retainedToolProof?.contradiction !== undefined
     )) throw new Error("provider qualification gateway-tool omission evidence is inconsistent");
     if (result.provider === "xai"
       && result.status === "passed"
-      && retainedToolOmissions !== null
+      && (retainedToolOmissions !== null || retainedToolAlias !== undefined)
       && result.toolBoundaryEvidence === undefined) {
       throw new Error("provider qualification omitted gateway-tool risk evidence");
     }

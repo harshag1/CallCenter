@@ -8,6 +8,7 @@ import {
 } from "../realtime/client/events";
 import {
   OpenAICompatibleRealtimeClient,
+  XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
   buildSessionConfigurationAcknowledgement,
   createOpenAIRealtimeClient,
   createXaiRealtimeClient,
@@ -3168,6 +3169,132 @@ describe("OpenAI-compatible realtime client", () => {
 });
 
 describe("manual PCM session compilation", () => {
+  it("normalizes only the exact xAI nested function wire alias and retains safe evidence", () => {
+    const tool = {
+      type: "function",
+      name: "capability_gateway",
+      description: "Dispatch one scoped capability.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { tool_name: { type: "string" } },
+        required: ["tool_name"],
+      },
+    };
+    const proofFor = (tools: unknown[], provider: "xai" | "openai" = "xai") => (
+      buildSessionConfigurationAcknowledgement({
+        provider,
+        requestedUpdate: { type: "session.update", session: { tools: [tool] } },
+        acknowledgedEvent: { type: "session.updated", session: { tools } },
+      })
+    );
+    const nested = {
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+    };
+    const exact = proofFor([nested]);
+    expect(exact.fields.tools).toMatchObject({
+      status: "verified",
+      aliasNormalization: {
+        kind: "xai_function_tool_wire_alias_v1",
+        policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+        sourcePaths: ["tools[0]", "tools[0].function"],
+        keyInventory: [
+          { path: "tools[0]", keys: ["function", "type"] },
+          { path: "tools[0].function", keys: ["description", "name", "parameters"] },
+        ],
+        canonicalSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+      },
+    });
+    expect(exact.session).toMatchObject({ status: "verified" });
+
+    const omitted = proofFor([{ type: "function", function: {} }]);
+    expect(omitted.fields.tools).toMatchObject({
+      status: "unverifiable",
+      omission: {
+        paths: ["tools[0].description", "tools[0].name", "tools[0].parameters"],
+      },
+      aliasNormalization: { policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256 },
+    });
+
+    const exactBoth = proofFor([{ ...tool, function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    } }]);
+    expect(exactBoth.fields.tools.status).toBe("verified");
+
+    const adversarial = [
+      [{ ...tool, function: { ...nested.function, name: "other_gateway" } }],
+      [{ ...nested, extra_callable: { name: "hidden" } }],
+      [{ ...nested, function: { ...nested.function, additional_schema: {} } }],
+      [{ ...nested, function: { ...nested.function, name: "other_gateway" } }],
+      [{ ...nested, function: { ...nested.function, parameters: { type: "object", additionalProperties: true } } }],
+      [nested, nested],
+    ];
+    for (const acknowledgedTools of adversarial) {
+      const rejected = proofFor(acknowledgedTools);
+      expect(rejected.fields.tools.status).toBe("mismatch");
+      expect(rejected.fields.tools.contradiction?.paths.length).toBeGreaterThan(0);
+    }
+    expect(proofFor([nested], "openai").fields.tools.status).toBe("mismatch");
+  });
+
+  it("admits xAI's nested function acknowledgement at the real readiness boundary", async () => {
+    const socket = new FakeSocket();
+    const events: NormalizedRealtimeEvent[] = [];
+    const client = new OpenAICompatibleRealtimeClient({
+      provider: "xai",
+      url: "wss://xai.example/realtime?model=grok-voice-think-fast-1.0",
+      sessionUpdate: localProxySession,
+      socketFactory: () => socket,
+      connectTimeoutMs: 1_000,
+    });
+    client.onEvent((event) => events.push(event));
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_alias", model: "grok-voice-think-fast-1.0" },
+    }));
+    const sent = JSON.parse(socket.sent[0]!) as Record<string, unknown>;
+    const acknowledgedSession = structuredClone(recordForTest(sent.session));
+    const sentTools = acknowledgedSession.tools as Array<Record<string, unknown>>;
+    const flat = sentTools[0]!;
+    sentTools[0] = {
+      type: "function",
+      function: {
+        name: flat.name,
+        description: flat.description,
+        parameters: flat.parameters,
+      },
+    };
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_alias", ...acknowledgedSession },
+    }));
+    await expect(pending).resolves.toBeUndefined();
+    expect(client.state).toBe("ready");
+    expect(events.find((event) => event.type === "session.ready")).toMatchObject({
+      configuration: {
+        fields: {
+          tools: {
+            status: "verified",
+            aliasNormalization: {
+              policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+              claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("hashes exact effective OpenAI session identity without mistaking provider defaults for drift", () => {
     const requested = {
       type: "session.update",
