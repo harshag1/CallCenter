@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,13 +15,26 @@ import {
   lc4DevLedgerGenesisSha256,
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
+import { createLc4HeadlessListenerPlaybackAuthority } from "../lc4-development-headless-listener-authority";
 import type { Lc4DevImmutableLedgerEvent, Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import { createBenchmarkKernelAttestationSigner } from "../kernel-attestation";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const HASH = "a".repeat(64);
 const roots: string[] = [];
+
+function listenerAuthority() {
+  const keys = generateKeyPairSync("ed25519");
+  return createLc4HeadlessListenerPlaybackAuthority({
+    signer: createBenchmarkKernelAttestationSigner({
+      keyId: "lc4-dev-headless-listener-test",
+      privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      publicKeyPem: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    }),
+  });
+}
 
 async function temporaryDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "lc4-dev-deps-"));
@@ -63,7 +77,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       "public_corpus_missing_frozen_semantic_registry",
       "public_corpus_missing_pinned_asr_evaluator",
       "realtime_exchange_missing_repair_playback_channel",
-      "listener_handoff_missing_playback_authority",
+      "listener_handoff_missing_evaluator_consumption_authority",
     ]);
     expect(audit.gaps.every((gap) => gap.detail.length > 40)).toBe(true);
     expect(audit.audit_sha256).toMatch(/^[a-f0-9]{64}$/);
@@ -104,7 +118,7 @@ describe("LC4-DEV concrete live dependencies", () => {
     await expect(createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis })).rejects.toThrow("already exists");
   });
 
-  it("binds listener evidence to externally verified played PCM and the pinned evaluator identity", async () => {
+  it("binds listener evidence to the signed complete-capture handoff and pinned evaluator identity", async () => {
     const root = await temporaryDirectory();
     const cas = await createLc4ImmutableCas(join(root, "cas"));
     const corpus = createLc4PublicDevelopmentCorpus();
@@ -129,7 +143,8 @@ describe("LC4-DEV concrete live dependencies", () => {
         };
       },
     };
-    const playbackAuthorityManifest = "7".repeat(64);
+    const playbackAuthority = listenerAuthority();
+    const playbackAuthorityManifest = playbackAuthority.authority_manifest_sha256;
     const listenerManifest = createLc4PinnedListenerManifestSha256({
       corpus_sha256: corpus.artifact_sha256,
       evaluator,
@@ -142,17 +157,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       criteria,
       evaluator,
       playback_authority_manifest_sha256: playbackAuthorityManifest,
-      playback_authority: {
-        async verify({ pcm }) {
-          return {
-            status: "completed",
-            played_byte_start: 0,
-            played_byte_end: pcm.byteLength,
-            played_pcm_sha256: sha256Hex(pcm),
-            authority_receipt_sha256: "8".repeat(64),
-          };
-        },
-      },
+      playback_authority: playbackAuthority,
       cas,
     });
     const pcm = Uint8Array.from([1, 2, 3, 4]);
@@ -187,7 +192,7 @@ describe("LC4-DEV concrete live dependencies", () => {
     expect(await cas.get(sha256Hex(pcm))).toEqual(pcm);
   });
 
-  it("rejects evaluator evidence that was produced from any bytes other than caller-heard PCM", async () => {
+  it("rejects evaluator evidence produced from bytes other than the complete server-captured PCM", async () => {
     const root = await temporaryDirectory();
     const cas = await createLc4ImmutableCas(join(root, "cas"));
     const corpus = createLc4PublicDevelopmentCorpus();
@@ -212,7 +217,8 @@ describe("LC4-DEV concrete live dependencies", () => {
         };
       },
     };
-    const playbackAuthorityManifest = "7".repeat(64);
+    const playbackAuthority = listenerAuthority();
+    const playbackAuthorityManifest = playbackAuthority.authority_manifest_sha256;
     const sink = createLc4PinnedListenerSink({
       corpus,
       listener_manifest_sha256: createLc4PinnedListenerManifestSha256({
@@ -224,11 +230,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       criteria,
       evaluator,
       playback_authority_manifest_sha256: playbackAuthorityManifest,
-      playback_authority: {
-        async verify({ pcm }) {
-          return { status: "completed", played_byte_start: 0, played_byte_end: pcm.byteLength, played_pcm_sha256: sha256Hex(pcm), authority_receipt_sha256: "8".repeat(64) };
-        },
-      },
+      playback_authority: playbackAuthority,
       cas,
     });
     const capture = createLc4CapturedOutput({
@@ -251,6 +253,6 @@ describe("LC4-DEV concrete live dependencies", () => {
       capture,
       response_plan_sha256: null,
       wire_observation_set_sha256: "b".repeat(64),
-    })).rejects.toThrow("not pinned to the exact played PCM");
+    })).rejects.toThrow("did not attest consumption of the exact complete captured PCM");
   });
 });

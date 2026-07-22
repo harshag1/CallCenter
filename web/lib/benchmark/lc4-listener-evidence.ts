@@ -461,6 +461,17 @@ function verifyCapture(capture: Lc4CapturedOutput): readonly string[] {
   return Object.freeze(errors);
 }
 
+/**
+ * Fail-closed integrity check for a complete provider-output capture. This is
+ * exported so a server-side evaluator handoff can independently reject chunk
+ * substitution, reordering, truncation, and aggregate-receipt tampering before
+ * any bytes reach ASR.
+ */
+export function assertLc4CapturedOutputIntegrity(capture: Lc4CapturedOutput): void {
+  const errors = verifyCapture(capture);
+  if (errors.length > 0) throw new Error(`invalid LC4 capture: ${errors.join("; ")}`);
+}
+
 function playbackBody(receipt: Lc4PlaybackReceipt) {
   const body: Record<string, unknown> = { ...receipt };
   delete body.receipt_sha256;

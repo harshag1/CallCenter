@@ -16,6 +16,10 @@ import type {
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
+import type {
+  Lc4ListenerPlaybackAuthority,
+  Lc4PinnedListenerEvaluator,
+} from "./lc4-development-headless-listener-authority";
 import type { Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   assertLc4PublicDevelopmentCorpus,
@@ -79,7 +83,7 @@ export type Lc4DevLiveReadinessGapCode =
   | "public_corpus_missing_frozen_semantic_registry"
   | "public_corpus_missing_pinned_asr_evaluator"
   | "realtime_exchange_missing_repair_playback_channel"
-  | "listener_handoff_missing_playback_authority";
+  | "listener_handoff_missing_evaluator_consumption_authority";
 
 export type Lc4DevLiveReadinessGap = Readonly<{
   code: Lc4DevLiveReadinessGapCode;
@@ -97,7 +101,7 @@ const CURRENT_PUBLIC_CORPUS_GAPS: readonly Lc4DevLiveReadinessGap[] = Object.fre
   Object.freeze({ code: "public_corpus_missing_frozen_semantic_registry", blocks: "listener_evidence", detail: "Expected listener prose is not a frozen phrase/operator registry committed before provider output." }),
   Object.freeze({ code: "public_corpus_missing_pinned_asr_evaluator", blocks: "listener_evidence", detail: "No evaluator executable, weights, decoding contract, calibration, or signing identity is bound to the public DEV corpus." }),
   Object.freeze({ code: "realtime_exchange_missing_repair_playback_channel", blocks: "all_provider_calls", detail: "The exchange contract has no arm-blind channel for playing bounded repair PCM inside the same canonical opportunity without extending the horizon." }),
-  Object.freeze({ code: "listener_handoff_missing_playback_authority", blocks: "listener_evidence", detail: "The listener handoff contains generated PCM but no independently verified byte range proving what the caller actually heard." }),
+  Object.freeze({ code: "listener_handoff_missing_evaluator_consumption_authority", blocks: "listener_evidence", detail: "The headless listener handoff needs a signed authority proving the exact complete captured PCM byte range consumed by the pinned evaluator; it must not claim physical playback or human audibility." }),
 ]);
 
 /**
@@ -273,43 +277,11 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
   });
 }
 
-export type Lc4PinnedListenerEvaluation = Readonly<{
-  source_pcm_sha256: string;
-  source_pcm_byte_length: number;
-  evaluator_contract_sha256: string;
-  evaluator_build_sha256: string;
-  calibration_sha256: string;
-  transcript_sha256: string;
-  semantic_result_sha256: string;
-  signed_invocation_receipt_sha256: string;
-}>;
-
-export type Lc4PinnedListenerEvaluator = Readonly<{
-  evaluator_contract_sha256: string;
-  evaluator_build_sha256: string;
-  calibration_sha256: string;
-  evaluate(input: Readonly<{
-    run_id: string;
-    opportunity_id: string;
-    provider: "openai" | "gemini" | "xai";
-    sample_rate_hz: number;
-    pcm: Uint8Array;
-    criterion_plan_sha256: string;
-  }>): Promise<Lc4PinnedListenerEvaluation>;
-}>;
-
-export type Lc4ListenerPlaybackAuthority = Readonly<{
-  verify(input: Readonly<{
-    capture: Lc4CapturedOutput;
-    pcm: Uint8Array;
-  }>): Promise<Readonly<{
-    status: "completed";
-    played_byte_start: 0;
-    played_byte_end: number;
-    played_pcm_sha256: string;
-    authority_receipt_sha256: string;
-  }>>;
-}>;
+export type {
+  Lc4ListenerPlaybackAuthority,
+  Lc4PinnedListenerEvaluation,
+  Lc4PinnedListenerEvaluator,
+} from "./lc4-development-headless-listener-authority";
 
 export type Lc4DevListenerCriterionBinding = Readonly<{
   opportunity_id: string;
@@ -336,8 +308,9 @@ export function createLc4PinnedListenerManifestSha256(input: Readonly<{
 }
 
 /**
- * Evaluates only externally verified caller-heard PCM. Generated-but-unplayed
- * output and evaluator results that are not pinned to the exact bytes fail.
+ * Evaluates only the complete server-captured PCM byte range through a signed,
+ * pinned headless handoff. This proves evaluator consumption, not physical
+ * speaker playback or that a human caller heard the output.
  */
 export function createLc4PinnedListenerSink(input: Readonly<{
   corpus: Lc4PublicDevelopmentCorpus;
@@ -375,6 +348,10 @@ export function createLc4PinnedListenerSink(input: Readonly<{
   if (expectedManifest !== input.listener_manifest_sha256) {
     throw new Error("LC4-DEV listener manifest is not bound to its corpus, criteria, evaluator, and playback authority");
   }
+  if (input.playback_authority.mode !== "headless_evaluator_handoff"
+    || input.playback_authority.authority_manifest_sha256 !== input.playback_authority_manifest_sha256) {
+    throw new Error("LC4-DEV listener authority is not the pinned headless evaluator handoff");
+  }
 
   return Object.freeze({
     accept: async ({ episode, opportunity, capture, response_plan_sha256, wire_observation_set_sha256 }) => {
@@ -389,24 +366,15 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         throw new Error("LC4-DEV native listener evidence cannot bind a HACC response plan");
       }
       const generatedPcm = pcmFromCapture(capture);
-      const playback = await input.playback_authority.verify({ capture, pcm: generatedPcm.slice() });
-      requireSha256(playback.authority_receipt_sha256, "LC4-DEV playback authority receipt");
-      if (playback.status !== "completed"
-        || playback.played_byte_start !== 0
-        || playback.played_byte_end !== generatedPcm.byteLength
-        || playback.played_pcm_sha256 !== sha256Hex(generatedPcm)) {
-        throw new Error("LC4-DEV listener evidence requires independently verified full captured-PCM playback");
-      }
       const criterion = input.criteria[opportunity.index - 1];
       if (!criterion || criterion.opportunity_id !== opportunity.id) throw new Error("LC4-DEV listener criterion binding is missing");
-      const evaluation = await input.evaluator.evaluate({
-        run_id: episode.episode_id,
-        opportunity_id: opportunity.id,
-        provider: episode.provider,
-        sample_rate_hz: capture.format.sample_rate_hz,
+      const handoff = await input.playback_authority.consume({
+        capture,
         pcm: generatedPcm.slice(),
         criterion_plan_sha256: criterion.criterion_plan_sha256,
+        evaluator: input.evaluator,
       });
+      const evaluation = handoff.evaluation;
       for (const digest of [
         evaluation.evaluator_contract_sha256,
         evaluation.evaluator_build_sha256,
@@ -415,14 +383,30 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         evaluation.semantic_result_sha256,
         evaluation.signed_invocation_receipt_sha256,
       ]) requireSha256(digest, "LC4-DEV listener evaluator receipt");
-      if (evaluation.source_pcm_sha256 !== sha256Hex(generatedPcm)
+      requireSha256(handoff.authority_receipt.receipt_sha256, "LC4-DEV headless listener authority receipt");
+      if (handoff.status !== "evaluator_consumed_complete_capture"
+        || handoff.generated_pcm_sha256 !== capture.generated_pcm_sha256
+        || handoff.generated_byte_length !== capture.generated_byte_length
+        || handoff.captured_byte_start !== 0
+        || handoff.captured_byte_end !== generatedPcm.byteLength
+        || handoff.evaluator_consumed_byte_start !== 0
+        || handoff.evaluator_consumed_byte_end !== generatedPcm.byteLength
+        || handoff.captured_pcm_sha256 !== sha256Hex(generatedPcm)
+        || handoff.evaluator_consumed_pcm_sha256 !== sha256Hex(generatedPcm)
+        || handoff.physical_playback_status !== "not_performed_headless"
+        || handoff.human_audibility_status !== "not_measured_not_claimed"
+        || evaluation.source_pcm_sha256 !== sha256Hex(generatedPcm)
         || evaluation.source_pcm_byte_length !== generatedPcm.byteLength
         || evaluation.evaluator_contract_sha256 !== input.evaluator.evaluator_contract_sha256
         || evaluation.evaluator_build_sha256 !== input.evaluator.evaluator_build_sha256
         || evaluation.calibration_sha256 !== input.evaluator.calibration_sha256) {
-        throw new Error("LC4-DEV evaluator result is not pinned to the exact played PCM and evaluator identity");
+        throw new Error("LC4-DEV evaluator result is not pinned to the exact complete captured PCM and evaluator identity");
       }
       const pcmReceipt = await input.cas.put(generatedPcm, "audio/pcm");
+      const authorityReceiptCas = await input.cas.put(
+        Buffer.from(canonicalJson(handoff.authority_receipt)),
+        "application/json",
+      );
       const body = {
         schema_version: 1 as const,
         dependency_version: LC4_DEV_LIVE_DEPENDENCY_VERSION,
@@ -430,9 +414,17 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         opportunity_id: opportunity.id,
         provider: episode.provider,
         capture_receipt_sha256: capture.capture_receipt_sha256,
-        played_pcm_sha256: playback.played_pcm_sha256,
-        played_pcm_cas_receipt_sha256: pcmReceipt.receipt_sha256,
-        playback_authority_receipt_sha256: playback.authority_receipt_sha256,
+        generated_pcm_sha256: capture.generated_pcm_sha256,
+        captured_pcm_sha256: handoff.captured_pcm_sha256,
+        evaluator_consumed_pcm_sha256: handoff.evaluator_consumed_pcm_sha256,
+        evaluator_consumed_byte_start: handoff.evaluator_consumed_byte_start,
+        evaluator_consumed_byte_end: handoff.evaluator_consumed_byte_end,
+        evaluator_consumed_pcm_cas_receipt_sha256: pcmReceipt.receipt_sha256,
+        headless_listener_authority_receipt_sha256: handoff.authority_receipt.receipt_sha256,
+        headless_listener_authority_receipt_cas_sha256: authorityReceiptCas.artifact_sha256,
+        headless_listener_authority_receipt_cas_receipt_sha256: authorityReceiptCas.receipt_sha256,
+        physical_playback_status: handoff.physical_playback_status,
+        human_audibility_status: handoff.human_audibility_status,
         criterion_plan_sha256: criterion.criterion_plan_sha256,
         response_plan_sha256,
         wire_observation_set_sha256,
