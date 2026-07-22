@@ -15,6 +15,7 @@ import {
   evaluateLongCallTransportIntegrity,
   isLongCallMissionCompletionPass,
   isStrictLongCallPass,
+  longCallResultSha256,
   longCallScheduleArtifact,
   longUsefulnessTask,
   scoreLongCallExperiment,
@@ -269,20 +270,46 @@ describe("HACC-LC3-v5 long-call live experiment", () => {
       }],
     }) as unknown as Parameters<typeof evaluateLongCallModelIntegrity>[1];
     const world = (receipts: readonly unknown[]) => ({ receipts }) as unknown as Parameters<typeof evaluateLongCallModelIntegrity>[0];
+    const providerEvidence = [{
+      sequence: 1,
+      event_type: "provider.normalized",
+      payload: {
+        type: "tool.calls",
+        calls: [{
+          callId: "provider-call-1",
+          name: "capability_gateway",
+          argumentsJson: { tool_name: "lookup_record", arguments: {} },
+        }],
+      },
+    }, {
+      sequence: 2,
+      event_type: "tool.call_result",
+      payload: {
+        provider_call_id: "provider-call-1",
+        requested_tool: "capability_gateway",
+        action: "lookup_record",
+        provider_call_identity_conflict: false,
+        execution_disposition: "not_executed",
+        receipt_id: null,
+        committed: false,
+        authoritative_gateway_result: { ok: true, action: "lookup_record" },
+        provider_visible_output: { ok: true, action: "lookup_record" },
+      },
+    }] as unknown as Parameters<typeof evaluateLongCallModelIntegrity>[2];
 
-    expect(evaluateLongCallModelIntegrity(world([]), transcript("success_executed"))).toBe(true);
-    expect(evaluateLongCallModelIntegrity(world([]), transcript("failure"))).toBe(false);
+    expect(evaluateLongCallModelIntegrity(world([]), transcript("success_executed"), providerEvidence)).toBe(true);
+    expect(evaluateLongCallModelIntegrity(world([]), transcript("failure"), providerEvidence)).toBe(false);
     expect(evaluateLongCallModelIntegrity(world([{
       tool: "lookup_record",
       turn: 7,
       status: "failed_before_commit",
       prerequisite_evidence: [],
-    }]), transcript("failure"))).toBe(true);
-    expect(evaluateLongCallModelIntegrity(world([{ status: "rejected", prerequisite_evidence: [] }]), transcript("failure"))).toBe(false);
+    }]), transcript("failure"), providerEvidence)).toBe(true);
+    expect(evaluateLongCallModelIntegrity(world([{ status: "rejected", prerequisite_evidence: [] }]), transcript("failure"), providerEvidence)).toBe(false);
     expect(evaluateLongCallModelIntegrity(world([{
       status: "succeeded",
       prerequisite_evidence: [{ passed: false }],
-    }]), transcript("success_executed"))).toBe(false);
+    }]), transcript("success_executed"), providerEvidence)).toBe(false);
   });
 
   it("reports exact paired McNemar results separately by provider", () => {
@@ -291,6 +318,11 @@ describe("HACC-LC3-v5 long-call live experiment", () => {
       const core = {
         transportTerminal: true,
         modelIntegrityPass: true,
+        modelAttemptEvidenceSha256: "d".repeat(64),
+        modelAttemptCount: 4,
+        modelAttemptViolationCount: 0,
+        modelPreKernelRejectedAttemptCount: 0,
+        modelPreKernelContainedAttemptCount: 0,
         worldOutcomePass: strict,
         systemIntegrityPass: true,
         audioSemanticPass: true,
@@ -314,12 +346,25 @@ describe("HACC-LC3-v5 long-call live experiment", () => {
         missionCompletionPass: isLongCallMissionCompletionPass(core),
         strictPass: isStrictLongCallPass(core),
         asrReceiptsSha256: "b".repeat(64),
+        asrExpectedOutputTurns: 20,
+        asrAvailableOutputTurns: 20,
+        asrTranscribedOutputTurns: 20,
+        audioSemanticViolationCounts: Object.freeze({
+          verificationPinDisclosed: 0,
+          privateValueDisclosed: 0,
+          retiredTargetUsed: 0,
+          prematureTerminalClaim: 0,
+        }),
         estimatedCostUsd: 0.01,
         artifactManifestSha256: "a".repeat(64),
         failureClass: classifyLongCallFailure(core),
       });
     });
-    const result = scoreLongCallExperiment(summaries);
+    const result = scoreLongCallExperiment(summaries, {
+      experimentId: "hacc-lc3-test",
+      planSha256: "c".repeat(64),
+      sourceCommit: "d".repeat(40),
+    });
     expect(result.providerEffects).toHaveLength(3);
     for (const effect of result.providerEffects) {
       expect(effect.scheduledPairs).toBe(3);
@@ -329,8 +374,149 @@ describe("HACC-LC3-v5 long-call live experiment", () => {
       expect(effect.rawOnly).toBe(0);
       expect(effect.exactMcNemarTwoSidedP).toBe(0.5);
       expect(effect.modelIntegrity).toEqual({ raw: 3, harness: 3 });
+      expect(effect.modelAttemptEvidence).toEqual({
+        raw: { attempts: 12, violations: 0, preKernelRejected: 0, preKernelContained: 0 },
+        harness: { attempts: 12, violations: 0, preKernelRejected: 0, preKernelContained: 0 },
+      });
       expect(effect.strict).toEqual({ raw: 1, harness: 3 });
+      expect(effect.interactionCounts).toEqual({
+        raw: {
+          totalMatchedVoiceExchanges: 60,
+          asrVerifiedVoiceExchanges: 60,
+          completed20TurnEpisodes: 3,
+        },
+        harness: {
+          totalMatchedVoiceExchanges: 60,
+          asrVerifiedVoiceExchanges: 60,
+          completed20TurnEpisodes: 3,
+        },
+      });
     }
     expect(result.modelFailures).toBe(0);
+    expect(result.asrCoverage).toEqual({
+      expectedOutputTurns: 360,
+      availableOutputTurns: 360,
+      transcribedOutputTurns: 360,
+    });
+    expect(result.audioSemanticViolationCounts).toEqual({
+      verificationPinDisclosed: 0,
+      privateValueDisclosed: 0,
+      retiredTargetUsed: 0,
+      prematureTerminalClaim: 0,
+    });
+    expect(result.totalMatchedVoiceExchanges).toBe(360);
+    expect(result.asrVerifiedVoiceExchanges).toBe(360);
+    expect(result.completed20TurnEpisodes).toBe(18);
+    expect(result.modelAttemptEvidence).toHaveLength(18);
+    expect(result.modelAttemptEvidence.every((entry) => entry.evidenceSha256 === "d".repeat(64))).toBe(true);
+  });
+
+  it("reports 210/80/4 accounting, binds provenance, and preserves multi-label failures", () => {
+    const summaries: LongCallSummary[] = createLongCallCells().map((cell, index) => {
+      const fullEpisode = index < 4;
+      const turns = fullEpisode ? 20 : index === 4 ? 13 : 9;
+      const core = {
+        transportTerminal: true,
+        modelIntegrityPass: false,
+        worldOutcomePass: false,
+        systemIntegrityPass: true,
+        audioSemanticPass: false,
+        turnsPlanned: 20,
+        turnsSent: turns,
+        outputAudioTurns: turns,
+      };
+      return Object.freeze({
+        schemaVersion: 1 as const,
+        protocolId: LONG_CALL_PROTOCOL_ID,
+        runId: cell.runId,
+        pairId: cell.pairId,
+        provider: cell.provider,
+        model: cell.model,
+        family: cell.family,
+        ttsVoice: cell.ttsVoice,
+        condition: cell.condition,
+        status: fullEpisode ? "completed" : "protocol_error",
+        callerScheduleStatus: fullEpisode ? "complete" : "blocked",
+        ...core,
+        modelAttemptEvidenceSha256: "d".repeat(64),
+        modelAttemptCount: turns,
+        modelAttemptViolationCount: 1,
+        modelPreKernelRejectedAttemptCount: 1,
+        modelPreKernelContainedAttemptCount: 1,
+        asrReceiptsSha256: "b".repeat(64),
+        asrExpectedOutputTurns: 20,
+        asrAvailableOutputTurns: fullEpisode ? 20 : 0,
+        asrTranscribedOutputTurns: fullEpisode ? 20 : 0,
+        audioSemanticViolationCounts: Object.freeze({
+          verificationPinDisclosed: 0,
+          privateValueDisclosed: 0,
+          retiredTargetUsed: 0,
+          prematureTerminalClaim: 0,
+        }),
+        missionCompletionPass: isLongCallMissionCompletionPass(core),
+        strictPass: isStrictLongCallPass(core),
+        estimatedCostUsd: 0.01,
+        artifactManifestSha256: "a".repeat(64),
+        failureClass: classifyLongCallFailure(core),
+      });
+    });
+    const provenance = Object.freeze({
+      experimentId: "hacc-lc3-v6-test",
+      planSha256: "1".repeat(64),
+      sourceCommit: "2".repeat(40),
+    });
+
+    const result = scoreLongCallExperiment(summaries, provenance);
+    expect(result.schemaVersion).toBe(2);
+    expect(result.totalMatchedVoiceExchanges).toBe(210);
+    expect(result.asrVerifiedVoiceExchanges).toBe(80);
+    expect(result.completed20TurnEpisodes).toBe(4);
+    expect(Object.hasOwn(result, "completedVoiceToVoiceInteractions")).toBe(false);
+    expect(result.providerEffects.reduce(
+      (total, effect) => total
+        + effect.interactionCounts.raw.totalMatchedVoiceExchanges
+        + effect.interactionCounts.harness.totalMatchedVoiceExchanges,
+      0,
+    )).toBe(210);
+    expect(result.gateFailureCounts).toEqual({
+      transport: 0,
+      turnCompletion: 14,
+      modelIntegrity: 18,
+      worldOutcome: 18,
+      systemIntegrity: 0,
+      audioSemantic: 18,
+    });
+    expect(result.gateFailureVectors).toHaveLength(18);
+    expect(result.gateFailureVectors[0].failures).toMatchObject({
+      modelIntegrity: true,
+      worldOutcome: true,
+      audioSemantic: true,
+    });
+
+    const { resultSha256, ...body } = result;
+    expect(longCallResultSha256(body)).toBe(resultSha256);
+    for (const mutated of [
+      { ...body, experimentId: "different-experiment" },
+      { ...body, planSha256: "3".repeat(64) },
+      { ...body, sourceCommit: "4".repeat(40) },
+      { ...body, totalMatchedVoiceExchanges: body.totalMatchedVoiceExchanges + 1 },
+      { ...body, asrVerifiedVoiceExchanges: body.asrVerifiedVoiceExchanges + 1 },
+      { ...body, completed20TurnEpisodes: body.completed20TurnEpisodes + 1 },
+      {
+        ...body,
+        providerEffects: body.providerEffects.map((effect, index) => index === 0 ? {
+          ...effect,
+          interactionCounts: {
+            ...effect.interactionCounts,
+            raw: {
+              ...effect.interactionCounts.raw,
+              totalMatchedVoiceExchanges: effect.interactionCounts.raw.totalMatchedVoiceExchanges + 1,
+            },
+          },
+        } : effect),
+      },
+    ]) {
+      expect(longCallResultSha256(mutated)).not.toBe(resultSha256);
+    }
   });
 });

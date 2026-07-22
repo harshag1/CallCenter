@@ -30,7 +30,11 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).toContain("maxOutputAudioBytes: 64 * 1024 * 1024");
     expect(source).toContain("ASR semantic scoring is incomplete");
     expect(source).toContain("summary.asrReceiptsSha256 ??");
-    expect(source).toContain("evaluateLongCallModelIntegrity(result.world, publicTranscript)");
+    expect(source).toContain("evaluateLongCallModelIntegrity(result.world, publicTranscript, result.artifacts.events)");
+    expect(source).toContain('createArtifactDescriptor(evidencePath, evidenceJson, "application/json")');
+    expect(source).toContain("model_attempt_evidence_sha256: modelAttemptEvidence.evidenceSha256");
+    expect(source).toContain("modelAttemptEvidenceSha256: modelAttemptEvidence.evidenceSha256");
+    expect(source).toContain("provider-attempt evidence is incomplete");
     expect(source).toContain("assertHostManagedGrantExposure(publicTranscript, condition)");
     expect(source).toContain("isLongCallMissionCompletionPass(summary)");
     expect(source).not.toContain("autoAdvanceLinearFlow:");
@@ -38,7 +42,7 @@ describe("HACC-LC3 live runner release contract", () => {
 
   it("retains completed trial measurements when post-trial validation fails closed", async () => {
     const source = await runnerSource();
-    const persistence = source.indexOf("await persistArtifacts(partial, result)");
+    const persistence = source.indexOf("await persistArtifacts(partial, result, modelAttemptEvidence)");
     const durableWrite = source.indexOf('resolve(partial, "retained-trial-evidence.json")');
     const retention = source.indexOf("retainedEvidence = parseRetainedTrialEvidence");
     const validation = source.indexOf("const evaluation = evaluateScenarioWorld");
@@ -51,6 +55,8 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).toContain("turnsSent: retainedEvidence?.turnsSent ?? 0");
     expect(source).toContain("outputAudioTurns: retainedEvidence?.outputAudioTurns ?? 0");
     expect(source).toContain("estimatedCostUsd: retainedEvidence?.estimatedCostUsd ?? null");
+    expect(source).toContain("modelAttemptEvidenceSha256: retainedModelAttemptEvidence?.evidenceSha256 ?? null");
+    expect(source).toContain("artifactManifestSha256: retainedAugmentedManifestSha256");
     expect(source).toContain('status: "runner_exception"');
     expect(source).toContain("transportTerminal: false");
     expect(source).toContain("modelIntegrityPass: false");
