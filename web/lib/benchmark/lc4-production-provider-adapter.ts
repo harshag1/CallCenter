@@ -393,6 +393,7 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
     "caller_pcm_appended",
     "response_plan_prepared",
     "caller_pcm_committed",
+    ...(readonly ["caller_pcm_commit_acknowledged"] | readonly []),
     "response_generation_requested",
     "assistant_pcm_captured",
     "listener_evidence_handed_off",
@@ -1112,6 +1113,13 @@ export class Lc4RealtimeProviderBridge {
           diagnosticStage = "audio_commit";
           client.commitInputAudio();
           operationOrder.push("caller_pcm_committed");
+          if (client.provider === "xai") {
+            if (typeof client.waitForInputAudioCommit !== "function") {
+              throw new Error("LC4 provider commit acknowledgement barrier is unavailable");
+            }
+            await client.waitForInputAudioCommit(5_000);
+            operationOrder.push("caller_pcm_commit_acknowledged");
+          }
           const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
           diagnosticStage = "response_request";
           client.createResponse();

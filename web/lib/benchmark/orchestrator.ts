@@ -1864,6 +1864,21 @@ async function deliverCallerAudio(input: Readonly<{
       await input.journal.flush();
     }
     input.client.commitInputAudio();
+    if (input.client.provider === "xai") {
+      if (typeof input.client.waitForInputAudioCommit !== "function") {
+        throw trialError("protocol_error", "commit_acknowledgement_failed", "provider commit acknowledgement barrier is unavailable", "turn", { fatal: true });
+      }
+      try {
+        await input.client.waitForInputAudioCommit(5_000);
+      } catch (error) {
+        throw trialError("protocol_error", "commit_acknowledgement_failed", errorMessage(error), "turn", { fatal: true });
+      }
+      input.record("caller.turn_commit_acknowledged", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+      });
+      await input.journal.flush();
+    }
     // Open the response window only after caller audio is durably committed,
     // but before createResponse because test and provider adapters may emit
     // normalized response events synchronously from that call.

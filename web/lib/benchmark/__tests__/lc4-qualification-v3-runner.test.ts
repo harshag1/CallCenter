@@ -33,8 +33,13 @@ import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   RealtimeEventListener,
+  RealtimeWireObservation,
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
+import {
+  realtimeWireObservationSha256,
+  realtimeWireProjectionSha256,
+} from "../../realtime/client/wire-evidence";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -80,7 +85,7 @@ const renderer: Lc4S2sAudioRenderer = Object.freeze({
   },
 });
 
-function acknowledgement(provider: LiveStsProvider): SessionConfigurationAcknowledgement {
+function acknowledgement(provider: LiveStsProvider, conditionalXaiManualTurn = false): SessionConfigurationAcknowledgement {
   const verified = Object.freeze({ status: "verified" as const, requestedSha256: "1".repeat(64), acknowledgedSha256: "1".repeat(64), acknowledgedBy: "session.updated" as const });
   const unverifiable = Object.freeze({ status: "unverifiable" as const, requestedSha256: "2".repeat(64), reason: "provider does not echo this field" });
   if (provider === "gemini") return Object.freeze({
@@ -89,7 +94,22 @@ function acknowledgement(provider: LiveStsProvider): SessionConfigurationAcknowl
   });
   if (provider === "xai") return Object.freeze({
     schemaVersion: 1, strictParityVerified: false, paidBenchmarkReady: false, session: unverifiable,
-    fields: Object.freeze({ model: verified, voice: unverifiable, instructions: verified, tools: unverifiable, tool_choice: verified, input_audio: unverifiable, output_audio: verified, turn_detection: verified }),
+    fields: Object.freeze({
+      model: verified, voice: unverifiable, instructions: verified, tools: unverifiable,
+      tool_choice: verified, input_audio: unverifiable, output_audio: verified,
+      turn_detection: conditionalXaiManualTurn ? Object.freeze({
+        status: "unverifiable" as const,
+        requestedSha256: "3".repeat(64),
+        acknowledgedSha256: "4".repeat(64),
+        acknowledgedBy: "session.updated" as const,
+        reason: "Provider session.updated omitted requested path(s): turn_detection.type",
+        omission: Object.freeze({
+          kind: "requested_paths_omitted" as const,
+          paths: Object.freeze(["turn_detection.type"]),
+          acknowledgedShape: "empty_object" as const,
+        }),
+      }) : verified,
+    }),
   });
   return Object.freeze({
     schemaVersion: 1, strictParityVerified: true, paidBenchmarkReady: true, session: verified,
@@ -102,9 +122,9 @@ class SetupClient implements NormalizedRealtimeClient {
   state: "idle" | "ready" | "closed" = "idle";
   readonly sessionConfigurationAcknowledgement;
   readonly #listeners = new Set<RealtimeEventListener>();
-  constructor(provider: LiveStsProvider) {
+  constructor(provider: LiveStsProvider, conditionalXaiManualTurn = false) {
     this.provider = provider;
-    this.sessionConfigurationAcknowledgement = acknowledgement(provider);
+    this.sessionConfigurationAcknowledgement = acknowledgement(provider, conditionalXaiManualTurn);
   }
   async connect() {
     this.state = "ready";
@@ -127,6 +147,24 @@ class SetupClient implements NormalizedRealtimeClient {
 }
 
 function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4QualificationV3>[0]["dependencies"]>["executeRoundtrip"]>[0]): Lc4S2sRoundtripExecution {
+  const wire: RealtimeWireObservation[] = [];
+  const observe = (direction: "inbound" | "outbound", wireType: string) => {
+    const sequence = wire.length + 1;
+    const projection = Object.freeze({ direction, wireType, sequence });
+    const core = Object.freeze({
+      schemaVersion: 1 as const, provider: input.provider, direction, connectionEpoch: 1, sequence,
+      observedAtMs: sequence, observedAtMonotonicMs: sequence, wireType,
+      payloadSha256: sha256Hex(canonicalJson(projection)), payloadBytes: 64,
+      projectionSha256: realtimeWireProjectionSha256(projection),
+      previousObservationSha256: wire.at(-1)?.observationSha256 ?? null,
+      identities: Object.freeze({}), projection,
+    });
+    const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+    wire.push(observation);
+    return observation;
+  };
+  const commit = input.provider === "xai" ? observe("inbound", "input_audio_buffer.committed") : null;
+  const trigger = input.provider === "xai" ? observe("outbound", "response.create") : null;
   const body = Object.freeze({
     schema_version: 1 as const,
     roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v3" as const,
@@ -150,6 +188,8 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: true,
+    manual_turn_commit_observation_sha256: commit?.observationSha256 ?? null,
+    response_trigger_observation_sha256: trigger?.observationSha256 ?? null,
     tool_call_observed: true,
     tool_result_submitted: true,
     tool_result_event_observed: true,
@@ -160,9 +200,11 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     post_tool_usage_observed: true,
     provider_tool_call_evidence_sha256: "4".repeat(64),
     tool_result_evidence_sha256: "5".repeat(64),
-    wire_observations: Object.freeze([]),
+    wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
-    operation_order: Object.freeze(["session_ready", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]),
+    operation_order: Object.freeze(input.provider === "xai"
+      ? ["session_ready", "caller_audio_commit_acknowledged", "response_generation_requested", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]
+      : ["session_ready", "response_generation_requested", "exact_tool_call_observed", "matching_tool_result_submitted", "post_tool_terminal_observed"]),
     failure_evidence_sha256: "6".repeat(64),
   });
   return Object.freeze({
@@ -252,7 +294,7 @@ describe("LC4 qualification v3 signed runner", () => {
         inspectGitSource: async () => SOURCE,
         loadCredentials: async () => CREDENTIALS,
         materializeAudio: audioModule.materializeLc4S2sAudioFixture,
-        createClient: (provider) => new SetupClient(provider),
+        createClient: (provider) => new SetupClient(provider, true),
         executeRoundtrip: async (input) => passedExecution(input),
       },
     });
@@ -263,6 +305,14 @@ describe("LC4 qualification v3 signed runner", () => {
       generation_phases_attempted: 6,
       tool_roundtrips_attempted: 3,
       paid_retries_attempted: 0,
+      manual_turn_mode_qualification: {
+        gate_a_classification: "acknowledged_unverifiable_manual_turn",
+        retained_risk: "provider_omitted_turn_detection_type",
+        gate_b_required: true,
+        gate_b_status: "behaviorally_verified",
+        gate_b_evidence_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        benchmark_ready: true,
+      },
     });
     const manifest = JSON.parse(await readFile(join(root, "attempts", `${authBody.authorization_id}.complete`, "artifact-manifest.json"), "utf8")) as { self_excluded: boolean; entries: { path: string }[] };
     expect(manifest.self_excluded).toBe(true);
@@ -276,6 +326,13 @@ describe("LC4 qualification v3 signed runner", () => {
       complete_attempts: 1,
       partial_attempts: 0,
       gate_c_qualification_gate: false,
+      latest: {
+        manual_turn_mode_qualification: {
+          gate_a_classification: "acknowledged_unverifiable_manual_turn",
+          gate_b_status: "behaviorally_verified",
+          benchmark_ready: true,
+        },
+      },
     });
   });
 

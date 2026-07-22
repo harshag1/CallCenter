@@ -223,6 +223,12 @@ export type SessionConfigurationFieldProof = Readonly<{
   /** Exact provider event that supplied the acknowledged value. */
   acknowledgedBy?: "session.created" | "session.updated";
   reason?: string;
+  /** Structured omission evidence; consumers must not parse the human reason string. */
+  omission?: Readonly<{
+    kind: "field_omitted" | "requested_paths_omitted";
+    paths: readonly string[];
+    acknowledgedShape: "missing" | "empty_object" | "partial_value";
+  }>;
 }>;
 
 /**

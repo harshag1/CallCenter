@@ -134,6 +134,7 @@ export type Lc4S2sRoundtripFailureClass =
   | "response_trigger_failed"
   | "commit_acknowledgement_failed"
   | "manual_turn_mode_violation"
+  | "response_before_explicit_trigger"
   | "dynamic_control_not_wire_observed"
   | "speech_before_tool"
   | "wrong_tool"
@@ -173,6 +174,8 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
   tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
   response_generation_requested: boolean;
+  manual_turn_commit_observation_sha256: string | null;
+  response_trigger_observation_sha256: string | null;
   tool_call_observed: boolean;
   tool_result_submitted: boolean;
   tool_result_event_observed: boolean;
@@ -470,6 +473,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let terminalObserved = false;
   let postToolUsageObserved = false;
   let triggerObservationSha256: string | null = null;
+  let commitObservationSha256: string | null = null;
   let controlObservationSha256: string | null = null;
   let finish!: () => void;
   const done = new Promise<void>((resolvePromise) => { finish = resolvePromise; });
@@ -490,6 +494,11 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       && observation.direction === "outbound" && observation.wireType === expectedTrigger) {
       triggerObservationSha256 = observation.observationSha256;
     }
+    if (commitObservationSha256 === null
+      && observation.direction === "inbound"
+      && observation.wireType === "input_audio_buffer.committed") {
+      commitObservationSha256 = observation.observationSha256;
+    }
     if (toolResultSubmitted && toolCall !== null && toolResultWireObservationSha256 === null
       && observation.direction === "outbound"
       && observation.identities.callIdSha256 === realtimeWireIdentitySha256("call", toolCall.callId)
@@ -508,6 +517,16 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   };
   const unsubscribeEvent = input.client.onEvent((event) => {
     if (failure !== "none") return;
+    if (input.provider === "xai"
+      && !responseRequested
+      && (event.type === "response.started"
+        || event.type === "output.audio"
+        || event.type === "output.transcript"
+        || event.type === "tool.calls")) {
+      failure = "response_before_explicit_trigger";
+      finish();
+      return;
+    }
     if (event.type === "output.audio" || event.type === "output.transcript") {
       if (toolCall === null) {
         failure = "speech_before_tool";
@@ -632,7 +651,9 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       }
     }
     if (event.type === "error") {
-      failure = "provider_error";
+      failure = event.code === "unexpected_manual_turn_detection_event"
+        ? "manual_turn_mode_violation"
+        : "provider_error";
       finish();
       return;
     }
@@ -683,7 +704,12 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         failure = "commit_acknowledgement_failed";
         throw new Error("provider commit acknowledgement barrier is unavailable");
       }
-      await input.client.waitForInputAudioCommit(5_000);
+      try {
+        await input.client.waitForInputAudioCommit(5_000);
+      } catch {
+        failure = "commit_acknowledgement_failed";
+        throw new Error("provider did not acknowledge the explicit manual-turn commit");
+      }
       operations.push("caller_audio_commit_acknowledged");
       responseRequested = true;
       const toolChoice = forcedToolChoice(input.provider);
@@ -753,6 +779,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: responseRequested,
+    manual_turn_commit_observation_sha256: commitObservationSha256,
+    response_trigger_observation_sha256: triggerObservationSha256,
     tool_call_observed: retainedToolCall !== null,
     tool_result_submitted: toolResultSubmitted,
     tool_result_event_observed: toolResultEventObserved,
@@ -797,5 +825,32 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.provider_tool_call_evidence_sha256 === null
     || execution.tool_result_evidence_sha256 === null
   )) throw new Error("passing LC4 S2S roundtrip lacks closed-loop evidence");
+  if (execution.status === "passed" && execution.provider === "xai") {
+    const commitIndex = execution.wire_observations.findIndex((observation) => (
+      observation.direction === "inbound"
+      && observation.wireType === "input_audio_buffer.committed"
+      && observation.observationSha256 === execution.manual_turn_commit_observation_sha256
+    ));
+    const triggerIndex = execution.wire_observations.findIndex((observation) => (
+      observation.direction === "outbound"
+      && observation.wireType === "response.create"
+      && observation.observationSha256 === execution.response_trigger_observation_sha256
+    ));
+    const forbiddenBeforeTrigger = execution.wire_observations.slice(0, triggerIndex < 0 ? undefined : triggerIndex)
+      .some((observation) => observation.direction === "inbound" && (
+        observation.wireType === "input_audio_buffer.speech_started"
+        || observation.wireType === "input_audio_buffer.speech_stopped"
+        || observation.wireType.startsWith("response.")
+      ));
+    const commitOperation = execution.operation_order.indexOf("caller_audio_commit_acknowledged");
+    const responseOperation = execution.operation_order.indexOf("response_generation_requested");
+    if (commitIndex < 0
+      || triggerIndex <= commitIndex
+      || forbiddenBeforeTrigger
+      || commitOperation < 0
+      || responseOperation <= commitOperation) {
+      throw new Error("passing xAI LC4 S2S roundtrip lacks ordered manual-turn evidence");
+    }
+  }
   if (execution.status === "failed" && execution.failure_class === "none") throw new Error("failed LC4 S2S roundtrip lacks a failure class");
 }

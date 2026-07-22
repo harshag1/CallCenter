@@ -9,6 +9,7 @@ import {
   LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_SOURCE_TEXT,
   LC4_S2S_TOOL_SCHEMA_SHA256,
+  assertLc4S2sRoundtripExecution,
   executeLc4S2sToolRoundtrip,
   lc4S2sControlSizeDiagnostic,
   loadLc4S2sPcm,
@@ -58,6 +59,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly speechBeforeTool: boolean;
   readonly omitDynamicControl: boolean;
   readonly omitToolResultEvent: boolean;
+  readonly emitManualVadOnCommit: boolean;
+  readonly emitEarlyResponseOnCommit: boolean;
+  readonly rejectCommitAcknowledgement: boolean;
   appendedBytes = 0;
   responseCount = 0;
   pendingControl: { sha256: string; byteLength: number; authority: string } | null = null;
@@ -67,11 +71,17 @@ class RoundtripClient implements NormalizedRealtimeClient {
     speechBeforeTool?: boolean;
     omitDynamicControl?: boolean;
     omitToolResultEvent?: boolean;
+    emitManualVadOnCommit?: boolean;
+    emitEarlyResponseOnCommit?: boolean;
+    rejectCommitAcknowledgement?: boolean;
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
     this.omitDynamicControl = options.omitDynamicControl === true;
     this.omitToolResultEvent = options.omitToolResultEvent === true;
+    this.emitManualVadOnCommit = options.emitManualVadOnCommit === true;
+    this.emitEarlyResponseOnCommit = options.emitEarlyResponseOnCommit === true;
+    this.rejectCommitAcknowledgement = options.rejectCommitAcknowledgement === true;
   }
 
   #observe(direction: "inbound" | "outbound", wireType: string, identities: RealtimeWireObservation["identities"] = {}, extraProjection: Record<string, unknown> = {}) {
@@ -197,6 +207,26 @@ class RoundtripClient implements NormalizedRealtimeClient {
     if (this.provider === "gemini") {
       this.#observe("outbound", "realtimeInput.activityEnd");
       this.#initialResponse();
+      return;
+    }
+    if (this.emitManualVadOnCommit) {
+      this.#observe("inbound", "input_audio_buffer.speech_started");
+      this.#emit({
+        type: "error", provider: this.provider, receivedAtMs: 4,
+        wireType: "input_audio_buffer.speech_started",
+        code: "unexpected_manual_turn_detection_event",
+        message: "Provider emitted VAD activity while manual mode was requested",
+        fatal: false,
+      });
+    }
+    if (this.emitEarlyResponseOnCommit) {
+      const observation = this.#observe("inbound", "response.created", {
+        responseIdSha256: realtimeWireIdentitySha256("response", `${this.provider}-early`),
+      });
+      this.#emit({
+        type: "response.started", provider: this.provider, receivedAtMs: 4,
+        wireType: observation.wireType, responseId: `${this.provider}-early`,
+      });
     }
   }
   createResponse() {
@@ -232,7 +262,17 @@ class RoundtripClient implements NormalizedRealtimeClient {
     else this.pendingContinuation = true;
   }
   async waitForInputAudioCommit() {
-    this.#emit({ type: "input.audio_committed", provider: this.provider, receivedAtMs: 4, wireType: "input_audio_buffer.committed", connectionEpoch: 1, commitOrdinal: 1 });
+    if (this.rejectCommitAcknowledgement) throw new Error("commit acknowledgement timed out");
+    const observation = this.#observe("inbound", "input_audio_buffer.committed");
+    this.#emit({
+      type: "input.audio_committed", provider: this.provider, receivedAtMs: 4,
+      wireType: "input_audio_buffer.committed", connectionEpoch: 1, commitOrdinal: 1,
+      wireObservation: {
+        availability: "observed", connectionEpoch: 1, sequence: observation.sequence,
+        observationSha256: observation.observationSha256, payloadSha256: observation.payloadSha256,
+        projectionSha256: observation.projectionSha256,
+      },
+    });
     return Object.freeze({
       provider: this.provider === "xai" ? "xai" as const : "openai" as const,
       connectionEpoch: 1,
@@ -284,6 +324,10 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
       });
       expect(client.appendedBytes).toBe(artifact.provider_renditions[provider].byte_length);
+      if (provider !== "gemini") {
+        expect(execution.operation_order.indexOf("caller_audio_commit_acknowledged"))
+          .toBeLessThan(execution.operation_order.indexOf("response_generation_requested"));
+      }
     });
   }
 
@@ -320,6 +364,73 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("commit_acknowledgement_failed");
+  });
+
+  it("classifies a timed-out xAI manual commit acknowledgement exactly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model",
+      client: new RoundtripClient("xai", { rejectCommitAcknowledgement: true }), audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("commit_acknowledgement_failed");
+    expect(execution.response_generation_requested).toBe(false);
+  });
+
+  it("classifies xAI VAD activity as a manual-turn violation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model",
+      client: new RoundtripClient("xai", { emitManualVadOnCommit: true }), audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("manual_turn_mode_violation");
+  });
+
+  it("rejects an xAI response that begins before the explicit trigger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model",
+      client: new RoundtripClient("xai", { emitEarlyResponseOnCommit: true }), audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("response_before_explicit_trigger");
+  });
+
+  it("rejects a hash-consistent passing xAI summary with fabricated empty wire evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model", client: new RoundtripClient("xai"), audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+    });
+    const { evidence_sha256: originalEvidenceSha256, ...body } = execution;
+    expect(originalEvidenceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const fabricatedBody = Object.freeze({ ...body, wire_observations: Object.freeze([]) });
+    const fabricated = Object.freeze({
+      ...fabricatedBody,
+      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v3\n${canonicalJson(fabricatedBody)}`),
+    });
+    expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("ordered manual-turn evidence");
   });
 
   it("rejects a call whose compact dynamic control is absent from wire evidence", async () => {

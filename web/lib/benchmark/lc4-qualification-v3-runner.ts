@@ -27,6 +27,7 @@ import {
   assertProviderQualificationArtifactIntegrity,
   providerQualificationMatrixSha256,
   qualifyProviders,
+  XAI_MANUAL_TURN_SETTING_SHA256,
   type ProviderQualificationArtifact,
   type ProviderQualificationTarget,
 } from "./provider-qualification";
@@ -62,7 +63,8 @@ import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   assertLc4ProviderProfileManifest,
 } from "./lc4-provider-profiles";
-import type { NormalizedRealtimeClient, NormalizedRealtimeUsage } from "../realtime/client/types";
+import type { NormalizedRealtimeClient, NormalizedRealtimeUsage, RealtimeWireObservation } from "../realtime/client/types";
+import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 import {
   assertLc4QualificationBudgetEvidence,
   finalizeLc4QualificationBudget,
@@ -79,6 +81,7 @@ export const LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS = 3 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES = 6 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS = 3 as const;
 export const LC4_QUALIFICATION_V3_PROVIDER_ORDER = Object.freeze(["openai", "gemini", "xai"] as const);
+export const LC4_XAI_MANUAL_TURN_SETTING_SHA256 = XAI_MANUAL_TURN_SETTING_SHA256;
 
 const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v3\n";
 const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v3\n";
@@ -306,6 +309,16 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
   tool_roundtrips_attempted: number;
   caller_audio_bytes: number;
   paid_retries_attempted: 0;
+  manual_turn_mode_qualification: Readonly<{
+    provider: "xai";
+    requested_setting_sha256: string;
+    gate_a_classification: "verified_by_provider_echo" | "acknowledged_unverifiable_manual_turn" | "failed";
+    retained_risk: "none" | "provider_omitted_turn_detection_type";
+    gate_b_required: boolean;
+    gate_b_status: "behaviorally_verified" | "failed" | "not_run";
+    gate_b_evidence_sha256: string | null;
+    benchmark_ready: boolean;
+  }>;
   results: readonly Readonly<{
     provider: LiveStsProvider;
     model: string;
@@ -381,6 +394,57 @@ async function writeImmutableJson(path: string, value: unknown): Promise<void> {
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function readJsonLines<T>(path: string): Promise<readonly T[]> {
+  const text = await readFile(path, "utf8");
+  if (text.length > 0 && !text.endsWith("\n")) throw new Error("LC4 qualification JSONL is not newline terminated");
+  return freeze(text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as T));
+}
+
+type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage"> & Readonly<{
+  wire_observation_count: number;
+  usage_event_count: number;
+}>;
+
+function assertRetainedXaiManualTurnEvidence(input: Readonly<{
+  summary: RetainedRoundtripSummary;
+  wire: readonly RealtimeWireObservation[];
+  terminalResult: Lc4QualificationV3TerminalBody["results"][number];
+  gateEvidenceSha256: string | null;
+}>): void {
+  const { summary, wire, terminalResult } = input;
+  if (summary.provider !== "xai"
+    || summary.status !== "passed"
+    || summary.failure_class !== "none"
+    || summary.evidence_sha256 !== terminalResult.evidence_sha256
+    || summary.evidence_sha256 !== input.gateEvidenceSha256
+    || summary.wire_observation_count !== wire.length
+    || summary.wire_observation_count !== terminalResult.wire_observation_count
+    || !verifyRealtimeWireObservationChain(wire).valid) {
+    throw new Error("LC4 qualification retained xAI roundtrip binding failed integrity");
+  }
+  const commitIndex = wire.findIndex((observation) => observation.direction === "inbound"
+    && observation.wireType === "input_audio_buffer.committed"
+    && observation.observationSha256 === summary.manual_turn_commit_observation_sha256);
+  const triggerIndex = wire.findIndex((observation) => observation.direction === "outbound"
+    && observation.wireType === "response.create"
+    && observation.observationSha256 === summary.response_trigger_observation_sha256);
+  const forbiddenBeforeTrigger = wire.slice(0, triggerIndex < 0 ? undefined : triggerIndex)
+    .some((observation) => observation.direction === "inbound" && (
+      observation.wireType === "input_audio_buffer.speech_started"
+      || observation.wireType === "input_audio_buffer.speech_stopped"
+      || observation.wireType.startsWith("response.")
+    ));
+  const commitOperation = summary.operation_order.indexOf("caller_audio_commit_acknowledged");
+  const responseOperation = summary.operation_order.indexOf("response_generation_requested");
+  if (commitIndex < 0
+    || triggerIndex <= commitIndex
+    || forbiddenBeforeTrigger
+    || commitOperation < 0
+    || responseOperation <= commitOperation) {
+    throw new Error("LC4 qualification retained xAI manual-turn order failed integrity");
+  }
 }
 
 function keyIdentity(privateKeyPem: string): Readonly<{
@@ -1248,6 +1312,34 @@ export async function runLc4QualificationV3(input: Readonly<{
     || toolRoundtripsAttempted > plan.body.maximum_tool_roundtrips) {
     primaryFailure ??= "planned_counter_ceiling_exceeded";
   }
+  const xaiSetup = setupArtifact!.results.find((result) => result.provider === "xai");
+  const xaiExecution = executions.find((execution) => execution.provider === "xai");
+  const xaiGateAClassification = xaiSetup?.manualTurnModeVerification === "verified_by_provider_echo"
+    ? "verified_by_provider_echo" as const
+    : xaiSetup?.code === "acknowledged_unverifiable_manual_turn"
+      ? "acknowledged_unverifiable_manual_turn" as const
+      : "failed" as const;
+  const xaiGateBStatus = xaiExecution === undefined
+    ? "not_run" as const
+    : xaiExecution.status === "passed"
+      ? "behaviorally_verified" as const
+      : "failed" as const;
+  const manualTurnModeQualification = freeze({
+    provider: "xai" as const,
+    requested_setting_sha256: LC4_XAI_MANUAL_TURN_SETTING_SHA256,
+    gate_a_classification: xaiGateAClassification,
+    retained_risk: xaiGateAClassification === "acknowledged_unverifiable_manual_turn"
+      ? "provider_omitted_turn_detection_type" as const
+      : "none" as const,
+    gate_b_required: xaiGateAClassification === "acknowledged_unverifiable_manual_turn",
+    gate_b_status: xaiGateBStatus,
+    gate_b_evidence_sha256: xaiExecution?.evidence_sha256 ?? null,
+    benchmark_ready: xaiGateAClassification !== "failed" && xaiGateBStatus === "behaviorally_verified",
+  });
+  if (xaiGateAClassification === "acknowledged_unverifiable_manual_turn"
+    && xaiGateBStatus !== "behaviorally_verified") {
+    primaryFailure ??= `xai:manual_turn_behavioral_verification_${xaiGateBStatus}`;
+  }
   const terminalWithoutHash = freeze({
     schema_version: 1 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
@@ -1272,6 +1364,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     tool_roundtrips_attempted: toolRoundtripsAttempted,
     caller_audio_bytes: callerAudioBytes,
     paid_retries_attempted: 0 as const,
+    manual_turn_mode_qualification: manualTurnModeQualification,
     results: freeze(executions.map((execution) => freeze({
       provider: execution.provider,
       model: execution.model,
@@ -1390,6 +1483,22 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256) {
       throw new Error("LC4 qualification v3 terminal binding failed integrity");
     }
+    const xaiResult = terminal.body.results.find((result) => result.provider === "xai");
+    const manualTurn = terminal.body.manual_turn_mode_qualification;
+    const expectedManualReady = manualTurn.gate_a_classification !== "failed"
+      && manualTurn.gate_b_status === "behaviorally_verified"
+      && xaiResult?.status === "passed"
+      && manualTurn.gate_b_evidence_sha256 === xaiResult.evidence_sha256;
+    if (manualTurn.provider !== "xai"
+      || manualTurn.requested_setting_sha256 !== LC4_XAI_MANUAL_TURN_SETTING_SHA256
+      || manualTurn.gate_b_required !== (manualTurn.gate_a_classification === "acknowledged_unverifiable_manual_turn")
+      || manualTurn.retained_risk !== (manualTurn.gate_a_classification === "acknowledged_unverifiable_manual_turn"
+        ? "provider_omitted_turn_detection_type"
+        : "none")
+      || manualTurn.benchmark_ready !== expectedManualReady
+      || (terminal.body.status === "passed" && !manualTurn.benchmark_ready)) {
+      throw new Error("LC4 qualification v3 manual-turn promotion binding failed integrity");
+    }
     const { package_sha256, ...packageBody } = manifest;
     if (manifest.self_excluded !== true
       || manifest.entries.some((entry) => entry.path === "artifact-manifest.json")
@@ -1407,6 +1516,31 @@ export async function reportLc4QualificationV3(input: Readonly<{
       if (bytes.byteLength !== entry.byte_length || sha256Hex(bytes) !== entry.sha256) {
         throw new Error("LC4 qualification v3 package entry failed integrity");
       }
+    }
+    const setupQualification = await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"));
+    assertProviderQualificationArtifactIntegrity(setupQualification);
+    const retainedXaiSetup = setupQualification.results.find((result) => result.provider === "xai");
+    if (setupQualification.artifactSha256 !== terminal.body.setup_qualification_artifact_sha256
+      || retainedXaiSetup === undefined
+      || manualTurn.gate_a_classification !== (retainedXaiSetup.manualTurnModeVerification === "verified_by_provider_echo"
+        ? "verified_by_provider_echo"
+        : retainedXaiSetup.code === "acknowledged_unverifiable_manual_turn"
+          ? "acknowledged_unverifiable_manual_turn"
+          : "failed")) {
+      throw new Error("LC4 qualification retained xAI setup binding failed integrity");
+    }
+    if (manualTurn.benchmark_ready) {
+      if (!xaiResult) throw new Error("LC4 qualification terminal lacks xAI result");
+      const [xaiSummary, xaiWire] = await Promise.all([
+        readJson<RetainedRoundtripSummary>(resolve(directory, "xai-spoken-roundtrip.json")),
+        readJsonLines<RealtimeWireObservation>(resolve(directory, "xai-spoken-roundtrip-wire.jsonl")),
+      ]);
+      assertRetainedXaiManualTurnEvidence({
+        summary: xaiSummary,
+        wire: xaiWire,
+        terminalResult: xaiResult,
+        gateEvidenceSha256: manualTurn.gate_b_evidence_sha256,
+      });
     }
     const budgetEvidence = await readJson<Lc4QualificationBudgetEvidence>(resolve(directory, "budget-settlement.json"));
     assertLc4QualificationBudgetEvidence(budgetEvidence);

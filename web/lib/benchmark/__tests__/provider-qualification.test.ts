@@ -86,6 +86,28 @@ function xaiAcknowledgement(): SessionConfigurationAcknowledgement {
   });
 }
 
+function xaiEmptyManualTurnAcknowledgement(): SessionConfigurationAcknowledgement {
+  const base = xaiAcknowledgement();
+  return Object.freeze({
+    ...base,
+    fields: Object.freeze({
+      ...base.fields,
+      turn_detection: Object.freeze({
+        status: "unverifiable" as const,
+        requestedSha256: H("c"),
+        acknowledgedSha256: H("d"),
+        acknowledgedBy: "session.updated" as const,
+        reason: "Provider session.updated omitted requested path(s): turn_detection.type",
+        omission: Object.freeze({
+          kind: "requested_paths_omitted" as const,
+          paths: Object.freeze(["turn_detection.type"]),
+          acknowledgedShape: "empty_object" as const,
+        }),
+      }),
+    }),
+  });
+}
+
 function configuration(
   provider: "openai" | "gemini" | "xai",
   model: string,
@@ -129,15 +151,20 @@ class QualificationClient implements NormalizedRealtimeClient {
   closeCalls = 0;
   forbiddenCalls = 0;
 
-  constructor(target: ProviderQualificationTarget, error: Error | null = null, markReady = true) {
+  constructor(
+    target: ProviderQualificationTarget,
+    error: Error | null = null,
+    markReady = true,
+    acknowledgement?: SessionConfigurationAcknowledgement,
+  ) {
     this.provider = target.provider;
     this.#error = error;
     this.#markReady = markReady;
-    this.sessionConfigurationAcknowledgement = target.provider === "gemini"
+    this.sessionConfigurationAcknowledgement = acknowledgement ?? (target.provider === "gemini"
       ? geminiAcknowledgement()
       : target.provider === "xai"
         ? xaiAcknowledgement()
-        : exactAcknowledgement();
+        : exactAcknowledgement());
   }
 
   async connect(): Promise<void> {
@@ -215,6 +242,124 @@ describe("provider qualification", () => {
       credentials: prepared.input.credentials,
       now: prepared.input.now,
     })).resolves.toMatchObject({ artifactSha256: artifact.artifactSha256 });
+  });
+
+  it("admits only xAI's exact empty manual-turn echo to the paid behavioral gate", async () => {
+    const prepared = await setup();
+    const artifact = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-empty-manual-turn",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? xaiEmptyManualTurnAcknowledgement() : undefined,
+      ),
+    });
+    expect(artifact.status).toBe("conditional");
+    expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "acknowledged_unverifiable_manual_turn",
+      acknowledgementMode: "conditional_manual_turn_echo",
+      manualTurnModeVerification: "requires_paid_behavioral_canary",
+    });
+    await expect(assertRecentPassingProviderQualification({
+      root: prepared.root,
+      protocolId: prepared.input.protocolId,
+      planSha256: prepared.input.planSha256,
+      sourceCommit: prepared.input.sourceCommit,
+      targets: prepared.input.targets,
+      credentials: prepared.input.credentials,
+      now: prepared.input.now,
+    })).rejects.toThrow("spoken manual-turn behavioral qualification");
+
+    const missingField = xaiEmptyManualTurnAcknowledgement();
+    const failed = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-generic-missing-manual-turn",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? Object.freeze({
+          ...missingField,
+          fields: Object.freeze({
+            ...missingField.fields,
+            turn_detection: Object.freeze({
+              status: "unverifiable" as const,
+              requestedSha256: H("c"),
+              reason: "Provider session.updated omitted the requested field",
+              omission: Object.freeze({
+                kind: "field_omitted" as const,
+                paths: Object.freeze(["turn_detection"]),
+                acknowledgedShape: "missing" as const,
+              }),
+            }),
+          }),
+        }) : undefined,
+      ),
+    });
+    expect(failed.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+      manualTurnModeVerification: "not_verified",
+    });
+
+    const inconsistentTopLevelParity = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-inconsistent-top-level-parity",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? Object.freeze({
+          ...missingField,
+          strictParityVerified: true,
+          paidBenchmarkReady: true,
+          fields: Object.freeze({
+            ...missingField.fields,
+            turn_detection: Object.freeze({
+              status: "unverifiable" as const,
+              requestedSha256: H("c"),
+              reason: "Malformed client claims parity despite missing manual-turn proof",
+            }),
+          }),
+        }) : undefined,
+      ),
+    });
+    expect(inconsistentTopLevelParity.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+      manualTurnModeVerification: "not_verified",
+    });
+
+    const contradictory = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-contradictory-manual-turn",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? Object.freeze({
+          ...missingField,
+          fields: Object.freeze({
+            ...missingField.fields,
+            turn_detection: Object.freeze({
+              status: "mismatch" as const,
+              requestedSha256: H("c"),
+              acknowledgedSha256: H("e"),
+              acknowledgedBy: "session.updated" as const,
+              reason: "Provider explicitly acknowledged a different value",
+            }),
+          }),
+        }) : undefined,
+      ),
+    });
+    expect(contradictory.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "configuration_rejected",
+      manualTurnModeVerification: "not_verified",
+    });
   });
 
   it("retains failed authentication attempts immutably and refuses the paid gate", async () => {

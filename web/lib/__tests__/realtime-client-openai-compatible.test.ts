@@ -2832,6 +2832,11 @@ describe("manual PCM session compilation", () => {
     expect(proof.fields.turn_detection).toMatchObject({
       status: "unverifiable",
       reason: expect.stringContaining("turn_detection.type"),
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: ["turn_detection.type"],
+        acknowledgedShape: "empty_object",
+      },
     });
     expect(proof.strictParityVerified).toBe(false);
     expect(proof.paidBenchmarkReady).toBe(false);

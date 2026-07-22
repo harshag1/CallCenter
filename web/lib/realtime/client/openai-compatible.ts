@@ -2219,6 +2219,11 @@ function configurationFieldProof(
       status: "unverifiable" as const,
       requestedSha256,
       reason: "Provider session.updated omitted the requested field",
+      omission: Object.freeze({
+        kind: "field_omitted" as const,
+        paths: Object.freeze([field]),
+        acknowledgedShape: "missing" as const,
+      }),
     });
   }
   const projection = projectAcknowledgedValue(requested, acknowledged, field);
@@ -2229,6 +2234,13 @@ function configurationFieldProof(
       acknowledgedSha256: configurationHash(field, projection.value),
       acknowledgedBy,
       reason: `Provider session.updated omitted requested path(s): ${projection.missing.join(", ")}`,
+      omission: Object.freeze({
+        kind: "requested_paths_omitted" as const,
+        paths: Object.freeze([...projection.missing]),
+        acknowledgedShape: isRecord(acknowledged) && Object.keys(acknowledged).length === 0
+          ? "empty_object" as const
+          : "partial_value" as const,
+      }),
     });
   }
   const acknowledgedSha256 = configurationHash(field, projection.value);

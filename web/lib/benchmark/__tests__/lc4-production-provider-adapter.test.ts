@@ -356,6 +356,10 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.wire("response.plan", { oracle: ORACLE_SECRET });
   }
   commitInputAudio() { this.events.push("commit"); this.wire("input.commit", {}); }
+  async waitForInputAudioCommit() {
+    this.events.push("commit-ack");
+    return Object.freeze({ provider: "xai" as const, connectionEpoch: 1, commitOrdinal: 1, status: "acknowledged" as const });
+  }
   sendTurn() { throw new Error("bridge must use append/commit, not sendTurn"); }
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean) {
     if (!this.#toolRoundtrip) throw new Error("not used");
@@ -1015,7 +1019,9 @@ describe("LC4 production realtime adapter bridge", () => {
       Array.from({ length: chunkCount }, (_, index) => index * 20),
     );
     expect(events.slice(1, chunkCount + 1)).toEqual(Array.from({ length: chunkCount }, () => "append"));
-    expect(events.slice(chunkCount + 1)).toEqual(["prepare", "commit", "create", "listener"]);
+    expect(events.slice(chunkCount + 1)).toEqual(provider === "xai"
+      ? ["prepare", "commit", "commit-ack", "create", "listener"]
+      : ["prepare", "commit", "create", "listener"]);
     expect(events.filter((event) => event === "commit")).toHaveLength(1);
     expect(events.filter((event) => event === "create")).toHaveLength(1);
     await session.close();

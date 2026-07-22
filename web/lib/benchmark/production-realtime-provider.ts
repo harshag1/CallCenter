@@ -126,5 +126,8 @@ export function createProductionRealtimeClient(
         connectTimeoutMs: 15_000,
         enableResumption: false,
         requireStrictSessionConfigurationParity: false,
+        // xAI may omit turn_detection.type from session.updated. Conditional
+        // qualification therefore relies on runtime behavioral enforcement.
+        unexpectedManualTurnDetectionPolicy: "fail",
       });
 }
