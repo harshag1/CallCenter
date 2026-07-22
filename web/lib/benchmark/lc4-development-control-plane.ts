@@ -946,10 +946,19 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         throw new Error("LC4-DEV gateway call references a non-current corpus opportunity");
       }
       const targetArguments = valueJson(request.target_arguments) as Record<string, JsonValue>;
+      const exactOpportunityAction = request.target_tool === "archive.submit_transcript_request"
+        || request.target_tool === "archive.reconcile_transcript_request";
+      const pendingForAction = state.pendingGatewayActions.filter((logical) => logical.action === request.target_tool);
+      const pendingForCurrentOpportunity = exactOpportunityAction
+        ? pendingForAction.filter((logical) => logical.opportunity.id === opportunity.id)
+        : pendingForAction;
       const pendingIndex = state.pendingGatewayActions.findIndex((logical) => {
-        if (logical.action !== request.target_tool) return false;
+        if (logical.action !== request.target_tool
+          || (exactOpportunityAction && logical.opportunity.id !== opportunity.id)) return false;
         const expectedArguments = logical.action === "archive.reconcile_transcript_request"
-          ? reconcileArguments(state)
+          ? state.episode.arm === "hacc"
+            ? {}
+            : reconcileArguments(state)
           : logical.arguments;
         return expectedArguments !== null
           && canonicalJson(expectedArguments) === canonicalJson(targetArguments);
@@ -961,24 +970,40 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       let accepted = false;
       let invocationId: string | null = null;
       const requiredReconciliationArguments = request.target_tool === "archive.reconcile_transcript_request"
+        && state.episode.arm === "native"
         ? reconcileArguments(state)
         : null;
       const reconciliationBindingFailure = request.target_tool === "archive.reconcile_transcript_request"
+        && state.episode.arm === "native"
         ? requiredReconciliationArguments === null
           ? "reconciliation_source_missing"
           : canonicalJson(requiredReconciliationArguments) !== canonicalJson(targetArguments)
             ? "reconciliation_identity_mismatch"
             : null
         : null;
-      if (reconciliationBindingFailure) {
+      const logicalActionBindingFailure = pendingIndex < 0
+        && pendingForCurrentOpportunity.length > 0
+        && !(state.episode.arm === "hacc" && request.target_tool === "archive.reconcile_transcript_request")
+        ? "logical_action_arguments_mismatch"
+        : pendingForCurrentOpportunity.length === 0
+          && exactOpportunityAction
+          && pendingForAction.some((logical) => logical.opportunity.index < opportunity.index)
+          ? "missed_opportunity_window"
+          : null;
+      const controlBindingFailure = reconciliationBindingFailure ?? logicalActionBindingFailure;
+      if (controlBindingFailure) {
         const result: CapabilityGatewayResult = {
           ok: false,
           gateway_version: 1,
           action: request.target_tool,
-          code: reconciliationBindingFailure,
-          message: reconciliationBindingFailure === "reconciliation_source_missing"
+          code: controlBindingFailure,
+          message: controlBindingFailure === "reconciliation_source_missing"
             ? "Authoritative reconciliation is unavailable because no source mutation receipt exists"
-            : "Reconciliation identity differs from the host-bound source mutation receipt",
+            : controlBindingFailure === "reconciliation_identity_mismatch"
+              ? "Reconciliation identity differs from the host-bound source mutation receipt"
+              : controlBindingFailure === "missed_opportunity_window"
+                ? "The exact benchmark opportunity for this logical action has passed"
+                : "Logical action arguments differ from the exact benchmark opportunity contract",
           retriable: false,
           ...(state.snapshot ? { current_capability_epoch: state.snapshot.capability_epoch } : {}),
         };
@@ -995,9 +1020,17 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         });
         state.world = execution.state;
         invocationId = execution.receipt.invocation_id;
-        providerOutput = execution.visible_result;
-        authoritativeReceipt = execution.receipt;
         const committedAfterError = execution.receipt.status === "committed_after_error";
+        providerOutput = committedAfterError
+          ? valueJson({
+              ...execution.visible_result,
+              reconciliation: {
+                required: true,
+                invocation_id: execution.receipt.invocation_id,
+              },
+            })
+          : execution.visible_result;
+        authoritativeReceipt = execution.receipt;
         disposition = committedAfterError
           ? "executed"
           : execution.disposition === "failed" || execution.disposition === "rejected"
@@ -1085,15 +1118,23 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         return freeze([{ opportunity_id: currentOpportunityId, target_tool: "flow.get_state", target_arguments: {} }]);
       }
       const executable = state.pendingGatewayActions
-        .filter((logical) => (
-          (state.episode.arm === "native" || Boolean(state.snapshot && capability(state.snapshot, logical.action)))
-          && (logical.action !== "archive.reconcile_transcript_request" || reconcileArguments(state) !== null)
-        ))
+        .filter((logical) => {
+          const exactWindow = logical.action === "archive.submit_transcript_request"
+            || logical.action === "archive.reconcile_transcript_request";
+          const withinOpportunityWindow = !exactWindow || logical.opportunity.id === currentOpportunityId;
+          const disclosed = state.episode.arm === "native"
+            || Boolean(state.snapshot && capability(state.snapshot, logical.action));
+          const sourceAvailable = logical.action !== "archive.reconcile_transcript_request"
+            || reconcileArguments(state) !== null;
+          return withinOpportunityWindow && disclosed && sourceAvailable;
+        })
         .map((logical) => ({
         opportunity_id: currentOpportunityId,
         target_tool: logical.action,
         target_arguments: logical.action === "archive.reconcile_transcript_request"
-          ? reconcileArguments(state)!
+          ? state.episode.arm === "hacc"
+            ? {}
+            : reconcileArguments(state)!
           : logical.arguments,
         }));
       return freeze(executable);

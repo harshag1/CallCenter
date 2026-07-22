@@ -102,6 +102,7 @@ describe("LC4-DEV municipal executable control plane", () => {
     const haccContinuity: string[] = [];
     const gatewayReceipts: string[] = [];
     const gatewayReceiptsByArm = { native: [] as string[], hacc: [] as string[] };
+    let nativeReconciliationHandle: string | null = null;
     for (const arm of ["native", "hacc"] as const) {
       const plan = episode(arm);
       let previous: string | null = null;
@@ -136,6 +137,19 @@ describe("LC4-DEV municipal executable control plane", () => {
               ? receipt.response_control.plan.eligible_actions.join(",")
               : "native-full";
             expect(gateway.disposition, `${plan.arm}:${opportunity.id}:${call.target_tool}:eligible=${eligible}:${JSON.stringify(gateway.provider_output)}`).not.toBe("rejected");
+            if (plan.arm === "native" && call.target_tool === "archive.submit_transcript_request") {
+              expect(gateway.provider_output).toMatchObject({
+                ok: false,
+                reconciliation: { required: true, invocation_id: expect.any(String) },
+              });
+              nativeReconciliationHandle = (gateway.provider_output as {
+                reconciliation?: { invocation_id?: string };
+              }).reconciliation?.invocation_id ?? null;
+              expect(nativeReconciliationHandle).toMatch(/^native\./u);
+            }
+            if (plan.arm === "native" && call.target_tool === "archive.reconcile_transcript_request") {
+              expect(call.target_arguments).toEqual({ invocation_id: nativeReconciliationHandle });
+            }
             gatewayReceipts.push(gateway.authoritative_receipt_sha256);
             gatewayReceiptsByArm[arm].push(gateway.authoritative_receipt_sha256);
           }
@@ -196,11 +210,27 @@ describe("LC4-DEV municipal executable control plane", () => {
     let previous: string | null = null;
     let callSequence = 0;
     let rejectedReconciliation: Awaited<ReturnType<typeof control.gateway_executor.execute>> | null = null;
+    let rejectedLateMutation: Awaited<ReturnType<typeof control.gateway_executor.execute>> | null = null;
 
     for (const opportunity of corpus.opportunities) {
       await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
 
       if (opportunity.events.some((event) => event.kind === "authoritative-reconciliation")) {
+        callSequence += 1;
+        rejectedLateMutation = await control.gateway_executor.execute({
+          bridge_version: "lc4-dev-gateway-bridge-v1",
+          episode_id: plan.episode_id,
+          opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
+          provider: plan.provider,
+          arm: plan.arm,
+          provider_call_id: `test.missing-mutation.late-submit.${callSequence}`,
+          provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          target_tool: "archive.submit_transcript_request",
+          target_arguments: { request_id: "lc4-dev-accessible-transcript" },
+          request_sha256: sha256Hex(`request:missing-mutation:late-submit:${callSequence}`),
+          provider_provenance_sha256: sha256Hex(`provenance:missing-mutation:late-submit:${callSequence}`),
+        });
         callSequence += 1;
         rejectedReconciliation = await control.gateway_executor.execute({
           bridge_version: "lc4-dev-gateway-bridge-v1",
@@ -240,9 +270,24 @@ describe("LC4-DEV municipal executable control plane", () => {
       previous = sha256Hex(`provider-exchange:${plan.episode_id}:${opportunity.id}`);
     }
 
+    expect(rejectedLateMutation).toMatchObject({
+      disposition: "rejected",
+      provider_output: { ok: false, code: "missed_opportunity_window" },
+    });
     expect(rejectedReconciliation).toMatchObject({
       disposition: "rejected",
-      provider_output: { ok: false, code: "reconciliation_source_missing" },
+      provider_output: {
+        gateway_result: { ok: false, code: "reconciliation_source_missing" },
+        hacc_response_plan: {
+          capability_catalog: {
+            actions: expect.arrayContaining([expect.objectContaining({
+              name: "archive.reconcile_transcript_request",
+              description: expect.stringContaining("Host-bound arguments (omit them): invocation_id"),
+              input_schema: expect.objectContaining({ properties: {}, required: [] }),
+            })]),
+          },
+        },
+      },
     });
     const snapshot = control.snapshot(plan.episode_id);
     expect(snapshot.opportunities).toBe(60);
