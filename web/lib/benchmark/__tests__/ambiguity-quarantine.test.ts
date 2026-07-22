@@ -179,6 +179,25 @@ function visibleSnapshot(state: FlowExecutionState) {
 }
 
 describe("provider-neutral ambiguity quarantine", () => {
+  it("fails closed when an explicit reconciliation contract is malformed", () => {
+    const invalid = structuredClone(flow);
+    const node = invalid.nodes.find((candidate) => candidate.id === "orders");
+    if (!node || node.kind !== "topic" || !node.steps?.[0]?.action_policies?.[0]) {
+      throw new Error("test flow shape changed");
+    }
+    node.steps[0].action_policies[0].reconciliation = {
+      queryTool: "read_order_status",
+      // A name alone is not an invocation-bound authoritative proof contract.
+    };
+    const state = reserveAndDispatch(
+      activeState(), "flow-commit-invalid-policy", "commit_order", { order_id: "order-7" },
+      "2026-07-21T12:00:03.000Z",
+    );
+    expect(() => designatedReconciliationActionsForReceipt(
+      invalid, state, "flow-commit-invalid-policy",
+    )).toThrow("invalid explicit reconciliation contract");
+  });
+
   it("preserves the committed ToolWorld outcome but exposes indeterminate no-retry Flow state", () => {
     const fixture = quarantinedFixture();
     expect(fixture.rawWorldReceipt).toMatchObject({

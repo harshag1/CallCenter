@@ -47,7 +47,7 @@ export type Lc4DevGatewayExecutor = Readonly<{
     provider_output: JsonValue;
     authoritative_receipt_sha256: string;
     control_plane_head_sha256: string;
-    disposition: "executed" | "replayed" | "deduplicated" | "rejected";
+    disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
   }>>;
 }>;
 
@@ -68,7 +68,7 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   provider_output_sha256: string;
   authoritative_receipt_sha256: string;
   control_plane_head_sha256: string;
-  disposition: "executed" | "replayed" | "deduplicated" | "rejected";
+  disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
   receipt_sha256: string;
 }>;
 

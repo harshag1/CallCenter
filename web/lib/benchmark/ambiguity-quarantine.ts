@@ -1,4 +1,5 @@
 import { findStep, type AgentFlow } from "../flow";
+import { ActionReconciliationSpecSchema } from "../action-reconciliation";
 import {
   flowStateSummary,
   hashFlowValue,
@@ -95,6 +96,19 @@ export function designatedReconciliationActionsForReceipt(
   const step = findStep(flow, receipt.step)?.step;
   if (!step) throw new Error("ambiguous Flow receipt is not bound to a configured step");
   const granted = new Set(step.tools ?? []);
+  const explicitPolicy = (step.action_policies ?? [])
+    .find((policy) => policy.tool === receipt.tool)?.reconciliation;
+  const parsedPolicy = ActionReconciliationSpecSchema.safeParse(explicitPolicy);
+  if (explicitPolicy !== undefined && !parsedPolicy.success) {
+    throw new Error("ambiguous Flow receipt has an invalid explicit reconciliation contract");
+  }
+  const explicitQueryTool = parsedPolicy.success ? parsedPolicy.data.queryTool : undefined;
+  if (explicitQueryTool) {
+    if (!granted.has(explicitQueryTool) || explicitQueryTool === receipt.tool) {
+      throw new Error("ambiguous Flow receipt has an invalid explicit reconciliation query tool");
+    }
+    return Object.freeze([explicitQueryTool]);
+  }
   return Object.freeze([...new Set((step.output_bindings ?? [])
     .map((binding) => binding.tool)
     .filter((tool) => tool !== receipt.tool && granted.has(tool)))].sort());
