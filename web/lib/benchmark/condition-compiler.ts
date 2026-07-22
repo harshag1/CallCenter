@@ -1,5 +1,6 @@
 import {
   AgentFlowSchema,
+  findStep,
   listStepRefs,
   topicEntryStepPaths,
   validateAgentFlow,
@@ -714,6 +715,24 @@ function normalizeSource(input: CanonicalConditionCompilerInput): NormalizedSour
       omitted.length ? `scenario tools absent from every flow grant: ${omitted.join(", ")}` : "",
     ].filter(Boolean).join("; "));
   }
+  const toolsByName = new Map(scenario.tools.map((tool) => [tool.name, tool]));
+  for (const ref of listStepRefs(flow)) {
+    for (const policy of ref.step.action_policies ?? []) {
+      const target = toolsByName.get(policy.tool);
+      for (const binding of policy.bound_arguments ?? []) {
+        if (!target?.arguments.some((argument) => argument.name === binding.argument)) {
+          throw new ConditionCompilerError(
+            `bound argument "${binding.argument}" is not declared by scenario tool "${policy.tool}" at ${ref.path}`
+          );
+        }
+        if (!toolsByName.has(binding.source.tool)) {
+          throw new ConditionCompilerError(
+            `bound argument source tool "${binding.source.tool}" is absent from the scenario at ${ref.path}`
+          );
+        }
+      }
+    }
+  }
 
   const validTargets = new Set<DisclosureTarget>(["$base"]);
   for (const node of flow.nodes.filter((candidate) => candidate.kind === "topic" || candidate.kind === "fallback")) {
@@ -1009,6 +1028,44 @@ function leafToolNamesAtTarget(flow: AgentFlow, target: DisclosureTarget): strin
   ]);
 }
 
+function hostBoundCapability(
+  capability: CompiledCapability,
+  boundArguments: readonly string[],
+): CompiledCapability {
+  if (capability.category !== "leaf" || boundArguments.length === 0) return capability;
+  const input = structuredClone(capability.inputSchema) as Record<string, JsonValue>;
+  const properties = input.properties && typeof input.properties === "object" && !Array.isArray(input.properties)
+    ? { ...(input.properties as Record<string, JsonValue>) }
+    : {};
+  const omitted = [...new Set(boundArguments)].sort();
+  for (const argument of omitted) delete properties[argument];
+  input.properties = properties;
+  if (Array.isArray(input.required)) {
+    input.required = input.required.filter((argument) => typeof argument !== "string" || !omitted.includes(argument));
+  }
+  return {
+    ...capability,
+    description: `${capability.description} Host-bound arguments (omit them): ${omitted.join(", ")}.`,
+    inputSchema: asImmutableJson(input),
+  };
+}
+
+function capabilityAtTarget(
+  flow: AgentFlow,
+  target: DisclosureTarget,
+  capability: CompiledCapability,
+  behavior: ConditionBehavior,
+): CompiledCapability {
+  if (
+    behavior.transitionOwnership !== "host-managed-linear"
+    || capability.category !== "leaf"
+    || !target.startsWith("step:")
+  ) return capability;
+  const ref = findStep(flow, target.slice("step:".length));
+  const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === capability.name);
+  return hostBoundCapability(capability, (policy?.bound_arguments ?? []).map((binding) => binding.argument));
+}
+
 function flowControlsAtTarget(
   target: DisclosureTarget,
   controls: readonly CompiledCapability[],
@@ -1035,7 +1092,9 @@ function capabilitiesAtTarget(
   const leafNames = new Set(leafToolNamesAtTarget(flow, target));
   return [
     ...flowControlsAtTarget(target, controls, behavior),
-    ...tools.filter((tool) => leafNames.has(tool.name)).map((tool) => tool.capability),
+    ...tools
+      .filter((tool) => leafNames.has(tool.name))
+      .map((tool) => capabilityAtTarget(flow, target, tool.capability, behavior)),
   ].sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -1373,6 +1432,32 @@ function leafCapabilityUnion(condition: CompiledBenchmarkCondition): readonly Co
     .filter((capability) => capability.category === "leaf");
 }
 
+function canonicalBoundArguments(
+  information: readonly CompiledInformationUnit[],
+  target: DisclosureTarget,
+  tool: string,
+): readonly string[] {
+  if (!target.startsWith("step:")) return [];
+  const unit = information.find((candidate) => candidate.id === `step.${target.slice("step:".length)}`);
+  if (!unit || unit.payload === null || typeof unit.payload !== "object" || Array.isArray(unit.payload)) return [];
+  const policies = Array.isArray(unit.payload.action_policies) ? unit.payload.action_policies : [];
+  const policy = policies.find((candidate) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+    return (candidate as Record<string, JsonValue>).tool === tool;
+  });
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) return [];
+  const bindings = (policy as Record<string, JsonValue>).bound_arguments;
+  if (!Array.isArray(bindings)) return [];
+  return bindings.flatMap((candidate) =>
+    candidate !== null
+    && typeof candidate === "object"
+    && !Array.isArray(candidate)
+    && typeof (candidate as Record<string, JsonValue>).argument === "string"
+      ? [(candidate as Record<string, JsonValue>).argument as string]
+      : []
+  ).sort();
+}
+
 function unitSetHash(units: readonly CompiledInformationUnit[], kind?: CompiledInformationUnit["kind"]): string {
   const pairs = [...new Map(units
     .filter((unit) => !kind || unit.kind === kind)
@@ -1695,19 +1780,23 @@ export function auditConditionParity(
       }
       const allVisibleCapabilities = capabilityContainers.flatMap((container) => container.capabilities);
       const canonicalLeafByName = new Map(suite.semanticLeafTools.map((tool) => [tool.name, tool.capability]));
-      for (const capability of allVisibleCapabilities.filter((candidate) => candidate.category === "leaf")) {
-        if (canonicalJson(capability) !== canonicalJson(canonicalLeafByName.get(capability.name))) {
-          addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${capability.name}`, id);
+      for (const container of capabilityContainers) {
+        for (const capability of container.capabilities.filter((candidate) => candidate.category === "leaf")) {
+          const canonical = canonicalLeafByName.get(capability.name);
+          const expected = canonical && condition.behavior.transitionOwnership === "host-managed-linear"
+            ? hostBoundCapability(
+              canonical,
+              canonicalBoundArguments(suite.canonicalInformation, container.target, capability.name),
+            )
+            : canonical;
+          if (canonicalJson(capability) !== canonicalJson(expected)) {
+            addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${capability.name}`, id);
+          }
         }
       }
-      const leafCapabilities = new Map(leafCapabilityUnion(condition).map((capability) => [capability.name, capability]));
-      if (!sameStringSet([...leafCapabilities.keys()], suite.semanticLeafTools.map((tool) => tool.name))) {
+      const visibleLeafNames = leafCapabilityUnion(condition).map((capability) => capability.name);
+      if (!sameStringSet(visibleLeafNames, suite.semanticLeafTools.map((tool) => tool.name))) {
         addIssue(issues, "logical_capability_parity", "condition's visible leaf-capability union differs from canonical tools", id);
-      }
-      for (const tool of suite.semanticLeafTools) {
-        if (canonicalJson(leafCapabilities.get(tool.name)) !== canonicalJson(tool.capability)) {
-          addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${tool.name}`, id);
-        }
       }
       const controlUnion = [...new Map(allVisibleCapabilities
         .filter((capability) => capability.category === "flow-control")

@@ -1223,20 +1223,18 @@ function assertSnapshotSubset(
   if (!condition.behavior.progressiveDisclosure) {
     return assertSnapshotMatches(snapshot, condition.visibleCapabilities, label);
   }
-  const catalog = new Map(
-    [
-      ...condition.visibleCapabilities,
-      ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
-    ].map((capability) => [capability.name, capability])
-  );
+  const catalog = [
+    ...condition.visibleCapabilities,
+    ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
+  ];
   for (const action of snapshot.actions) {
-    const capability = catalog.get(action.name);
-    if (
-      !capability
-      || capability.description !== action.description
-      || capability.semanticHash !== action.semantic_hash
-      || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(action.input_schema)
-    ) {
+    const matches = catalog.some((capability) =>
+      capability.name === action.name
+      && capability.description === action.description
+      && capability.semanticHash === action.semantic_hash
+      && canonicalArtifactJson(capability.inputSchema) === canonicalArtifactJson(action.input_schema)
+    );
+    if (!matches) {
       throw new Error(`${label} capability snapshot action ${action.name} is outside the compiled catalog`);
     }
   }

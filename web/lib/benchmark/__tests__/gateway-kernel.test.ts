@@ -202,6 +202,95 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
 }
 
 describe("benchmark gateway kernel", () => {
+  it("omits and injects receipt-bound arguments before reservation and execution", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const step = topic?.steps?.find((candidate) => candidate.id === "collect_safety_and_diagnosis");
+    const policy = step?.action_policies?.find((candidate) => candidate.tool === "confirm_zero_energy");
+    if (!policy) throw new Error("test flow is missing confirm_zero_energy policy");
+    policy.bound_arguments = [{
+      argument: "work_order_id",
+      source: { kind: "receipt_result", tool: "record_diagnostic", result_path: "valve_id" },
+    }];
+    const source = industrialFieldServiceCompilerInput(scenario);
+    const boundSuite = compileConditionSuite({ ...source, flow });
+    const condition = boundSuite.conditions["host-managed-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow,
+      expectedFlowHash: boundSuite.flowHash,
+      expectedScenarioHash: boundSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: boundSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    const harness: Harness = {
+      kernel,
+      condition,
+      snapshot: kernel.initialize({
+        runId: "run-bound-argument",
+        condition,
+        scenario,
+        world: createToolWorld(scenario),
+      }),
+      world: createToolWorld(scenario),
+      sequence: 0,
+    };
+    const boundDisclosure = condition.disclosures.find(
+      (candidate) => candidate.target === "step:field_service.collect_safety_and_diagnosis"
+    );
+    const compiledZeroCapability = boundDisclosure?.visibleCapabilities.find(
+      (action) => action.name === "confirm_zero_energy"
+    );
+    expect(compiledZeroCapability?.description).toContain("Host-bound arguments (omit them): work_order_id");
+    expect(compiledZeroCapability?.inputSchema).not.toHaveProperty("properties.work_order_id");
+    expect(compiledZeroCapability?.inputSchema).toMatchObject({
+      required: ["measured_voltage", "residual_pressure_psi"],
+    });
+
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    expectOk(invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }));
+    expectOk(invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" }));
+
+    expectOk(invoke(harness, "record_diagnostic", {
+      work_order_id: "WO-2048",
+      valve_id: "V-9B",
+      pressure_psi: 212,
+      diagnostic_code: "OVERPRESSURE_VALVE",
+    }));
+    expectOk(invoke(harness, "confirm_lockout", { work_order_id: "WO-2048", lockout_tag: "LOT-884" }));
+    expectOk(invoke(harness, "flow.get_state", {}));
+    const receiptsBeforeOverride = harness.world.receipts.length;
+    const override = invoke(harness, "confirm_zero_energy", {
+      work_order_id: "MODEL-OVERRIDE",
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+    });
+    expect(override.result).toMatchObject({ ok: false, code: "bound_argument_override" });
+    expect(harness.world.receipts).toHaveLength(receiptsBeforeOverride);
+    const zero = invoke(harness, "confirm_zero_energy", {
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+    });
+    expectOk(zero);
+    expect(harness.world.receipts.at(-1)?.arguments).toEqual({
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+      work_order_id: "V-9B",
+    });
+
+    const publicInvoke = harness.kernel.transcript().entries.at(-1);
+    expect(publicInvoke?.operation).toBe("invoke");
+    expect(publicInvoke?.payload).toMatchObject({
+      input: {
+        argument_binding_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        effective_arguments_hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+  });
+
   it("derives host-owned linear transitions from the attested condition", () => {
     const harness = createHarness("host-managed-harness", "run-auto-linear");
     expect(harness.snapshot.actions.map((action) => action.name).sort()).toEqual([

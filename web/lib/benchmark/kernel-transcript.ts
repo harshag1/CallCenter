@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { FlowExecutionState } from "../flow-runtime";
+import type { FlowBoundArgumentEvidence } from "../flow-runtime";
 import {
   canonicalJson,
   immutableJson,
@@ -197,7 +198,15 @@ export type KernelTranscriptInvokePayload = Readonly<{
     turn: number;
     condition_hash: string;
     action: string;
+    /** Provider-authored arguments, retained for provider-call replay identity. */
     arguments: JsonValue;
+    /** Exact arguments admitted by the host after receipt binding; null when binding rejected. */
+    effective_arguments: JsonValue | null;
+    argument_binding: Readonly<{
+      status: "not_applicable" | "resolved" | "rejected";
+      failure_code: string | null;
+      sources: readonly FlowBoundArgumentEvidence[];
+    }>;
     capability_grant_commitment: string;
   }>;
   pre_state: KernelTranscriptStateHeads;
@@ -389,11 +398,23 @@ const INVOKE_PAYLOAD_KEYS = Object.freeze([
 ].sort());
 const INVOKE_INPUT_KEYS = Object.freeze([
   "action",
+  "argument_binding",
   "arguments",
   "capability_grant_commitment",
   "condition_hash",
+  "effective_arguments",
   "provider_call_id",
   "turn",
+].sort());
+const ARGUMENT_BINDING_KEYS = Object.freeze(["failure_code", "sources", "status"].sort());
+const ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
+  "argument",
+  "result_path",
+  "source_kind",
+  "source_receipt_id",
+  "source_receipt_result_hash",
+  "source_step",
+  "source_tool",
 ].sort());
 const CALLER_TURN_PAYLOAD_KEYS = Object.freeze([
   "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state", "response_plan",
@@ -1019,6 +1040,16 @@ function publicInvokeEntry(
     "$provider_call.arguments",
     restricted.payload.input.arguments
   );
+  const effectiveArgumentsHmac = hmacCommitment(
+    secret,
+    SENSITIVE_VALUE_COMMITMENT_DOMAIN,
+    "$provider_call.effective_arguments",
+    restricted.payload.input.effective_arguments
+  );
+  const argumentBindingSha256 = domainHash(
+    "harshas-amazing-call-center/kernel-argument-binding/v1\n",
+    restricted.payload.input.argument_binding,
+  );
   const providerCallFingerprint = hmacCommitment(
     secret,
     SENSITIVE_VALUE_COMMITMENT_DOMAIN,
@@ -1042,6 +1073,8 @@ function publicInvokeEntry(
         condition_hash: restricted.payload.input.condition_hash,
         action: restricted.payload.input.action,
         arguments_hmac_sha256: argumentsHmac,
+        effective_arguments_hmac_sha256: effectiveArgumentsHmac,
+        argument_binding_sha256: argumentBindingSha256,
         capability_grant_commitment: restricted.payload.input.capability_grant_commitment,
         provider_call_fingerprint_hmac_sha256: providerCallFingerprint,
       },
@@ -1394,6 +1427,12 @@ export function appendKernelTranscriptInvocation(
     postFlowState: FlowExecutionState | null;
     preCapabilityHead: BenchmarkKernelCapabilityHead;
     postCapabilityHead: BenchmarkKernelCapabilityHead;
+    argumentBinding?: Readonly<{
+      status: "not_applicable" | "resolved" | "rejected";
+      effectiveArguments: Readonly<Record<string, JsonValue>> | null;
+      failureCode: string | null;
+      sources: readonly FlowBoundArgumentEvidence[];
+    }>;
     /** Private HMAC key. It is never persisted in the transcript. */
     sensitiveValueSecret: string;
     /** Exact snapshots captured before and after kernel execution. Required for durable-memory arms. */
@@ -1472,6 +1511,76 @@ export function appendKernelTranscriptInvocation(
     throw new Error("invocation pre-state does not continue the prior transcript state");
   }
   const outcome = sanitizeOutcome(input.outcome, input.sensitiveValueSecret);
+  const argumentBinding = input.argumentBinding ?? Object.freeze({
+    status: "not_applicable" as const,
+    effectiveArguments: input.invocation.call.arguments,
+    failureCode: null,
+    sources: Object.freeze([]),
+  });
+  if ((argumentBinding.status === "rejected") !== (argumentBinding.effectiveArguments === null)) {
+    throw new Error("effective arguments disagree with argument-binding status");
+  }
+  const parsedArgumentBinding = parseArgumentBinding({
+    status: argumentBinding.status,
+    failure_code: argumentBinding.failureCode,
+    sources: argumentBinding.sources,
+  }, "invocation argument_binding");
+  if (parsedArgumentBinding.status === "resolved") {
+    const replayed = input.outcome.result.ok && input.outcome.result.disposition === "replayed";
+    if (argumentBinding.effectiveArguments === null) throw new Error("resolved argument binding requires effective arguments");
+    const boundNames = new Set(parsedArgumentBinding.sources.map((source) => source.argument));
+    const expectedKeys = [...Object.keys(input.invocation.call.arguments), ...boundNames].sort();
+    const effectiveKeys = Object.keys(argumentBinding.effectiveArguments).sort();
+    if (canonicalJson(expectedKeys) !== canonicalJson(effectiveKeys)) {
+      throw new Error("effective argument keys differ from model arguments plus declared bindings");
+    }
+    for (const [key, value] of Object.entries(input.invocation.call.arguments)) {
+      if (canonicalJson(argumentBinding.effectiveArguments[key]) !== canonicalJson(value)) {
+        throw new Error(`effective arguments changed model-owned argument ${key}`);
+      }
+    }
+    for (const source of parsedArgumentBinding.sources) {
+      if (Object.prototype.hasOwnProperty.call(input.invocation.call.arguments, source.argument)) {
+        throw new Error(`model arguments override host-bound argument ${source.argument}`);
+      }
+      if (!Object.prototype.hasOwnProperty.call(argumentBinding.effectiveArguments, source.argument)) {
+        throw new Error(`effective arguments omit host-bound argument ${source.argument}`);
+      }
+      if (!replayed) {
+        if (!input.preFlowState?.currentStep) {
+          throw new Error("resolved argument binding requires an active pre-invocation Flow step");
+        }
+        const receipt = input.preFlowState.actionReceipts.find((candidate) => candidate.id === source.source_receipt_id);
+        if (
+          !receipt
+          || receipt.status !== "succeeded"
+          || receipt.step !== input.preFlowState.currentStep
+          || receipt.step !== source.source_step
+          || receipt.capabilityEpoch !== input.preFlowState.capabilityEpoch
+          || receipt.tool !== source.source_tool
+          || receipt.resultHash !== source.source_receipt_result_hash
+        ) throw new Error(`bound argument ${source.argument} source receipt is not current successful Flow authority`);
+      }
+    }
+    if (input.outcome.result.ok) {
+      const appendedReceipts = after.receipts.slice(before.receipts.length);
+      const executionReceipt = appendedReceipts.find((receipt) => receipt.tool === input.invocation.call.action);
+      if (
+        executionReceipt
+        && canonicalJson(executionReceipt.arguments) !== canonicalJson(argumentBinding.effectiveArguments)
+      ) throw new Error("effective arguments differ from the authoritative ToolWorld receipt");
+    }
+  } else if (
+    parsedArgumentBinding.status === "rejected"
+    && (input.outcome.result.ok || input.outcome.result.code !== parsedArgumentBinding.failure_code)
+  ) {
+    throw new Error("rejected argument binding differs from the authoritative gateway failure");
+  } else if (
+    parsedArgumentBinding.status === "not_applicable"
+    && canonicalJson(argumentBinding.effectiveArguments) !== canonicalJson(input.invocation.call.arguments)
+  ) {
+    throw new Error("unbound effective arguments differ from model arguments");
+  }
   if (outcome.capability_snapshot) {
     assertSnapshotMatchesHead(outcome.capability_snapshot, post.capability_head, "rotated capability snapshot");
   } else if (canonicalJson(pre.capability_head) !== canonicalJson(post.capability_head)) {
@@ -1499,6 +1608,10 @@ export function appendKernelTranscriptInvocation(
         condition_hash: input.invocation.condition.conditionHash,
         action: input.invocation.call.action,
         arguments: commitSensitiveTranscriptValues(input.invocation.call.arguments, input.sensitiveValueSecret),
+        effective_arguments: argumentBinding.effectiveArguments === null
+          ? null
+          : commitSensitiveTranscriptValues(argumentBinding.effectiveArguments, input.sensitiveValueSecret),
+        argument_binding: parsedArgumentBinding,
         capability_grant_commitment: kernelTranscriptGrantCommitment(input.invocation.call.capability_grant),
       },
       pre_state: pre,
@@ -1883,6 +1996,49 @@ function parseStateHeads(input: unknown, label: string): KernelTranscriptStateHe
   });
 }
 
+function parseArgumentBinding(
+  input: unknown,
+  label: string,
+): KernelTranscriptInvokePayload["input"]["argument_binding"] {
+  exactKeys(input, ARGUMENT_BINDING_KEYS, label);
+  if (
+    input.status !== "not_applicable"
+    && input.status !== "resolved"
+    && input.status !== "rejected"
+  ) throw new Error(`${label}.status is invalid`);
+  if (input.failure_code !== null && (typeof input.failure_code !== "string" || !/^[a-z][a-z0-9_.-]{0,95}$/u.test(input.failure_code))) {
+    throw new Error(`${label}.failure_code is invalid`);
+  }
+  if (!Array.isArray(input.sources) || input.sources.length > 64) throw new Error(`${label}.sources is invalid`);
+  const sources = input.sources.map((source, index) => {
+    exactKeys(source, ARGUMENT_BINDING_SOURCE_KEYS, `${label}.sources[${index}]`);
+    if (typeof source.argument !== "string" || !/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u.test(source.argument)) {
+      throw new Error(`${label}.sources[${index}].argument is invalid`);
+    }
+    if (source.source_kind !== "receipt_result") throw new Error(`${label}.sources[${index}].source_kind is invalid`);
+    for (const key of ["source_tool", "source_step", "source_receipt_id", "result_path"] as const) {
+      if (typeof source[key] !== "string" || source[key].length < 1 || source[key].length > 512) {
+        throw new Error(`${label}.sources[${index}].${key} is invalid`);
+      }
+    }
+    assertSha(source.source_receipt_result_hash, `${label}.sources[${index}].source_receipt_result_hash`);
+    return immutableJson(source) as unknown as FlowBoundArgumentEvidence;
+  });
+  if (new Set(sources.map((source) => source.argument)).size !== sources.length) {
+    throw new Error(`${label}.sources repeats a bound argument`);
+  }
+  if (
+    (input.status === "resolved") !== (sources.length > 0)
+    || (input.status === "rejected") !== (input.failure_code !== null)
+    || (input.status === "not_applicable" && input.failure_code !== null)
+  ) throw new Error(`${label} status, sources, and failure code disagree`);
+  return Object.freeze({
+    status: input.status,
+    failure_code: input.failure_code,
+    sources: Object.freeze(sources),
+  });
+}
+
 function parseSnapshot(input: unknown, label: string): KernelTranscriptCapabilitySnapshot {
   exactKeys(input, SNAPSHOT_KEYS, label);
   if (input.gateway_version !== 1) throw new Error(`${label}.gateway_version is invalid`);
@@ -1988,8 +2144,46 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
   if (typeof input.payload.input.action !== "string" || !input.payload.input.action) throw new Error(`entry[${index}] action is invalid`);
   assertSha(input.payload.input.capability_grant_commitment, `entry[${index}] grant commitment`);
   const args = JsonValueSchema.parse(input.payload.input.arguments);
+  const effectiveArgs = input.payload.input.effective_arguments === null
+    ? null
+    : JsonValueSchema.parse(input.payload.input.effective_arguments);
+  const argumentBinding = parseArgumentBinding(
+    input.payload.input.argument_binding,
+    `entry[${index}] argument_binding`,
+  );
+  if ((argumentBinding.status === "rejected") !== (effectiveArgs === null)) {
+    throw new Error(`entry[${index}] effective arguments disagree with argument-binding status`);
+  }
   exactKeys(input.payload.outcome, OUTCOME_KEYS, `entry[${index}] outcome`);
   const result = CapabilityGatewayResultSchema.parse(input.payload.outcome.authoritative_result);
+  if (argumentBinding.status === "resolved") {
+    if (effectiveArgs === null || typeof effectiveArgs !== "object" || Array.isArray(effectiveArgs)) {
+      throw new Error(`entry[${index}] resolved binding requires object effective arguments`);
+    }
+    if (args === null || typeof args !== "object" || Array.isArray(args)) {
+      throw new Error(`entry[${index}] model arguments must be an object`);
+    }
+    const boundNames = argumentBinding.sources.map((source) => source.argument);
+    const expectedKeys = [...Object.keys(args), ...boundNames].sort();
+    if (canonicalJson(expectedKeys) !== canonicalJson(Object.keys(effectiveArgs).sort())) {
+      throw new Error(`entry[${index}] effective argument keys differ from the signed binding overlay`);
+    }
+    for (const [key, value] of Object.entries(args)) {
+      if (canonicalJson(effectiveArgs[key]) !== canonicalJson(value)) {
+        throw new Error(`entry[${index}] effective arguments changed model-owned argument ${key}`);
+      }
+    }
+  } else if (
+    argumentBinding.status === "not_applicable"
+    && canonicalJson(effectiveArgs) !== canonicalJson(args)
+  ) {
+    throw new Error(`entry[${index}] unbound effective arguments differ from model arguments`);
+  } else if (
+    argumentBinding.status === "rejected"
+    && (result.ok || result.code !== argumentBinding.failure_code)
+  ) {
+    throw new Error(`entry[${index}] rejected binding differs from its gateway failure`);
+  }
   const providerVisible = JsonValueSchema.parse(input.payload.outcome.provider_visible_output);
   const snapshot = input.payload.outcome.capability_snapshot === null
     ? null
@@ -2012,6 +2206,8 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
       condition_hash: input.payload.input.condition_hash,
       action: input.payload.input.action,
       arguments: args,
+      effective_arguments: effectiveArgs,
+      argument_binding: argumentBinding,
       capability_grant_commitment: input.payload.input.capability_grant_commitment,
     }),
     pre_state: parseStateHeads(input.payload.pre_state, `entry[${index}] pre_state`),
@@ -2426,9 +2622,11 @@ const PUBLIC_INVOKE_PAYLOAD_KEYS = Object.freeze([
 ].sort());
 const PUBLIC_INPUT_KEYS = Object.freeze([
   "action",
+  "argument_binding_sha256",
   "arguments_hmac_sha256",
   "capability_grant_commitment",
   "condition_hash",
+  "effective_arguments_hmac_sha256",
   "provider_call_fingerprint_hmac_sha256",
   "provider_call_id",
   "turn",
@@ -2850,6 +3048,8 @@ export function verifyKernelTranscript(input: Readonly<{
       assertNonNegativeInteger(call.turn, `public entry ${index} turn`);
       assertSha(call.condition_hash, `public entry ${index} condition_hash`);
       assertSha(call.arguments_hmac_sha256, `public entry ${index} arguments HMAC`);
+      assertSha(call.effective_arguments_hmac_sha256, `public entry ${index} effective arguments HMAC`);
+      assertSha(call.argument_binding_sha256, `public entry ${index} argument binding commitment`);
       assertSha(call.capability_grant_commitment, `public entry ${index} grant commitment`);
       assertSha(call.provider_call_fingerprint_hmac_sha256, `public entry ${index} call fingerprint`);
       if (call.condition_hash !== bindings.condition_hash) errors.push(`public entry ${index} condition binding mismatch`);

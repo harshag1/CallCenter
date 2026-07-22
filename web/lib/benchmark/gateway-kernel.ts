@@ -5,12 +5,14 @@ import {
   flowCapabilityScope,
   markFlowActionDispatchStarted,
   reserveFlowAction,
+  resolveFlowBoundArguments,
   rotateFlowCapabilityEpoch,
   selectFlowTopic,
   settleFlowAction,
   completeFlowStep,
   createFlowExecutionState,
   type FlowExecutionState,
+  type FlowBoundArgumentEvidence,
   type RuntimeError,
 } from "../flow-runtime";
 import {
@@ -152,6 +154,13 @@ type LooseState = {
   outputs: Record<string, JsonValue>;
 };
 
+type GatewayArgumentBinding = Readonly<{
+  status: "not_applicable" | "resolved" | "rejected";
+  effectiveArguments: Readonly<Record<string, JsonValue>> | null;
+  failureCode: string | null;
+  sources: readonly FlowBoundArgumentEvidence[];
+}>;
+
 type KernelRun = {
   runId: string;
   condition: CompiledBenchmarkCondition;
@@ -168,6 +177,7 @@ type KernelRun = {
   providerCalls: Map<string, Readonly<{
     fingerprint: string;
     outcome: BenchmarkGatewayOutcome;
+    argumentBinding: GatewayArgumentBinding;
   }>>;
   grants: Map<string, Readonly<{
     action: string;
@@ -288,6 +298,17 @@ function asJson(value: unknown): JsonValue {
   // Flow state and tool-world results are JSON-shaped. The round trip removes
   // optional `undefined` fields before the strict artifact schema sees them.
   return JsonValueSchema.parse(JSON.parse(JSON.stringify(value)));
+}
+
+function unboundArgumentBinding(
+  args: Readonly<Record<string, JsonValue>>,
+): GatewayArgumentBinding {
+  return Object.freeze({
+    status: "not_applicable" as const,
+    effectiveArguments: Object.freeze(structuredClone(args)),
+    failureCode: null,
+    sources: Object.freeze([]),
+  });
 }
 
 function record(value: JsonValue): Record<string, JsonValue> | null {
@@ -855,6 +876,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         return { ...execution, state: nextWorld };
       },
     });
+    let executionInput = boundInput;
+    let argumentBinding = unboundArgumentBinding(input.call.arguments);
     try {
       const { action } = input.call;
       const fingerprint = sha256Hex(canonicalJson({
@@ -893,6 +916,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
             ? {}
             : { providerVisibleOutput: priorCall.outcome.providerVisibleOutput }),
         };
+        argumentBinding = priorCall.argumentBinding;
         this.#recordInvocation(
           run,
           input,
@@ -900,7 +924,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           preFlowState,
           preDurableMemoryState,
           preCapabilityHead,
-          outcome
+          outcome,
+          argumentBinding,
         );
         return outcome;
       }
@@ -926,6 +951,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         run.providerCalls.set(input.providerCallId, Object.freeze({
           fingerprint,
           outcome: Object.freeze(structuredClone(outcome)),
+          argumentBinding,
         }));
         return outcome;
       }
@@ -941,13 +967,64 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         if (verified) outcome = { result: verified };
       }
       if (!outcome) {
+        if (
+          knownLeaf
+          && condition.behavior.transitionOwnership === "host-managed-linear"
+          && run.flowState
+        ) {
+          const resolved = resolveFlowBoundArguments(
+            this.#flow,
+            run.flowState,
+            action,
+            input.call.arguments,
+          );
+          if ("error" in resolved) {
+            argumentBinding = Object.freeze({
+              status: "rejected" as const,
+              effectiveArguments: null,
+              failureCode: resolved.code,
+              sources: Object.freeze([]),
+            });
+            outcome = {
+              result: failure(
+                resolved.code,
+                resolved.error,
+                action,
+                false,
+                this.#epoch(run),
+              ),
+            };
+          } else {
+            const effectiveArguments = JsonValueSchema.parse(resolved.effectiveArguments);
+            if (effectiveArguments === null || typeof effectiveArguments !== "object" || Array.isArray(effectiveArguments)) {
+              throw new Error("resolved Flow arguments must be a JSON object");
+            }
+            argumentBinding = resolved.evidence.length > 0
+              ? Object.freeze({
+                status: "resolved" as const,
+                effectiveArguments: Object.freeze(effectiveArguments),
+                failureCode: null,
+                sources: resolved.evidence,
+              })
+              : unboundArgumentBinding(input.call.arguments);
+            executionInput = Object.freeze({
+              ...boundInput,
+              call: Object.freeze({
+                ...boundInput.call,
+                arguments: effectiveArguments,
+              }),
+            });
+          }
+        }
+      }
+      if (!outcome) {
         outcome = knownMemory
           ? this.#memory(run, input.providerCallId, input.call.arguments)
           : knownControl
             ? this.#flowControl(run, input.providerCallId, action, input.call.arguments)
             : condition.behavior.enforceExactlyOnce
-              ? this.#enforcedLeaf(run, boundInput)
-              : this.#unrestrictedLeaf(run, boundInput);
+              ? this.#enforcedLeaf(run, executionInput)
+              : this.#unrestrictedLeaf(run, executionInput);
       }
       this.#advanceSpeechGuardrailState(run, outcome);
       outcome = this.#speechGuardedOutcome(run, outcome);
@@ -957,6 +1034,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       const providerCallRecord = Object.freeze({
         fingerprint,
         outcome: Object.freeze(structuredClone(outcome)),
+        argumentBinding: Object.freeze(structuredClone(argumentBinding)),
       });
       this.#recordInvocation(
         run,
@@ -965,7 +1043,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         preFlowState,
         preDurableMemoryState,
         preCapabilityHead,
-        outcome
+        outcome,
+        argumentBinding,
       );
       run.providerCalls.set(input.providerCallId, providerCallRecord);
       return outcome;
@@ -1079,7 +1158,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     preFlowState: FlowExecutionState | null,
     preDurableMemoryState: ReadonlyMap<string, JsonValue> | null,
     preCapabilityHead: BenchmarkKernelCapabilityHead,
-    outcome: BenchmarkGatewayOutcome
+    outcome: BenchmarkGatewayOutcome,
+    argumentBinding: GatewayArgumentBinding = unboundArgumentBinding(input.call.arguments),
   ): void {
     if (!run.transcript) throw new Error("benchmark gateway transcript was not initialized");
     run.transcript = appendKernelTranscriptInvocation(run.transcript, {
@@ -1098,6 +1178,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       postDurableMemoryState: run.condition.behavior.genericDurableMemory ? run.memory : null,
       preCapabilityHead,
       postCapabilityHead: this.#capabilityHead(run),
+      argumentBinding,
       sensitiveValueSecret: run.transcriptSecret,
     });
   }
