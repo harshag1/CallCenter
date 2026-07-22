@@ -9,6 +9,7 @@ import {
   LONG_CALL_ASR_SEMANTIC_SLOTS,
   createLongCallAsrCalibrationArtifact,
   createLongCallAsrCalibrationPlan,
+  createOutputVoiceAsrCalibrationArtifact,
   createOutputVoiceCalibrationManifest,
   createOutputVoiceCaptureVerificationReceipt,
   normalizeLongCallAsrText,
@@ -16,6 +17,7 @@ import {
   outputVoiceCaptureSigningBytes,
   outputVoiceChunkSequenceSha256,
   scoreLongCallAsrCalibration,
+  scoreOutputVoiceAsrCalibration,
   verifyLongCallAsrCalibrationArtifact,
   wordErrorCounts,
   verifyOutputVoiceCalibrationPcm,
@@ -162,6 +164,15 @@ function exactTranscripts(plan: ReturnType<typeof createLongCallAsrCalibrationPl
   ];
 }
 
+function exactOutputTranscripts(manifest: ReturnType<typeof createOutputVoiceCalibrationManifest>) {
+  return manifest.fixtures.map((fixture) => Object.freeze({
+    calibrationUnitId: fixture.calibrationUnitId,
+    transcript: fixture.referenceText,
+    receiptSha256: sha256Hex(`output-receipt/${fixture.calibrationUnitId}`),
+    playedAudioSha256: fixture.sha256,
+  }));
+}
+
 describe("long-call ASR calibration", () => {
   it("atomically publishes the evidence directory before making it read-only", () => {
     const source = readFileSync(
@@ -172,6 +183,19 @@ describe("long-call ASR calibration", () => {
     const lock = source.indexOf("await makeReadOnlyRecursively(finalDirectory, finalReceiptPaths)");
     expect(publish).toBeGreaterThan(0);
     expect(lock).toBeGreaterThan(publish);
+  });
+
+  it("verifies every signed output PCM before preparing the standalone ASR batch", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "scripts/long-call-output-voice-asr-calibration.ts"),
+      "utf8"
+    );
+    const verifyAllPcm = source.lastIndexOf("verifyOutputVoiceCalibrationPcm({");
+    const prepareToolchain = source.lastIndexOf("prepareWhisperCppAsrToolchain({");
+    const publish = source.lastIndexOf("await lockAndPublishDirectory({");
+    expect(verifyAllPcm).toBeGreaterThan(0);
+    expect(prepareToolchain).toBeGreaterThan(verifyAllPcm);
+    expect(publish).toBeGreaterThan(prepareToolchain);
   });
 
   it("normalizes compact/spaced identifiers and numeric renderings equivalently", () => {
@@ -315,6 +339,69 @@ describe("long-call ASR calibration", () => {
     });
     expect(outputFailure.gatePass).toBe(false);
     expect(outputFailure.outputVoiceMetrics.find((metrics) => metrics.provider === "openai")?.criticalSlotFalseNegatives).toBe(1);
+  });
+
+  it("scores a signed capture root independently and fail-closes every provider route", () => {
+    const source = frozenPlan();
+    const manifest = createOutputVoiceCalibrationManifest(source.outputVoiceCalibrationFixtures);
+    const exact = exactOutputTranscripts(manifest);
+    const pass = scoreOutputVoiceAsrCalibration({ manifest, transcripts: exact });
+    expect(pass.gatePass).toBe(true);
+    expect(pass.metrics).toMatchObject({
+      plannedFixtures: 18,
+      completedFixtures: 18,
+      fixtureCoverage: 1,
+      wordErrorRate: 0,
+      criticalSlotFalseNegatives: 0,
+      semanticSlotFalsePositives: 0,
+    });
+    expect(pass.outputVoiceMetrics).toHaveLength(3);
+    expect(pass.outputVoiceMetrics.every((route) => route.plannedFixtures === 6
+      && route.completedFixtures === 6
+      && route.fixtureCoverage === 1)).toBe(true);
+
+    const missing = scoreOutputVoiceAsrCalibration({ manifest, transcripts: exact.slice(1) });
+    expect(missing.gatePass).toBe(false);
+    expect(missing.metrics.completedFixtures).toBe(17);
+    expect(missing.outputVoiceMetrics.find((route) => route.provider === "openai")?.completedFixtures).toBe(5);
+
+    const falseNegative = scoreOutputVoiceAsrCalibration({
+      manifest,
+      transcripts: exact.map((transcript) => transcript.calibrationUnitId === manifest.fixtures[0].calibrationUnitId
+        ? Object.freeze({ ...transcript, transcript: "Calibration phrase omitted." })
+        : transcript),
+    });
+    expect(falseNegative.gatePass).toBe(false);
+    expect(falseNegative.outputVoiceMetrics.find((route) => route.provider === "openai")?.criticalSlotFalseNegatives).toBe(1);
+    expect(falseNegative.outputVoiceMetrics.filter((route) => route.provider !== "openai")
+      .every((route) => route.criticalSlotFalseNegatives === 0)).toBe(true);
+
+    const falsePositive = scoreOutputVoiceAsrCalibration({
+      manifest,
+      transcripts: exact.map((transcript) => transcript.calibrationUnitId === manifest.fixtures[0].calibrationUnitId
+        ? Object.freeze({ ...transcript, transcript: `${transcript.transcript} fifty-two percent` })
+        : transcript),
+    });
+    expect(falsePositive.gatePass).toBe(false);
+    expect(falsePositive.outputVoiceMetrics.find((route) => route.provider === "openai")?.semanticSlotFalsePositives).toBe(1);
+
+    const artifact = createOutputVoiceAsrCalibrationArtifact({
+      scored: pass,
+      captureVerificationSha256: "b".repeat(64),
+      captureAuthoritySha256: "c".repeat(64),
+      asrConfigSha256: "d".repeat(64),
+      asrBatchFinalizationSha256: "e".repeat(64),
+      receiptsManifestSha256: "f".repeat(64),
+    });
+    expect(artifact.artifactSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(() => createOutputVoiceAsrCalibrationArtifact({
+      scored: pass,
+      captureVerificationSha256: "invalid",
+      captureAuthoritySha256: "c".repeat(64),
+      asrConfigSha256: "d".repeat(64),
+      asrBatchFinalizationSha256: "e".repeat(64),
+      receiptsManifestSha256: "f".repeat(64),
+    })).toThrow("requires complete SHA-256 evidence bindings");
   });
 
   it("hash-binds and verifies the final artifact against experiment inputs", () => {

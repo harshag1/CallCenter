@@ -42,6 +42,7 @@
     "benchmark:long-call:calibrate": "tsx scripts/long-call-asr-calibration.ts",
     "benchmark:long-call:capture": "tsx scripts/long-call-output-voice-capture.ts",
     "benchmark:long-call:capture-verify": "tsx scripts/long-call-output-voice-capture-verify.ts",
+    "benchmark:long-call:output-asr-calibrate": "tsx scripts/long-call-output-voice-asr-calibration.ts",
     "benchmark:long-call:audio": "tsx scripts/long-call-audio-postprocess.ts"
   },
   "dependencies": {

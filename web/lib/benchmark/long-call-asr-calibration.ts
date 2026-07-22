@@ -34,6 +34,8 @@ const OUTPUT_CAPTURE_SIGNATURE_DOMAIN = "hacc/output-voice-calibration-capture-s
 const OUTPUT_FIXTURE_MANIFEST_DOMAIN = "hacc/output-voice-calibration-manifest/v1\n";
 const OUTPUT_CHUNK_SEQUENCE_DOMAIN = "hacc/output-voice-calibration-chunk-sequence/v1\n";
 const OUTPUT_CAPTURE_VERIFICATION_DOMAIN = "hacc/output-voice-calibration-capture-verification/v1\n";
+const OUTPUT_ASR_RESULT_DOMAIN = "hacc/output-voice-asr-calibration-result/v1\n";
+const OUTPUT_ASR_ARTIFACT_DOMAIN = "hacc/output-voice-asr-calibration-artifact/v1\n";
 const SAFE_CALIBRATION_UNIT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
 export type FrozenLongCallFixture = Readonly<{
@@ -205,6 +207,15 @@ export type LongCallAsrCalibrationTranscript = Readonly<{
   transcript: string;
   receiptSha256: string;
   playedAudioSha256: string;
+}>;
+
+export type OutputVoiceAsrCalibrationArtifact = ScoredOutputVoiceAsrCalibration & Readonly<{
+  captureVerificationSha256: string;
+  captureAuthoritySha256: string;
+  asrConfigSha256: string;
+  asrBatchFinalizationSha256: string;
+  receiptsManifestSha256: string;
+  artifactSha256: string;
 }>;
 
 type SemanticSlot = Readonly<{
@@ -623,6 +634,179 @@ export function validateOutputVoiceCalibrationFixtures(input: Readonly<{
     validateCaptureReceipt(fixture, captureAuthority);
   }
   return Object.freeze([...fixtures]);
+}
+
+/**
+ * Score a completed provider-output capture root without requiring the larger
+ * long-call experiment plan. The manifest itself is the frozen test plan: six
+ * critical-slot fixtures for each exact provider/model/voice route.
+ */
+export function scoreOutputVoiceAsrCalibration(input: Readonly<{
+  manifest: OutputVoiceCalibrationManifest;
+  transcripts: readonly LongCallAsrCalibrationTranscript[];
+}>) {
+  const canonicalManifest = createOutputVoiceCalibrationManifest(input.manifest.fixtures);
+  if (canonicalJson(canonicalManifest) !== canonicalJson(input.manifest)) {
+    throw new Error("output-voice calibration manifest is noncanonical or has a version/hash mismatch");
+  }
+  const fixtures = validateOutputVoiceCalibrationFixtures({
+    fixtures: input.manifest.fixtures,
+    manifestSha256: input.manifest.manifestSha256,
+  });
+  const byUnit = new Map<string, LongCallAsrCalibrationTranscript>();
+  for (const transcript of input.transcripts) {
+    if (byUnit.has(transcript.calibrationUnitId)) {
+      throw new Error(`duplicate ASR transcript ${transcript.calibrationUnitId}`);
+    }
+    byUnit.set(transcript.calibrationUnitId, transcript);
+  }
+  const plannedUnits = new Set(fixtures.map((fixture) => fixture.calibrationUnitId));
+  const unexpectedUnits = [...byUnit.keys()].filter((unitId) => !plannedUnits.has(unitId));
+  if (unexpectedUnits.length > 0) {
+    throw new Error(`unexpected ASR calibration transcript ${unexpectedUnits.sort()[0]}`);
+  }
+  const fixtureResults = Object.freeze(fixtures.map((fixture) => {
+    const transcript = byUnit.get(fixture.calibrationUnitId);
+    const referenceTokens = normalizeLongCallAsrText(fixture.referenceText);
+    const hypothesisTokens = normalizeLongCallAsrText(transcript?.transcript ?? "");
+    const wordErrors = wordErrorCounts(referenceTokens, hypothesisTokens);
+    const semanticSlots = Object.freeze(LONG_CALL_ASR_SEMANTIC_SLOTS
+      .filter((slot) => slot.family === fixture.family)
+      .map((slot) => {
+        const representations = [slot.canonicalText, ...(slot.aliases ?? [])].map(normalizeLongCallAsrText);
+        return Object.freeze({
+          slotId: slot.id,
+          kind: slot.kind,
+          expected: representations.some((tokens) => containsSequence(referenceTokens, tokens)),
+          detected: representations.some((tokens) => containsSequence(hypothesisTokens, tokens)),
+        });
+      }));
+    return Object.freeze({
+      calibrationKind: "provider_output" as const,
+      calibrationUnitId: fixture.calibrationUnitId,
+      provider: fixture.provider,
+      model: fixture.model,
+      voice: fixture.voice,
+      family: fixture.family,
+      slotId: fixture.slotId,
+      sourceTextSha256: fixture.referenceTextSha256,
+      fixtureSha256: fixture.sha256,
+      captureReceiptSha256: fixture.captureReceipt.receiptSha256,
+      receiptSha256: transcript?.receiptSha256 ?? null,
+      playedAudioSha256: transcript?.playedAudioSha256 ?? null,
+      evidenceComplete: transcript?.playedAudioSha256 === fixture.sha256
+        && /^[a-f0-9]{64}$/u.test(transcript.receiptSha256),
+      referenceNormalized: referenceTokens.join(" "),
+      hypothesisNormalized: hypothesisTokens.join(" "),
+      wordErrors: wordErrors.errors,
+      referenceWords: wordErrors.referenceWords,
+      semanticSlots,
+    });
+  }));
+  type FixtureResult = (typeof fixtureResults)[number];
+  const metricSummary = (results: readonly FixtureResult[]) => {
+    const totalReferenceWords = results.reduce((sum, result) => sum + result.referenceWords, 0);
+    const totalWordErrors = results.reduce((sum, result) => sum + result.wordErrors, 0);
+    const expectedSlots = results.flatMap((result) => result.semanticSlots.filter((slot) => slot.expected));
+    const criticalSlotFalseNegatives = expectedSlots.filter((slot) => !slot.detected).length;
+    const semanticSlotFalsePositives = results.flatMap((result) => result.semanticSlots)
+      .filter((slot) => !slot.expected && slot.detected).length;
+    const completedFixtures = results.filter((result) => result.evidenceComplete).length;
+    return Object.freeze({
+      plannedFixtures: results.length,
+      completedFixtures,
+      fixtureCoverage: results.length === 0 ? 0 : completedFixtures / results.length,
+      totalReferenceWords,
+      totalWordErrors,
+      wordErrorRate: totalReferenceWords === 0 ? 1 : totalWordErrors / totalReferenceWords,
+      expectedCriticalSlots: expectedSlots.length,
+      detectedCriticalSlots: expectedSlots.length - criticalSlotFalseNegatives,
+      criticalSlotRecall: expectedSlots.length === 0
+        ? 0
+        : (expectedSlots.length - criticalSlotFalseNegatives) / expectedSlots.length,
+      criticalSlotFalseNegatives,
+      semanticSlotFalsePositives,
+    });
+  };
+  const metrics = metricSummary(fixtureResults);
+  const outputVoiceMetrics = Object.freeze(input.manifest.requiredOutputVoiceRoutes.map((route) => {
+    const routeResults = fixtureResults.filter((result) => result.provider === route.provider
+      && result.model === route.model
+      && result.voice === route.voice);
+    return Object.freeze({
+      routeId: longCallOutputVoiceRouteId(route),
+      ...route,
+      ...metricSummary(routeResults),
+    });
+  }));
+  const thresholds = Object.freeze({
+    maximumWordErrorRate: LONG_CALL_ASR_MAX_WER,
+    requiredFixtureCoverage: 1,
+    maximumCriticalSlotFalseNegatives: 0,
+    maximumSemanticSlotFalsePositives: 0,
+  });
+  const passesThresholds = (summary: typeof metrics): boolean =>
+    summary.fixtureCoverage === thresholds.requiredFixtureCoverage
+    && summary.wordErrorRate <= thresholds.maximumWordErrorRate
+    && summary.criticalSlotFalseNegatives <= thresholds.maximumCriticalSlotFalseNegatives
+    && summary.semanticSlotFalsePositives <= thresholds.maximumSemanticSlotFalsePositives;
+  const gatePass = fixtures.length === LONG_CALL_ASR_OUTPUT_VOICE_ROUTES.length * LONG_CALL_ASR_OUTPUT_FIXTURES_PER_VOICE
+    && passesThresholds(metrics)
+    && outputVoiceMetrics.length === LONG_CALL_ASR_OUTPUT_VOICE_ROUTES.length
+    && outputVoiceMetrics.every((summary) => summary.plannedFixtures === LONG_CALL_ASR_OUTPUT_FIXTURES_PER_VOICE
+      && summary.completedFixtures === LONG_CALL_ASR_OUTPUT_FIXTURES_PER_VOICE
+      && passesThresholds(summary));
+  const body = Object.freeze({
+    schemaVersion: 1 as const,
+    calibrationType: "hacc_output_voice_asr_calibration" as const,
+    calibrationId: LONG_CALL_ASR_CALIBRATION_ID,
+    outputVoiceCalibrationManifestSha256: input.manifest.manifestSha256,
+    requiredOutputVoiceRoutes: input.manifest.requiredOutputVoiceRoutes,
+    normalization: "nfkd-lower-diacritic-strip-ampersand-apostrophe-punctuation-cardinal-digit-letter-v1" as const,
+    metrics,
+    outputVoiceMetrics,
+    thresholds,
+    gatePass,
+    fixtureResults,
+  });
+  return Object.freeze({
+    ...body,
+    calibrationSha256: sha256Hex(`${OUTPUT_ASR_RESULT_DOMAIN}${canonicalJson(body)}`),
+  });
+}
+
+export type ScoredOutputVoiceAsrCalibration = ReturnType<typeof scoreOutputVoiceAsrCalibration>;
+
+export function createOutputVoiceAsrCalibrationArtifact(input: Readonly<{
+  scored: ScoredOutputVoiceAsrCalibration;
+  captureVerificationSha256: string;
+  captureAuthoritySha256: string;
+  asrConfigSha256: string;
+  asrBatchFinalizationSha256: string;
+  receiptsManifestSha256: string;
+}>): OutputVoiceAsrCalibrationArtifact {
+  const hashes = [
+    input.captureVerificationSha256,
+    input.captureAuthoritySha256,
+    input.asrConfigSha256,
+    input.asrBatchFinalizationSha256,
+    input.receiptsManifestSha256,
+  ];
+  if (hashes.some((value) => !/^[a-f0-9]{64}$/u.test(value))) {
+    throw new Error("output-voice ASR artifact requires complete SHA-256 evidence bindings");
+  }
+  const body = Object.freeze({
+    ...input.scored,
+    captureVerificationSha256: input.captureVerificationSha256,
+    captureAuthoritySha256: input.captureAuthoritySha256,
+    asrConfigSha256: input.asrConfigSha256,
+    asrBatchFinalizationSha256: input.asrBatchFinalizationSha256,
+    receiptsManifestSha256: input.receiptsManifestSha256,
+  });
+  return Object.freeze({
+    ...body,
+    artifactSha256: sha256Hex(`${OUTPUT_ASR_ARTIFACT_DOMAIN}${canonicalJson(body)}`),
+  });
 }
 
 export function createLongCallAsrCalibrationPlan(plan: FrozenLongCallExperimentPlan): LongCallAsrCalibrationPlan {
