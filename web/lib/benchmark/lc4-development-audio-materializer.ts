@@ -13,6 +13,14 @@ import {
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
+import {
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+  LC4_DEV_CALLER_BRANCH_SOURCE_MATRIX_SHA256,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
+  type Lc4DevCallerBranchAudioBinding,
+  type Lc4DevPriorMutationOutcome,
+} from "./lc4-development-caller-branch";
 import type { Lc4DevCallerAudioBinding } from "./lc4-development-live-runner";
 import {
   assertLc4PublicDevelopmentCorpus,
@@ -41,6 +49,7 @@ const REPAIR_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-audio
 const TOOLCHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-toolchain/v1\n";
 const RENDITION_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-rendition/v1\n";
 const PREPARE_FRAGMENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-prepare-fragment/v1\n";
+const BRANCH_BINDING_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-audio-binding-set/v1\n";
 
 type SampleRate = 16_000 | 24_000 | 48_000;
 
@@ -114,6 +123,16 @@ export type Lc4DevRepairAudioSource = Readonly<{
   provider_renditions: Readonly<Record<LiveStsProvider, Lc4DevAudioRendition>>;
 }>;
 
+export type Lc4DevBranchAudioSource = Readonly<{
+  source_kind: "closed_loop_branch";
+  source_id: string;
+  opportunity_id: typeof LC4_DEV_BRANCH_OPPORTUNITY_ID;
+  prior_outcome: Exclude<Lc4DevPriorMutationOutcome, "committed_after_error">;
+  source_text_sha256: string;
+  master_48khz: Lc4DevPcmObject;
+  provider_renditions: Readonly<Record<LiveStsProvider, Lc4DevAudioRendition>>;
+}>;
+
 export type Lc4DevRepairAudioBinding = Readonly<{
   repair_id: string;
   stage_id: string;
@@ -155,12 +174,18 @@ export type Lc4DevAudioManifest = Readonly<{
   renderer_identity: Lc4DevAudioRendererIdentity;
   canonical_sources: readonly Lc4DevCanonicalAudioSource[];
   caller_audio_bindings: readonly Lc4DevCallerAudioBinding[];
+  branch_source_matrix_sha256: string;
+  branch_sources: readonly Lc4DevBranchAudioSource[];
+  caller_branch_audio_bindings: readonly Lc4DevCallerBranchAudioBinding[];
+  branch_audio_binding_set_sha256: string;
   repair_manifest_sha256: string;
   counts: Readonly<{
     canonical_sources: 60;
     repair_sources: 24;
-    source_masters_48khz: 84;
+    branch_sources: 4;
+    source_masters_48khz: 88;
     logical_caller_bindings: 180;
+    logical_branch_bindings: 15;
     logical_repair_bindings: 72;
   }>;
   manifest_sha256: string;
@@ -172,6 +197,13 @@ export type Lc4DevAudioPrepareFragment = Readonly<{
   audio_manifest_sha256: string;
   audio_bindings: readonly Lc4DevCallerAudioBinding[];
   fragment_sha256: string;
+}>;
+
+export type Lc4DevCallerBranchAudioAccessor = Readonly<{
+  audio_manifest_sha256: string;
+  source_matrix_sha256: string;
+  binding_set_sha256: string;
+  binding(provider: LiveStsProvider, priorOutcome: Lc4DevPriorMutationOutcome): Lc4DevCallerBranchAudioBinding;
 }>;
 
 function freeze<T>(value: T): T {
@@ -319,6 +351,38 @@ function repairManifest(input: Readonly<{
   return freeze({ ...body, repair_manifest_sha256: sha256Hex(`${REPAIR_MANIFEST_DOMAIN}${canonicalJson(body)}`) });
 }
 
+function branchBindingSetSha256(bindings: readonly Lc4DevCallerBranchAudioBinding[]): string {
+  return sha256Hex(`${BRANCH_BINDING_SET_DOMAIN}${canonicalJson(bindings)}`);
+}
+
+function branchAudioBindings(input: Readonly<{
+  canonicalSources: readonly Lc4DevCanonicalAudioSource[];
+  branchSources: readonly Lc4DevBranchAudioSource[];
+}>): readonly Lc4DevCallerBranchAudioBinding[] {
+  const canonicalOp42 = input.canonicalSources.find((source) => source.opportunity_id === LC4_DEV_BRANCH_OPPORTUNITY_ID);
+  if (!canonicalOp42) throw new Error("LC4-DEV canonical opportunity 42 audio is missing");
+  return Object.freeze((["openai", "gemini", "xai"] as const).flatMap((provider) => (
+    LC4_DEV_CALLER_BRANCH_SOURCES.map((branch) => {
+      const rendition = branch.prior_outcome === "committed_after_error"
+        ? canonicalOp42.provider_renditions[provider]
+        : input.branchSources.find((source) => source.prior_outcome === branch.prior_outcome)?.provider_renditions[provider];
+      if (!rendition) throw new Error(`LC4-DEV caller branch audio is missing for ${provider}/${branch.prior_outcome}`);
+      return Object.freeze({
+        prior_outcome: branch.prior_outcome,
+        provider,
+        opportunity_id: LC4_DEV_BRANCH_OPPORTUNITY_ID,
+        source_id: branch.source_id,
+        source_text_sha256: branch.canonical_caller_text_sha256,
+        pcm_sha256: rendition.sha256,
+        pcm_byte_length: rendition.byte_length,
+        sample_rate_hz: rendition.sample_rate_hz as 16_000 | 24_000,
+        channels: 1 as const,
+        encoding: "pcm16le" as const,
+      });
+    })
+  )));
+}
+
 export async function materializeLc4DevelopmentAudio(input: Readonly<{
   outputRoot: string;
   renderer: Lc4DevAudioRenderer;
@@ -341,6 +405,7 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
   const workspace = join(staging, ".work");
   const canonicalSources: Lc4DevCanonicalAudioSource[] = [];
   const repairSources: Lc4DevRepairAudioSource[] = [];
+  const branchSources: Lc4DevBranchAudioSource[] = [];
   try {
     await mkdir(workspace, { recursive: true, mode: 0o700 });
     const sources = [
@@ -358,6 +423,17 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
         sourceTextSha256: source.canonical_caller_text_sha256,
         source,
       })),
+      ...LC4_DEV_CALLER_BRANCH_SOURCES
+        .filter((source): source is typeof source & { prior_outcome: Exclude<Lc4DevPriorMutationOutcome, "committed_after_error"> } => (
+          source.prior_outcome !== "committed_after_error"
+        ))
+        .map((source) => ({
+          kind: "closed_loop_branch" as const,
+          id: source.source_id,
+          text: source.canonical_caller_text,
+          sourceTextSha256: source.canonical_caller_text_sha256,
+          source,
+        })),
     ];
     for (const item of sources) {
       let rendered: Awaited<ReturnType<Lc4DevAudioRenderer["render"]>>;
@@ -389,13 +465,23 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
           master_48khz: master,
           provider_renditions: renditions,
         }));
-      } else {
+      } else if (item.kind === "repair") {
         repairSources.push(Object.freeze({
           source_kind: "repair",
           source_id: item.id,
           stage_id: item.source.stage_id,
           blocker_code: item.source.blocker_code,
           repair_ordinal: item.source.repair_ordinal,
+          source_text_sha256: item.sourceTextSha256,
+          master_48khz: master,
+          provider_renditions: renditions,
+        }));
+      } else {
+        branchSources.push(Object.freeze({
+          source_kind: "closed_loop_branch",
+          source_id: item.id,
+          opportunity_id: LC4_DEV_BRANCH_OPPORTUNITY_ID,
+          prior_outcome: item.source.prior_outcome,
           source_text_sha256: item.sourceTextSha256,
           master_48khz: master,
           provider_renditions: renditions,
@@ -415,6 +501,8 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
         source_text_sha256: source.source_text_sha256,
       });
     }));
+    const callerBranchAudioBindings = branchAudioBindings({ canonicalSources, branchSources });
+    const branchAudioBindingSetSha256 = branchBindingSetSha256(callerBranchAudioBindings);
     const body = {
       schema_version: 1 as const,
       protocol_id: "HACC-LC4-DEV-v1" as const,
@@ -427,12 +515,18 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
       renderer_identity: input.renderer.identity,
       canonical_sources: Object.freeze(canonicalSources),
       caller_audio_bindings: Object.freeze(callerAudioBindings),
+      branch_source_matrix_sha256: LC4_DEV_CALLER_BRANCH_SOURCE_MATRIX_SHA256,
+      branch_sources: Object.freeze(branchSources),
+      caller_branch_audio_bindings: callerBranchAudioBindings,
+      branch_audio_binding_set_sha256: branchAudioBindingSetSha256,
       repair_manifest_sha256: repairs.repair_manifest_sha256,
       counts: Object.freeze({
         canonical_sources: 60 as const,
         repair_sources: 24 as const,
-        source_masters_48khz: 84 as const,
+        branch_sources: 4 as const,
+        source_masters_48khz: 88 as const,
         logical_caller_bindings: 180 as const,
+        logical_branch_bindings: 15 as const,
         logical_repair_bindings: 72 as const,
       }),
     };
@@ -486,6 +580,23 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
   if (input.manifest.canonical_sources.length !== 60 || input.manifest.caller_audio_bindings.length !== 180) {
     throw new Error("LC4-DEV canonical audio coverage is incomplete");
   }
+  if (input.manifest.branch_source_matrix_sha256 !== LC4_DEV_CALLER_BRANCH_SOURCE_MATRIX_SHA256
+    || input.manifest.branch_sources.length !== 4
+    || input.manifest.caller_branch_audio_bindings.length !== 15
+    || input.manifest.branch_audio_binding_set_sha256 !== branchBindingSetSha256(input.manifest.caller_branch_audio_bindings)) {
+    throw new Error("LC4-DEV closed-loop caller branch audio coverage is incomplete");
+  }
+  if (canonicalJson(input.manifest.counts) !== canonicalJson({
+    canonical_sources: 60,
+    repair_sources: 24,
+    branch_sources: 4,
+    source_masters_48khz: 88,
+    logical_caller_bindings: 180,
+    logical_branch_bindings: 15,
+    logical_repair_bindings: 72,
+  })) {
+    throw new Error("LC4-DEV audio manifest counts differ from its frozen source matrix");
+  }
   if (input.repairManifest.repair_sources.length !== 24 || input.repairManifest.repair_audio_bindings.length !== 72) {
     throw new Error("LC4-DEV repair audio coverage is incomplete");
   }
@@ -506,6 +617,33 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
       }
     });
   }
+  const expectedBranchSources = LC4_DEV_CALLER_BRANCH_SOURCES.filter((source) => source.prior_outcome !== "committed_after_error");
+  expectedBranchSources.forEach((expected, index) => {
+    const actual = input.manifest.branch_sources[index];
+    if (!actual || actual.source_id !== expected.source_id || actual.opportunity_id !== LC4_DEV_BRANCH_OPPORTUNITY_ID
+      || actual.prior_outcome !== expected.prior_outcome
+      || actual.source_text_sha256 !== expected.canonical_caller_text_sha256) {
+      throw new Error("LC4-DEV closed-loop caller branch source order or commitment drifted");
+    }
+  });
+  const canonicalOp42 = input.manifest.canonical_sources.find((source) => source.opportunity_id === LC4_DEV_BRANCH_OPPORTUNITY_ID);
+  if (!canonicalOp42) throw new Error("LC4-DEV closed-loop branch lacks canonical opportunity 42 audio");
+  for (const [providerIndex, provider] of (["openai", "gemini", "xai"] as const).entries()) {
+    const offset = providerIndex * LC4_DEV_PRIOR_MUTATION_OUTCOMES.length;
+    LC4_DEV_CALLER_BRANCH_SOURCES.forEach((expected, outcomeIndex) => {
+      const binding = input.manifest.caller_branch_audio_bindings[offset + outcomeIndex];
+      const rendition = expected.prior_outcome === "committed_after_error"
+        ? canonicalOp42.provider_renditions[provider]
+        : input.manifest.branch_sources.find((source) => source.prior_outcome === expected.prior_outcome)?.provider_renditions[provider];
+      if (!binding || !rendition || binding.provider !== provider || binding.prior_outcome !== expected.prior_outcome
+        || binding.opportunity_id !== LC4_DEV_BRANCH_OPPORTUNITY_ID || binding.source_id !== expected.source_id
+        || binding.source_text_sha256 !== expected.canonical_caller_text_sha256
+        || binding.pcm_sha256 !== rendition.sha256 || binding.pcm_byte_length !== rendition.byte_length
+        || binding.sample_rate_hz !== rendition.sample_rate_hz || binding.channels !== 1 || binding.encoding !== "pcm16le") {
+        throw new Error("LC4-DEV caller branch binding differs from its exact provider rendition");
+      }
+    });
+  }
   for (const [providerIndex, provider] of (["openai", "gemini", "xai"] as const).entries()) {
     const offset = providerIndex * 24;
     corpus.repair_policy.library.forEach((repair, index) => {
@@ -523,8 +661,12 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
 export function createLc4DevCallerAudioLoader(input: Readonly<{
   outputRoot: string;
   manifest: Lc4DevAudioManifest;
-}>): Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }> {
+}>): Readonly<{
+  load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array>;
+  loadBranch(binding: Lc4DevCallerBranchAudioBinding): Promise<Uint8Array>;
+}> {
   const root = resolve(input.outputRoot);
+  const branchAccessor = createLc4DevCallerBranchAudioAccessor({ manifest: input.manifest });
   return Object.freeze({
     async load(binding) {
       const source = input.manifest.canonical_sources.find((candidate) => candidate.opportunity_id === binding.opportunity_id);
@@ -540,6 +682,54 @@ export function createLc4DevCallerAudioLoader(input: Readonly<{
         throw new Error("LC4-DEV caller loader detected PCM corruption");
       }
       return bytes;
+    },
+    async loadBranch(binding) {
+      const committed = branchAccessor.binding(binding.provider, binding.prior_outcome);
+      if (canonicalJson(committed) !== canonicalJson(binding)) {
+        throw new Error("LC4-DEV caller loader rejected an uncommitted branch binding");
+      }
+      const canonicalOp42 = input.manifest.canonical_sources.find((source) => source.opportunity_id === LC4_DEV_BRANCH_OPPORTUNITY_ID);
+      const rendition = binding.prior_outcome === "committed_after_error"
+        ? canonicalOp42?.provider_renditions[binding.provider]
+        : input.manifest.branch_sources.find((source) => source.prior_outcome === binding.prior_outcome)?.provider_renditions[binding.provider];
+      if (!rendition || rendition.sha256 !== binding.pcm_sha256 || rendition.byte_length !== binding.pcm_byte_length
+        || rendition.sample_rate_hz !== binding.sample_rate_hz) {
+        throw new Error("LC4-DEV caller loader rejected a branch binding without an exact rendition");
+      }
+      const path = resolve(root, rendition.path);
+      if (!inside(root, path)) throw new Error("LC4-DEV caller branch loader path escapes the artifact root");
+      const bytes = new Uint8Array(await readFile(path));
+      if (bytes.byteLength !== rendition.byte_length || sha256Hex(bytes) !== rendition.sha256) {
+        throw new Error("LC4-DEV caller branch loader detected PCM corruption");
+      }
+      return bytes;
+    },
+  });
+}
+
+/** Deterministic provider+outcome lookup used to build the signed branch matrix. */
+export function createLc4DevCallerBranchAudioAccessor(input: Readonly<{
+  manifest: Lc4DevAudioManifest;
+}>): Lc4DevCallerBranchAudioAccessor {
+  const { manifest_sha256: claimed, ...body } = input.manifest;
+  if (claimed !== sha256Hex(`${MANIFEST_DOMAIN}${canonicalJson(body)}`)) {
+    throw new Error("LC4-DEV caller branch accessor rejected a noncanonical audio manifest");
+  }
+  if (input.manifest.branch_source_matrix_sha256 !== LC4_DEV_CALLER_BRANCH_SOURCE_MATRIX_SHA256
+    || input.manifest.caller_branch_audio_bindings.length !== 15
+    || input.manifest.branch_audio_binding_set_sha256 !== branchBindingSetSha256(input.manifest.caller_branch_audio_bindings)) {
+    throw new Error("LC4-DEV caller branch accessor rejected an incomplete binding matrix");
+  }
+  return Object.freeze({
+    audio_manifest_sha256: input.manifest.manifest_sha256,
+    source_matrix_sha256: input.manifest.branch_source_matrix_sha256,
+    binding_set_sha256: input.manifest.branch_audio_binding_set_sha256,
+    binding(provider, priorOutcome) {
+      const binding = input.manifest.caller_branch_audio_bindings.find((candidate) => (
+        candidate.provider === provider && candidate.prior_outcome === priorOutcome
+      ));
+      if (!binding) throw new Error(`LC4-DEV caller branch binding is missing for ${provider}/${priorOutcome}`);
+      return binding;
     },
   });
 }
