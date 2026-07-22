@@ -6,11 +6,16 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson, sha256Hex } from "./artifacts";
 import { createBenchmarkKernelAttestationSigner } from "./kernel-attestation";
 import {
+  createLc4DevCallerBranchAudioAccessor,
   createLc4DevCallerAudioLoader,
   type Lc4DevAudioManifest,
   type Lc4DevRepairAudioBinding,
   type Lc4DevRepairAudioManifest,
 } from "./lc4-development-audio-materializer";
+import {
+  createLc4DevCallerBranchAuthority,
+  createLc4DevCallerBranchMatrixArtifact,
+} from "./lc4-development-caller-branch";
 import {
   prepareLc4DevelopmentSemanticCalibrationFromArtifact,
   type Lc4DevelopmentSemanticCalibrationArtifact,
@@ -238,6 +243,21 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
     signer: Lc4DevOperatorSigner;
   }>) {
     const signer = authoritySigner(input.signer);
+    const branchSigningIdentity = Object.freeze({
+      key_id: `lc4-dev-authority-${input.signer.public_key_fingerprint_sha256.slice(0, 24)}`,
+      private_key_pem: input.signer.private_key_pkcs8_pem,
+      public_key_pem: input.signer.public_key_spki_pem,
+    });
+    const branchAudio = createLc4DevCallerBranchAudioAccessor({ manifest: input.audio_manifest });
+    const branchMatrix = createLc4DevCallerBranchMatrixArtifact({
+      audio_manifest_sha256: branchAudio.audio_manifest_sha256,
+      audio_bindings: input.audio_manifest.caller_branch_audio_bindings,
+      signing_identity: branchSigningIdentity,
+    });
+    const branchAuthority = createLc4DevCallerBranchAuthority({
+      matrix: branchMatrix,
+      signing_identity: branchSigningIdentity,
+    });
     const control = createLc4DevMunicipalControlPlane({
       audio_manifest: input.audio_manifest,
       repair_manifest: input.repair_manifest,
@@ -258,6 +278,14 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
     return Object.freeze({
       signer,
       control,
+      caller_branch: Object.freeze({
+        matrix: branchMatrix,
+        authority: branchAuthority,
+        trust: Object.freeze({
+          key_id: branchSigningIdentity.key_id,
+          public_key_pem: branchSigningIdentity.public_key_pem,
+        }),
+      }),
       playback_authority: playbackAuthority,
       playback_authority_manifest_sha256: playbackAuthorityManifestSha256,
       listener_manifest_sha256: listenerManifestSha256,
@@ -271,6 +299,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       const loadRepairPcm = repairLoader(audioRoot, repair_manifest);
       await Promise.all([
         ...audio_manifest.caller_audio_bindings.map((binding) => callerLoader.load(binding)),
+        ...audio_manifest.caller_branch_audio_bindings.map((binding) => callerLoader.loadBranch(binding)),
         ...repair_manifest.repair_audio_bindings.map((binding) => loadRepairPcm(binding)),
       ]);
       const composition = createLc4DevelopmentDefaultRuntimeComposition({
@@ -338,7 +367,12 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         cas_root_dir: casRoot,
         ledger_path: resolve(evidence_root, "ledger.jsonl"),
         caller_audio: callerAudio,
+        caller_branch: Object.freeze({
+          ...built.caller_branch,
+          load: callerAudio.loadBranch,
+        }),
         control: built.control,
+        authority_signer: built.signer,
         repair: repairs,
         criteria,
         evaluator,

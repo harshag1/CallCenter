@@ -42,6 +42,16 @@ import {
   type Lc4DevReplayEvidenceStore,
 } from "../lc4-development-evidence-retention";
 import {
+  LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
+  createLc4DevCallerBranchAuthority,
+  createLc4DevCallerBranchMatrixArtifact,
+  lc4DevBranchedOpportunity,
+  type Lc4DevCallerBranchAudioBinding,
+  type Lc4DevPriorMutationOutcome,
+} from "../lc4-development-caller-branch";
+import {
   LC4_QUALIFICATION_RUNNER_VERSION,
   createLc4QualificationTargets,
 } from "../lc4-qualification-runner";
@@ -52,6 +62,12 @@ import {
 
 const HASH = "a".repeat(64);
 const NOW = "2026-07-21T22:00:00.000Z";
+const branchKeys = generateKeyPairSync("ed25519");
+const branchIdentity = Object.freeze({
+  key_id: "lc4-dev-live-runner-branch-test",
+  private_key_pem: branchKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  public_key_pem: branchKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+});
 
 function repairProjection(opportunityId: string) {
   return createLc4DevArmBlindRepairProjection({
@@ -337,14 +353,83 @@ async function testJsonEvidence(
   return evidence.retainJson({ kind, body: body as never });
 }
 
+function callerBranchDependencies(input: Readonly<{
+  evidence: Lc4DevReplayEvidenceStore;
+  pcm: Map<string, Uint8Array>;
+  outcome?: Lc4DevPriorMutationOutcome;
+}>): Lc4DevLiveRunnerDependencies["caller_branch"] {
+  const bindings = (["openai", "gemini", "xai"] as const).flatMap((provider) => {
+    const op42Pcm = input.pcm.get(`${provider}:lc4-dev-op-42`)!;
+    return LC4_DEV_PRIOR_MUTATION_OUTCOMES.map((outcome): Lc4DevCallerBranchAudioBinding => {
+      const source = LC4_DEV_CALLER_BRANCH_SOURCES.find((candidate) => candidate.prior_outcome === outcome)!;
+      return Object.freeze({
+        prior_outcome: outcome,
+        provider,
+        opportunity_id: "lc4-dev-op-42",
+        source_id: source.source_id,
+        source_text_sha256: source.canonical_caller_text_sha256,
+        pcm_sha256: sha256Hex(op42Pcm),
+        pcm_byte_length: op42Pcm.byteLength,
+        sample_rate_hz: provider === "gemini" ? 16_000 : 24_000,
+        channels: 1,
+        encoding: "pcm16le",
+      });
+    });
+  });
+  const matrix = createLc4DevCallerBranchMatrixArtifact({
+    audio_manifest_sha256: "d".repeat(64),
+    audio_bindings: bindings,
+    signing_identity: branchIdentity,
+  });
+  const authority = createLc4DevCallerBranchAuthority({ matrix, signing_identity: branchIdentity });
+  const trust = Object.freeze({ key_id: branchIdentity.key_id, public_key_pem: branchIdentity.public_key_pem });
+  return Object.freeze({
+    matrix,
+    trust,
+    async select({ episode, canonical_opportunity }) {
+      const outcome = input.outcome ?? "committed_after_error";
+      const decision = authority.decide({
+        episode_id: episode.episode_id,
+        provider: episode.provider,
+        opportunity: canonical_opportunity,
+        prior_receipt: {
+          semantic_opportunity_id: "lc4-dev-op-35",
+          tool: "archive.submit_transcript_request",
+          outcome,
+          receipt_sha256: outcome === "no_call" ? null : sha256Hex(`prior-receipt:${episode.episode_id}:${outcome}`),
+        },
+      });
+      const { decision_sha256: claimed, ...body } = decision;
+      const evidence = await input.evidence.retainJson({
+        kind: "caller_branch_decision",
+        body: body as never,
+        domain_prefix: LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+        expected_evidence_sha256: claimed,
+      });
+      return Object.freeze({
+        decision,
+        opportunity: lc4DevBranchedOpportunity(canonical_opportunity, decision),
+        pcm: Uint8Array.from(input.pcm.get(`${episode.provider}:lc4-dev-op-42`)! as Uint8Array),
+        evidence,
+      });
+    },
+  });
+}
+
 function retainedDependencies(input: Readonly<{
   evidence: Lc4DevReplayEvidenceStore;
   pcm: Map<string, Uint8Array>;
   repair: Lc4DevLiveRunnerDependencies["repair"];
-}>): Pick<Lc4DevLiveRunnerDependencies, "caller_audio" | "retention" | "control" | "repair" | "evidence" | "finalization"> {
+  branch_outcome?: Lc4DevPriorMutationOutcome;
+}>): Pick<Lc4DevLiveRunnerDependencies, "caller_audio" | "caller_branch" | "retention" | "control" | "repair" | "evidence" | "finalization"> {
   return {
     evidence: input.evidence,
     caller_audio: { async load(binding) { return input.pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
+    caller_branch: callerBranchDependencies({
+      evidence: input.evidence,
+      pcm: input.pcm,
+      ...(input.branch_outcome ? { outcome: input.branch_outcome } : {}),
+    }),
     retention: {
       async retain({ direction, pcm }) {
         const kind = direction === "caller_repair" ? "repair_pcm" : direction === "caller_input" ? "caller_pcm" : "assistant_pcm";
@@ -412,6 +497,11 @@ describe("LC4-DEV live runner", () => {
             exchanges += 1;
             expect(control_receipt.response_control.kind).toBe(episode.arm === "native" ? "native_context" : "hacc_response_plan");
             expect(caller_pcm).toEqual(pcm.get(`${episode.provider}:${opportunity.id}`));
+            if (opportunity.index === 42) {
+              expect(opportunity).toMatchObject({ id: "lc4-dev-op-42", index: 42 });
+              expect(opportunity.canonical_caller_text).toContain("did not hear a transcript request get submitted");
+              expect(opportunity.events.some((event) => event.kind === "authoritative-reconciliation")).toBe(false);
+            }
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
             const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
             const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
@@ -446,7 +536,7 @@ describe("LC4-DEV live runner", () => {
       preflight,
       dependencies: {
         adapter,
-        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies() }),
+        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies(), branch_outcome: "no_call" }),
         ledger: { async append(event) { ledger.push(event.event_sha256); } },
         now: () => new Date(NOW),
       },
@@ -461,10 +551,13 @@ describe("LC4-DEV live runner", () => {
     expect(run.repair_playbacks).toBe(0);
     expect(run.episode_finalization_count).toBe(6);
     expect(run.replay_evidence_reference_count).toBeGreaterThan(run.ledger.length);
-    expect(run.ledger).toHaveLength(1_092); // 6 opened + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
+    expect(run.ledger).toHaveLength(1_098); // 6 opened + 6 op42 branches + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
+    expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")).toHaveLength(6);
+    expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")
+      .every((event) => event.payload_sha256.length === 64)).toBe(true);
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
     await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
-      event_count: 1_092,
+      event_count: 1_098,
       ledger_head_sha256: run.ledger_head_sha256,
     });
     expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
@@ -620,9 +713,9 @@ describe("LC4-DEV live runner", () => {
       expect(canonicalAfterRepair).toBe(11);
       expect(run.ledger.filter((event) => event.event_type === "repair_audio_submitted")).toHaveLength(1);
       expect(run.ledger.filter((event) => event.event_type === "repair_completed")).toHaveLength(1);
-      expect(run.ledger).toHaveLength(1_094);
+      expect(run.ledger).toHaveLength(1_100);
       await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
-        event_count: 1_094,
+        event_count: 1_100,
         ledger_head_sha256: run.ledger_head_sha256,
       });
       expect(createLc4DevLiveReportArtifact(run)).toMatchObject({
@@ -670,6 +763,38 @@ describe("LC4-DEV live runner", () => {
     expect(run.opportunities_completed).toBe(0);
     expect(run.paid_retry_count).toBe(0);
     expect(run.failure_message_sha256).toBe(sha256Hex("transport disconnected"));
+  });
+
+  it("rejects a tampered caller-branch matrix before opening any provider segment", async () => {
+    const { pcm, prepare, preflight } = fixtures();
+    const evidence = memoryEvidence();
+    const retained = retainedDependencies({ evidence, pcm, repair: noRepairDependencies() });
+    let opens = 0;
+    const tamperedCallerBranch = {
+      ...retained.caller_branch,
+      matrix: {
+        ...retained.caller_branch.matrix,
+        audio_manifest_sha256: "e".repeat(64),
+      },
+    } as Lc4DevLiveRunnerDependencies["caller_branch"];
+    await expect(executeLc4DevLiveRun({
+      prepare,
+      preflight,
+      dependencies: {
+        adapter: {
+          kind: "lc4-development-realtime-v1",
+          factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+          preflight_sha256: preflight.preflight_sha256,
+          maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+          async openSegment() { opens += 1; throw new Error("must not open"); },
+        },
+        ...retained,
+        caller_branch: tamperedCallerBranch,
+        ledger: { async append() {} },
+        now: () => new Date(NOW),
+      },
+    })).rejects.toThrow(/caller branch matrix/u);
+    expect(opens).toBe(0);
   });
 
   it("documents the exact safe source unlock instead of casting DEV as confirmatory", () => {

@@ -14,7 +14,7 @@ const MATRIX_BODY_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-ma
 const MATRIX_SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-matrix-signature/v1\n";
 const MATRIX_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-matrix-artifact/v1\n";
 const DECISION_SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-decision-signature/v1\n";
-const DECISION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-decision-artifact/v1\n";
+export const LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-decision-artifact/v1\n" as const;
 const OPPORTUNITY_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-opportunity/v1\n";
 
 export const LC4_DEV_PRIOR_MUTATION_OUTCOMES = Object.freeze([
@@ -367,7 +367,7 @@ export function createLc4DevCallerBranchAuthority(input: Readonly<{
       });
       const signatureBase64 = sign(null, signingBytes(DECISION_SIGNATURE_DOMAIN, body), privateKey).toString("base64");
       const signed = { ...body, signature_base64: signatureBase64 };
-      return freeze({ ...signed, decision_sha256: sha256Hex(`${DECISION_ARTIFACT_DOMAIN}${canonicalJson(signed)}`) });
+      return freeze({ ...signed, decision_sha256: sha256Hex(`${LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN}${canonicalJson(signed)}`) });
     },
   });
 }
@@ -411,7 +411,7 @@ export function assertLc4DevCallerBranchDecision(input: Readonly<{
     throw new Error("LC4-DEV caller branch decision signature is invalid");
   }
   const signed = { ...body, signature_base64: signatureBase64 };
-  if (claimed !== sha256Hex(`${DECISION_ARTIFACT_DOMAIN}${canonicalJson(signed)}`)) {
+  if (claimed !== sha256Hex(`${LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN}${canonicalJson(signed)}`)) {
     throw new Error("LC4-DEV caller branch decision hash is invalid");
   }
 }

@@ -28,6 +28,11 @@ import {
   type Lc4DevAudioManifest,
   type Lc4DevRepairAudioManifest,
 } from "./lc4-development-audio-materializer";
+import {
+  LC4_DEV_MUTATION_OPPORTUNITY_ID,
+  type Lc4DevPriorMutationOutcome,
+  type Lc4DevPriorMutationReceipt,
+} from "./lc4-development-caller-branch";
 import type { Lc4DevExecutableMechanismControl } from "./lc4-development-live-dependencies";
 import {
   LC4_DEV_INTENT_ACTION_MAP,
@@ -412,6 +417,7 @@ type EpisodeState = {
   lastTransitionBindingSha256: string | null;
   lastPreviousExchangeSha256: string | null;
   originalMutationInvocationId: string | null;
+  originalMutationReceipt: Lc4DevPriorMutationReceipt;
 };
 
 export type Lc4DevMunicipalControlManifest = Readonly<{
@@ -443,6 +449,7 @@ export type Lc4DevMunicipalControlSnapshot = Readonly<{
   repair_state: ConversationalRepairState;
   gateway_transcript_sha256: string;
   pending_gateway_actions: number;
+  caller_branch_prior_receipt: Lc4DevPriorMutationReceipt;
   pending_gateway_obligations: readonly Readonly<{
     semantic_intent: Lc4DevSemanticIntent;
     target_tool: string;
@@ -465,6 +472,7 @@ export type Lc4DevMunicipalControlPlane = Lc4DevExecutableMechanismControl & Rea
     target_tool: string;
     target_arguments: Readonly<Record<string, JsonValue>>;
   }>[];
+  callerBranchPriorReceipt(episodeId: string): Lc4DevPriorMutationReceipt;
   snapshot(episodeId: string): Lc4DevMunicipalControlSnapshot;
 }>;
 
@@ -769,6 +777,40 @@ function receiptDerivedAuthoritativeOutcome(receipt: JsonValue): JsonValue {
   });
 }
 
+function mutationOutcomeFromToolWorldReceipt(receipt: JsonValue): Exclude<Lc4DevPriorMutationOutcome, "no_call" | "rejected_pre_dispatch"> {
+  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+    throw new Error("LC4-DEV mutation outcome classification requires a ToolWorld receipt");
+  }
+  const record = receipt as Record<string, JsonValue>;
+  if (record.status === "committed_after_error") return "committed_after_error";
+  if (record.status === "succeeded" || record.status === "deduplicated") return "settled_success";
+  return "settled_failure";
+}
+
+function recordOriginalMutationOutcome(
+  state: EpisodeState,
+  input: Readonly<{
+    outcome: Exclude<Lc4DevPriorMutationOutcome, "no_call">;
+    receipt_sha256: string;
+  }>,
+): void {
+  if (!/^[a-f0-9]{64}$/u.test(input.receipt_sha256)) {
+    throw new Error("LC4-DEV mutation branch receipt must be one SHA-256 digest");
+  }
+  const current = state.originalMutationReceipt.outcome;
+  // A pre-dispatch rejection may be followed by one actual dispatch in the
+  // same response. Once ToolWorld produced a terminal receipt, later malformed
+  // duplicate attempts cannot rewrite the authoritative branch.
+  if (current !== "no_call" && current !== "rejected_pre_dispatch") return;
+  if (current === "rejected_pre_dispatch" && input.outcome === "rejected_pre_dispatch") return;
+  state.originalMutationReceipt = freeze({
+    semantic_opportunity_id: LC4_DEV_MUTATION_OPPORTUNITY_ID,
+    tool: "archive.submit_transcript_request" as const,
+    outcome: input.outcome,
+    receipt_sha256: input.receipt_sha256,
+  });
+}
+
 function dueStageCompletions(state: EpisodeState, opportunity: Lc4PublicDevOpportunity): LogicalAction[] {
   const pending = new Set(state.pendingGatewayActions
     .filter((action) => action.action === "archive.complete_stage")
@@ -875,6 +917,12 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       lastTransitionBindingSha256: null,
       lastPreviousExchangeSha256: null,
       originalMutationInvocationId: null,
+      originalMutationReceipt: freeze({
+        semantic_opportunity_id: LC4_DEV_MUTATION_OPPORTUNITY_ID,
+        tool: "archive.submit_transcript_request" as const,
+        outcome: "no_call" as const,
+        receipt_sha256: null,
+      }),
     };
     if (episode.arm === "hacc") {
       const evidenceBinding: BenchmarkKernelEvidenceBinding = {
@@ -1221,6 +1269,18 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         control_plane_head_sha256: controlPlaneHead,
         disposition,
       });
+      if (opportunity.id === LC4_DEV_MUTATION_OPPORTUNITY_ID
+        && request.target_tool === "archive.submit_transcript_request") {
+        const outcome = authoritativeToolWorldReceipt === null
+          ? "rejected_pre_dispatch" as const
+          : mutationOutcomeFromToolWorldReceipt(authoritativeToolWorldReceipt);
+        recordOriginalMutationOutcome(state, {
+          outcome,
+          receipt_sha256: authoritativeToolWorldReceipt === null
+            ? authoritativeReceiptSha256
+            : sha256Hex(canonicalJson(authoritativeToolWorldReceipt)),
+        });
+      }
       const authorityProjectionBody = {
         schema_version: 1 as const,
         bridge_version: "lc4-dev-gateway-bridge-v1" as const,
@@ -1293,6 +1353,14 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         }));
       return freeze(executable);
     },
+    callerBranchPriorReceipt(episodeId: string): Lc4DevPriorMutationReceipt {
+      const state = episodes.get(episodeId);
+      if (!state) throw new Error("LC4-DEV caller branch requested before its control episode started");
+      if (state.common.opportunities < 35) {
+        throw new Error("LC4-DEV caller branch requested before mutation opportunity 35 completed");
+      }
+      return freeze(state.originalMutationReceipt);
+    },
     snapshot(episodeId: string): Lc4DevMunicipalControlSnapshot {
       const state = episodes.get(episodeId);
       if (!state) throw new Error("LC4-DEV control episode has not started");
@@ -1309,6 +1377,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         repair_state: state.repairState,
         gateway_transcript_sha256: gatewayTranscriptSha256,
         pending_gateway_actions: state.pendingGatewayActions.length,
+        caller_branch_prior_receipt: state.originalMutationReceipt,
         pending_gateway_obligations: state.pendingGatewayActions.map((logical) => ({
           semantic_intent: lc4DevSemanticIntentForAction(logical.action),
           target_tool: logical.action,

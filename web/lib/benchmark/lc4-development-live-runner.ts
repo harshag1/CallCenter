@@ -30,6 +30,14 @@ import type {
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
 import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-playback";
+import {
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  assertLc4DevCallerBranchDecision,
+  assertLc4DevCallerBranchMatrixArtifact,
+  lc4DevBranchedOpportunity,
+  type Lc4DevCallerBranchDecision,
+  type Lc4DevCallerBranchMatrixArtifact,
+} from "./lc4-development-caller-branch";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -595,7 +603,7 @@ export type Lc4DevControlReceipt = Readonly<{
 export type Lc4DevImmutableLedgerEvent = Readonly<{
   sequence: number;
   observed_at: string;
-  event_type: "episode_opened" | "audio_submitted" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal";
+  event_type: "episode_opened" | "caller_branch_selected" | "audio_submitted" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal";
   episode_id: string;
   opportunity_id: string | null;
   payload_sha256: string;
@@ -638,6 +646,19 @@ export type Lc4DevLiveRunArtifact = Readonly<{
 export type Lc4DevLiveRunnerDependencies = Readonly<{
   adapter: Lc4DevelopmentRealtimeAdapter;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
+  caller_branch: Readonly<{
+    matrix: Lc4DevCallerBranchMatrixArtifact;
+    trust: Readonly<{ key_id: string; public_key_pem: string }>;
+    select(input: Readonly<{
+      episode: Lc4DevLiveEpisodePlan;
+      canonical_opportunity: Lc4PublicDevOpportunity;
+    }>): Promise<Readonly<{
+      decision: Lc4DevCallerBranchDecision;
+      opportunity: Lc4PublicDevOpportunity;
+      pcm: Uint8Array;
+      evidence: Lc4DevReplayArtifactReference;
+    }>>;
+  }>;
   retention: Readonly<{ retain(input: Readonly<{ episode_id: string; opportunity_id: string; direction: "caller_input" | "caller_repair" | "assistant_output" | "assistant_repair_output"; pcm: Uint8Array }>): Promise<Readonly<{ artifact_sha256: string; byte_length: number; evidence: Lc4DevReplayArtifactReference }>> }>;
   control: Readonly<{ next(input: Readonly<{ episode: Lc4DevLiveEpisodePlan; opportunity: Lc4PublicDevOpportunity; previous_exchange_sha256: string | null }>): Promise<Readonly<{ receipt: Lc4DevControlReceipt; evidence: Lc4DevReplayArtifactReference }>> }>;
   repair: Readonly<Record<LiveStsProvider, Lc4DevRepairPlaybackController>>;
@@ -705,6 +726,13 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   if (input.dependencies.adapter.preflight_sha256 !== input.preflight.preflight_sha256
     || input.dependencies.adapter.maximum_total_micro_usd !== input.prepare.maximum_total_micro_usd) {
     throw new Error("LC4-DEV realtime adapter is not bound to this preflight and $15-or-lower plan");
+  }
+  assertLc4DevCallerBranchMatrixArtifact(
+    input.dependencies.caller_branch.matrix,
+    input.dependencies.caller_branch.trust,
+  );
+  if (input.dependencies.caller_branch.matrix.audio_manifest_sha256 !== input.prepare.audio_manifest_sha256) {
+    throw new Error("LC4-DEV caller branch matrix differs from the prepare-bound audio manifest");
   }
   const corpus = createLc4PublicDevelopmentCorpus();
   if (corpus.artifact_sha256 !== input.prepare.corpus_sha256) throw new Error("LC4-DEV prepared corpus differs from runtime corpus");
@@ -790,11 +818,51 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         try {
           const start = (segmentOrdinal - 1) * 20;
           for (let offset = 0; offset < 20; offset += 1) {
-            const opportunity = corpus.opportunities[start + offset]!;
+            const canonicalOpportunity = corpus.opportunities[start + offset]!;
             const binding = providerBindings[start + offset]!;
+            let opportunity = canonicalOpportunity;
+            let callerPcm: Uint8Array;
+            let expectedCallerPcmSha256 = binding.pcm_sha256;
+            let expectedCallerPcmByteLength = binding.pcm_byte_length;
+            let branchDecisionEvidence: Lc4DevReplayArtifactReference | null = null;
             failureClass = "pre-open";
-            const callerPcm = await bounded("caller-audio-load", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.caller_audio.load(binding));
-            if (callerPcm.byteLength !== binding.pcm_byte_length || sha256Hex(callerPcm) !== binding.pcm_sha256) {
+            if (canonicalOpportunity.id === LC4_DEV_BRANCH_OPPORTUNITY_ID) {
+              const selected = await bounded("caller-branch-selection", LC4_DEV_LIVE_TIMEOUTS.control_ms, () => input.dependencies.caller_branch.select({
+                episode,
+                canonical_opportunity: canonicalOpportunity,
+              }));
+              assertLc4DevCallerBranchDecision({
+                decision: selected.decision,
+                matrix: input.dependencies.caller_branch.matrix,
+                trust: input.dependencies.caller_branch.trust,
+              });
+              if (selected.decision.episode_id !== episode.episode_id
+                || selected.decision.provider !== episode.provider
+                || canonicalJson(selected.opportunity) !== canonicalJson(lc4DevBranchedOpportunity(canonicalOpportunity, selected.decision))) {
+                throw new Error("LC4-DEV caller branch selection differs from its episode or projected opportunity");
+              }
+              if (selected.evidence.kind !== "caller_branch_decision"
+                || selected.evidence.evidence_sha256 !== selected.decision.decision_sha256) {
+                throw new Error("LC4-DEV caller branch decision is not retained under its signed hash");
+              }
+              await input.dependencies.evidence.assertResolvable(selected.evidence);
+              opportunity = selected.opportunity;
+              callerPcm = selected.pcm;
+              expectedCallerPcmSha256 = selected.decision.pcm_sha256;
+              expectedCallerPcmByteLength = selected.decision.pcm_byte_length;
+              branchDecisionEvidence = selected.evidence;
+              await append("caller_branch_selected", episode.episode_id, opportunity.id, {
+                decision_sha256: selected.decision.decision_sha256,
+                prior_outcome: selected.decision.prior_outcome,
+                prior_receipt_sha256: selected.decision.prior_receipt_sha256,
+                reconciliation_audio_selected: selected.decision.reconciliation_audio_selected,
+                projected_opportunity_id: opportunity.id,
+                projected_opportunity_index: opportunity.index,
+              }, [selected.evidence]);
+            } else {
+              callerPcm = await bounded("caller-audio-load", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.caller_audio.load(binding));
+            }
+            if (callerPcm.byteLength !== expectedCallerPcmByteLength || sha256Hex(callerPcm) !== expectedCallerPcmSha256) {
               throw new Error("LC4-DEV loaded caller audio differs from prepared binding");
             }
             const callerReceipt = await bounded("caller-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
@@ -803,10 +871,10 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               direction: "caller_input",
               pcm: callerPcm,
             }));
-            if (callerReceipt.artifact_sha256 !== binding.pcm_sha256 || callerReceipt.byte_length !== callerPcm.byteLength) {
+            if (callerReceipt.artifact_sha256 !== expectedCallerPcmSha256 || callerReceipt.byte_length !== callerPcm.byteLength) {
               throw new Error("LC4-DEV caller retention receipt is invalid");
             }
-            if (callerReceipt.evidence.evidence_sha256 !== binding.pcm_sha256) throw new Error("LC4-DEV caller PCM is not replay-addressable");
+            if (callerReceipt.evidence.evidence_sha256 !== expectedCallerPcmSha256) throw new Error("LC4-DEV caller PCM is not replay-addressable");
             retainedCaller += 1;
             failureClass = "evidence";
             const retainedControl = await bounded("control", LC4_DEV_LIVE_TIMEOUTS.control_ms, () => input.dependencies.control.next({
@@ -826,8 +894,12 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               "audio_submitted",
               episode.episode_id,
               opportunity.id,
-              { caller_pcm_sha256: binding.pcm_sha256, control_receipt_sha256: control.control_receipt_sha256 },
-              [callerReceipt.evidence, retainedControl.evidence],
+              {
+                caller_pcm_sha256: expectedCallerPcmSha256,
+                control_receipt_sha256: control.control_receipt_sha256,
+                caller_branch_decision_sha256: branchDecisionEvidence?.evidence_sha256 ?? null,
+              },
+              [callerReceipt.evidence, retainedControl.evidence, ...(branchDecisionEvidence ? [branchDecisionEvidence] : [])],
             );
             const exchange = await bounded("opportunity-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeCanonical({
               opportunity,
@@ -957,12 +1029,14 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
               opportunity_receipt_sha256: finalized.opportunity_receipt_sha256,
               assistant_pcm_sha256: assistantReceipt.artifact_sha256,
+              caller_branch_decision_sha256: branchDecisionEvidence?.evidence_sha256 ?? null,
             }, [
               exchange.provider_exchange_evidence,
               exchange.listener_evidence,
               repairDecisionEvidence,
               finalized.opportunity_finalization,
               assistantReceipt.evidence,
+              ...(branchDecisionEvidence ? [branchDecisionEvidence] : []),
             ]);
           }
         } catch (error) {

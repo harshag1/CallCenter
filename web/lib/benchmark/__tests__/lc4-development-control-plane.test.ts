@@ -21,6 +21,11 @@ import {
 } from "../lc4-development-control-plane";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import {
+  createLc4DevCallerBranchAuthority,
+  createLc4DevCallerBranchMatrixArtifact,
+  lc4DevBranchedOpportunity,
+} from "../lc4-development-caller-branch";
 
 let root = "";
 let artifacts: Awaited<ReturnType<typeof materializeLc4DevelopmentAudio>>;
@@ -245,6 +250,12 @@ describe("LC4-DEV municipal executable control plane", () => {
       expect(snapshot.worker.receipts.some((receipt) => receipt.kind === "result.rejected" && receipt.body.reason === "duplicate")).toBe(true);
       expect(snapshot.world.receipts.filter((receipt) => receipt.tool === "archive.submit_transcript_request")).toHaveLength(1);
       expect(snapshot.world.receipts.find((receipt) => receipt.tool === "archive.submit_transcript_request")?.status).toBe("committed_after_error");
+      expect(snapshot.caller_branch_prior_receipt).toMatchObject({
+        semantic_opportunity_id: "lc4-dev-op-35",
+        tool: "archive.submit_transcript_request",
+        outcome: "committed_after_error",
+        receipt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      });
       if (snapshot.arm === "native") {
         expect(snapshot.world.receipts.some((receipt) => receipt.tool === "archive.reconcile_transcript_request" && receipt.status === "succeeded")).toBe(true);
       } else {
@@ -301,6 +312,14 @@ describe("LC4-DEV municipal executable control plane", () => {
     let rejectedLateMutation: Awaited<ReturnType<typeof control.gateway_executor.execute>> | null = null;
 
     for (const opportunity of corpus.opportunities) {
+      if (opportunity.index === 42) {
+        expect(control.callerBranchPriorReceipt(plan.episode_id)).toEqual({
+          semantic_opportunity_id: "lc4-dev-op-35",
+          tool: "archive.submit_transcript_request",
+          outcome: "no_call",
+          receipt_sha256: null,
+        });
+      }
       await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
 
       if (opportunity.events.some((event) => event.kind === "authoritative-reconciliation")) {
@@ -376,6 +395,73 @@ describe("LC4-DEV municipal executable control plane", () => {
     expect(snapshot.opportunities).toBe(60);
     expect(snapshot.world.receipts.some((receipt) => receipt.tool === "archive.submit_transcript_request")).toBe(false);
     expect(snapshot.world.receipts.some((receipt) => receipt.tool === "archive.reconcile_transcript_request")).toBe(false);
+    expect(snapshot.caller_branch_prior_receipt.outcome).toBe("no_call");
     expect(snapshot.pending_gateway_actions).toBeGreaterThanOrEqual(2);
   }, 30_000);
+
+  it("distinguishes a rejected pre-dispatch mutation from no call before opportunity 42", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const privateKeyPem = keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const control = createLc4DevMunicipalControlPlane({
+      audio_manifest: artifacts.manifest,
+      repair_manifest: artifacts.repairManifest,
+      signer: createBenchmarkKernelAttestationSigner({
+        keyId: "lc4-dev-rejected-branch-test",
+        privateKeyPem,
+      }),
+    });
+    const plan = episode("hacc");
+    const corpus = createLc4PublicDevelopmentCorpus();
+    let previous: string | null = null;
+    for (const opportunity of corpus.opportunities.slice(0, 41)) {
+      await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
+      if (opportunity.index === 35) {
+        const rejected = await control.gateway_executor.execute({
+          bridge_version: "lc4-dev-gateway-bridge-v1",
+          episode_id: plan.episode_id,
+          opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
+          provider: plan.provider,
+          arm: plan.arm,
+          provider_call_id: "test.rejected-pre-dispatch.op35",
+          provider_response_id: "response.rejected-pre-dispatch.op35",
+          semantic_intent: "submit_accessible_transcript",
+          target_tool: "archive.submit_transcript_request",
+          target_arguments: { request_id: "model-must-not-bind-this" },
+          request_sha256: sha256Hex("request:rejected-pre-dispatch:op35"),
+          provider_provenance_sha256: sha256Hex("provenance:rejected-pre-dispatch:op35"),
+        });
+        expect(rejected).toMatchObject({ disposition: "rejected", provider_output: { code: "host_bound_argument_override" } });
+      }
+      previous = sha256Hex(`provider-exchange:${plan.episode_id}:${opportunity.id}`);
+    }
+    const priorReceipt = control.callerBranchPriorReceipt(plan.episode_id);
+    expect(priorReceipt).toMatchObject({
+      outcome: "rejected_pre_dispatch",
+      receipt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    const identity = Object.freeze({
+      key_id: "lc4-dev-rejected-branch-test",
+      private_key_pem: privateKeyPem,
+      public_key_pem: publicKeyPem,
+    });
+    const matrix = createLc4DevCallerBranchMatrixArtifact({
+      audio_manifest_sha256: artifacts.manifest.manifest_sha256,
+      audio_bindings: artifacts.manifest.caller_branch_audio_bindings,
+      signing_identity: identity,
+    });
+    const decision = createLc4DevCallerBranchAuthority({ matrix, signing_identity: identity }).decide({
+      episode_id: plan.episode_id,
+      provider: plan.provider,
+      opportunity: corpus.opportunities[41]!,
+      prior_receipt: priorReceipt,
+    });
+    const projected = lc4DevBranchedOpportunity(corpus.opportunities[41]!, decision);
+    expect(projected).toMatchObject({ id: "lc4-dev-op-42", index: 42 });
+    expect(projected.events.some((event) => event.kind === "authoritative-reconciliation")).toBe(false);
+    await control.next({ episode: plan, opportunity: projected, previous_exchange_sha256: previous });
+    expect(control.snapshot(plan.episode_id).pending_gateway_obligations
+      .some((obligation) => obligation.target_tool === "archive.reconcile_transcript_request")).toBe(false);
+  });
 });
