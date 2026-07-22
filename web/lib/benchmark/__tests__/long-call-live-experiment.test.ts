@@ -116,6 +116,38 @@ describe("HACC-LC3-v4 long-call live experiment", () => {
     expect(() => assertHostManagedGrantExposure(transcript("$base", ["flow.complete_step"]))).toThrow("flow.complete_step");
   });
 
+  it("validates caller-turn snapshots without treating them as invocation outcomes", () => {
+    const transcript = (callerActions: readonly string[]) => ({
+      view: "public_commitment",
+      entries: [{
+        operation: "initialize",
+        payload: {
+          provider_visible_capability_snapshot: {
+            gateway_version: 1,
+            scope: "$base",
+            capability_epoch: 0,
+            actions: [{ name: "flow.get_state" }],
+          },
+        },
+      }, {
+        operation: "caller_turn",
+        payload: {
+          capability_snapshot: {
+            gateway_version: 1,
+            scope: "step:route.lookup",
+            capability_epoch: 1,
+            actions: callerActions.map((name) => ({ name })),
+          },
+        },
+      }],
+    }) as unknown as Parameters<typeof assertHostManagedGrantExposure>[0];
+
+    expect(() => assertHostManagedGrantExposure(transcript(["flow.get_state", "lookup_record"]))).not.toThrow();
+    expect(() => assertHostManagedGrantExposure(transcript(["flow.enter_step"]))).toThrow(
+      "step-scoped flow.enter_step in entry[1].caller_turn_snapshot",
+    );
+  });
+
   it("classifies a caller-policy stop as model evidence rather than a transport failure", () => {
     expect(evaluateLongCallTransportIntegrity({
       status: "protocol_error",

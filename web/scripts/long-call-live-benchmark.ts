@@ -66,6 +66,7 @@ import {
   qualifyProviders,
   type ProviderQualificationTarget,
 } from "../lib/benchmark/provider-qualification";
+import { retainedTrialEvidence, type RetainedTrialEvidence } from "../lib/benchmark/runner-exception-evidence";
 import { evaluateScenarioWorld } from "../lib/benchmark/tool-world";
 import { createUsefulnessCallerSchedulePlan } from "../lib/benchmark/usefulness-task-suite";
 import { AgentFlowSchema } from "../lib/flow";
@@ -587,6 +588,7 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
 
   let summary: LongCallSummary;
   let providerSessionOpened = false;
+  let retainedEvidence: RetainedTrialEvidence | null = null;
   try {
     const inputBytes = loaded.callerTurns.reduce((total, turn) => total + (
       Array.isArray(turn.audio)
@@ -639,6 +641,7 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       },
     });
     await persistArtifacts(partial, result);
+    retainedEvidence = retainedTrialEvidence(result, `${cell.runId}-cell-reservation`);
     const evaluation = evaluateScenarioWorld(loaded.task.scenario, result.world);
     const transportTerminal = evaluateLongCallTransportIntegrity({
       status: result.status,
@@ -686,9 +689,9 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
     });
   } catch (error) {
     const core = {
-      turnsPlanned: 20,
-      turnsSent: 0,
-      outputAudioTurns: 0,
+      turnsPlanned: retainedEvidence?.turnsPlanned ?? 20,
+      turnsSent: retainedEvidence?.turnsSent ?? 0,
+      outputAudioTurns: retainedEvidence?.outputAudioTurns ?? 0,
       transportTerminal: false,
       modelIntegrityPass: false,
       worldOutcomePass: false,
@@ -706,13 +709,14 @@ async function runCell(root: string, plan: ExperimentPlan, cell: LongCallCell, a
       ttsVoice: cell.ttsVoice,
       condition: cell.condition,
       status: "runner_exception",
-      callerScheduleStatus: null,
+      callerScheduleStatus: retainedEvidence?.callerScheduleStatus ?? null,
       ...core,
       asrReceiptsSha256: null,
       missionCompletionPass: false,
       strictPass: false,
-      estimatedCostUsd: null,
-      artifactManifestSha256: sha256Hex(`runner-exception\n${cell.runId}`),
+      estimatedCostUsd: retainedEvidence?.estimatedCostUsd ?? null,
+      artifactManifestSha256: retainedEvidence?.artifactManifestSha256
+        ?? sha256Hex(`runner-exception\n${cell.runId}`),
       failureClass: "transport",
     });
     const rawMessage = error instanceof Error ? error.message : String(error);

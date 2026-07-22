@@ -36,6 +36,24 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).not.toContain("autoAdvanceLinearFlow:");
   });
 
+  it("retains completed trial measurements when post-trial validation fails closed", async () => {
+    const source = await runnerSource();
+    const persistence = source.indexOf("await persistArtifacts(partial, result)");
+    const retention = source.indexOf("retainedEvidence = retainedTrialEvidence(result");
+    const validation = source.indexOf("const evaluation = evaluateScenarioWorld");
+    expect(persistence).toBeGreaterThan(-1);
+    expect(retention).toBeGreaterThan(persistence);
+    expect(validation).toBeGreaterThan(retention);
+    expect(source).toContain("turnsSent: retainedEvidence?.turnsSent ?? 0");
+    expect(source).toContain("outputAudioTurns: retainedEvidence?.outputAudioTurns ?? 0");
+    expect(source).toContain("estimatedCostUsd: retainedEvidence?.estimatedCostUsd ?? null");
+    expect(source).toContain('status: "runner_exception"');
+    expect(source).toContain("transportTerminal: false");
+    expect(source).toContain("modelIntegrityPass: false");
+    expect(source).toContain("worldOutcomePass: false");
+    expect(source).toContain("systemIntegrityPass: false");
+  });
+
   it("requires a fresh, plan-bound three-provider qualification before paid execution", async () => {
     const source = await runnerSource();
     expect(source).toContain('if (command === "qualify") return qualify(root)');

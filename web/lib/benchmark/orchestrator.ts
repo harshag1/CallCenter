@@ -1176,22 +1176,29 @@ function validateCompiledCondition(condition: CompiledBenchmarkCondition): void 
 function assertSnapshotMatches(
   snapshotInput: unknown,
   capabilities: CompiledBenchmarkCondition["visibleCapabilities"] | CompiledDisclosure["visibleCapabilities"],
-  label: string
+  label: string,
+  options: Readonly<{ allowLeafSubset?: boolean }> = {}
 ): ProviderCapabilitySnapshot {
   const snapshot = ProviderCapabilitySnapshotSchema.parse(snapshotInput);
   const expected = [...capabilities].sort((left, right) => left.name.localeCompare(right.name));
   const actual = [...snapshot.actions].sort((left, right) => left.name.localeCompare(right.name));
+  const expectedByName = new Map(expected.map((capability) => [capability.name, capability]));
   if (new Set(actual.map((action) => action.capability_grant)).size !== actual.length) {
     throw new Error(`${label} capability snapshot must use action-bound unique grants`);
   }
   if (
-    expected.length !== actual.length
-    || expected.some((capability, index) =>
-      capability.name !== actual[index]?.name
-      || capability.description !== actual[index]?.description
-      || capability.semanticHash !== actual[index]?.semantic_hash
-      || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(actual[index]?.input_schema)
-    )
+    (options.allowLeafSubset ? actual.length > expected.length : expected.length !== actual.length)
+    || actual.some((action) => {
+      const capability = expectedByName.get(action.name);
+      return !capability
+        || capability.description !== action.description
+        || capability.semanticHash !== action.semantic_hash
+        || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(action.input_schema);
+    })
+    || (options.allowLeafSubset && expected.some((capability) =>
+      capability.category !== "leaf"
+      && !actual.some((action) => action.name === capability.name)
+    ))
   ) {
     throw new Error(`${label} capability snapshot does not match the compiled logical catalog`);
   }
@@ -1667,7 +1674,11 @@ async function dispatchToolCall(input: Readonly<{
     const snapshot = assertSnapshotMatches(
       selectedSnapshot,
       template.visibleCapabilities,
-      `disclosure ${template.target}`
+      `disclosure ${template.target}`,
+      {
+        allowLeafSubset: condition.behavior.transitionOwnership === "host-managed-linear"
+          && template.target.startsWith("step:"),
+      }
     );
     runtime.currentCapabilitySnapshot = snapshot;
     const renderedSnapshot = condition.behavior.progressiveDisclosure

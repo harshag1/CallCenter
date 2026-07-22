@@ -363,6 +363,10 @@ export function assertHostManagedGrantExposure(transcript: PublicKernelTranscrip
       inspectSnapshot(payload.provider_visible_capability_snapshot, `entry[${index}].initialize_snapshot`);
       continue;
     }
+    if (entry.operation === "caller_turn") {
+      inspectSnapshot(payload.capability_snapshot, `entry[${index}].caller_turn_snapshot`);
+      continue;
+    }
     const outcome = record(payload.outcome);
     if (!outcome) throw new Error(`host-managed mechanism evidence has malformed entry[${index}].outcome`);
     inspectSnapshot(outcome.capability_snapshot, `entry[${index}].capability_snapshot`);

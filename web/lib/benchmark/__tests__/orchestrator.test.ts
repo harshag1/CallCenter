@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
+import { AgentFlowSchema } from "../../flow";
 import { sha256Hex, verifyEventChain, verifyRunManifest } from "../artifacts";
 import { freezeCallerAudioIndex } from "../caller-world-scheduler";
 import { createBudgetLedger } from "../budget";
@@ -10,6 +11,7 @@ import {
   runBenchmarkTrial,
   type BenchmarkGatewayInvocation,
   type BenchmarkGatewayKernel,
+  type BenchmarkGatewayOutcome,
   type CallerAudioTurn,
   type TrialAudioDeliveryProfile,
   type TrialJournalFinalization,
@@ -31,6 +33,7 @@ import {
   compileConditionSuite,
   compiledConditionHash,
 } from "../condition-compiler";
+import { createInMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
@@ -48,6 +51,7 @@ import {
 } from "../kernel-transcript";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
 import { createToolWorld } from "../tool-world";
+import { longUsefulnessTask } from "../long-call-live-experiment";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -643,6 +647,115 @@ function gatewayCall(callId: string, action: string, argumentsJson: Record<strin
     tool_name: action,
     arguments: argumentsJson,
   });
+}
+
+async function runMuseumFrontierDisclosure(
+  runId: string,
+  transform?: (input: Readonly<{
+    outcome: BenchmarkGatewayOutcome;
+    condition: CompiledBenchmarkCondition;
+  }>) => BenchmarkGatewayOutcome
+) {
+  const task = longUsefulnessTask("museum");
+  const taskSuite = compileConditionSuite(task.compiler_input);
+  const condition = taskSuite.conditions["host-managed-harness"];
+  const taskTurns: readonly CallerAudioTurn[] = Object.freeze(
+    task.scenario.caller.turns.map((turn, index) => Object.freeze({
+      turnId: turn.id,
+      audio: Object.freeze({
+        ...AUDIO_FORMAT,
+        data: Uint8Array.from([index + 1, 0]),
+      }),
+    }))
+  );
+  const taskAudio = createPairedAudioManifest({
+    pairId: TEST_ATTESTATION_EVIDENCE.pairId,
+    scenario: task.scenario,
+    callerTurns: taskTurns,
+  });
+  const concreteKernel = createInMemoryBenchmarkGatewayKernel({
+    flow: AgentFlowSchema.parse(task.compiler_input.flow),
+    expectedFlowHash: taskSuite.flowHash,
+    expectedScenarioHash: taskSuite.scenarioHash,
+    expectedConditionHash: condition.conditionHash,
+    grantBindingHash: taskSuite.sourceHash,
+    leaseSubjectId: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+    evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+    signer: TEST_ATTESTATION_SIGNER,
+    capabilitySecret: "orchestrator-frontier-test-secret-at-least-thirty-two-characters",
+    clock: {
+      nowMs: () => Date.parse("2026-07-20T20:00:00.000Z"),
+      nowIso: () => "2026-07-20T20:00:00.000Z",
+    },
+  });
+  const kernel: BenchmarkGatewayKernel = transform
+    ? {
+        initialize: (input) => concreteKernel.initialize(input),
+        invoke(input) {
+          const outcome = concreteKernel.invoke(input);
+          return outcome.disclosure?.target === "step:museum_case.verify_actor"
+            ? transform({ outcome, condition })
+            : outcome;
+        },
+        advanceCallerTurn: (input) => concreteKernel.advanceCallerTurn(input),
+        attestFinal: (input) => concreteKernel.attestFinal(input),
+        encodedTranscript: () => concreteKernel.encodedTranscript(),
+        transcriptReference: () => concreteKernel.transcriptReference(),
+      }
+    : concreteKernel;
+  let turn = 0;
+  let toolRound = 0;
+  const submittedOutputs: RealtimeToolResult["output"][] = [];
+  const client = new FakeRealtimeClient({
+    onTurn(fake) {
+      turn += 1;
+      const responseId = `${runId}-turn-${turn}`;
+      fake.emit(event("response.started", { responseId }));
+      if (turn === 1) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-refresh`, "flow.get_state", {})],
+        }));
+      }
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+    onToolResults(fake, results) {
+      toolRound += 1;
+      submittedOutputs.push(results[0].output);
+      const responseId = `${runId}-tool-${toolRound}`;
+      fake.emit(event("response.started", { responseId }));
+      if (toolRound === 1) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-topic`, "flow.select_topic", { topic_id: "museum_case" })],
+        }));
+      } else if (toolRound === 2) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-lookup`, "lookup_loan_case", { case_id: "MLR-2048" })],
+        }));
+      }
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+  });
+  const trialBudget = budget(runId);
+  const result = await runBenchmarkTrial({
+    runId,
+    model: TEST_ATTESTATION_EVIDENCE.model,
+    scenario: task.scenario,
+    ...runtimeBindings(client, { condition, kernel }),
+    callerTurns: taskTurns,
+    pairedAudio: taskAudio,
+    limits: {
+      ...limits,
+      maxTurns: taskTurns.length,
+      maxSessionMs: 5_000,
+      maxInputAudioBytes: taskTurns.length * 2,
+      maxToolCalls: 16,
+    },
+    budget: trialBudget.value,
+  });
+  return { condition, result, submittedOutputs, taskTurns, toolRound };
 }
 
 function rawE2eClient(): FakeRealtimeClient {
@@ -1341,6 +1454,83 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(result.inputAudioHashes).toEqual([pairedAudio.turns[0].sha256]);
     expect(result.artifacts.files.find((file) => file.path.includes("audio/input/"))?.descriptor.sha256)
       .toBe(pairedAudio.turns[0].sha256);
+  });
+
+  it("accepts a host-managed active-step disclosure filtered by the admissibility frontier", async () => {
+    const { result, submittedOutputs, taskTurns, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-subset-disclosure"
+    );
+    const disclosure = submittedOutputs[2];
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsSent: taskTurns.length, toolCalls: 3 });
+    expect(toolRound).toBe(3);
+    expect(disclosure).toMatchObject({
+      gateway_result: { ok: true, action: "lookup_loan_case" },
+      progressive_disclosure: { target: "step:museum_case.verify_actor" },
+    });
+    const rendered = (disclosure as { capability_snapshot: string }).capability_snapshot;
+    expect(rendered).toContain('"name":"flow.get_state"');
+    expect(rendered).not.toContain('"name":"verify_museum_registrar"');
+  });
+
+  it("rejects an active-step subset containing a capability compiled for a different target", async () => {
+    const { result, submittedOutputs, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-cross-target",
+      ({ outcome, condition }) => {
+        const foreign = condition.disclosures
+          .find((candidate) => candidate.target === "step:museum_case.capture_correction_and_guardrails")
+          ?.visibleCapabilities.find((capability) => capability.name === "record_corrected_crate");
+        if (!foreign || !outcome.disclosure) throw new Error("frontier test fixture is missing its foreign capability");
+        const snapshot: ProviderCapabilitySnapshot = {
+          ...outcome.disclosure.snapshot,
+          actions: [...outcome.disclosure.snapshot.actions, {
+            name: foreign.name,
+            description: foreign.description,
+            input_schema: foreign.inputSchema as Record<string, never>,
+            semantic_hash: foreign.semanticHash,
+            capability_grant: "foreign.record_corrected_crate",
+          }],
+        };
+        return {
+          ...outcome,
+          capabilitySnapshot: snapshot,
+          disclosure: { ...outcome.disclosure, snapshot },
+        };
+      }
+    );
+
+    expect(result.status).toBe("protocol_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("does not match the compiled logical catalog"),
+    }));
+    expect(toolRound).toBe(2);
+    expect(submittedOutputs).toHaveLength(2);
+  });
+
+  it("rejects an active-step subset that omits a required flow-control capability", async () => {
+    const { result, submittedOutputs, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-missing-control",
+      ({ outcome }) => {
+        if (!outcome.disclosure) throw new Error("frontier test fixture is missing its disclosure");
+        const snapshot: ProviderCapabilitySnapshot = {
+          ...outcome.disclosure.snapshot,
+          actions: outcome.disclosure.snapshot.actions.filter((action) => action.name !== "flow.get_state"),
+        };
+        return {
+          ...outcome,
+          capabilitySnapshot: snapshot,
+          disclosure: { ...outcome.disclosure, snapshot },
+        };
+      }
+    );
+
+    expect(result.status).toBe("protocol_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("does not match the compiled logical catalog"),
+    }));
+    expect(toolRound).toBe(2);
+    expect(submittedOutputs).toHaveLength(2);
   });
 
   it("appends compiled disclosure and validates independent post-checkpoint rotations against the catalog union", async () => {
