@@ -6,11 +6,10 @@ export const LC4_XAI_SERVER_VAD = Object.freeze({
   threshold: 0.85,
   silence_duration_ms: 500,
   prefix_padding_ms: 333,
-  idle_timeout_ms: null,
 });
 
 export const LC4_XAI_SERVER_VAD_SHA256 = sha256Hex(
-  `harshas-amazing-call-center/lc4-xai-server-vad/v1\n${canonicalJson(LC4_XAI_SERVER_VAD)}`,
+  `harshas-amazing-call-center/lc4-xai-server-vad/v2\n${canonicalJson(LC4_XAI_SERVER_VAD)}`,
 );
 
 export const LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE = Object.freeze({
@@ -18,6 +17,7 @@ export const LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE = Object.freeze({
   transport: "provider_native_server_vad" as const,
   initial_turn_client_events: Object.freeze(["session.update", "input_audio_buffer.append"] as const),
   initial_turn_provider_events: Object.freeze([
+    "session.created",
     "session.updated",
     "input_audio_buffer.speech_started",
     "input_audio_buffer.speech_stopped",
@@ -31,5 +31,5 @@ export const LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE = Object.freeze({
 });
 
 export const LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 = sha256Hex(
-  `harshas-amazing-call-center/lc4-xai-server-vad-disclosure/v1\n${canonicalJson(LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE)}`,
+  `harshas-amazing-call-center/lc4-xai-server-vad-disclosure/v2\n${canonicalJson(LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE)}`,
 );

@@ -34,6 +34,7 @@ import {
   type ProviderQualificationTarget,
 } from "./provider-qualification";
 import {
+  LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_COMPACT_CONTROL_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_TOOL,
@@ -50,6 +51,7 @@ import {
 } from "./provider-s2s-tool-roundtrip";
 import {
   createProductionRealtimeClient,
+  productionOpenAiCompatibleSessionUpdate,
   productionSessionPayloadParitySha256,
 } from "./production-realtime-provider";
 import { parseBenchmarkEnvironmentFile } from "./environment";
@@ -67,6 +69,10 @@ import {
   assertLc4ProviderProfileManifest,
 } from "./lc4-provider-profiles";
 import type { NormalizedRealtimeClient, RealtimeWireObservation } from "../realtime/client/types";
+import {
+  withXaiServerVadPcmSession,
+  xaiServerVadTransportParitySha256,
+} from "../realtime/client/openai-compatible";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 import {
   replayProviderToolRoundtrip,
@@ -89,7 +95,7 @@ import {
   type Lc4QualificationBudgetEvidence,
 } from "./lc4-qualification-budget";
 
-export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v4" as const;
+export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v5" as const;
 export const LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-AUTHORIZATION-v4" as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD = 3_000_000 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS = 6 as const;
@@ -104,8 +110,8 @@ const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
 const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
 const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
-const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v5\n";
-const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v5\n";
+const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v6\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n";
 const REPLAY_AGGREGATE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-replay-aggregate/v1\n";
 const CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
@@ -116,7 +122,8 @@ const REFUSAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal/v4
 const REFUSAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-artifact/v4\n";
 const REFUSAL_PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-package/v4\n";
 const REFUSAL_ERROR_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-error/v4\n";
-const XAI_SERVER_VAD_GATE_A_RISK_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-a-risk/v1\n";
+const XAI_SERVER_VAD_GATE_A_RISK_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-a-risk/v2\n";
+const XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-b-binding/v1\n";
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
@@ -200,6 +207,7 @@ export type Lc4QualificationV3PlanBody = Readonly<{
     packetizer_sha256: typeof LC4_S2S_PACKETIZER_SHA256;
     audio_delivery_profile_sha256: string;
     production_session_payload_sha256: string | null;
+    xai_transport_parity_sha256: string | null;
     setup_sessions: 1;
     paid_sessions: 1;
     generation_phases: 2;
@@ -307,8 +315,8 @@ export type Lc4QualificationV3RefusalPackage = Readonly<{
 }>;
 
 export type Lc4QualificationV3TerminalBody = Readonly<{
-  schema_version: 2;
-  terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v5";
+  schema_version: 3;
+  terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v6";
   runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
   attempt_id: string;
   plan_artifact_sha256: string;
@@ -344,11 +352,27 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
     gate_b_required: boolean;
     gate_b_status: "behaviorally_verified" | "failed" | "not_run";
     gate_b_evidence_sha256: string | null;
+    gate_b_binding_sha256: string | null;
     gate_a_risk_sha256: string;
     gate_a_connection_epoch: number | null;
     gate_b_connection_epoch: number | null;
     exact_setting_verified: boolean;
     operational_vad_verified: boolean;
+    claims: Readonly<{
+      operational_gateway: "verified" | "not_verified";
+      operational_server_vad: "verified" | "not_verified";
+      exact_gateway_name_and_arguments: "verified" | "not_verified";
+      matching_gateway_result: "verified" | "not_verified";
+      sole_post_tool_continuation_terminal_usage: "verified" | "not_verified";
+      full_gateway_schema: "verified_by_provider_echo" | "unverifiable";
+      gateway_description: "verified_by_provider_echo" | "unverifiable";
+      post_update_voice: "verified_by_provider_echo" | "unverifiable";
+      input_transcription: "not_requested" | "verified_by_provider_echo" | "unverifiable";
+      idle_timeout: "documented_default_not_independently_verified" | "verified_by_provider_echo";
+      exact_vad_parameters: "verified_by_provider_echo" | "unverifiable";
+      created_to_updated_session_identity: "verified" | "unverifiable";
+      dynamic_update_configuration: "behaviorally_verified_not_provider_echoed" | "verified_by_provider_echo" | "not_verified";
+    }>;
     benchmark_ready: boolean;
   }>;
   results: readonly Readonly<{
@@ -367,12 +391,13 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
 export type Lc4QualificationV3TerminalArtifact = SignedArtifact<Lc4QualificationV3TerminalBody>;
 
 export type Lc4XaiServerVadGateARiskArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   provider: "xai";
   model: string;
   source_commit: string;
   plan_sha256: string;
   configuration_matrix_sha256: string;
+  provider_profile_manifest_sha256: string;
   requested_configuration_sha256: string;
   requested_setting_sha256: string;
   production_session_payload_sha256: string;
@@ -381,10 +406,57 @@ export type Lc4XaiServerVadGateARiskArtifact = Readonly<{
   field_evidence: ProviderQualificationArtifact["results"][number]["configurationEvidence"] | null;
   omitted_paths: readonly string[];
   mismatched_paths: readonly string[];
+  field_status_inventory: readonly Readonly<{
+    field: string;
+    status: string;
+    acknowledged_by: "session.created" | "session.updated" | null;
+    omitted_paths: readonly string[];
+    mismatched_paths: readonly string[];
+  }>[];
   setup_wire_evidence: NonNullable<ProviderQualificationArtifact["results"][number]["setupWireEvidence"]> | null;
+  transcription_policy: Readonly<{
+    requested: false;
+    host_consumed: false;
+    verification: "not_requested";
+  }>;
+  idle_timeout_policy: Readonly<{
+    requested: false;
+    effective_basis: "documented_default";
+    exact_setting_verified: false;
+  }>;
+  initial_snapshot_disposition: "provider_default_snapshot_only_not_update_echo";
+  created_to_updated_session_identity: "verified" | "unverifiable";
+  matched_arm_payload_policy: "same_profile_and_payload_hash_required";
   retained_risk: "none" | "provider_did_not_echo_exact_server_vad_parameters";
   claim_boundary: "gate_b_proves_operational_server_vad_lifecycle_not_exact_numeric_vad_parameters";
   risk_sha256: string;
+}>;
+
+export type Lc4XaiServerVadGateBBindingArtifact = Readonly<{
+  schema_version: 1;
+  provider: "xai";
+  model: string;
+  source_commit: string;
+  plan_sha256: string;
+  provider_profile_manifest_sha256: string;
+  gate_a_risk_sha256: string;
+  production_session_payload_sha256: string;
+  gate_b_execution_sha256: string;
+  connection_epoch: number;
+  per_turn_session_update_observation_sha256: string;
+  per_turn_session_ack_observation_sha256: string;
+  transport_parity_sha256: string;
+  tool_frontier_sha256: string;
+  exact_gateway_call_evidence_sha256: string;
+  matching_gateway_result_evidence_sha256: string;
+  public_execution_sha256: string;
+  replay_sha256: string;
+  dynamic_update_provider_echo: "unverifiable" | "verified";
+  ordered_vad_verified: true;
+  exact_gateway_call_verified: true;
+  matching_gateway_result_verified: true;
+  sole_continuation_terminal_usage_verified: true;
+  binding_sha256: string;
 }>;
 
 type Dependencies = Readonly<{
@@ -640,6 +712,7 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
   sourceCommit: string;
   planSha256: string;
   configurationMatrixSha256: string;
+  providerProfileManifestSha256: string;
   productionSessionPayloadSha256: string;
 }>): Lc4XaiServerVadGateARiskArtifact {
   if (input.setup.provider !== "xai") throw new Error("xAI Gate A risk requires the xAI setup result");
@@ -649,13 +722,36 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
       .filter((proof): proof is NonNullable<typeof proof> => proof !== undefined);
   const omittedPaths = [...new Set(proofs.flatMap((proof) => proof.omission?.paths ?? []))].sort();
   const mismatchedPaths = [...new Set(proofs.flatMap((proof) => proof.contradiction?.paths ?? []))].sort();
+  const fieldStatusInventory = input.setup.configurationEvidence === undefined
+    ? []
+    : Object.entries(input.setup.configurationEvidence.fields)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([field, proof]) => freeze({
+        field,
+        status: proof.status,
+        acknowledged_by: proof.acknowledgedBy ?? null,
+        omitted_paths: freeze([...(proof.omission?.paths ?? [])].sort()),
+        mismatched_paths: freeze([...(proof.contradiction?.paths ?? [])].sort()),
+      }));
+  const createdObservation = input.setup.setupWireEvidence?.observations.find((observation) => (
+    observation.direction === "inbound" && observation.wireType === "session.created"
+  ));
+  const updatedObservation = input.setup.setupWireEvidence?.observations.find((observation) => (
+    observation.observationSha256 === input.setup.setupWireEvidence?.acknowledgementObservationSha256
+  ));
+  const createdSessionId = createdObservation?.identities.sessionIdSha256;
+  const updatedSessionId = updatedObservation?.identities.sessionIdSha256;
+  if (createdSessionId !== undefined && updatedSessionId !== undefined && createdSessionId !== updatedSessionId) {
+    throw new Error("xAI Gate A session identity changed from created to updated");
+  }
   const withoutHash = freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     provider: "xai" as const,
     model: input.setup.model,
     source_commit: input.sourceCommit,
     plan_sha256: input.planSha256,
     configuration_matrix_sha256: input.configurationMatrixSha256,
+    provider_profile_manifest_sha256: input.providerProfileManifestSha256,
     requested_configuration_sha256: input.setup.requestedConfigurationSha256,
     requested_setting_sha256: LC4_XAI_SERVER_VAD_SETTING_SHA256,
     production_session_payload_sha256: input.productionSessionPayloadSha256,
@@ -664,8 +760,25 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
     field_evidence: input.setup.configurationEvidence ?? null,
     omitted_paths: freeze(omittedPaths),
     mismatched_paths: freeze(mismatchedPaths),
+    field_status_inventory: freeze(fieldStatusInventory),
     setup_wire_evidence: input.setup.setupWireEvidence ?? null,
-    retained_risk: input.setup.code === "acknowledged_unverifiable_server_vad"
+    transcription_policy: freeze({
+      requested: false as const,
+      host_consumed: false as const,
+      verification: "not_requested" as const,
+    }),
+    idle_timeout_policy: freeze({
+      requested: false as const,
+      effective_basis: "documented_default" as const,
+      exact_setting_verified: false as const,
+    }),
+    initial_snapshot_disposition: "provider_default_snapshot_only_not_update_echo" as const,
+    created_to_updated_session_identity: createdSessionId !== undefined && updatedSessionId !== undefined
+      ? "verified" as const
+      : "unverifiable" as const,
+    matched_arm_payload_policy: "same_profile_and_payload_hash_required" as const,
+    retained_risk: (input.setup.code === "acknowledged_unverifiable_server_vad"
+      || input.setup.code === "initial_snapshot_exact_only")
       ? "provider_did_not_echo_exact_server_vad_parameters" as const
       : "none" as const,
     claim_boundary: "gate_b_proves_operational_server_vad_lifecycle_not_exact_numeric_vad_parameters" as const,
@@ -686,12 +799,27 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
     ? undefined
     : (inbound.projection.session as { configurationEvidence?: unknown } | undefined)?.configurationEvidence;
   if (artifact.provider !== "xai"
+    || artifact.schema_version !== 2
     || artifact.policy_sha256 !== XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256
     || artifact.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
     || !SHA256.test(artifact.production_session_payload_sha256)
+    || artifact.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
+    || canonicalJson(artifact.transcription_policy) !== canonicalJson({ requested: false, host_consumed: false, verification: "not_requested" })
+    || canonicalJson(artifact.idle_timeout_policy) !== canonicalJson({ requested: false, effective_basis: "documented_default", exact_setting_verified: false })
+    || artifact.initial_snapshot_disposition !== "provider_default_snapshot_only_not_update_echo"
+    || (artifact.created_to_updated_session_identity !== "verified"
+      && artifact.created_to_updated_session_identity !== "unverifiable")
+    || artifact.matched_arm_payload_policy !== "same_profile_and_payload_hash_required"
     || risk_sha256 !== sha256Hex(`${XAI_SERVER_VAD_GATE_A_RISK_DOMAIN}${canonicalJson(body)}`)
     || canonicalJson(artifact.omitted_paths) !== canonicalJson([...artifact.omitted_paths].sort())
     || canonicalJson(artifact.mismatched_paths) !== canonicalJson([...artifact.mismatched_paths].sort())
+    || artifact.field_status_inventory.some((entry, index, entries) => (
+      !/^[a-z][a-z0-9_]*$/u.test(entry.field)
+      || (index > 0 && entries[index - 1]!.field.localeCompare(entry.field) >= 0)
+      || canonicalJson(entry.omitted_paths) !== canonicalJson([...entry.omitted_paths].sort())
+      || canonicalJson(entry.mismatched_paths) !== canonicalJson([...entry.mismatched_paths].sort())
+      || [...entry.omitted_paths, ...entry.mismatched_paths].some((path) => !/^[a-z][a-z0-9_.\[\]-]*$/u.test(path))
+    ))
     || (artifact.field_evidence !== null && (
       setupWire === null
       || !verifyRealtimeWireObservationChain(setupWire.observations).valid
@@ -699,6 +827,119 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
       || canonicalJson(projectedFieldEvidence) !== canonicalJson(artifact.field_evidence)
     ))) {
     throw new Error("LC4 xAI server-VAD Gate A risk artifact failed integrity");
+  }
+}
+
+function createXaiServerVadGateBBindingArtifact(input: Readonly<{
+  risk: Lc4XaiServerVadGateARiskArtifact;
+  execution: Lc4S2sRoundtripExecution;
+  sourceCommit: string;
+  planSha256: string;
+  providerProfileManifestSha256: string;
+  expectedTransportParitySha256: string;
+}>): Lc4XaiServerVadGateBBindingArtifact {
+  assertXaiServerVadGateARiskArtifact(input.risk);
+  assertLc4S2sRoundtripExecution(input.execution);
+  const execution = input.execution;
+  if (execution.provider !== "xai" || execution.status !== "passed") {
+    throw new Error("xAI Gate B binding requires a passing xAI execution");
+  }
+  const update = execution.wire_observations.find((observation) => (
+    observation.observationSha256 === execution.per_turn_session_update_observation_sha256
+  ));
+  const acknowledgement = execution.wire_observations.find((observation) => (
+    observation.observationSha256 === execution.per_turn_session_ack_observation_sha256
+  ));
+  const configuration = (acknowledgement?.projection.session as {
+    configurationEvidence?: ProviderQualificationArtifact["results"][number]["configurationEvidence"];
+  } | undefined)?.configurationEvidence;
+  const dynamicProofs = configuration === undefined
+    ? []
+    : [configuration.fields.instructions, configuration.fields.tools, configuration.fields.tool_choice];
+  const dynamicUpdateProviderEcho = dynamicProofs.length === 3
+    && dynamicProofs.every((proof) => proof.status === "verified")
+    ? "verified" as const
+    : "unverifiable" as const;
+  const dynamicControl = update?.projection.dynamicControl !== null
+    && typeof update?.projection.dynamicControl === "object"
+    && !Array.isArray(update.projection.dynamicControl)
+    ? update.projection.dynamicControl as Record<string, unknown>
+    : null;
+  if (!update || !acknowledgement
+    || update.direction !== "outbound" || update.wireType !== "session.update"
+    || acknowledgement.direction !== "inbound" || acknowledgement.wireType !== "session.updated"
+    || update.connectionEpoch !== acknowledgement.connectionEpoch
+    || update.sequence >= acknowledgement.sequence
+    || dynamicControl?.sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
+    || dynamicControl.byteLength !== Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8")
+    || dynamicControl.authority !== "advisory_only_gateway_and_speech_gate_enforced"
+    || dynamicControl.toolFrontierSha256 !== execution.tool_frontier_sha256
+    || dynamicControl.transportParitySha256 !== input.expectedTransportParitySha256
+    || dynamicControl.delivery !== "session.update_before_audio"
+    || execution.transport_parity_sha256 !== input.expectedTransportParitySha256
+    || execution.provider_tool_call_evidence_sha256 === null
+    || execution.tool_result_evidence_sha256 === null
+    || execution.public_execution_sha256 === null
+    || execution.replay_sha256 === null) {
+    throw new Error("xAI Gate B binding lacks same-epoch payload and roundtrip evidence");
+  }
+  const withoutHash = freeze({
+    schema_version: 1 as const,
+    provider: "xai" as const,
+    model: execution.model,
+    source_commit: input.sourceCommit,
+    plan_sha256: input.planSha256,
+    provider_profile_manifest_sha256: input.providerProfileManifestSha256,
+    gate_a_risk_sha256: input.risk.risk_sha256,
+    production_session_payload_sha256: input.risk.production_session_payload_sha256,
+    gate_b_execution_sha256: execution.evidence_sha256,
+    connection_epoch: update.connectionEpoch,
+    per_turn_session_update_observation_sha256: update.observationSha256,
+    per_turn_session_ack_observation_sha256: acknowledgement.observationSha256,
+    transport_parity_sha256: execution.transport_parity_sha256,
+    tool_frontier_sha256: execution.tool_frontier_sha256,
+    exact_gateway_call_evidence_sha256: execution.provider_tool_call_evidence_sha256,
+    matching_gateway_result_evidence_sha256: execution.tool_result_evidence_sha256,
+    public_execution_sha256: execution.public_execution_sha256,
+    replay_sha256: execution.replay_sha256,
+    dynamic_update_provider_echo: dynamicUpdateProviderEcho,
+    ordered_vad_verified: true as const,
+    exact_gateway_call_verified: true as const,
+    matching_gateway_result_verified: true as const,
+    sole_continuation_terminal_usage_verified: true as const,
+  });
+  return freeze({
+    ...withoutHash,
+    binding_sha256: sha256Hex(`${XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN}${canonicalJson(withoutHash)}`),
+  });
+}
+
+function assertXaiServerVadGateBBindingArtifact(input: Readonly<{
+  artifact: Lc4XaiServerVadGateBBindingArtifact;
+  risk: Lc4XaiServerVadGateARiskArtifact;
+  execution: Lc4S2sRoundtripExecution;
+  expectedTransportParitySha256: string;
+}>): void {
+  const { binding_sha256, ...body } = input.artifact;
+  assertXaiServerVadGateARiskArtifact(input.risk);
+  assertLc4S2sRoundtripExecution(input.execution);
+  if (binding_sha256 !== sha256Hex(`${XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN}${canonicalJson(body)}`)
+    || input.artifact.gate_a_risk_sha256 !== input.risk.risk_sha256
+    || input.artifact.production_session_payload_sha256 !== input.risk.production_session_payload_sha256
+    || input.artifact.provider_profile_manifest_sha256 !== input.risk.provider_profile_manifest_sha256
+    || input.artifact.gate_b_execution_sha256 !== input.execution.evidence_sha256
+    || input.artifact.transport_parity_sha256 !== input.expectedTransportParitySha256
+    || input.artifact.per_turn_session_update_observation_sha256 !== input.execution.per_turn_session_update_observation_sha256
+    || input.artifact.per_turn_session_ack_observation_sha256 !== input.execution.per_turn_session_ack_observation_sha256
+    || input.artifact.exact_gateway_call_evidence_sha256 !== input.execution.provider_tool_call_evidence_sha256
+    || input.artifact.matching_gateway_result_evidence_sha256 !== input.execution.tool_result_evidence_sha256
+    || input.artifact.public_execution_sha256 !== input.execution.public_execution_sha256
+    || input.artifact.replay_sha256 !== input.execution.replay_sha256
+    || input.artifact.ordered_vad_verified !== true
+    || input.artifact.exact_gateway_call_verified !== true
+    || input.artifact.matching_gateway_result_verified !== true
+    || input.artifact.sole_continuation_terminal_usage_verified !== true) {
+    throw new Error("LC4 xAI server-VAD Gate B binding failed integrity");
   }
 }
 
@@ -1025,6 +1266,14 @@ function planBodySha256(body: Omit<Lc4QualificationV3PlanBody, "plan_sha256">): 
   return sha256Hex(`${PLAN_DOMAIN}${canonicalJson(body)}`);
 }
 
+function expectedXaiTransportParitySha256(configuration: TrialSessionConfiguration): string {
+  if (configuration.provider !== "xai") throw new Error("xAI transport parity requires xAI configuration");
+  const compiled = withXaiServerVadPcmSession(
+    productionOpenAiCompatibleSessionUpdate("xai", configuration),
+  );
+  return xaiServerVadTransportParitySha256(compiled, configuration.model);
+}
+
 export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV3PlanArtifact, trustRootFingerprint: string): void {
   assertSignedArtifact({ artifact, expectedFingerprint: trustRootFingerprint, signingDomain: PLAN_DOMAIN, artifactDomain: PLAN_ARTIFACT_DOMAIN });
   const { plan_sha256, ...body } = artifact.body;
@@ -1048,9 +1297,13 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
     const expectedPayloadSha256 = target.provider === "gemini"
       ? null
       : productionSessionPayloadParitySha256(target.provider, expected.configuration);
+    const expectedTransportParitySha256 = target.provider === "xai"
+      ? expectedXaiTransportParitySha256(expected.configuration)
+      : null;
     if (target.provider !== expected.provider
       || target.model !== expected.model
-      || target.production_session_payload_sha256 !== expectedPayloadSha256) {
+      || target.production_session_payload_sha256 !== expectedPayloadSha256
+      || target.xai_transport_parity_sha256 !== expectedTransportParitySha256) {
       throw new Error("LC4 qualification v3 plan session payload parity differs from production");
     }
   }
@@ -1112,6 +1365,9 @@ export async function prepareLc4QualificationV3(input: Readonly<{
         production_session_payload_sha256: provider === "gemini"
           ? null
           : productionSessionPayloadParitySha256(provider, configuration),
+        xai_transport_parity_sha256: provider === "xai"
+          ? expectedXaiTransportParitySha256(configuration)
+          : null,
         setup_sessions: 1 as const,
         paid_sessions: 1 as const,
         generation_phases: 2 as const,
@@ -1653,6 +1909,7 @@ export async function runLc4QualificationV3(input: Readonly<{
       sourceCommit: plan.body.source.source_commit,
       planSha256: plan.body.plan_sha256,
       configurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
+      providerProfileManifestSha256: plan.body.provider_profile_manifest_sha256,
       productionSessionPayloadSha256: plan.body.targets.find((target) => target.provider === "xai")!
         .production_session_payload_sha256!,
     });
@@ -1694,7 +1951,7 @@ export async function runLc4QualificationV3(input: Readonly<{
   } catch (error) {
     primaryFailure ??= error instanceof Error ? `runner_exception:${sha256Hex(error.message)}` : "runner_exception";
     setupArtifact ??= freeze({
-      schemaVersion: 2,
+      schemaVersion: 3,
       qualificationId: attemptId,
       protocolId: plan.body.protocol_id,
       planSha256: plan.body.plan_sha256,
@@ -1732,7 +1989,8 @@ export async function runLc4QualificationV3(input: Readonly<{
   const xaiExecution = executions.find((execution) => execution.provider === "xai");
   const xaiGateAClassification = xaiSetup?.turnBoundaryVerification === "verified_by_provider_echo"
     ? "verified_by_provider_echo" as const
-    : xaiSetup?.code === "acknowledged_unverifiable_server_vad"
+    : (xaiSetup?.code === "acknowledged_unverifiable_server_vad"
+      || xaiSetup?.code === "initial_snapshot_exact_only")
       ? "acknowledged_unverifiable_server_vad" as const
       : "failed" as const;
   const xaiGateBStatus = xaiExecution === undefined
@@ -1748,12 +2006,34 @@ export async function runLc4QualificationV3(input: Readonly<{
       sourceCommit: plan.body.source.source_commit,
       planSha256: plan.body.plan_sha256,
       configurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
+      providerProfileManifestSha256: plan.body.provider_profile_manifest_sha256,
       productionSessionPayloadSha256: plan.body.targets.find((target) => target.provider === "xai")!
         .production_session_payload_sha256!,
     });
     await writeImmutableJson(resolve(partial, "xai-server-vad-gate-a-risk.json"), xaiGateARisk);
   }
   assertXaiServerVadGateARiskArtifact(xaiGateARisk);
+  const expectedXaiTransportParity = plan.body.targets.find((target) => target.provider === "xai")!
+    .xai_transport_parity_sha256!;
+  const xaiGateBBinding = xaiExecution?.status === "passed"
+    ? createXaiServerVadGateBBindingArtifact({
+        risk: xaiGateARisk,
+        execution: xaiExecution,
+        sourceCommit: plan.body.source.source_commit,
+        planSha256: plan.body.plan_sha256,
+        providerProfileManifestSha256: plan.body.provider_profile_manifest_sha256,
+        expectedTransportParitySha256: expectedXaiTransportParity,
+      })
+    : null;
+  if (xaiGateBBinding !== null) {
+    assertXaiServerVadGateBBindingArtifact({
+      artifact: xaiGateBBinding,
+      risk: xaiGateARisk,
+      execution: xaiExecution!,
+      expectedTransportParitySha256: expectedXaiTransportParity,
+    });
+    await writeImmutableJson(resolve(partial, "xai-server-vad-gate-b-binding.json"), xaiGateBBinding);
+  }
   const gateBConnectionEpoch = xaiExecution?.wire_observations.find((observation) => (
     observation.direction === "outbound" && observation.wireType === "session.update"
   ))?.connectionEpoch ?? null;
@@ -1769,13 +2049,44 @@ export async function runLc4QualificationV3(input: Readonly<{
     gate_b_required: true as const,
     gate_b_status: xaiGateBStatus,
     gate_b_evidence_sha256: xaiExecution?.evidence_sha256 ?? null,
+    gate_b_binding_sha256: xaiGateBBinding?.binding_sha256 ?? null,
     gate_a_risk_sha256: xaiGateARisk.risk_sha256,
     gate_a_connection_epoch: gateAConnectionEpoch,
     gate_b_connection_epoch: gateBConnectionEpoch,
     exact_setting_verified: xaiGateAClassification === "verified_by_provider_echo",
     operational_vad_verified: xaiGateBStatus === "behaviorally_verified",
+    claims: freeze({
+      operational_gateway: xaiGateBBinding === null ? "not_verified" as const : "verified" as const,
+      operational_server_vad: xaiGateBBinding === null ? "not_verified" as const : "verified" as const,
+      exact_gateway_name_and_arguments: xaiGateBBinding === null ? "not_verified" as const : "verified" as const,
+      matching_gateway_result: xaiGateBBinding === null ? "not_verified" as const : "verified" as const,
+      sole_post_tool_continuation_terminal_usage: xaiGateBBinding === null ? "not_verified" as const : "verified" as const,
+      full_gateway_schema: xaiSetup?.toolSchemaVerification === "verified_by_provider_echo"
+        && xaiSetup.configurationEvidence?.fields.tools.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      gateway_description: xaiSetup?.toolSchemaVerification === "verified_by_provider_echo"
+        && xaiSetup.configurationEvidence?.fields.tools.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      post_update_voice: xaiSetup?.configurationEvidence?.fields.voice.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      input_transcription: "not_requested" as const,
+      idle_timeout: "documented_default_not_independently_verified" as const,
+      exact_vad_parameters: xaiGateAClassification === "verified_by_provider_echo"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      created_to_updated_session_identity: xaiGateARisk.created_to_updated_session_identity,
+      dynamic_update_configuration: xaiGateBBinding === null
+        ? "not_verified" as const
+        : xaiGateBBinding.dynamic_update_provider_echo === "verified"
+          ? "verified_by_provider_echo" as const
+          : "behaviorally_verified_not_provider_echoed" as const,
+    }),
     benchmark_ready: xaiGateAClassification !== "failed"
       && xaiGateBStatus === "behaviorally_verified"
+      && xaiGateBBinding !== null
       && gateAConnectionEpoch !== null
       && gateBConnectionEpoch !== null,
   });
@@ -1840,8 +2151,8 @@ export async function runLc4QualificationV3(input: Readonly<{
     envelopePath: "qualification-package-envelope.json",
   });
   const terminalWithoutHash = freeze({
-    schema_version: 2 as const,
-    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v5" as const,
+    schema_version: 3 as const,
+    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v6" as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     attempt_id: attemptId,
     plan_artifact_sha256: plan.artifact_sha256,
@@ -1987,8 +2298,8 @@ export async function reportLc4QualificationV3(input: Readonly<{
     });
     const { terminal_sha256, ...terminalBody } = terminal.body;
     if (terminal_sha256 !== sha256Hex(`${TERMINAL_DOMAIN}${canonicalJson(terminalBody)}`)
-      || terminal.body.schema_version !== 2
-      || terminal.body.terminal_version !== "HACC-LC4-QUALIFICATION-TERMINAL-v5"
+      || terminal.body.schema_version !== 3
+      || terminal.body.terminal_version !== "HACC-LC4-QUALIFICATION-TERMINAL-v6"
       || terminal.body.plan_artifact_sha256 !== plan.artifact_sha256
       || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256
       || terminal.body.source_commit !== plan.body.source.source_commit
@@ -2045,6 +2356,8 @@ export async function reportLc4QualificationV3(input: Readonly<{
       && serverVad.gate_b_status === "behaviorally_verified"
       && xaiResult?.status === "passed"
       && serverVad.gate_b_evidence_sha256 === xaiResult.evidence_sha256
+      && typeof serverVad.gate_b_binding_sha256 === "string"
+      && SHA256.test(serverVad.gate_b_binding_sha256)
       && serverVad.gate_a_connection_epoch !== null
       && serverVad.gate_b_connection_epoch !== null;
     if (serverVad.provider !== "xai"
@@ -2053,10 +2366,13 @@ export async function reportLc4QualificationV3(input: Readonly<{
         ?.production_session_payload_sha256
       || serverVad.gate_b_required !== true
       || !SHA256.test(serverVad.gate_a_risk_sha256)
+      || (serverVad.gate_b_binding_sha256 !== null && !SHA256.test(serverVad.gate_b_binding_sha256))
       || serverVad.retained_risk !== (serverVad.gate_a_classification === "acknowledged_unverifiable_server_vad"
         ? "provider_omitted_turn_detection_fields"
         : "none")
       || serverVad.benchmark_ready !== expectedServerVadReady
+      || serverVad.claims.input_transcription !== "not_requested"
+      || serverVad.claims.idle_timeout !== "documented_default_not_independently_verified"
       || (terminal.body.status === "passed" && !serverVad.benchmark_ready)) {
       throw new Error("LC4 qualification v3 server-VAD promotion binding failed integrity");
     }
@@ -2099,6 +2415,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
     }
     const setupQualification = await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"));
     const gateARisk = await readJson<Lc4XaiServerVadGateARiskArtifact>(resolve(directory, "xai-server-vad-gate-a-risk.json"));
+    const gateBBinding = serverVad.gate_b_binding_sha256 === null
+      ? null
+      : await readJson<Lc4XaiServerVadGateBBindingArtifact>(resolve(directory, "xai-server-vad-gate-b-binding.json"));
     assertProviderQualificationArtifactIntegrity(setupQualification);
     assertXaiServerVadGateARiskArtifact(gateARisk);
     const setupByProvider = new Map(setupQualification.results.map((result) => [result.provider, result]));
@@ -2155,6 +2474,7 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || gateARisk.source_commit !== plan.body.source.source_commit
       || gateARisk.plan_sha256 !== plan.body.plan_sha256
       || gateARisk.configuration_matrix_sha256 !== plan.body.setup_configuration_matrix_sha256
+      || gateARisk.provider_profile_manifest_sha256 !== plan.body.provider_profile_manifest_sha256
       || gateARisk.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
       || gateARisk.acknowledgement_sha256 !== retainedXaiSetup.acknowledgementSha256
       || gateARisk.setup_wire_evidence?.connectionEpoch !== serverVad.gate_a_connection_epoch
@@ -2162,10 +2482,43 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || serverVad.operational_vad_verified !== (serverVad.gate_b_status === "behaviorally_verified")
       || serverVad.gate_a_classification !== (retainedXaiSetup.turnBoundaryVerification === "verified_by_provider_echo"
         ? "verified_by_provider_echo"
-        : retainedXaiSetup.code === "acknowledged_unverifiable_server_vad"
+        : (retainedXaiSetup.code === "acknowledged_unverifiable_server_vad"
+          || retainedXaiSetup.code === "initial_snapshot_exact_only")
           ? "acknowledged_unverifiable_server_vad"
           : "failed")) {
       throw new Error("LC4 qualification retained xAI setup binding failed integrity");
+    }
+    const expectedClaims = freeze({
+      operational_gateway: gateBBinding === null ? "not_verified" as const : "verified" as const,
+      operational_server_vad: gateBBinding === null ? "not_verified" as const : "verified" as const,
+      exact_gateway_name_and_arguments: gateBBinding === null ? "not_verified" as const : "verified" as const,
+      matching_gateway_result: gateBBinding === null ? "not_verified" as const : "verified" as const,
+      sole_post_tool_continuation_terminal_usage: gateBBinding === null ? "not_verified" as const : "verified" as const,
+      full_gateway_schema: retainedXaiSetup.toolSchemaVerification === "verified_by_provider_echo"
+        && retainedXaiSetup.configurationEvidence?.fields.tools.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      gateway_description: retainedXaiSetup.toolSchemaVerification === "verified_by_provider_echo"
+        && retainedXaiSetup.configurationEvidence?.fields.tools.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      post_update_voice: retainedXaiSetup.configurationEvidence?.fields.voice.status === "verified"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      input_transcription: "not_requested" as const,
+      idle_timeout: "documented_default_not_independently_verified" as const,
+      exact_vad_parameters: serverVad.gate_a_classification === "verified_by_provider_echo"
+        ? "verified_by_provider_echo" as const
+        : "unverifiable" as const,
+      created_to_updated_session_identity: gateARisk.created_to_updated_session_identity,
+      dynamic_update_configuration: gateBBinding === null
+        ? "not_verified" as const
+        : gateBBinding.dynamic_update_provider_echo === "verified"
+          ? "verified_by_provider_echo" as const
+          : "behaviorally_verified_not_provider_echoed" as const,
+    });
+    if (canonicalJson(serverVad.claims) !== canonicalJson(expectedClaims)) {
+      throw new Error("LC4 qualification xAI machine-readable claims exceed retained evidence");
     }
     if (serverVad.benchmark_ready) {
       if (!xaiResult) throw new Error("LC4 qualification terminal lacks xAI result");
@@ -2181,10 +2534,46 @@ export async function reportLc4QualificationV3(input: Readonly<{
         terminalResult: xaiResult,
         gateEvidenceSha256: serverVad.gate_b_evidence_sha256,
       });
-      const firstGateBObservation = xaiWire.find((observation) => (
-        observation.direction === "outbound" && observation.wireType === "session.update"
+      if (gateBBinding === null
+        || gateBBinding.binding_sha256 !== serverVad.gate_b_binding_sha256
+        || gateBBinding.gate_a_risk_sha256 !== gateARisk.risk_sha256
+        || gateBBinding.gate_b_execution_sha256 !== xaiSummary.evidence_sha256
+        || gateBBinding.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
+        || gateBBinding.provider_profile_manifest_sha256 !== plan.body.provider_profile_manifest_sha256
+        || gateBBinding.transport_parity_sha256 !== plan.body.targets.find((target) => target.provider === "xai")
+          ?.xai_transport_parity_sha256
+        || gateBBinding.per_turn_session_update_observation_sha256 !== xaiSummary.per_turn_session_update_observation_sha256
+        || gateBBinding.per_turn_session_ack_observation_sha256 !== xaiSummary.per_turn_session_ack_observation_sha256
+        || gateBBinding.exact_gateway_call_evidence_sha256 !== xaiSummary.provider_tool_call_evidence_sha256
+        || gateBBinding.matching_gateway_result_evidence_sha256 !== xaiSummary.tool_result_evidence_sha256
+        || gateBBinding.public_execution_sha256 !== xaiSummary.public_execution_sha256
+        || gateBBinding.replay_sha256 !== xaiSummary.replay_sha256) {
+        throw new Error("LC4 qualification xAI Gate B binding differs from retained roundtrip");
+      }
+      const { binding_sha256, ...gateBBody } = gateBBinding;
+      if (binding_sha256 !== sha256Hex(`${XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN}${canonicalJson(gateBBody)}`)) {
+        throw new Error("LC4 qualification xAI Gate B binding hash failed integrity");
+      }
+      const matchingGateBObservations = xaiWire.filter((observation) => (
+        observation.observationSha256 === gateBBinding.per_turn_session_update_observation_sha256
       ));
-      if (firstGateBObservation?.connectionEpoch !== serverVad.gate_b_connection_epoch) {
+      const firstGateBObservation = matchingGateBObservations[0];
+      const retainedDynamicControl = firstGateBObservation?.projection.dynamicControl !== null
+        && typeof firstGateBObservation?.projection.dynamicControl === "object"
+        && !Array.isArray(firstGateBObservation.projection.dynamicControl)
+        ? firstGateBObservation.projection.dynamicControl as Record<string, unknown>
+        : null;
+      if (matchingGateBObservations.length !== 1
+        || firstGateBObservation?.direction !== "outbound"
+        || firstGateBObservation.wireType !== "session.update"
+        || firstGateBObservation.connectionEpoch !== serverVad.gate_b_connection_epoch
+        || firstGateBObservation?.observationSha256 !== gateBBinding.per_turn_session_update_observation_sha256
+        || retainedDynamicControl?.sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
+        || retainedDynamicControl.byteLength !== Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8")
+        || retainedDynamicControl.authority !== "advisory_only_gateway_and_speech_gate_enforced"
+        || retainedDynamicControl.toolFrontierSha256 !== gateBBinding.tool_frontier_sha256
+        || retainedDynamicControl.transportParitySha256 !== gateBBinding.transport_parity_sha256
+        || retainedDynamicControl.delivery !== "session.update_before_audio") {
         throw new Error("LC4 qualification xAI Gate B epoch is not terminal-bound");
       }
     }

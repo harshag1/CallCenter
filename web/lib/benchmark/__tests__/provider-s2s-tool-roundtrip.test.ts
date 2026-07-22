@@ -19,6 +19,7 @@ import {
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  NormalizedRealtimeUsage,
   LocalToolProxyDispatch,
   Pcm16Audio,
   ProviderToolCallProvenance,
@@ -97,6 +98,10 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly omitServerVadSpeechStop: boolean;
   readonly omitServerVadAutoCommit: boolean;
   readonly localGatewayDispatchMode: "none" | "exact" | "completion_first" | "competing" | "malformed" | "call_free";
+  readonly continuationUsage: NormalizedRealtimeUsage;
+  readonly providerUsageCounters: Readonly<Record<string, number>> | null;
+  readonly continuationUsageResponseId: "continuation" | "initial";
+  readonly malformedInputAudioProjection: boolean;
   appendedBytes = 0;
   responseCount = 0;
   readonly responseToolChoices: unknown[] = [];
@@ -116,6 +121,10 @@ class RoundtripClient implements NormalizedRealtimeClient {
     omitServerVadSpeechStop?: boolean;
     omitServerVadAutoCommit?: boolean;
     localGatewayDispatchMode?: "exact" | "completion_first" | "competing" | "malformed" | "call_free";
+    continuationUsage?: NormalizedRealtimeUsage;
+    providerUsageCounters?: Readonly<Record<string, number>> | null;
+    continuationUsageResponseId?: "continuation" | "initial";
+    malformedInputAudioProjection?: boolean;
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -130,6 +139,16 @@ class RoundtripClient implements NormalizedRealtimeClient {
     this.omitServerVadSpeechStop = options.omitServerVadSpeechStop === true;
     this.omitServerVadAutoCommit = options.omitServerVadAutoCommit === true;
     this.localGatewayDispatchMode = options.localGatewayDispatchMode ?? "none";
+    this.continuationUsage = options.continuationUsage ?? {
+      totalTokens: 5,
+      meteringSource: "provider_reported",
+      raw: { total: 5 },
+    };
+    this.providerUsageCounters = options.providerUsageCounters === undefined
+      ? Object.freeze({ totalTokens: 5 })
+      : options.providerUsageCounters;
+    this.continuationUsageResponseId = options.continuationUsageResponseId ?? "continuation";
+    this.malformedInputAudioProjection = options.malformedInputAudioProjection === true;
   }
 
   get serverVadTransportParitySha256() {
@@ -340,16 +359,86 @@ class RoundtripClient implements NormalizedRealtimeClient {
 
   #continuation() {
     const responseId = `${this.provider}-continuation`;
-    const started = this.#observe("inbound", "response.created", { responseIdSha256: realtimeWireIdentitySha256("response", responseId) });
-    this.#emit({ type: "response.started", provider: this.provider, receivedAtMs: 5, wireType: started.wireType, responseId });
-    this.#observe("inbound", "response.audio.delta", { responseIdSha256: realtimeWireIdentitySha256("response", responseId) });
+    const started = this.#observe(
+      "inbound",
+      this.provider === "gemini" ? "serverContent" : "response.created",
+      this.provider === "gemini"
+        ? {}
+        : { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+    );
+    this.#emit({
+      type: "response.started", provider: this.provider, receivedAtMs: 5,
+      wireType: started.wireType, responseId,
+      wireObservation: {
+        availability: "observed", connectionEpoch: 1, sequence: started.sequence,
+        observationSha256: started.observationSha256, payloadSha256: started.payloadSha256,
+        projectionSha256: started.projectionSha256,
+      },
+    });
+    const outputAudio = new Uint8Array([1, 0]);
+    this.#observe(
+      "inbound",
+      "response.audio.delta",
+      { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+      {
+        audio: {
+          direction: "output",
+          validCanonicalBase64: true,
+          sha256: sha256Hex(outputAudio),
+          byteLength: outputAudio.byteLength,
+          format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+        },
+      },
+    );
     this.#emit({
       type: "output.audio", provider: this.provider, receivedAtMs: 6, wireType: "response.audio.delta", responseId,
-      audio: new Uint8Array([1, 0]), format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+      audio: outputAudio, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
     });
-    this.#observe("inbound", "response.done", { responseIdSha256: realtimeWireIdentitySha256("response", responseId) });
-    this.#emit({ type: "response.completed", provider: this.provider, receivedAtMs: 7, wireType: "response.done", responseId, status: "completed" });
-    this.#emit({ type: "usage", provider: this.provider, receivedAtMs: 8, wireType: "usage", responseId, usage: { totalTokens: 5, raw: { total: 5 } } });
+    const terminal = this.#observe(
+      "inbound",
+      "response.done",
+      { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+      { terminal: { status: "completed" } },
+    );
+    const terminalReference = {
+      availability: "observed" as const,
+      connectionEpoch: 1,
+      sequence: terminal.sequence,
+      observationSha256: terminal.observationSha256,
+      payloadSha256: terminal.payloadSha256,
+      projectionSha256: terminal.projectionSha256,
+    };
+    this.#emit({
+      type: "response.completed", provider: this.provider, receivedAtMs: 7,
+      wireType: "response.done", responseId, status: "completed", wireObservation: terminalReference,
+    });
+    const usageResponseId = this.continuationUsageResponseId === "continuation"
+      ? responseId
+      : `${this.provider}-initial`;
+    const providerUsage = this.continuationUsage.meteringSource !== "client_measured"
+        && this.providerUsageCounters !== null
+      ? this.#observe(
+          "inbound",
+          "usage",
+          { responseIdSha256: realtimeWireIdentitySha256("response", usageResponseId) },
+          { usage: this.providerUsageCounters },
+        )
+      : null;
+    this.#emit({
+      type: "usage", provider: this.provider, receivedAtMs: 8, wireType: "usage",
+      responseId: usageResponseId,
+      usage: this.continuationUsage,
+      ...(providerUsage === null ? {} : {
+        wireObservation: {
+          availability: "observed" as const,
+          connectionEpoch: 1,
+          sequence: providerUsage.sequence,
+          observationSha256: providerUsage.observationSha256,
+          payloadSha256: providerUsage.payloadSha256,
+          projectionSha256: providerUsage.projectionSha256,
+        },
+      }),
+    });
   }
 
   async connect() {
@@ -362,7 +451,20 @@ class RoundtripClient implements NormalizedRealtimeClient {
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio(audio: Pcm16Audio) {
     this.appendedBytes += audio.data.byteLength;
-    this.#observe("outbound", this.provider === "gemini" ? "realtimeInput.audio" : "input_audio_buffer.append");
+    this.#observe(
+      "outbound",
+      this.provider === "gemini" ? "realtimeInput.audio" : "input_audio_buffer.append",
+      {},
+      {
+        audio: {
+          direction: "input",
+          validCanonicalBase64: !this.malformedInputAudioProjection,
+          sha256: sha256Hex(audio.data),
+          byteLength: audio.data.byteLength,
+          format: { encoding: "pcm16", sampleRateHz: audio.sampleRateHz, channels: audio.channels },
+        },
+      },
+    );
     if (this.provider !== "xai" || this.appendedBytes !== 24_000 * 1.2 * 2) return;
     if (this.emitEarlyResponseOnCommit) {
       const early = this.#observe("inbound", "response.created", {
@@ -636,6 +738,164 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
   }
 
+  it("labels xAI close-time wire-PCM metering from its normalized source across many chunks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const inputAudioMinutes = audio.data.byteLength / 2 / audio.sampleRateHz / 60;
+    const outputAudioMinutes = 2 / 2 / 24_000 / 60;
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai",
+      model: "xai-model",
+      client: new RoundtripClient("xai", {
+        continuationUsage: {
+          inputAudioMinutes,
+          outputAudioMinutes,
+          billableTextInputEvents: 0,
+          meteringSource: "client_measured",
+          raw: {},
+        },
+        providerUsageCounters: null,
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution.sanitized_usage).toHaveLength(1);
+    expect(execution.sanitized_usage[0]).toMatchObject({
+      source: "client_measured_wire_pcm",
+      provider_usage_observation_sha256: null,
+      counters: { inputAudioMinutes, outputAudioMinutes },
+    });
+    expect(execution.sanitized_usage[0]!.counters).not.toHaveProperty("billableTextInputEvents");
+    expect(execution.sanitized_usage[0]!.contributing_wire_observation_sha256s).toHaveLength(61);
+  });
+
+  it("projects mixed xAI metering down to only the exact provider-reported wire counters", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai",
+      model: "xai-model",
+      client: new RoundtripClient("xai", {
+        continuationUsage: {
+          totalTokens: 5,
+          inputAudioMinutes: 0.02,
+          outputAudioMinutes: 0.001,
+          meteringSource: "mixed",
+          raw: { total_tokens: 5 },
+        },
+        providerUsageCounters: { totalTokens: 5 },
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution.sanitized_usage).toHaveLength(1);
+    expect(execution.sanitized_usage[0]).toMatchObject({
+      source: "provider_reported",
+      counters: { totalTokens: 5 },
+    });
+    expect(execution.sanitized_usage[0]!.counters).not.toHaveProperty("inputAudioMinutes");
+    expect(execution.sanitized_usage[0]!.provider_usage_observation_sha256)
+      .toBe(execution.sanitized_usage[0]!.contributing_wire_observation_sha256s[0]);
+  });
+
+  it.each([
+    {
+      id: "missing metering provenance",
+      usage: { totalTokens: 5, raw: { total: 5 } } satisfies NormalizedRealtimeUsage,
+      providerUsageCounters: { totalTokens: 5 },
+    },
+    {
+      id: "wire-PCM counter mismatch",
+      usage: {
+        inputAudioMinutes: 0.5,
+        outputAudioMinutes: 2 / 2 / 24_000 / 60,
+        meteringSource: "client_measured" as const,
+        raw: {},
+      } satisfies NormalizedRealtimeUsage,
+      providerUsageCounters: null,
+    },
+  ])("refuses to relabel $id as provider-reported usage", async ({ usage, providerUsageCounters }) => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai",
+      model: "xai-model",
+      client: new RoundtripClient("xai", { continuationUsage: usage, providerUsageCounters }),
+      audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution.sanitized_usage).toEqual([]);
+    expect(execution.public_execution_sha256).toBeNull();
+  });
+
+  it("fails closed when an expected xAI PCM contributor has malformed wire evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai",
+      model: "xai-model",
+      client: new RoundtripClient("xai", {
+        continuationUsage: {
+          inputAudioMinutes: audio.data.byteLength / 2 / audio.sampleRateHz / 60,
+          outputAudioMinutes: 2 / 2 / 24_000 / 60,
+          meteringSource: "client_measured",
+          raw: {},
+        },
+        providerUsageCounters: null,
+        malformedInputAudioProjection: true,
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution.sanitized_usage).toEqual([]);
+    expect(execution.public_execution_sha256).toBeNull();
+  });
+
+  it("does not bind an initial-response usage frame to the final continuation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai",
+      model: "xai-model",
+      client: new RoundtripClient("xai", { continuationUsageResponseId: "initial" }),
+      audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution.status).toBe("failed");
+    expect(execution.failure_class).toBe("post_tool_usage_missing");
+    expect(execution.sanitized_usage).toEqual([]);
+  });
+
   for (const variant of [
     { id: "required", toolChoice: "required" as const },
     {
@@ -857,7 +1117,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     const fabricatedBody = Object.freeze({ ...body, wire_observations: Object.freeze([]) });
     const fabricated = Object.freeze({
       ...fabricatedBody,
-      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(fabricatedBody)}`),
+      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(fabricatedBody)}`),
     });
     expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("lacks closed-loop evidence");
   });

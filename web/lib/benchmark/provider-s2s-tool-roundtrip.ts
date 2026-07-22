@@ -40,9 +40,14 @@ import {
 } from "./xai-server-vad";
 import {
   replayProviderToolRoundtrip,
+  projectRoundtripInputAudioEvidence,
+  projectRoundtripOutputAudioEvidence,
+  roundtripInputAudioChunkListSha256,
   roundtripCausalBindingSha256,
   roundtripSanitizedUsageSha256,
   type RoundtripCausalBinding,
+  type RoundtripInputAudioEvidence,
+  type RoundtripOutputAudioEvidence,
   type RoundtripReplaySummary,
   type RoundtripSanitizedUsage,
   type RoundtripUsageCounter,
@@ -55,7 +60,7 @@ import {
   type RealtimeAudioDeliveryRuntime,
 } from "../realtime/audio-delivery";
 
-export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v5" as const;
+export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v6" as const;
 export const LC4_S2S_AUDIO_FIXTURE_VERSION = "HACC-LC4-S2S-SPOKEN-FIXTURE-v1" as const;
 export const LC4_S2S_SOURCE_TEXT = "Please complete the current stage." as const;
 export const LC4_S2S_SOURCE_TEXT_SHA256 = sha256Hex(
@@ -95,10 +100,25 @@ export const LC4_S2S_PACKETIZER_SHA256 = sha256Hex(
 const execFileAsync = promisify(execFile);
 const CAS_DOMAIN = "harshas-amazing-call-center/lc4-s2s-pcm-object/v1\n";
 const FIXTURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-spoken-fixture-artifact/v1\n";
-const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n";
-const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v5\n";
+const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n";
+const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v6\n";
 const CONTROL_DIAGNOSTIC_DOMAIN = "harshas-amazing-call-center/lc4-s2s-control-size-diagnostic/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
+const ROUNDTRIP_USAGE_COUNTERS = new Set<RoundtripUsageCounter>([
+  "inputTextTokens",
+  "inputAudioTokens",
+  "cachedInputTokens",
+  "cachedInputTextTokens",
+  "cachedInputAudioTokens",
+  "outputTextTokens",
+  "outputAudioTokens",
+  "totalInputTokens",
+  "totalOutputTokens",
+  "totalTokens",
+  "inputAudioMinutes",
+  "outputAudioMinutes",
+  "billableTextInputEvents",
+]);
 
 export type Lc4S2sPcmObject = Readonly<{
   path: string;
@@ -151,6 +171,7 @@ export type Lc4S2sRoundtripFailureClass =
   | "session_setup_failed"
   | "audio_delivery_failed"
   | "audio_delivery_contract_failed"
+  | "input_audio_replay_invalid"
   | "response_trigger_failed"
   | "commit_acknowledgement_failed"
   | "manual_turn_mode_violation"
@@ -174,6 +195,7 @@ export type Lc4S2sRoundtripFailureClass =
   | "tool_result_event_missing"
   | "tool_result_not_wire_observed"
   | "post_tool_continuation_missing"
+  | "post_tool_output_audio_missing_or_invalid"
   | "post_tool_terminal_missing"
   | "post_tool_usage_missing"
   | "provider_error"
@@ -191,7 +213,7 @@ export type Lc4S2sRoundtripDeliveryReceipt = Readonly<{
 }>;
 
 export type Lc4S2sRoundtripExecution = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   roundtrip_version: typeof LC4_S2S_ROUNDTRIP_VERSION;
   provider: LiveStsProvider;
   model: string;
@@ -201,6 +223,8 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   failure_class: Lc4S2sRoundtripFailureClass;
   audio: Lc4S2sPcmObject;
   delivery: Lc4S2sRoundtripDeliveryReceipt | null;
+  input_audio_evidence: RoundtripInputAudioEvidence | null;
+  output_audio_evidence: RoundtripOutputAudioEvidence | null;
   compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
   tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
   response_generation_requested: boolean;
@@ -520,6 +544,100 @@ function forcedToolChoice(provider: LiveStsProvider): Readonly<Record<string, un
   return freeze({ type: "function", name: LC4_S2S_TOOL.name });
 }
 
+function wirePcmUsage(
+  observations: readonly RealtimeWireObservation[],
+): Readonly<{
+  contributingObservationSha256s: readonly string[];
+  counters: Readonly<Partial<Record<RoundtripUsageCounter, number>>>;
+}> | null {
+  const contributingObservationSha256s: string[] = [];
+  const meters: Record<"input" | "output", { bytes: number; sampleRateHz: number | null }> = {
+    input: { bytes: 0, sampleRateHz: null },
+    output: { bytes: 0, sampleRateHz: null },
+  };
+  for (const observation of observations) {
+    const expectedDirection = observation.direction === "outbound"
+        && observation.wireType === "input_audio_buffer.append"
+      ? "input"
+      : observation.direction === "inbound"
+          && (observation.wireType === "response.audio.delta"
+            || observation.wireType === "response.output_audio.delta")
+        ? "output"
+        : null;
+    if (expectedDirection === null) continue;
+    const value = observation.projection.audio;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    const audio = value as Record<string, unknown>;
+    const chunks = Array.isArray(audio.chunks) ? audio.chunks : [audio];
+    if ((audio.direction === "input" || audio.direction === "output")
+      && audio.direction !== expectedDirection) return null;
+    let observationBytes = 0;
+    let observationSampleRateHz: number | null = null;
+    for (const chunkValue of chunks) {
+      if (chunkValue === null || typeof chunkValue !== "object" || Array.isArray(chunkValue)) {
+        return null;
+      }
+      const chunk = chunkValue as Record<string, unknown>;
+      const formatValue = chunk.format;
+      if (formatValue === null || typeof formatValue !== "object" || Array.isArray(formatValue)) {
+        return null;
+      }
+      const format = formatValue as Record<string, unknown>;
+      if (chunk.validCanonicalBase64 !== true
+        || typeof chunk.byteLength !== "number"
+        || !Number.isSafeInteger(chunk.byteLength)
+        || chunk.byteLength <= 0
+        || chunk.byteLength % 2 !== 0
+        || format.encoding !== "pcm16"
+        || format.channels !== 1
+        || typeof format.sampleRateHz !== "number"
+        || !Number.isSafeInteger(format.sampleRateHz)
+        || format.sampleRateHz <= 0) {
+        return null;
+      }
+      if (observationSampleRateHz !== null && observationSampleRateHz !== format.sampleRateHz) return null;
+      observationSampleRateHz = format.sampleRateHz;
+      observationBytes += chunk.byteLength;
+    }
+    if (observationSampleRateHz === null) return null;
+    const meter = meters[expectedDirection];
+    if (meter.sampleRateHz !== null && meter.sampleRateHz !== observationSampleRateHz) return null;
+    meter.sampleRateHz = observationSampleRateHz;
+    meter.bytes += observationBytes;
+    contributingObservationSha256s.push(observation.observationSha256);
+  }
+  if (contributingObservationSha256s.length === 0) return null;
+  const counters: Partial<Record<RoundtripUsageCounter, number>> = {};
+  if (meters.input.sampleRateHz !== null) {
+    counters.inputAudioMinutes = meters.input.bytes / 2 / meters.input.sampleRateHz / 60;
+  }
+  if (meters.output.sampleRateHz !== null) {
+    counters.outputAudioMinutes = meters.output.bytes / 2 / meters.output.sampleRateHz / 60;
+  }
+  return freeze({ contributingObservationSha256s, counters });
+}
+
+function providerWireUsage(
+  observations: readonly RealtimeWireObservation[],
+  observationSha256: string | null,
+): Readonly<Partial<Record<RoundtripUsageCounter, number>>> | null {
+  if (observationSha256 === null) return null;
+  const observation = observations.find((candidate) => (
+    candidate.observationSha256 === observationSha256
+  ));
+  const value = observation?.projection.usage;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const counters: Partial<Record<RoundtripUsageCounter, number>> = {};
+  for (const [key, counter] of Object.entries(value as Record<string, unknown>)) {
+    if (!ROUNDTRIP_USAGE_COUNTERS.has(key as RoundtripUsageCounter)
+      || typeof counter !== "number"
+      || !Number.isFinite(counter)
+      || counter < 0) return null;
+    counters[key as RoundtripUsageCounter] = counter;
+  }
+  return Object.keys(counters).length === 0 ? null : freeze(counters);
+}
+
 export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   provider: LiveStsProvider;
   model: string;
@@ -546,6 +664,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   const operations: string[] = [];
   let failure: Lc4S2sRoundtripFailureClass = "none";
   let delivery: Lc4S2sRoundtripDeliveryReceipt | null = null;
+  let inputAudioEvidence: RoundtripInputAudioEvidence | null = null;
+  let outputAudioEvidence: RoundtripOutputAudioEvidence | null = null;
   let responseRequested = false;
   let providerAutoResponseObserved = false;
   let transportFailureDiagnostic: RealtimeTransportFailureDiagnostic | null = null;
@@ -702,10 +822,13 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     }
     if (event.type === "usage") {
       usage.push(event.usage);
-      if (toolResultWireObservationSha256 !== null) {
+      const candidateUsageResponseId = event.responseId ?? continuationResponseId;
+      if (toolResultWireObservationSha256 !== null
+        && continuationResponseId !== null
+        && candidateUsageResponseId === continuationResponseId) {
         postToolUsageObserved = true;
         retainedUsage = event.usage;
-        usageResponseId = event.responseId ?? continuationResponseId;
+        usageResponseId = candidateUsageResponseId;
         if (event.wireObservation?.availability === "observed") {
           usageObservationSha256 = event.wireObservation.observationSha256;
         }
@@ -879,6 +1002,24 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       tail_bytes: receipt.tail_byte_length,
       scheduled_offsets_ms: freeze(receipt.chunks.map((chunk) => chunk.scheduled_offset_ms)),
     });
+    inputAudioEvidence = projectRoundtripInputAudioEvidence(wire, {
+      chunk_sha256s: freeze(plan.frames.map((frame) => sha256Hex(frame.data))),
+      chunk_list_sha256: roundtripInputAudioChunkListSha256(
+        plan.frames.map((frame) => sha256Hex(frame.data)),
+      ),
+      audio_sha256: input.audioObject.sha256,
+      delivery_profile_sha256: delivery.delivery_profile_sha256,
+      packetizer_sha256: delivery.packetizer_sha256,
+      audio_bytes: delivery.audio_bytes,
+      chunk_count: delivery.chunk_count,
+      frame_bytes: delivery.frame_bytes,
+      tail_bytes: delivery.tail_bytes,
+      sample_rate_hz: input.audio.sampleRateHz,
+    });
+    if (inputAudioEvidence === null) {
+      failure = "input_audio_replay_invalid";
+      throw new Error("wire-observed input audio differs from preregistered delivery");
+    }
     operations.push("preregistered_pcm_paced_20ms");
     if (input.provider !== "xai") {
       input.client.prepareResponse({
@@ -951,7 +1092,30 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     unsubscribeWire?.();
   }
 
+  if (continuationStartObservationSha256 !== null
+    && terminalObservationSha256 !== null
+    && continuationResponseId !== null) {
+    outputAudioEvidence = projectRoundtripOutputAudioEvidence({
+      provider: input.provider,
+      wire,
+      continuation_start_observation_sha256: continuationStartObservationSha256,
+      terminal_observation_sha256: terminalObservationSha256,
+      continuation_response_id_sha256: realtimeWireIdentitySha256(
+        "response",
+        continuationResponseId,
+      ),
+    });
+  }
+  if (failure === "none" && inputAudioEvidence === null) {
+    failure = "input_audio_replay_invalid";
+  }
+  if (failure === "none" && outputAudioEvidence === null) {
+    failure = "post_tool_output_audio_missing_or_invalid";
+  }
+
   const passed = failure === "none"
+    && inputAudioEvidence !== null
+    && outputAudioEvidence !== null
     && toolCall !== null
     && toolResultSubmitted
     && toolResultWireObservationSha256 !== null
@@ -963,27 +1127,56 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   if (input.provider === "gemini" && toolResultWireObservationSha256 !== null) {
     continuationRequestObservationSha256 ??= toolResultWireObservationSha256;
   }
-  const usageCounters = retainedUsage === null ? null : Object.freeze(Object.fromEntries(
-    Object.entries(retainedUsage)
+  const retainedUsageSnapshot = retainedUsage as NormalizedRealtimeUsage | null;
+  const usageCounters = retainedUsageSnapshot === null ? null : Object.freeze(Object.fromEntries(
+    Object.entries(retainedUsageSnapshot)
       .filter(([key, value]) => key !== "raw" && key !== "meteringSource"
         && typeof value === "number" && Number.isFinite(value) && value >= 0),
   ) as Partial<Record<RoundtripUsageCounter, number>>);
-  const sanitizedUsage = retainedUsage === null
+  const meteringSource = retainedUsageSnapshot?.meteringSource;
+  const measuredWirePcm = meteringSource === "client_measured" ? wirePcmUsage(wire) : null;
+  const providerUsageCounters = meteringSource === "provider_reported" || meteringSource === "mixed"
+    ? providerWireUsage(wire, usageObservationSha256)
+    : null;
+  const measuredUsageCounters = usageCounters === null ? null : freeze(Object.fromEntries(
+    Object.entries(usageCounters).filter(([key]) => (
+      key === "inputAudioMinutes" || key === "outputAudioMinutes"
+    )),
+  ) as Partial<Record<RoundtripUsageCounter, number>>);
+  const providerReportedUsageReady = (meteringSource === "provider_reported" || meteringSource === "mixed")
+    && usageObservationSha256 !== null
+    && providerUsageCounters !== null
+    && (meteringSource === "mixed"
+      || (usageCounters !== null && canonicalJson(usageCounters) === canonicalJson(providerUsageCounters)));
+  const clientMeasuredUsageReady = input.provider === "xai"
+    && meteringSource === "client_measured"
+    && measuredWirePcm !== null
+    && measuredUsageCounters !== null
+    && Object.keys(measuredUsageCounters).length > 0
+    && canonicalJson(measuredUsageCounters) === canonicalJson(measuredWirePcm.counters);
+  const sanitizedUsage = retainedUsageSnapshot === null
     || usageResponseId === null
     || terminalObservationSha256 === null
-    || usageObservationSha256 === null
-    || usageCounters === null
-    || Object.keys(usageCounters).length === 0
+    || (!providerReportedUsageReady && !clientMeasuredUsageReady)
     ? [] as const
     : [freeze({
         schema_version: 1 as const,
-        source: "provider_reported" as const,
+        source: providerReportedUsageReady
+          ? "provider_reported" as const
+          : "client_measured_wire_pcm" as const,
         response_id_sha256: realtimeWireIdentitySha256("response", usageResponseId),
         terminal_observation_sha256: terminalObservationSha256,
-        provider_usage_observation_sha256: usageObservationSha256,
-        contributing_wire_observation_sha256s: freeze([usageObservationSha256]),
-        counters: usageCounters,
+        provider_usage_observation_sha256: providerReportedUsageReady
+          ? usageObservationSha256
+          : null,
+        contributing_wire_observation_sha256s: providerReportedUsageReady
+          ? freeze([usageObservationSha256!])
+          : measuredWirePcm!.contributingObservationSha256s,
+        counters: providerReportedUsageReady ? providerUsageCounters! : measuredUsageCounters!,
       })] as const;
+  const usageBindingObservationSha256 = sanitizedUsage[0]?.source === "client_measured_wire_pcm"
+    ? terminalObservationSha256
+    : usageObservationSha256;
   const callResponseIdSha256 = retainedToolCall === null
     ? null
     : realtimeWireIdentitySha256("response", retainedToolCall.responseId);
@@ -1004,7 +1197,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     && continuationStartObservationSha256 !== null
     && terminalObservationSha256 !== null
     && terminalResponseId !== null
-    && usageObservationSha256 !== null
+    && usageBindingObservationSha256 !== null
     && usageResponseId !== null
     && sanitizedUsage.length === 1;
   const replayCausalBindingBody = completeCausalEvidence ? freeze({
@@ -1027,7 +1220,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     continuation_response_id_sha256: continuationResponseIdSha256!,
     continuation_start_observation_sha256: continuationStartObservationSha256!,
     terminal_observation_sha256: terminalObservationSha256!,
-    usage_observation_sha256: usageObservationSha256!,
+    usage_observation_sha256: usageBindingObservationSha256!,
     usage_response_id_sha256: realtimeWireIdentitySha256("response", usageResponseId!),
   }) : null;
   const replayCausalBinding = replayCausalBindingBody === null
@@ -1038,6 +1231,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         evidence_sha256: roundtripCausalBindingSha256(replayCausalBindingBody),
       });
   const replaySummary = replayCausalBinding === null || sanitizedUsage.length !== 1
+    || inputAudioEvidence === null || outputAudioEvidence === null
     ? null
     : freeze({
         schema_version: 1 as const,
@@ -1068,6 +1262,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
           evidence_sha256: roundtripSanitizedUsageSha256(sanitizedUsage[0]!),
           response_id_sha256: replayCausalBinding.usage_response_id_sha256,
         }),
+        input_audio: inputAudioEvidence,
+        output_audio: outputAudioEvidence,
       });
   const replay = replaySummary === null ? null : replayProviderToolRoundtrip({
     expected: { provider: input.provider, model: input.model },
@@ -1086,7 +1282,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     transport_failure_diagnostic: transportFailureDiagnostic,
   });
   const body = freeze({
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     roundtrip_version: LC4_S2S_ROUNDTRIP_VERSION,
     provider: input.provider,
     model: input.model,
@@ -1096,6 +1292,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     failure_class: failure,
     audio: input.audioObject,
     delivery,
+    input_audio_evidence: inputAudioEvidence,
+    output_audio_evidence: outputAudioEvidence,
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: responseRequested,
@@ -1159,6 +1357,8 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
   if (execution.status === "passed" && (
     execution.failure_class !== "none"
     || execution.delivery === null
+    || execution.input_audio_evidence === null
+    || execution.output_audio_evidence === null
     || (execution.provider === "xai"
       ? !execution.provider_auto_response_observed || execution.response_generation_requested
       : !execution.response_generation_requested || execution.provider_auto_response_observed)
@@ -1179,6 +1379,21 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.replay_sha256 === null
   )) throw new Error("passing LC4 S2S roundtrip lacks closed-loop evidence");
   if (execution.status === "passed") {
+    const delivery = execution.delivery!;
+    const inputAudio = execution.input_audio_evidence!;
+    if (canonicalJson(execution.replay_summary!.input_audio) !== canonicalJson(inputAudio)
+      || canonicalJson(execution.replay_summary!.output_audio)
+        !== canonicalJson(execution.output_audio_evidence)
+      || inputAudio.audio_sha256 !== execution.audio.sha256
+      || inputAudio.audio_bytes !== delivery.audio_bytes
+      || inputAudio.chunk_count !== delivery.chunk_count
+      || inputAudio.frame_bytes !== delivery.frame_bytes
+      || inputAudio.tail_bytes !== delivery.tail_bytes
+      || inputAudio.packetizer_sha256 !== delivery.packetizer_sha256
+      || inputAudio.delivery_profile_sha256 !== delivery.delivery_profile_sha256
+      || inputAudio.sample_rate_hz !== execution.audio.sample_rate_hz) {
+      throw new Error("passing LC4 S2S roundtrip input/output audio binding is invalid");
+    }
     const replay = replayProviderToolRoundtrip({
       expected: { provider: execution.provider, model: execution.model },
       summary: execution.replay_summary!,

@@ -865,6 +865,7 @@ function geminiGatewayCallWireProjection(
       ...(typeof call.id === "string" ? { callIdSha256: realtimeWireIdentitySha256("call", call.id) } : {}),
       argumentsSha256: argumentsEvidence.sha256,
       argumentsBytes: argumentsEvidence.byteLength,
+      argumentsJsonValid: true,
       ...(targetName ? { targetToolNameSha256: realtimeWireIdentitySha256("target-tool", targetName) } : {}),
       ...(targetArguments ? { targetArgumentsSha256: targetArguments.sha256 } : {}),
     }];
@@ -887,6 +888,7 @@ function geminiGatewayResultWireProjection(
         : {}),
       resultSha256: resultEvidence.sha256,
       resultBytes: resultEvidence.byteLength,
+      resultJsonValid: true,
     }];
   });
 }

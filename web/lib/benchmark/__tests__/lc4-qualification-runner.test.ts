@@ -134,6 +134,7 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
   async connect(): Promise<void> {
     this.state = "ready";
     let predecessor: string | null = null;
+    const xaiSessionIdSha256 = sha256Hex("xai-test-session-id");
     const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string): RealtimeWireObservation => {
       const projection = Object.freeze({
         direction,
@@ -155,7 +156,9 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
         payloadBytes: 1,
         projectionSha256: realtimeWireProjectionSha256(projection),
         previousObservationSha256: predecessor,
-        identities: Object.freeze({}),
+        identities: Object.freeze(this.provider === "xai" && direction === "inbound"
+          ? { sessionIdSha256: xaiSessionIdSha256 }
+          : {}),
         projection,
       });
       const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
@@ -164,8 +167,16 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
     };
     const requestWireType = this.provider === "gemini" ? "setup" : "session.update";
     const acknowledgementWireType = this.provider === "gemini" ? "setupComplete" : "session.updated";
-    for (const listener of this.#wireListeners) listener(wire("outbound", 1, requestWireType));
-    for (const listener of this.#wireListeners) listener(wire("inbound", 2, acknowledgementWireType));
+    if (this.provider === "xai") {
+      // xAI is server-first: the client must bind one created session before it
+      // sends its sole setup update and accepts the corresponding acknowledgement.
+      for (const listener of this.#wireListeners) listener(wire("inbound", 1, "session.created"));
+      for (const listener of this.#wireListeners) listener(wire("outbound", 2, requestWireType));
+      for (const listener of this.#wireListeners) listener(wire("inbound", 3, acknowledgementWireType));
+    } else {
+      for (const listener of this.#wireListeners) listener(wire("outbound", 1, requestWireType));
+      for (const listener of this.#wireListeners) listener(wire("inbound", 2, acknowledgementWireType));
+    }
     const event = Object.freeze({
       type: "session.ready" as const,
       provider: this.provider,

@@ -10,11 +10,11 @@ import {
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 
-export const LC4_PROVIDER_PROFILE_ID = "HACC-LC4-provider-profiles-v2" as const;
+export const LC4_PROVIDER_PROFILE_ID = "HACC-LC4-provider-profiles-v3" as const;
 export const LC4_PROVIDER_PROFILE_VERIFIED_AT = "2026-07-22" as const;
 
 const PROFILE_HASH_DOMAIN =
-  "harshas-amazing-call-center/lc4-provider-profile-manifest/v2\n";
+  "harshas-amazing-call-center/lc4-provider-profile-manifest/v3\n";
 
 export const LC4_PROVIDER_PRIMARY_SOURCES = Object.freeze({
   openai: Object.freeze([

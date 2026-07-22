@@ -109,6 +109,12 @@ function fakeClient(
 async function connect(client: OpenAICompatibleRealtimeClient, socket: FakeSocket) {
   const connected = client.connect();
   socket.emit("open");
+  if (client.provider === "xai") {
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
+  }
   socket.emit("message", JSON.stringify(sessionAcknowledgement(client.provider)));
   await connected;
 }
@@ -943,6 +949,43 @@ describe("OpenAI-compatible realtime client", () => {
     expect(client.state).toBe("ready");
   });
 
+  it("waits for xAI session.created before sending the initial session.update", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    expect(socket.sent).toEqual([]);
+
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
+    expect(socket.sent.map((frame) => JSON.parse(frame))).toEqual([
+      expect.objectContaining({ type: "session.update" }),
+    ]);
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+  });
+
+  it("fails closed when xAI session.created omits its session identity", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({ type: "session.created", session: {} }));
+    await expect(pending).rejects.toThrow("session.created omitted the session identity");
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("failed");
+  });
+
+  it("rejects xAI session.updated if no created-session handshake preceded it", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await expect(pending).rejects.toThrow("before session.created initialized the session");
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("failed");
+  });
+
   it("records omitted acknowledgement fields as unverifiable instead of provider proof", async () => {
     const { client, socket } = fakeClient();
     const observed: NormalizedRealtimeEvent[] = [];
@@ -1342,7 +1385,7 @@ describe("OpenAI-compatible realtime client", () => {
     socket.emit("open");
     socket.emit("message", JSON.stringify({
       type: "session.created",
-      session: { model: "grok-voice-think-fast-1.0" },
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
     }));
     const updated = sessionAcknowledgement("xai") as unknown as Record<string, unknown>;
     recordForTest(updated.session).model = "grok-voice-fast-1.0";
@@ -1458,11 +1501,90 @@ describe("OpenAI-compatible realtime client", () => {
     });
     const substitutedPending = substitutedClient.connect();
     substitutedSocket.emit("open");
+    substitutedSocket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
+    }));
     const substitutedAck = sessionAcknowledgement("xai") as unknown as Record<string, unknown>;
     recordForTest(substitutedAck.session).model = "grok-voice-fast-1.0";
     substitutedSocket.emit("message", JSON.stringify(substitutedAck));
     await expect(substitutedPending).rejects.toThrow(/differs from requested model/);
     expect(substitutedClient.state).toBe("failed");
+  });
+
+  it("rejects nested tool-schema and tool-choice capability widening", async () => {
+    const requestedTool = {
+      type: "function",
+      name: "lookup_member",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { member_id: { type: "string" } },
+        required: ["member_id"],
+      },
+    };
+    const omission = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: {
+        type: "session.update",
+        session: { tools: [requestedTool] },
+      },
+      acknowledgedEvent: {
+        type: "session.updated",
+        session: { tools: [{ type: "function" }] },
+      },
+    });
+    expect(omission.fields.tools).toMatchObject({
+      status: "unverifiable",
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: ["tools[0].name", "tools[0].parameters"],
+      },
+    });
+
+    const schemaSocket = new FakeSocket();
+    const schemaClient = new OpenAICompatibleRealtimeClient({
+      provider: "openai",
+      url: "wss://openai.example/realtime",
+      sessionUpdate: {
+        ...baseSession,
+        session: { ...baseSession.session, tools: [requestedTool], tool_choice: "auto" },
+      },
+      socketFactory: () => schemaSocket,
+      connectTimeoutMs: 1_000,
+    });
+    const schemaPending = schemaClient.connect();
+    schemaSocket.emit("open");
+    const schemaAck = JSON.parse(schemaSocket.sent[0]) as Record<string, unknown>;
+    const acknowledgedTool = recordForTest((recordForTest(schemaAck.session).tools as unknown[])[0]);
+    const acknowledgedParameters = recordForTest(acknowledgedTool.parameters);
+    acknowledgedParameters["x-provider-extension"] = { permits: "unrequested" };
+    schemaSocket.emit("message", JSON.stringify({ type: "session.updated", session: schemaAck.session }));
+    await expect(schemaPending).rejects.toThrow(/tools differs/);
+    expect(schemaClient.state).toBe("failed");
+
+    const choiceSocket = new FakeSocket();
+    const choiceClient = new OpenAICompatibleRealtimeClient({
+      provider: "openai",
+      url: "wss://openai.example/realtime",
+      sessionUpdate: {
+        ...baseSession,
+        session: {
+          ...baseSession.session,
+          tools: [requestedTool],
+          tool_choice: { type: "function", name: "lookup_member" },
+        },
+      },
+      socketFactory: () => choiceSocket,
+      connectTimeoutMs: 1_000,
+    });
+    const choicePending = choiceClient.connect();
+    choiceSocket.emit("open");
+    const choiceAck = JSON.parse(choiceSocket.sent[0]) as Record<string, unknown>;
+    recordForTest(recordForTest(choiceAck.session).tool_choice).fallback = "auto";
+    choiceSocket.emit("message", JSON.stringify({ type: "session.updated", session: choiceAck.session }));
+    await expect(choicePending).rejects.toThrow(/tool_choice differs/);
+    expect(choiceClient.state).toBe("failed");
   });
 
   it("rejects an acknowledgement that did not preserve manual PCM invariants", async () => {
@@ -1528,6 +1650,10 @@ describe("OpenAI-compatible realtime client", () => {
       code: "pre_ready_application_event",
     }));
 
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
     socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
     await pending;
     expect(client.state).toBe("ready");
@@ -1601,6 +1727,10 @@ describe("OpenAI-compatible realtime client", () => {
     client.onWireObservation(() => undefined);
     const connecting = client.connect();
     socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_server_vad" },
+    }));
     const initialUpdate = JSON.parse(socket.sent.at(-1)!);
     socket.emit("message", JSON.stringify({
       type: "session.updated",
@@ -1699,6 +1829,10 @@ describe("OpenAI-compatible realtime client", () => {
     });
     const connecting = client.connect();
     socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_bad_order" },
+    }));
     const initialUpdate = JSON.parse(socket.sent.at(-1)!);
     socket.emit("message", JSON.stringify({ type: "session.updated", session: { id: "sess_bad_order", ...initialUpdate.session } }));
     await connecting;
@@ -3422,6 +3556,11 @@ describe("manual PCM session compilation", () => {
     client.onEvent((event) => events.push(event));
     const pending = client.connect();
     socket.emit("open");
+    expect(socket.sent).toEqual([]);
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
+    }));
     const sent = JSON.parse(socket.sent[0]);
     expect(sent).toMatchObject({ session: { resumption: { enabled: true } } });
     const url = new URL(connectedUrl);

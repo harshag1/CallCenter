@@ -370,7 +370,7 @@ function verifyDevAuthorization(input: Readonly<{
   assertIso(body.expires_at, "LC4-DEV authorization expiry");
   const checked = Date.parse(input.checked_at);
   if (checked < Date.parse(body.not_before) || checked >= Date.parse(body.expires_at)) throw new Error("LC4-DEV authorization is not active");
-  if (qualification.schema_version !== 2
+  if (qualification.schema_version !== 3
     || qualification.protocol_id !== "HACC-LC4-DEV-v1"
     || qualification.qualification_protocol_id !== "HACC-LC4-v1"
     || qualification.status !== "passed"

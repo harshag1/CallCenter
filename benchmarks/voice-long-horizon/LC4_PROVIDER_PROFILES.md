@@ -36,8 +36,9 @@ are the intended differences.
   requires exact transport acknowledgement. xAI requires a per-turn
   `session.update`/`session.updated` barrier; an exact empty
   `turn_detection` echo remains conditional until the paid spoken Gate B.
-- xAI freezes documented server VAD at threshold `0.85`, silence `500 ms`,
-  prefix padding `333 ms`, and `idle_timeout_ms: null`. The caller PCM is paced
+- xAI freezes documented server VAD at threshold `0.85`, silence `500 ms`, and
+  prefix padding `333 ms`; idle-timeout and transcription controls are omitted.
+  The caller PCM is paced
   only after the per-turn context and exact closed tool frontier are
   acknowledged. The client sends neither `input_audio_buffer.commit` nor the
   initial `response.create`; after a tool result it sends exactly one explicit

@@ -29,8 +29,12 @@ import {
   type Lc4QualificationV3GitSource,
   type Lc4QualificationV3PlanArtifact,
 } from "../lc4-qualification-v3-runner";
-import { productionSessionPayloadParitySha256 } from "../production-realtime-provider";
 import {
+  productionOpenAiCompatibleSessionUpdate,
+  productionSessionPayloadParitySha256,
+} from "../production-realtime-provider";
+import {
+  LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_COMPACT_CONTROL_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_SOURCE_TEXT,
@@ -54,10 +58,17 @@ import {
   realtimeWireObservationSha256,
   realtimeWireProjectionSha256,
 } from "../../realtime/client/wire-evidence";
-import { realtimeToolFrontierSha256 } from "../../realtime/client/openai-compatible";
+import {
+  realtimeToolFrontierSha256,
+  withXaiServerVadPcmSession,
+  xaiServerVadTransportParitySha256,
+} from "../../realtime/client/openai-compatible";
 import { LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 } from "../xai-server-vad";
 import {
   replayProviderToolRoundtrip,
+  projectRoundtripInputAudioEvidence,
+  projectRoundtripOutputAudioEvidence,
+  roundtripInputAudioChunkListSha256,
   roundtripCausalBindingSha256,
   roundtripSanitizedUsageSha256,
 } from "../provider-roundtrip-replay";
@@ -154,7 +165,6 @@ function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = fa
       omission: Object.freeze({
         kind: "requested_paths_omitted" as const,
         paths: Object.freeze([
-          "session.turn_detection.idle_timeout_ms",
           "session.turn_detection.prefix_padding_ms",
           "session.turn_detection.silence_duration_ms",
           "session.turn_detection.threshold",
@@ -175,7 +185,6 @@ function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = fa
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
           paths: Object.freeze([
-            "turn_detection.idle_timeout_ms",
             "turn_detection.prefix_padding_ms",
             "turn_detection.silence_duration_ms",
             "turn_detection.threshold",
@@ -205,7 +214,13 @@ class SetupClient implements NormalizedRealtimeClient {
   async connect() {
     this.state = "ready";
     let predecessor: string | null = null;
-    const observe = (direction: "outbound" | "inbound", wireType: string, sequence: number) => {
+    const observe = (
+      direction: "outbound" | "inbound",
+      wireType: string,
+      sequence: number,
+      identities: RealtimeWireObservation["identities"] = Object.freeze({}),
+      extraProjection: Readonly<Record<string, unknown>> = Object.freeze({}),
+    ) => {
       const projection = Object.freeze({
         direction,
         wireType,
@@ -213,6 +228,7 @@ class SetupClient implements NormalizedRealtimeClient {
         ...(direction === "inbound"
           ? { session: { configurationEvidence: this.sessionConfigurationAcknowledgement } }
           : {}),
+        ...extraProjection,
       });
       const core = Object.freeze({
         schemaVersion: 1 as const, provider: this.provider, direction, connectionEpoch: 1, sequence,
@@ -220,14 +236,25 @@ class SetupClient implements NormalizedRealtimeClient {
         payloadSha256: sha256Hex(canonicalJson(projection)), payloadBytes: 64,
         projectionSha256: realtimeWireProjectionSha256(projection),
         previousObservationSha256: predecessor,
-        identities: Object.freeze({}), projection,
+        identities, projection,
       });
       const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
       predecessor = observation.observationSha256;
       for (const listener of this.#wireListeners) listener(observation);
     };
-    observe("outbound", this.provider === "gemini" ? "setup" : "session.update", 1);
-    observe("inbound", this.provider === "gemini" ? "setupComplete" : "session.updated", 2);
+    if (this.provider === "xai") {
+      const sessionIdSha256 = "8".repeat(64);
+      observe("inbound", "session.created", 1, { sessionIdSha256 }, {
+        session: { fieldSha256: { turn_detection: "3".repeat(64), voice: "1".repeat(64) } },
+      });
+      observe("outbound", "session.update", 2);
+      observe("inbound", "session.updated", 3, { sessionIdSha256 }, {
+        session: { configurationEvidence: this.sessionConfigurationAcknowledgement, toolCount: 1 },
+      });
+    } else {
+      observe("outbound", this.provider === "gemini" ? "setup" : "session.update", 1);
+      observe("inbound", this.provider === "gemini" ? "setupComplete" : "session.updated", 2);
+    }
     const event: NormalizedRealtimeEvent = {
       type: "session.ready", provider: this.provider, receivedAtMs: 1,
       wireType: this.provider === "gemini" ? "setupComplete" : "session.updated",
@@ -275,10 +302,44 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   const callIdSha256 = realtimeWireIdentitySha256("call", callId);
   const initialResponseIdSha256 = realtimeWireIdentitySha256("response", initialResponseId);
   const continuationResponseIdSha256 = realtimeWireIdentitySha256("response", continuationResponseId);
+  const inputAudioSha256 = sha256Hex(input.audio.data);
+  const inputAudioProjection = Object.freeze({
+    audio: Object.freeze({
+      direction: "input" as const,
+      validCanonicalBase64: true,
+      sha256: inputAudioSha256,
+      byteLength: input.audio.data.byteLength,
+      format: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: input.audio.sampleRateHz, channels: 1 as const }),
+    }),
+  });
+  const outputAudioProjection = Object.freeze({
+    audio: Object.freeze({
+      direction: "output" as const,
+      validCanonicalBase64: true,
+      sha256: sha256Hex(new Uint8Array([1, 0])),
+      byteLength: 2,
+      format: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: input.provider === "gemini" ? 24_000 : input.audio.sampleRateHz, channels: 1 as const }),
+    }),
+  });
+  const xaiTarget = createLc4QualificationV3Targets().find((target) => target.provider === "xai")!;
+  const xaiTransportParitySha256 = xaiServerVadTransportParitySha256(
+    withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate("xai", xaiTarget.configuration)),
+    xaiTarget.model,
+  );
+  const xaiToolFrontierSha256 = realtimeToolFrontierSha256([LC4_S2S_TOOL]);
   const xaiWire = input.provider === "xai" ? (() => {
-    const control = observe("outbound", "session.update");
+    const control = observe("outbound", "session.update", Object.freeze({}), {
+      dynamicControl: {
+        sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
+        byteLength: Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8"),
+        authority: "advisory_only_gateway_and_speech_gate_enforced",
+        toolFrontierSha256: xaiToolFrontierSha256,
+        transportParitySha256: xaiTransportParitySha256,
+        delivery: "session.update_before_audio",
+      },
+    });
     const ack = observe("inbound", "session.updated");
-    observe("outbound", "input_audio_buffer.append");
+    const inputAudio = observe("outbound", "input_audio_buffer.append", Object.freeze({}), inputAudioProjection);
     const speechStart = observe("inbound", "input_audio_buffer.speech_started");
     const speechStop = observe("inbound", "input_audio_buffer.speech_stopped");
     const commit = observe("inbound", "input_audio_buffer.committed");
@@ -287,39 +348,63 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     });
     const call = observe("inbound", "response.function_call_arguments.done", {
       responseIdSha256: initialResponseIdSha256, callIdSha256,
-    }, { gatewayCalls: [{ gateway: "capability_gateway", callIdSha256, responseIdSha256: initialResponseIdSha256 }] });
+    }, { gatewayCalls: [{
+      gateway: "capability_gateway", callIdSha256, responseIdSha256: initialResponseIdSha256,
+      argumentsSha256: "a".repeat(64), argumentsBytes: 67, argumentsJsonValid: true,
+      targetToolNameSha256: realtimeWireIdentitySha256("target-tool", "complete_current_stage"),
+      targetArgumentsSha256: sha256Hex(canonicalJson({})),
+    }] });
     const result = observe("outbound", "conversation.item.create", { callIdSha256 }, {
-      gatewayResults: [{ gateway: "capability_gateway", callIdSha256 }],
+      gatewayResults: [{
+        gateway: "capability_gateway", callIdSha256,
+        resultSha256: sha256Hex(canonicalJson({ ok: true, qualification_stage: "completed" })),
+        resultBytes: 49, resultJsonValid: true,
+      }],
     });
     const continuation = observe("outbound", "response.create");
     const continuationStarted = observe("inbound", "response.created", { responseIdSha256: continuationResponseIdSha256 });
-    observe("inbound", "response.audio.delta", { responseIdSha256: continuationResponseIdSha256 }, {
-      audio: { validCanonicalBase64: true, byteLength: 2, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 } },
-    });
+    const outputAudio = observe("inbound", "response.audio.delta", { responseIdSha256: continuationResponseIdSha256 }, outputAudioProjection);
     const terminal = observe("inbound", "response.done", { responseIdSha256: continuationResponseIdSha256 }, {
       terminal: { status: "completed" }, usage: { totalTokens: 8 },
     });
-    return { control, ack, speechStart, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, terminal };
+    return { control, ack, inputAudio, speechStart, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, outputAudio, terminal };
   })() : null;
   const commonWire = input.provider !== "xai" ? (() => {
+    const inputAudio = observe(
+      "outbound",
+      input.provider === "gemini" ? "realtimeInput.audio" : "input_audio_buffer.append",
+      Object.freeze({}),
+      inputAudioProjection,
+    );
     const trigger = observe("outbound", input.provider === "gemini" ? "realtimeInput.activityEnd" : "response.create");
     const call = observe("inbound", input.provider === "gemini" ? "toolCall" : "response.function_call_arguments.done", {
       callIdSha256,
       ...(input.provider === "gemini" ? {} : { responseIdSha256: initialResponseIdSha256 }),
-    }, { gatewayCalls: [{ gateway: "capability_gateway", callIdSha256, ...(input.provider === "gemini" ? {} : { responseIdSha256: initialResponseIdSha256 }) }] });
+    }, { gatewayCalls: [{
+      gateway: "capability_gateway", callIdSha256,
+      ...(input.provider === "gemini" ? {} : { responseIdSha256: initialResponseIdSha256 }),
+      argumentsSha256: "a".repeat(64), argumentsBytes: 67, argumentsJsonValid: true,
+      targetToolNameSha256: realtimeWireIdentitySha256("target-tool", "complete_current_stage"),
+      targetArgumentsSha256: sha256Hex(canonicalJson({})),
+    }] });
     const result = observe("outbound", input.provider === "gemini" ? "toolResponse" : "conversation.item.create", { callIdSha256 }, {
-      gatewayResults: [{ gateway: "capability_gateway", callIdSha256 }],
+      gatewayResults: [{
+        gateway: "capability_gateway", callIdSha256,
+        resultSha256: sha256Hex(canonicalJson({ ok: true, qualification_stage: "completed" })),
+        resultBytes: 49, resultJsonValid: true,
+      }],
     });
     const continuation = input.provider === "gemini" ? result : observe("outbound", "response.create");
     const continuationStarted = observe("inbound", input.provider === "gemini" ? "serverContent" : "response.created", {
       ...(input.provider === "gemini" ? {} : { responseIdSha256: continuationResponseIdSha256 }),
-    }, input.provider === "gemini"
-      ? { audio: { direction: "output", chunks: [{ validCanonicalBase64: true, byteLength: 2, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 } }] } }
-      : {});
+    }, input.provider === "gemini" ? outputAudioProjection : {});
+    const outputAudio = input.provider === "openai"
+      ? observe("inbound", "response.output_audio.delta", { responseIdSha256: continuationResponseIdSha256 }, outputAudioProjection)
+      : continuationStarted;
     const terminal = observe("inbound", input.provider === "gemini" ? "serverContent" : "response.done", {
       ...(input.provider === "gemini" ? {} : { responseIdSha256: continuationResponseIdSha256 }),
     }, { terminal: { status: "completed" }, usage: { totalTokens: 8 } });
-    return { trigger, call, result, continuation, continuationStarted, terminal };
+    return { inputAudio, trigger, call, result, continuation, continuationStarted, outputAudio, terminal };
   })() : null;
   const causalWire = xaiWire ?? commonWire!;
   const triggerObservationSha256 = input.provider === "xai"
@@ -354,6 +439,27 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     usage_response_id_sha256: continuationResponseIdSha256,
   });
   const causalBinding = Object.freeze({ ...causalBody, evidence_sha256: roundtripCausalBindingSha256(causalBody) });
+  const inputAudioEvidence = projectRoundtripInputAudioEvidence(wire, {
+    chunk_sha256s: Object.freeze([inputAudioSha256]),
+    chunk_list_sha256: roundtripInputAudioChunkListSha256([inputAudioSha256]),
+    audio_sha256: input.audioObject.sha256,
+    delivery_profile_sha256: "3".repeat(64),
+    packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
+    audio_bytes: input.audioObject.byte_length,
+    chunk_count: 1,
+    frame_bytes: input.audioObject.byte_length,
+    tail_bytes: input.audioObject.byte_length,
+    sample_rate_hz: input.audioObject.sample_rate_hz,
+  });
+  const outputAudioEvidence = projectRoundtripOutputAudioEvidence({
+    provider: input.provider,
+    wire,
+    continuation_start_observation_sha256: causalWire.continuationStarted.observationSha256,
+    terminal_observation_sha256: causalWire.terminal.observationSha256,
+    continuation_response_id_sha256: continuationResponseIdSha256,
+  });
+  expect(inputAudioEvidence).not.toBeNull();
+  expect(outputAudioEvidence).not.toBeNull();
   const replaySummary = Object.freeze({
     schema_version: 1 as const,
     provider: input.provider,
@@ -369,6 +475,8 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     }),
     terminal: Object.freeze({ observation_sha256: causalWire.terminal.observationSha256, response_id_sha256: continuationResponseIdSha256, status: "completed" as const }),
     usage: Object.freeze({ evidence_sha256: roundtripSanitizedUsageSha256(sanitizedUsage), response_id_sha256: continuationResponseIdSha256 }),
+    input_audio: inputAudioEvidence!,
+    output_audio: outputAudioEvidence!,
   });
   const replay = replayProviderToolRoundtrip({
     expected: { provider: input.provider, model: input.model },
@@ -376,8 +484,8 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   expect(replay.valid, replay.errors.join(", ")).toBe(true);
   const body = Object.freeze({
-    schema_version: 2 as const,
-    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v5" as const,
+    schema_version: 3 as const,
+    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v6" as const,
     provider: input.provider,
     model: input.model,
     attempted_at: NOW.toISOString(),
@@ -390,10 +498,10 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
       delivery_profile_sha256: "3".repeat(64),
       audio_sha256: input.audioObject.sha256,
       audio_bytes: input.audioObject.byte_length,
-      chunk_count: 60,
-      frame_bytes: input.audioObject.sample_rate_hz * 20 / 1_000 * 2,
-      tail_bytes: input.audioObject.sample_rate_hz * 20 / 1_000 * 2,
-      scheduled_offsets_ms: Object.freeze(Array.from({ length: 60 }, (_, index) => index * 20)),
+      chunk_count: 1,
+      frame_bytes: input.audioObject.byte_length,
+      tail_bytes: input.audioObject.byte_length,
+      scheduled_offsets_ms: Object.freeze([0]),
     }),
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
@@ -403,8 +511,8 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     turn_boundary_mode: input.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
     server_vad_setting_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_SETTING_SHA256 : null,
     server_vad_transport_disclosure_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 : null,
-    transport_parity_sha256: input.provider === "xai" ? "b".repeat(64) : null,
-    tool_frontier_sha256: input.provider === "xai" ? realtimeToolFrontierSha256([LC4_S2S_TOOL]) : "c".repeat(64),
+    transport_parity_sha256: input.provider === "xai" ? xaiTransportParitySha256 : null,
+    tool_frontier_sha256: input.provider === "xai" ? xaiToolFrontierSha256 : "c".repeat(64),
     per_turn_session_update_observation_sha256: xaiWire?.control.observationSha256 ?? null,
     per_turn_session_ack_observation_sha256: xaiWire?.ack.observationSha256 ?? null,
     server_vad_speech_start_observation_sha256: xaiWire?.speechStart.observationSha256 ?? null,
@@ -423,6 +531,8 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     post_tool_usage_observed: true,
     provider_tool_call_evidence_sha256: "4".repeat(64),
     tool_result_evidence_sha256: "5".repeat(64),
+    input_audio_evidence: inputAudioEvidence,
+    output_audio_evidence: outputAudioEvidence,
     wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
     replay_summary: replaySummary,
@@ -437,7 +547,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   const execution = Object.freeze({
     ...body,
-    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(body)}`),
+    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(body)}`),
   });
   assertLc4S2sRoundtripExecution(execution);
   return execution;

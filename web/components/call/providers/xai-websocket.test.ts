@@ -197,6 +197,16 @@ async function settle() {
   await Promise.resolve();
 }
 
+function initializeXaiSession(socket: FakeWebSocket, id = "s-1") {
+  socket.open();
+  expect(socket.sent).toEqual([]);
+  socket.receive({ type: "session.created", session: { id } });
+  expect(JSON.parse(socket.sent[0])).toMatchObject({
+    type: "session.update",
+    session: { resumption: { enabled: false } },
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   FakeWebSocket.instances.length = 0;
@@ -212,21 +222,35 @@ describe("xAI browser transport", () => {
 
   it("verifies the acknowledged voice/audio/VAD boundary and reports unverifiable fields honestly", () => {
     const sent = buildXaiBrowserSessionUpdate(sessionUpdate());
-    expect(verifyXaiBrowserSessionAcknowledgement(acknowledged(), sent)).toEqual({
+    expect(verifyXaiBrowserSessionAcknowledgement(acknowledged(), sent, "s-1")).toEqual({
       acknowledgement: "session.updated",
       strictParityVerified: false,
-      verifiedFields: ["voice", "input_audio", "output_audio", "turn_detection", "resumption_disabled"],
-      unverifiableFields: ["model", "instructions", "tools"],
+      verifiedFields: ["voice", "input_audio_format", "output_audio_format", "turn_detection_type", "resumption_disabled"],
+      unverifiableFields: [
+        "model",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "input_audio_configuration_except_format",
+        "output_audio_configuration_except_format",
+        "turn_detection_parameters",
+      ],
+      sessionIdentity: {
+        source: "session.created",
+        updatedContinuity: "unverifiable_session_updated_omitted_identity",
+      },
     });
     expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({
       audio: {
         input: { format: { type: "audio/pcm", rate: 16_000 } },
         output: { format: { type: "audio/pcm", rate: 24_000 } },
       },
-    }), sent)).toThrow("audio.input.format.rate");
+    }), sent, "s-1")).toThrow("audio.input.format.rate");
     expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({
       resumption: { enabled: true },
-    }), sent)).toThrow("resumption.enabled");
+    }), sent, "s-1")).toThrow("resumption.enabled");
+    expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({ id: "s-other" }), sent, "s-1"))
+      .toThrow("session.id");
   });
 
   it("does not enable microphone delivery until session.updated passes verification", async () => {
@@ -239,9 +263,10 @@ describe("xAI browser transport", () => {
     await settle();
     const socket = FakeWebSocket.instances[0];
     socket.open();
-    expect(JSON.parse(socket.sent[0])).toMatchObject({ session: { resumption: { enabled: false } } });
+    expect(socket.sent).toEqual([]);
     expect(test.processor.onaudioprocess).toBeNull();
     socket.receive({ type: "session.created", session: { id: "s-1" } });
+    expect(JSON.parse(socket.sent[0])).toMatchObject({ session: { resumption: { enabled: false } } });
     expect(test.processor.onaudioprocess).toBeNull();
 
     socket.receive(acknowledged());
@@ -267,13 +292,53 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged({ voice: "wrong" }));
 
     await expect(started).rejects.toThrow("acknowledgement mismatch: voice");
     expect(test.processor.onaudioprocess).toBeNull();
     expect(socket.closeCode).toBe(1002);
     expect(transport.sessionReadinessEvidence).toBeNull();
+  });
+
+  it("does not send configuration when session.created omits its identity", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({ type: "session.created", session: {} });
+
+    await expect(started).rejects.toThrow("session.created omitted a valid session identity");
+    expect(socket.sent).toEqual([]);
+    expect(socket.closeCode).toBe(1002);
+  });
+
+  it("rejects session.updated before creation and duplicate session.created", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const early = harness();
+    const earlyTransport = new XaiWebSocketTransport();
+    const earlyStarted = earlyTransport.start(early.args);
+    await settle();
+    const earlySocket = FakeWebSocket.instances[0];
+    earlySocket.open();
+    earlySocket.receive(acknowledged());
+    await expect(earlyStarted).rejects.toThrow("before session.created initialized the session");
+    expect(earlySocket.sent).toEqual([]);
+
+    const duplicate = harness();
+    const duplicateTransport = new XaiWebSocketTransport();
+    const duplicateStarted = duplicateTransport.start(duplicate.args);
+    await settle();
+    const duplicateSocket = FakeWebSocket.instances[1];
+    initializeXaiSession(duplicateSocket, "s-original");
+    duplicateSocket.receive({ type: "session.created", session: { id: "s-replacement" } });
+    await expect(duplicateStarted).rejects.toThrow("duplicate session.created");
+    expect(duplicateSocket.closeCode).toBe(1002);
   });
 
   it("rejects provider output before acknowledgement and bounds post-ready messages", async () => {
@@ -284,7 +349,7 @@ describe("xAI browser transport", () => {
     const earlyStart = earlyTransport.start(early.args);
     await settle();
     const earlySocket = FakeWebSocket.instances[0];
-    earlySocket.open();
+    initializeXaiSession(earlySocket, "s-early");
     earlySocket.receive({ type: "response.audio.delta", delta: "AQAA" });
     await expect(earlyStart).rejects.toThrow("before session.updated verification");
 
@@ -293,7 +358,7 @@ describe("xAI browser transport", () => {
     const readyStart = readyTransport.start(ready.args);
     await settle();
     const readySocket = FakeWebSocket.instances[1];
-    readySocket.open();
+    initializeXaiSession(readySocket, "s-ready");
     readySocket.receive(acknowledged());
     await readyStart;
     readySocket.receive("{");
@@ -309,7 +374,7 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged());
     await started;
 
@@ -351,7 +416,7 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged());
     await started;
 
@@ -410,7 +475,7 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged());
     await started;
     socket.sent.length = 0;

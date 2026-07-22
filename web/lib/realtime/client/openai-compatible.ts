@@ -204,6 +204,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private responseGenerationRequested = false;
   private responseGenerationStarted = false;
   private responseTerminalObserved = false;
+  private initialSessionUpdateSent = false;
 
   constructor(options: OpenAICompatibleRealtimeClientOptions) {
     if (options.provider !== "openai" && options.provider !== "xai") {
@@ -832,11 +833,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
   private onSocketOpen(): void {
     if (this.currentState !== "connecting") return;
-    try {
-      this.sendRaw(this.sessionUpdate);
-    } catch (error) {
-      this.failConnection(errorMessage(error), "session_update_send_failed");
-    }
+    // xAI creates the session before accepting its initial configuration.
+    // OpenAI accepts session.update as soon as the socket opens.
+    if (this.provider === "openai") this.sendInitialSessionUpdate();
   }
 
   private onSocketMessage(data: unknown): void {
@@ -886,6 +885,31 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       return;
     }
 
+    if (
+      this.provider === "xai"
+      && this.currentState === "connecting"
+      && parsed.event.type === "session.updated"
+      && !this.initialSessionUpdateSent
+    ) {
+      const message = "xAI emitted session.updated before session.created initialized the session";
+      const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
+      this.emit({
+        type: "error",
+        provider: "xai",
+        receivedAtMs: this.now(),
+        wireType: "session.updated",
+        code: "session_ack_before_session_created",
+        message,
+        fatal: true,
+        ...optional(
+          "wireObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      this.failConnection(message, "session_ack_before_session_created", false);
+      return;
+    }
+
     const wireIdentityError = providerRedundantIdentityError(parsed.event)
       ?? this.admitProviderWireToolCallIdentities(parsed.event);
     if (wireIdentityError) {
@@ -911,6 +935,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (parsed.event.type === "session.created" || parsed.event.type === "session.updated") {
       try {
         const providerSessionId = acknowledgedSessionId(parsed.event);
+        if (
+          this.provider === "xai"
+          && parsed.event.type === "session.created"
+          && this.currentState === "connecting"
+          && providerSessionId === undefined
+        ) {
+          throw new Error("Provider xAI session.created omitted the session identity");
+        }
         if (
           providerSessionId !== undefined
           && this.providerSessionId !== undefined
@@ -1065,6 +1097,15 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       exactSerialized,
       configurationAcknowledgement,
     );
+
+    if (
+      this.provider === "xai"
+      && parsed.event.type === "session.created"
+      && this.currentState === "connecting"
+      && !this.initialSessionUpdateSent
+    ) {
+      if (!this.sendInitialSessionUpdate()) return;
+    }
 
     if (parsed.event.type === "session.updated"
       && this.pendingServerVadTurn?.phase === "awaiting_session_ack"
@@ -1780,6 +1821,19 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     for (const [callId, identity] of staged) this.providerWireToolCalls.set(callId, identity);
     for (const [itemId, callId] of stagedItemOwners) this.providerCallByItemId.set(itemId, callId);
     return undefined;
+  }
+
+  private sendInitialSessionUpdate(): boolean {
+    if (this.initialSessionUpdateSent) return true;
+    if (this.currentState !== "connecting") return false;
+    try {
+      this.sendRaw(this.sessionUpdate);
+      this.initialSessionUpdateSent = true;
+      return true;
+    } catch (error) {
+      this.failConnection(errorMessage(error), "session_update_send_failed");
+      return false;
+    }
   }
 
   private sendRaw(
@@ -2746,7 +2800,15 @@ function configurationFieldProof(
       }),
     });
   }
-  const projection = projectAcknowledgedValue(requested, acknowledged, field);
+  // Tool declarations and tool-choice policy are executable capability
+  // identity. Provider-added object keys, schema branches, or array members
+  // must never be hidden by the safe requested-key projection used for
+  // descriptive/non-capability session fields.
+  const projection = field === "tools"
+    ? projectToolCapabilityAcknowledgement(requested, acknowledged, field)
+    : field === "tool_choice"
+      ? projectExactCapabilityAcknowledgement(requested, acknowledged, field)
+      : projectAcknowledgedValue(requested, acknowledged, field);
   const acknowledgedSha256 = configurationHash(field, projection.value);
   if (projection.mismatched.length) {
     return Object.freeze({
@@ -2827,6 +2889,64 @@ function acknowledgedSessionId(event: Record<string, unknown>): string | undefin
 }
 
 type ProjectedAcknowledgement = { value: unknown; missing: string[]; mismatched: string[] };
+
+function projectExactCapabilityAcknowledgement(
+  requested: unknown,
+  acknowledged: unknown,
+  path: string,
+): ProjectedAcknowledgement {
+  return canonicalJson(requested) === canonicalJson(acknowledged)
+    ? { value: acknowledged, missing: [], mismatched: [] }
+    : { value: acknowledged, missing: [], mismatched: [path] };
+}
+
+function projectToolCapabilityAcknowledgement(
+  requested: unknown,
+  acknowledged: unknown,
+  path: string,
+): ProjectedAcknowledgement {
+  if (Array.isArray(requested)) {
+    if (!Array.isArray(acknowledged)) return { value: acknowledged, missing: [], mismatched: [path] };
+    if (requested.length !== acknowledged.length) return { value: acknowledged, missing: [], mismatched: [path] };
+    const values: unknown[] = [];
+    const missing: string[] = [];
+    const mismatched: string[] = [];
+    for (let index = 0; index < requested.length; index += 1) {
+      const projected = projectToolCapabilityAcknowledgement(requested[index], acknowledged[index], `${path}[${index}]`);
+      values.push(projected.value);
+      missing.push(...projected.missing);
+      mismatched.push(...projected.mismatched);
+    }
+    return { value: values, missing, mismatched };
+  }
+  if (isRecord(requested)) {
+    if (!isRecord(acknowledged)) return { value: acknowledged, missing: [], mismatched: [path] };
+    const value: Record<string, unknown> = {};
+    const missing: string[] = [];
+    const mismatched: string[] = [];
+    for (const key of Object.keys(requested).sort()) {
+      if (!(key in acknowledged)) {
+        missing.push(`${path}.${key}`);
+        continue;
+      }
+      const projected = projectToolCapabilityAcknowledgement(requested[key], acknowledged[key], `${path}.${key}`);
+      value[key] = projected.value;
+      missing.push(...projected.missing);
+      mismatched.push(...projected.mismatched);
+    }
+    for (const key of Object.keys(acknowledged).sort()) {
+      if (key in requested) continue;
+      value[key] = acknowledged[key];
+      mismatched.push(`${path}.${key}`);
+    }
+    return { value, missing, mismatched };
+  }
+  return {
+    value: acknowledged,
+    missing: [],
+    mismatched: canonicalJson(requested) === canonicalJson(acknowledged) ? [] : [path],
+  };
+}
 
 function projectAcknowledgedValue(
   requested: unknown,

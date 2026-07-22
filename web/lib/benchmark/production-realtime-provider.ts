@@ -138,7 +138,7 @@ export function productionOpenAiCompatibleSessionUpdate(
           voice: spec.voice,
           instructions: configuration.instructions,
           turn_detection: LC4_XAI_SERVER_VAD,
-          audio: { input: { transcription: null }, output: {} },
+          audio: { input: {}, output: {} },
           tools: configuration.providerTools,
           tool_choice: "auto",
         },

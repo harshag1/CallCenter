@@ -423,7 +423,7 @@ function createClient(provider: LiveStsProvider, configuration: TrialSessionConf
           voice: spec.voice,
           instructions: configuration.instructions,
           turn_detection: { type: null },
-          audio: { input: { transcription: null }, output: {} },
+          audio: { input: {}, output: {} },
           tools: configuration.providerTools,
           tool_choice: "auto",
         },

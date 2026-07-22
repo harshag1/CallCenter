@@ -13,10 +13,10 @@ import type {
 import { LC4_XAI_SERVER_VAD_SHA256 } from "./xai-server-vad";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 
-export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 2 as const;
+export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 3 as const;
 export const PROVIDER_QUALIFICATION_MAX_AGE_MS = 30 * 60_000;
 const MAX_CLOCK_SKEW_MS = 2 * 60_000;
-const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v2";
+const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification/v3";
 const MATRIX_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification-matrix/v1";
 const RESPONSE_CANARY_HASH_DOMAIN = "harshas-amazing-call-center/provider-response-tool-canary/v1";
 export const XAI_SERVER_VAD_SETTING_SHA256 = LC4_XAI_SERVER_VAD_SHA256;
@@ -25,16 +25,22 @@ export const XAI_SERVER_VAD_OMITTED_PATHS = Object.freeze([
   "turn_detection.threshold",
   "turn_detection.silence_duration_ms",
   "turn_detection.prefix_padding_ms",
-  "turn_detection.idle_timeout_ms",
 ]);
 const XAI_SERVER_VAD_OMITTED_PATH_SET = new Set(XAI_SERVER_VAD_OMITTED_PATHS);
-const XAI_SERVER_VAD_SESSION_OMITTED_PATH_SET = new Set(
-  XAI_SERVER_VAD_OMITTED_PATHS.map((path) => `session.${path}`),
-);
+export const XAI_GATEWAY_TOOL_OMITTED_PATHS = Object.freeze([
+  "tools[0].description",
+  "tools[0].name",
+  "tools[0].parameters",
+]);
+const XAI_GATEWAY_TOOL_OMITTED_PATH_SET = new Set(XAI_GATEWAY_TOOL_OMITTED_PATHS);
 export const XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256 = sha256Hex(
-  `harshas-amazing-call-center/xai-server-vad-conditional-policy/v1\n${canonicalJson({
+  `harshas-amazing-call-center/xai-server-vad-conditional-policy/v2\n${canonicalJson({
     allowedOmittedPaths: [...XAI_SERVER_VAD_OMITTED_PATHS].sort(),
-    nonTurnFields: ["model", "voice", "instructions", "tools", "tool_choice", "input_audio", "output_audio"],
+    allowedGatewayToolOmittedPaths: [...XAI_GATEWAY_TOOL_OMITTED_PATHS].sort(),
+    exactMutableEchoFields: ["model", "instructions", "tool_choice", "input_audio", "output_audio"],
+    createdSnapshotOnlyAllowedFields: ["voice"],
+    gatewayConstraint: "exactly_one_function_capability_gateway",
+    evidenceAggregation: "per_field_only_no_independent_whole_session_gate",
     explicitContradictionsFatal: true,
     promotion: "ordered_provider_native_vad_lifecycle",
   })}`,
@@ -47,6 +53,11 @@ export type ProviderSetupWireEvidence = Readonly<{
   acknowledgementWireType: "session.updated" | "setupComplete";
   requestObservationSha256: string;
   acknowledgementObservationSha256: string;
+  sessionIdentity?: Readonly<{
+    createdSessionIdSha256: string | null;
+    updatedSessionIdSha256: string | null;
+    status: "verified" | "unverifiable";
+  }>;
   observations: readonly RealtimeWireObservation[];
 }>;
 
@@ -60,6 +71,7 @@ export type ProviderQualificationCode =
   | "configuration_echo_verified"
   | "configuration_accepted_partial_echo"
   | "acknowledged_unverifiable_server_vad"
+  | "initial_snapshot_exact_only"
   | "setup_accepted_without_field_echo"
   | "credential_missing"
   | "unauthenticated"
@@ -79,15 +91,29 @@ export type ProviderQualificationResult = Readonly<{
   completedAt: string;
   status: "passed" | "failed";
   code: ProviderQualificationCode;
-  acknowledgementMode: "exact_provider_echo" | "partial_provider_echo" | "conditional_server_vad_echo" | "setup_complete_no_field_echo" | "none";
+  acknowledgementMode: "exact_provider_echo" | "partial_provider_echo" | "conditional_server_vad_echo" | "initial_snapshot_exact_only" | "setup_complete_no_field_echo" | "none";
   acknowledgementSha256: string | null;
   toolSchemaVerification: "verified_by_provider_echo" | "requires_paid_response_canary" | "not_requested";
   turnBoundaryVerification: "verified_by_provider_echo" | "requires_paid_behavioral_canary" | "not_verified" | "not_applicable";
   turnBoundaryEvidence?: Readonly<{
     requestedSettingSha256: typeof XAI_SERVER_VAD_SETTING_SHA256;
-    acknowledgement: "verified_echo" | "bounded_server_vad_omission";
+    acknowledgement: "verified_echo" | "bounded_server_vad_omission" | "initial_snapshot_exact_only";
     omittedPaths: readonly string[];
     acknowledgedShape: "verified_value" | "empty_object" | "partial_value";
+  }>;
+  toolBoundaryEvidence?: Readonly<{
+    requestedToolCount: 1;
+    acknowledgedToolCount: 1;
+    exactFunctionTypeVerified: true;
+    omittedPaths: readonly string[];
+    verification: "bounded_gateway_metadata_omission_requires_paid_exact_call";
+  }>;
+  initialConfigurationEvidence?: Readonly<{
+    observationSha256: string;
+    connectionEpoch: number;
+    exactFields: readonly string[];
+    scope: "provider_created_defaults_before_client_update";
+    claimBoundary: "matching_initial_snapshot_does_not_acknowledge_later_session_update";
   }>;
   configurationEvidence?: SessionConfigurationAcknowledgement;
   setupWireEvidence?: ProviderSetupWireEvidence;
@@ -250,16 +276,40 @@ function setupWireEvidence(observations: readonly RealtimeWireObservation[]): Pr
   if (observations.some((observation) => observation.provider !== provider)) return null;
   const requestWireType = provider === "gemini" ? "setup" as const : "session.update" as const;
   const acknowledgementWireType = provider === "gemini" ? "setupComplete" as const : "session.updated" as const;
-  const outbound = observations.find((observation) => (
+  const outboundCandidates = observations.filter((observation) => (
     observation.direction === "outbound" && observation.wireType === requestWireType
   ));
-  const inbound = observations.find((observation) => (
+  const inboundCandidates = observations.filter((observation) => (
     observation.direction === "inbound" && observation.wireType === acknowledgementWireType
-      && outbound !== undefined
-      && observation.connectionEpoch === outbound.connectionEpoch
-      && observation.sequence > outbound.sequence
   ));
+  if (outboundCandidates.length !== 1 || inboundCandidates.length !== 1) return null;
+  const outbound = outboundCandidates[0]!;
+  const inbound = inboundCandidates[0]!;
+  if (inbound.connectionEpoch !== outbound.connectionEpoch || inbound.sequence <= outbound.sequence) return null;
   if (!outbound || !inbound) return null;
+  let sessionIdentity: ProviderSetupWireEvidence["sessionIdentity"];
+  if (provider === "xai") {
+    const createdCandidates = observations.filter((observation) => (
+      observation.direction === "inbound"
+        && observation.wireType === "session.created"
+        && observation.connectionEpoch === outbound.connectionEpoch
+    ));
+    if (createdCandidates.length !== 1) return null;
+    const created = createdCandidates[0]!;
+    if (created.sequence >= outbound.sequence) return null;
+    const createdSessionIdSha256 = created.identities.sessionIdSha256 ?? null;
+    const updatedSessionIdSha256 = inbound.identities.sessionIdSha256 ?? null;
+    if (createdSessionIdSha256 !== null
+      && updatedSessionIdSha256 !== null
+      && createdSessionIdSha256 !== updatedSessionIdSha256) return null;
+    sessionIdentity = Object.freeze({
+      createdSessionIdSha256,
+      updatedSessionIdSha256,
+      status: createdSessionIdSha256 !== null && updatedSessionIdSha256 !== null
+        ? "verified" as const
+        : "unverifiable" as const,
+    });
+  }
   return Object.freeze({
     provider,
     connectionEpoch: outbound.connectionEpoch,
@@ -267,6 +317,7 @@ function setupWireEvidence(observations: readonly RealtimeWireObservation[]): Pr
     acknowledgementWireType,
     requestObservationSha256: outbound.observationSha256,
     acknowledgementObservationSha256: inbound.observationSha256,
+    ...(sessionIdentity === undefined ? {} : { sessionIdentity }),
     observations: Object.freeze([...observations]),
   });
 }
@@ -282,10 +333,34 @@ function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
   const inbound = evidence.observations.find((observation) => (
     observation.observationSha256 === evidence.acknowledgementObservationSha256
   ));
+  const exactRequestCount = evidence.observations.filter((observation) => (
+    observation.direction === "outbound" && observation.wireType === expectedRequest
+  )).length;
+  const exactAcknowledgementCount = evidence.observations.filter((observation) => (
+    observation.direction === "inbound" && observation.wireType === expectedAcknowledgement
+  )).length;
+  const validXaiCreated = evidence.provider !== "xai" || (() => {
+    const created = evidence.observations.filter((observation) => (
+      observation.direction === "inbound" && observation.wireType === "session.created"
+    ));
+    if (created.length !== 1 || outbound === undefined || inbound === undefined) return false;
+    const createdId = created[0]!.identities.sessionIdSha256 ?? null;
+    const updatedId = inbound.identities.sessionIdSha256 ?? null;
+    const status = createdId !== null && updatedId !== null ? "verified" : "unverifiable";
+    return created[0]!.connectionEpoch === evidence.connectionEpoch
+      && created[0]!.sequence < outbound.sequence
+      && (createdId === null || updatedId === null || createdId === updatedId)
+      && evidence.sessionIdentity?.createdSessionIdSha256 === createdId
+      && evidence.sessionIdentity?.updatedSessionIdSha256 === updatedId
+      && evidence.sessionIdentity?.status === status;
+  })();
   return evidence.requestWireType === expectedRequest
     && evidence.acknowledgementWireType === expectedAcknowledgement
     && evidence.observations.every((observation) => observation.provider === evidence.provider)
     && evidence.observations.every((observation) => observation.connectionEpoch === 1)
+    && exactRequestCount === 1
+    && exactAcknowledgementCount === 1
+    && validXaiCreated
     && outbound?.direction === "outbound"
     && outbound.wireType === expectedRequest
     && inbound?.direction === "inbound"
@@ -293,6 +368,55 @@ function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
     && outbound.connectionEpoch === evidence.connectionEpoch
     && inbound.connectionEpoch === evidence.connectionEpoch
     && outbound.sequence < inbound.sequence;
+}
+
+type SessionWireProjection = Readonly<{
+  fieldSha256?: Readonly<Record<string, string>>;
+  toolCount?: number;
+}>;
+
+function sessionProjection(observation: RealtimeWireObservation | undefined): SessionWireProjection | null {
+  if (observation === undefined || typeof observation.projection.session !== "object" || observation.projection.session === null) {
+    return null;
+  }
+  return observation.projection.session as SessionWireProjection;
+}
+
+function initialConfigurationEvidence(
+  wire: ProviderSetupWireEvidence,
+  acknowledgement: SessionConfigurationAcknowledgement,
+): ProviderQualificationResult["initialConfigurationEvidence"] {
+  const created = wire.observations.find((observation) => (
+    observation.direction === "inbound"
+      && observation.wireType === "session.created"
+      && observation.connectionEpoch === wire.connectionEpoch
+      && observation.sequence < wire.observations.find((candidate) => (
+        candidate.observationSha256 === wire.acknowledgementObservationSha256
+      ))!.sequence
+  ));
+  const fields = sessionProjection(created)?.fieldSha256;
+  if (created === undefined || fields === undefined) return undefined;
+  const exactFields = Object.entries(acknowledgement.fields)
+    .filter(([field, proof]) => proof.requestedSha256 !== undefined && fields[field] === proof.requestedSha256)
+    .map(([field]) => field)
+    .sort();
+  return Object.freeze({
+    observationSha256: created.observationSha256,
+    connectionEpoch: created.connectionEpoch,
+    exactFields: Object.freeze(exactFields),
+    scope: "provider_created_defaults_before_client_update" as const,
+    claimBoundary: "matching_initial_snapshot_does_not_acknowledge_later_session_update" as const,
+  });
+}
+
+function exactGatewayTarget(target: ProviderQualificationTarget): boolean {
+  if (target.configuration.providerTools.length !== 1) return false;
+  const tool = target.configuration.providerTools[0];
+  return typeof tool === "object"
+    && tool !== null
+    && !Array.isArray(tool)
+    && (tool as Record<string, unknown>).type === "function"
+    && (tool as Record<string, unknown>).name === "capability_gateway";
 }
 
 function acknowledgementResult(
@@ -353,9 +477,7 @@ function acknowledgementResult(
   if (target.provider === "xai") {
     const requiredEchoes = ([
       "model",
-      "voice",
       "instructions",
-      "tools",
       "tool_choice",
       "input_audio",
       "output_audio",
@@ -365,24 +487,41 @@ function acknowledgementResult(
       && turnBoundaryProof.omission?.kind === "requested_paths_omitted"
       ? boundedOmission(turnBoundaryProof.omission.paths, XAI_SERVER_VAD_OMITTED_PATH_SET)
       : null;
-    const sessionOmissions = acknowledgement.session?.status === "unverifiable"
-      && acknowledgement.session.omission?.kind === "requested_paths_omitted"
-      ? boundedOmission(
-          acknowledgement.session.omission.paths,
-          XAI_SERVER_VAD_SESSION_OMITTED_PATH_SET,
-        )
+    const toolProof = acknowledgement.fields.tools;
+    const omittedToolPaths = toolProof.status === "unverifiable"
+      && toolProof.omission?.kind === "requested_paths_omitted"
+      ? boundedOmission(toolProof.omission.paths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET)
       : null;
-    const conditionalServerVad = omittedTurnPaths !== null
-      && sessionOmissions !== null
-      && canonicalJson(sessionOmissions.map((path) => path.slice("session.".length))) === canonicalJson(omittedTurnPaths)
-      && turnBoundaryProof.contradiction === undefined
-      && acknowledgement.session?.contradiction === undefined;
     const wireEvidence = observedWireEvidence;
+    const acknowledgedObservation = wireEvidence?.observations.find((observation) => (
+      observation.observationSha256 === wireEvidence.acknowledgementObservationSha256
+    ));
+    const acknowledgedToolCount = sessionProjection(acknowledgedObservation)?.toolCount;
+    const boundedGatewayToolOmission = omittedToolPaths !== null
+      && exactGatewayTarget(target)
+      && acknowledgedToolCount === 1
+      && toolProof.contradiction === undefined;
+    const conditionalServerVad = omittedTurnPaths !== null
+      && turnBoundaryProof.contradiction === undefined;
+    const initialEvidence = wireEvidence === null
+      ? undefined
+      : initialConfigurationEvidence(wireEvidence, acknowledgement);
+    const initialTurnExact = initialEvidence?.exactFields.includes("turn_detection") ?? false;
+    const voiceProof = acknowledgement.fields.voice;
+    const initialVoiceExact = initialEvidence?.exactFields.includes("voice") ?? false;
+    const voiceAccepted = voiceProof.status === "verified"
+      || (voiceProof.status === "unverifiable"
+        && initialVoiceExact
+        && voiceProof.contradiction === undefined);
+    const toolAccepted = toolProof.status === "verified"
+      || (toolProof.status === "not_requested" && target.configuration.providerTools.length === 0)
+      || boundedGatewayToolOmission;
     if (
       readyEvent.wireType !== "session.updated"
       || requiredEchoes.some((field) => field.status !== "verified")
+      || !voiceAccepted
+      || !toolAccepted
       || (turnBoundaryProof.status !== "verified" && !conditionalServerVad)
-      || (acknowledgement.session?.status !== "verified" && !conditionalServerVad)
       || wireEvidence === null
     ) {
       return {
@@ -396,23 +535,49 @@ function acknowledgementResult(
         ...(wireEvidence === null ? {} : { setupWireEvidence: wireEvidence }),
       };
     }
-    if (conditionalServerVad) {
+    const toolBoundaryEvidence = boundedGatewayToolOmission
+      ? Object.freeze({
+          requestedToolCount: 1 as const,
+          acknowledgedToolCount: 1 as const,
+          exactFunctionTypeVerified: true as const,
+          omittedPaths: omittedToolPaths,
+          verification: "bounded_gateway_metadata_omission_requires_paid_exact_call" as const,
+        })
+      : undefined;
+    if (conditionalServerVad || voiceProof.status !== "verified") {
+      const initialSnapshotRequired = initialTurnExact || voiceProof.status !== "verified";
       return {
         status: "passed",
-        code: "acknowledged_unverifiable_server_vad",
-        acknowledgementMode: "conditional_server_vad_echo",
+        code: initialSnapshotRequired
+          ? "initial_snapshot_exact_only"
+          : "acknowledged_unverifiable_server_vad",
+        acknowledgementMode: initialSnapshotRequired
+          ? "initial_snapshot_exact_only"
+          : "conditional_server_vad_echo",
         acknowledgementSha256: digest,
-        toolSchemaVerification: "verified_by_provider_echo",
+        toolSchemaVerification: boundedGatewayToolOmission
+          ? "requires_paid_response_canary"
+          : target.configuration.providerTools.length === 0
+            ? "not_requested"
+            : "verified_by_provider_echo",
         turnBoundaryVerification: "requires_paid_behavioral_canary",
         configurationEvidence: acknowledgement,
         setupWireEvidence: wireEvidence,
+        ...(initialEvidence === undefined ? {} : { initialConfigurationEvidence: initialEvidence }),
+        ...(toolBoundaryEvidence === undefined ? {} : { toolBoundaryEvidence }),
         turnBoundaryEvidence: Object.freeze({
           requestedSettingSha256: XAI_SERVER_VAD_SETTING_SHA256,
-          acknowledgement: "bounded_server_vad_omission" as const,
-          omittedPaths: omittedTurnPaths,
-          acknowledgedShape: turnBoundaryProof.omission!.acknowledgedShape === "empty_object"
-            ? "empty_object" as const
-            : "partial_value" as const,
+          acknowledgement: conditionalServerVad
+            ? initialTurnExact
+              ? "initial_snapshot_exact_only" as const
+              : "bounded_server_vad_omission" as const
+            : "verified_echo" as const,
+          omittedPaths: conditionalServerVad ? omittedTurnPaths! : Object.freeze([]),
+          acknowledgedShape: conditionalServerVad
+            ? turnBoundaryProof.omission!.acknowledgedShape === "empty_object"
+              ? "empty_object" as const
+              : "partial_value" as const
+            : "verified_value" as const,
         }),
       };
     }
@@ -427,9 +592,11 @@ function acknowledgementResult(
       acknowledgementSha256: digest,
       configurationEvidence: acknowledgement,
       setupWireEvidence: wireEvidence,
+      ...(initialEvidence === undefined ? {} : { initialConfigurationEvidence: initialEvidence }),
+      ...(toolBoundaryEvidence === undefined ? {} : { toolBoundaryEvidence }),
       toolSchemaVerification: target.configuration.providerTools.length === 0
         ? "not_requested"
-        : acknowledgement.fields.tools.status === "verified"
+        : toolProof.status === "verified"
           ? "verified_by_provider_echo"
           : "requires_paid_response_canary",
       turnBoundaryVerification: "verified_by_provider_echo",
@@ -582,22 +749,65 @@ export function assertProviderQualificationArtifactIntegrity(
     throw new Error("provider qualification aggregate status is inconsistent");
   }
   for (const result of artifact.results) {
-    const conditionalServerVad = result.code === "acknowledged_unverifiable_server_vad";
+    const conditionalServerVad = result.code === "acknowledged_unverifiable_server_vad"
+      || result.code === "initial_snapshot_exact_only";
     if (conditionalServerVad !== (result.provider === "xai"
       && result.status === "passed"
-      && result.acknowledgementMode === "conditional_server_vad_echo"
+      && (result.acknowledgementMode === "conditional_server_vad_echo"
+        || result.acknowledgementMode === "initial_snapshot_exact_only")
       && result.turnBoundaryVerification === "requires_paid_behavioral_canary")) {
       throw new Error("provider qualification server-VAD classification is inconsistent");
     }
     if (conditionalServerVad && (
       result.turnBoundaryEvidence?.requestedSettingSha256 !== XAI_SERVER_VAD_SETTING_SHA256
-      || result.turnBoundaryEvidence.acknowledgement !== "bounded_server_vad_omission"
+      || (result.turnBoundaryEvidence.acknowledgement !== "bounded_server_vad_omission"
+        && result.turnBoundaryEvidence.acknowledgement !== "initial_snapshot_exact_only")
       || boundedOmission(result.turnBoundaryEvidence.omittedPaths, XAI_SERVER_VAD_OMITTED_PATH_SET) === null
       || result.configurationEvidence === undefined
       || result.setupWireEvidence === undefined
       || result.acknowledgementSha256 !== acknowledgementSha256(result.configurationEvidence)
       || !validSetupWireEvidence(result.setupWireEvidence)
     )) throw new Error("provider qualification server-VAD omission evidence is inconsistent");
+    if ((result.code === "initial_snapshot_exact_only") !== (
+      result.acknowledgementMode === "initial_snapshot_exact_only"
+      && result.turnBoundaryEvidence?.acknowledgement === "initial_snapshot_exact_only"
+      && result.initialConfigurationEvidence?.exactFields.includes("turn_detection") === true
+      && result.initialConfigurationEvidence.scope === "provider_created_defaults_before_client_update"
+      && result.initialConfigurationEvidence.claimBoundary === "matching_initial_snapshot_does_not_acknowledge_later_session_update"
+      && result.setupWireEvidence !== undefined
+      && result.configurationEvidence !== undefined
+      && canonicalJson(result.initialConfigurationEvidence) === canonicalJson(initialConfigurationEvidence(
+        result.setupWireEvidence,
+        result.configurationEvidence,
+      ))
+    )) throw new Error("provider qualification initial-exact evidence is inconsistent");
+    const retainedToolProof = result.configurationEvidence?.fields.tools;
+    const retainedToolOmissions = retainedToolProof?.status === "unverifiable"
+      && retainedToolProof.omission?.kind === "requested_paths_omitted"
+      ? boundedOmission(retainedToolProof.omission.paths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET)
+      : null;
+    const acknowledgementObservation = result.setupWireEvidence?.observations.find((observation) => (
+      observation.observationSha256 === result.setupWireEvidence?.acknowledgementObservationSha256
+    ));
+    if (result.toolBoundaryEvidence !== undefined && (
+      result.provider !== "xai"
+      || result.status !== "passed"
+      || result.toolSchemaVerification !== "requires_paid_response_canary"
+      || result.toolBoundaryEvidence.requestedToolCount !== 1
+      || result.toolBoundaryEvidence.acknowledgedToolCount !== 1
+      || result.toolBoundaryEvidence.exactFunctionTypeVerified !== true
+      || result.toolBoundaryEvidence.verification !== "bounded_gateway_metadata_omission_requires_paid_exact_call"
+      || boundedOmission(result.toolBoundaryEvidence.omittedPaths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET) === null
+      || canonicalJson(result.toolBoundaryEvidence.omittedPaths) !== canonicalJson(retainedToolOmissions)
+      || sessionProjection(acknowledgementObservation)?.toolCount !== 1
+      || retainedToolProof?.contradiction !== undefined
+    )) throw new Error("provider qualification gateway-tool omission evidence is inconsistent");
+    if (result.provider === "xai"
+      && result.status === "passed"
+      && retainedToolOmissions !== null
+      && result.toolBoundaryEvidence === undefined) {
+      throw new Error("provider qualification omitted gateway-tool risk evidence");
+    }
     if (result.provider === "xai"
       && result.status === "passed"
       && result.turnBoundaryVerification !== "verified_by_provider_echo"
@@ -628,13 +838,18 @@ export async function qualifyProviders(input: QualifyInput): Promise<ProviderQua
     list.push(target);
     targetsByProvider.set(target.provider, list);
   }
-  const providerResults = await Promise.all([...targetsByProvider.entries()].map(async ([provider, targets]) => {
+  const providerResults: ProviderQualificationResult[][] = [];
+  // Provider admission is intentionally serialized in caller-supplied target
+  // order. Qualification runners re-check signed expiry and evidence-root
+  // identity in createClient; parallel admission would make the first admitted
+  // provider scheduler-dependent and could admit peers after one check expires.
+  for (const [provider, targets] of targetsByProvider.entries()) {
     const results: ProviderQualificationResult[] = [];
     for (const target of targets) {
       results.push(await qualifyTarget(target, input.credentials[provider], input.createClient, now));
     }
-    return results;
-  }));
+    providerResults.push(results);
+  }
   const results = Object.freeze(providerResults.flat().sort((left, right) => (
     left.provider.localeCompare(right.provider)
     || left.model.localeCompare(right.model)

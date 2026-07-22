@@ -9,7 +9,10 @@ import {
   type ProviderQualificationTarget,
 } from "../provider-qualification";
 import { canonicalJson, sha256Hex } from "../artifacts";
-import { createProductionRealtimeClient } from "../production-realtime-provider";
+import {
+  createProductionRealtimeClient,
+  productionOpenAiCompatibleSessionUpdate,
+} from "../production-realtime-provider";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -103,7 +106,6 @@ function xaiEmptyServerVadAcknowledgement(): SessionConfigurationAcknowledgement
       omission: Object.freeze({
         kind: "requested_paths_omitted" as const,
         paths: Object.freeze([
-          "session.turn_detection.idle_timeout_ms",
           "session.turn_detection.prefix_padding_ms",
           "session.turn_detection.silence_duration_ms",
           "session.turn_detection.threshold",
@@ -123,7 +125,6 @@ function xaiEmptyServerVadAcknowledgement(): SessionConfigurationAcknowledgement
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
           paths: Object.freeze([
-            "turn_detection.idle_timeout_ms",
             "turn_detection.prefix_padding_ms",
             "turn_detection.silence_duration_ms",
             "turn_detection.threshold",
@@ -169,6 +170,32 @@ function targets(withTool = false): readonly ProviderQualificationTarget[] {
   ]);
 }
 
+describe("production xAI session payload", () => {
+  it("retains the pinned voice while omitting unsupported null controls", () => {
+    const update = productionOpenAiCompatibleSessionUpdate(
+      "xai",
+      configuration("xai", "grok-voice-think-fast-1.0", true),
+    );
+    expect(update).toMatchObject({
+      type: "session.update",
+      session: {
+        voice: "ara",
+        audio: { input: {}, output: {} },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.85,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 333,
+        },
+      },
+    });
+    const session = update.session as Record<string, unknown>;
+    const audio = session.audio as Record<string, unknown>;
+    expect(audio.input as Record<string, unknown>).not.toHaveProperty("transcription");
+    expect(session.turn_detection as Record<string, unknown>).not.toHaveProperty("idle_timeout_ms");
+  });
+});
+
 class QualificationClient implements NormalizedRealtimeClient {
   readonly provider;
   state: "idle" | "ready" | "closed" = "idle";
@@ -178,6 +205,14 @@ class QualificationClient implements NormalizedRealtimeClient {
   readonly #error: Error | null;
   readonly #markReady: boolean;
   readonly #wireEpochs: Readonly<{ outbound: number; inbound: number }>;
+  readonly #wireProjection: Readonly<{
+    initialFieldSha256?: Readonly<Record<string, string>>;
+    acknowledgedToolCount?: number;
+    createdSessionIdSha256?: string | null;
+    updatedSessionIdSha256?: string | null;
+    preRequestUpdated?: boolean;
+    duplicateUpdated?: boolean;
+  }>;
   closeCalls = 0;
   forbiddenCalls = 0;
 
@@ -187,11 +222,20 @@ class QualificationClient implements NormalizedRealtimeClient {
     markReady = true,
     acknowledgement?: SessionConfigurationAcknowledgement,
     wireEpochs: Readonly<{ outbound: number; inbound: number }> = Object.freeze({ outbound: 1 as number, inbound: 1 as number }),
+    wireProjection: Readonly<{
+      initialFieldSha256?: Readonly<Record<string, string>>;
+      acknowledgedToolCount?: number;
+      createdSessionIdSha256?: string | null;
+      updatedSessionIdSha256?: string | null;
+      preRequestUpdated?: boolean;
+      duplicateUpdated?: boolean;
+    }> = Object.freeze({}),
   ) {
     this.provider = target.provider;
     this.#error = error;
     this.#markReady = markReady;
     this.#wireEpochs = wireEpochs;
+    this.#wireProjection = wireProjection;
     this.sessionConfigurationAcknowledgement = acknowledgement ?? (target.provider === "gemini"
       ? geminiAcknowledgement()
       : target.provider === "xai"
@@ -207,8 +251,15 @@ class QualificationClient implements NormalizedRealtimeClient {
       const projection = Object.freeze({
         direction,
         wireType,
-        ...(direction === "inbound"
-          ? { session: { configurationEvidence: this.sessionConfigurationAcknowledgement } }
+        ...(direction === "inbound" && wireType === "session.created"
+          ? { session: { fieldSha256: this.#wireProjection.initialFieldSha256 ?? {} } }
+          : direction === "inbound"
+            ? { session: {
+                configurationEvidence: this.sessionConfigurationAcknowledgement,
+                ...(this.#wireProjection.acknowledgedToolCount === undefined
+                  ? {}
+                  : { toolCount: this.#wireProjection.acknowledgedToolCount }),
+              } }
           : {}),
       });
       const core = Object.freeze({
@@ -224,21 +275,45 @@ class QualificationClient implements NormalizedRealtimeClient {
         payloadBytes: 1,
         projectionSha256: realtimeWireProjectionSha256(projection),
         previousObservationSha256: predecessor,
-        identities: Object.freeze({}),
+        identities: Object.freeze(this.provider === "xai" && direction === "inbound"
+          ? wireType === "session.created"
+            ? (this.#wireProjection.createdSessionIdSha256 === null
+                ? {}
+                : { sessionIdSha256: this.#wireProjection.createdSessionIdSha256 ?? H("8") })
+            : wireType === "session.updated"
+              ? (this.#wireProjection.updatedSessionIdSha256 === null
+                  ? {}
+                  : { sessionIdSha256: this.#wireProjection.updatedSessionIdSha256 ?? H("8") })
+              : {}
+          : {}),
         projection,
       });
       const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
       predecessor = observation.observationSha256;
       return observation;
     };
+    let sequence = 1;
+    if (this.provider === "xai") {
+      for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.created"));
+      sequence += 1;
+      if (this.#wireProjection.preRequestUpdated) {
+        for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.updated"));
+        sequence += 1;
+      }
+    }
     for (const listener of this.#wireListeners) listener(wire(
       "outbound",
-      1,
+      sequence,
       this.provider === "gemini" ? "setup" : "session.update",
     ));
+    if (this.provider === "xai" && this.#wireProjection.duplicateUpdated) {
+      sequence += 1;
+      for (const listener of this.#wireListeners) listener(wire("inbound", sequence, "session.updated"));
+    }
+    sequence += 1;
     for (const listener of this.#wireListeners) listener(wire(
       "inbound",
-      2,
+      sequence,
       this.provider === "gemini" ? "setupComplete" : "session.updated",
     ));
     const event = Object.freeze({
@@ -337,7 +412,6 @@ describe("provider qualification", () => {
     });
     expect(artifact.results.find((result) => result.provider === "xai")?.turnBoundaryEvidence?.omittedPaths)
       .toEqual([
-        "turn_detection.idle_timeout_ms",
         "turn_detection.prefix_padding_ms",
         "turn_detection.silence_duration_ms",
         "turn_detection.threshold",
@@ -470,6 +544,7 @@ describe("provider qualification", () => {
       qualificationId: string,
       acknowledgement: SessionConfigurationAcknowledgement,
       epochs: Readonly<{ outbound: number; inbound: number }> = Object.freeze({ outbound: 1, inbound: 1 }),
+      wireProjection: ConstructorParameters<typeof QualificationClient>[5] = Object.freeze({}),
     ) => qualifyProviders({
       ...prepared.input,
       qualificationId,
@@ -479,6 +554,7 @@ describe("provider qualification", () => {
         true,
         target.provider === "xai" ? acknowledgement : undefined,
         epochs,
+        target.provider === "xai" ? wireProjection : undefined,
       ),
     });
 
@@ -486,6 +562,19 @@ describe("provider qualification", () => {
     expect(subset.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "passed",
       code: "acknowledged_unverifiable_server_vad",
+    });
+
+    const independentlyWrongSessionAggregate = await qualify(
+      "xai-server-vad-derived-field-aggregate",
+      withPaths(
+        ["turn_detection.type"],
+        ["session.this_is_not_an_independent_acknowledgement_gate"],
+      ),
+    );
+    expect(independentlyWrongSessionAggregate.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "acknowledged_unverifiable_server_vad",
+      turnBoundaryEvidence: { omittedPaths: ["turn_detection.type"] },
     });
 
     const superset = await qualify("xai-server-vad-superset", withPaths([
@@ -525,6 +614,193 @@ describe("provider qualification", () => {
       Object.freeze({ outbound: 1, inbound: 2 }),
     );
     expect(crossEpoch.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+    });
+
+    for (const [qualificationId, wireProjection] of [
+      ["xai-pre-request-updated", Object.freeze({ preRequestUpdated: true })],
+      ["xai-duplicate-updated", Object.freeze({ duplicateUpdated: true })],
+      ["xai-session-identity-mismatch", Object.freeze({ updatedSessionIdSha256: H("7") })],
+    ] as const) {
+      const malformed = await qualify(
+        qualificationId,
+        base,
+        Object.freeze({ outbound: 1, inbound: 1 }),
+        wireProjection,
+      );
+      expect(malformed.results.find((result) => result.provider === "xai"), qualificationId).toMatchObject({
+        status: "failed",
+        code: "acknowledgement_incomplete",
+      });
+    }
+
+    const identityUnverifiable = await qualify(
+      "xai-session-identity-unverifiable",
+      base,
+      Object.freeze({ outbound: 1, inbound: 1 }),
+      Object.freeze({ createdSessionIdSha256: null, updatedSessionIdSha256: null }),
+    );
+    expect(identityUnverifiable.results.find((result) => result.provider === "xai")?.setupWireEvidence)
+      .toMatchObject({ sessionIdentity: { status: "unverifiable" } });
+  });
+
+  it("retains matching session.created defaults without laundering the lossy session.updated acknowledgement", async () => {
+    const prepared = await setup();
+    const acknowledgement = xaiEmptyServerVadAcknowledgement();
+    const artifact = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-created-default-update-lossy",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? acknowledgement : undefined,
+        Object.freeze({ outbound: 1, inbound: 1 }),
+        target.provider === "xai"
+          ? Object.freeze({ initialFieldSha256: Object.freeze({ turn_detection: H("c") }) })
+          : undefined,
+      ),
+    });
+    expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "initial_snapshot_exact_only",
+      acknowledgementMode: "initial_snapshot_exact_only",
+      turnBoundaryVerification: "requires_paid_behavioral_canary",
+      turnBoundaryEvidence: {
+        acknowledgement: "initial_snapshot_exact_only",
+      },
+      initialConfigurationEvidence: {
+        exactFields: ["turn_detection"],
+        scope: "provider_created_defaults_before_client_update",
+        claimBoundary: "matching_initial_snapshot_does_not_acknowledge_later_session_update",
+      },
+    });
+    expect(artifact.status).toBe("conditional");
+  });
+
+  it("keeps an omitted post-update voice unverifiable even when the created default matches", async () => {
+    const prepared = await setup();
+    const base = xaiEmptyServerVadAcknowledgement();
+    const acknowledgement = Object.freeze({
+      ...base,
+      fields: Object.freeze({
+        ...base.fields,
+        voice: Object.freeze({
+          status: "unverifiable" as const,
+          requestedSha256: H("a"),
+          acknowledgedBy: "session.updated" as const,
+          reason: "Provider session.updated omitted voice",
+          omission: Object.freeze({
+            kind: "field_omitted" as const,
+            paths: Object.freeze(["voice"]),
+            acknowledgedShape: "missing" as const,
+          }),
+        }),
+      }),
+    });
+    const artifact = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-created-voice-default-update-lossy",
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? acknowledgement : undefined,
+        Object.freeze({ outbound: 1, inbound: 1 }),
+        target.provider === "xai"
+          ? Object.freeze({ initialFieldSha256: Object.freeze({ turn_detection: H("c"), voice: H("a") }) })
+          : undefined,
+      ),
+    });
+    expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "initial_snapshot_exact_only",
+      initialConfigurationEvidence: { exactFields: ["turn_detection", "voice"] },
+      configurationEvidence: { fields: { voice: { status: "unverifiable" } } },
+    });
+  });
+
+  it("conditionally admits only one exact gateway with bounded metadata omissions", async () => {
+    const prepared = await setup();
+    const base = xaiEmptyServerVadAcknowledgement();
+    const boundedToolOmission = Object.freeze({
+      ...base,
+      fields: Object.freeze({
+        ...base.fields,
+        tools: Object.freeze({
+          status: "unverifiable" as const,
+          requestedSha256: H("e"),
+          acknowledgedSha256: H("f"),
+          acknowledgedBy: "session.updated" as const,
+          reason: "Provider retained one function entry but omitted gateway metadata",
+          omission: Object.freeze({
+            kind: "requested_paths_omitted" as const,
+            paths: Object.freeze([
+              "tools[0].description",
+              "tools[0].name",
+              "tools[0].parameters",
+            ]),
+            acknowledgedShape: "partial_value" as const,
+          }),
+        }),
+      }),
+    });
+    const qualifyTool = (
+      qualificationId: string,
+      acknowledgement: SessionConfigurationAcknowledgement,
+      acknowledgedToolCount: number,
+    ) => qualifyProviders({
+      ...prepared.input,
+      qualificationId,
+      targets: targets(true),
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? acknowledgement : undefined,
+        Object.freeze({ outbound: 1, inbound: 1 }),
+        target.provider === "xai" ? Object.freeze({ acknowledgedToolCount }) : undefined,
+      ),
+    });
+
+    const admitted = await qualifyTool("xai-bounded-tool-omission", boundedToolOmission, 1);
+    expect(admitted.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      toolSchemaVerification: "requires_paid_response_canary",
+      toolBoundaryEvidence: {
+        requestedToolCount: 1,
+        acknowledgedToolCount: 1,
+        exactFunctionTypeVerified: true,
+        omittedPaths: [
+          "tools[0].description",
+          "tools[0].name",
+          "tools[0].parameters",
+        ],
+      },
+    });
+
+    const widened = await qualifyTool("xai-tool-count-widened", boundedToolOmission, 2);
+    expect(widened.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+    });
+
+    const typeOmitted = Object.freeze({
+      ...boundedToolOmission,
+      fields: Object.freeze({
+        ...boundedToolOmission.fields,
+        tools: Object.freeze({
+          ...boundedToolOmission.fields.tools,
+          omission: Object.freeze({
+            ...boundedToolOmission.fields.tools.omission!,
+            paths: Object.freeze(["tools[0].type"]),
+          }),
+        }),
+      }),
+    });
+    const rejectedType = await qualifyTool("xai-tool-type-unverifiable", typeOmitted, 1);
+    expect(rejectedType.results.find((result) => result.provider === "xai")).toMatchObject({
       status: "failed",
       code: "acknowledgement_incomplete",
     });

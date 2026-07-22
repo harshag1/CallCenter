@@ -30,8 +30,20 @@ import {
 export type XaiBrowserSessionReadinessEvidence = Readonly<{
   acknowledgement: "session.updated";
   strictParityVerified: false;
-  verifiedFields: readonly ["voice", "input_audio", "output_audio", "turn_detection", "resumption_disabled"];
-  unverifiableFields: readonly ["model", "instructions", "tools"];
+  verifiedFields: readonly ["voice", "input_audio_format", "output_audio_format", "turn_detection_type", "resumption_disabled"];
+  unverifiableFields: readonly [
+    "model",
+    "instructions",
+    "tools",
+    "tool_choice",
+    "input_audio_configuration_except_format",
+    "output_audio_configuration_except_format",
+    "turn_detection_parameters",
+  ];
+  sessionIdentity: Readonly<{
+    source: "session.created";
+    updatedContinuity: "verified" | "unverifiable_session_updated_omitted_identity";
+  }>;
 }>;
 
 function safeError(error: unknown): Error {
@@ -104,6 +116,7 @@ function requireFormat(
 export function verifyXaiBrowserSessionAcknowledgement(
   event: Readonly<Record<string, unknown>>,
   sentUpdate: Readonly<Record<string, unknown>>,
+  createdSessionId: string,
 ): XaiBrowserSessionReadinessEvidence {
   if (event.type !== "session.updated") throw new Error("xAI readiness event was not session.updated");
   const acknowledged = record(event.session);
@@ -115,6 +128,13 @@ export function verifyXaiBrowserSessionAcknowledgement(
   const acknowledgedOutput = record(acknowledgedAudio.output);
   const requestedOutput = record(requestedAudio.output);
   const mismatches: string[] = [];
+  const updatedSessionId = acknowledged.id;
+  if (updatedSessionId !== undefined && (
+    typeof updatedSessionId !== "string"
+    || !updatedSessionId.trim()
+    || utf8Bytes(updatedSessionId) > 512
+    || updatedSessionId !== createdSessionId
+  )) mismatches.push("session.id");
   if (acknowledged.voice !== requested.voice) mismatches.push("voice");
   requireFormat(record(acknowledgedInput.format), record(requestedInput.format), "audio.input.format", mismatches);
   requireFormat(record(acknowledgedOutput.format), record(requestedOutput.format), "audio.output.format", mismatches);
@@ -129,9 +149,23 @@ export function verifyXaiBrowserSessionAcknowledgement(
     acknowledgement: "session.updated" as const,
     strictParityVerified: false as const,
     verifiedFields: Object.freeze([
-      "voice", "input_audio", "output_audio", "turn_detection", "resumption_disabled",
+      "voice", "input_audio_format", "output_audio_format", "turn_detection_type", "resumption_disabled",
     ] as const),
-    unverifiableFields: Object.freeze(["model", "instructions", "tools"] as const),
+    unverifiableFields: Object.freeze([
+      "model",
+      "instructions",
+      "tools",
+      "tool_choice",
+      "input_audio_configuration_except_format",
+      "output_audio_configuration_except_format",
+      "turn_detection_parameters",
+    ] as const),
+    sessionIdentity: Object.freeze({
+      source: "session.created" as const,
+      updatedContinuity: updatedSessionId === undefined
+        ? "unverifiable_session_updated_omitted_identity" as const
+        : "verified" as const,
+    }),
   });
 }
 
@@ -213,6 +247,8 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
         });
         let ready = false;
         let settled = false;
+        let initialSessionUpdateSent = false;
+        let createdSessionId: string | null = null;
         const timeout = window.setTimeout(() => {
           failBeforeReady(new Error("xAI realtime session acknowledgement timed out"));
         }, 15_000);
@@ -231,13 +267,8 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
           try { socket.close(1002, "xAI session verification failed"); } catch { /* already closed */ }
         };
 
-        socket.onopen = () => {
-        try {
-          sendBoundedWebSocketJson(socket, sessionUpdate, "xAI session update");
-        } catch (error) {
-          failBeforeReady(safeError(error));
-        }
-        };
+        // xAI emits session.created before accepting the initial session.update.
+        socket.onopen = () => {};
         socket.onmessage = (message) => {
         if (this.stopped || this.socket !== socket) return;
         let event: Record<string, unknown>;
@@ -258,7 +289,31 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
         }
 
         if (!ready) {
-          if (type === "session.created" || type === "rate_limits.updated") return;
+          if (type === "session.created") {
+            if (createdSessionId !== null) {
+              failBeforeReady(new Error("xAI emitted duplicate session.created events"));
+              return;
+            }
+            if (!initialSessionUpdateSent) {
+              try {
+                const sessionId = record(event.session).id;
+                if (
+                  typeof sessionId !== "string"
+                  || !sessionId.trim()
+                  || utf8Bytes(sessionId) > 512
+                ) {
+                  throw new Error("xAI session.created omitted a valid session identity");
+                }
+                createdSessionId = sessionId;
+                sendBoundedWebSocketJson(socket, sessionUpdate, "xAI session update");
+                initialSessionUpdateSent = true;
+              } catch (error) {
+                failBeforeReady(safeError(error));
+              }
+            }
+            return;
+          }
+          if (type === "rate_limits.updated") return;
           if (type === "error") {
             failBeforeReady(new Error("xAI rejected the realtime session update"));
             return;
@@ -267,8 +322,13 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
             failBeforeReady(new Error(`xAI emitted ${type} before session.updated verification`));
             return;
           }
+          if (!initialSessionUpdateSent) {
+            failBeforeReady(new Error("xAI emitted session.updated before session.created initialized the session"));
+            return;
+          }
           try {
-            this.readiness = verifyXaiBrowserSessionAcknowledgement(event, sessionUpdate);
+            if (createdSessionId === null) throw new Error("xAI session identity was not initialized");
+            this.readiness = verifyXaiBrowserSessionAcknowledgement(event, sessionUpdate, createdSessionId);
           } catch (error) {
             failBeforeReady(safeError(error));
             return;
@@ -293,9 +353,16 @@ export class XaiWebSocketTransport implements BrowserRealtimeTransport {
           return;
         }
 
+        if (type === "session.created") {
+          args.handlers.onError(new Error("xAI emitted duplicate session.created events"));
+          try { socket.close(1002, "duplicate xAI session identity"); } catch { /* already closed */ }
+          return;
+        }
+
         if (type === "session.updated") {
           try {
-            verifyXaiBrowserSessionAcknowledgement(event, sessionUpdate);
+            if (createdSessionId === null) throw new Error("xAI session identity was not initialized");
+            verifyXaiBrowserSessionAcknowledgement(event, sessionUpdate, createdSessionId);
           } catch (error) {
             const normalized = safeError(error);
             args.handlers.onError(normalized);
