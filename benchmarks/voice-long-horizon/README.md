@@ -86,6 +86,7 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 - [PROGRESS.md](PROGRESS.md): dated implementation and experiment log
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
 - [RESULTS.md](RESULTS.md): exploratory live outcome and exact claim boundary
+- [HACC-LC4 output-voice calibration](evidence/HACC_LC4_OUTPUT_VOICE_CALIBRATION.md): 54 retained production calibration utterances across three development batches; the final independently pinned ASR gate passed 18/18 fixtures with 0/144 word errors, but this is evaluator evidence rather than Native-versus-HACC efficacy evidence
 - [LIVE_STS_DEVELOPMENT_RESULT.json](LIVE_STS_DEVELOPMENT_RESULT.json): public machine-readable summary of the 32-session development batch
 - [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
 - [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result
