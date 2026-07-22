@@ -110,7 +110,13 @@ function observationHash(event: NormalizedRealtimeEvent, label: string): string 
 function outputVoiceReferenceText(slotId: string): string {
   const slot = LONG_CALL_ASR_SEMANTIC_SLOTS.find((candidate) => candidate.id === slotId);
   if (!slot) throw new Error(`unknown output-voice semantic slot ${slotId}`);
-  return slot.canonicalText;
+  // Isolated fragments are not representative of in-call speech and make
+  // homophones (for example "parts"/"carts") needlessly ambiguous to an
+  // independent ASR. Keep the wrapper fixed by slot kind so every provider is
+  // calibrated against the same natural, non-cherry-picked sentence shape.
+  return slot.kind === "numeric_limit"
+    ? `The exact limit is ${slot.canonicalText}.`
+    : `The corrected identifier is ${slot.canonicalText}.`;
 }
 
 /** Duplicate slot rows are rejected by the manifest; retain one deterministic row per semantic ID. */
