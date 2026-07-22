@@ -40,6 +40,7 @@ import type {
   NormalizedRealtimeEvent,
   RealtimeWireObservation,
   RealtimeEventListener,
+  RealtimeWireObservationListener,
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
 import {
@@ -107,12 +108,12 @@ function acknowledgement(provider: LiveStsProvider): SessionConfigurationAcknowl
   }
   return Object.freeze({
     schemaVersion: 1,
-    strictParityVerified: false,
-    paidBenchmarkReady: false,
-    session: unverifiable,
+    strictParityVerified: true,
+    paidBenchmarkReady: true,
+    session: verified,
     fields: Object.freeze({
-      model: verified, voice: unverifiable, instructions: verified, tools: unverifiable,
-      tool_choice: verified, input_audio: unverifiable, output_audio: verified, turn_detection: verified,
+      model: verified, voice: verified, instructions: verified, tools: verified,
+      tool_choice: verified, input_audio: verified, output_audio: verified, turn_detection: verified,
     }),
   });
 }
@@ -122,6 +123,7 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
   state: "idle" | "ready" | "closed" = "idle";
   readonly sessionConfigurationAcknowledgement;
   readonly #listeners = new Set<RealtimeEventListener>();
+  readonly #wireListeners = new Set<RealtimeWireObservationListener>();
   forbiddenAudioCalls = 0;
 
   constructor(provider: LiveStsProvider) {
@@ -131,6 +133,37 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
 
   async connect(): Promise<void> {
     this.state = "ready";
+    let predecessor: string | null = null;
+    const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string): RealtimeWireObservation => {
+      const projection = Object.freeze({
+        direction,
+        wireType,
+        ...(direction === "inbound"
+          ? { session: { configurationEvidence: this.sessionConfigurationAcknowledgement } }
+          : {}),
+      });
+      const core = Object.freeze({
+        schemaVersion: 1 as const,
+        provider: this.provider,
+        direction,
+        connectionEpoch: 1,
+        sequence,
+        observedAtMs: NOW.getTime() + sequence,
+        observedAtMonotonicMs: sequence,
+        wireType,
+        payloadSha256: sha256Hex(`${this.provider}/${direction}/payload`),
+        payloadBytes: 1,
+        projectionSha256: realtimeWireProjectionSha256(projection),
+        previousObservationSha256: predecessor,
+        identities: Object.freeze({}),
+        projection,
+      });
+      const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+      predecessor = observation.observationSha256;
+      return observation;
+    };
+    for (const listener of this.#wireListeners) listener(wire("outbound", 1, "session.update"));
+    for (const listener of this.#wireListeners) listener(wire("inbound", 2, "session.updated"));
     const event = Object.freeze({
       type: "session.ready" as const,
       provider: this.provider,
@@ -143,6 +176,10 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
 
   close(): void { this.state = "closed"; }
   onEvent(listener: RealtimeEventListener): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  onWireObservation(listener: RealtimeWireObservationListener): () => void {
+    this.#wireListeners.add(listener);
+    return () => this.#wireListeners.delete(listener);
+  }
   onWireEvent(): () => void { return () => undefined; }
   appendInputAudio(): void { this.forbiddenAudioCalls += 1; throw new Error("caller audio forbidden"); }
   prepareResponse(): void { throw new Error("not used by handshake mock"); }

@@ -229,6 +229,11 @@ export type SessionConfigurationFieldProof = Readonly<{
     paths: readonly string[];
     acknowledgedShape: "missing" | "empty_object" | "partial_value";
   }>;
+  /** Requested paths whose provider-echoed values explicitly differ. */
+  contradiction?: Readonly<{
+    kind: "requested_paths_mismatched";
+    paths: readonly string[];
+  }>;
 }>;
 
 /**

@@ -1060,7 +1060,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
 
     // Normalize before exposing the raw object so an observer cannot mutate the
     // protocol input that drives session state.
-    const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
+    const wireObservation = this.notifyWireListeners(
+      parsed.event,
+      exactSerialized,
+      configurationAcknowledgement,
+    );
 
     if (parsed.event.type === "session.updated"
       && this.pendingServerVadTurn?.phase === "awaiting_session_ack"
@@ -1797,11 +1801,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private notifyWireListeners(
     event: Record<string, unknown>,
     exactSerialized?: string,
+    configurationEvidence?: SessionConfigurationAcknowledgement,
   ): RealtimeWireObservation | undefined {
     for (const listener of this.wireListeners) {
       safelyNotify(() => listener(observerSnapshot(event)));
     }
-    return this.notifyWireObservation("inbound", event, exactSerialized);
+    return this.notifyWireObservation("inbound", event, exactSerialized, undefined, configurationEvidence);
   }
 
   private notifyWireObservation(
@@ -1809,6 +1814,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     event: Record<string, unknown>,
     exactSerialized?: string,
     dynamicControl?: WireDynamicControlEvidence,
+    configurationEvidence?: SessionConfigurationAcknowledgement,
   ): RealtimeWireObservation | undefined {
     if (!this.wireObservationListeners.size) return undefined;
     const sequence = this.wireSequence + 1;
@@ -1827,6 +1833,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       localToolProxyEnabled: this.localToolProxyEnabled,
       previousObservationSha256: this.wireObservationChainHead,
       ...(dynamicControl ? { dynamicControl } : {}),
+      ...(configurationEvidence ? { configurationEvidence } : {}),
     });
     this.wireSequence = sequence;
     this.wireObservationChainHead = observation.observationSha256;
@@ -1899,6 +1906,7 @@ type WireObservationBuildInput = Readonly<{
   localToolProxyEnabled: boolean;
   previousObservationSha256: string | null;
   dynamicControl?: WireDynamicControlEvidence;
+  configurationEvidence?: SessionConfigurationAcknowledgement;
 }>;
 
 type WireDynamicControlEvidence = Readonly<{
@@ -1987,7 +1995,12 @@ function buildRedactedWireProjection(
 ): Record<string, unknown> {
   const projection: Record<string, unknown> = {};
   const session = sessionWireProjection(input, wireType);
-  if (session !== undefined) projection.session = session;
+  if (session !== undefined) projection.session = {
+    ...session,
+    ...(input.configurationEvidence === undefined
+      ? {}
+      : { configurationEvidence: input.configurationEvidence }),
+  };
 
   const audio = audioWireProjection(input.event, wireType, input.inputAudioFormat, input.outputAudioFormat);
   if (audio !== undefined) projection.audio = audio;
@@ -2734,11 +2747,36 @@ function configurationFieldProof(
     });
   }
   const projection = projectAcknowledgedValue(requested, acknowledged, field);
+  const acknowledgedSha256 = configurationHash(field, projection.value);
+  if (projection.mismatched.length) {
+    return Object.freeze({
+      status: "mismatch" as const,
+      requestedSha256,
+      acknowledgedSha256,
+      acknowledgedBy,
+      reason: `Provider explicitly acknowledged different requested path(s): ${projection.mismatched.join(", ")}`,
+      contradiction: Object.freeze({
+        kind: "requested_paths_mismatched" as const,
+        paths: Object.freeze([...projection.mismatched]),
+      }),
+      ...(projection.missing.length === 0
+        ? {}
+        : {
+            omission: Object.freeze({
+              kind: "requested_paths_omitted" as const,
+              paths: Object.freeze([...projection.missing]),
+              acknowledgedShape: isRecord(acknowledged) && Object.keys(acknowledged).length === 0
+                ? "empty_object" as const
+                : "partial_value" as const,
+            }),
+          }),
+    });
+  }
   if (projection.missing.length) {
     return Object.freeze({
       status: "unverifiable" as const,
       requestedSha256,
-      acknowledgedSha256: configurationHash(field, projection.value),
+      acknowledgedSha256,
       acknowledgedBy,
       reason: `Provider session.updated omitted requested path(s): ${projection.missing.join(", ")}`,
       omission: Object.freeze({
@@ -2750,7 +2788,6 @@ function configurationFieldProof(
       }),
     });
   }
-  const acknowledgedSha256 = configurationHash(field, projection.value);
   return Object.freeze({
     status: requestedSha256 === acknowledgedSha256 ? "verified" as const : "mismatch" as const,
     requestedSha256,
@@ -2789,7 +2826,7 @@ function acknowledgedSessionId(event: Record<string, unknown>): string | undefin
   return stringValue(nested) ?? stringValue(topLevel);
 }
 
-type ProjectedAcknowledgement = { value: unknown; missing: string[] };
+type ProjectedAcknowledgement = { value: unknown; missing: string[]; mismatched: string[] };
 
 function projectAcknowledgedValue(
   requested: unknown,
@@ -2797,23 +2834,26 @@ function projectAcknowledgedValue(
   path: string,
 ): ProjectedAcknowledgement {
   if (Array.isArray(requested)) {
-    if (!Array.isArray(acknowledged)) return { value: acknowledged, missing: [] };
+    if (!Array.isArray(acknowledged)) return { value: acknowledged, missing: [], mismatched: [path] };
     // Array membership and order are capability identity. Preserve a different
     // length in the hash rather than silently projecting injected/removed tools.
-    if (requested.length !== acknowledged.length) return { value: acknowledged, missing: [] };
+    if (requested.length !== acknowledged.length) return { value: acknowledged, missing: [], mismatched: [path] };
     const values: unknown[] = [];
     const missing: string[] = [];
+    const mismatched: string[] = [];
     for (let index = 0; index < requested.length; index += 1) {
       const projected = projectAcknowledgedValue(requested[index], acknowledged[index], `${path}[${index}]`);
       values.push(projected.value);
       missing.push(...projected.missing);
+      mismatched.push(...projected.mismatched);
     }
-    return { value: values, missing };
+    return { value: values, missing, mismatched };
   }
   if (isRecord(requested)) {
-    if (!isRecord(acknowledged)) return { value: acknowledged, missing: [] };
+    if (!isRecord(acknowledged)) return { value: acknowledged, missing: [], mismatched: [path] };
     const value: Record<string, unknown> = {};
     const missing: string[] = [];
+    const mismatched: string[] = [];
     for (const key of Object.keys(requested).sort()) {
       if (!(key in acknowledged)) {
         missing.push(`${path}.${key}`);
@@ -2822,10 +2862,15 @@ function projectAcknowledgedValue(
       const projected = projectAcknowledgedValue(requested[key], acknowledged[key], `${path}.${key}`);
       value[key] = projected.value;
       missing.push(...projected.missing);
+      mismatched.push(...projected.mismatched);
     }
-    return { value, missing };
+    return { value, missing, mismatched };
   }
-  return { value: acknowledged, missing: [] };
+  return {
+    value: acknowledged,
+    missing: [],
+    mismatched: canonicalJson(requested) === canonicalJson(acknowledged) ? [] : [path],
+  };
 }
 
 const SESSION_ACK_HASH_DOMAIN = "harshas-amazing-call-center/session-configuration/v1";

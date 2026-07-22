@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
   LC4_XAI_SERVER_VAD_SETTING_SHA256,
   assertLc4QualificationV3PlanArtifact,
   createLc4QualificationV3AuthorizationArtifact,
+  createLc4QualificationV3Targets,
   loadLc4QualificationV3ExplicitCredentials,
   prepareLc4QualificationV3,
   reportLc4QualificationV3,
@@ -21,6 +22,7 @@ import {
   type Lc4QualificationV3AuthorizationBody,
   type Lc4QualificationV3GitSource,
 } from "../lc4-qualification-v3-runner";
+import { productionSessionPayloadParitySha256 } from "../production-realtime-provider";
 import {
   LC4_S2S_COMPACT_CONTROL_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
@@ -36,6 +38,7 @@ import type {
   NormalizedRealtimeEvent,
   RealtimeEventListener,
   RealtimeWireObservation,
+  RealtimeWireObservationListener,
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
 import {
@@ -98,10 +101,26 @@ function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = fa
     fields: Object.freeze({ model: unverifiable, voice: unverifiable, instructions: unverifiable, tools: unverifiable, tool_choice: Object.freeze({ status: "not_requested" as const }), input_audio: unverifiable, output_audio: unverifiable, turn_detection: unverifiable }),
   });
   if (provider === "xai") return Object.freeze({
-    schemaVersion: 1, strictParityVerified: false, paidBenchmarkReady: false, session: unverifiable,
+    schemaVersion: 1, strictParityVerified: !conditionalXaiServerVad, paidBenchmarkReady: !conditionalXaiServerVad,
+    session: conditionalXaiServerVad ? Object.freeze({
+      status: "unverifiable" as const,
+      requestedSha256: "1".repeat(64), acknowledgedSha256: "2".repeat(64), acknowledgedBy: "session.updated" as const,
+      reason: "provider omitted bounded server-VAD paths",
+      omission: Object.freeze({
+        kind: "requested_paths_omitted" as const,
+        paths: Object.freeze([
+          "session.turn_detection.idle_timeout_ms",
+          "session.turn_detection.prefix_padding_ms",
+          "session.turn_detection.silence_duration_ms",
+          "session.turn_detection.threshold",
+          "session.turn_detection.type",
+        ]),
+        acknowledgedShape: "partial_value" as const,
+      }),
+    }) : verified,
     fields: Object.freeze({
-      model: verified, voice: unverifiable, instructions: verified, tools: unverifiable,
-      tool_choice: verified, input_audio: unverifiable, output_audio: verified,
+      model: verified, voice: verified, instructions: verified, tools: verified,
+      tool_choice: verified, input_audio: verified, output_audio: verified,
       turn_detection: conditionalXaiServerVad ? Object.freeze({
         status: "unverifiable" as const,
         requestedSha256: "3".repeat(64),
@@ -111,11 +130,11 @@ function acknowledgement(provider: LiveStsProvider, conditionalXaiServerVad = fa
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
           paths: Object.freeze([
-            "turn_detection.type",
-            "turn_detection.threshold",
-            "turn_detection.silence_duration_ms",
-            "turn_detection.prefix_padding_ms",
             "turn_detection.idle_timeout_ms",
+            "turn_detection.prefix_padding_ms",
+            "turn_detection.silence_duration_ms",
+            "turn_detection.threshold",
+            "turn_detection.type",
           ]),
           acknowledgedShape: "empty_object" as const,
         }),
@@ -133,12 +152,37 @@ class SetupClient implements NormalizedRealtimeClient {
   state: "idle" | "ready" | "closed" = "idle";
   readonly sessionConfigurationAcknowledgement;
   readonly #listeners = new Set<RealtimeEventListener>();
+  readonly #wireListeners = new Set<RealtimeWireObservationListener>();
   constructor(provider: LiveStsProvider, conditionalXaiServerVad = false) {
     this.provider = provider;
     this.sessionConfigurationAcknowledgement = acknowledgement(provider, conditionalXaiServerVad);
   }
   async connect() {
     this.state = "ready";
+    let predecessor: string | null = null;
+    const observe = (direction: "outbound" | "inbound", wireType: string, sequence: number) => {
+      const projection = Object.freeze({
+        direction,
+        wireType,
+        sequence,
+        ...(direction === "inbound"
+          ? { session: { configurationEvidence: this.sessionConfigurationAcknowledgement } }
+          : {}),
+      });
+      const core = Object.freeze({
+        schemaVersion: 1 as const, provider: this.provider, direction, connectionEpoch: 1, sequence,
+        observedAtMs: sequence, observedAtMonotonicMs: sequence, wireType,
+        payloadSha256: sha256Hex(canonicalJson(projection)), payloadBytes: 64,
+        projectionSha256: realtimeWireProjectionSha256(projection),
+        previousObservationSha256: predecessor,
+        identities: Object.freeze({}), projection,
+      });
+      const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+      predecessor = observation.observationSha256;
+      for (const listener of this.#wireListeners) listener(observation);
+    };
+    observe("outbound", "session.update", 1);
+    observe("inbound", "session.updated", 2);
     const event: NormalizedRealtimeEvent = {
       type: "session.ready", provider: this.provider, receivedAtMs: 1,
       wireType: this.provider === "gemini" ? "setupComplete" : "session.updated",
@@ -148,6 +192,7 @@ class SetupClient implements NormalizedRealtimeClient {
   }
   close() { this.state = "closed"; }
   onEvent(listener: RealtimeEventListener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  onWireObservation(listener: RealtimeWireObservationListener) { this.#wireListeners.add(listener); return () => this.#wireListeners.delete(listener); }
   onWireEvent() { return () => undefined; }
   appendInputAudio() { throw new Error("setup only"); }
   prepareResponse() { throw new Error("setup only"); }
@@ -283,6 +328,9 @@ describe("LC4 qualification v3 signed runner", () => {
       maximum_tool_roundtrips: 3,
     });
     expect(plan.body.control_size_diagnostic.qualification_gate).toBe(false);
+    const xaiConfiguration = createLc4QualificationV3Targets().find((target) => target.provider === "xai")!.configuration;
+    expect(plan.body.targets.find((target) => target.provider === "xai")?.production_session_payload_sha256)
+      .toBe(productionSessionPayloadParitySha256("xai", xaiConfiguration));
     expect(() => assertLc4QualificationV3PlanArtifact(plan, authority.fingerprint)).not.toThrow();
     expect(() => assertLc4QualificationV3PlanArtifact({
       ...plan,
@@ -357,6 +405,8 @@ describe("LC4 qualification v3 signed runner", () => {
         gate_b_required: true,
         gate_b_status: "behaviorally_verified",
         gate_b_evidence_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        exact_setting_verified: false,
+        operational_vad_verified: true,
         benchmark_ready: true,
       },
     });
@@ -380,6 +430,12 @@ describe("LC4 qualification v3 signed runner", () => {
         },
       },
     });
+    const riskPath = join(root, "attempts", `${authBody.authorization_id}.complete`, "xai-server-vad-gate-a-risk.json");
+    const risk = JSON.parse(await readFile(riskPath, "utf8")) as { policy_sha256: string };
+    await chmod(riskPath, 0o600);
+    await writeFile(riskPath, `${canonicalJson({ ...risk, policy_sha256: "0".repeat(64) })}\n`);
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .rejects.toThrow(/package entry|risk artifact/u);
   });
 
   it("loads only two explicit regular files with stable repository-last precedence", async () => {

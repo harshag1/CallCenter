@@ -3104,13 +3104,65 @@ describe("manual PCM session compilation", () => {
     });
     expect(proof.strictParityVerified).toBe(false);
     expect(proof.paidBenchmarkReady).toBe(false);
-    expect(proof.session).toMatchObject({ status: "unverifiable" });
+    expect(proof.session).toMatchObject({ status: "mismatch" });
     expect(proof.fields.instructions).toMatchObject({ status: "mismatch" });
     expect(proof.fields.tools).toMatchObject({
       status: "unverifiable",
       reason: expect.stringContaining("omitted"),
     });
     expect(proof.fields.model).toMatchObject({ status: "unverifiable" });
+  });
+
+  it("does not hide an explicit server-VAD contradiction behind omitted sibling paths", () => {
+    const requested = {
+      type: "session.update",
+      session: {
+        voice: "ara",
+        instructions: "Use only the scoped gateway.",
+        tools: [],
+        tool_choice: "auto",
+        audio: {
+          input: { format: { type: "audio/pcm", rate: 24_000 } },
+          output: { format: { type: "audio/pcm", rate: 24_000 } },
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.85,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 333,
+          idle_timeout_ms: null,
+        },
+      },
+    };
+    const proof = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: requested,
+      requestedModel: "grok-voice-think-fast-1.0",
+      acknowledgedModel: { value: "grok-voice-think-fast-1.0", wireType: "session.updated" },
+      acknowledgedEvent: {
+        type: "session.updated",
+        session: {
+          ...requested.session,
+          turn_detection: { type: "server_vad", threshold: 0.1 },
+        },
+      },
+    });
+    expect(proof.fields.turn_detection).toMatchObject({
+      status: "mismatch",
+      contradiction: {
+        kind: "requested_paths_mismatched",
+        paths: ["turn_detection.threshold"],
+      },
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: [
+          "turn_detection.idle_timeout_ms",
+          "turn_detection.prefix_padding_ms",
+          "turn_detection.silence_duration_ms",
+        ],
+      },
+    });
+    expect(proof.session).toMatchObject({ status: "mismatch" });
   });
 
   it("pins OpenAI VAD inside input audio without mutating the source", () => {

@@ -27,6 +27,7 @@ import {
   assertProviderQualificationArtifactIntegrity,
   providerQualificationMatrixSha256,
   qualifyProviders,
+  XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256,
   XAI_SERVER_VAD_SETTING_SHA256,
   type ProviderQualificationArtifact,
   type ProviderQualificationTarget,
@@ -48,6 +49,7 @@ import {
 } from "./provider-s2s-tool-roundtrip";
 import {
   createProductionRealtimeClient,
+  productionSessionPayloadParitySha256,
 } from "./production-realtime-provider";
 import { parseBenchmarkEnvironmentFile } from "./environment";
 import {
@@ -99,6 +101,7 @@ const REFUSAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal/v4
 const REFUSAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-artifact/v4\n";
 const REFUSAL_PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-package/v4\n";
 const REFUSAL_ERROR_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-error/v4\n";
+const XAI_SERVER_VAD_GATE_A_RISK_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-a-risk/v1\n";
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
@@ -179,6 +182,7 @@ export type Lc4QualificationV3PlanBody = Readonly<{
     compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
     packetizer_sha256: typeof LC4_S2S_PACKETIZER_SHA256;
     audio_delivery_profile_sha256: string;
+    production_session_payload_sha256: string | null;
     setup_sessions: 1;
     paid_sessions: 1;
     generation_phases: 2;
@@ -312,11 +316,17 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
   server_vad_qualification: Readonly<{
     provider: "xai";
     requested_setting_sha256: string;
+    production_session_payload_sha256: string;
     gate_a_classification: "verified_by_provider_echo" | "acknowledged_unverifiable_server_vad" | "failed";
     retained_risk: "none" | "provider_omitted_turn_detection_fields";
     gate_b_required: boolean;
     gate_b_status: "behaviorally_verified" | "failed" | "not_run";
     gate_b_evidence_sha256: string | null;
+    gate_a_risk_sha256: string;
+    gate_a_connection_epoch: number | null;
+    gate_b_connection_epoch: number | null;
+    exact_setting_verified: boolean;
+    operational_vad_verified: boolean;
     benchmark_ready: boolean;
   }>;
   results: readonly Readonly<{
@@ -333,6 +343,27 @@ export type Lc4QualificationV3TerminalBody = Readonly<{
 }>;
 
 export type Lc4QualificationV3TerminalArtifact = SignedArtifact<Lc4QualificationV3TerminalBody>;
+
+export type Lc4XaiServerVadGateARiskArtifact = Readonly<{
+  schema_version: 1;
+  provider: "xai";
+  model: string;
+  source_commit: string;
+  plan_sha256: string;
+  configuration_matrix_sha256: string;
+  requested_configuration_sha256: string;
+  requested_setting_sha256: string;
+  production_session_payload_sha256: string;
+  acknowledgement_sha256: string | null;
+  policy_sha256: typeof XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256;
+  field_evidence: ProviderQualificationArtifact["results"][number]["configurationEvidence"] | null;
+  omitted_paths: readonly string[];
+  mismatched_paths: readonly string[];
+  setup_wire_evidence: NonNullable<ProviderQualificationArtifact["results"][number]["setupWireEvidence"]> | null;
+  retained_risk: "none" | "provider_did_not_echo_exact_server_vad_parameters";
+  claim_boundary: "gate_b_proves_operational_server_vad_lifecycle_not_exact_numeric_vad_parameters";
+  risk_sha256: string;
+}>;
 
 type Dependencies = Readonly<{
   inspectGitSource(repositoryRoot: string): Promise<Lc4QualificationV3GitSource>;
@@ -406,6 +437,73 @@ type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observation
   wire_observation_count: number;
   usage_event_count: number;
 }>;
+
+function createXaiServerVadGateARiskArtifact(input: Readonly<{
+  setup: ProviderQualificationArtifact["results"][number];
+  sourceCommit: string;
+  planSha256: string;
+  configurationMatrixSha256: string;
+  productionSessionPayloadSha256: string;
+}>): Lc4XaiServerVadGateARiskArtifact {
+  if (input.setup.provider !== "xai") throw new Error("xAI Gate A risk requires the xAI setup result");
+  const proofs = input.setup.configurationEvidence === undefined
+    ? []
+    : [input.setup.configurationEvidence.session, ...Object.values(input.setup.configurationEvidence.fields)]
+      .filter((proof): proof is NonNullable<typeof proof> => proof !== undefined);
+  const omittedPaths = [...new Set(proofs.flatMap((proof) => proof.omission?.paths ?? []))].sort();
+  const mismatchedPaths = [...new Set(proofs.flatMap((proof) => proof.contradiction?.paths ?? []))].sort();
+  const withoutHash = freeze({
+    schema_version: 1 as const,
+    provider: "xai" as const,
+    model: input.setup.model,
+    source_commit: input.sourceCommit,
+    plan_sha256: input.planSha256,
+    configuration_matrix_sha256: input.configurationMatrixSha256,
+    requested_configuration_sha256: input.setup.requestedConfigurationSha256,
+    requested_setting_sha256: LC4_XAI_SERVER_VAD_SETTING_SHA256,
+    production_session_payload_sha256: input.productionSessionPayloadSha256,
+    acknowledgement_sha256: input.setup.acknowledgementSha256,
+    policy_sha256: XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256,
+    field_evidence: input.setup.configurationEvidence ?? null,
+    omitted_paths: freeze(omittedPaths),
+    mismatched_paths: freeze(mismatchedPaths),
+    setup_wire_evidence: input.setup.setupWireEvidence ?? null,
+    retained_risk: input.setup.code === "acknowledged_unverifiable_server_vad"
+      ? "provider_did_not_echo_exact_server_vad_parameters" as const
+      : "none" as const,
+    claim_boundary: "gate_b_proves_operational_server_vad_lifecycle_not_exact_numeric_vad_parameters" as const,
+  });
+  return freeze({
+    ...withoutHash,
+    risk_sha256: sha256Hex(`${XAI_SERVER_VAD_GATE_A_RISK_DOMAIN}${canonicalJson(withoutHash)}`),
+  });
+}
+
+function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskArtifact): void {
+  const { risk_sha256, ...body } = artifact;
+  const setupWire = artifact.setup_wire_evidence;
+  const inbound = setupWire?.observations.find((observation) => (
+    observation.observationSha256 === setupWire.sessionUpdatedObservationSha256
+  ));
+  const projectedFieldEvidence = inbound === undefined
+    ? undefined
+    : (inbound.projection.session as { configurationEvidence?: unknown } | undefined)?.configurationEvidence;
+  if (artifact.provider !== "xai"
+    || artifact.policy_sha256 !== XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256
+    || artifact.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
+    || !SHA256.test(artifact.production_session_payload_sha256)
+    || risk_sha256 !== sha256Hex(`${XAI_SERVER_VAD_GATE_A_RISK_DOMAIN}${canonicalJson(body)}`)
+    || canonicalJson(artifact.omitted_paths) !== canonicalJson([...artifact.omitted_paths].sort())
+    || canonicalJson(artifact.mismatched_paths) !== canonicalJson([...artifact.mismatched_paths].sort())
+    || (artifact.field_evidence !== null && (
+      setupWire === null
+      || !verifyRealtimeWireObservationChain(setupWire.observations).valid
+      || inbound?.connectionEpoch !== setupWire.connectionEpoch
+      || canonicalJson(projectedFieldEvidence) !== canonicalJson(artifact.field_evidence)
+    ))) {
+    throw new Error("LC4 xAI server-VAD Gate A risk artifact failed integrity");
+  }
+}
 
 function assertRetainedXaiServerVadEvidence(input: Readonly<{
   summary: RetainedRoundtripSummary;
@@ -681,6 +779,18 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
     || artifact.body.targets.some((target) => target.gateway_schema_sha256 !== LC4_S2S_TOOL_SCHEMA_SHA256)) {
     throw new Error("LC4 qualification v3 plan weakened a frozen boundary");
   }
+  const expectedTargets = createLc4QualificationV3Targets();
+  for (const [index, target] of artifact.body.targets.entries()) {
+    const expected = expectedTargets[index]!;
+    const expectedPayloadSha256 = target.provider === "gemini"
+      ? null
+      : productionSessionPayloadParitySha256(target.provider, expected.configuration);
+    if (target.provider !== expected.provider
+      || target.model !== expected.model
+      || target.production_session_payload_sha256 !== expectedPayloadSha256) {
+      throw new Error("LC4 qualification v3 plan session payload parity differs from production");
+    }
+  }
 }
 
 export async function prepareLc4QualificationV3(input: Readonly<{
@@ -726,6 +836,7 @@ export async function prepareLc4QualificationV3(input: Readonly<{
     control_size_diagnostic: lc4S2sControlSizeDiagnostic(),
     targets: freeze(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => {
       const object = fixture.provider_renditions[provider];
+      const configuration = targets.find((target) => target.provider === provider)!.configuration;
       return freeze({
         provider,
         model: LIVE_STS_PROVIDER_SPECS[provider].model,
@@ -739,6 +850,9 @@ export async function prepareLc4QualificationV3(input: Readonly<{
         compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
         packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
         audio_delivery_profile_sha256: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
+        production_session_payload_sha256: provider === "gemini"
+          ? null
+          : productionSessionPayloadParitySha256(provider, configuration),
         setup_sessions: 1 as const,
         paid_sessions: 1 as const,
         generation_phases: 2 as const,
@@ -1220,6 +1334,7 @@ export async function runLc4QualificationV3(input: Readonly<{
   let primaryFailure: string | null = null;
   const executions: Lc4S2sRoundtripExecution[] = [];
   let budgetEvidence: Lc4QualificationBudgetEvidence | null = null;
+  let xaiGateARisk: Lc4XaiServerVadGateARiskArtifact | null = null;
   try {
     await writeImmutableJson(resolve(partial, "intent.json"), freeze({
       schema_version: 1,
@@ -1248,6 +1363,18 @@ export async function runLc4QualificationV3(input: Readonly<{
     });
     assertProviderQualificationArtifactIntegrity(setupArtifact);
     await writeImmutableJson(resolve(partial, "setup-acceptance.json"), setupArtifact);
+    const xaiSetup = setupArtifact.results.find((result) => result.provider === "xai");
+    if (!xaiSetup) throw new Error("LC4 qualification v3 setup lacks xAI evidence");
+    xaiGateARisk = createXaiServerVadGateARiskArtifact({
+      setup: xaiSetup,
+      sourceCommit: plan.body.source.source_commit,
+      planSha256: plan.body.plan_sha256,
+      configurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
+      productionSessionPayloadSha256: plan.body.targets.find((target) => target.provider === "xai")!
+        .production_session_payload_sha256!,
+    });
+    assertXaiServerVadGateARiskArtifact(xaiGateARisk);
+    await writeImmutableJson(resolve(partial, "xai-server-vad-gate-a-risk.json"), xaiGateARisk);
     if (setupArtifact.status === "failed") primaryFailure = "setup_acceptance_failed";
     if (primaryFailure === null) {
       for (const provider of LC4_QUALIFICATION_V3_PROVIDER_ORDER) {
@@ -1326,9 +1453,28 @@ export async function runLc4QualificationV3(input: Readonly<{
     : xaiExecution.status === "passed"
       ? "behaviorally_verified" as const
       : "failed" as const;
+  if (xaiGateARisk === null) {
+    const fallbackXaiSetup = setupArtifact!.results.find((result) => result.provider === "xai");
+    if (!fallbackXaiSetup) throw new Error("LC4 qualification v3 cannot retain xAI Gate A risk");
+    xaiGateARisk = createXaiServerVadGateARiskArtifact({
+      setup: fallbackXaiSetup,
+      sourceCommit: plan.body.source.source_commit,
+      planSha256: plan.body.plan_sha256,
+      configurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
+      productionSessionPayloadSha256: plan.body.targets.find((target) => target.provider === "xai")!
+        .production_session_payload_sha256!,
+    });
+    await writeImmutableJson(resolve(partial, "xai-server-vad-gate-a-risk.json"), xaiGateARisk);
+  }
+  assertXaiServerVadGateARiskArtifact(xaiGateARisk);
+  const gateBConnectionEpoch = xaiExecution?.wire_observations.find((observation) => (
+    observation.direction === "outbound" && observation.wireType === "session.update"
+  ))?.connectionEpoch ?? null;
+  const gateAConnectionEpoch = xaiGateARisk.setup_wire_evidence?.connectionEpoch ?? null;
   const serverVadQualification = freeze({
     provider: "xai" as const,
     requested_setting_sha256: LC4_XAI_SERVER_VAD_SETTING_SHA256,
+    production_session_payload_sha256: xaiGateARisk.production_session_payload_sha256,
     gate_a_classification: xaiGateAClassification,
     retained_risk: xaiGateAClassification === "acknowledged_unverifiable_server_vad"
       ? "provider_omitted_turn_detection_fields" as const
@@ -1336,7 +1482,15 @@ export async function runLc4QualificationV3(input: Readonly<{
     gate_b_required: true as const,
     gate_b_status: xaiGateBStatus,
     gate_b_evidence_sha256: xaiExecution?.evidence_sha256 ?? null,
-    benchmark_ready: xaiGateAClassification !== "failed" && xaiGateBStatus === "behaviorally_verified",
+    gate_a_risk_sha256: xaiGateARisk.risk_sha256,
+    gate_a_connection_epoch: gateAConnectionEpoch,
+    gate_b_connection_epoch: gateBConnectionEpoch,
+    exact_setting_verified: xaiGateAClassification === "verified_by_provider_echo",
+    operational_vad_verified: xaiGateBStatus === "behaviorally_verified",
+    benchmark_ready: xaiGateAClassification !== "failed"
+      && xaiGateBStatus === "behaviorally_verified"
+      && gateAConnectionEpoch !== null
+      && gateBConnectionEpoch !== null,
   });
   if (xaiGateAClassification === "acknowledged_unverifiable_server_vad"
     && xaiGateBStatus !== "behaviorally_verified") {
@@ -1482,7 +1636,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
     const { terminal_sha256, ...terminalBody } = terminal.body;
     if (terminal_sha256 !== sha256Hex(`${TERMINAL_DOMAIN}${canonicalJson(terminalBody)}`)
       || terminal.body.plan_artifact_sha256 !== plan.artifact_sha256
-      || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256) {
+      || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256
+      || terminal.body.source_commit !== plan.body.source.source_commit
+      || terminal.body.source_tree_sha256 !== plan.body.source.source_tree_sha256) {
       throw new Error("LC4 qualification v3 terminal binding failed integrity");
     }
     const xaiResult = terminal.body.results.find((result) => result.provider === "xai");
@@ -1490,10 +1646,15 @@ export async function reportLc4QualificationV3(input: Readonly<{
     const expectedServerVadReady = serverVad.gate_a_classification !== "failed"
       && serverVad.gate_b_status === "behaviorally_verified"
       && xaiResult?.status === "passed"
-      && serverVad.gate_b_evidence_sha256 === xaiResult.evidence_sha256;
+      && serverVad.gate_b_evidence_sha256 === xaiResult.evidence_sha256
+      && serverVad.gate_a_connection_epoch !== null
+      && serverVad.gate_b_connection_epoch !== null;
     if (serverVad.provider !== "xai"
       || serverVad.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
+      || serverVad.production_session_payload_sha256 !== plan.body.targets.find((target) => target.provider === "xai")
+        ?.production_session_payload_sha256
       || serverVad.gate_b_required !== true
+      || !SHA256.test(serverVad.gate_a_risk_sha256)
       || serverVad.retained_risk !== (serverVad.gate_a_classification === "acknowledged_unverifiable_server_vad"
         ? "provider_omitted_turn_detection_fields"
         : "none")
@@ -1520,10 +1681,24 @@ export async function reportLc4QualificationV3(input: Readonly<{
       }
     }
     const setupQualification = await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"));
+    const gateARisk = await readJson<Lc4XaiServerVadGateARiskArtifact>(resolve(directory, "xai-server-vad-gate-a-risk.json"));
     assertProviderQualificationArtifactIntegrity(setupQualification);
+    assertXaiServerVadGateARiskArtifact(gateARisk);
     const retainedXaiSetup = setupQualification.results.find((result) => result.provider === "xai");
     if (setupQualification.artifactSha256 !== terminal.body.setup_qualification_artifact_sha256
       || retainedXaiSetup === undefined
+      || setupQualification.planSha256 !== plan.body.plan_sha256
+      || setupQualification.sourceCommit !== plan.body.source.source_commit
+      || setupQualification.configurationMatrixSha256 !== plan.body.setup_configuration_matrix_sha256
+      || gateARisk.risk_sha256 !== serverVad.gate_a_risk_sha256
+      || gateARisk.source_commit !== plan.body.source.source_commit
+      || gateARisk.plan_sha256 !== plan.body.plan_sha256
+      || gateARisk.configuration_matrix_sha256 !== plan.body.setup_configuration_matrix_sha256
+      || gateARisk.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
+      || gateARisk.acknowledgement_sha256 !== retainedXaiSetup.acknowledgementSha256
+      || gateARisk.setup_wire_evidence?.connectionEpoch !== serverVad.gate_a_connection_epoch
+      || serverVad.exact_setting_verified !== (serverVad.gate_a_classification === "verified_by_provider_echo")
+      || serverVad.operational_vad_verified !== (serverVad.gate_b_status === "behaviorally_verified")
       || serverVad.gate_a_classification !== (retainedXaiSetup.turnBoundaryVerification === "verified_by_provider_echo"
         ? "verified_by_provider_echo"
         : retainedXaiSetup.code === "acknowledged_unverifiable_server_vad"
@@ -1543,6 +1718,12 @@ export async function reportLc4QualificationV3(input: Readonly<{
         terminalResult: xaiResult,
         gateEvidenceSha256: serverVad.gate_b_evidence_sha256,
       });
+      const firstGateBObservation = xaiWire.find((observation) => (
+        observation.direction === "outbound" && observation.wireType === "session.update"
+      ));
+      if (firstGateBObservation?.connectionEpoch !== serverVad.gate_b_connection_epoch) {
+        throw new Error("LC4 qualification xAI Gate B epoch is not terminal-bound");
+      }
     }
     const budgetEvidence = await readJson<Lc4QualificationBudgetEvidence>(resolve(directory, "budget-settlement.json"));
     assertLc4QualificationBudgetEvidence(budgetEvidence);

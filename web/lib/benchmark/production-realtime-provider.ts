@@ -9,9 +9,12 @@ import { GeminiLiveClient } from "../realtime/client/gemini-live";
 import {
   createOpenAIRealtimeClient,
   createXaiRealtimeClient,
+  withManualPcmSession,
+  withXaiServerVadPcmSession,
 } from "../realtime/client/openai-compatible";
 import type { NormalizedRealtimeClient } from "../realtime/client/types";
 import { LC4_XAI_SERVER_VAD } from "./xai-server-vad";
+import { canonicalJson, sha256Hex } from "./artifacts";
 
 function parseEnv(text: string): Record<string, string> {
   const values: Record<string, string> = {};
@@ -89,7 +92,35 @@ export function createProductionRealtimeClient(
       maximumSessionDurationMs: 10 * 60_000,
     });
   }
-  const sessionUpdate = provider === "openai"
+  const sessionUpdate = productionOpenAiCompatibleSessionUpdate(provider, configuration);
+  return provider === "openai"
+    ? createOpenAIRealtimeClient({
+        apiKey,
+        model: spec.model,
+        sessionUpdate,
+        connectTimeoutMs: 15_000,
+        requireStrictSessionConfigurationParity: true,
+      })
+    : createXaiRealtimeClient({
+        apiKey,
+        model: spec.model,
+        sessionUpdate,
+        connectTimeoutMs: 15_000,
+        enableResumption: false,
+        requireStrictSessionConfigurationParity: false,
+        // Provider-native server VAD owns initial commit/response creation.
+        // LC4 additionally requires the ordered behavioral lifecycle per turn.
+        unexpectedManualTurnDetectionPolicy: "diagnose",
+      });
+}
+
+export function productionOpenAiCompatibleSessionUpdate(
+  provider: Exclude<LiveStsProvider, "gemini">,
+  configuration: TrialSessionConfiguration,
+): Readonly<Record<string, unknown>> {
+  if (configuration.provider !== provider) throw new Error("realtime provider differs from the session payload configuration");
+  const spec = LIVE_STS_PROVIDER_SPECS[provider];
+  return provider === "openai"
     ? {
         type: "session.update",
         session: {
@@ -112,23 +143,21 @@ export function createProductionRealtimeClient(
           tool_choice: "auto",
         },
       };
-  return provider === "openai"
-    ? createOpenAIRealtimeClient({
-        apiKey,
-        model: spec.model,
-        sessionUpdate,
-        connectTimeoutMs: 15_000,
-        requireStrictSessionConfigurationParity: true,
-      })
-    : createXaiRealtimeClient({
-        apiKey,
-        model: spec.model,
-        sessionUpdate,
-        connectTimeoutMs: 15_000,
-        enableResumption: false,
-        requireStrictSessionConfigurationParity: false,
-        // Provider-native server VAD owns initial commit/response creation.
-        // LC4 additionally requires the ordered behavioral lifecycle per turn.
-        unexpectedManualTurnDetectionPolicy: "diagnose",
-      });
+}
+
+export function productionSessionPayloadParitySha256(
+  provider: Exclude<LiveStsProvider, "gemini">,
+  configuration: TrialSessionConfiguration,
+): string {
+  const base = productionOpenAiCompatibleSessionUpdate(provider, configuration);
+  const compiled = provider === "xai"
+    ? withXaiServerVadPcmSession(base)
+    : withManualPcmSession("openai", base);
+  return sha256Hex(
+    `harshas-amazing-call-center/production-realtime-session-payload/v1\n${canonicalJson({
+      provider,
+      model: configuration.model,
+      sessionUpdate: compiled,
+    })}`,
+  );
 }

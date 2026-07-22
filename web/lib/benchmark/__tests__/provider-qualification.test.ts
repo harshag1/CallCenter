@@ -14,9 +14,12 @@ import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   RealtimeEventListener,
+  RealtimeWireObservation,
+  RealtimeWireObservationListener,
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
 import type { TrialSessionConfiguration } from "../orchestrator";
+import { realtimeWireObservationSha256, realtimeWireProjectionSha256 } from "../../realtime/client/wire-evidence";
 
 const roots: string[] = [];
 const H = (character: string) => character.repeat(64);
@@ -67,19 +70,18 @@ function geminiAcknowledgement(): SessionConfigurationAcknowledgement {
 
 function xaiAcknowledgement(): SessionConfigurationAcknowledgement {
   const verified = Object.freeze({ status: "verified" as const, requestedSha256: H("a"), acknowledgedSha256: H("a"), acknowledgedBy: "session.updated" as const });
-  const unverifiable = Object.freeze({ status: "unverifiable" as const, requestedSha256: H("b"), reason: "xAI accepted but omitted the field from session.updated" });
   return Object.freeze({
     schemaVersion: 1,
-    strictParityVerified: false,
-    paidBenchmarkReady: false,
-    session: unverifiable,
+    strictParityVerified: true,
+    paidBenchmarkReady: true,
+    session: verified,
     fields: Object.freeze({
       model: verified,
-      voice: unverifiable,
+      voice: verified,
       instructions: verified,
-      tools: unverifiable,
+      tools: verified,
       tool_choice: verified,
-      input_audio: unverifiable,
+      input_audio: verified,
       output_audio: verified,
       turn_detection: verified,
     }),
@@ -90,6 +92,26 @@ function xaiEmptyServerVadAcknowledgement(): SessionConfigurationAcknowledgement
   const base = xaiAcknowledgement();
   return Object.freeze({
     ...base,
+    strictParityVerified: false,
+    paidBenchmarkReady: false,
+    session: Object.freeze({
+      status: "unverifiable" as const,
+      requestedSha256: H("a"),
+      acknowledgedSha256: H("b"),
+      acknowledgedBy: "session.updated" as const,
+      reason: "Provider omitted bounded server-VAD paths",
+      omission: Object.freeze({
+        kind: "requested_paths_omitted" as const,
+        paths: Object.freeze([
+          "session.turn_detection.idle_timeout_ms",
+          "session.turn_detection.prefix_padding_ms",
+          "session.turn_detection.silence_duration_ms",
+          "session.turn_detection.threshold",
+          "session.turn_detection.type",
+        ]),
+        acknowledgedShape: "partial_value" as const,
+      }),
+    }),
     fields: Object.freeze({
       ...base.fields,
       turn_detection: Object.freeze({
@@ -101,11 +123,11 @@ function xaiEmptyServerVadAcknowledgement(): SessionConfigurationAcknowledgement
         omission: Object.freeze({
           kind: "requested_paths_omitted" as const,
           paths: Object.freeze([
-            "turn_detection.type",
-            "turn_detection.threshold",
-            "turn_detection.silence_duration_ms",
-            "turn_detection.prefix_padding_ms",
             "turn_detection.idle_timeout_ms",
+            "turn_detection.prefix_padding_ms",
+            "turn_detection.silence_duration_ms",
+            "turn_detection.threshold",
+            "turn_detection.type",
           ]),
           acknowledgedShape: "empty_object" as const,
         }),
@@ -152,8 +174,10 @@ class QualificationClient implements NormalizedRealtimeClient {
   state: "idle" | "ready" | "closed" = "idle";
   readonly sessionConfigurationAcknowledgement;
   readonly #listeners = new Set<RealtimeEventListener>();
+  readonly #wireListeners = new Set<RealtimeWireObservationListener>();
   readonly #error: Error | null;
   readonly #markReady: boolean;
+  readonly #wireEpochs: Readonly<{ outbound: number; inbound: number }>;
   closeCalls = 0;
   forbiddenCalls = 0;
 
@@ -162,10 +186,12 @@ class QualificationClient implements NormalizedRealtimeClient {
     error: Error | null = null,
     markReady = true,
     acknowledgement?: SessionConfigurationAcknowledgement,
+    wireEpochs: Readonly<{ outbound: number; inbound: number }> = Object.freeze({ outbound: 1 as number, inbound: 1 as number }),
   ) {
     this.provider = target.provider;
     this.#error = error;
     this.#markReady = markReady;
+    this.#wireEpochs = wireEpochs;
     this.sessionConfigurationAcknowledgement = acknowledgement ?? (target.provider === "gemini"
       ? geminiAcknowledgement()
       : target.provider === "xai"
@@ -176,6 +202,37 @@ class QualificationClient implements NormalizedRealtimeClient {
   async connect(): Promise<void> {
     if (this.#error) throw this.#error;
     if (this.#markReady) this.state = "ready";
+    let predecessor: string | null = null;
+    const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string): RealtimeWireObservation => {
+      const projection = Object.freeze({
+        direction,
+        wireType,
+        ...(direction === "inbound"
+          ? { session: { configurationEvidence: this.sessionConfigurationAcknowledgement } }
+          : {}),
+      });
+      const core = Object.freeze({
+        schemaVersion: 1 as const,
+        provider: this.provider,
+        direction,
+        connectionEpoch: direction === "outbound" ? this.#wireEpochs.outbound : this.#wireEpochs.inbound,
+        sequence,
+        observedAtMs: Date.parse("2026-07-22T00:00:00.000Z") + sequence,
+        observedAtMonotonicMs: sequence,
+        wireType,
+        payloadSha256: H(direction === "outbound" ? "c" : "d"),
+        payloadBytes: 1,
+        projectionSha256: realtimeWireProjectionSha256(projection),
+        previousObservationSha256: predecessor,
+        identities: Object.freeze({}),
+        projection,
+      });
+      const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+      predecessor = observation.observationSha256;
+      return observation;
+    };
+    for (const listener of this.#wireListeners) listener(wire("outbound", 1, "session.update"));
+    for (const listener of this.#wireListeners) listener(wire("inbound", 2, "session.updated"));
     const event = Object.freeze({
       type: "session.ready" as const,
       provider: this.provider,
@@ -187,6 +244,7 @@ class QualificationClient implements NormalizedRealtimeClient {
   }
   close(): void { this.closeCalls += 1; this.state = "closed"; }
   onEvent(listener: RealtimeEventListener): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  onWireObservation(listener: RealtimeWireObservationListener): () => void { this.#wireListeners.add(listener); return () => this.#wireListeners.delete(listener); }
   onWireEvent(): () => void { return () => undefined; }
   appendInputAudio(): void { this.forbiddenCalls += 1; throw new Error("qualification sent caller audio"); }
   prepareResponse(): void { this.forbiddenCalls += 1; throw new Error("qualification prepared a response"); }
@@ -228,8 +286,8 @@ describe("provider qualification", () => {
       acknowledgementMode: "setup_complete_no_field_echo",
     });
     expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
-      code: "configuration_accepted_partial_echo",
-      acknowledgementMode: "partial_provider_echo",
+      code: "configuration_echo_verified",
+      acknowledgementMode: "exact_provider_echo",
     });
     expect(prepared.created).toHaveLength(3);
     expect(prepared.created.every((client) => client.closeCalls === 1 && client.forbiddenCalls === 0)).toBe(true);
@@ -269,6 +327,14 @@ describe("provider qualification", () => {
       acknowledgementMode: "conditional_server_vad_echo",
       turnBoundaryVerification: "requires_paid_behavioral_canary",
     });
+    expect(artifact.results.find((result) => result.provider === "xai")?.turnBoundaryEvidence?.omittedPaths)
+      .toEqual([
+        "turn_detection.idle_timeout_ms",
+        "turn_detection.prefix_padding_ms",
+        "turn_detection.silence_duration_ms",
+        "turn_detection.threshold",
+        "turn_detection.type",
+      ]);
     await expect(assertRecentPassingProviderQualification({
       root: prepared.root,
       protocolId: prepared.input.protocolId,
@@ -365,6 +431,94 @@ describe("provider qualification", () => {
       status: "failed",
       code: "configuration_rejected",
       turnBoundaryVerification: "not_verified",
+    });
+  });
+
+  it("admits only bounded server-VAD omissions and rejects other omissions or cross-epoch acks", async () => {
+    const prepared = await setup();
+    const base = xaiEmptyServerVadAcknowledgement();
+    const withPaths = (paths: readonly string[], sessionPaths = paths.map((path) => `session.${path}`)) => Object.freeze({
+      ...base,
+      session: Object.freeze({
+        ...base.session!,
+        omission: Object.freeze({
+          ...base.session!.omission!,
+          paths: Object.freeze([...sessionPaths]),
+        }),
+      }),
+      fields: Object.freeze({
+        ...base.fields,
+        turn_detection: Object.freeze({
+          ...base.fields.turn_detection,
+          omission: Object.freeze({
+            ...base.fields.turn_detection.omission!,
+            paths: Object.freeze([...paths]),
+            acknowledgedShape: "partial_value" as const,
+          }),
+        }),
+      }),
+    });
+    const qualify = async (
+      qualificationId: string,
+      acknowledgement: SessionConfigurationAcknowledgement,
+      epochs: Readonly<{ outbound: number; inbound: number }> = Object.freeze({ outbound: 1, inbound: 1 }),
+    ) => qualifyProviders({
+      ...prepared.input,
+      qualificationId,
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? acknowledgement : undefined,
+        epochs,
+      ),
+    });
+
+    const subset = await qualify("xai-server-vad-subset", withPaths(["turn_detection.type"]));
+    expect(subset.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "acknowledged_unverifiable_server_vad",
+    });
+
+    const superset = await qualify("xai-server-vad-superset", withPaths([
+      "turn_detection.type",
+      "turn_detection.unknown",
+    ]));
+    expect(superset.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+    });
+
+    const missingTools = Object.freeze({
+      ...base,
+      fields: Object.freeze({
+        ...base.fields,
+        tools: Object.freeze({
+          status: "unverifiable" as const,
+          requestedSha256: H("9"),
+          reason: "Provider omitted tools",
+          omission: Object.freeze({
+            kind: "field_omitted" as const,
+            paths: Object.freeze(["tools"]),
+            acknowledgedShape: "missing" as const,
+          }),
+        }),
+      }),
+    });
+    const missing = await qualify("xai-server-vad-missing-tools", missingTools);
+    expect(missing.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
+    });
+
+    const crossEpoch = await qualify(
+      "xai-server-vad-cross-epoch",
+      base,
+      Object.freeze({ outbound: 1, inbound: 2 }),
+    );
+    expect(crossEpoch.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "failed",
+      code: "acknowledgement_incomplete",
     });
   });
 
@@ -491,7 +645,7 @@ describe("provider qualification", () => {
     expect(qualification.results.find((result) => result.provider === "gemini")?.toolSchemaVerification)
       .toBe("requires_paid_response_canary");
     expect(qualification.results.find((result) => result.provider === "xai")?.toolSchemaVerification)
-      .toBe("requires_paid_response_canary");
+      .toBe("verified_by_provider_echo");
     const gate = () => assertRecentPassingProviderQualification({
       root: prepared.root,
       protocolId: prepared.input.protocolId,

@@ -7,9 +7,11 @@ import type { TrialSessionConfiguration } from "./orchestrator";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  RealtimeWireObservation,
   SessionConfigurationAcknowledgement,
 } from "../realtime/client/types";
 import { LC4_XAI_SERVER_VAD_SHA256 } from "./xai-server-vad";
+import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 
 export const PROVIDER_QUALIFICATION_SCHEMA_VERSION = 2 as const;
 export const PROVIDER_QUALIFICATION_MAX_AGE_MS = 30 * 60_000;
@@ -18,13 +20,32 @@ const QUALIFICATION_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualific
 const MATRIX_HASH_DOMAIN = "harshas-amazing-call-center/provider-qualification-matrix/v1";
 const RESPONSE_CANARY_HASH_DOMAIN = "harshas-amazing-call-center/provider-response-tool-canary/v1";
 export const XAI_SERVER_VAD_SETTING_SHA256 = LC4_XAI_SERVER_VAD_SHA256;
-const XAI_SERVER_VAD_OMITTED_PATHS = Object.freeze([
+export const XAI_SERVER_VAD_OMITTED_PATHS = Object.freeze([
   "turn_detection.type",
   "turn_detection.threshold",
   "turn_detection.silence_duration_ms",
   "turn_detection.prefix_padding_ms",
   "turn_detection.idle_timeout_ms",
 ]);
+const XAI_SERVER_VAD_OMITTED_PATH_SET = new Set(XAI_SERVER_VAD_OMITTED_PATHS);
+const XAI_SERVER_VAD_SESSION_OMITTED_PATH_SET = new Set(
+  XAI_SERVER_VAD_OMITTED_PATHS.map((path) => `session.${path}`),
+);
+export const XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/xai-server-vad-conditional-policy/v1\n${canonicalJson({
+    allowedOmittedPaths: [...XAI_SERVER_VAD_OMITTED_PATHS].sort(),
+    nonTurnFields: ["model", "voice", "instructions", "tools", "tool_choice", "input_audio", "output_audio"],
+    explicitContradictionsFatal: true,
+    promotion: "ordered_provider_native_vad_lifecycle",
+  })}`,
+);
+
+export type ProviderSetupWireEvidence = Readonly<{
+  connectionEpoch: number;
+  sessionUpdateObservationSha256: string;
+  sessionUpdatedObservationSha256: string;
+  observations: readonly RealtimeWireObservation[];
+}>;
 
 export type ProviderQualificationTarget = Readonly<{
   provider: LiveStsProvider;
@@ -61,10 +82,12 @@ export type ProviderQualificationResult = Readonly<{
   turnBoundaryVerification: "verified_by_provider_echo" | "requires_paid_behavioral_canary" | "not_verified" | "not_applicable";
   turnBoundaryEvidence?: Readonly<{
     requestedSettingSha256: typeof XAI_SERVER_VAD_SETTING_SHA256;
-    acknowledgement: "verified_echo" | "exact_empty_object_omission";
+    acknowledgement: "verified_echo" | "bounded_server_vad_omission";
     omittedPaths: readonly string[];
-    acknowledgedShape: "verified_value" | "empty_object";
+    acknowledgedShape: "verified_value" | "empty_object" | "partial_value";
   }>;
+  configurationEvidence?: SessionConfigurationAcknowledgement;
+  setupWireEvidence?: ProviderSetupWireEvidence;
 }>;
 
 export type ProviderQualificationArtifact = Readonly<{
@@ -202,11 +225,64 @@ function acknowledgementSha256(value: SessionConfigurationAcknowledgement): stri
   return sha256Hex(`harshas-amazing-call-center/provider-configuration-acknowledgement/v1\n${canonicalJson(value)}`);
 }
 
+function sortedUniquePaths(paths: readonly string[]): readonly string[] | null {
+  const sorted = [...paths].sort();
+  return new Set(sorted).size === sorted.length ? Object.freeze(sorted) : null;
+}
+
+function boundedOmission(
+  paths: readonly string[],
+  allowed: ReadonlySet<string>,
+): readonly string[] | null {
+  const normalized = sortedUniquePaths(paths);
+  return normalized !== null && normalized.length > 0 && normalized.every((path) => allowed.has(path))
+    ? normalized
+    : null;
+}
+
+function setupWireEvidence(observations: readonly RealtimeWireObservation[]): ProviderSetupWireEvidence | null {
+  if (!verifyRealtimeWireObservationChain(observations).valid) return null;
+  const outbound = observations.find((observation) => (
+    observation.direction === "outbound" && observation.wireType === "session.update"
+  ));
+  const inbound = observations.find((observation) => (
+    observation.direction === "inbound" && observation.wireType === "session.updated"
+      && outbound !== undefined
+      && observation.connectionEpoch === outbound.connectionEpoch
+      && observation.sequence > outbound.sequence
+  ));
+  if (!outbound || !inbound) return null;
+  return Object.freeze({
+    connectionEpoch: outbound.connectionEpoch,
+    sessionUpdateObservationSha256: outbound.observationSha256,
+    sessionUpdatedObservationSha256: inbound.observationSha256,
+    observations: Object.freeze([...observations]),
+  });
+}
+
+function validSetupWireEvidence(evidence: ProviderSetupWireEvidence): boolean {
+  if (!verifyRealtimeWireObservationChain(evidence.observations).valid) return false;
+  const outbound = evidence.observations.find((observation) => (
+    observation.observationSha256 === evidence.sessionUpdateObservationSha256
+  ));
+  const inbound = evidence.observations.find((observation) => (
+    observation.observationSha256 === evidence.sessionUpdatedObservationSha256
+  ));
+  return outbound?.direction === "outbound"
+    && outbound.wireType === "session.update"
+    && inbound?.direction === "inbound"
+    && inbound.wireType === "session.updated"
+    && outbound.connectionEpoch === evidence.connectionEpoch
+    && inbound.connectionEpoch === evidence.connectionEpoch
+    && outbound.sequence < inbound.sequence;
+}
+
 function acknowledgementResult(
   target: ProviderQualificationTarget,
   readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null,
   fallback: SessionConfigurationAcknowledgement | null | undefined,
-): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256" | "toolSchemaVerification" | "turnBoundaryVerification" | "turnBoundaryEvidence"> {
+  wireObservations: readonly RealtimeWireObservation[],
+): Pick<ProviderQualificationResult, "status" | "code" | "acknowledgementMode" | "acknowledgementSha256" | "toolSchemaVerification" | "turnBoundaryVerification" | "turnBoundaryEvidence" | "configurationEvidence" | "setupWireEvidence"> {
   const toolSchemaVerification = target.configuration.providerTools.length === 0
     ? "not_requested" as const
     : "requires_paid_response_canary" as const;
@@ -219,9 +295,21 @@ function acknowledgementResult(
     return { status: "failed", code: "acknowledgement_missing", acknowledgementMode: "none", acknowledgementSha256: null, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
   }
   const digest = acknowledgementSha256(acknowledgement);
+  const observedWireEvidence = setupWireEvidence(wireObservations);
   const fields = Object.values(acknowledgement.fields);
   if (fields.some((field) => field.status === "mismatch")) {
-    return { status: "failed", code: "configuration_rejected", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: unverifiedTurnBoundary };
+    return {
+      status: "failed",
+      code: "configuration_rejected",
+      acknowledgementMode: "none",
+      acknowledgementSha256: digest,
+      toolSchemaVerification,
+      turnBoundaryVerification: unverifiedTurnBoundary,
+      ...(target.provider === "xai" ? { configurationEvidence: acknowledgement } : {}),
+      ...(target.provider === "xai" && observedWireEvidence !== null
+        ? { setupWireEvidence: observedWireEvidence }
+        : {}),
+    };
   }
   if (target.provider === "gemini") {
     const allowed = fields.every((field) => field.status === "unverifiable" || field.status === "not_requested");
@@ -243,42 +331,68 @@ function acknowledgementResult(
     };
   }
   if (target.provider === "xai") {
-    const requiredEchoes = [
-      acknowledgement.fields.model,
-      acknowledgement.fields.instructions,
-      acknowledgement.fields.tool_choice,
-      acknowledgement.fields.output_audio,
-    ];
+    const requiredEchoes = ([
+      "model",
+      "voice",
+      "instructions",
+      "tools",
+      "tool_choice",
+      "input_audio",
+      "output_audio",
+    ] as const).map((field) => acknowledgement.fields[field]);
     const turnBoundaryProof = acknowledgement.fields.turn_detection;
-    const exactEmptyServerVadOmission = turnBoundaryProof.status === "unverifiable"
+    const omittedTurnPaths = turnBoundaryProof.status === "unverifiable"
       && turnBoundaryProof.omission?.kind === "requested_paths_omitted"
-      && turnBoundaryProof.omission.acknowledgedShape === "empty_object"
-      && canonicalJson(turnBoundaryProof.omission.paths) === canonicalJson(XAI_SERVER_VAD_OMITTED_PATHS);
-    const acceptedStatuses = fields.every((field) => (
-      field.status === "verified" || field.status === "unverifiable" || field.status === "not_requested"
-    ));
+      ? boundedOmission(turnBoundaryProof.omission.paths, XAI_SERVER_VAD_OMITTED_PATH_SET)
+      : null;
+    const sessionOmissions = acknowledgement.session?.status === "unverifiable"
+      && acknowledgement.session.omission?.kind === "requested_paths_omitted"
+      ? boundedOmission(
+          acknowledgement.session.omission.paths,
+          XAI_SERVER_VAD_SESSION_OMITTED_PATH_SET,
+        )
+      : null;
+    const conditionalServerVad = omittedTurnPaths !== null
+      && sessionOmissions !== null
+      && canonicalJson(sessionOmissions.map((path) => path.slice("session.".length))) === canonicalJson(omittedTurnPaths)
+      && turnBoundaryProof.contradiction === undefined
+      && acknowledgement.session?.contradiction === undefined;
+    const wireEvidence = observedWireEvidence;
     if (
       readyEvent.wireType !== "session.updated"
       || requiredEchoes.some((field) => field.status !== "verified")
-      || (turnBoundaryProof.status !== "verified" && !exactEmptyServerVadOmission)
-      || !acceptedStatuses
-      || (acknowledgement.session?.status !== "verified" && acknowledgement.session?.status !== "unverifiable")
+      || (turnBoundaryProof.status !== "verified" && !conditionalServerVad)
+      || (acknowledgement.session?.status !== "verified" && !conditionalServerVad)
+      || wireEvidence === null
     ) {
-      return { status: "failed", code: "acknowledgement_incomplete", acknowledgementMode: "none", acknowledgementSha256: digest, toolSchemaVerification, turnBoundaryVerification: "not_verified" };
+      return {
+        status: "failed",
+        code: "acknowledgement_incomplete",
+        acknowledgementMode: "none",
+        acknowledgementSha256: digest,
+        toolSchemaVerification,
+        turnBoundaryVerification: "not_verified",
+        configurationEvidence: acknowledgement,
+        ...(wireEvidence === null ? {} : { setupWireEvidence: wireEvidence }),
+      };
     }
-    if (exactEmptyServerVadOmission) {
+    if (conditionalServerVad) {
       return {
         status: "passed",
         code: "acknowledged_unverifiable_server_vad",
         acknowledgementMode: "conditional_server_vad_echo",
         acknowledgementSha256: digest,
-        toolSchemaVerification,
+        toolSchemaVerification: "verified_by_provider_echo",
         turnBoundaryVerification: "requires_paid_behavioral_canary",
+        configurationEvidence: acknowledgement,
+        setupWireEvidence: wireEvidence,
         turnBoundaryEvidence: Object.freeze({
           requestedSettingSha256: XAI_SERVER_VAD_SETTING_SHA256,
-          acknowledgement: "exact_empty_object_omission" as const,
-          omittedPaths: XAI_SERVER_VAD_OMITTED_PATHS,
-          acknowledgedShape: "empty_object" as const,
+          acknowledgement: "bounded_server_vad_omission" as const,
+          omittedPaths: omittedTurnPaths,
+          acknowledgedShape: turnBoundaryProof.omission!.acknowledgedShape === "empty_object"
+            ? "empty_object" as const
+            : "partial_value" as const,
         }),
       };
     }
@@ -291,6 +405,8 @@ function acknowledgementResult(
         ? "exact_provider_echo"
         : "partial_provider_echo",
       acknowledgementSha256: digest,
+      configurationEvidence: acknowledgement,
+      setupWireEvidence: wireEvidence,
       toolSchemaVerification: target.configuration.providerTools.length === 0
         ? "not_requested"
         : acknowledgement.fields.tools.status === "verified"
@@ -361,10 +477,15 @@ async function qualifyTarget(
   let client: NormalizedRealtimeClient | null = null;
   let readyEvent: Extract<NormalizedRealtimeEvent, { type: "session.ready" }> | null = null;
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeWire: (() => void) | undefined;
+  const wireObservations: RealtimeWireObservation[] = [];
   try {
     client = await createClient(target, apiKey);
     unsubscribe = client.onEvent((event) => {
       if (event.type === "session.ready") readyEvent = event;
+    });
+    unsubscribeWire = client.onWireObservation?.((observation) => {
+      wireObservations.push(observation);
     });
     await client.connect();
     if (client.state !== "ready") {
@@ -382,7 +503,12 @@ async function qualifyTarget(
         turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" : "not_verified",
       });
     }
-    const outcome = acknowledgementResult(target, readyEvent, client.sessionConfigurationAcknowledgement);
+    const outcome = acknowledgementResult(
+      target,
+      readyEvent,
+      client.sessionConfigurationAcknowledgement,
+      wireObservations,
+    );
     return Object.freeze({
       provider: target.provider,
       model: target.model,
@@ -407,6 +533,7 @@ async function qualifyTarget(
     });
   } finally {
     unsubscribe?.();
+    unsubscribeWire?.();
     client?.close(1000, "qualification complete");
   }
 }
@@ -443,9 +570,12 @@ export function assertProviderQualificationArtifactIntegrity(
     }
     if (conditionalServerVad && (
       result.turnBoundaryEvidence?.requestedSettingSha256 !== XAI_SERVER_VAD_SETTING_SHA256
-      || result.turnBoundaryEvidence.acknowledgement !== "exact_empty_object_omission"
-      || result.turnBoundaryEvidence.acknowledgedShape !== "empty_object"
-      || canonicalJson(result.turnBoundaryEvidence.omittedPaths) !== canonicalJson(XAI_SERVER_VAD_OMITTED_PATHS)
+      || result.turnBoundaryEvidence.acknowledgement !== "bounded_server_vad_omission"
+      || boundedOmission(result.turnBoundaryEvidence.omittedPaths, XAI_SERVER_VAD_OMITTED_PATH_SET) === null
+      || result.configurationEvidence === undefined
+      || result.setupWireEvidence === undefined
+      || result.acknowledgementSha256 !== acknowledgementSha256(result.configurationEvidence)
+      || !validSetupWireEvidence(result.setupWireEvidence)
     )) throw new Error("provider qualification server-VAD omission evidence is inconsistent");
     if (result.provider === "xai"
       && result.status === "passed"
