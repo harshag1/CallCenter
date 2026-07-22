@@ -33,7 +33,6 @@ import {
   createLc4DevLivePreflightArtifact,
   createLc4DevLivePrepareArtifact,
   createLc4DevLiveReportArtifact,
-  createLc4DevRetainedQualificationReceipt,
   executeLc4DevLiveRun,
   lc4DevLiveAuthorizationArtifactSha256,
   lc4DevLiveAuthorizationSigningBytes,
@@ -51,12 +50,10 @@ import {
 import {
   inspectLc4QualificationGitSource,
   type Lc4QualificationGitSource,
-  type Lc4QualificationPlan,
-  type Lc4QualificationTerminalArtifact,
 } from "./lc4-qualification-runner";
 import { lc4DevCredentialIdentitySetSha256 } from "./lc4-production-provider-adapter";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
-import type { ProviderResponseToolCanaryArtifact } from "./provider-qualification";
+import { loadLc4DevRetainedQualificationV3 } from "./lc4-development-qualification-v3";
 import {
   createLc4DevelopmentDefaultOperatorRuntime,
   type Lc4DevDefaultRuntimeConfig,
@@ -275,7 +272,7 @@ export async function loadLc4DevExplicitCredentials(input: Readonly<{
 function qualificationCredentialSetSha256(credentials: Readonly<Record<LiveStsProvider, string>>): string {
   const identities = PROVIDERS.map((provider) => ({
     provider,
-    credentialSha256: sha256Hex(`${QUALIFICATION_CREDENTIAL_DOMAIN}${credentials[provider]}`),
+    credential_sha256: sha256Hex(`${QUALIFICATION_CREDENTIAL_DOMAIN}${credentials[provider]}`),
   }));
   return sha256Hex(`${QUALIFICATION_CREDENTIAL_SET_DOMAIN}${canonicalJson(identities)}`);
 }
@@ -295,26 +292,17 @@ async function loadAudio(root: string): Promise<Readonly<{
   return Object.freeze({ manifest, repair_manifest: repairManifest });
 }
 
-async function oneJson(directory: string, label: string): Promise<string> {
-  const entries = (await readdir(directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".json"))
-    .map((entry) => resolve(directory, entry.name));
-  if (entries.length !== 1) throw new Error(`${label} must contain exactly one retained JSON artifact`);
-  return entries[0]!;
-}
-
-export async function loadLc4DevRetainedQualification(root: string): Promise<Lc4DevRetainedQualificationReceipt> {
+export async function loadLc4DevRetainedQualification(
+  root: string,
+  qualificationTrustRootSha256: string,
+  now: Date = new Date(),
+): Promise<Lc4DevRetainedQualificationReceipt> {
   absolute(root, "LC4 qualification root");
-  const attemptEntries = (await readdir(resolve(root, "attempts"), { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.endsWith(".complete"));
-  if (attemptEntries.length !== 1) throw new Error("LC4 qualification root must contain exactly one completed no-retry attempt");
-  const [plan, terminal, canary] = await Promise.all([
-    readBoundedJson<Lc4QualificationPlan>(resolve(root, "lc4-qualification-plan.json"), "LC4 qualification plan"),
-    readBoundedJson<Lc4QualificationTerminalArtifact>(resolve(root, "attempts", attemptEntries[0]!.name, "terminal.json"), "LC4 qualification terminal"),
-    oneJson(resolve(root, "response-tool-canaries"), "LC4 qualification response-tool canaries")
-      .then((path) => readBoundedJson<ProviderResponseToolCanaryArtifact>(path, "LC4 qualification response-tool canary")),
-  ]);
-  return createLc4DevRetainedQualificationReceipt({ plan, terminal, response_tool_canary: canary });
+  return loadLc4DevRetainedQualificationV3({
+    root,
+    qualification_trust_root_sha256: qualificationTrustRootSha256,
+    now,
+  });
 }
 
 async function loadSigner(source: string): Promise<Lc4DevOperatorSigner> {
@@ -550,7 +538,7 @@ export async function runLc4DevelopmentOperatorCli(
     if (command === "status") {
       exact(parsed, withRuntimeFlags(dependencies, [
         "--repository-root", "--audio-root", "--qualification-root", "--evidence-root",
-        "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
+        "--qualification-trust-root-sha256", "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
       ]));
       const reasons: string[] = [];
       let source: Lc4QualificationGitSource | null = null;
@@ -561,12 +549,12 @@ export async function runLc4DevelopmentOperatorCli(
       let signer: Lc4DevOperatorSigner | null = null;
       try { source = await dependencies.inspect_source(parsed["--repository-root"]!); } catch { reasons.push("repository_not_clean_or_unverifiable"); }
       try { audio = await loadAudio(parsed["--audio-root"]!); } catch { reasons.push("audio_manifest_or_cas_not_verified"); }
-      try { qualification = await loadLc4DevRetainedQualification(parsed["--qualification-root"]!); } catch { reasons.push("retained_qualification_not_verified"); }
+      try { qualification = await loadLc4DevRetainedQualification(parsed["--qualification-root"]!, parsed["--qualification-trust-root-sha256"]!, io.now()); } catch { reasons.push("retained_qualification_not_verified"); }
       try { credentials = await loadLc4DevExplicitCredentials({ provider_env_file: parsed["--provider-env-file"]!, repository_env_file: parsed["--repo-env-file"]! }); } catch { reasons.push("explicit_provider_credentials_not_verified"); }
       try { runtime = (await runtimeFromFlags(parsed, dependencies)) ?? null; } catch { reasons.push("default_runtime_dependencies_not_verified"); }
       try { signer = await loadSigner(parsed["--authority-private-key-source"]!); } catch { reasons.push("authority_signing_key_not_verified"); }
-      if (source && qualification && (source.source_commit !== qualification.plan.source_commit || source.source_tree_sha256 !== qualification.plan.source_tree_sha256)) reasons.push("retained_qualification_source_is_stale");
-      if (credentials && qualification && qualificationCredentialSetSha256(credentials) !== qualification.plan.credential_set_sha256) reasons.push("retained_qualification_credential_identity_is_stale");
+      if (source && qualification && (source.source_commit !== qualification.source_commit || source.source_tree_sha256 !== qualification.source_tree_sha256)) reasons.push("retained_qualification_source_is_stale");
+      if (credentials && qualification && qualificationCredentialSetSha256(credentials) !== qualification.credential_set_sha256) reasons.push("retained_qualification_credential_identity_is_stale");
       let evidenceState: "absent" | "prepared" | "preflighted" | "terminal" | "occupied_invalid" = "absent";
       try {
         const names = await readdir(absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root"));
@@ -668,7 +656,7 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "preflight") {
-      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source", "--expires-minutes"]));
+      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--qualification-trust-root-sha256", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source", "--expires-minutes"]));
       const runtime = await runtimeFromFlags(parsed, dependencies);
       if (!runtime) throw new Error("LC4-DEV preflight requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
@@ -683,14 +671,14 @@ export async function runLc4DevelopmentOperatorCli(
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
         dependencies.inspect_source(repositoryRoot),
         loadAudio(parsed["--audio-root"]!),
-        loadLc4DevRetainedQualification(parsed["--qualification-root"]!),
+        loadLc4DevRetainedQualification(parsed["--qualification-root"]!, parsed["--qualification-trust-root-sha256"]!, io.now()),
         loadLc4DevExplicitCredentials({ provider_env_file: parsed["--provider-env-file"]!, repository_env_file: parsed["--repo-env-file"]! }),
         loadSigner(parsed["--authority-private-key-source"]!),
       ]);
       assertLc4DevLivePrepareArtifact(prepare);
       if (prepare.source_commit !== source.source_commit || prepare.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV prepare differs from the current clean source");
-      if (qualification.plan.source_commit !== source.source_commit || qualification.plan.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV retained qualification is stale for the current clean source");
-      if (qualificationCredentialSetSha256(credentials) !== qualification.plan.credential_set_sha256) throw new Error("LC4-DEV retained qualification used different credential identities");
+      if (qualification.source_commit !== source.source_commit || qualification.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV retained qualification is stale for the current clean source");
+      if (qualificationCredentialSetSha256(credentials) !== qualification.credential_set_sha256) throw new Error("LC4-DEV retained qualification used different credential identities");
       if (audio.manifest.manifest_sha256 !== prepare.audio_manifest_sha256) throw new Error("LC4-DEV audio differs from prepare");
       const minutes = Number(parsed["--expires-minutes"]!);
       if (!Number.isSafeInteger(minutes) || minutes < 5 || minutes > 60) throw new Error("LC4-DEV authorization expiry must be from 5 through 60 minutes");
@@ -737,7 +725,7 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "run") {
-      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source"]));
+      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--qualification-trust-root-sha256", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source"]));
       const runtime = await runtimeFromFlags(parsed, dependencies);
       if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
@@ -752,7 +740,7 @@ export async function runLc4DevelopmentOperatorCli(
         readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
         dependencies.inspect_source(repositoryRoot),
         loadAudio(parsed["--audio-root"]!),
-        loadLc4DevRetainedQualification(parsed["--qualification-root"]!),
+        loadLc4DevRetainedQualification(parsed["--qualification-root"]!, parsed["--qualification-trust-root-sha256"]!, io.now()),
         loadLc4DevExplicitCredentials({ provider_env_file: parsed["--provider-env-file"]!, repository_env_file: parsed["--repo-env-file"]! }),
         loadSigner(parsed["--authority-private-key-source"]!),
       ]);
@@ -760,8 +748,8 @@ export async function runLc4DevelopmentOperatorCli(
       assertLc4DevLivePreflightArtifact(preflight, prepare, io.now());
       if (source.source_commit !== prepare.source_commit || source.source_tree_sha256 !== prepare.source_tree_sha256) throw new Error("LC4-DEV run source differs from prepare");
       if (qualification.receipt_sha256 !== preflight.qualification.receipt_sha256) throw new Error("LC4-DEV run qualification differs from preflight");
-      if (qualification.plan.source_commit !== source.source_commit || qualification.plan.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV run qualification is stale");
-      if (qualificationCredentialSetSha256(credentials) !== qualification.plan.credential_set_sha256 || lc4DevCredentialIdentitySetSha256(credentials) !== preflight.credential_identity_set_sha256) throw new Error("LC4-DEV run credentials differ from qualification or preflight");
+      if (qualification.source_commit !== source.source_commit || qualification.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV run qualification is stale");
+      if (qualificationCredentialSetSha256(credentials) !== qualification.credential_set_sha256 || lc4DevCredentialIdentitySetSha256(credentials) !== preflight.credential_identity_set_sha256) throw new Error("LC4-DEV run credentials differ from qualification or preflight");
       if (signer.public_key_fingerprint_sha256 !== preflight.authority_trust_root_sha256) throw new Error("LC4-DEV run signer differs from preflight trust root");
       const roots = await runtime.inspect({ prepare, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, signer, evidence_root: evidenceRoot });
       assertLc4DevOperatorAuthorizationDag({ preflight, expected_authority_public_key_fingerprint_sha256: signer.public_key_fingerprint_sha256 });

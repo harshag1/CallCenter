@@ -1,0 +1,611 @@
+import { createPublicKey, verify } from "node:crypto";
+import { lstat, readFile, readdir } from "node:fs/promises";
+import { resolve } from "node:path";
+
+import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
+import {
+  LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+  LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+  LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+  LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+  LC4_QUALIFICATION_V3_PROVIDER_ORDER,
+  LC4_QUALIFICATION_V3_RUNNER_VERSION,
+  LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+  LC4_XAI_SERVER_VAD_SETTING_SHA256,
+  assertLc4QualificationV3PlanArtifact,
+  createLc4QualificationV3Targets,
+  reportLc4QualificationV3,
+  type Lc4QualificationV3AuthorizationArtifact,
+  type Lc4QualificationV3PlanArtifact,
+  type Lc4QualificationV3TerminalArtifact,
+} from "./lc4-qualification-v3-runner";
+import {
+  assertLc4QualificationBudgetEvidence,
+  type Lc4QualificationBudgetEvidence,
+} from "./lc4-qualification-budget";
+import type { Lc4S2sRoundtripExecution } from "./provider-s2s-tool-roundtrip";
+import {
+  PROVIDER_QUALIFICATION_MAX_AGE_MS,
+  assertProviderQualificationArtifactIntegrity,
+  providerQualificationMatrixSha256,
+  type ProviderQualificationArtifact,
+} from "./provider-qualification";
+import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
+import type { LiveStsProvider } from "./live-sts-development-experiment";
+import type { RealtimeWireObservation } from "../realtime/client/types";
+import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+
+const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
+const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v4\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v4\n";
+const AUTHORIZATION_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
+const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-package/v4\n";
+const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification-v3/v1\n";
+const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-qualification-v3-report/v1\n";
+const HASH = /^[a-f0-9]{64}$/u;
+const MAX_JSON_BYTES = 64 * 1024 * 1024;
+const MAX_JSONL_BYTES = 256 * 1024 * 1024;
+
+type QualificationReport = Readonly<{
+  schema_version: 1;
+  runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
+  plan_artifact_sha256: string;
+  source_commit: string;
+  invoked_attempts: number;
+  refused_attempts: number;
+  stranded_invocations: number;
+  complete_attempts: number;
+  partial_attempts: number;
+  gate_c_qualification_gate: false;
+  maximum_total_usd: 3;
+  maximum_provider_sessions: number;
+  maximum_paid_sessions: number;
+  maximum_generation_phases: number;
+  paid_retry_allowed: false;
+  latest: Lc4QualificationV3TerminalArtifact["body"];
+}>;
+
+type PackageManifest = Readonly<{
+  schema_version: 1;
+  manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4";
+  self_excluded: true;
+  entries: readonly Readonly<{ path: string; byte_length: number; sha256: string }>[];
+  bindings: Readonly<Record<string, string>>;
+  package_sha256: string;
+}>;
+
+type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observations" | "usage"> & Readonly<{
+  wire_observation_count: number;
+  usage_event_count: number;
+}>;
+
+export type Lc4DevQualificationV3SpokenEvidence = Readonly<{
+  provider: LiveStsProvider;
+  model: string;
+  evidence_sha256: string;
+  summary_file_sha256: string;
+  wire_file_sha256: string;
+  usage_file_sha256: string;
+  wire_observation_count: number;
+  usage_event_count: number;
+  caller_audio_bytes: number;
+  tool_call_observed: true;
+  tool_result_wire_observed: true;
+  post_tool_terminal_observed: true;
+  post_tool_usage_observed: true;
+}>;
+
+export type Lc4DevRetainedQualificationReceipt = Readonly<{
+  schema_version: 2;
+  protocol_id: "HACC-LC4-DEV-v1";
+  qualification_protocol_id: "HACC-LC4-v1";
+  qualification_runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
+  status: "passed";
+  providers: readonly ["openai", "gemini", "xai"];
+  source_commit: string;
+  source_tree_sha256: string;
+  credential_set_sha256: string;
+  provider_profile_manifest_sha256: string;
+  setup_configuration_matrix_sha256: string;
+  qualification_trust_root_sha256: string;
+  plan_sha256: string;
+  plan_artifact_sha256: string;
+  terminal_sha256: string;
+  terminal_artifact_sha256: string;
+  terminal_root_sha256: string;
+  report_sha256: string;
+  package_sha256: string;
+  setup_qualification_artifact_sha256: string;
+  budget_evidence_sha256: string;
+  budget_final_head_sha256: string;
+  retained_artifact_sha256: string;
+  plan: Lc4QualificationV3PlanArtifact;
+  authorization: Lc4QualificationV3AuthorizationArtifact;
+  terminal: Lc4QualificationV3TerminalArtifact;
+  report: QualificationReport;
+  setup_qualification: ProviderQualificationArtifact;
+  package_manifest: PackageManifest;
+  budget_evidence: Lc4QualificationBudgetEvidence;
+  spoken_gate_evidence: readonly Lc4DevQualificationV3SpokenEvidence[];
+  receipt_sha256: string;
+}>;
+
+type ReceiptInput = Readonly<{
+  plan: Lc4QualificationV3PlanArtifact;
+  authorization: Lc4QualificationV3AuthorizationArtifact;
+  terminal: Lc4QualificationV3TerminalArtifact;
+  report: QualificationReport;
+  package_manifest: PackageManifest;
+  setup_qualification: ProviderQualificationArtifact;
+  budget_evidence: Lc4QualificationBudgetEvidence;
+  spoken_gate_evidence: readonly Lc4DevQualificationV3SpokenEvidence[];
+  qualification_trust_root_sha256: string;
+}>;
+
+function freeze<T>(value: T): T {
+  return immutableJson(value) as unknown as T;
+}
+
+function requireHash(value: string, label: string): void {
+  if (!HASH.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
+}
+
+function assertSignedArtifact<Body>(input: Readonly<{
+  artifact: Readonly<{
+    body: Body;
+    authority_public_key_spki_base64: string;
+    authority_public_key_fingerprint_sha256: string;
+    signature_algorithm: "Ed25519";
+    signature_base64: string;
+    artifact_sha256: string;
+  }>;
+  expected_fingerprint: string;
+  signing_domain: string;
+  artifact_domain: string;
+}>): void {
+  const { artifact_sha256, ...unsigned } = input.artifact;
+  if (sha256Hex(`${input.artifact_domain}${canonicalJson(unsigned)}`) !== artifact_sha256) {
+    throw new Error("LC4-DEV qualification signed artifact hash mismatch");
+  }
+  const keyBytes = Buffer.from(input.artifact.authority_public_key_spki_base64, "base64");
+  if (sha256Hex(keyBytes) !== input.artifact.authority_public_key_fingerprint_sha256
+    || input.artifact.authority_public_key_fingerprint_sha256 !== input.expected_fingerprint) {
+    throw new Error("LC4-DEV qualification signed artifact trust root mismatch");
+  }
+  let key;
+  try {
+    key = createPublicKey({ key: keyBytes, format: "der", type: "spki" });
+  } catch {
+    throw new Error("LC4-DEV qualification signed artifact public key is invalid");
+  }
+  if (key.asymmetricKeyType !== "ed25519"
+    || input.artifact.signature_algorithm !== "Ed25519"
+    || !verify(null, Buffer.from(`${input.signing_domain}${canonicalJson(input.artifact.body)}`), key, Buffer.from(input.artifact.signature_base64, "base64"))) {
+    throw new Error("LC4-DEV qualification signed artifact signature is invalid");
+  }
+}
+
+function assertReport(value: unknown): asserts value is QualificationReport {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("LC4-DEV qualification v3 report is invalid");
+  const report = value as Partial<QualificationReport>;
+  if (report.schema_version !== 1
+    || report.runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION
+    || report.invoked_attempts !== 1
+    || report.refused_attempts !== 0
+    || report.stranded_invocations !== 0
+    || report.complete_attempts !== 1
+    || report.partial_attempts !== 0
+    || report.gate_c_qualification_gate !== false
+    || report.maximum_total_usd !== 3
+    || report.maximum_provider_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
+    || report.maximum_paid_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
+    || report.maximum_generation_phases !== LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES
+    || report.paid_retry_allowed !== false
+    || report.latest?.status !== "passed") {
+    throw new Error("LC4-DEV qualification v3 report is not one completed passing no-retry attempt");
+  }
+}
+
+function assertProviderOrder(values: readonly Readonly<{ provider: LiveStsProvider; model: string }>[], label: string): void {
+  if (canonicalJson(values.map(({ provider }) => provider)) !== canonicalJson(LC4_QUALIFICATION_V3_PROVIDER_ORDER)) {
+    throw new Error(`${label} is not in exact OpenAI, Gemini, xAI order`);
+  }
+  for (const value of values) {
+    if (value.model !== LC4_PROVIDER_PROFILE_MANIFEST.providers[value.provider].model) {
+      throw new Error(`${label} contains a stale provider model`);
+    }
+  }
+}
+
+function requestedConfigurationSha256(target: ReturnType<typeof createLc4QualificationV3Targets>[number]): string {
+  return sha256Hex(`harshas-amazing-call-center/provider-session-configuration/v1\n${canonicalJson({
+    provider: target.provider,
+    model: target.model,
+    configuration: target.configuration,
+  })}`);
+}
+
+function assertClosedLoopWire(
+  provider: LiveStsProvider,
+  wire: readonly RealtimeWireObservation[],
+  usage: readonly Readonly<Record<string, unknown>>[],
+): void {
+  const call = wire.findIndex((entry) => entry.direction === "inbound"
+    && entry.identities.callIdSha256 !== undefined
+    && ["toolCall", "response.function_call_arguments.done", "response.done"].includes(entry.wireType));
+  if (call < 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained wire lacks a provider-authored tool call`);
+  const callIdentity = wire[call]!.identities.callIdSha256;
+  const result = wire.findIndex((entry, index) => index > call
+    && entry.direction === "outbound"
+    && entry.identities.callIdSha256 === callIdentity
+    && ["toolResponse", "conversation.item.create"].includes(entry.wireType));
+  if (result < 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained wire lacks the matching tool result`);
+  const continuation = provider === "gemini"
+    ? wire.findIndex((entry, index) => index > result && entry.direction === "inbound" && entry.wireType === "serverContent")
+    : wire.findIndex((entry, index) => index > result && entry.direction === "outbound" && entry.wireType === "response.create");
+  if (continuation < 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained wire lacks post-tool continuation`);
+  const terminal = wire.findIndex((entry, index) => index > continuation
+    && entry.direction === "inbound"
+    && typeof entry.projection === "object"
+    && entry.projection !== null
+    && "terminal" in entry.projection);
+  if (terminal < 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained wire lacks a post-tool terminal`);
+  const usageOnWire = wire.slice(terminal).some((entry) => typeof entry.projection === "object"
+    && entry.projection !== null
+    && "usage" in entry.projection);
+  if (!usageOnWire || usage.length === 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained evidence lacks post-tool usage`);
+  const prematureSpeech = wire.slice(0, call).some((entry) => {
+    if (entry.direction !== "inbound" || typeof entry.projection !== "object" || entry.projection === null) return false;
+    const projection = entry.projection as Record<string, unknown>;
+    return projection.audio !== undefined || projection.text !== undefined;
+  });
+  if (prematureSpeech) throw new Error(`LC4-DEV qualification v3 ${provider} spoke before its required tool call`);
+}
+
+export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): Lc4DevRetainedQualificationReceipt {
+  requireHash(input.qualification_trust_root_sha256, "LC4-DEV qualification trust root");
+  assertLc4QualificationV3PlanArtifact(input.plan, input.qualification_trust_root_sha256);
+  assertSignedArtifact({
+    artifact: input.plan,
+    expected_fingerprint: input.qualification_trust_root_sha256,
+    signing_domain: PLAN_SIGNING_DOMAIN,
+    artifact_domain: PLAN_ARTIFACT_DOMAIN,
+  });
+  assertSignedArtifact({
+    artifact: input.authorization,
+    expected_fingerprint: input.qualification_trust_root_sha256,
+    signing_domain: AUTHORIZATION_SIGNING_DOMAIN,
+    artifact_domain: AUTHORIZATION_ARTIFACT_DOMAIN,
+  });
+  assertSignedArtifact({
+    artifact: input.terminal,
+    expected_fingerprint: input.authorization.body.terminal_public_key_fingerprint_sha256,
+    signing_domain: TERMINAL_SIGNING_DOMAIN,
+    artifact_domain: TERMINAL_ARTIFACT_DOMAIN,
+  });
+  assertReport(input.report);
+  assertProviderQualificationArtifactIntegrity(input.setup_qualification);
+  assertLc4QualificationBudgetEvidence(input.budget_evidence);
+
+  const plan = input.plan.body;
+  const terminal = input.terminal.body;
+  const expectedTargets = createLc4QualificationV3Targets();
+  assertProviderOrder(plan.targets, "LC4-DEV qualification v3 plan targets");
+  assertProviderOrder(terminal.results, "LC4-DEV qualification v3 terminal results");
+  assertProviderOrder(input.setup_qualification.results, "LC4-DEV qualification v3 Gate A results");
+  assertProviderOrder(input.spoken_gate_evidence, "LC4-DEV qualification v3 Gate B results");
+  const credentialSetFromPlan = sha256Hex(`harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(plan.credential_identities)}`);
+
+  if (plan.protocol_id !== "HACC-LC4-v1"
+    || plan.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
+    || credentialSetFromPlan !== plan.credential_set_sha256
+    || plan.setup_configuration_matrix_sha256 !== providerQualificationMatrixSha256(expectedTargets)
+    || input.setup_qualification.planSha256 !== plan.plan_sha256
+    || input.setup_qualification.sourceCommit !== plan.source.source_commit
+    || input.setup_qualification.configurationMatrixSha256 !== plan.setup_configuration_matrix_sha256
+    || input.setup_qualification.credentialSetSha256 !== plan.credential_set_sha256
+    || input.setup_qualification.artifactSha256 !== terminal.setup_qualification_artifact_sha256
+    || input.setup_qualification.results.length !== 3
+    || input.setup_qualification.results.some((result) => result.status !== "passed")
+    || input.report.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || input.report.source_commit !== plan.source.source_commit
+    || canonicalJson(input.report.latest) !== canonicalJson(terminal)
+    || terminal.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || terminal.plan_sha256 !== plan.plan_sha256
+    || terminal.authorization_artifact_sha256 !== input.authorization.artifact_sha256
+    || input.authorization.body.authorization_version !== LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION
+    || input.authorization.body.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || input.authorization.body.plan_sha256 !== plan.plan_sha256
+    || input.authorization.body.source_commit !== plan.source.source_commit
+    || input.authorization.body.source_tree_sha256 !== plan.source.source_tree_sha256
+    || input.authorization.body.credential_set_sha256 !== plan.credential_set_sha256
+    || sha256Hex(Buffer.from(input.authorization.body.terminal_public_key_spki_base64, "base64")) !== input.authorization.body.terminal_public_key_fingerprint_sha256
+    || input.authorization.body.maximum_provider_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
+    || input.authorization.body.maximum_total_micro_usd !== plan.maximum_total_micro_usd
+    || input.authorization.body.maximum_paid_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
+    || input.authorization.body.maximum_generation_phases !== LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES
+    || input.authorization.body.maximum_tool_roundtrips !== LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS
+    || input.authorization.body.paid_retry_allowed !== false
+    || terminal.source_commit !== plan.source.source_commit
+    || terminal.source_tree_sha256 !== plan.source.source_tree_sha256
+    || terminal.primary_failure_class !== null
+    || terminal.provider_sessions_opened !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
+    || terminal.paid_sessions_opened !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
+    || terminal.generation_phases_attempted !== LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES
+    || terminal.tool_roundtrips_attempted !== LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS
+    || terminal.caller_audio_bytes !== plan.targets.reduce((total, target) => total + target.caller_audio_bytes, 0)
+    || terminal.paid_retries_attempted !== 0
+    || terminal.results.length !== 3
+    || terminal.results.some((result) => result.status !== "passed" || result.failure_class !== "none")
+    || terminal.roundtrip_evidence_sha256.length !== 3
+    || input.spoken_gate_evidence.length !== 3
+    || input.budget_evidence.terminal_outcome !== "completed"
+    || input.budget_evidence.evidence_sha256 !== terminal.budget_evidence_sha256
+    || input.budget_evidence.final_head_sha256 !== terminal.budget_final_head_sha256
+    || input.package_manifest.bindings.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || input.package_manifest.bindings.authorization_artifact_sha256 !== input.authorization.artifact_sha256
+    || input.package_manifest.bindings.terminal_artifact_sha256 !== input.terminal.artifact_sha256
+    || input.package_manifest.bindings.budget_evidence_sha256 !== input.budget_evidence.evidence_sha256) {
+    throw new Error("LC4-DEV qualification v3 plan, Gate A, Gate B, budget, report, and terminal bindings are not exact");
+  }
+  const { package_sha256: claimedPackageSha256, ...packageBody } = input.package_manifest;
+  if (input.package_manifest.schema_version !== 1
+    || input.package_manifest.manifest_version !== "HACC-LC4-QUALIFICATION-PACKAGE-v4"
+    || input.package_manifest.self_excluded !== true
+    || claimedPackageSha256 !== sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(packageBody)}`)
+    || input.package_manifest.entries.some((entry) => entry.path.includes("/") || !HASH.test(entry.sha256))) {
+    throw new Error("LC4-DEV qualification v3 retained package manifest is invalid");
+  }
+  const entries = new Map(input.package_manifest.entries.map((entry) => [entry.path, entry]));
+  for (const evidence of input.spoken_gate_evidence) {
+    for (const [path, digest] of [
+      [`${evidence.provider}-spoken-roundtrip.json`, evidence.summary_file_sha256],
+      [`${evidence.provider}-spoken-roundtrip-wire.jsonl`, evidence.wire_file_sha256],
+      [`${evidence.provider}-spoken-roundtrip-usage.jsonl`, evidence.usage_file_sha256],
+    ] as const) {
+      if (entries.get(path)?.sha256 !== digest) {
+        throw new Error(`LC4-DEV qualification v3 ${evidence.provider} retained Gate B file is not package-bound`);
+      }
+    }
+  }
+  if (entries.get("setup-acceptance.json")?.sha256 !== sha256Hex(`${canonicalJson(input.setup_qualification)}\n`)
+    || entries.get("budget-settlement.json")?.sha256 !== sha256Hex(`${canonicalJson(input.budget_evidence)}\n`)
+    || entries.get("terminal.json")?.sha256 !== sha256Hex(`${canonicalJson(input.terminal)}\n`)
+    || entries.get("authorization.json")?.sha256 !== sha256Hex(`${canonicalJson(input.authorization)}\n`)) {
+    throw new Error("LC4-DEV qualification v3 package omits a required admission artifact");
+  }
+
+  for (const [index, provider] of LC4_QUALIFICATION_V3_PROVIDER_ORDER.entries()) {
+    const target = plan.targets[index]!;
+    const expected = expectedTargets[index]!;
+    const setup = input.setup_qualification.results[index]!;
+    const spoken = input.spoken_gate_evidence[index]!;
+    const result = terminal.results[index]!;
+    if (target.provider !== provider
+      || target.model !== expected.model
+      || target.sample_rate_hz !== expected.configuration.inputAudioFormat.sampleRateHz
+      || setup.provider !== provider
+      || setup.model !== target.model
+      || setup.requestedConfigurationSha256 !== requestedConfigurationSha256(expected)
+      || spoken.provider !== provider
+      || spoken.model !== target.model
+      || spoken.evidence_sha256 !== terminal.roundtrip_evidence_sha256[index]
+      || spoken.evidence_sha256 !== result.evidence_sha256
+      || spoken.caller_audio_bytes !== target.caller_audio_bytes
+      || result.caller_audio_bytes !== target.caller_audio_bytes
+      || result.wire_observation_count !== spoken.wire_observation_count
+      || result.usage_event_count !== spoken.usage_event_count
+      || !spoken.tool_call_observed
+      || !spoken.tool_result_wire_observed
+      || !spoken.post_tool_terminal_observed
+      || !spoken.post_tool_usage_observed) {
+      throw new Error(`LC4-DEV qualification v3 ${provider} Gate A/Gate B evidence differs from its plan`);
+    }
+  }
+
+  const xai = terminal.server_vad_qualification;
+  const xaiResult = terminal.results[2]!;
+  const xaiSetup = input.setup_qualification.results[2]!;
+  const expectedXaiGateA = xaiSetup.turnBoundaryVerification === "verified_by_provider_echo"
+    ? "verified_by_provider_echo"
+    : xaiSetup.code === "acknowledged_unverifiable_server_vad"
+      ? "acknowledged_unverifiable_server_vad"
+      : "failed";
+  if (xai.provider !== "xai"
+    || xai.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
+    || xai.gate_a_classification === "failed"
+    || xai.gate_a_classification !== expectedXaiGateA
+    || xai.gate_b_required !== true
+    || xai.gate_b_status !== "behaviorally_verified"
+    || xai.gate_b_evidence_sha256 !== xaiResult.evidence_sha256
+    || xai.benchmark_ready !== true) {
+    throw new Error("LC4-DEV qualification v3 lacks promoted xAI server-VAD Gate A/Gate B evidence");
+  }
+
+  const reportSha256 = sha256Hex(`${REPORT_DOMAIN}${canonicalJson(input.report)}`);
+  const retainedBody = freeze({
+    plan_artifact_sha256: input.plan.artifact_sha256,
+    authorization_artifact_sha256: input.authorization.artifact_sha256,
+    terminal_artifact_sha256: input.terminal.artifact_sha256,
+    report_sha256: reportSha256,
+    package_sha256: input.package_manifest.package_sha256,
+    setup_qualification_artifact_sha256: input.setup_qualification.artifactSha256,
+    budget_evidence_sha256: input.budget_evidence.evidence_sha256,
+    spoken_gate_evidence: input.spoken_gate_evidence,
+  });
+  const retainedArtifactSha256 = sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(retainedBody)}`);
+  const body = freeze({
+    schema_version: 2 as const,
+    protocol_id: "HACC-LC4-DEV-v1" as const,
+    qualification_protocol_id: "HACC-LC4-v1" as const,
+    qualification_runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
+    status: "passed" as const,
+    providers: LC4_QUALIFICATION_V3_PROVIDER_ORDER,
+    source_commit: plan.source.source_commit,
+    source_tree_sha256: plan.source.source_tree_sha256,
+    credential_set_sha256: plan.credential_set_sha256,
+    provider_profile_manifest_sha256: plan.provider_profile_manifest_sha256,
+    setup_configuration_matrix_sha256: plan.setup_configuration_matrix_sha256,
+    qualification_trust_root_sha256: input.qualification_trust_root_sha256,
+    plan_sha256: plan.plan_sha256,
+    plan_artifact_sha256: input.plan.artifact_sha256,
+    terminal_sha256: terminal.terminal_sha256,
+    terminal_artifact_sha256: input.terminal.artifact_sha256,
+    terminal_root_sha256: input.terminal.artifact_sha256,
+    report_sha256: reportSha256,
+    package_sha256: input.package_manifest.package_sha256,
+    setup_qualification_artifact_sha256: input.setup_qualification.artifactSha256,
+    budget_evidence_sha256: input.budget_evidence.evidence_sha256,
+    budget_final_head_sha256: input.budget_evidence.final_head_sha256,
+    retained_artifact_sha256: retainedArtifactSha256,
+    plan: input.plan,
+    authorization: input.authorization,
+    terminal: input.terminal,
+    report: input.report,
+    setup_qualification: input.setup_qualification,
+    package_manifest: input.package_manifest,
+    budget_evidence: input.budget_evidence,
+    spoken_gate_evidence: freeze([...input.spoken_gate_evidence]),
+  });
+  return freeze({ ...body, receipt_sha256: sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`) });
+}
+
+export function assertLc4DevRetainedQualificationReceipt(receipt: Lc4DevRetainedQualificationReceipt): void {
+  const { receipt_sha256, ...body } = receipt;
+  if (sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`) !== receipt_sha256) {
+    throw new Error("LC4-DEV retained qualification v3 receipt hash mismatch");
+  }
+  const rebuilt = createLc4DevRetainedQualificationReceipt({
+    plan: receipt.plan,
+    authorization: receipt.authorization,
+    terminal: receipt.terminal,
+    report: receipt.report,
+    package_manifest: receipt.package_manifest,
+    setup_qualification: receipt.setup_qualification,
+    budget_evidence: receipt.budget_evidence,
+    spoken_gate_evidence: receipt.spoken_gate_evidence,
+    qualification_trust_root_sha256: receipt.qualification_trust_root_sha256,
+  });
+  if (canonicalJson(rebuilt) !== canonicalJson(receipt)) {
+    throw new Error("LC4-DEV retained qualification v3 receipt is not canonical");
+  }
+}
+
+async function readBoundedJson<T>(path: string, maximum = MAX_JSON_BYTES): Promise<T> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size < 2 || metadata.size > maximum) {
+    throw new Error("LC4-DEV qualification v3 retained JSON is not a bounded regular file");
+  }
+  return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function readJsonLines<T>(path: string): Promise<readonly T[]> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_JSONL_BYTES) {
+    throw new Error("LC4-DEV qualification v3 retained JSONL is not a bounded regular file");
+  }
+  const text = await readFile(path, "utf8");
+  if (text && !text.endsWith("\n")) throw new Error("LC4-DEV qualification v3 retained JSONL is not newline terminated");
+  return freeze(text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as T));
+}
+
+export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
+  root: string;
+  qualification_trust_root_sha256: string;
+  now?: Date;
+}>): Promise<Lc4DevRetainedQualificationReceipt> {
+  const root = resolve(input.root);
+  requireHash(input.qualification_trust_root_sha256, "LC4-DEV qualification trust root");
+  const names = await readdir(root);
+  if (!names.includes("lc4-qualification-v3-plan.json")) {
+    if (names.includes("lc4-qualification-plan.json")) {
+      throw new Error("LC4-DEV refuses legacy qualification v2; current server-VAD admission requires qualification v3");
+    }
+    throw new Error("LC4-DEV qualification v3 plan is missing");
+  }
+  const plan = await readBoundedJson<Lc4QualificationV3PlanArtifact>(resolve(root, "lc4-qualification-v3-plan.json"));
+  assertLc4QualificationV3PlanArtifact(plan, input.qualification_trust_root_sha256);
+  const reportValue = await reportLc4QualificationV3({ root, trustRootFingerprint: input.qualification_trust_root_sha256 });
+  assertReport(reportValue);
+  const now = input.now ?? new Date();
+  const completedAt = Date.parse(reportValue.latest.completed_at);
+  if (!Number.isFinite(completedAt)
+    || completedAt > now.getTime() + 120_000
+    || now.getTime() - completedAt > PROVIDER_QUALIFICATION_MAX_AGE_MS) {
+    throw new Error("LC4-DEV qualification v3 passing terminal is stale or future-dated");
+  }
+  const attemptsRoot = resolve(root, "attempts");
+  const complete = (await readdir(attemptsRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.endsWith(".complete"));
+  if (complete.length !== 1) throw new Error("LC4-DEV qualification v3 must retain exactly one completed attempt");
+  const directory = resolve(attemptsRoot, complete[0]!.name);
+  const [authorization, terminal, manifest, setup, budget] = await Promise.all([
+    readBoundedJson<Lc4QualificationV3AuthorizationArtifact>(resolve(directory, "authorization.json")),
+    readBoundedJson<Lc4QualificationV3TerminalArtifact>(resolve(directory, "terminal.json")),
+    readBoundedJson<PackageManifest>(resolve(directory, "artifact-manifest.json")),
+    readBoundedJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json")),
+    readBoundedJson<Lc4QualificationBudgetEvidence>(resolve(directory, "budget-settlement.json")),
+  ]);
+  const spoken: Lc4DevQualificationV3SpokenEvidence[] = [];
+  for (const provider of LC4_QUALIFICATION_V3_PROVIDER_ORDER) {
+    const summaryPath = resolve(directory, `${provider}-spoken-roundtrip.json`);
+    const wirePath = resolve(directory, `${provider}-spoken-roundtrip-wire.jsonl`);
+    const usagePath = resolve(directory, `${provider}-spoken-roundtrip-usage.jsonl`);
+    const [summaryBytes, wireBytes, usageBytes, summary, wire, usage] = await Promise.all([
+      readFile(summaryPath), readFile(wirePath), readFile(usagePath),
+      readBoundedJson<RetainedRoundtripSummary>(summaryPath),
+      readJsonLines<RealtimeWireObservation>(wirePath),
+      readJsonLines<Readonly<Record<string, unknown>>>(usagePath),
+    ]);
+    const { wire_observation_count, usage_event_count } = summary;
+    if (wire_observation_count !== wire.length || usage_event_count !== usage.length) {
+      throw new Error(`LC4-DEV qualification v3 ${provider} retained Gate B counts differ from their logs`);
+    }
+    if (summary.provider !== provider
+      || summary.status !== "passed"
+      || summary.failure_class !== "none"
+      || summary.delivery === null
+      || !summary.tool_call_observed
+      || !summary.tool_result_submitted
+      || !summary.tool_result_event_observed
+      || !summary.tool_result_wire_observed
+      || !summary.post_tool_continuation_requested
+      || !summary.post_tool_continuation_observed
+      || !summary.post_tool_terminal_observed
+      || !summary.post_tool_usage_observed
+      || summary.provider_tool_call_evidence_sha256 === null
+      || summary.tool_result_evidence_sha256 === null
+      || !verifyRealtimeWireObservationChain(wire).valid) {
+      throw new Error(`LC4-DEV qualification v3 ${provider} spoken Gate B did not pass`);
+    }
+    assertClosedLoopWire(provider, wire, usage);
+    spoken.push(freeze({
+      provider,
+      model: summary.model,
+      evidence_sha256: summary.evidence_sha256,
+      summary_file_sha256: sha256Hex(summaryBytes),
+      wire_file_sha256: sha256Hex(wireBytes),
+      usage_file_sha256: sha256Hex(usageBytes),
+      wire_observation_count,
+      usage_event_count,
+      caller_audio_bytes: summary.delivery.audio_bytes,
+      tool_call_observed: true,
+      tool_result_wire_observed: true,
+      post_tool_terminal_observed: true,
+      post_tool_usage_observed: true,
+    }));
+  }
+  return createLc4DevRetainedQualificationReceipt({
+    plan,
+    authorization,
+    terminal,
+    report: reportValue,
+    package_manifest: manifest,
+    setup_qualification: setup,
+    budget_evidence: budget,
+    spoken_gate_evidence: spoken,
+    qualification_trust_root_sha256: input.qualification_trust_root_sha256,
+  });
+}

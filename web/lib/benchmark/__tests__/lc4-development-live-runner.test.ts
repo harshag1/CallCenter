@@ -52,20 +52,41 @@ import {
   type Lc4DevPriorMutationOutcome,
 } from "../lc4-development-caller-branch";
 import {
-  LC4_QUALIFICATION_RUNNER_VERSION,
-  createLc4DevAudioQualificationTargets,
-  createLc4QualificationTargets,
-} from "../lc4-qualification-runner";
-import {
-  LC4_DEV_AUDIO_CANARY_CONTROL_BYTES,
-  LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256,
-  LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
-  lc4DevAudioCanarySpecification,
-} from "../provider-dev-audio-canary";
+  LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+  LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+  LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+  LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+  LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+  LC4_QUALIFICATION_V3_RUNNER_VERSION,
+  LC4_XAI_SERVER_VAD_SETTING_SHA256,
+  createLc4QualificationV3Targets,
+  type Lc4QualificationV3PlanArtifact,
+  type Lc4QualificationV3AuthorizationArtifact,
+  type Lc4QualificationV3TerminalArtifact,
+} from "../lc4-qualification-v3-runner";
 import {
   providerQualificationMatrixSha256,
-  providerResponseToolCanaryRequirements,
+  type ProviderQualificationArtifact,
 } from "../provider-qualification";
+import {
+  LC4_S2S_AUDIO_FIXTURE_VERSION,
+  LC4_S2S_COMPACT_CONTROL_SHA256,
+  LC4_S2S_PACKETIZER_SHA256,
+  LC4_S2S_SOURCE_TEXT_SHA256,
+  LC4_S2S_TOOL_SCHEMA_SHA256,
+  LC4_S2S_VOICE,
+  LC4_S2S_VOICE_SHA256,
+  lc4S2sControlSizeDiagnostic,
+} from "../provider-s2s-tool-roundtrip";
+import { productionSessionPayloadParitySha256 } from "../production-realtime-provider";
+import {
+  DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+  trialAudioDeliveryProfileHash,
+} from "../orchestrator";
+import {
+  LC4_QUALIFICATION_BUDGET_VERSION,
+  type Lc4QualificationBudgetEvidence,
+} from "../lc4-qualification-budget";
 import {
   LC4_DEV_FAILURE_EVIDENCE_VERSION,
   Lc4DevFailureEvidenceError,
@@ -154,133 +175,350 @@ function noRepairDependencies(): Lc4DevLiveRunnerDependencies["repair"] {
 }
 
 function qualificationFixture() {
-  const targets = createLc4QualificationTargets();
-  const devTargets = createLc4DevAudioQualificationTargets();
-  const requirements = providerResponseToolCanaryRequirements(targets);
-  const plannedTargets = (["openai", "gemini", "xai"] as const).map((provider) => {
-    const devTarget = devTargets.find((candidate) => candidate.provider === provider)!;
-    const requirement = requirements.find((item) => item.provider === provider)!;
-    const specification = lc4DevAudioCanarySpecification(provider, devTarget.model, devTarget.configuration.inputAudioFormat.sampleRateHz);
-    return {
-      provider,
-      model: devTarget.model,
-      zero_audio_tool_schema_sha256: requirement.toolSchemaSha256,
-      dev_audio_tool_schema_sha256: specification.tool_schema_sha256,
-      packetizer_sha256: LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
-      audio_delivery_profile_sha256: devTarget.configuration.audioDeliveryProfileHash,
-      dev_control_bytes: LC4_DEV_AUDIO_CANARY_CONTROL_BYTES,
-      dev_control_sha256: specification.control_sha256,
-      dev_control_source_sha256: LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256,
-      caller_audio_bytes: specification.audio_bytes,
-      caller_audio_sha256: specification.audio_sha256,
-      response_generations: 2 as const,
-      maximum_micro_usd: 1_000_000 as const,
-      paid_retry_allowed: false as const,
+  const planAuthority = generateKeyPairSync("ed25519");
+  const terminalAuthority = generateKeyPairSync("ed25519");
+  const signArtifact = <Body,>(input: Readonly<{
+    body: Body;
+    privateKey: typeof planAuthority.privateKey;
+    publicKey: typeof planAuthority.publicKey;
+    signingDomain: string;
+    artifactDomain: string;
+  }>) => {
+    const publicKey = input.publicKey.export({ type: "spki", format: "der" });
+    const unsigned = {
+      body: input.body,
+      authority_public_key_spki_base64: publicKey.toString("base64"),
+      authority_public_key_fingerprint_sha256: sha256Hex(publicKey),
+      signature_algorithm: "Ed25519" as const,
+      signature_base64: sign(null, Buffer.from(`${input.signingDomain}${canonicalJson(input.body)}`), input.privateKey).toString("base64"),
     };
-  });
-  const planBody = {
-    schema_version: 1 as const,
-    runner_version: LC4_QUALIFICATION_RUNNER_VERSION,
-    protocol_id: "HACC-LC4-v1" as const,
-    plan_id: "lc4-dev-test-qualification",
-    prepared_at: "2026-07-21T20:00:00.000Z",
+    return {
+      ...unsigned,
+      artifact_sha256: sha256Hex(`${input.artifactDomain}${canonicalJson(unsigned)}`),
+    };
+  };
+
+  const setupTargets = createLc4QualificationV3Targets();
+  const source = {
     source_commit: "b".repeat(40),
     source_tree_oid: "c".repeat(40),
     source_tree_sha256: "d".repeat(64),
-    provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
-    configuration_matrix_sha256: providerQualificationMatrixSha256(targets),
-    dev_configuration_matrix_sha256: providerQualificationMatrixSha256(devTargets),
-    credential_set_sha256: "e".repeat(64),
-    credential_identities: ["openai", "gemini", "xai"].map((provider, index) => ({ provider: provider as "openai" | "gemini" | "xai", credential_sha256: String(index + 1).repeat(64) })),
-    targets: plannedTargets,
-    execution_scope: "development_only_exact_model_handshake_zero_audio_gateway_then_exact_dev_schema_packetized_audio_canary" as const,
-    maximum_total_micro_usd: 3_000_000 as const,
-    provider_calls_authorized: false as const,
-    authorization_required: "pinned_ed25519_development_artifact" as const,
+    worktree_clean: true as const,
   };
-  const plan = { ...planBody, plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v2\n${canonicalJson(planBody)}`) };
-  const results = [...plan.targets].sort((a, b) => a.provider.localeCompare(b.provider)).map((target) => ({
+  const renditions = Object.fromEntries(setupTargets.map((target, index) => {
+    const sampleRate = target.configuration.inputAudioFormat.sampleRateHz;
+    const byteLength = sampleRate * 12 / 10 * 2;
+    const audioSha256 = sha256Hex(`qualification-v3-audio:${target.provider}`);
+    return [target.provider, {
+      path: `cas/${target.provider}-${index}.pcm`,
+      sha256: audioSha256,
+      cas_sha256: sha256Hex(`qualification-v3-cas:${target.provider}`),
+      cas_receipt_sha256: sha256Hex(`qualification-v3-cas-receipt:${target.provider}`),
+      byte_length: byteLength,
+      sample_rate_hz: sampleRate,
+      channels: 1 as const,
+      encoding: "pcm16le" as const,
+      duration_ms: 1_200,
+    }];
+  })) as Record<"openai" | "gemini" | "xai", {
+    path: string; sha256: string; cas_sha256: string; cas_receipt_sha256: string;
+    byte_length: number; sample_rate_hz: 16_000 | 24_000; channels: 1; encoding: "pcm16le"; duration_ms: number;
+  }>;
+  const audioFixtureBody = {
+    schema_version: 1 as const,
+    fixture_version: LC4_S2S_AUDIO_FIXTURE_VERSION,
+    source_text_sha256: LC4_S2S_SOURCE_TEXT_SHA256,
+    voice: LC4_S2S_VOICE,
+    voice_sha256: LC4_S2S_VOICE_SHA256,
+    tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+    base_fixture_manifest_sha256: sha256Hex("qualification-v3-base-fixture"),
+    toolchain_sha256: sha256Hex("qualification-v3-toolchain"),
+    renderer_identity_sha256: sha256Hex("qualification-v3-renderer"),
+    provider_renditions: renditions,
+  };
+  const audioFixture = {
+    ...audioFixtureBody,
+    artifact_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-spoken-fixture-artifact/v1\n${canonicalJson(audioFixtureBody)}`),
+  };
+  const deliveryProfileSha256 = trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE);
+  const credentialIdentities = setupTargets.map((target, index) => ({
+    provider: target.provider,
+    credential_sha256: String(index + 1).repeat(64),
+  }));
+  const credentialSetSha256 = sha256Hex(`harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(credentialIdentities)}`);
+  const plannedTargets = setupTargets.map((target) => {
+    const audio = renditions[target.provider];
+    return {
+      provider: target.provider,
+      model: target.model,
+      sample_rate_hz: audio.sample_rate_hz,
+      caller_audio_bytes: audio.byte_length,
+      caller_audio_sha256: audio.sha256,
+      caller_audio_cas_sha256: audio.cas_sha256,
+      caller_audio_duration_ms: audio.duration_ms,
+      gateway_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+      voice_sha256: LC4_S2S_VOICE_SHA256,
+      compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
+      packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
+      audio_delivery_profile_sha256: deliveryProfileSha256,
+      production_session_payload_sha256: target.provider === "gemini"
+        ? null
+        : productionSessionPayloadParitySha256(target.provider, target.configuration),
+      setup_sessions: 1 as const,
+      paid_sessions: 1 as const,
+      generation_phases: 2 as const,
+      tool_roundtrips: 1 as const,
+    };
+  });
+  const unsignedPlanBody = {
+    schema_version: 1 as const,
+    runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
+    protocol_id: "HACC-LC4-v1" as const,
+    plan_id: "lc4-dev-test-qualification-v3",
+    prepared_at: "2026-07-21T20:00:00.000Z",
+    source,
+    provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    setup_configuration_matrix_sha256: providerQualificationMatrixSha256(setupTargets),
+    credential_set_sha256: credentialSetSha256,
+    credential_identities: credentialIdentities,
+    audio_fixture: audioFixture,
+    control_size_diagnostic: lc4S2sControlSizeDiagnostic(),
+    targets: plannedTargets,
+    execution_scope: "gate_a_setup_acceptance_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only" as const,
+    maximum_total_micro_usd: 3_000_000 as const,
+    maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+    maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+    maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+    maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+    paid_retry_allowed: false as const,
+    provider_calls_authorized: false as const,
+  };
+  const planBody = {
+    ...unsignedPlanBody,
+    plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v4\n${canonicalJson(unsignedPlanBody)}`),
+  };
+  const plan = signArtifact({
+    body: planBody,
+    privateKey: planAuthority.privateKey,
+    publicKey: planAuthority.publicKey,
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-plan/v4\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n",
+  }) as Lc4QualificationV3PlanArtifact;
+  const terminalPublicKey = terminalAuthority.publicKey.export({ type: "spki", format: "der" });
+  const authorizationBody = {
+    schema_version: 1 as const,
+    authorization_version: LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION,
+    authorization_id: "lc4-dev-qualification-v3-attempt",
+    authorization_nonce_sha256: sha256Hex("qualification-v3-authorization-nonce"),
+    plan_artifact_sha256: plan.artifact_sha256,
+    plan_sha256: plan.body.plan_sha256,
+    source_commit: source.source_commit,
+    source_tree_sha256: source.source_tree_sha256,
+    credential_set_sha256: unsignedPlanBody.credential_set_sha256,
+    terminal_public_key_spki_base64: terminalPublicKey.toString("base64"),
+    terminal_public_key_fingerprint_sha256: sha256Hex(terminalPublicKey),
+    maximum_total_micro_usd: 3_000_000 as const,
+    maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+    maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+    maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+    maximum_tool_roundtrips: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+    paid_retry_allowed: false as const,
+    not_before: "2026-07-21T19:00:00.000Z",
+    expires_at: "2026-07-21T22:00:00.000Z",
+  };
+  const authorization = signArtifact({
+    body: authorizationBody,
+    privateKey: planAuthority.privateKey,
+    publicKey: planAuthority.publicKey,
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-authorization/v4\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n",
+  }) as Lc4QualificationV3AuthorizationArtifact;
+
+  const setupResults: ProviderQualificationArtifact["results"] = setupTargets.map((target) => ({
     provider: target.provider,
     model: target.model,
-    toolSchemaSha256: target.zero_audio_tool_schema_sha256,
+    requestedConfigurationSha256: sha256Hex(`harshas-amazing-call-center/provider-session-configuration/v1\n${canonicalJson({
+      provider: target.provider,
+      model: target.model,
+      configuration: target.configuration,
+    })}`),
     attemptedAt: "2026-07-21T20:01:00.000Z",
     completedAt: "2026-07-21T20:01:01.000Z",
     status: "passed" as const,
-    code: "gateway_tool_call_observed" as const,
-    callerAudioBytes: 0 as const,
-    responseGenerationEvidenceSha256: sha256Hex(`generation:${target.provider}`),
-    providerToolCallEvidenceSha256: sha256Hex(`tool:${target.provider}`),
+    code: "configuration_echo_verified" as const,
+    acknowledgementMode: "exact_provider_echo" as const,
+    acknowledgementSha256: sha256Hex(`qualification-v3-ack:${target.provider}`),
+    toolSchemaVerification: "verified_by_provider_echo" as const,
+    turnBoundaryVerification: target.provider === "gemini" ? "not_applicable" as const : "verified_by_provider_echo" as const,
   }));
-  const canaryBody = {
-    schemaVersion: 1 as const,
-    canaryId: "lc4-dev-canary",
+  const setupBody = {
+    schemaVersion: 2 as const,
+    qualificationId: "lc4-dev-v3-setup",
     protocolId: "HACC-LC4-v1",
-    planSha256: plan.plan_sha256,
-    sourceCommit: plan.source_commit,
-    configurationMatrixSha256: plan.configuration_matrix_sha256,
-    credentialSetSha256: plan.credential_set_sha256,
-    probeScope: "paid_response_generation_tool_call_no_caller_audio" as const,
+    planSha256: plan.body.plan_sha256,
+    sourceCommit: source.source_commit,
+    configurationMatrixSha256: unsignedPlanBody.setup_configuration_matrix_sha256,
+    credentialSetSha256: unsignedPlanBody.credential_set_sha256,
+    probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation" as const,
     attemptedAt: "2026-07-21T20:01:00.000Z",
     completedAt: "2026-07-21T20:01:03.000Z",
     status: "passed" as const,
-    results,
+    results: setupResults,
   };
-  const response_tool_canary = { ...canaryBody, artifactSha256: sha256Hex(`harshas-amazing-call-center/provider-response-tool-canary/v1\n${canonicalJson(canaryBody)}`) };
-  const terminalBody = {
+  const setupQualification: ProviderQualificationArtifact = {
+    ...setupBody,
+    artifactSha256: sha256Hex(`harshas-amazing-call-center/provider-qualification/v2\n${canonicalJson(setupBody)}`),
+  };
+  const budgetBody = {
     schema_version: 1 as const,
-    runner_version: LC4_QUALIFICATION_RUNNER_VERSION,
-    attempt_id: "lc4-dev-qualification-attempt",
-    plan_sha256: plan.plan_sha256,
-    authorization_artifact_sha256: "f".repeat(64),
-    source_commit: plan.source_commit,
-    source_tree_sha256: plan.source_tree_sha256,
+    budget_version: LC4_QUALIFICATION_BUDGET_VERSION,
+    ledger_id: "lc4-dev-v3-budget-ledger",
+    reservation_id: "lc4-dev-v3-budget-reservation",
+    binding_sha256: sha256Hex("qualification-v3-budget-binding"),
+    usage_event_count: 3,
+    usage_evidence_sha256: sha256Hex("qualification-v3-budget-usage"),
+    terminal_outcome: "completed" as const,
+    maximum_micro_usd: 3_000_000 as const,
+    conservative_settled_micro_usd: 3_000_000,
+    final_head_sha256: sha256Hex("qualification-v3-budget-final-head"),
+  };
+  const budgetEvidence: Lc4QualificationBudgetEvidence = {
+    ...budgetBody,
+    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-budget-evidence/v3\n${canonicalJson(budgetBody)}`),
+  };
+  const spokenGateEvidence = plannedTargets.map((target) => ({
+    provider: target.provider,
+    model: target.model,
+    evidence_sha256: sha256Hex(`qualification-v3-spoken-evidence:${target.provider}`),
+    summary_file_sha256: sha256Hex(`qualification-v3-spoken-summary:${target.provider}`),
+    wire_file_sha256: sha256Hex(`qualification-v3-spoken-wire:${target.provider}`),
+    usage_file_sha256: sha256Hex(`qualification-v3-spoken-usage:${target.provider}`),
+    wire_observation_count: 12,
+    usage_event_count: 1,
+    caller_audio_bytes: target.caller_audio_bytes,
+    tool_call_observed: true as const,
+    tool_result_wire_observed: true as const,
+    post_tool_terminal_observed: true as const,
+    post_tool_usage_observed: true as const,
+  }));
+  const unsignedTerminalBody = {
+    schema_version: 1 as const,
+    runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
+    attempt_id: "lc4-dev-qualification-v3-attempt",
+    plan_artifact_sha256: plan.artifact_sha256,
+    plan_sha256: plan.body.plan_sha256,
+    authorization_artifact_sha256: authorization.artifact_sha256,
+    source_commit: source.source_commit,
+    source_tree_sha256: source.source_tree_sha256,
     attempted_at: "2026-07-21T20:01:00.000Z",
     completed_at: "2026-07-21T20:01:03.000Z",
     status: "passed" as const,
-    qualification_artifact_sha256: "a".repeat(64),
-    response_tool_canary_artifact_sha256: response_tool_canary.artifactSha256,
-    dev_audio_canary_artifact_sha256: "9".repeat(64),
-    caller_audio_bytes: 5_120,
-    response_generations_attempted: 6,
+    primary_failure_class: null,
+    setup_qualification_artifact_sha256: setupQualification.artifactSha256,
+    control_size_diagnostic_sha256: unsignedPlanBody.control_size_diagnostic.diagnostic_sha256,
+    roundtrip_evidence_sha256: spokenGateEvidence.map((evidence) => evidence.evidence_sha256),
+    budget_evidence_sha256: budgetEvidence.evidence_sha256,
+    budget_final_head_sha256: budgetEvidence.final_head_sha256,
+    provider_sessions_opened: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+    paid_sessions_opened: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+    generation_phases_attempted: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+    tool_roundtrips_attempted: LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS,
+    caller_audio_bytes: plannedTargets.reduce((total, target) => total + target.caller_audio_bytes, 0),
     paid_retries_attempted: 0 as const,
-    maximum_total_micro_usd: 3_000_000 as const,
-    results: results.map((result) => ({
-      provider: result.provider,
-      model: result.model,
-      status: result.status,
-      code: result.code,
-      wire_observation_count: 1,
-      wire_evidence_sha256: sha256Hex(`wire:${result.provider}`),
-      usage_event_count: 1,
-      usage_evidence_sha256: sha256Hex(`usage:${result.provider}`),
-      provider_tool_call_evidence_sha256: result.providerToolCallEvidenceSha256,
-    })),
-    dev_audio_results: plannedTargets.map((target) => ({
+    server_vad_qualification: {
+      provider: "xai" as const,
+      requested_setting_sha256: LC4_XAI_SERVER_VAD_SETTING_SHA256,
+      production_session_payload_sha256: plannedTargets[2]!.production_session_payload_sha256!,
+      gate_a_classification: "verified_by_provider_echo" as const,
+      retained_risk: "none" as const,
+      gate_b_required: true,
+      gate_b_status: "behaviorally_verified" as const,
+      gate_b_evidence_sha256: spokenGateEvidence[2]!.evidence_sha256,
+      gate_a_risk_sha256: sha256Hex("qualification-v3-xai-risk"),
+      gate_a_connection_epoch: 1,
+      gate_b_connection_epoch: 1,
+      exact_setting_verified: true,
+      operational_vad_verified: true,
+      benchmark_ready: true,
+    },
+    results: plannedTargets.map((target, index) => ({
       provider: target.provider,
       model: target.model,
       status: "passed" as const,
-      code: "dev_gateway_tool_call_observed" as const,
+      failure_class: "none",
       caller_audio_bytes: target.caller_audio_bytes,
-      response_generation_requested: true,
-      tool_schema_sha256: target.dev_audio_tool_schema_sha256,
-      packetizer_sha256: target.packetizer_sha256,
-      audio_delivery_profile_sha256: target.audio_delivery_profile_sha256,
-      control_bytes: target.dev_control_bytes,
-      control_sha256: target.dev_control_sha256,
-      audio_sha256: target.caller_audio_sha256,
-      delivery_complete: true,
-      chunk_count: 2,
-      wire_observation_count: 4,
-      wire_evidence_sha256: sha256Hex(`dev-wire:${target.provider}`),
-      usage_event_count: 1,
-      usage_evidence_sha256: sha256Hex(`dev-usage:${target.provider}`),
-      response_generation_evidence_sha256: sha256Hex(`dev-generation:${target.provider}`),
-      provider_tool_call_evidence_sha256: sha256Hex(`dev-tool:${target.provider}`),
-      failure_evidence_sha256: sha256Hex(`dev-failure:${target.provider}`),
+      wire_observation_count: spokenGateEvidence[index]!.wire_observation_count,
+      usage_event_count: spokenGateEvidence[index]!.usage_event_count,
+      evidence_sha256: spokenGateEvidence[index]!.evidence_sha256,
     })),
   };
-  const terminal = { ...terminalBody, terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v2\n${canonicalJson(terminalBody)}`) };
-  return createLc4DevRetainedQualificationReceipt({ plan, terminal, response_tool_canary });
+  const terminalBody = {
+    ...unsignedTerminalBody,
+    terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v4\n${canonicalJson(unsignedTerminalBody)}`),
+  };
+  const terminal = signArtifact({
+    body: terminalBody,
+    privateKey: terminalAuthority.privateKey,
+    publicKey: terminalAuthority.publicKey,
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-terminal/v4\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v4\n",
+  }) as Lc4QualificationV3TerminalArtifact;
+  const report = {
+    schema_version: 1 as const,
+    runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
+    plan_artifact_sha256: plan.artifact_sha256,
+    source_commit: source.source_commit,
+    invoked_attempts: 1,
+    refused_attempts: 0,
+    stranded_invocations: 0,
+    complete_attempts: 1,
+    partial_attempts: 0,
+    gate_c_qualification_gate: false as const,
+    maximum_total_usd: 3 as const,
+    maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
+    maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
+    maximum_generation_phases: LC4_QUALIFICATION_V3_MAXIMUM_GENERATION_PHASES,
+    paid_retry_allowed: false as const,
+    latest: terminal.body,
+  };
+  const packageEntries = [
+    { path: "authorization.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(authorization)}\n`) },
+    { path: "terminal.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(terminal)}\n`) },
+    { path: "setup-acceptance.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(setupQualification)}\n`) },
+    { path: "budget-settlement.json", byte_length: 1, sha256: sha256Hex(`${canonicalJson(budgetEvidence)}\n`) },
+    ...spokenGateEvidence.flatMap((evidence) => [
+      { path: `${evidence.provider}-spoken-roundtrip.json`, byte_length: 1, sha256: evidence.summary_file_sha256 },
+      { path: `${evidence.provider}-spoken-roundtrip-wire.jsonl`, byte_length: 1, sha256: evidence.wire_file_sha256 },
+      { path: `${evidence.provider}-spoken-roundtrip-usage.jsonl`, byte_length: 1, sha256: evidence.usage_file_sha256 },
+    ]),
+  ];
+  const packageBody = {
+    schema_version: 1 as const,
+    manifest_version: "HACC-LC4-QUALIFICATION-PACKAGE-v4" as const,
+    self_excluded: true as const,
+    entries: packageEntries,
+    bindings: {
+      plan_artifact_sha256: plan.artifact_sha256,
+      authorization_artifact_sha256: authorization.artifact_sha256,
+      terminal_artifact_sha256: terminal.artifact_sha256,
+      budget_evidence_sha256: budgetEvidence.evidence_sha256,
+    },
+  };
+  const packageManifest = {
+    ...packageBody,
+    package_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-package/v4\n${canonicalJson(packageBody)}`),
+  };
+  return createLc4DevRetainedQualificationReceipt({
+    plan,
+    authorization,
+    terminal,
+    report,
+    package_manifest: packageManifest,
+    setup_qualification: setupQualification,
+    budget_evidence: budgetEvidence,
+    spoken_gate_evidence: spokenGateEvidence,
+    qualification_trust_root_sha256: plan.authority_public_key_fingerprint_sha256,
+  });
 }
 
 function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareArtifact>, credentialIdentity = "2".repeat(64)) {
@@ -1100,7 +1338,7 @@ describe("LC4-DEV live runner", () => {
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       qualification: { ...valid.qualification, terminal_root_sha256: "9".repeat(64) },
-    })).toThrow(/retained qualification receipt|authorization differs/);
+    })).toThrow(/retained qualification(?: v3)? receipt|authorization differs/);
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       credential_identity_set_sha256: "9".repeat(64),
@@ -1110,50 +1348,83 @@ describe("LC4-DEV live runner", () => {
       audio_manifest_sha256: "9".repeat(64),
     })).toThrow(/audio manifest differs/);
 
-    const weakenedTerminalBody = { ...valid.qualification.terminal, response_generations_attempted: 2 };
-    delete (weakenedTerminalBody as Partial<typeof weakenedTerminalBody>).terminal_sha256;
-    const weakenedTerminal = {
-      ...weakenedTerminalBody,
-      terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v2\n${canonicalJson(weakenedTerminalBody)}`),
-    };
-    expect(() => createLc4DevRetainedQualificationReceipt({
+    const qualificationInput = {
       plan: valid.qualification.plan,
-      terminal: weakenedTerminal,
-      response_tool_canary: valid.qualification.response_tool_canary,
-    })).toThrow(/exact passing three-provider zero-audio plus packetized-audio run/);
-
-    const weakenedDevAudioBody = {
-      ...valid.qualification.terminal,
-      dev_audio_results: valid.qualification.terminal.dev_audio_results.map((result, index) => (
-        index === 0 ? { ...result, delivery_complete: false } : result
-      )),
-    };
-    delete (weakenedDevAudioBody as Partial<typeof weakenedDevAudioBody>).terminal_sha256;
-    const weakenedDevAudio = {
-      ...weakenedDevAudioBody,
-      terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v2\n${canonicalJson(weakenedDevAudioBody)}`),
-    };
-    expect(() => createLc4DevRetainedQualificationReceipt({
-      plan: valid.qualification.plan,
-      terminal: weakenedDevAudio,
-      response_tool_canary: valid.qualification.response_tool_canary,
-    })).toThrow(/packetized-audio result differs/u);
-
-    const canaryBody = {
-      ...valid.qualification.response_tool_canary,
-      results: valid.qualification.response_tool_canary.results.map((result, index) => (
-        index === 0 ? { ...result, model: "mutated-model" } : result
-      )),
-    };
-    delete (canaryBody as Partial<typeof canaryBody>).artifactSha256;
-    const mutatedCanary = {
-      ...canaryBody,
-      artifactSha256: sha256Hex(`harshas-amazing-call-center/provider-response-tool-canary/v1\n${canonicalJson(canaryBody)}`),
-    };
-    expect(() => createLc4DevRetainedQualificationReceipt({
-      plan: valid.qualification.plan,
+      authorization: valid.qualification.authorization,
       terminal: valid.qualification.terminal,
-      response_tool_canary: mutatedCanary,
-    })).toThrow(/result matrix mismatch/);
+      report: valid.qualification.report,
+      package_manifest: valid.qualification.package_manifest,
+      setup_qualification: valid.qualification.setup_qualification,
+      budget_evidence: valid.qualification.budget_evidence,
+      spoken_gate_evidence: valid.qualification.spoken_gate_evidence,
+      qualification_trust_root_sha256: valid.qualification.qualification_trust_root_sha256,
+    };
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      plan: {
+        ...valid.qualification.plan,
+        body: { ...valid.qualification.plan.body, maximum_paid_sessions: 2 as 3 },
+      },
+    })).toThrow(/hash mismatch/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      authorization: {
+        ...valid.qualification.authorization,
+        body: { ...valid.qualification.authorization.body, maximum_generation_phases: 5 as 6 },
+      },
+    })).toThrow(/hash mismatch/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      terminal: {
+        ...valid.qualification.terminal,
+        body: { ...valid.qualification.terminal.body, generation_phases_attempted: 5 },
+      },
+    })).toThrow(/hash mismatch/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      report: {
+        ...valid.qualification.report,
+        complete_attempts: 0,
+        partial_attempts: 1,
+      },
+    })).toThrow(/report is not one completed passing no-retry attempt/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      report: {
+        ...valid.qualification.report,
+        source_commit: "9".repeat(40),
+      },
+    })).toThrow(/bindings are not exact/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      setup_qualification: {
+        ...valid.qualification.setup_qualification,
+        results: valid.qualification.setup_qualification.results.map((result, index) => (
+          index === 0 ? { ...result, model: "mutated-model" } : result
+        )),
+      },
+    })).toThrow(/provider qualification artifact hash mismatch/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      spoken_gate_evidence: valid.qualification.spoken_gate_evidence.map((evidence, index) => (
+        index === 0 ? { ...evidence, post_tool_terminal_observed: false as true } : evidence
+      )),
+    })).toThrow(/Gate A\/Gate B evidence differs from its plan/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      budget_evidence: {
+        ...valid.qualification.budget_evidence,
+        terminal_outcome: "failed",
+      },
+    })).toThrow(/budget evidence hash mismatch/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      package_manifest: {
+        ...valid.qualification.package_manifest,
+        entries: valid.qualification.package_manifest.entries.map((entry, index) => (
+          index === 0 ? { ...entry, sha256: "9".repeat(64) } : entry
+        )),
+      },
+    })).toThrow(/package manifest is invalid/);
   });
 });

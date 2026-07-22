@@ -10,6 +10,7 @@ import {
   assertLc4DevOperatorAuthorizationDag,
   createLc4DevOperatorAuthorizationDag,
   lc4DevOperatorAuthorizationBindingSha256,
+  loadLc4DevRetainedQualification,
   loadLc4DevExplicitCredentials,
   runLc4DevelopmentOperatorCli,
   type Lc4DevOperatorSigner,
@@ -222,6 +223,17 @@ describe("LC4-DEV operator custody", () => {
     await writeFile(repository, "OPENAI_API_KEY=different-openai-secret\nXAI_API_KEY=xai-test-secret-value\n");
     const overridden = await loadLc4DevExplicitCredentials({ provider_env_file: provider, repository_env_file: repository });
     expect(overridden.openai).toBe("different-openai-secret");
+  });
+
+  it("refuses legacy qualification v2 instead of reinterpreting it as current server-VAD evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-legacy-qualification-"));
+    roots.push(root);
+    await writeFile(join(root, "lc4-qualification-plan.json"), "{}\n", { mode: 0o400 });
+    await expect(loadLc4DevRetainedQualification(
+      root,
+      "a".repeat(64),
+      new Date("2026-07-22T06:00:00.000Z"),
+    )).rejects.toThrow("refuses legacy qualification v2");
   });
 
   it("publishes a complete six-episode authority replay separately from execution counters", async () => {

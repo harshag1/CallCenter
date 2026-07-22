@@ -24,18 +24,9 @@ import {
   type Lc4DevFailureEvidence,
 } from "./lc4-development-failure-evidence";
 import {
-  LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS,
-  LC4_QUALIFICATION_RUNNER_VERSION,
-  LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES,
-  assertLc4QualificationPlan,
-  createLc4QualificationTargets,
-  type Lc4QualificationPlan,
-  type Lc4QualificationTerminalArtifact,
-} from "./lc4-qualification-runner";
-import {
-  assertProviderResponseToolCanaryArtifactIntegrity,
-  type ProviderResponseToolCanaryArtifact,
-} from "./provider-qualification";
+  assertLc4DevRetainedQualificationReceipt,
+  type Lc4DevRetainedQualificationReceipt,
+} from "./lc4-development-qualification-v3";
 import type {
   Lc4DevExchangeEvidence,
   Lc4DevelopmentRealtimeAdapter,
@@ -79,8 +70,6 @@ const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v1\n";
 const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v1\n";
 const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v1\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v1\n";
-const QUALIFICATION_TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v2\n";
-const QUALIFICATION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification/v1\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
@@ -320,136 +309,11 @@ export function lc4DevLiveAuthorizationArtifactSha256(
   return hash(AUTHORIZATION_ARTIFACT_DOMAIN, artifact);
 }
 
-export type Lc4DevRetainedQualificationReceipt = Readonly<{
-  schema_version: 1;
-  protocol_id: "HACC-LC4-DEV-v1";
-  status: "passed";
-  providers: readonly ["openai", "gemini", "xai"];
-  terminal_root_sha256: string;
-  retained_artifact_sha256: string;
-  qualification_artifact_sha256: string;
-  response_tool_canary_artifact_sha256: string;
-  plan: Lc4QualificationPlan;
-  terminal: Lc4QualificationTerminalArtifact;
-  response_tool_canary: ProviderResponseToolCanaryArtifact;
-  receipt_sha256: string;
-}>;
-
-export function createLc4DevRetainedQualificationReceipt(input: Readonly<{
-  plan: Lc4QualificationPlan;
-  terminal: Lc4QualificationTerminalArtifact;
-  response_tool_canary: ProviderResponseToolCanaryArtifact;
-}>): Lc4DevRetainedQualificationReceipt {
-  assertLc4QualificationPlan(input.plan);
-  const targets = createLc4QualificationTargets();
-  assertProviderResponseToolCanaryArtifactIntegrity(input.response_tool_canary, targets);
-  const { terminal_sha256, ...terminalBody } = input.terminal;
-  if (sha256Hex(`${QUALIFICATION_TERMINAL_DOMAIN}${canonicalJson(terminalBody)}`) !== terminal_sha256) {
-    throw new Error("LC4-DEV qualification terminal hash mismatch");
-  }
-  if (input.terminal.schema_version !== 1
-    || input.terminal.runner_version !== LC4_QUALIFICATION_RUNNER_VERSION
-    || input.terminal.status !== "passed"
-    || input.terminal.plan_sha256 !== input.plan.plan_sha256
-    || input.terminal.source_commit !== input.plan.source_commit
-    || input.terminal.source_tree_sha256 !== input.plan.source_tree_sha256
-    || input.terminal.caller_audio_bytes !== LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES
-    || input.terminal.response_generations_attempted !== LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS
-    || input.terminal.paid_retries_attempted !== 0
-    || input.terminal.results.length !== 3
-    || input.terminal.dev_audio_results.length !== 3
-    || input.response_tool_canary.status !== "passed"
-    || input.response_tool_canary.results.length !== 3
-    || input.terminal.response_tool_canary_artifact_sha256 !== input.response_tool_canary.artifactSha256
-    || input.response_tool_canary.planSha256 !== input.plan.plan_sha256
-    || input.response_tool_canary.sourceCommit !== input.plan.source_commit
-    || input.response_tool_canary.credentialSetSha256 !== input.plan.credential_set_sha256
-    || input.response_tool_canary.configurationMatrixSha256 !== input.plan.configuration_matrix_sha256) {
-    throw new Error("LC4-DEV qualification terminal/canary/plan binding is not an exact passing three-provider zero-audio plus packetized-audio run");
-  }
-  const expected = input.plan.targets.map((target) => ({ provider: target.provider, model: target.model })).sort((a, b) => a.provider.localeCompare(b.provider));
-  const terminalResults = input.terminal.results.map((result) => ({ provider: result.provider, model: result.model })).sort((a, b) => a.provider.localeCompare(b.provider));
-  const canaryResults = input.response_tool_canary.results.map((result) => ({ provider: result.provider, model: result.model })).sort((a, b) => a.provider.localeCompare(b.provider));
-  if (canonicalJson(expected) !== canonicalJson(terminalResults)
-    || canonicalJson(expected) !== canonicalJson(canaryResults)
-    || input.terminal.results.some((result) => result.status !== "passed" || result.code !== "gateway_tool_call_observed")
-    || input.response_tool_canary.results.some((result) => result.status !== "passed" || result.code !== "gateway_tool_call_observed")) {
-    throw new Error("LC4-DEV qualification does not contain 3/3 exact-model passing gateway results");
-  }
-  requireHash(input.terminal.dev_audio_canary_artifact_sha256 ?? "", "LC4-DEV packetized-audio canary artifact");
-  const expectedProviders = input.plan.targets.map((target) => target.provider);
-  if (canonicalJson(input.terminal.dev_audio_results.map((result) => result.provider)) !== canonicalJson(expectedProviders)) {
-    throw new Error("LC4-DEV packetized-audio results are not in the exact plan provider order");
-  }
-  for (const result of input.terminal.dev_audio_results) {
-    const planned = input.plan.targets.find((target) => target.provider === result.provider);
-    if (!planned
-      || result.model !== planned.model
-      || result.status !== "passed"
-      || result.code !== "dev_gateway_tool_call_observed"
-      || result.caller_audio_bytes !== planned.caller_audio_bytes
-      || result.response_generation_requested !== true
-      || result.delivery_complete !== true
-      || result.chunk_count < 2
-      || result.packetizer_sha256 !== planned.packetizer_sha256
-      || result.tool_schema_sha256 !== planned.dev_audio_tool_schema_sha256
-      || result.audio_delivery_profile_sha256 !== planned.audio_delivery_profile_sha256
-      || result.control_bytes !== planned.dev_control_bytes
-      || result.control_sha256 !== planned.dev_control_sha256
-      || result.audio_sha256 !== planned.caller_audio_sha256) {
-      throw new Error(`LC4-DEV ${result.provider} packetized-audio result differs from its immutable plan`);
-    }
-    for (const [label, digest] of Object.entries({
-      tool_schema_sha256: result.tool_schema_sha256,
-      packetizer_sha256: result.packetizer_sha256,
-      audio_delivery_profile_sha256: result.audio_delivery_profile_sha256,
-      control_sha256: result.control_sha256,
-      audio_sha256: result.audio_sha256,
-      wire_evidence_sha256: result.wire_evidence_sha256,
-      usage_evidence_sha256: result.usage_evidence_sha256,
-      response_generation_evidence_sha256: result.response_generation_evidence_sha256,
-      provider_tool_call_evidence_sha256: result.provider_tool_call_evidence_sha256 ?? "",
-      failure_evidence_sha256: result.failure_evidence_sha256,
-    })) requireHash(digest, `LC4-DEV ${result.provider} ${label}`);
-  }
-  for (const terminalResult of input.terminal.results) {
-    const canaryResult = input.response_tool_canary.results.find((candidate) => candidate.provider === terminalResult.provider);
-    if (!canaryResult
-      || canaryResult.model !== terminalResult.model
-      || canaryResult.providerToolCallEvidenceSha256 !== terminalResult.provider_tool_call_evidence_sha256) {
-      throw new Error("LC4-DEV terminal result differs from retained response canary evidence");
-    }
-  }
-  requireHash(input.terminal.qualification_artifact_sha256, "LC4-DEV qualification handshake artifact");
-  const retainedArtifactSha256 = hash(QUALIFICATION_RECEIPT_DOMAIN, {
-    plan: input.plan,
-    terminal: input.terminal,
-    response_tool_canary: input.response_tool_canary,
-  });
-  const body = {
-    schema_version: 1 as const,
-    protocol_id: "HACC-LC4-DEV-v1" as const,
-    status: "passed" as const,
-    providers: ["openai", "gemini", "xai"] as const,
-    terminal_root_sha256: input.terminal.terminal_sha256,
-    retained_artifact_sha256: retainedArtifactSha256,
-    qualification_artifact_sha256: input.terminal.qualification_artifact_sha256,
-    response_tool_canary_artifact_sha256: input.response_tool_canary.artifactSha256,
-    plan: input.plan,
-    terminal: input.terminal,
-    response_tool_canary: input.response_tool_canary,
-  };
-  return freeze({ ...body, receipt_sha256: hash(QUALIFICATION_RECEIPT_DOMAIN, body) });
-}
-
-export function assertLc4DevRetainedQualificationReceipt(receipt: Lc4DevRetainedQualificationReceipt): void {
-  const rebuilt = createLc4DevRetainedQualificationReceipt({
-    plan: receipt.plan,
-    terminal: receipt.terminal,
-    response_tool_canary: receipt.response_tool_canary,
-  });
-  if (canonicalJson(rebuilt) !== canonicalJson(receipt)) throw new Error("LC4-DEV retained qualification receipt is not canonical");
-}
+export {
+  assertLc4DevRetainedQualificationReceipt,
+  createLc4DevRetainedQualificationReceipt,
+  type Lc4DevRetainedQualificationReceipt,
+} from "./lc4-development-qualification-v3";
 
 function verifyDevAuthorization(input: Readonly<{
   artifact: Lc4DevLiveAuthorizationArtifact;
@@ -478,8 +342,9 @@ function verifyDevAuthorization(input: Readonly<{
   assertIso(body.expires_at, "LC4-DEV authorization expiry");
   const checked = Date.parse(input.checked_at);
   if (checked < Date.parse(body.not_before) || checked >= Date.parse(body.expires_at)) throw new Error("LC4-DEV authorization is not active");
-  if (qualification.schema_version !== 1
+  if (qualification.schema_version !== 2
     || qualification.protocol_id !== "HACC-LC4-DEV-v1"
+    || qualification.qualification_protocol_id !== "HACC-LC4-v1"
     || qualification.status !== "passed"
     || canonicalJson(qualification.providers) !== canonicalJson(["openai", "gemini", "xai"])) {
     throw new Error("LC4-DEV retained qualification is not a three-provider passing terminal receipt");
