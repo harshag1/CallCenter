@@ -200,7 +200,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   })() : null;
   const body = Object.freeze({
     schema_version: 2 as const,
-    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v4" as const,
+    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v5" as const,
     provider: input.provider,
     model: input.model,
     attempted_at: NOW.toISOString(),
@@ -255,7 +255,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   return Object.freeze({
     ...body,
-    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v4\n${canonicalJson(body)}`),
+    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(body)}`),
   });
 }
 

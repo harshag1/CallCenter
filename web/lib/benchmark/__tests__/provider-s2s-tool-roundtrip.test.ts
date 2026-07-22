@@ -19,10 +19,17 @@ import {
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  LocalToolProxyDispatch,
   Pcm16Audio,
+  ProviderToolCallProvenance,
   RealtimeEventListener,
   RealtimeWireObservation,
   RealtimeWireObservationListener,
+} from "../../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  PROVIDER_PROVENANCE_META_KEY,
 } from "../../realtime/client/types";
 import {
   realtimeWireIdentitySha256,
@@ -89,8 +96,10 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly omitServerVadSpeechStart: boolean;
   readonly omitServerVadSpeechStop: boolean;
   readonly omitServerVadAutoCommit: boolean;
+  readonly localGatewayDispatchMode: "none" | "exact" | "completion_first" | "competing" | "malformed" | "call_free";
   appendedBytes = 0;
   responseCount = 0;
+  readonly responseToolChoices: unknown[] = [];
   pendingControl: { sha256: string; byteLength: number; authority: string } | null = null;
   pendingContinuation = false;
 
@@ -106,6 +115,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
     omitServerVadSpeechStart?: boolean;
     omitServerVadSpeechStop?: boolean;
     omitServerVadAutoCommit?: boolean;
+    localGatewayDispatchMode?: "exact" | "completion_first" | "competing" | "malformed" | "call_free";
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -119,6 +129,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
     this.omitServerVadSpeechStart = options.omitServerVadSpeechStart === true;
     this.omitServerVadSpeechStop = options.omitServerVadSpeechStop === true;
     this.omitServerVadAutoCommit = options.omitServerVadAutoCommit === true;
+    this.localGatewayDispatchMode = options.localGatewayDispatchMode ?? "none";
   }
 
   get serverVadTransportParitySha256() {
@@ -195,7 +206,11 @@ class RoundtripClient implements NormalizedRealtimeClient {
     }
     const observation = this.#observe(
       "inbound",
-      this.provider === "gemini" ? "toolCall" : "response.function_call_arguments.done",
+      this.provider === "gemini"
+        ? "toolCall"
+        : this.localGatewayDispatchMode !== "none"
+          ? "response.done"
+          : "response.function_call_arguments.done",
       this.provider === "gemini"
         ? { callIdSha256: realtimeWireIdentitySha256("call", callId) }
         : {
@@ -203,42 +218,124 @@ class RoundtripClient implements NormalizedRealtimeClient {
             callIdSha256: realtimeWireIdentitySha256("call", callId),
           },
     );
-    this.#emit({
-      type: "tool.calls",
-      provider: this.provider,
-      receivedAtMs: 3,
-      wireType: observation.wireType,
-      responseId,
-      calls: [{
-        callId,
-        name: "capability_gateway",
-        argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
-        argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
-        responseId,
-        responseIdSource: this.provider === "gemini" ? "client_local" : "provider",
-        ...(this.provider === "gemini" ? {
-          causalBinding: {
-            connectionEpoch: 1,
-            inputTurn: 1,
-            trigger: "audio_activity_end" as const,
-            clientMessageOrdinal: 1,
-            triggerObservationSha256: this.observations.find((item) => item.wireType === "realtimeInput.activityEnd")!.observationSha256,
-            providerCallId: callId,
-            localResponseId: responseId,
-          },
-        } : {}),
+    const wireObservation = {
+      availability: "observed" as const,
+      connectionEpoch: 1,
+      sequence: observation.sequence,
+      observationSha256: observation.observationSha256,
+      payloadSha256: observation.payloadSha256,
+      projectionSha256: observation.projectionSha256,
+      callIdSha256: observation.identities.callIdSha256,
+    };
+    if (this.localGatewayDispatchMode !== "none" && this.provider !== "gemini") {
+      const provenance = Object.freeze({
+        schemaVersion: 1 as const,
+        provider: this.provider,
+        nativeCallId: callId,
+        nativeResponseId: this.localGatewayDispatchMode === "malformed" ? `${responseId}-forged` : responseId,
+        nativeItemId: `${this.provider}-item`,
+        terminalEventId: `${this.provider}-terminal-event`,
         terminalWireType: observation.wireType,
-      }],
-      wireObservation: {
-        availability: "observed",
-        connectionEpoch: 1,
-        sequence: observation.sequence,
-        observationSha256: observation.observationSha256,
-        payloadSha256: observation.payloadSha256,
-        projectionSha256: observation.projectionSha256,
-        callIdSha256: observation.identities.callIdSha256,
-      },
-    });
+      });
+      const completion = {
+        type: "response.completed" as const,
+        provider: this.provider,
+        receivedAtMs: 3,
+        wireType: observation.wireType,
+        nativeEventId: provenance.terminalEventId,
+        responseId,
+        status: "completed" as const,
+        wireObservation,
+      };
+      if (this.localGatewayDispatchMode === "call_free") {
+        this.#emit(completion);
+        return;
+      }
+      const dispatches: Array<{
+        callId: string;
+        provenance: ProviderToolCallProvenance;
+        request: LocalToolProxyDispatch;
+      }> = [{
+        callId,
+        provenance,
+        request: {
+          method: "tools/call" as const,
+          params: {
+            name: "complete_current_stage",
+            arguments: {},
+            _meta: {
+              [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: callId,
+              [PROVIDER_PROVENANCE_META_KEY]: provenance,
+            },
+          },
+        },
+      }];
+      if (this.localGatewayDispatchMode === "competing") {
+        const competingCallId = `${callId}-competing`;
+        const competingProvenance = Object.freeze({
+          ...provenance,
+          nativeCallId: competingCallId,
+          nativeItemId: `${this.provider}-competing-item`,
+        });
+        dispatches.push({
+          callId: competingCallId,
+          provenance: competingProvenance,
+          request: {
+            method: "tools/call",
+            params: {
+              name: "complete_current_stage",
+              arguments: {},
+              _meta: {
+                [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: competingCallId,
+                [PROVIDER_PROVENANCE_META_KEY]: competingProvenance,
+              },
+            },
+          },
+        });
+      }
+      if (this.localGatewayDispatchMode === "completion_first") this.#emit(completion);
+      this.#emit({
+        type: "tool.dispatch",
+        provider: this.provider,
+        receivedAtMs: 3,
+        wireType: observation.wireType,
+        nativeEventId: provenance.terminalEventId,
+        responseId,
+        gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        dispatches,
+        wireObservation,
+      });
+      if (this.localGatewayDispatchMode !== "completion_first") this.#emit(completion);
+    } else {
+      this.#emit({
+        type: "tool.calls",
+        provider: this.provider,
+        receivedAtMs: 3,
+        wireType: observation.wireType,
+        responseId,
+        calls: [{
+          callId,
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+          argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
+          responseId,
+          responseIdSource: this.provider === "gemini" ? "client_local" : "provider",
+          ...(this.provider === "gemini" ? {
+            causalBinding: {
+              connectionEpoch: 1,
+              inputTurn: 1,
+              trigger: "audio_activity_end" as const,
+              clientMessageOrdinal: 1,
+              triggerObservationSha256: this.observations.find((item) => item.wireType === "realtimeInput.activityEnd")!.observationSha256,
+              providerCallId: callId,
+              localResponseId: responseId,
+            },
+          } : {}),
+          terminalWireType: observation.wireType,
+        }],
+        wireObservation,
+      });
+    }
   }
 
   #continuation() {
@@ -407,7 +504,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
       });
     }
   }
-  createResponse() {
+  createResponse(overrides: Record<string, unknown> = {}) {
+    this.responseToolChoices.push(overrides.tool_choice);
     this.responseCount += 1;
     this.#observe("outbound", "response.create", {}, this.pendingControl && !this.omitDynamicControl ? { dynamicControl: this.pendingControl } : {});
     this.pendingControl = null;
@@ -458,6 +556,29 @@ class RoundtripClient implements NormalizedRealtimeClient {
       status: "acknowledged" as const,
     });
   }
+}
+
+function withInitialToolChoice(
+  client: NormalizedRealtimeClient,
+  toolChoice: "required" | Readonly<{ type: "function"; name: "capability_gateway" }>,
+): NormalizedRealtimeClient {
+  let initialCreateSeen = false;
+  return new Proxy(client, {
+    get(target, property) {
+      if (property === "createResponse") {
+        return (overrides: Record<string, unknown> = {}) => {
+          if (!initialCreateSeen) {
+            initialCreateSeen = true;
+            target.createResponse({ ...overrides, tool_choice: toolChoice });
+            return;
+          }
+          target.createResponse(overrides);
+        };
+      }
+      const value = Reflect.get(target as object, property, target as object);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 describe("LC4 qualification v3 spoken S2S roundtrip", () => {
@@ -512,6 +633,98 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
           item.direction === "outbound" && item.wireType === "response.create"
         ))).toHaveLength(1);
       }
+    });
+  }
+
+  for (const variant of [
+    { id: "required", toolChoice: "required" as const },
+    {
+      id: "forced_function",
+      toolChoice: { type: "function" as const, name: "capability_gateway" as const },
+    },
+  ] as const) {
+    it(`admits the production local dispatch before same-frame completion for ${variant.id}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+      roots.push(root);
+      const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+      const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+      const rawClient = new RoundtripClient("openai", { localGatewayDispatchMode: "exact" });
+      const execution = await executeLc4S2sToolRoundtrip({
+        provider: "openai",
+        model: "openai-model",
+        client: withInitialToolChoice(rawClient, variant.toolChoice),
+        audio,
+        audioObject: artifact.provider_renditions.openai,
+        profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+        timeoutMs: 1_000,
+      });
+
+      expect(rawClient.responseToolChoices[0]).toEqual(variant.toolChoice);
+      expect(execution, canonicalJson({
+        failure: execution.failure_class,
+        operations: execution.operation_order,
+      })).toMatchObject({
+        status: "passed",
+        failure_class: "none",
+        tool_call_observed: true,
+        tool_result_submitted: true,
+        post_tool_continuation_requested: true,
+        post_tool_terminal_observed: true,
+      });
+      expect(execution.operation_order.indexOf("exact_tool_call_observed"))
+        .toBeLessThan(execution.operation_order.indexOf("matching_tool_result_submitted"));
+    });
+  }
+
+  it("waits one normalization turn when completion precedes its same-frame local dispatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai",
+      model: "openai-model",
+      client: new RoundtripClient("openai", { localGatewayDispatchMode: "completion_first" }),
+      audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+    expect(execution).toMatchObject({
+      status: "passed",
+      failure_class: "none",
+      tool_call_observed: true,
+      tool_result_submitted: true,
+    });
+  });
+
+  for (const diagnostic of [
+    { mode: "competing", failure: "competing_tool_call" },
+    { mode: "malformed", failure: "provider_error" },
+    { mode: "call_free", failure: "wrong_tool" },
+  ] as const) {
+    it(`fails closed for a ${diagnostic.mode} same-frame gateway terminal`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+      roots.push(root);
+      const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+      const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+      const execution = await executeLc4S2sToolRoundtrip({
+        provider: "openai",
+        model: "openai-model",
+        client: new RoundtripClient("openai", { localGatewayDispatchMode: diagnostic.mode }),
+        audio,
+        audioObject: artifact.provider_renditions.openai,
+        profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+        timeoutMs: 1_000,
+      });
+      expect(execution).toMatchObject({
+        status: "failed",
+        failure_class: diagnostic.failure,
+        tool_result_submitted: false,
+      });
     });
   }
 
@@ -644,7 +857,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     const fabricatedBody = Object.freeze({ ...body, wire_observations: Object.freeze([]) });
     const fabricated = Object.freeze({
       ...fabricatedBody,
-      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v4\n${canonicalJson(fabricatedBody)}`),
+      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n${canonicalJson(fabricatedBody)}`),
     });
     expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("ordered provider-native server-VAD evidence");
   });

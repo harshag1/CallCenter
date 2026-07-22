@@ -2076,6 +2076,124 @@ describe("OpenAI-compatible realtime client", () => {
     }]);
   });
 
+  for (const variant of [
+    { id: "required", toolChoice: "required" as const },
+    {
+      id: "forced_function",
+      toolChoice: { type: "function" as const, name: LOCAL_TOOL_PROXY_FUNCTION_NAME },
+    },
+  ] as const) {
+    it(`admits a duplicated incremental-plus-terminal gateway call before completion for ${variant.id}`, async () => {
+      const socket = new FakeSocket();
+      const observed: NormalizedRealtimeEvent[] = [];
+      const client = new OpenAICompatibleRealtimeClient({
+        provider: "openai",
+        url: "wss://openai.example/realtime",
+        sessionUpdate: localProxySession,
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      client.onEvent((event) => observed.push(event));
+      await connect(client, socket);
+      observed.length = 0;
+      socket.sent.length = 0;
+      client.createResponse({ tool_choice: variant.toolChoice });
+
+      const argumentsText = JSON.stringify({
+        tool_name: "complete_current_stage",
+        arguments: {},
+      });
+      socket.emit("message", JSON.stringify({
+        type: "response.output_item.added",
+        event_id: `evt_added_${variant.id}`,
+        response_id: `resp_${variant.id}`,
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: `item_${variant.id}`,
+          call_id: `call_${variant.id}`,
+          name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          arguments: "",
+        },
+      }));
+      for (const delta of [argumentsText.slice(0, 17), argumentsText.slice(17)]) {
+        socket.emit("message", JSON.stringify({
+          type: "response.function_call_arguments.delta",
+          response_id: `resp_${variant.id}`,
+          item_id: `item_${variant.id}`,
+          call_id: `call_${variant.id}`,
+          delta,
+        }));
+      }
+      socket.emit("message", JSON.stringify({
+        type: "response.function_call_arguments.done",
+        response_id: `resp_${variant.id}`,
+        item_id: `item_${variant.id}`,
+        call_id: `call_${variant.id}`,
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: argumentsText,
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.output_item.done",
+        response_id: `resp_${variant.id}`,
+        output_index: 0,
+        item: terminalToolOutput(
+          `call_${variant.id}`,
+          LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          argumentsText,
+          `item_${variant.id}`,
+        ),
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.done",
+        event_id: `evt_done_${variant.id}`,
+        response: {
+          id: `resp_${variant.id}`,
+          status: "completed",
+          output: [terminalToolOutput(
+            `call_${variant.id}`,
+            LOCAL_TOOL_PROXY_FUNCTION_NAME,
+            argumentsText,
+            `item_${variant.id}`,
+          )],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        },
+      }));
+
+      expect(JSON.parse(socket.sent[0]!)).toMatchObject({
+        type: "response.create",
+        response: { tool_choice: variant.toolChoice },
+      });
+      const terminal = observed.filter((event) => (
+        event.type === "tool.dispatch"
+        || event.type === "usage"
+        || event.type === "response.completed"
+      ));
+      expect(terminal.map((event) => event.type)).toEqual([
+        "tool.dispatch",
+        "usage",
+        "response.completed",
+      ]);
+      expect(terminal[0]).toMatchObject({
+        type: "tool.dispatch",
+        nativeEventId: `evt_done_${variant.id}`,
+        responseId: `resp_${variant.id}`,
+        dispatches: [{
+          callId: `call_${variant.id}`,
+          provenance: {
+            nativeCallId: `call_${variant.id}`,
+            nativeResponseId: `resp_${variant.id}`,
+            nativeItemId: `item_${variant.id}`,
+            terminalEventId: `evt_done_${variant.id}`,
+            terminalWireType: "response.done",
+          },
+        }],
+      });
+      expect(observed.filter((event) => event.type === "tool.dispatch")).toHaveLength(1);
+      expect(observed.some((event) => event.type === "tool.calls")).toBe(false);
+    });
+  }
+
   it("fails closed when model arguments try to overwrite local-dispatch provenance", async () => {
     const socket = new FakeSocket();
     const observed: NormalizedRealtimeEvent[] = [];

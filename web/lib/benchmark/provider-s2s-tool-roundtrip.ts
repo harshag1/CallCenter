@@ -24,6 +24,10 @@ import type {
   RealtimeTransportFailureDiagnostic,
   RealtimeWireObservation,
 } from "../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../realtime/client/types";
 import { assertRealtimeTransportFailureDiagnostic } from "../realtime/client/transport-diagnostics";
 import {
   realtimeWireIdentitySha256,
@@ -42,7 +46,7 @@ import {
   type RealtimeAudioDeliveryRuntime,
 } from "../realtime/audio-delivery";
 
-export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v4" as const;
+export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v5" as const;
 export const LC4_S2S_AUDIO_FIXTURE_VERSION = "HACC-LC4-S2S-SPOKEN-FIXTURE-v1" as const;
 export const LC4_S2S_SOURCE_TEXT = "Please complete the current stage." as const;
 export const LC4_S2S_SOURCE_TEXT_SHA256 = sha256Hex(
@@ -82,8 +86,8 @@ export const LC4_S2S_PACKETIZER_SHA256 = sha256Hex(
 const execFileAsync = promisify(execFile);
 const CAS_DOMAIN = "harshas-amazing-call-center/lc4-s2s-pcm-object/v1\n";
 const FIXTURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-spoken-fixture-artifact/v1\n";
-const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v4\n";
-const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v4\n";
+const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v5\n";
+const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v5\n";
 const CONTROL_DIAGNOSTIC_DOMAIN = "harshas-amazing-call-center/lc4-s2s-control-size-diagnostic/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -443,9 +447,45 @@ function exactToolCall(event: NormalizedRealtimeEvent): Readonly<{
   call: RealtimeToolCall;
   observationSha256: string;
 }> | Lc4S2sRoundtripFailureClass | null {
-  if (event.type !== "tool.calls") return null;
-  if (event.calls.length !== 1) return "competing_tool_call";
-  const call = event.calls[0]!;
+  if (event.type !== "tool.calls" && event.type !== "tool.dispatch") return null;
+  const calls: readonly RealtimeToolCall[] = event.type === "tool.calls"
+    ? event.calls
+    : event.dispatches.map((dispatch): RealtimeToolCall => ({
+        callId: dispatch.callId,
+        name: event.gateway,
+        argumentsText: canonicalJson({
+          tool_name: dispatch.request.params.name,
+          arguments: dispatch.request.params.arguments,
+        }),
+        argumentsJson: {
+          tool_name: dispatch.request.params.name,
+          arguments: dispatch.request.params.arguments,
+        },
+        responseId: event.responseId,
+        responseIdSource: "provider",
+        ...(dispatch.provenance.nativeItemId === undefined
+          ? {}
+          : { itemId: dispatch.provenance.nativeItemId }),
+        ...(dispatch.provenance.terminalEventId === undefined
+          ? {}
+          : { terminalEventId: dispatch.provenance.terminalEventId }),
+        terminalWireType: dispatch.provenance.terminalWireType,
+      }));
+  if (calls.length !== 1) return "competing_tool_call";
+  const call = calls[0]!;
+  if (event.type === "tool.dispatch") {
+    const dispatch = event.dispatches[0]!;
+    const providerCallId = dispatch.request.params._meta[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY];
+    const requestProvenance = dispatch.request.params._meta[PROVIDER_PROVENANCE_META_KEY];
+    if (dispatch.provenance.nativeCallId !== dispatch.callId
+      || dispatch.provenance.nativeResponseId !== event.responseId
+      || dispatch.provenance.provider !== event.provider
+      || dispatch.provenance.terminalWireType !== event.wireType
+      || dispatch.provenance.terminalEventId !== event.nativeEventId
+      || providerCallId !== dispatch.callId
+      || canonicalJson(requestProvenance) !== canonicalJson(dispatch.provenance)
+      || dispatch.request.method !== "tools/call") return "provider_error";
+  }
   if (call.name !== LC4_S2S_TOOL.name) return "wrong_tool";
   if (call.argumentsJson === null
     || typeof call.argumentsJson !== "object"
@@ -714,8 +754,14 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     }
     if (event.type === "response.completed") {
       if (toolCall === null) {
-        failure = "wrong_tool";
-        finish();
+        // A provider adapter may derive a terminal call and completion from one
+        // wire frame. Give every normalized sibling from that frame one turn to
+        // reach this listener before classifying a genuinely call-free response.
+        queueMicrotask(() => {
+          if (failure !== "none" || toolCall !== null) return;
+          failure = "wrong_tool";
+          finish();
+        });
         return;
       }
       if (toolResultWireObservationSha256 !== null && event.status === "completed") {
