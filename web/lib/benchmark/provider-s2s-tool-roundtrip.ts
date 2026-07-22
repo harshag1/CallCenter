@@ -1,0 +1,801 @@
+import { execFile } from "node:child_process";
+import { chmod, link, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { promisify } from "node:util";
+import { canonicalJson, sha256Hex } from "./artifacts";
+import { prepareCallerAudioFixture } from "./audio-fixture-generator";
+import { loadFrozenCallerAudioForPaidTrial } from "./audio-fixtures";
+import { createLc4ImmutableCas } from "./lc4-development-live-dependencies";
+import {
+  LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+} from "./lc4-development-gateway-bridge";
+import type { LiveStsProvider } from "./live-sts-development-experiment";
+import {
+  trialAudioDeliveryProfileHash,
+  type TrialAudioDeliveryProfile,
+} from "./orchestrator";
+import type {
+  NormalizedRealtimeClient,
+  NormalizedRealtimeEvent,
+  NormalizedRealtimeUsage,
+  Pcm16Audio,
+  RealtimeToolCall,
+  RealtimeWireObservation,
+} from "../realtime/client/types";
+import {
+  realtimeWireIdentitySha256,
+  verifyRealtimeWireObservationChain,
+} from "../realtime/client/wire-evidence";
+import {
+  RealtimeAudioDeliveryError,
+  SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
+  deliverRealtimePcm16,
+  packetizeRealtimePcm16,
+  type RealtimeAudioDeliveryRuntime,
+} from "../realtime/audio-delivery";
+
+export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v3" as const;
+export const LC4_S2S_AUDIO_FIXTURE_VERSION = "HACC-LC4-S2S-SPOKEN-FIXTURE-v1" as const;
+export const LC4_S2S_SOURCE_TEXT = "Please complete the current stage." as const;
+export const LC4_S2S_SOURCE_TEXT_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/lc4-s2s-spoken-request/v1\n${LC4_S2S_SOURCE_TEXT}`,
+);
+export const LC4_S2S_VOICE = Object.freeze({
+  engine: "macos-say" as const,
+  name: "Samantha" as const,
+  locale: "en_US" as const,
+  words_per_minute: 195 as const,
+});
+export const LC4_S2S_VOICE_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/lc4-s2s-voice/v1\n${canonicalJson(LC4_S2S_VOICE)}`,
+);
+export const LC4_S2S_TOOL = LC4_DEV_SEMANTIC_GATEWAY_FUNCTION;
+export const LC4_S2S_TOOL_SCHEMA_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/lc4-s2s-tool-schema/v1\n${canonicalJson(LC4_S2S_TOOL)}`,
+);
+export const LC4_S2S_COMPACT_CONTROL = [
+  "Listen to the caller's spoken request.",
+  "If the caller asks to complete the current stage, call capability_gateway exactly once with tool_name complete_current_stage and arguments {}.",
+  "Do not call another tool and do not speak before the tool call.",
+  "After the tool result, briefly acknowledge completion.",
+].join(" ");
+export const LC4_S2S_COMPACT_CONTROL_SHA256 = sha256Hex(
+  LC4_S2S_COMPACT_CONTROL,
+);
+export const LC4_S2S_REFERENCE_LARGE_CONTROL_BYTES = 35_518 as const;
+export const LC4_S2S_PACKETIZER_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/lc4-s2s-audio-delivery/v1\n${canonicalJson({
+    packetizer: "packetizeRealtimePcm16",
+    delivery: "deliverRealtimePcm16",
+    profile: { schemaVersion: 1, chunkMs: 20, pace: "realtime" },
+  })}`,
+);
+
+const execFileAsync = promisify(execFile);
+const CAS_DOMAIN = "harshas-amazing-call-center/lc4-s2s-pcm-object/v1\n";
+const FIXTURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-spoken-fixture-artifact/v1\n";
+const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v3\n";
+const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v3\n";
+const CONTROL_DIAGNOSTIC_DOMAIN = "harshas-amazing-call-center/lc4-s2s-control-size-diagnostic/v1\n";
+const SHA256 = /^[a-f0-9]{64}$/u;
+
+export type Lc4S2sPcmObject = Readonly<{
+  path: string;
+  sha256: string;
+  cas_sha256: string;
+  cas_receipt_sha256: string;
+  byte_length: number;
+  sample_rate_hz: 16_000 | 24_000;
+  channels: 1;
+  encoding: "pcm16le";
+  duration_ms: number;
+}>;
+
+export type Lc4S2sAudioFixtureArtifact = Readonly<{
+  schema_version: 1;
+  fixture_version: typeof LC4_S2S_AUDIO_FIXTURE_VERSION;
+  source_text_sha256: typeof LC4_S2S_SOURCE_TEXT_SHA256;
+  voice: typeof LC4_S2S_VOICE;
+  voice_sha256: typeof LC4_S2S_VOICE_SHA256;
+  tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
+  base_fixture_manifest_sha256: string;
+  toolchain_sha256: string;
+  renderer_identity_sha256: string;
+  provider_renditions: Readonly<Record<LiveStsProvider, Lc4S2sPcmObject>>;
+  artifact_sha256: string;
+}>;
+
+export type Lc4S2sAudioRenderer = Readonly<{
+  identitySha256: string;
+  render(text: typeof LC4_S2S_SOURCE_TEXT): Promise<Readonly<{
+    pcm16k: Uint8Array;
+    pcm24k: Uint8Array;
+  }>>;
+}>;
+
+export type Lc4S2sControlSizeDiagnostic = Readonly<{
+  schema_version: 1;
+  diagnostic_id: "HACC-LC4-CONTROL-SIZE-DIAGNOSTIC-v1";
+  qualification_gate: false;
+  compact_control_bytes: number;
+  compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
+  reference_large_control_bytes: typeof LC4_S2S_REFERENCE_LARGE_CONTROL_BYTES;
+  bytes_removed: number;
+  compact_fraction_ppm: number;
+  diagnostic_sha256: string;
+}>;
+
+export type Lc4S2sRoundtripFailureClass =
+  | "none"
+  | "session_setup_failed"
+  | "audio_delivery_failed"
+  | "audio_delivery_contract_failed"
+  | "response_trigger_failed"
+  | "commit_acknowledgement_failed"
+  | "manual_turn_mode_violation"
+  | "dynamic_control_not_wire_observed"
+  | "speech_before_tool"
+  | "wrong_tool"
+  | "wrong_arguments"
+  | "competing_tool_call"
+  | "tool_result_submission_failed"
+  | "tool_result_event_missing"
+  | "tool_result_not_wire_observed"
+  | "post_tool_continuation_missing"
+  | "post_tool_terminal_missing"
+  | "post_tool_usage_missing"
+  | "provider_error"
+  | "timeout";
+
+export type Lc4S2sRoundtripDeliveryReceipt = Readonly<{
+  packetizer_sha256: typeof LC4_S2S_PACKETIZER_SHA256;
+  delivery_profile_sha256: string;
+  audio_sha256: string;
+  audio_bytes: number;
+  chunk_count: number;
+  frame_bytes: number;
+  tail_bytes: number;
+  scheduled_offsets_ms: readonly number[];
+}>;
+
+export type Lc4S2sRoundtripExecution = Readonly<{
+  schema_version: 1;
+  roundtrip_version: typeof LC4_S2S_ROUNDTRIP_VERSION;
+  provider: LiveStsProvider;
+  model: string;
+  attempted_at: string;
+  completed_at: string;
+  status: "passed" | "failed";
+  failure_class: Lc4S2sRoundtripFailureClass;
+  audio: Lc4S2sPcmObject;
+  delivery: Lc4S2sRoundtripDeliveryReceipt | null;
+  compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
+  tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
+  response_generation_requested: boolean;
+  tool_call_observed: boolean;
+  tool_result_submitted: boolean;
+  tool_result_event_observed: boolean;
+  tool_result_wire_observed: boolean;
+  post_tool_continuation_requested: boolean;
+  post_tool_continuation_observed: boolean;
+  post_tool_terminal_observed: boolean;
+  post_tool_usage_observed: boolean;
+  provider_tool_call_evidence_sha256: string | null;
+  tool_result_evidence_sha256: string | null;
+  wire_observations: readonly RealtimeWireObservation[];
+  usage: readonly NormalizedRealtimeUsage[];
+  operation_order: readonly string[];
+  failure_evidence_sha256: string;
+  evidence_sha256: string;
+}>;
+
+function freeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  if (ArrayBuffer.isView(value)) return value;
+  for (const child of Object.values(value)) freeze(child);
+  return Object.freeze(value);
+}
+
+async function writeImmutable(path: string, bytes: string | Uint8Array): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${crypto.randomUUID()}.tmp`;
+  await writeFile(temporary, bytes, { flag: "wx", mode: 0o400 });
+  try {
+    await link(temporary, path);
+    await chmod(path, 0o400);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+function inspectPcm(bytes: Uint8Array, sampleRateHz: 16_000 | 24_000): Omit<Lc4S2sPcmObject, "path"> {
+  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0) throw new Error("LC4 S2S renderer returned invalid PCM16LE");
+  const durationMs = bytes.byteLength / 2 / sampleRateHz * 1_000;
+  if (durationMs < 1_000 || durationMs > 2_000) throw new Error("LC4 S2S spoken request must be 1 to 2 seconds");
+  const sha256 = sha256Hex(bytes);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let peak = 0;
+  for (let offset = 0; offset < bytes.byteLength; offset += 2) peak = Math.max(peak, Math.abs(view.getInt16(offset, true)));
+  if (peak < 128) throw new Error("LC4 S2S spoken request is silent");
+  return freeze({
+    sha256,
+    cas_sha256: sha256Hex(`${CAS_DOMAIN}${sha256}`),
+    cas_receipt_sha256: sha256Hex(`${CAS_DOMAIN}injected-test-receipt\n${sha256}`),
+    byte_length: bytes.byteLength,
+    sample_rate_hz: sampleRateHz,
+    channels: 1 as const,
+    encoding: "pcm16le" as const,
+    duration_ms: Number(durationMs.toFixed(3)),
+  });
+}
+
+export function lc4S2sControlSizeDiagnostic(): Lc4S2sControlSizeDiagnostic {
+  const compactBytes = Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8");
+  const body = freeze({
+    schema_version: 1 as const,
+    diagnostic_id: "HACC-LC4-CONTROL-SIZE-DIAGNOSTIC-v1" as const,
+    qualification_gate: false as const,
+    compact_control_bytes: compactBytes,
+    compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
+    reference_large_control_bytes: LC4_S2S_REFERENCE_LARGE_CONTROL_BYTES,
+    bytes_removed: LC4_S2S_REFERENCE_LARGE_CONTROL_BYTES - compactBytes,
+    compact_fraction_ppm: Math.round(compactBytes / LC4_S2S_REFERENCE_LARGE_CONTROL_BYTES * 1_000_000),
+  });
+  return freeze({ ...body, diagnostic_sha256: sha256Hex(`${CONTROL_DIAGNOSTIC_DOMAIN}${canonicalJson(body)}`) });
+}
+
+export async function createSystemLc4S2sAudioRenderer(input: Readonly<{
+  ffmpegPath?: string;
+}> = {}): Promise<Lc4S2sAudioRenderer> {
+  const sayPath = "/usr/bin/say";
+  const ffmpegPath = resolve(input.ffmpegPath ?? "/opt/homebrew/bin/ffmpeg");
+  const [sayBytes, ffmpegBytes] = await Promise.all([readFile(sayPath), readFile(ffmpegPath)]);
+  const identitySha256 = sha256Hex(`harshas-amazing-call-center/lc4-s2s-renderer/v1\n${canonicalJson({
+    say_path: sayPath,
+    say_sha256: sha256Hex(sayBytes),
+    ffmpeg_path: ffmpegPath,
+    ffmpeg_sha256: sha256Hex(ffmpegBytes),
+    voice: LC4_S2S_VOICE,
+  })}`);
+  return freeze({
+    identitySha256,
+    async render(text) {
+      if (text !== LC4_S2S_SOURCE_TEXT) throw new Error("LC4 S2S renderer received uncommitted source text");
+      const workspace = await mkdtemp(resolve(tmpdir(), "hacc-lc4-s2s-render-"));
+      const aiff = resolve(workspace, "spoken-request.aiff");
+      const pcm16k = resolve(workspace, "spoken-request.16000.pcm");
+      const pcm24k = resolve(workspace, "spoken-request.24000.pcm");
+      await execFileAsync(sayPath, ["-v", LC4_S2S_VOICE.name, "-r", String(LC4_S2S_VOICE.words_per_minute), "-o", aiff, text]);
+      for (const [rate, output] of [[16_000, pcm16k], [24_000, pcm24k]] as const) {
+        await execFileAsync(ffmpegPath, [
+          "-nostdin", "-loglevel", "error", "-nostats", "-y", "-i", aiff,
+          "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact",
+          "-af", `aresample=${rate}:resampler=soxr:precision=28:dither_method=none`,
+          "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", String(rate), output,
+        ], { maxBuffer: 1024 * 1024 });
+      }
+      return freeze({
+        pcm16k: new Uint8Array(await readFile(pcm16k)),
+        pcm24k: new Uint8Array(await readFile(pcm24k)),
+      });
+    },
+  });
+}
+
+export async function materializeLc4S2sAudioFixture(input: Readonly<{
+  root: string;
+  renderer?: Lc4S2sAudioRenderer;
+}>): Promise<Lc4S2sAudioFixtureArtifact> {
+  const root = resolve(input.root);
+  if (input.renderer === undefined) return materializeProductionLc4S2sAudioFixture(root);
+  const renderer = input.renderer;
+  if (!SHA256.test(renderer.identitySha256)) throw new Error("LC4 S2S renderer identity is invalid");
+  const rendered = await renderer.render(LC4_S2S_SOURCE_TEXT);
+  const objects = {
+    16_000: inspectPcm(rendered.pcm16k, 16_000),
+    24_000: inspectPcm(rendered.pcm24k, 24_000),
+  } as const;
+  const install = async (rate: 16_000 | 24_000, bytes: Uint8Array): Promise<Lc4S2sPcmObject> => {
+    const object = objects[rate];
+    const path = `fixtures/objects/sha256/${object.sha256.slice(0, 2)}/${object.sha256}.pcm`;
+    await writeImmutable(resolve(root, path), bytes);
+    return freeze({ path, ...object });
+  };
+  const [pcm16, pcm24] = await Promise.all([
+    install(16_000, rendered.pcm16k),
+    install(24_000, rendered.pcm24k),
+  ]);
+  const body = freeze({
+    schema_version: 1 as const,
+    fixture_version: LC4_S2S_AUDIO_FIXTURE_VERSION,
+    source_text_sha256: LC4_S2S_SOURCE_TEXT_SHA256,
+    voice: LC4_S2S_VOICE,
+    voice_sha256: LC4_S2S_VOICE_SHA256,
+    tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+    base_fixture_manifest_sha256: sha256Hex(`${FIXTURE_DOMAIN}injected-test-fixture\n${renderer.identitySha256}`),
+    toolchain_sha256: renderer.identitySha256,
+    renderer_identity_sha256: renderer.identitySha256,
+    provider_renditions: freeze({ openai: pcm24, gemini: pcm16, xai: pcm24 }),
+  });
+  const artifact = freeze({ ...body, artifact_sha256: sha256Hex(`${FIXTURE_DOMAIN}${canonicalJson(body)}`) });
+  await writeImmutable(resolve(root, "fixtures", "spoken-request.json"), `${canonicalJson(artifact)}\n`);
+  return artifact;
+}
+
+async function materializeProductionLc4S2sAudioFixture(root: string): Promise<Lc4S2sAudioFixtureArtifact> {
+  const sourceRoot = resolve(root, "fixtures", "frozen-source");
+  const scenario = freeze({
+    id: "lc4-qualification-v3-spoken-request",
+    version: "1",
+    canonical_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-scenario/v1\n${LC4_S2S_SOURCE_TEXT_SHA256}`),
+  });
+  const turns = freeze([{ id: "complete-current-stage-v1", text: LC4_S2S_SOURCE_TEXT, pause_after_ms: 0 }]);
+  const manifest = await prepareCallerAudioFixture({
+    phase: "fixture-preparation",
+    rootDirectory: sourceRoot,
+    scenario,
+    turns,
+    voice: LC4_S2S_VOICE.name,
+    rateWpm: LC4_S2S_VOICE.words_per_minute,
+    ffmpegExecutable: "/opt/homebrew/bin/ffmpeg",
+  });
+  const verified = await loadFrozenCallerAudioForPaidTrial({
+    rootDirectory: sourceRoot,
+    expectedScenario: scenario,
+    expectedTurns: turns,
+    expectedManifestSha256: manifest.manifest_sha256,
+  });
+  const cas = await createLc4ImmutableCas(resolve(root, "fixtures", "cas"));
+  const createObject = async (
+    rate: 16_000 | 24_000,
+    rendition: "pcm16le_mono_16000" | "pcm16le_mono_24000",
+  ): Promise<Lc4S2sPcmObject> => {
+    const bytes = verified.readPcm(turns[0]!.id, rendition);
+    const inspected = inspectPcm(bytes, rate);
+    const receipt = await cas.put(bytes, "audio/pcm");
+    const reloaded = await cas.get(receipt.artifact_sha256);
+    if (sha256Hex(reloaded) !== inspected.sha256 || receipt.artifact_sha256 !== inspected.sha256) {
+      throw new Error("LC4 S2S qualification CAS read-after-write verification failed");
+    }
+    return freeze({
+      ...inspected,
+      path: `fixtures/cas/${receipt.relative_path}`,
+      cas_sha256: receipt.artifact_sha256,
+      cas_receipt_sha256: receipt.receipt_sha256,
+    });
+  };
+  const [pcm16, pcm24] = await Promise.all([
+    createObject(16_000, "pcm16le_mono_16000"),
+    createObject(24_000, "pcm16le_mono_24000"),
+  ]);
+  const toolchainSha256 = sha256Hex(`harshas-amazing-call-center/lc4-s2s-toolchain/v1\n${canonicalJson(manifest.toolchain)}`);
+  const body = freeze({
+    schema_version: 1 as const,
+    fixture_version: LC4_S2S_AUDIO_FIXTURE_VERSION,
+    source_text_sha256: LC4_S2S_SOURCE_TEXT_SHA256,
+    voice: LC4_S2S_VOICE,
+    voice_sha256: LC4_S2S_VOICE_SHA256,
+    tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+    base_fixture_manifest_sha256: manifest.manifest_sha256,
+    toolchain_sha256: toolchainSha256,
+    renderer_identity_sha256: sha256Hex(`${FIXTURE_DOMAIN}${manifest.manifest_sha256}\n${toolchainSha256}`),
+    provider_renditions: freeze({ openai: pcm24, gemini: pcm16, xai: pcm24 }),
+  });
+  const artifact = freeze({ ...body, artifact_sha256: sha256Hex(`${FIXTURE_DOMAIN}${canonicalJson(body)}`) });
+  await writeImmutable(resolve(root, "fixtures", "spoken-request.json"), `${canonicalJson(artifact)}\n`);
+  return artifact;
+}
+
+export async function loadLc4S2sPcm(input: Readonly<{
+  root: string;
+  artifact: Lc4S2sAudioFixtureArtifact;
+  provider: LiveStsProvider;
+}>): Promise<Pcm16Audio> {
+  const object = input.artifact.provider_renditions[input.provider];
+  const path = resolve(input.root, object.path);
+  const objectRoot = resolve(input.root, "fixtures", "objects", "sha256");
+  const productionCasRoot = resolve(input.root, "fixtures", "cas");
+  if (!path.startsWith(`${objectRoot}/`) && !path.startsWith(`${productionCasRoot}/`)) {
+    throw new Error("LC4 S2S PCM path escapes the fixture CAS");
+  }
+  const bytes = new Uint8Array(await readFile(path));
+  if (bytes.byteLength !== object.byte_length || sha256Hex(bytes) !== object.sha256) {
+    throw new Error("LC4 S2S PCM CAS object failed integrity");
+  }
+  return freeze({ encoding: "pcm16" as const, sampleRateHz: object.sample_rate_hz, channels: 1 as const, data: bytes });
+}
+
+function exactToolCall(event: NormalizedRealtimeEvent): Readonly<{
+  call: RealtimeToolCall;
+  observationSha256: string;
+}> | Lc4S2sRoundtripFailureClass | null {
+  if (event.type !== "tool.calls") return null;
+  if (event.calls.length !== 1) return "competing_tool_call";
+  const call = event.calls[0]!;
+  if (call.name !== LC4_S2S_TOOL.name) return "wrong_tool";
+  if (call.argumentsJson === null
+    || typeof call.argumentsJson !== "object"
+    || Array.isArray(call.argumentsJson)) return "wrong_arguments";
+  const argumentsJson = call.argumentsJson as Record<string, unknown>;
+  if (argumentsJson.tool_name !== "complete_current_stage"
+    || argumentsJson.arguments === null
+    || typeof argumentsJson.arguments !== "object"
+    || Array.isArray(argumentsJson.arguments)
+    || Object.keys(argumentsJson.arguments as Record<string, unknown>).length !== 0
+    || Object.keys(argumentsJson).sort().join(",") !== "arguments,tool_name") return "wrong_arguments";
+  if (event.wireObservation?.availability !== "observed") return "provider_error";
+  return freeze({ call, observationSha256: event.wireObservation.observationSha256 });
+}
+
+function forcedToolChoice(provider: LiveStsProvider): Readonly<Record<string, unknown>> | undefined {
+  if (provider === "gemini") return undefined;
+  return freeze({ type: "function", name: LC4_S2S_TOOL.name });
+}
+
+export async function executeLc4S2sToolRoundtrip(input: Readonly<{
+  provider: LiveStsProvider;
+  model: string;
+  client: NormalizedRealtimeClient;
+  audio: Pcm16Audio;
+  audioObject: Lc4S2sPcmObject;
+  profile: TrialAudioDeliveryProfile;
+  runtime?: RealtimeAudioDeliveryRuntime;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  now?: () => Date;
+}>): Promise<Lc4S2sRoundtripExecution> {
+  const now = input.now ?? (() => new Date());
+  const attemptedAt = now().toISOString();
+  const timeoutMs = input.timeoutMs ?? 45_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 90_000) throw new Error("LC4 S2S roundtrip timeout must be 1000..90000ms");
+  if (input.client.provider !== input.provider) throw new Error("LC4 S2S roundtrip provider mismatch");
+  if (sha256Hex(input.audio.data) !== input.audioObject.sha256
+    || input.audio.data.byteLength !== input.audioObject.byte_length
+    || input.audio.sampleRateHz !== input.audioObject.sample_rate_hz) throw new Error("LC4 S2S roundtrip audio differs from its preregistered CAS object");
+
+  const wire: RealtimeWireObservation[] = [];
+  const usage: NormalizedRealtimeUsage[] = [];
+  const operations: string[] = [];
+  let failure: Lc4S2sRoundtripFailureClass = "none";
+  let delivery: Lc4S2sRoundtripDeliveryReceipt | null = null;
+  let responseRequested = false;
+  let toolCall: RealtimeToolCall | null = null;
+  let toolCallEvidenceSha256: string | null = null;
+  let toolResultSubmitted = false;
+  let toolResultEventObserved = false;
+  let toolResultWireObservationSha256: string | null = null;
+  let continuationRequested = false;
+  let continuationObserved = false;
+  let terminalObserved = false;
+  let postToolUsageObserved = false;
+  let triggerObservationSha256: string | null = null;
+  let controlObservationSha256: string | null = null;
+  let finish!: () => void;
+  const done = new Promise<void>((resolvePromise) => { finish = resolvePromise; });
+  const expectedTrigger = input.provider === "gemini" ? "realtimeInput.activityEnd" : "response.create";
+
+  const unsubscribeWire = input.client.onWireObservation?.((observation) => {
+    wire.push(observation);
+    const dynamicControl = observation.projection.dynamicControl;
+    if (dynamicControl !== null && typeof dynamicControl === "object" && !Array.isArray(dynamicControl)) {
+      const record = dynamicControl as Record<string, unknown>;
+      if (record.sha256 === LC4_S2S_COMPACT_CONTROL_SHA256
+        && record.byteLength === Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8")
+        && record.authority === "advisory_only_gateway_and_speech_gate_enforced") {
+        controlObservationSha256 ??= observation.observationSha256;
+      }
+    }
+    if (responseRequested && triggerObservationSha256 === null
+      && observation.direction === "outbound" && observation.wireType === expectedTrigger) {
+      triggerObservationSha256 = observation.observationSha256;
+    }
+    if (toolResultSubmitted && toolCall !== null && toolResultWireObservationSha256 === null
+      && observation.direction === "outbound"
+      && observation.identities.callIdSha256 === realtimeWireIdentitySha256("call", toolCall.callId)
+      && (observation.wireType === "conversation.item.create" || observation.wireType === "toolResponse")) {
+      toolResultWireObservationSha256 = observation.observationSha256;
+      operations.push("matching_tool_result_wire_observed");
+    }
+  });
+  const maybeFinish = () => {
+    if (toolResultWireObservationSha256
+      && toolResultEventObserved
+      && (input.provider === "gemini" || continuationRequested)
+      && continuationObserved
+      && terminalObserved
+      && postToolUsageObserved) finish();
+  };
+  const unsubscribeEvent = input.client.onEvent((event) => {
+    if (failure !== "none") return;
+    if (event.type === "output.audio" || event.type === "output.transcript") {
+      if (toolCall === null) {
+        failure = "speech_before_tool";
+        finish();
+        return;
+      }
+      if (toolResultWireObservationSha256 !== null) {
+        continuationObserved = true;
+        operations.push("post_tool_continuation_observed");
+      }
+    }
+    if (event.type === "input.speech_activity" && input.provider === "xai") {
+      failure = "manual_turn_mode_violation";
+      finish();
+      return;
+    }
+    if (event.type === "tool.results.submitted") {
+      if (toolCall === null || event.callIds.length !== 1 || event.callIds[0] !== toolCall.callId) {
+        failure = "tool_result_submission_failed";
+        finish();
+        return;
+      }
+      toolResultEventObserved = true;
+      operations.push("matching_tool_result_event_observed");
+    }
+    if (event.type === "tool.continuation.requested") {
+      continuationRequested = true;
+      operations.push("post_tool_continuation_request_observed");
+    }
+    if (event.type === "response.started" && toolResultWireObservationSha256 !== null) {
+      continuationObserved = true;
+      operations.push("post_tool_continuation_observed");
+    }
+    if (event.type === "usage") {
+      usage.push(event.usage);
+      if (toolResultWireObservationSha256 !== null) {
+        postToolUsageObserved = true;
+        operations.push("post_tool_usage_observed");
+      }
+    }
+    const candidate = exactToolCall(event);
+    if (typeof candidate === "string") {
+      failure = candidate;
+      finish();
+      return;
+    }
+    if (candidate !== null) {
+      if (toolCall !== null) {
+        failure = "competing_tool_call";
+        finish();
+        return;
+      }
+      toolCall = candidate.call;
+      operations.push("exact_tool_call_observed");
+      const callObservation = wire.find((item) => item.observationSha256 === candidate.observationSha256);
+      const controlIndex = wire.findIndex((item) => item.observationSha256 === controlObservationSha256);
+      const triggerIndex = wire.findIndex((item) => item.observationSha256 === triggerObservationSha256);
+      const callIndex = wire.findIndex((item) => item.observationSha256 === candidate.observationSha256);
+      const providerCausalityValid = input.provider === "gemini"
+        ? candidate.call.responseIdSource === "client_local"
+          && candidate.call.causalBinding?.providerCallId === candidate.call.callId
+          && candidate.call.causalBinding.triggerObservationSha256 === triggerObservationSha256
+          && candidate.call.causalBinding.trigger === "audio_activity_end"
+        : candidate.call.responseIdSource === "provider";
+      if (controlIndex < 0) {
+        failure = "dynamic_control_not_wire_observed";
+        finish();
+        return;
+      }
+      if (triggerIndex < controlIndex
+        || (input.provider !== "gemini" && controlIndex !== triggerIndex)
+        || callIndex <= triggerIndex || !callObservation
+        || callObservation.direction !== "inbound"
+        || callObservation.identities.callIdSha256 !== realtimeWireIdentitySha256("call", candidate.call.callId)
+        || !providerCausalityValid
+        || !verifyRealtimeWireObservationChain(wire).valid) {
+        failure = "provider_error";
+        finish();
+        return;
+      }
+      toolCallEvidenceSha256 = sha256Hex(canonicalJson({
+        provider: input.provider,
+        model: input.model,
+        call_id_sha256: realtimeWireIdentitySha256("call", candidate.call.callId),
+        tool_name: candidate.call.name,
+        arguments_sha256: sha256Hex(canonicalJson(candidate.call.argumentsJson)),
+        dynamic_control_observation_sha256: controlObservationSha256,
+        trigger_observation_sha256: triggerObservationSha256,
+        call_observation_sha256: candidate.observationSha256,
+        causal_binding: input.provider === "gemini"
+          ? "activity_end_then_native_tool_call_id"
+          : "response_create_then_native_response_and_call_ids",
+      }));
+      queueMicrotask(() => {
+        if (failure !== "none" || toolCall === null) return;
+        try {
+          toolResultSubmitted = true;
+          input.client.submitToolResults([{
+            callId: toolCall.callId,
+            output: { ok: true, qualification_stage: "completed" },
+          }], false);
+          operations.push("matching_tool_result_submitted");
+          if (input.provider !== "gemini") {
+            input.client.createResponse({ tool_choice: "none" });
+            operations.push("post_tool_continuation_requested");
+          }
+        } catch {
+          failure = "tool_result_submission_failed";
+          finish();
+        }
+      });
+    }
+    if (event.type === "response.completed") {
+      if (toolCall === null) {
+        failure = "wrong_tool";
+        finish();
+        return;
+      }
+      if (toolResultWireObservationSha256 !== null && event.status === "completed") {
+        terminalObserved = true;
+        operations.push("post_tool_terminal_observed");
+      }
+    }
+    if (event.type === "error") {
+      failure = "provider_error";
+      finish();
+      return;
+    }
+    maybeFinish();
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await input.client.connect();
+    if (input.client.state !== "ready") throw new Error("client not ready");
+    operations.push("session_ready");
+    const receipt = await deliverRealtimePcm16({
+      client: input.client,
+      audio: input.audio,
+      profile: input.profile,
+      runtime: input.runtime ?? SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
+      signal: input.signal ?? new AbortController().signal,
+    });
+    const plan = packetizeRealtimePcm16(input.audio, input.profile);
+    if (receipt.total_byte_length !== input.audioObject.byte_length
+      || receipt.chunk_count !== plan.frames.length
+      || receipt.chunks.some((chunk, index) => chunk.scheduled_offset_ms !== index * 20)) {
+      failure = "audio_delivery_contract_failed";
+      throw new Error("delivery contract failed");
+    }
+    delivery = freeze({
+      packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
+      delivery_profile_sha256: trialAudioDeliveryProfileHash(input.profile),
+      audio_sha256: input.audioObject.sha256,
+      audio_bytes: receipt.total_byte_length,
+      chunk_count: receipt.chunk_count,
+      frame_bytes: receipt.frame_byte_length,
+      tail_bytes: receipt.tail_byte_length,
+      scheduled_offsets_ms: freeze(receipt.chunks.map((chunk) => chunk.scheduled_offset_ms)),
+    });
+    operations.push("preregistered_pcm_paced_20ms");
+    input.client.prepareResponse({
+      additionalInstructions: LC4_S2S_COMPACT_CONTROL,
+      contextSha256: LC4_S2S_COMPACT_CONTROL_SHA256,
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    operations.push("compact_semantic_control_prepared");
+    if (input.provider === "gemini") responseRequested = true;
+    input.client.commitInputAudio();
+    operations.push("caller_audio_committed");
+    if (input.provider !== "gemini") {
+      if (typeof input.client.waitForInputAudioCommit !== "function") {
+        failure = "commit_acknowledgement_failed";
+        throw new Error("provider commit acknowledgement barrier is unavailable");
+      }
+      await input.client.waitForInputAudioCommit(5_000);
+      operations.push("caller_audio_commit_acknowledged");
+      responseRequested = true;
+      const toolChoice = forcedToolChoice(input.provider);
+      input.client.createResponse(toolChoice === undefined ? undefined : { tool_choice: toolChoice });
+    }
+    operations.push("response_generation_requested");
+    await Promise.race([
+      done,
+      new Promise<void>((resolvePromise) => { timer = setTimeout(resolvePromise, timeoutMs); }),
+    ]);
+    if (failure === "none" && !(toolResultWireObservationSha256
+      && toolResultEventObserved
+      && (input.provider === "gemini" || continuationRequested)
+      && continuationObserved
+      && terminalObserved
+      && postToolUsageObserved)) {
+      failure = toolCall === null ? "timeout"
+        : !toolResultSubmitted ? "tool_result_submission_failed"
+          : !toolResultWireObservationSha256 ? "tool_result_not_wire_observed"
+            : !toolResultEventObserved ? "tool_result_event_missing"
+              : input.provider !== "gemini" && !continuationRequested ? "post_tool_continuation_missing"
+            : !continuationObserved ? "post_tool_continuation_missing"
+              : !terminalObserved ? "post_tool_terminal_missing"
+                : "post_tool_usage_missing";
+    }
+  } catch (error) {
+    if (failure === "none") failure = error instanceof RealtimeAudioDeliveryError
+      ? "audio_delivery_failed"
+      : operations.includes("session_ready") ? "response_trigger_failed" : "session_setup_failed";
+  } finally {
+    if (timer) clearTimeout(timer);
+    // xAI emits its final client-measured usage synchronously while closing.
+    // Keep listeners attached until that meter is captured.
+    input.client.close(1000, "LC4 S2S qualification complete");
+    unsubscribeEvent();
+    unsubscribeWire?.();
+  }
+
+  const passed = failure === "none"
+    && toolCall !== null
+    && toolResultSubmitted
+    && toolResultWireObservationSha256 !== null
+    && continuationObserved
+    && terminalObserved
+    && postToolUsageObserved;
+  if (!passed && failure === "none") failure = "provider_error";
+  const retainedToolCall = toolCall as RealtimeToolCall | null;
+  const failureBody = freeze({
+    provider: input.provider,
+    model: input.model,
+    failure_class: failure,
+    operation_order: operations,
+    wire_count: wire.length,
+    terminal_wire_sha256: wire.at(-1)?.observationSha256 ?? null,
+  });
+  const body = freeze({
+    schema_version: 1 as const,
+    roundtrip_version: LC4_S2S_ROUNDTRIP_VERSION,
+    provider: input.provider,
+    model: input.model,
+    attempted_at: attemptedAt,
+    completed_at: now().toISOString(),
+    status: passed ? "passed" as const : "failed" as const,
+    failure_class: failure,
+    audio: input.audioObject,
+    delivery,
+    compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
+    tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+    response_generation_requested: responseRequested,
+    tool_call_observed: retainedToolCall !== null,
+    tool_result_submitted: toolResultSubmitted,
+    tool_result_event_observed: toolResultEventObserved,
+    tool_result_wire_observed: toolResultWireObservationSha256 !== null,
+    post_tool_continuation_requested: input.provider === "gemini" || continuationRequested,
+    post_tool_continuation_observed: continuationObserved,
+    post_tool_terminal_observed: terminalObserved,
+    post_tool_usage_observed: postToolUsageObserved,
+    provider_tool_call_evidence_sha256: toolCallEvidenceSha256,
+    tool_result_evidence_sha256: toolResultWireObservationSha256 === null || retainedToolCall === null ? null : sha256Hex(canonicalJson({
+      call_id_sha256: realtimeWireIdentitySha256("call", retainedToolCall.callId),
+      result_observation_sha256: toolResultWireObservationSha256,
+      output_sha256: sha256Hex(canonicalJson({ ok: true, qualification_stage: "completed" })),
+    })),
+    wire_observations: freeze([...wire]),
+    usage: freeze([...usage]),
+    operation_order: freeze([...operations]),
+    failure_evidence_sha256: sha256Hex(`${ROUNDTRIP_FAILURE_DOMAIN}${canonicalJson(failureBody)}`),
+  });
+  return freeze({ ...body, evidence_sha256: sha256Hex(`${ROUNDTRIP_EVIDENCE_DOMAIN}${canonicalJson(body)}`) });
+}
+
+export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecution): void {
+  const { evidence_sha256, ...body } = execution;
+  if (sha256Hex(`${ROUNDTRIP_EVIDENCE_DOMAIN}${canonicalJson(body)}`) !== evidence_sha256) throw new Error("LC4 S2S roundtrip evidence hash mismatch");
+  if (execution.roundtrip_version !== LC4_S2S_ROUNDTRIP_VERSION
+    || execution.tool_schema_sha256 !== LC4_S2S_TOOL_SCHEMA_SHA256
+    || execution.compact_control_sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
+    || !verifyRealtimeWireObservationChain(execution.wire_observations).valid) throw new Error("LC4 S2S roundtrip evidence contract is invalid");
+  if (execution.status === "passed" && (
+    execution.failure_class !== "none"
+    || execution.delivery === null
+    || !execution.response_generation_requested
+    || !execution.tool_call_observed
+    || !execution.tool_result_submitted
+    || !execution.tool_result_event_observed
+    || !execution.tool_result_wire_observed
+    || !execution.post_tool_continuation_requested
+    || !execution.post_tool_continuation_observed
+    || !execution.post_tool_terminal_observed
+    || !execution.post_tool_usage_observed
+    || execution.provider_tool_call_evidence_sha256 === null
+    || execution.tool_result_evidence_sha256 === null
+  )) throw new Error("passing LC4 S2S roundtrip lacks closed-loop evidence");
+  if (execution.status === "failed" && execution.failure_class === "none") throw new Error("failed LC4 S2S roundtrip lacks a failure class");
+}
