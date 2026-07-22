@@ -91,7 +91,7 @@ function projection(opportunityId: string, transcript: string) {
   const artifact = replay(opportunityId, transcript);
   return createLc4DevArmBlindRepairProjection({
     opportunity_id: opportunityId,
-    listener_status: "verified",
+    listener_status: artifact.semantic_applicability === "applicable" ? "verified" : "not_applicable",
     semantic_result_sha256: artifact.artifact_sha256,
     semantic_replay_sha256: artifact.semantic_replay.replay_sha256,
     unmet_blocker_codes: artifact.semantic_replay.earliest_unmet_crp_blocker === null ? [] : [artifact.semantic_replay.earliest_unmet_crp_blocker],

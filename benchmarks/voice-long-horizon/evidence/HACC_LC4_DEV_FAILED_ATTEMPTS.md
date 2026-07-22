@@ -130,6 +130,22 @@ the catalog must expose the exact mutation and reconciliation capabilities, and
 the evidence/evaluator contract must require receipt-grounded action outcomes
 with non-empty criteria for action-bearing opportunities.
 
+### Retrospective evaluator disposition
+
+The repaired evaluator classifies all eight retained opportunity-35/42 records
+as `unscorable_missing_authority_evidence`. Their score numerator and denominator
+are both `null`: this packet is neither `0/8` nor a pass. Response-plan hashes
+and listener transcripts do not prove tool acceptance, authoritative rejection,
+commit state, idempotency, reconciliation, or terminal world state.
+
+This is locked by the provider-free regression in
+`web/lib/benchmark/__tests__/lc4-authoritative-obligation-evidence.test.ts`.
+Future episodes become scorable only when an arm-neutral signed authority
+artifact binds a pre-frozen manifest, a complete tool/worker/fact/confirmation/
+terminal source-head set, and a replay-valid event chain. A complete trusted
+ledger may yield ordinary `pass` or `fail`; missing or invalid ledger authority
+yields `evidence_invalid` and cannot enter a benchmark denominator.
+
 ## Current release boundary
 
 The next admissible provider run requires a fresh clean-source qualification

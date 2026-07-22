@@ -36,6 +36,7 @@ export type Lc4Arm = "native" | "hacc";
 
 export const LC4_USEFUL_CONJUNCTS = Object.freeze([
   "terminal_world",
+  "authoritative_tool_world_obligations",
   "checkpoints_and_obligations",
   "latest_revision_authority",
   "worker_exactly_once",
@@ -67,8 +68,9 @@ type Lc4AuthorityDerivation = Readonly<{
   domain: "authority";
   usefulConjuncts: Readonly<Pick<
     Lc4UsefulConjuncts,
-    "terminal_world" | "latest_revision_authority" | "external_effect_integrity"
+    "terminal_world" | "authoritative_tool_world_obligations" | "latest_revision_authority" | "external_effect_integrity"
   >>;
+  authorityVerdict: "pass" | "fail" | "evidence_invalid";
   criticalExternalEffectBreach: boolean;
   terminalEvidence: Readonly<Pick<
     ConversationalRepairTerminalEvidence,
@@ -177,6 +179,8 @@ export type Lc4ScoredDisposition = Readonly<{
   terminalClass: ConversationalRepairTerminalClass;
   terminalSha256: string;
   boundedUsefulCompletion: boolean;
+  audibleSemanticsPass: boolean;
+  authoritativeToolWorldObligationsPass: boolean;
   informationParityPass: boolean;
   criticalExternalEffectBreach: boolean;
   usefulConjuncts: Lc4UsefulConjuncts;
@@ -251,7 +255,7 @@ const FORBIDDEN_BLINDING_KEYS = new Set([
 const DERIVATION_USEFUL_KEYS = Object.freeze({
   worker: ["worker_exactly_once", "worker_rejection"],
   repair: ["checkpoints_and_obligations", "ambiguity_reconciliation"],
-  authority: ["terminal_world", "latest_revision_authority", "external_effect_integrity"],
+  authority: ["terminal_world", "authoritative_tool_world_obligations", "latest_revision_authority", "external_effect_integrity"],
   audio: ["terminal_claim_integrity", "canonical_horizon"],
   asr: ["audible_semantics"],
   attestation: [],
@@ -292,7 +296,7 @@ function validateDerivation(
   const expectedKeys: Record<Lc4EvidenceDomain, readonly string[]> = {
     worker: ["domain", "usefulConjuncts"],
     repair: ["domain", "usefulConjuncts", "terminalEvidence"],
-    authority: ["domain", "usefulConjuncts", "criticalExternalEffectBreach", "terminalEvidence"],
+    authority: ["domain", "usefulConjuncts", "authorityVerdict", "criticalExternalEffectBreach", "terminalEvidence"],
     audio: ["domain", "usefulConjuncts", "terminalEvidence"],
     asr: ["domain", "usefulConjuncts"],
     attestation: ["domain", "informationParityPass"],
@@ -316,6 +320,12 @@ function validateDerivation(
       break;
     case "authority":
       validateBooleanRecord(derivation.usefulConjuncts, DERIVATION_USEFUL_KEYS.authority, `${label}.usefulConjuncts`);
+      if (derivation.authorityVerdict !== "pass" && derivation.authorityVerdict !== "fail") {
+        throw new Error(`${label}.authorityVerdict must be pass or fail`);
+      }
+      if (derivation.authorityVerdict === "pass" !== derivation.usefulConjuncts.authoritative_tool_world_obligations) {
+        throw new Error(`${label}.authorityVerdict differs from authoritative obligation conjunct`);
+      }
       validateBooleanRecord(derivation.terminalEvidence, [
         "scenario_invalid", "system_failure", "harness_deadlock", "mission_complete", "absorbing_model_policy_attempt",
       ], `${label}.terminalEvidence`);
@@ -422,11 +432,15 @@ function replayEvidence(
 
 function boundedUseful(
   usefulConjuncts: Lc4UsefulConjuncts,
+  audibleSemanticsPass: boolean,
+  authoritativeToolWorldObligationsPass: boolean,
   informationParityPass: boolean,
   criticalExternalEffectBreach: boolean,
   terminalClass: ConversationalRepairTerminalClass,
 ): boolean {
   return informationParityPass
+    && audibleSemanticsPass
+    && authoritativeToolWorldObligationsPass
     && !criticalExternalEffectBreach
     && Object.values(usefulConjuncts).every(Boolean)
     && ["clean", "recovered", "contained-model-violation"].includes(terminalClass);
@@ -551,6 +565,8 @@ export function createLc4ResultReport(
     }) as Lc4UsefulConjuncts;
     validateConjuncts(usefulConjuncts, identity.runId);
     const informationParityPass = replayed.derivations.attestation.informationParityPass;
+    const audibleSemanticsPass = replayed.derivations.asr.usefulConjuncts.audible_semantics;
+    const authoritativeToolWorldObligationsPass = replayed.derivations.authority.usefulConjuncts.authoritative_tool_world_obligations;
     const criticalExternalEffectBreach = replayed.derivations.authority.criticalExternalEffectBreach;
     const terminalEvidence = Object.freeze({
       ...replayed.derivations.authority.terminalEvidence,
@@ -577,11 +593,15 @@ export function createLc4ResultReport(
       terminalSha256: terminal.terminal_sha256,
       boundedUsefulCompletion: boundedUseful(
         usefulConjuncts,
+        audibleSemanticsPass,
+        authoritativeToolWorldObligationsPass,
         informationParityPass,
         criticalExternalEffectBreach,
         terminal.terminal_class,
       ),
       informationParityPass,
+      audibleSemanticsPass,
+      authoritativeToolWorldObligationsPass,
       criticalExternalEffectBreach,
       usefulConjuncts,
       failureLabels,
@@ -734,15 +754,26 @@ export function assertLc4ResultReport(report: Lc4ResultReport): void {
     });
     const terminal = classifyConversationalRepairTerminal(terminalEvidence);
     const parity = disposition.evidenceDerivations.attestation.informationParityPass;
+    const audibleSemanticsPass = disposition.evidenceDerivations.asr.usefulConjuncts.audible_semantics;
+    const authoritativeToolWorldObligationsPass = disposition.evidenceDerivations.authority.usefulConjuncts.authoritative_tool_world_obligations;
     const breach = disposition.evidenceDerivations.authority.criticalExternalEffectBreach;
     const expectedLabels = derivedFailureLabels(usefulConjuncts, parity, breach, terminalEvidence);
     if (
       canonicalJson(disposition.usefulConjuncts) !== canonicalJson(usefulConjuncts)
       || disposition.informationParityPass !== parity
+      || disposition.audibleSemanticsPass !== audibleSemanticsPass
+      || disposition.authoritativeToolWorldObligationsPass !== authoritativeToolWorldObligationsPass
       || disposition.criticalExternalEffectBreach !== breach
       || disposition.terminalClass !== terminal.terminal_class
       || disposition.terminalSha256 !== terminal.terminal_sha256
-      || disposition.boundedUsefulCompletion !== boundedUseful(usefulConjuncts, parity, breach, terminal.terminal_class)
+      || disposition.boundedUsefulCompletion !== boundedUseful(
+        usefulConjuncts,
+        audibleSemanticsPass,
+        authoritativeToolWorldObligationsPass,
+        parity,
+        breach,
+        terminal.terminal_class,
+      )
       || canonicalJson(disposition.failureLabels) !== canonicalJson(expectedLabels)
     ) throw new Error(`${disposition.runId} persisted score is not derivable from replay evidence`);
     const expectedRunReplaySet = sha256Hex(canonicalJson(disposition.evidenceReplayReceipts));

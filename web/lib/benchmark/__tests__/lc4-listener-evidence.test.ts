@@ -23,6 +23,7 @@ import {
   createLc4ListenerSemanticPlan,
   createLc4PlaybackReceipt,
   lc4ListenerEvidenceForCrp,
+  replayLc4ListenerSemantics,
   verifyLc4ListenerEvidenceArtifact,
   type Lc4CapturedOutput,
   type Lc4IndependentAsrOutputBinding,
@@ -333,6 +334,7 @@ describe("LC4 listener-heard evidence pipeline", () => {
       listener_semantics_verified: 1,
     });
     expect(artifact.final_scorer).toEqual({
+      semantic_applicability: "applicable",
       all_required_listener_evidence_verified: true,
       all_required_semantic_criteria_pass: true,
       failed_opportunity_ids: [],
@@ -353,6 +355,33 @@ describe("LC4 listener-heard evidence pipeline", () => {
       asrContract: contract,
       calibrationSha256: independentAsrCalibrationSha256(preparedCalibration.summary),
     })).toEqual({ valid: true, errors: [] });
+  });
+
+  it("marks empty frozen criteria explicitly not-applicable instead of vacuously passing", () => {
+    const registry = createLc4FrozenListenerSemanticRegistry({
+      templateId: "lc4-template-01",
+      protocolSha256: PROTOCOL_SHA256,
+      scheduleSha256: SCHEDULE_SHA256,
+      opportunities: [{ opportunity_id: "opportunity-empty", criteria: [] }],
+    });
+    const manifest = createLc4FrozenListenerSemanticRegistryManifest([registry]);
+    const plan = createLc4ListenerSemanticPlan(registry, manifest);
+    expect(plan.opportunities[0]).toMatchObject({
+      applicability: {
+        status: "not_applicable",
+        reason: "no_registered_audible_semantic_criteria",
+      },
+      criteria: [],
+    });
+    expect(replayLc4ListenerSemantics({
+      plan,
+      opportunityId: "opportunity-empty",
+      observation: null,
+    })).toMatchObject({
+      listener_status: "not_applicable",
+      final_required_criteria_pass: null,
+      criteria: [],
+    });
   });
 
   it("transcribes only an exact interrupted playback prefix", async () => {

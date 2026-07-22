@@ -49,12 +49,12 @@ const DEV_OBSERVATION_NONCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-listen
 const DEV_REPLAY_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-replay-artifact/v1\n";
 const DEV_PROTOCOL_MIGRATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-protocol-migration/v1\n";
 
-export const LC4_DEV_LISTENER_SEMANTIC_VERSION = "lc4-dev-listener-semantics-v2-crp-deadlines" as const;
+export const LC4_DEV_LISTENER_SEMANTIC_VERSION = "lc4-dev-listener-semantics-v3-explicit-applicability" as const;
 export const LC4_DEV_LISTENER_CRITERIA_SOURCE_CORPUS_SHA256 = "075cfbb0b4c914d409f8c0232d11314c27621e082087b20d8a658fc6e8248bfc";
 export const LC4_DEV_LISTENER_PROTOCOL_SHA256 = sha256Hex(
   `${DEV_PROTOCOL_DOMAIN}${LC4_PUBLIC_DEV_PROTOCOL_ID}\nplayed-pcm-only\nprovider-arm-blind\nfrozen-before-output`,
 );
-export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION = "lc4-dev-semantic-evaluator-v2-headless-complete-capture" as const;
+export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION = "lc4-dev-semantic-evaluator-v3-headless-complete-capture-explicit-applicability" as const;
 export const LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256 = sha256Hex(
   `${DEV_EVALUATOR_BUILD_DOMAIN}${LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION}\nnfkc-en-us-tokenization\ncontains-any-all-none-ordered\ncomplete-captured-pcm-independent-asr\nopaque-request-and-chunk-bindings\nfail-closed-v2`,
 );
@@ -312,7 +312,8 @@ export type Lc4DevelopmentListenerReplayArtifact = Readonly<{
   transcript_sha256: string;
   listener_observation: Extract<ConditionBlindListenerObservation, { status: "verified" }>;
   semantic_replay: Lc4ListenerSemanticReplay;
-  final_required_criteria_pass: boolean;
+  semantic_applicability: "applicable" | "not_applicable";
+  final_required_criteria_pass: boolean | null;
   artifact_sha256: string;
 }>;
 
@@ -355,9 +356,13 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
     opportunityId: input.opportunity_id,
     observation,
   });
+  const applicable = planned.applicability.status === "applicable";
   if (semanticReplay.criteria.length !== planned.criteria.length
-    || semanticReplay.criteria.some((criterion) => criterion.pass === null)
-    || semanticReplay.final_required_criteria_pass === null) {
+    || (applicable && semanticReplay.criteria.some((criterion) => criterion.pass === null))
+    || (applicable && semanticReplay.final_required_criteria_pass === null)
+    || (!applicable && (semanticReplay.listener_status !== "not_applicable"
+      || semanticReplay.final_required_criteria_pass !== null
+      || semanticReplay.criteria.length !== 0))) {
     throw new Error("LC4-DEV semantic replay produced missing or ambiguous criterion evidence");
   }
   const body = Object.freeze({
@@ -379,6 +384,7 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
     transcript_sha256: observation.transcript_sha256,
     listener_observation: observation,
     semantic_replay: semanticReplay,
+    semantic_applicability: applicable ? "applicable" as const : "not_applicable" as const,
     final_required_criteria_pass: semanticReplay.final_required_criteria_pass,
   });
   return immutableJson({ ...body, artifact_sha256: sha256Hex(`${DEV_REPLAY_DOMAIN}${canonicalJson(body)}`) }) as unknown as Lc4DevelopmentListenerReplayArtifact;
@@ -422,6 +428,7 @@ export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
       observation,
     });
     if (canonicalJson(replayed) !== canonicalJson(artifact.semantic_replay)
+      || artifact.semantic_applicability !== (replayed.applicability.status === "applicable" ? "applicable" : "not_applicable")
       || artifact.final_required_criteria_pass !== replayed.final_required_criteria_pass) {
       errors.push("LC4-DEV retained semantic result does not replay from the frozen criteria");
     }
@@ -601,10 +608,11 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         signed_invocation_receipt_sha256: invocation.receipt.receipt_sha256,
         repair_projection: createLc4DevArmBlindRepairProjection({
           opportunity_id: replay.opportunity_id,
-          listener_status: "verified",
+          listener_status: replay.semantic_applicability === "applicable" ? "verified" : "not_applicable",
           semantic_result_sha256: replay.artifact_sha256,
           semantic_replay_sha256: replay.semantic_replay.replay_sha256,
-          unmet_blocker_codes: replay.semantic_replay.earliest_unmet_crp_blocker === null
+          unmet_blocker_codes: replay.semantic_applicability === "not_applicable"
+            || replay.semantic_replay.earliest_unmet_crp_blocker === null
             ? []
             : [replay.semantic_replay.earliest_unmet_crp_blocker],
           final_required_criteria_pass: replay.final_required_criteria_pass,
@@ -620,23 +628,20 @@ const DEVELOPMENT_BUNDLE = createLc4DevelopmentListenerSemanticBundle();
 // phrase registry, operators, or ordering changes, this module refuses to load
 // until the versioned roots are intentionally reviewed and updated.
 export const LC4_DEV_LISTENER_SCHEDULE_SHA256 = "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415";
-export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "472c7374fbfd4d1e6ed317acad4b5ea5a5bb1ff9802347f2b3c286b125abed12";
-export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "9b9fd5bc48dcecc54cade793dbc025c072cd434c85b6eba2795c9a9bd3b801eb";
-export const LC4_DEV_LISTENER_PLAN_SHA256 = "5f112a21f61184fb81d76032d34d0b809f759f1242aee52cd2add280750eb110";
+export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "f383891b1d1b260de0ea8b0e58b1ab9129d993022b1b78d4ded2ca0e3818958d";
+export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "8dfe577f511a7b1093bb19faedf4dacdf19bd38d665d8ca67f961b65a0590d9b";
+export const LC4_DEV_LISTENER_PLAN_SHA256 = "62343cc7d3149e36c4388b321fe24128ce9a602bdd1a4b23950a7d1ad62266e0";
 
 export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
   schema_version: 1;
-  migration_id: "lc4-dev-listener-v1-to-v2-crp-deadlines";
+  migration_id: "lc4-dev-listener-v2-to-v3-explicit-applicability";
   timing: "before_first_paid_voice_episode";
   provider_output_used: false;
   efficacy_claim_eligible: false;
-  reason: "align_stage_deadline_listener_blockers_to_two_ordinal_crp_inventory_and_headless_complete_capture_evaluation";
-  changed_opportunity_ids: readonly [
-    "lc4-dev-op-10", "lc4-dev-op-20", "lc4-dev-op-30",
-    "lc4-dev-op-40", "lc4-dev-op-50", "lc4-dev-op-60",
-  ];
+  reason: "replace_empty_criterion_vacuous_pass_with_explicit_not_applicable";
+  changed_opportunity_ids: readonly string[];
   prior: Readonly<{
-    semantic_version: "lc4-dev-listener-semantics-v1";
+    semantic_version: "lc4-dev-listener-semantics-v2-crp-deadlines";
     schedule_sha256: string;
     registry_sha256: string;
     registry_manifest_sha256: string;
@@ -658,22 +663,25 @@ export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
 function listenerProtocolMigrationBody() {
   return Object.freeze({
     schema_version: 1 as const,
-    migration_id: "lc4-dev-listener-v1-to-v2-crp-deadlines" as const,
+    migration_id: "lc4-dev-listener-v2-to-v3-explicit-applicability" as const,
     timing: "before_first_paid_voice_episode" as const,
     provider_output_used: false as const,
     efficacy_claim_eligible: false as const,
-    reason: "align_stage_deadline_listener_blockers_to_two_ordinal_crp_inventory_and_headless_complete_capture_evaluation" as const,
+    reason: "replace_empty_criterion_vacuous_pass_with_explicit_not_applicable" as const,
     changed_opportunity_ids: Object.freeze([
-      "lc4-dev-op-10", "lc4-dev-op-20", "lc4-dev-op-30",
-      "lc4-dev-op-40", "lc4-dev-op-50", "lc4-dev-op-60",
-    ] as const),
+      "lc4-dev-op-06", "lc4-dev-op-07", "lc4-dev-op-08", "lc4-dev-op-09",
+      "lc4-dev-op-13", "lc4-dev-op-14", "lc4-dev-op-18", "lc4-dev-op-24",
+      "lc4-dev-op-25", "lc4-dev-op-31", "lc4-dev-op-34", "lc4-dev-op-35",
+      "lc4-dev-op-42", "lc4-dev-op-43", "lc4-dev-op-44", "lc4-dev-op-51",
+      "lc4-dev-op-52", "lc4-dev-op-56",
+    ]),
     prior: Object.freeze({
-      semantic_version: "lc4-dev-listener-semantics-v1" as const,
+      semantic_version: "lc4-dev-listener-semantics-v2-crp-deadlines" as const,
       schedule_sha256: "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415",
-      registry_sha256: "d1fc7ddf4a95d1affb0137cc64d26c30d9375d3538d59cc02e990204c80186d1",
-      registry_manifest_sha256: "0198f4078979628c29de988605ff3c49d96ba75942b9d7de23514283bc2bf858",
-      plan_sha256: "0af53acf42405ee5c537ade7075fbceff22208eb3439a52e51942dda78d2d3ad",
-      evaluator_build_sha256: "5ae3fa87e73242e7f39aff207181b367c58f277d9f9733115d27f1565c9cd282",
+      registry_sha256: "472c7374fbfd4d1e6ed317acad4b5ea5a5bb1ff9802347f2b3c286b125abed12",
+      registry_manifest_sha256: "9b9fd5bc48dcecc54cade793dbc025c072cd434c85b6eba2795c9a9bd3b801eb",
+      plan_sha256: "5f112a21f61184fb81d76032d34d0b809f759f1242aee52cd2add280750eb110",
+      evaluator_build_sha256: "45789738ab4cb5dc848286f725ee27501286d63201f879037e7fd82ce43360b3",
     }),
     current: Object.freeze({
       semantic_version: LC4_DEV_LISTENER_SEMANTIC_VERSION,

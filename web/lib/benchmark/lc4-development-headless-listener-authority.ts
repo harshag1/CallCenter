@@ -66,11 +66,11 @@ export type Lc4PinnedListenerEvaluation = Readonly<{
 export type Lc4DevArmBlindRepairProjection = Readonly<{
   schema_version: 1;
   opportunity_id: string;
-  listener_status: "verified";
+  listener_status: "verified" | "not_applicable";
   semantic_result_sha256: string;
   semantic_replay_sha256: string;
   unmet_blocker_codes: readonly Lc4CrpBlockerCode[];
-  final_required_criteria_pass: boolean;
+  final_required_criteria_pass: boolean | null;
   projection_sha256: string;
 }>;
 
@@ -78,8 +78,18 @@ export function createLc4DevArmBlindRepairProjection(input: Omit<Lc4DevArmBlindR
   requireSafeId(input.opportunity_id, "LC4 repair projection opportunity ID");
   requireHash(input.semantic_result_sha256, "LC4 repair projection semantic result");
   requireHash(input.semantic_replay_sha256, "LC4 repair projection semantic replay");
-  if (input.listener_status !== "verified" || new Set(input.unmet_blocker_codes).size !== input.unmet_blocker_codes.length) {
-    throw new Error("LC4 repair projection must contain unique blockers from verified listener evidence");
+  if (input.listener_status !== "verified" && input.listener_status !== "not_applicable") {
+    throw new Error("LC4 repair projection listener applicability is invalid");
+  }
+  if (new Set(input.unmet_blocker_codes).size !== input.unmet_blocker_codes.length) {
+    throw new Error("LC4 repair projection must contain unique blockers");
+  }
+  if (input.listener_status === "verified" && input.final_required_criteria_pass === null) {
+    throw new Error("verified LC4 repair projection requires a semantic verdict");
+  }
+  if (input.listener_status === "not_applicable"
+    && (input.final_required_criteria_pass !== null || input.unmet_blocker_codes.length !== 0)) {
+    throw new Error("not-applicable LC4 repair projection cannot claim semantic pass, fail, or blockers");
   }
   const body = freeze({ schema_version: 1 as const, ...input, unmet_blocker_codes: [...input.unmet_blocker_codes] });
   return freeze({ ...body, projection_sha256: hash(REPAIR_PROJECTION_DOMAIN, body) });

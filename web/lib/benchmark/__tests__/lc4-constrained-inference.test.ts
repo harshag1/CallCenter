@@ -65,9 +65,11 @@ function evidence(success: boolean, seed: string, pairId: string) {
       domain: "authority",
       usefulConjuncts: {
         terminal_world: success,
+        authoritative_tool_world_obligations: success,
         latest_revision_authority: success,
         external_effect_integrity: success,
       },
+      authorityVerdict: success ? "pass" : "fail",
       criticalExternalEffectBreach: false,
       terminalEvidence: {
         scenario_invalid: terminal.scenario_invalid,

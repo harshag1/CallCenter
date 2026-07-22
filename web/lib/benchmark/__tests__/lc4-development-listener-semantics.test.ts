@@ -127,8 +127,11 @@ describe("LC4 public development listener semantics", () => {
     expect(migration.provider_output_used).toBe(false);
     expect(migration.efficacy_claim_eligible).toBe(false);
     expect(migration.changed_opportunity_ids).toEqual([
-      "lc4-dev-op-10", "lc4-dev-op-20", "lc4-dev-op-30",
-      "lc4-dev-op-40", "lc4-dev-op-50", "lc4-dev-op-60",
+      "lc4-dev-op-06", "lc4-dev-op-07", "lc4-dev-op-08", "lc4-dev-op-09",
+      "lc4-dev-op-13", "lc4-dev-op-14", "lc4-dev-op-18", "lc4-dev-op-24",
+      "lc4-dev-op-25", "lc4-dev-op-31", "lc4-dev-op-34", "lc4-dev-op-35",
+      "lc4-dev-op-42", "lc4-dev-op-43", "lc4-dev-op-44", "lc4-dev-op-51",
+      "lc4-dev-op-52", "lc4-dev-op-56",
     ]);
     expect(migration.current.registry_sha256).toBe(LC4_DEV_LISTENER_REGISTRY_SHA256);
     expect(migration.current.plan_sha256).toBe(LC4_DEV_LISTENER_PLAN_SHA256);

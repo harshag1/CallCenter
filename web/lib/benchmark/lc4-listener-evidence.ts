@@ -139,6 +139,14 @@ export type Lc4ListenerSemanticCriterion = Readonly<{
   }> | null;
 }>;
 
+export type Lc4ListenerSemanticApplicability = Readonly<{
+  status: "applicable";
+  reason: null;
+}> | Readonly<{
+  status: "not_applicable";
+  reason: "no_registered_audible_semantic_criteria";
+}>;
+
 export type Lc4ListenerSemanticPlan = Readonly<{
   schema_version: 1;
   template_id: string;
@@ -148,6 +156,7 @@ export type Lc4ListenerSemanticPlan = Readonly<{
   registry_manifest_sha256: string;
   opportunities: readonly Readonly<{
     opportunity_id: string;
+    applicability: Lc4ListenerSemanticApplicability;
     criteria: readonly Lc4ListenerSemanticCriterion[];
     criterion_plan_sha256: string;
   }>[];
@@ -161,6 +170,7 @@ export type Lc4FrozenListenerSemanticRegistry = Readonly<{
   schedule_sha256: string;
   opportunities: readonly Readonly<{
     opportunity_id: string;
+    applicability: Lc4ListenerSemanticApplicability;
     criteria: readonly Lc4ListenerSemanticCriterion[];
     criterion_plan_sha256: string;
   }>[];
@@ -182,7 +192,8 @@ export type Lc4ListenerSemanticReplay = Readonly<{
   schema_version: 1;
   opportunity_id: string;
   listener_evidence_sha256: string | null;
-  listener_status: "verified" | "unverifiable";
+  applicability: Lc4ListenerSemanticApplicability;
+  listener_status: "verified" | "unverifiable" | "not_applicable";
   criteria: readonly Readonly<{
     criterion_id: string;
     pass: boolean | null;
@@ -244,11 +255,14 @@ export type Lc4ListenerEvidenceArtifact = Readonly<{
     output_captured: number;
     playback_verified: number;
     listener_semantics_verified: number;
+    semantic_applicable_opportunities: number;
+    semantic_not_applicable_opportunities: number;
     partial_playback_opportunities: number;
     unverifiable_opportunities: number;
   }>;
   final_scorer: Readonly<{
-    all_required_listener_evidence_verified: boolean;
+    semantic_applicability: "applicable" | "not_applicable";
+    all_required_listener_evidence_verified: boolean | null;
     all_required_semantic_criteria_pass: boolean | null;
     failed_opportunity_ids: readonly string[];
     unverifiable_opportunity_ids: readonly string[];
@@ -580,11 +594,13 @@ function semanticRegistryBody(registry: Lc4FrozenListenerSemanticRegistry) {
 function semanticOpportunityHash(input: Readonly<{
   templateId: string;
   opportunityId: string;
+  applicability: Lc4ListenerSemanticApplicability;
   criteria: readonly Lc4ListenerSemanticCriterion[];
 }>): string {
   return hash(SEMANTIC_OPPORTUNITY_DOMAIN, {
     template_id: input.templateId,
     opportunity_id: input.opportunityId,
+    applicability: input.applicability,
     criteria: input.criteria,
   });
 }
@@ -626,12 +642,17 @@ function normalizeSemanticOpportunities(input: Readonly<{
       }
       return Object.freeze({ ...criterion, phrases: Object.freeze([...criterion.phrases]) });
     }));
+    const applicability: Lc4ListenerSemanticApplicability = criteria.length === 0
+      ? Object.freeze({ status: "not_applicable" as const, reason: "no_registered_audible_semantic_criteria" as const })
+      : Object.freeze({ status: "applicable" as const, reason: null });
     return Object.freeze({
       opportunity_id: opportunity.opportunity_id,
+      applicability,
       criteria,
       criterion_plan_sha256: semanticOpportunityHash({
         templateId: input.templateId,
         opportunityId: opportunity.opportunity_id,
+        applicability,
         criteria,
       }),
     });
@@ -805,12 +826,14 @@ export function replayLc4ListenerSemantics(input: Readonly<{
   if (opportunity.criterion_plan_sha256 !== semanticOpportunityHash({
     templateId: input.plan.template_id,
     opportunityId: opportunity.opportunity_id,
+    applicability: opportunity.applicability,
     criteria: opportunity.criteria,
   })) throw new Error(`LC4 semantic criteria for ${input.opportunityId} differ from the frozen registry`);
   const verified = input.observation?.status === "verified";
+  const applicable = opportunity.applicability.status === "applicable";
   const criteria = opportunity.criteria.map((criterion) => Object.freeze({
     criterion_id: criterion.criterion_id,
-    pass: verified ? criterionPass(criterion, input.observation.transcript) : null,
+    pass: applicable && verified ? criterionPass(criterion, input.observation!.transcript) : null,
   }));
   const byId = new Map(criteria.map((criterion) => [criterion.criterion_id, criterion.pass]));
   const earliestUnmet = opportunity.criteria
@@ -818,12 +841,13 @@ export function replayLc4ListenerSemantics(input: Readonly<{
     .sort((left, right) => (left.crp_blocker?.precedence ?? 0) - (right.crp_blocker?.precedence ?? 0))[0]
     ?.crp_blocker?.code ?? null;
   const required = opportunity.criteria.filter((criterion) => criterion.required_for_final_scorer);
-  const finalPass = !verified ? null : required.every((criterion) => byId.get(criterion.criterion_id) === true);
+  const finalPass = !applicable || !verified ? null : required.every((criterion) => byId.get(criterion.criterion_id) === true);
   const body = Object.freeze({
     schema_version: 1 as const,
     opportunity_id: input.opportunityId,
     listener_evidence_sha256: input.observation?.evidence_sha256 ?? null,
-    listener_status: verified ? "verified" as const : "unverifiable" as const,
+    applicability: opportunity.applicability,
+    listener_status: !applicable ? "not_applicable" as const : verified ? "verified" as const : "unverifiable" as const,
     criteria: Object.freeze(criteria),
     earliest_unmet_crp_blocker: earliestUnmet,
     final_required_criteria_pass: finalPass,
@@ -883,23 +907,29 @@ function aggregateListenerEvidence(records: readonly Lc4ListenerEvidenceRecord[]
   const failedOpportunityIds = records
     .filter((record) => record.semantic_replay.final_required_criteria_pass === false)
     .map((record) => record.opportunity_id);
-  const unverifiableOpportunityIds = records
+  const applicableRecords = records.filter((record) => record.semantic_replay.applicability.status === "applicable");
+  const unverifiableOpportunityIds = applicableRecords
     .filter((record) => !verifiedDispositions.has(record.disposition))
     .map((record) => record.opportunity_id);
-  const finalPassValues = records.map((record) => record.semantic_replay.final_required_criteria_pass);
+  const finalPassValues = applicableRecords.map((record) => record.semantic_replay.final_required_criteria_pass);
   return Object.freeze({
     coverage: Object.freeze({
       expected_opportunities: records.length,
       reached_opportunities: records.filter((record) => !notReachedDispositions.has(record.disposition)).length,
       output_captured: records.filter((record) => record.capture_receipt_sha256 !== null).length,
       playback_verified: records.filter((record) => record.played_byte_end !== null).length,
-      listener_semantics_verified: records.filter((record) => verifiedDispositions.has(record.disposition)).length,
+      listener_semantics_verified: applicableRecords.filter((record) => verifiedDispositions.has(record.disposition)).length,
+      semantic_applicable_opportunities: applicableRecords.length,
+      semantic_not_applicable_opportunities: records.length - applicableRecords.length,
       partial_playback_opportunities: records.filter((record) => partialDispositions.has(record.disposition)).length,
       unverifiable_opportunities: unverifiableOpportunityIds.length,
     }),
     final_scorer: Object.freeze({
-      all_required_listener_evidence_verified: unverifiableOpportunityIds.length === 0,
-      all_required_semantic_criteria_pass: finalPassValues.includes(null)
+      semantic_applicability: applicableRecords.length === 0 ? "not_applicable" as const : "applicable" as const,
+      all_required_listener_evidence_verified: applicableRecords.length === 0
+        ? null
+        : unverifiableOpportunityIds.length === 0,
+      all_required_semantic_criteria_pass: applicableRecords.length === 0 || finalPassValues.includes(null)
         ? null
         : finalPassValues.every((value) => value === true),
       failed_opportunity_ids: Object.freeze(failedOpportunityIds),
