@@ -5,6 +5,7 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import { compileConditionSuite } from "../condition-compiler";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
+  Lc4ProviderInputAudioDeliveryError,
   Lc4RealtimeProviderBridge,
   assertLc4RotationSubstantiveFactParity,
   createLc4FrozenProductionRealtimeAdapter,
@@ -41,9 +42,11 @@ import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/in
 import type { AdmissibilityFrontierEvidence } from "../admissibility-frontier";
 import type { ProviderCapabilitySnapshot } from "../capability-gateway";
 import type { TrialSessionConfiguration } from "../orchestrator";
+import { trialAudioDeliveryProfileHash } from "../orchestrator";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  Pcm16Audio,
   RealtimeEventListener,
   RealtimeResponsePreparation,
   RealtimeToolResult,
@@ -191,6 +194,7 @@ function responsePlan() {
 
 function configuration(value: Lc4EpisodeManifest): TrialSessionConfiguration {
   const profile = value.episode_shape.provider_profile;
+  const audioDeliveryProfile = Object.freeze({ schemaVersion: 1 as const, chunkMs: 20, pace: "realtime" as const });
   return Object.freeze({
     provider: profile.provider,
     model: profile.model,
@@ -201,8 +205,21 @@ function configuration(value: Lc4EpisodeManifest): TrialSessionConfiguration {
     providerTools: Object.freeze([LOCAL_TOOL_PROXY_FUNCTION]),
     conditionHash: condition.conditionHash,
     inputAudioFormat: Object.freeze({ encoding: "pcm16", sampleRateHz: profile.input_sample_rate_hz, channels: 1 }),
-    audioDeliveryProfile: Object.freeze({ schemaVersion: 1, chunkMs: 20, pace: "realtime" }),
-    audioDeliveryProfileHash: HASH,
+    audioDeliveryProfile,
+    audioDeliveryProfileHash: trialAudioDeliveryProfileHash(audioDeliveryProfile),
+  });
+}
+
+function bindFirstOpportunityPcm(value: Lc4EpisodeManifest, pcm: Uint8Array): Lc4EpisodeManifest {
+  return Object.freeze({
+    ...value,
+    opportunities: Object.freeze(value.opportunities.map((opportunity, index) => index === 0
+      ? Object.freeze({
+          ...opportunity,
+          caller_pcm_sha256: sha256Hex(pcm),
+          caller_pcm_byte_length: pcm.byteLength,
+        })
+      : opportunity)),
   });
 }
 
@@ -307,6 +324,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   #responseOrdinal = 0;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
+  readonly appendedAudio: Pcm16Audio[] = [];
 
   constructor(
     provider: "openai" | "gemini" | "xai",
@@ -325,7 +343,11 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   onEvent(listener: RealtimeEventListener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
-  appendInputAudio() { this.events.push("append"); this.wire("input_audio", { plaintext: ORACLE_SECRET }); }
+  appendInputAudio(audio: Pcm16Audio) {
+    this.events.push("append");
+    this.appendedAudio.push(Object.freeze({ ...audio, data: Uint8Array.from(audio.data) }));
+    this.wire("input_audio", { plaintext: ORACLE_SECRET });
+  }
   prepareResponse(preparation: RealtimeResponsePreparation) {
     this.events.push("prepare");
     this.preparations.push(preparation);
@@ -486,6 +508,13 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   }
 }
 
+class PrepareFailureRealtimeClient extends FakeRealtimeClient {
+  override prepareResponse() {
+    this.events.push("prepare");
+    throw new Error("injected response preparation failure");
+  }
+}
+
 describe("LC4 production realtime adapter bridge", () => {
   it("delivers PCM, response plan, commit, generation, capture, and listener handoff in order", async () => {
     const value = manifest();
@@ -532,6 +561,290 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(encoded).not.toContain(ORACLE_SECRET);
     expect(encoded).not.toContain("provider-response-plaintext");
     await session.close();
+  });
+
+  it.each([
+    { provider: "openai" as const, frameBytes: 960, chunkCount: 206, tailBytes: 300, finalOffsetMs: 4_100 },
+    { provider: "xai" as const, frameBytes: 960, chunkCount: 206, tailBytes: 300, finalOffsetMs: 4_100 },
+    { provider: "gemini" as const, frameBytes: 640, chunkCount: 308, tailBytes: 620, finalOffsetMs: 6_140 },
+  ])("paces byte-exact 20ms packets with a real-size nonaligned tail for $provider", async ({
+    provider, frameBytes, chunkCount, tailBytes, finalOffsetMs,
+  }) => {
+    const pcm = Uint8Array.from({ length: 197_100 }, (_, index) => index % 251);
+    const value = bindFirstOpportunityPcm(manifest("hacc", provider), pcm);
+    const events: string[] = [];
+    const sleeps: number[] = [];
+    let monotonicMs = 0;
+    let fake: FakeRealtimeClient | null = null;
+    const bridge = new Lc4RealtimeProviderBridge((clientProvider) => {
+      fake = new FakeRealtimeClient(clientProvider, events);
+      return fake;
+    }, {
+      monotonicNowMs: () => monotonicMs,
+      async sleep(delayMs, signal) {
+        if (signal.aborted) throw new Error("test delivery aborted");
+        sleeps.push(delayMs);
+        monotonicMs += delayMs;
+      },
+    });
+    const session = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() { events.push("listener"); } },
+    });
+    const evidence = await session.exchange({
+      opportunity_id: "op-01",
+      caller_pcm: pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+
+    const delivered = fake!.appendedAudio;
+    expect(delivered).toHaveLength(chunkCount);
+    expect(delivered.slice(0, -1).every((chunk) => chunk.data.byteLength === frameBytes)).toBe(true);
+    expect(delivered.at(-1)?.data.byteLength).toBe(tailBytes);
+    expect(delivered.every((chunk) => (
+      chunk.encoding === "pcm16"
+      && chunk.channels === 1
+      && chunk.sampleRateHz === value.episode_shape.provider_profile.input_sample_rate_hz
+    ))).toBe(true);
+    expect(Buffer.concat(delivered.map((chunk) => Buffer.from(chunk.data))).equals(Buffer.from(pcm))).toBe(true);
+    expect(sleeps).toHaveLength(chunkCount - 1);
+    expect(sleeps.every((delay) => delay === 20)).toBe(true);
+    expect(evidence.input_audio_delivery).toMatchObject({
+      frame_byte_length: frameBytes,
+      chunk_count: chunkCount,
+      total_byte_length: pcm.byteLength,
+      tail_byte_length: tailBytes,
+      last_scheduled_offset_ms: finalOffsetMs,
+      media_duration_ms: pcm.byteLength / 2 / value.episode_shape.provider_profile.input_sample_rate_hz * 1_000,
+      pcm_sha256: sha256Hex(pcm),
+      profile_sha256: configuration(value).audioDeliveryProfileHash,
+    });
+    expect(evidence.input_audio_delivery.chunks.map((chunk) => chunk.appended_at_offset_ms)).toEqual(
+      Array.from({ length: chunkCount }, (_, index) => index * 20),
+    );
+    expect(events.slice(1, chunkCount + 1)).toEqual(Array.from({ length: chunkCount }, () => "append"));
+    expect(events.slice(chunkCount + 1)).toEqual(["prepare", "commit", "create", "listener"]);
+    expect(events.filter((event) => event === "commit")).toHaveLength(1);
+    expect(events.filter((event) => event === "create")).toHaveLength(1);
+    await session.close();
+  }, 15_000);
+
+  it("snapshots caller PCM before pacing so provider delivery and evidence retain one byte identity", async () => {
+    const pcm = Uint8Array.from({ length: 2_100 }, (_, index) => (index % 250) + 1);
+    const expected = Uint8Array.from(pcm);
+    const value = bindFirstOpportunityPcm(manifest(), expected);
+    let monotonicMs = 0;
+    let fake: FakeRealtimeClient | null = null;
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      fake = new FakeRealtimeClient(provider, []);
+      return fake;
+    }, {
+      monotonicNowMs: () => monotonicMs,
+      async sleep(delayMs) {
+        pcm.fill(0);
+        monotonicMs += delayMs;
+      },
+    });
+    const session = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() {} },
+    });
+    const evidence = await session.exchange({
+      opportunity_id: "op-01",
+      caller_pcm: pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    const delivered = Buffer.concat(fake!.appendedAudio.map((chunk) => Buffer.from(chunk.data)));
+    expect(delivered.equals(Buffer.from(expected))).toBe(true);
+    expect(delivered.equals(Buffer.from(pcm))).toBe(false);
+    expect(evidence.caller_pcm_sha256).toBe(sha256Hex(expected));
+    expect(evidence.input_audio_delivery.pcm_sha256).toBe(sha256Hex(expected));
+    await session.close();
+  });
+
+  it.each(["openai", "xai", "gemini"] as const)(
+    "poisons the %s segment when delivery is cancelled between packets",
+    async (provider) => {
+      const base = manifest("hacc", provider);
+      const pcm = Uint8Array.from({ length: base.episode_shape.provider_profile.input_sample_rate_hz / 25 * 2 }, (_, index) => index % 251);
+      const value = bindFirstOpportunityPcm(base, pcm);
+      const events: string[] = [];
+      const abort = new AbortController();
+      const bridge = new Lc4RealtimeProviderBridge(
+        (clientProvider) => new FakeRealtimeClient(clientProvider, events),
+        {
+          monotonicNowMs: () => 0,
+          async sleep(_delayMs, signal) {
+            abort.abort();
+            if (signal.aborted) throw new Error("test delivery aborted");
+          },
+        },
+      );
+      const session = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[0]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() { events.push("listener"); } },
+      });
+      let caught: unknown;
+      try {
+        await session.exchange({
+          opportunity_id: "op-01",
+          caller_pcm: pcm,
+          response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+          signal: abort.signal,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Lc4ProviderInputAudioDeliveryError);
+      expect((caught as Lc4ProviderInputAudioDeliveryError).diagnostic).toMatchObject({
+        stage: "caller_audio_delivery",
+        code: "aborted",
+        provider,
+        expected_pcm_byte_length: pcm.byteLength,
+        appended_chunk_count: 1,
+        appended_pcm_byte_length: base.episode_shape.provider_profile.input_sample_rate_hz * 20 / 1_000 * 2,
+        response_prepared: false,
+        input_committed: false,
+        response_requested: false,
+      });
+      expect(events).toEqual(["connect", "append", "close"]);
+      await expect(session.exchange({
+        opportunity_id: "op-01",
+        caller_pcm: pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      })).rejects.toThrow("session is not open");
+      await expect(session.close()).rejects.toThrow("already closed");
+    },
+  );
+
+  it("aborts an in-flight paced delivery on close without minting a rotation receipt", async () => {
+    const base = manifest();
+    const pcm = Uint8Array.from({ length: 1_920 }, (_, index) => index % 251);
+    const value = bindFirstOpportunityPcm(base, pcm);
+    const events: string[] = [];
+    let notifySleepStarted: (() => void) | undefined;
+    const sleepStarted = new Promise<void>((resolve) => { notifySleepStarted = resolve; });
+    const bridge = new Lc4RealtimeProviderBridge(
+      (provider) => new FakeRealtimeClient(provider, events),
+      {
+        monotonicNowMs: () => 0,
+        sleep(_delayMs, signal) {
+          notifySleepStarted?.();
+          return new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("segment closed")), { once: true });
+          });
+        },
+      },
+    );
+    const session = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() { events.push("listener"); } },
+    });
+    const exchangeResult = session.exchange({
+      opportunity_id: "op-01",
+      caller_pcm: pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }).then(() => null, (error: unknown) => error);
+    await sleepStarted;
+    await expect(session.close()).rejects.toThrow("without a rotation receipt");
+    expect(await exchangeResult).toBeInstanceOf(Lc4ProviderInputAudioDeliveryError);
+    expect(events).toEqual(["connect", "append", "close"]);
+  });
+
+  it("poisons a provider buffer when response preparation fails after audio append", async () => {
+    const value = manifest();
+    const events: string[] = [];
+    const bridge = new Lc4RealtimeProviderBridge(
+      (provider) => new PrepareFailureRealtimeClient(provider, events),
+    );
+    const session = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() { events.push("listener"); } },
+    });
+    await expect(session.exchange({
+      opportunity_id: "op-01",
+      caller_pcm: new Uint8Array([1, 7, 11, 13]),
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    })).rejects.toThrow("injected response preparation failure");
+    expect(events).toEqual(["connect", "append", "prepare", "close"]);
+    await expect(session.close()).rejects.toThrow("already closed");
+  });
+
+  it("cannot publish success when close races a pending listener handoff", async () => {
+    const value = manifest();
+    const events: string[] = [];
+    let notifyListenerStarted: (() => void) | undefined;
+    let releaseListener: (() => void) | undefined;
+    const listenerStarted = new Promise<void>((resolve) => { notifyListenerStarted = resolve; });
+    const listenerPending = new Promise<void>((resolve) => { releaseListener = resolve; });
+    const bridge = new Lc4RealtimeProviderBridge(
+      (provider) => new FakeRealtimeClient(provider, events),
+    );
+    const session = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: {
+        async accept() {
+          events.push("listener-start");
+          notifyListenerStarted?.();
+          await listenerPending;
+          events.push("listener-finish");
+        },
+      },
+    });
+    const exchangeResult = session.exchange({
+      opportunity_id: "op-01",
+      caller_pcm: new Uint8Array([1, 7, 11, 13]),
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }).then((evidence) => evidence, (error: unknown) => error);
+    await listenerStarted;
+    await expect(session.close()).rejects.toThrow("without a rotation receipt");
+    releaseListener?.();
+    const result = await exchangeResult;
+    expect(result).toBeInstanceOf(Error);
+    expect(result).not.toHaveProperty("evidence_sha256");
+    expect(events).toEqual(["connect", "append", "prepare", "commit", "create", "listener-start", "close", "listener-finish"]);
+  });
+
+  it("rejects an unbound audio-delivery profile before opening a provider connection", async () => {
+    const value = manifest();
+    let factoryCalls = 0;
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      factoryCalls += 1;
+      return new FakeRealtimeClient(provider, []);
+    });
+    await expect(bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: Object.freeze({ ...configuration(value), audioDeliveryProfileHash: HASH }),
+      rotation_context: null,
+      listener: { accept() {} },
+    })).rejects.toThrow("frozen production provider profile");
+    expect(factoryCalls).toBe(0);
   });
 
   it.each(["failed", "incomplete", "interrupted", "cancelled"] as const)(
