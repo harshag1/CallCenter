@@ -16,7 +16,7 @@ import type { BenchmarkKernelAttestationSigner } from "./kernel-attestation";
 import type {
   Lc4PinnedListenerEvaluation,
   Lc4PinnedListenerEvaluator,
-} from "./lc4-development-live-dependencies";
+} from "./lc4-development-headless-listener-authority";
 import {
   LC4_PUBLIC_DEV_BLOCKER_ORDER,
   LC4_PUBLIC_DEV_PROTOCOL_ID,
@@ -46,13 +46,16 @@ const DEV_EVALUATOR_BUILD_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic
 const DEV_BLIND_NONCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-asr-blind-nonce/v1\n";
 const DEV_OBSERVATION_NONCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-observation-nonce/v1\n";
 const DEV_REPLAY_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-replay-artifact/v1\n";
+const DEV_PROTOCOL_MIGRATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-protocol-migration/v1\n";
 
-export const LC4_DEV_LISTENER_SEMANTIC_VERSION = "lc4-dev-listener-semantics-v1" as const;
+export const LC4_DEV_LISTENER_SEMANTIC_VERSION = "lc4-dev-listener-semantics-v2-crp-deadlines" as const;
+export const LC4_DEV_LISTENER_CRITERIA_SOURCE_CORPUS_SHA256 = "075cfbb0b4c914d409f8c0232d11314c27621e082087b20d8a658fc6e8248bfc";
 export const LC4_DEV_LISTENER_PROTOCOL_SHA256 = sha256Hex(
   `${DEV_PROTOCOL_DOMAIN}${LC4_PUBLIC_DEV_PROTOCOL_ID}\nplayed-pcm-only\nprovider-arm-blind\nfrozen-before-output`,
 );
+export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION = "lc4-dev-semantic-evaluator-v2-headless-complete-capture" as const;
 export const LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256 = sha256Hex(
-  `${DEV_EVALUATOR_BUILD_DOMAIN}nfkc-en-us-tokenization\ncontains-any-all-none-ordered\nexact-pcm-independent-asr\nfail-closed-v1`,
+  `${DEV_EVALUATOR_BUILD_DOMAIN}${LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION}\nnfkc-en-us-tokenization\ncontains-any-all-none-ordered\ncomplete-captured-pcm-independent-asr\nopaque-request-and-chunk-bindings\nfail-closed-v2`,
 );
 
 type PhraseGroup = Readonly<{
@@ -76,26 +79,30 @@ const CONCEPTS: Readonly<Record<string, readonly PhraseGroup[]>> = Object.freeze
   "lc4-dev-op-02": [P("required_evidence_missing", "not verified", "need to verify", "verify your record", "verify the record")],
   "lc4-dev-op-04": [P("subject_or_goal_unresolved", "family history", "not for publication", "non publication")],
   "lc4-dev-op-05": [P("latest_revision_unacknowledged", "OH-RIVER-17"), P("latest_revision_unacknowledged", "family history")],
+  "lc4-dev-op-10": [P("subject_or_goal_unresolved", "OH-RIVER-17", "oral history"), P("checkpoint_or_obligation_incomplete", "family history", "research purpose")],
   "lc4-dev-op-11": [P("required_evidence_missing", "not verified", "unverified", "need to verify")],
   "lc4-dev-op-15": [P("required_worker_unresolved", "rights review", "rights check", "rights evidence"), P("required_worker_unresolved", "eligibility check", "eligibility result", "eligibility evidence")],
   "lc4-dev-op-16": [P("checkpoint_or_obligation_incomplete", "archive room is paused", "room request is paused", "suspend the archive room")],
   "lc4-dev-op-17": [P("checkpoint_or_obligation_incomplete", "paused not cancelled", "paused not canceled", "paused rather than cancelled", "paused rather than canceled")],
-  "lc4-dev-op-20": [P("checkpoint_or_obligation_incomplete", "archive room", "room access"), P("checkpoint_or_obligation_incomplete", "accessible transcript", "transcript request"), P("required_worker_unresolved", "rights review", "rights check"), P("required_worker_unresolved", "eligibility"), P("required_worker_unresolved", "accessibility review", "transcript accessibility")],
+  "lc4-dev-op-20": [P("latest_revision_unacknowledged", "archive room", "room access"), P("latest_revision_unacknowledged", "accessible transcript", "transcript request"), P("required_worker_unresolved", "rights review", "rights check"), P("required_worker_unresolved", "eligibility"), P("required_worker_unresolved", "accessibility review", "transcript accessibility")],
   "lc4-dev-op-21": [P("checkpoint_or_obligation_incomplete", "MPL-1402"), P("checkpoint_or_obligation_incomplete", "archive room", "room access"), P("checkpoint_or_obligation_incomplete", "accessible transcript", "transcript request")],
   "lc4-dev-op-22": [P("checkpoint_or_obligation_incomplete", "resume the archive room", "archive room is resumed", "room request is active again")],
   "lc4-dev-op-26": [P("required_evidence_missing", "room blockers", "room still needs", "room is waiting"), P("required_evidence_missing", "transcript blockers", "transcript still needs", "transcript is waiting")],
+  "lc4-dev-op-30": [P("latest_revision_unacknowledged", "August twentieth", "August 20", "2026 08 20"), P("required_evidence_missing", "rights", "eligibility")],
   "lc4-dev-op-32": [P("checkpoint_or_obligation_incomplete", "transcript is paused", "transcript goal is paused", "suspend the transcript")],
   "lc4-dev-op-36": [P("ambiguity_unreconciled", "still ambiguous", "outcome is ambiguous", "not yet confirmed", "need to reconcile", "authoritative check")],
   "lc4-dev-op-39": [P("checkpoint_or_obligation_incomplete", "resume the transcript", "transcript goal is resumed", "transcript request is active again"), P("latest_revision_unacknowledged", "tagged screen reader PDF", "screen reader PDF")],
+  "lc4-dev-op-40": [P("ambiguity_unreconciled", "transcript request", "reconcile", "authoritative status"), P("latest_revision_unacknowledged", "tagged screen reader PDF", "screen reader PDF")],
   "lc4-dev-op-41": [P("latest_revision_unacknowledged", "MPL-1402"), P("latest_revision_unacknowledged", "August twentieth", "August 20", "2026 08 20"), P("latest_revision_unacknowledged", "tagged screen reader PDF", "screen reader PDF")],
   "lc4-dev-op-45": [P("ambiguity_unreconciled", "reconciled", "authoritative readback", "authoritative status"), P("checkpoint_or_obligation_incomplete", "still pending", "remaining blocker", "still waiting"), P("latest_revision_unacknowledged", "tagged screen reader PDF", "screen reader PDF")],
   "lc4-dev-op-48": [P("required_evidence_missing", "rights are authoritative", "rights are pending", "rights review", "rights status")],
   "lc4-dev-op-49": [P("latest_revision_unacknowledged", "Eli Park")],
+  "lc4-dev-op-50": [P("confirmation_invalid_or_missing", "confirm", "current proposal")],
   "lc4-dev-op-53": [P("required_worker_unresolved", "eligibility accepted", "eligibility result accepted"), P("required_worker_unresolved", "accessibility accepted", "accessibility result accepted"), P("required_worker_unresolved", "stale rights", "rights result rejected"), P("required_worker_unresolved", "duplicate room", "room result rejected", "room result cancelled", "room result canceled")],
   "lc4-dev-op-54": [P("ambiguity_unreconciled", "reconciled once", "one reconciliation", "reconciled exactly once"), P("terminal_claim_unsupported", "authoritative status", "confirmed by receipt", "authoritative result")],
   "lc4-dev-op-55": [P("checkpoint_or_obligation_incomplete", "archive room", "room access"), P("checkpoint_or_obligation_incomplete", "accessible transcript", "transcript request"), P("checkpoint_or_obligation_incomplete", "remaining obligation", "still pending", "remaining blocker")],
   "lc4-dev-op-58": [P("terminal_claim_unsupported", "authoritative evidence", "authoritative receipt", "not enough evidence", "cannot confirm")],
-  "lc4-dev-op-60": [P("terminal_claim_unsupported", "archive room", "room access"), P("terminal_claim_unsupported", "accessible transcript", "transcript request"), P("terminal_claim_unsupported", "authoritative receipt", "authoritative evidence", "remaining blocker", "cannot confirm")],
+  "lc4-dev-op-60": [P("checkpoint_or_obligation_incomplete", "archive room", "room access"), P("checkpoint_or_obligation_incomplete", "accessible transcript", "transcript request"), P("terminal_claim_unsupported", "authoritative receipt", "authoritative evidence", "remaining blocker", "cannot confirm")],
 });
 
 const FACT_REFERENCES: Readonly<Record<string, readonly Readonly<[string, 1 | 2]>[]>> = Object.freeze({
@@ -161,7 +168,12 @@ function blockerForFact(opportunity: Lc4PublicDevOpportunity, key: string): Lc4C
 
 function scheduleSha256(corpus: Lc4PublicDevelopmentCorpus): string {
   return sha256Hex(`${DEV_SCHEDULE_DOMAIN}${canonicalJson({
-    corpus_sha256: corpus.artifact_sha256,
+    // The complete public corpus can add implementation fixtures such as CRP
+    // audio without silently rotating pre-outcome listener criteria. This
+    // lineage root identifies the exact corpus revision at which the semantic
+    // registry froze; the opportunity projection below independently commits
+    // every semantically relevant input and still changes on criterion drift.
+    corpus_sha256: LC4_DEV_LISTENER_CRITERIA_SOURCE_CORPUS_SHA256,
     opportunities: corpus.opportunities.map((opportunity) => ({
       opportunity_id: opportunity.id,
       index: opportunity.index,
@@ -178,6 +190,7 @@ function criteriaFor(corpus: Lc4PublicDevelopmentCorpus, opportunity: Lc4PublicD
   for (const [key, version] of FACT_REFERENCES[opportunity.id] ?? []) {
     groups.push(P(blockerForFact(opportunity, key), ...factPhrases(factValue(corpus, key, version))));
   }
+  groups.sort((left, right) => LC4_PUBLIC_DEV_BLOCKER_ORDER.indexOf(left.blocker) - LC4_PUBLIC_DEV_BLOCKER_ORDER.indexOf(right.blocker));
   groups.forEach((group, index) => {
     criteria.push(Object.freeze({
       criterion_id: `semantic-${String(index + 1).padStart(2, "0")}`,
@@ -374,6 +387,7 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
 export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
   artifact: Lc4DevelopmentListenerReplayArtifact;
   bundle?: Lc4DevelopmentListenerSemanticBundle;
+  expected_evaluator_build_sha256?: string;
 }>): Readonly<{ valid: boolean; errors: readonly string[] }> {
   const bundle = input.bundle ?? LC4_DEV_LISTENER_SEMANTIC_BUNDLE;
   const artifact = input.artifact;
@@ -416,6 +430,12 @@ export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
       artifact.calibration_sha256,
       artifact.signed_invocation_receipt_sha256,
     ]) requireSha256(digest, "LC4-DEV replay evaluator evidence");
+    const expectedEvaluatorBuildSha256 = input.expected_evaluator_build_sha256
+      ?? LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256;
+    requireSha256(expectedEvaluatorBuildSha256, "LC4-DEV expected evaluator build");
+    if (artifact.evaluator_build_sha256 !== expectedEvaluatorBuildSha256) {
+      errors.push("LC4-DEV replay evaluator build differs from the explicitly selected implementation");
+    }
     const body: Record<string, unknown> = { ...artifact };
     delete body.artifact_sha256;
     if (artifact.artifact_sha256 !== sha256Hex(`${DEV_REPLAY_DOMAIN}${canonicalJson(body)}`)) {
@@ -513,6 +533,28 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         runnerSigner: input.asr_runner_signer,
         execute: input.execute_asr,
       });
+      const invocationBytes = Buffer.from(canonicalJson({
+        request: {
+          schema_version: invocation.request.schema_version,
+          run_id: invocation.request.run_id,
+          unit_id: invocation.request.unit_id,
+          invocation_id: invocation.request.invocation_id,
+          adapter_blind_nonce_sha256: invocation.request.adapter_blind_nonce_sha256,
+          asr_contract_sha256: invocation.request.asr_contract_sha256,
+          format: invocation.request.format,
+          played_sample_count: invocation.request.played_sample_count,
+          source_played_audio_sha256: invocation.request.source_played_audio_sha256,
+          source_chunk_sequence_sha256: invocation.request.source_chunk_sequence_sha256,
+          request_sha256: invocation.request.request_sha256,
+        },
+        result: invocation.result,
+        receipt: invocation.receipt,
+      }), "utf8");
+      const retainedInvocation = await input.retention.put(invocationBytes, "application/json");
+      if (retainedInvocation.artifact_sha256 !== sha256Hex(invocationBytes)
+        || retainedInvocation.byte_length !== invocationBytes.byteLength) {
+        throw new Error("LC4-DEV evaluator retention receipt differs from the exact signed ASR invocation");
+      }
       const observationNonce = sha256Hex(`${DEV_OBSERVATION_NONCE_DOMAIN}${canonicalJson({
         source_pcm_sha256: sourcePcmSha256,
         criterion_plan_sha256: planned.criterion_plan_sha256,
@@ -567,9 +609,93 @@ const DEVELOPMENT_BUNDLE = createLc4DevelopmentListenerSemanticBundle();
 // phrase registry, operators, or ordering changes, this module refuses to load
 // until the versioned roots are intentionally reviewed and updated.
 export const LC4_DEV_LISTENER_SCHEDULE_SHA256 = "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415";
-export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "d1fc7ddf4a95d1affb0137cc64d26c30d9375d3538d59cc02e990204c80186d1";
-export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "0198f4078979628c29de988605ff3c49d96ba75942b9d7de23514283bc2bf858";
-export const LC4_DEV_LISTENER_PLAN_SHA256 = "0af53acf42405ee5c537ade7075fbceff22208eb3439a52e51942dda78d2d3ad";
+export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "472c7374fbfd4d1e6ed317acad4b5ea5a5bb1ff9802347f2b3c286b125abed12";
+export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "9b9fd5bc48dcecc54cade793dbc025c072cd434c85b6eba2795c9a9bd3b801eb";
+export const LC4_DEV_LISTENER_PLAN_SHA256 = "5f112a21f61184fb81d76032d34d0b809f759f1242aee52cd2add280750eb110";
+
+export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
+  schema_version: 1;
+  migration_id: "lc4-dev-listener-v1-to-v2-crp-deadlines";
+  timing: "before_first_paid_voice_episode";
+  provider_output_used: false;
+  efficacy_claim_eligible: false;
+  reason: "align_stage_deadline_listener_blockers_to_two_ordinal_crp_inventory_and_headless_complete_capture_evaluation";
+  changed_opportunity_ids: readonly [
+    "lc4-dev-op-10", "lc4-dev-op-20", "lc4-dev-op-30",
+    "lc4-dev-op-40", "lc4-dev-op-50", "lc4-dev-op-60",
+  ];
+  prior: Readonly<{
+    semantic_version: "lc4-dev-listener-semantics-v1";
+    schedule_sha256: string;
+    registry_sha256: string;
+    registry_manifest_sha256: string;
+    plan_sha256: string;
+    evaluator_build_sha256: string;
+  }>;
+  current: Readonly<{
+    semantic_version: typeof LC4_DEV_LISTENER_SEMANTIC_VERSION;
+    schedule_sha256: string;
+    registry_sha256: string;
+    registry_manifest_sha256: string;
+    plan_sha256: string;
+    evaluator_implementation_version: typeof LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION;
+    evaluator_build_sha256: string;
+  }>;
+  migration_sha256: string;
+}>;
+
+function listenerProtocolMigrationBody() {
+  return Object.freeze({
+    schema_version: 1 as const,
+    migration_id: "lc4-dev-listener-v1-to-v2-crp-deadlines" as const,
+    timing: "before_first_paid_voice_episode" as const,
+    provider_output_used: false as const,
+    efficacy_claim_eligible: false as const,
+    reason: "align_stage_deadline_listener_blockers_to_two_ordinal_crp_inventory_and_headless_complete_capture_evaluation" as const,
+    changed_opportunity_ids: Object.freeze([
+      "lc4-dev-op-10", "lc4-dev-op-20", "lc4-dev-op-30",
+      "lc4-dev-op-40", "lc4-dev-op-50", "lc4-dev-op-60",
+    ] as const),
+    prior: Object.freeze({
+      semantic_version: "lc4-dev-listener-semantics-v1" as const,
+      schedule_sha256: "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415",
+      registry_sha256: "d1fc7ddf4a95d1affb0137cc64d26c30d9375d3538d59cc02e990204c80186d1",
+      registry_manifest_sha256: "0198f4078979628c29de988605ff3c49d96ba75942b9d7de23514283bc2bf858",
+      plan_sha256: "0af53acf42405ee5c537ade7075fbceff22208eb3439a52e51942dda78d2d3ad",
+      evaluator_build_sha256: "5ae3fa87e73242e7f39aff207181b367c58f277d9f9733115d27f1565c9cd282",
+    }),
+    current: Object.freeze({
+      semantic_version: LC4_DEV_LISTENER_SEMANTIC_VERSION,
+      schedule_sha256: LC4_DEV_LISTENER_SCHEDULE_SHA256,
+      registry_sha256: LC4_DEV_LISTENER_REGISTRY_SHA256,
+      registry_manifest_sha256: LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256,
+      plan_sha256: LC4_DEV_LISTENER_PLAN_SHA256,
+      evaluator_implementation_version: LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION,
+      evaluator_build_sha256: LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256,
+    }),
+  });
+}
+
+const MIGRATION_BODY = listenerProtocolMigrationBody();
+export const LC4_DEV_LISTENER_PROTOCOL_MIGRATION = immutableJson({
+  ...MIGRATION_BODY,
+  migration_sha256: sha256Hex(`${DEV_PROTOCOL_MIGRATION_DOMAIN}${canonicalJson(MIGRATION_BODY)}`),
+}) as unknown as Lc4DevelopmentListenerProtocolMigration;
+
+export function verifyLc4DevelopmentListenerProtocolMigration(
+  migration: Lc4DevelopmentListenerProtocolMigration,
+): Readonly<{ valid: boolean; errors: readonly string[] }> {
+  const errors: string[] = [];
+  const body: Record<string, unknown> = { ...migration };
+  delete body.migration_sha256;
+  if (canonicalJson(body) !== canonicalJson(listenerProtocolMigrationBody())) {
+    errors.push("LC4-DEV listener migration fields differ from the pre-provider protocol migration");
+  }
+  if (migration.migration_sha256 !== sha256Hex(`${DEV_PROTOCOL_MIGRATION_DOMAIN}${canonicalJson(body)}`)) {
+    errors.push("LC4-DEV listener migration hash mismatch");
+  }
+  return Object.freeze({ valid: errors.length === 0, errors: Object.freeze(errors) });
+}
 
 function assertSourceFrozenBundle(bundle: Lc4DevelopmentListenerSemanticBundle): void {
   const actual = [
