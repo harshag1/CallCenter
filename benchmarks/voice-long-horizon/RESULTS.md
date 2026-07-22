@@ -2,14 +2,36 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-- Status: **multiple exploratory development batches collected; latest useful-task result is null; no confirmatory result**
-- Cumulative paid provider spend: **provider reconciliation pending; frozen batch reservation ceiling was $160**
+- Status: **multiple exploratory development batches collected; latest HACC-LC3-v6 result is null and evaluator-development-only; no confirmatory result**
+- HACC-LC3-v6 runner-estimated usage: **$13.404901**; provider-reported cost fields were unavailable
 - Auxiliary architecture/security-review spend: **$3.312551** ([claim review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md), [database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md), [campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md), [authentication/credential review](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md), and [pre-canary release-gate review](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md); all unverified advisory input, not provider sessions or results)
 - Confirmatory protocol frozen: **no**
 
+## 2026-07-21 HACC-LC3-v6 evaluator-development batch
+
+The latest paid run completed all 18 scheduled production-API episodes without
+retry or substitution. Its nine matched Native/HACC pairs produced 251 retained
+and independently transcribed assistant-output turns out of 360 scheduled.
+
+| Endpoint | Native | HACC |
+|---|---:|---:|
+| Mission completion | 0/9 | 0/9 |
+| Strict alignment | 0/9 | 0/9 |
+| Reached all 20 caller turns | 5/9 | 3/9 |
+| System integrity | 9/9 | 9/9 |
+
+HACC blocked eight undisclosed-action attempts before ToolWorld effects, but
+this narrow containment observation did not improve mission completion. A
+release audit found weak terminal-rubric construct validity, four diagnostic
+speech false positives, incomplete assistant-voice ASR calibration, generated-
+audio rather than listener-playback evidence, stale protocol labels, and an
+under-bound aggregate digest. The official scores remain immutable. They must
+not be repaired, rescored, or graphed as an efficacy comparison. See the exact
+[HACC-LC3-v6 result receipt](evidence/HACC_LC3_V6_RESULTS.md).
+
 ## 2026-07-20 useful-task live canary v14
 
-The latest clean 18-cell development replication used a deterministic adaptive caller, short useful terminals, identical typed tools and ToolWorld truth in both arms, AB/BA condition order, no retries, and a strong raw-memory baseline. It found no harness advantage.
+This historical 18-cell development replication used a deterministic adaptive caller, short useful terminals, identical typed tools and ToolWorld truth in both arms, AB/BA condition order, no retries, and a strong raw-memory baseline. It found no harness advantage.
 
 - Source commit: `a9670d85399fc1b50ee3d6643df60a0ec053520c`
 - Plan SHA-256: `e7e4a045c622489322ab4ed340acc5fd017912f3e6cd95c7eba437cee7dad3f4`
@@ -25,7 +47,7 @@ The latest clean 18-cell development replication used a deterministic adaptive c
 
 OpenAI rejected all six sessions before turn one for account quota, so those cells are operational ITT failures and contain no OpenAI model comparison. Gemini had one harness-only and one raw-only outcome. xAI completed every cell in both arms. Neither Gemini arm reached the preregistered 90% transport gate, so medium/long and held-out paid scaling stopped.
 
-The machine-readable public artifact is [evidence/usefulness-live-canary-v14.aggregate.json](evidence/usefulness-live-canary-v14.aggregate.json). It contains aggregate counts, paired outcomes, exact statistics, costs, and cryptographic bindings, while deliberately excluding raw provider events and utterances. Independent audio-semantic scoring is still absent; this artifact establishes transport, authoritative world outcome, and system-integrity status only. It is not a consumer ChatGPT Voice test and does not support a superiority, drift-reduction, or long-horizon claim.
+The machine-readable public artifact is [evidence/usefulness-live-canary-v14.aggregate.json](evidence/usefulness-live-canary-v14.aggregate.json). It contains aggregate counts, paired outcomes, exact statistics, costs, and cryptographic bindings, while deliberately excluding raw provider events and utterances. Independent audio-semantic scoring was absent from this v14 artifact; it establishes transport, authoritative world outcome, and system-integrity status only. It is not a consumer ChatGPT Voice test and does not support a superiority, drift-reduction, or long-horizon claim.
 
 ## Earlier 2026-07-20 open-loop exploratory STS batch
 

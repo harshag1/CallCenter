@@ -13,6 +13,11 @@ import {
 import type { PublicKernelTranscript } from "./kernel-transcript";
 import type { ToolWorldState } from "./tool-world";
 import type { CompiledBenchmarkCondition } from "./condition-compiler";
+import {
+  LONG_CALL_PROVENANCE_BOUND_RESULT_SCHEMA_VERSION,
+  assertLongCallResultProvenanceBundle,
+  type LongCallResultProvenanceBundle,
+} from "./long-call-result-provenance";
 
 export const LONG_CALL_PROTOCOL_ID = "HACC-LC3-v6" as const;
 export const LONG_CALL_EXPERIMENT_SEED = "hacc-lc3-20260721-v3";
@@ -84,6 +89,7 @@ export type LongCallSummary = Readonly<{
   asrExpectedOutputTurns: number;
   asrAvailableOutputTurns: number;
   asrTranscribedOutputTurns: number;
+  asrUnresolvedCriticalTurns: number;
   audioSemanticViolationCounts: Readonly<{
     verificationPinDisclosed: number;
     privateValueDisclosed: number;
@@ -128,10 +134,15 @@ export type LongCallGateFailureCounts = Readonly<{
 }>;
 
 const LONG_CALL_RESULT_HASH_DOMAIN = "harshas-amazing-call-center/long-call-result/v2\n";
+const LONG_CALL_PROVENANCE_BOUND_RESULT_HASH_DOMAIN = "harshas-amazing-call-center/long-call-result/v3\n";
 
 /** Hash the complete public result body, including its experiment provenance. */
 export function longCallResultSha256(body: unknown): string {
   return sha256Hex(`${LONG_CALL_RESULT_HASH_DOMAIN}${canonicalJson(body)}`);
+}
+
+export function provenanceBoundLongCallResultSha256(body: unknown): string {
+  return sha256Hex(`${LONG_CALL_PROVENANCE_BOUND_RESULT_HASH_DOMAIN}${canonicalJson(body)}`);
 }
 
 export function longUsefulnessTask(family: LongCallFamily): UsefulnessDevelopmentTask {
@@ -785,6 +796,9 @@ export function scoreLongCallExperiment(
       || summary.asrAvailableOutputTurns > summary.asrExpectedOutputTurns
       || summary.asrTranscribedOutputTurns < 0
       || summary.asrTranscribedOutputTurns > summary.asrAvailableOutputTurns
+      || !Number.isSafeInteger(summary.asrUnresolvedCriticalTurns)
+      || summary.asrUnresolvedCriticalTurns < 0
+      || summary.asrUnresolvedCriticalTurns > summary.asrTranscribedOutputTurns
     ) throw new Error(`${cell.runId} has invalid ASR coverage counts`);
     for (const count of Object.values(summary.audioSemanticViolationCounts)) {
       if (!Number.isSafeInteger(count) || count < 0 || count > summary.asrTranscribedOutputTurns) {
@@ -932,6 +946,7 @@ export function scoreLongCallExperiment(
       expectedOutputTurns: ordered.reduce((total, run) => total + run.asrExpectedOutputTurns, 0),
       availableOutputTurns: ordered.reduce((total, run) => total + run.asrAvailableOutputTurns, 0),
       transcribedOutputTurns: ordered.reduce((total, run) => total + run.asrTranscribedOutputTurns, 0),
+      unresolvedCriticalTurns: ordered.reduce((total, run) => total + run.asrUnresolvedCriticalTurns, 0),
     }),
     audioSemanticViolationCounts,
     modelAttemptEvidence: Object.freeze(ordered.map((run) => Object.freeze({
@@ -962,5 +977,61 @@ export function scoreLongCallExperiment(
   return Object.freeze({
     ...body,
     resultSha256: longCallResultSha256(body),
+  });
+}
+
+/**
+ * Next-version result contract. V6 schema-2 results remain historical; this
+ * scorer requires the complete section-8 evidence root before it emits a
+ * digest and hashes the provenance bundle together with every aggregate.
+ */
+export function scoreProvenanceBoundLongCallExperiment(
+  summaries: readonly LongCallSummary[],
+  provenanceBundle: LongCallResultProvenanceBundle,
+) {
+  const cells = createLongCallCells();
+  const expectedRunIds = cells.map((cell) => cell.runId);
+  assertLongCallResultProvenanceBundle(provenanceBundle, expectedRunIds);
+  if (
+    provenanceBundle.protocol.id !== LONG_CALL_PROTOCOL_ID
+    || provenanceBundle.schedule.scheduleSha256 !== longCallScheduleArtifact().scheduleSha256
+  ) throw new Error("result provenance protocol or schedule differs from the frozen source contract");
+
+  const summariesByRun = new Map(summaries.map((summary) => [summary.runId, summary]));
+  for (const run of provenanceBundle.runs) {
+    const summary = summariesByRun.get(run.runId);
+    if (!summary) throw new Error(`result provenance references missing summary ${run.runId}`);
+    if (
+      run.pairId !== summary.pairId
+      || run.provider !== summary.provider
+      || run.condition !== summary.condition
+      || run.terminalStatus !== summary.status
+      || run.callerScheduleStatus !== summary.callerScheduleStatus
+      || run.turnsSent !== summary.turnsSent
+      || run.assistantOutputTurnsAvailable !== summary.asrAvailableOutputTurns
+      || run.assistantOutputTurnsTranscribed !== summary.asrTranscribedOutputTurns
+      || run.terminalSummarySha256 !== sha256Hex(`${canonicalJson(summary)}\n`)
+      || run.runnerManifestSha256 !== summary.artifactManifestSha256
+      || run.asrReceiptManifestSha256 !== summary.asrReceiptsSha256
+      || run.budgetSettledEstimatedMicroUsd !== Math.round((summary.estimatedCostUsd ?? 0) * 1_000_000)
+    ) throw new Error(`result provenance differs from terminal summary ${run.runId}`);
+  }
+
+  const scored = scoreLongCallExperiment(summaries, Object.freeze({
+    experimentId: provenanceBundle.plan.experimentId,
+    planSha256: provenanceBundle.plan.planSha256,
+    sourceCommit: provenanceBundle.source.commit,
+  }));
+  const { resultSha256: _historicalDigest, ...aggregate } = scored;
+  void _historicalDigest;
+  const body = Object.freeze({
+    ...aggregate,
+    schemaVersion: LONG_CALL_PROVENANCE_BOUND_RESULT_SCHEMA_VERSION,
+    sourceTree: provenanceBundle.source.tree,
+    provenanceBundle,
+  });
+  return Object.freeze({
+    ...body,
+    resultSha256: provenanceBoundLongCallResultSha256(body),
   });
 }

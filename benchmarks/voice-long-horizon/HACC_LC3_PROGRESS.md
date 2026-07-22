@@ -42,3 +42,47 @@ subject identifier. No v1 cell will be retried or rewritten. The fixes and the
 unchanged design commitments are preregistered in
 `HACC_LC3_V2_AMENDMENT.md`; all v2 provider outcomes remain unavailable at the
 time of that freeze.
+
+## 2026-07-21 — HACC-LC3-v6 retained as evaluator-development evidence
+
+The completed 18-episode paid batch is retained immutably under local experiment
+root `.local/hacc-lc3-v8`; its frozen protocol identifier is `HACC-LC3-v6`.
+The runner completed all 18 scheduled cells without retry or substitution and
+postprocessed all 251 available output-audio artifacts. Estimated usage was
+$13.404901; provider-reported cost fields were unavailable.
+
+The preregistered primary and strict endpoints were both Native 0/9 versus HACC
+0/9. Only 8/18 episodes reached all 20 caller turns: Native 5/9 and HACC 3/9.
+HACC contained eight undisclosed-action attempts before ToolWorld effects, but
+that narrow containment result did not produce a mission-completion advantage.
+It is not evidence that HACC beats any provider-native arm.
+
+Release red-teaming found that this batch cannot support a public comparative
+graph: the terminal rubric conflated long-range recall with unsolicited final
+repetition; four of five speech labels were diagnostic false positives; output
+voice calibration did not cover the assistant voices; ASR/semantic artifacts
+carried a stale protocol label; and the aggregate result digest omitted required
+source and evidence bindings. The source receipt is
+`evidence/HACC_LC3_V6_RESULTS.md`. The official v6 scores remain unchanged.
+
+Completed follow-up hardening in the working tree:
+
+- semantic scorer v2 has balanced hard-negative coverage and records critical
+  ASR disagreement as unresolved rather than inventing a pass or violation;
+- output-voice calibration v2 requires all six provider/model/voice strata and
+  binds capture receipts before import;
+- aggregate provenance schema 3 binds the source tree, qualification,
+  calibration, semantic toolchain, ledger head, ordered run records, manifests,
+  audio, ASR, replay, and attestations, and refuses to upgrade the historical v6
+  artifact;
+- the host-managed benchmark path pushes a hash-chained response plan and live
+  catalog before every caller-turn response, eliminating routine state polls in
+  provider-free 20-turn canaries for all three v6 task families;
+- paid `prepare`, `qualify`, and `run` commands fail before side effects until a
+  new clean-boundary protocol is preregistered.
+
+The next paid experiment is the held-out HACC-LC4 design. Its current protocol
+file is explicitly a draft, not a preregistration or run authorization. No new
+provider episode may start until the evaluator, calibration, provenance, source,
+fixture, schedule, runner, repair policy, and execution budget are frozen at one
+clean commit and independently verified.

@@ -4,7 +4,7 @@
 
 This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. It compares the same model against itself: the raw agent receives the entire workflow and action catalog up front, while the harness progressively discloses the current objective and routes actions through durable, runtime-enforced state.
 
-**Current status: one 32-session exploratory paid development batch is complete. Every strict arm scored 0%, so no superiority result exists.** The batch completed 433 of 1,024 planned voice-to-voice interactions; provider reconciliation is pending. Five separately tracked unverified architecture/security reviews cost **$3.312551** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. The null development result is published in [RESULTS.md](RESULTS.md).
+**Current status: the latest paid evaluator-development batch completed 18 production-API episodes and nine matched pairs. Native and HACC both scored 0/9 for mission completion and strict alignment, so no superiority result exists.** Only 8/18 episodes reached all 20 turns (Native 5/9, HACC 3/9). Independent red-teaming found evaluator, output-voice calibration, playback, and provenance defects; the immutable scores remain retained, but the batch is not publication-quality efficacy evidence. Earlier exploratory batches and the exact v6 boundary are published in [RESULTS.md](RESULTS.md).
 
 The benchmark is designed to answer six questions:
 

@@ -23,6 +23,13 @@ describe("HACC-LC3 live runner release contract", () => {
     expect(source).toContain("operationalCeilingUsd: LONG_CALL_MAXIMUM_AGGREGATE_USD");
   });
 
+  it("fails closed while the next paid protocol remains an unregistered draft", async () => {
+    const source = await runnerSource();
+    expect(source).toContain("const PAID_EXECUTION_FROZEN = true");
+    expect(source).toContain('["prepare", "qualify", "run"].includes');
+    expect(source).toContain("paid long-call execution is frozen until a new protocol is preregistered");
+  });
+
   it("freezes the long-call bounds and blocks reporting before ASR scoring", async () => {
     const source = await runnerSource();
     expect(source).toContain("leaseTtlSeconds: 12 * 60");
@@ -72,6 +79,38 @@ describe("HACC-LC3 live runner release contract", () => {
       source.indexOf("await mkdir(resolve(root, \"runs\")"),
     );
     expect(source).toContain("loadProductionRealtimeCredentialCandidates");
+    expect(source).toContain("qualificationArtifactSha256");
+    expect(source).toContain("qualification.artifactSha256");
+  });
+
+  it("reports only through the next-version complete provenance bundle", async () => {
+    const source = await runnerSource();
+    expect(source).toContain("resultProvenanceBundle(root, plan, summaries)");
+    expect(source).toContain("scoreProvenanceBoundLongCallExperiment(summaries, provenanceBundle)");
+    expect(source).toContain("immutable historical result already exists");
+    expect(source).toContain("verifyRunManifest(manifest)");
+    expect(source).toContain("verifyKernelTranscript({");
+    expect(source).toContain('kernelReplayAuthenticity: "signed_attestation_verified"');
+    expect(source).toContain("semantic.scorerVersion !== LONG_CALL_AUDIO_ARTIFACT_CONTRACT.scorerVersion");
+    expect(source).toContain("verifyLongCallAudioReceiptManifestArtifact(asrManifest)");
+    expect(source).toContain("verifyLongCallAudioSemanticArtifact(semantic)");
+    expect(source).toContain("replayLongCallAudioSemanticArtifact(semantic)");
+    expect(source).toContain("exact ASR receipt/transcript binding mismatch");
+    expect(source).toContain("artifact.invocation_receipts.map");
+    expect(source).toContain("asrInvocations: Object.freeze(asrInvocations)");
+    expect(source).toContain("budget settlement differs from retained summary cost");
+    expect(source).toContain("setFilesystemBudgetPaused({");
+    expect(source).toContain('closed.state !== "paused"');
+    expect(source).not.toContain("ASR_SEMANTIC_DOMAIN");
+    expect(source).not.toContain("ASR_RECEIPT_MANIFEST_DOMAIN");
+  });
+
+  it("requires signed output-voice calibration bytes under a preregistered trust root", async () => {
+    const source = await runnerSource();
+    expect(source).toContain("--output-voice-capture-authority-sha256");
+    expect(source).toContain("verifyOutputVoiceCalibrationPcm({");
+    expect(source).toContain("expectedCaptureAuthoritySha256");
+    expect(source).toContain("outputVoiceCaptureAuthoritySha256: outputVoiceCalibration.captureAuthoritySha256");
   });
 
   it("does not commit a developer-machine credential path", async () => {

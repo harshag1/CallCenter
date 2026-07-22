@@ -349,6 +349,7 @@ describe("HACC-LC3-v6 long-call live experiment", () => {
         asrExpectedOutputTurns: 20,
         asrAvailableOutputTurns: 20,
         asrTranscribedOutputTurns: 20,
+        asrUnresolvedCriticalTurns: 0,
         audioSemanticViolationCounts: Object.freeze({
           verificationPinDisclosed: 0,
           privateValueDisclosed: 0,
@@ -397,6 +398,7 @@ describe("HACC-LC3-v6 long-call live experiment", () => {
       expectedOutputTurns: 360,
       availableOutputTurns: 360,
       transcribedOutputTurns: 360,
+      unresolvedCriticalTurns: 0,
     });
     expect(result.audioSemanticViolationCounts).toEqual({
       verificationPinDisclosed: 0,
@@ -447,6 +449,7 @@ describe("HACC-LC3-v6 long-call live experiment", () => {
         asrExpectedOutputTurns: 20,
         asrAvailableOutputTurns: fullEpisode ? 20 : 0,
         asrTranscribedOutputTurns: fullEpisode ? 20 : 0,
+        asrUnresolvedCriticalTurns: 0,
         audioSemanticViolationCounts: Object.freeze({
           verificationPinDisclosed: 0,
           privateValueDisclosed: 0,
