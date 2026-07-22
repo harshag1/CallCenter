@@ -16,21 +16,42 @@ import {
   type NormalizedRealtimeEvent,
   type Pcm16Audio,
   type RealtimeEventListener,
+  type RealtimeWireObservation,
+  type RealtimeWireObservationListener,
 } from "../../realtime/client/types";
+import {
+  realtimeWireIdentitySha256,
+  realtimeWireObservationSha256,
+  realtimeWireProjectionSha256,
+} from "../../realtime/client/wire-evidence";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import type { RealtimeAudioDeliveryRuntime } from "../../realtime/audio-delivery";
 
 class FakeDevAudioClient implements NormalizedRealtimeClient {
   readonly provider = "openai" as const;
   state: "idle" | "ready" | "closed" = "idle";
   readonly #listeners = new Set<RealtimeEventListener>();
+  readonly #wireListeners = new Set<RealtimeWireObservationListener>();
   readonly operations: string[] = [];
   readonly appendedBytes: number[] = [];
   preparedControlBytes = 0;
+  #wireSequence = 0;
+  #wireHead: string | null = null;
 
-  async connect(): Promise<void> { this.state = "ready"; this.operations.push("connect"); }
+  constructor(private readonly mode: "valid" | "pre_trigger" | "unbound_call" = "valid") {}
+
+  async connect(): Promise<void> {
+    this.state = "ready";
+    this.operations.push("connect");
+    if (this.mode === "pre_trigger") this.emitControlledDispatch(true);
+  }
   close(): void { this.state = "closed"; this.operations.push("close"); }
   onEvent(listener: RealtimeEventListener): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   onWireEvent(): () => void { return () => undefined; }
+  onWireObservation(listener: RealtimeWireObservationListener): () => void {
+    this.#wireListeners.add(listener);
+    return () => this.#wireListeners.delete(listener);
+  }
   appendInputAudio(audio: Pcm16Audio): void {
     this.operations.push("append");
     this.appendedBytes.push(audio.data.byteLength);
@@ -39,15 +60,61 @@ class FakeDevAudioClient implements NormalizedRealtimeClient {
     this.operations.push("prepare");
     this.preparedControlBytes = Buffer.byteLength(input.additionalInstructions, "utf8");
   }
-  commitInputAudio(): void { this.operations.push("commit"); }
+  commitInputAudio(): void {
+    this.operations.push("commit");
+    this.emitWire("outbound", "input_audio_buffer.commit", { type: "input_audio_buffer.commit" });
+  }
   createResponse(): void {
     this.operations.push("create");
-    queueMicrotask(() => this.emitControlledDispatch());
+    this.emitWire("outbound", "response.create", { type: "response.create" });
+    if (this.mode !== "pre_trigger") {
+      queueMicrotask(() => this.emitControlledDispatch(this.mode !== "unbound_call"));
+    }
   }
   sendTurn(): void { throw new Error("not used"); }
   submitToolResults(): void { throw new Error("not used"); }
 
-  private emitControlledDispatch(): void {
+  private createWire(
+    direction: "inbound" | "outbound",
+    wireType: string,
+    projection: Readonly<Record<string, unknown>>,
+    identities: RealtimeWireObservation["identities"] = {},
+  ): RealtimeWireObservation {
+    const sequence = this.#wireSequence + 1;
+    const projectionSha256 = realtimeWireProjectionSha256(projection);
+    const core = Object.freeze({
+      schemaVersion: 1 as const,
+      provider: this.provider,
+      direction,
+      connectionEpoch: 1,
+      sequence,
+      observedAtMs: sequence,
+      observedAtMonotonicMs: sequence,
+      wireType,
+      payloadSha256: sha256Hex(canonicalJson({ direction, wireType, sequence })),
+      payloadBytes: 100,
+      projectionSha256,
+      previousObservationSha256: this.#wireHead,
+      identities,
+      projection,
+    });
+    return Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+  }
+
+  private emitWire(
+    direction: "inbound" | "outbound",
+    wireType: string,
+    projection: Readonly<Record<string, unknown>>,
+    identities: RealtimeWireObservation["identities"] = {},
+  ): RealtimeWireObservation {
+    const observation = this.createWire(direction, wireType, projection, identities);
+    this.#wireSequence = observation.sequence;
+    this.#wireHead = observation.observationSha256;
+    for (const listener of this.#wireListeners) listener(observation);
+    return observation;
+  }
+
+  private emitControlledDispatch(retainCallObservation: boolean): void {
     const provenance = Object.freeze({
       schemaVersion: 1 as const,
       provider: this.provider,
@@ -55,6 +122,33 @@ class FakeDevAudioClient implements NormalizedRealtimeClient {
       nativeResponseId: "dev-response-secret",
       terminalWireType: "response.function_call_arguments.done",
     });
+    const responseIdSha256 = realtimeWireIdentitySha256("response", provenance.nativeResponseId);
+    const callIdSha256 = realtimeWireIdentitySha256("call", provenance.nativeCallId);
+    const startedObservation = this.emitWire(
+      "inbound",
+      "response.created",
+      { type: "response.created" },
+      { responseIdSha256 },
+    );
+    for (const listener of this.#listeners) listener({
+      type: "response.started",
+      provider: this.provider,
+      receivedAtMs: 1,
+      wireType: "response.created",
+      responseId: provenance.nativeResponseId,
+      wireObservation: {
+        availability: "observed",
+        connectionEpoch: startedObservation.connectionEpoch,
+        sequence: startedObservation.sequence,
+        observationSha256: startedObservation.observationSha256,
+        payloadSha256: startedObservation.payloadSha256,
+        projectionSha256: startedObservation.projectionSha256,
+      },
+    });
+    const projection = { gatewayCalls: [{ name: LOCAL_TOOL_PROXY_FUNCTION_NAME }] };
+    const observation = retainCallObservation
+      ? this.emitWire("inbound", provenance.terminalWireType, projection, { responseIdSha256, callIdSha256 })
+      : this.createWire("inbound", provenance.terminalWireType, projection, { responseIdSha256, callIdSha256 });
     const event = {
       type: "tool.dispatch" as const,
       provider: this.provider,
@@ -63,12 +157,12 @@ class FakeDevAudioClient implements NormalizedRealtimeClient {
       responseId: provenance.nativeResponseId,
       wireObservation: {
         availability: "observed" as const,
-        connectionEpoch: 1,
-        sequence: 1,
-        observationSha256: "1".repeat(64),
-        payloadSha256: "2".repeat(64),
-        projectionSha256: "3".repeat(64),
-        callIdSha256: "4".repeat(64),
+        connectionEpoch: observation.connectionEpoch,
+        sequence: observation.sequence,
+        observationSha256: observation.observationSha256,
+        payloadSha256: observation.payloadSha256,
+        projectionSha256: observation.projectionSha256,
+        callIdSha256: observation.identities.callIdSha256,
       },
       gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
       dispatches: [{
@@ -145,8 +239,36 @@ describe("LC4 exact DEV-schema audio canary", () => {
     expect(clock.sleeps).toEqual([20]);
     expect(client.operations).toEqual(["connect", "append", "append", "prepare", "commit", "create", "close"]);
     expect(client.preparedControlBytes).toBe(LC4_DEV_AUDIO_CANARY_CONTROL_BYTES);
+    expect(result.wireObservations).toHaveLength(4);
+    expect(result.providerToolCallEvidence).toMatchObject({
+      evidence_kind: "provenance_bound_lc4_dev_gateway_dispatch",
+      provider: "openai",
+      semantic_intent: LC4_DEV_AUDIO_CANARY_INTENT,
+    });
     expect(JSON.stringify(result)).not.toContain("dev-call-secret");
     expect(JSON.stringify(result)).not.toContain("dev-response-secret");
+  });
+
+  it.each([
+    ["pre-trigger tool event", "pre_trigger"],
+    ["tool event whose frame was not retained", "unbound_call"],
+  ] as const)("fails closed for a %s", async (_label, mode) => {
+    const result = await executeLc4DevAudioCanary({
+      provider: "openai",
+      model: "gpt-realtime-1.5",
+      client: new FakeDevAudioClient(mode),
+      sampleRateHz: 24_000,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      audioDeliveryRuntime: deterministicRuntime().runtime,
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      code: "response_generation_failed",
+      providerToolCallEvidence: null,
+      providerToolCallEvidenceSha256: null,
+    });
   });
 
   it("fails closed when a substituted delivery path claims one unpaced append", async () => {

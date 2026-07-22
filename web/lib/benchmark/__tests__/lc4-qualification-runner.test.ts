@@ -26,6 +26,7 @@ import {
   LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
   createLc4DevAudioCanaryPcm,
   lc4DevAudioCanaryFailureEvidenceSha256,
+  lc4DevAudioCanaryProviderToolCallEvidenceSha256,
   lc4DevAudioCanarySpecification,
   type Lc4DevAudioCanaryExecution,
 } from "../provider-dev-audio-canary";
@@ -36,9 +37,15 @@ import { packetizeRealtimePcm16 } from "../../realtime/audio-delivery";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  RealtimeWireObservation,
   RealtimeEventListener,
   SessionConfigurationAcknowledgement,
 } from "../../realtime/client/types";
+import {
+  realtimeWireIdentitySha256,
+  realtimeWireObservationSha256,
+  realtimeWireProjectionSha256,
+} from "../../realtime/client/wire-evidence";
 
 const roots: string[] = [];
 const SOURCE: Lc4QualificationGitSource = Object.freeze({
@@ -209,6 +216,63 @@ function passingDevAudioExecution(provider: LiveStsProvider, model: string): Lc4
   const specification = lc4DevAudioCanarySpecification(provider, model, sampleRateHz);
   const audio = createLc4DevAudioCanaryPcm(sampleRateHz);
   const plan = packetizeRealtimePcm16(audio, DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE);
+  const responseIdSha256 = realtimeWireIdentitySha256("response", `${provider}-response-secret`);
+  const callIdSha256 = realtimeWireIdentitySha256("call", `${provider}-call-secret`);
+  const wireObservations: RealtimeWireObservation[] = [];
+  const appendWire = (
+    direction: "inbound" | "outbound",
+    wireType: string,
+    projection: Readonly<Record<string, unknown>>,
+    identities: RealtimeWireObservation["identities"] = {},
+  ) => {
+    const sequence = wireObservations.length + 1;
+    const core = Object.freeze({
+      schemaVersion: 1 as const,
+      provider,
+      direction,
+      connectionEpoch: 1,
+      sequence,
+      observedAtMs: sequence,
+      observedAtMonotonicMs: sequence,
+      wireType,
+      payloadSha256: sha256Hex(canonicalJson({ provider, direction, wireType, sequence })),
+      payloadBytes: 100,
+      projectionSha256: realtimeWireProjectionSha256(projection),
+      previousObservationSha256: wireObservations.at(-1)?.observationSha256 ?? null,
+      identities,
+      projection,
+    });
+    const observation = Object.freeze({ ...core, observationSha256: realtimeWireObservationSha256(core) });
+    wireObservations.push(observation);
+    return observation;
+  };
+  const trigger = appendWire(
+    "outbound",
+    provider === "gemini" ? "realtimeInput.activityEnd" : "response.create",
+    { responseTrigger: true },
+  );
+  const started = appendWire("inbound", "response.created", { responseStarted: true }, { responseIdSha256 });
+  const call = appendWire(
+    "inbound",
+    provider === "gemini" ? "toolCall" : "response.function_call_arguments.done",
+    { gatewayCalls: [{ name: "capability_gateway" }] },
+    { responseIdSha256, callIdSha256 },
+  );
+  const providerToolCallEvidence = Object.freeze({
+    evidence_kind: provider === "gemini"
+      ? "wire_bound_lc4_dev_gateway_call"
+      : "provenance_bound_lc4_dev_gateway_dispatch",
+    provider,
+    response_id_sha256: responseIdSha256,
+    call_id_sha256: callIdSha256,
+    semantic_intent: "complete_current_stage",
+    arguments_sha256: sha256Hex(canonicalJson({})),
+    terminal_wire_type: call.wireType,
+    wire_observation_sha256: call.observationSha256,
+    response_trigger_wire_observation_sha256: trigger.observationSha256,
+    response_started_wire_observation_sha256: started.observationSha256,
+    ...(provider === "gemini" ? {} : { provenance_sha256: sha256Hex(`${provider}/provenance`) }),
+  });
   const sanitizedFailureEvidence = Object.freeze({
     schema_version: 1 as const,
     provider,
@@ -231,7 +295,11 @@ function passingDevAudioExecution(provider: LiveStsProvider, model: string): Lc4
       complete: true,
     }),
     response: Object.freeze({ requested: true, gateway_call_observed: true }),
-    wire: Object.freeze({ count: 0, terminal_type: null, terminal_observation_sha256: null }),
+    wire: Object.freeze({
+      count: wireObservations.length,
+      terminal_type: call.wireType,
+      terminal_observation_sha256: call.observationSha256,
+    }),
   });
   return Object.freeze({
     provider,
@@ -255,10 +323,11 @@ function passingDevAudioExecution(provider: LiveStsProvider, model: string): Lc4
     callerAudioBytes: specification.audio_bytes,
     responseGenerationRequested: true,
     responseGenerationEvidenceSha256: sha256Hex(`${provider}/dev-response`),
-    providerToolCallEvidenceSha256: sha256Hex(`${provider}/dev-tool`),
+    providerToolCallEvidence,
+    providerToolCallEvidenceSha256: lc4DevAudioCanaryProviderToolCallEvidenceSha256(providerToolCallEvidence),
     sanitizedFailureEvidence,
     failureEvidenceSha256: lc4DevAudioCanaryFailureEvidenceSha256(sanitizedFailureEvidence),
-    wireObservations: Object.freeze([]),
+    wireObservations: Object.freeze(wireObservations),
     usage: Object.freeze([]),
   });
 }
@@ -378,6 +447,24 @@ describe("LC4 exact-model qualification runner", () => {
       },
     })).rejects.toThrow("weakened the frozen development-only boundary");
     expect(clients).toEqual([]);
+
+    await expect(runLc4Qualification({
+      root: evidenceRoot,
+      repositoryRoot,
+      authorization: valid.authorization,
+      trustRoot: valid.trustRoot,
+      attemptId: "unsigned-attempt-id-replay",
+      now: () => NOW,
+      dependencies: {
+        ...preparationDependencies,
+        createClient: (provider) => { clients.push(provider); return new ReadyQualificationClient(provider); },
+        executeCanary: async () => { throw new Error("must not execute"); },
+        executeDevAudioCanary: async () => { throw new Error("must not execute"); },
+      },
+    })).rejects.toThrow("must equal the signed one-shot authorization ID");
+    expect(clients).toEqual([]);
+    await expect(readFile(join(evidenceRoot, "attempts", "unsigned-attempt-id-replay.consumed")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("retains exact zero-audio and packetized DEV canaries, sanitized evidence, and blocks paid retry", async () => {
@@ -454,6 +541,16 @@ describe("LC4 exact-model qualification runner", () => {
       response: { requested: true, gateway_call_observed: true },
     });
     expect(canonicalJson(retainedOutcome)).not.toContain("dev-call-secret");
+    const retainedCall = JSON.parse(await readFile(join(complete, "openai-dev-audio-tool-call.json"), "utf8"));
+    expect(retainedCall).toMatchObject({
+      evidence_kind: "provenance_bound_lc4_dev_gateway_dispatch",
+      provider: "openai",
+      semantic_intent: "complete_current_stage",
+    });
+    expect(retainedCall.evidence_sha256).toBe(terminal.dev_audio_results[0]!.provider_tool_call_evidence_sha256);
+    const retainedWire = await readFile(join(complete, "openai-dev-audio-wire.jsonl"), "utf8");
+    expect(retainedWire).toContain("observed_at_monotonic_ms");
+    expect(retainedWire).toContain("gatewayCalls");
     const report = await reportLc4Qualification(evidenceRoot);
     expect(report).toMatchObject({
       completed_attempts: 1,

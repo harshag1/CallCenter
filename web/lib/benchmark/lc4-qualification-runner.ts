@@ -20,8 +20,10 @@ import {
   LC4_DEV_AUDIO_CANARY_CONTROL_BYTES,
   LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256,
   LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
+  assertLc4DevAudioCanaryExecutionEvidence,
   executeLc4DevAudioCanary,
   lc4DevAudioCanaryFailureEvidenceSha256,
+  lc4DevAudioCanaryProviderToolCallEvidenceSha256,
   lc4DevAudioCanarySpecification,
   type Lc4DevAudioCanaryExecution,
   type Lc4DevAudioCanaryFailureEvidence,
@@ -167,6 +169,8 @@ type SanitizedWireObservation = Readonly<{
   direction: "inbound" | "outbound";
   connection_epoch: number;
   sequence: number;
+  observed_at_ms: number;
+  observed_at_monotonic_ms: number;
   wire_type: string;
   payload_sha256: string;
   payload_bytes: number;
@@ -174,6 +178,7 @@ type SanitizedWireObservation = Readonly<{
   previous_observation_sha256: string | null;
   observation_sha256: string;
   identities: RealtimeWireObservation["identities"];
+  projection: RealtimeWireObservation["projection"];
 }>;
 
 export type Lc4QualificationTerminalArtifact = Readonly<{
@@ -651,6 +656,8 @@ function sanitizeWire(observation: RealtimeWireObservation): SanitizedWireObserv
     direction: observation.direction,
     connection_epoch: observation.connectionEpoch,
     sequence: observation.sequence,
+    observed_at_ms: observation.observedAtMs,
+    observed_at_monotonic_ms: observation.observedAtMonotonicMs,
     wire_type: observation.wireType,
     payload_sha256: observation.payloadSha256,
     payload_bytes: observation.payloadBytes,
@@ -658,6 +665,7 @@ function sanitizeWire(observation: RealtimeWireObservation): SanitizedWireObserv
     previous_observation_sha256: observation.previousObservationSha256,
     observation_sha256: observation.observationSha256,
     identities: observation.identities,
+    projection: observation.projection,
   });
 }
 
@@ -748,6 +756,25 @@ async function retainDevAudioFailureEvidence(
   );
 }
 
+async function retainDevAudioToolCallEvidence(
+  partial: string,
+  execution: Lc4DevAudioCanaryExecution,
+): Promise<void> {
+  assertLc4DevAudioCanaryExecutionEvidence(execution);
+  if (execution.providerToolCallEvidence === null) return;
+  if (lc4DevAudioCanaryProviderToolCallEvidenceSha256(execution.providerToolCallEvidence)
+    !== execution.providerToolCallEvidenceSha256) {
+    throw new Error(`LC4 ${execution.provider} DEV audio tool-call evidence hash mismatch`);
+  }
+  await writeImmutableJson(
+    resolve(partial, `${execution.provider}-dev-audio-tool-call.json`),
+    Object.freeze({
+      ...execution.providerToolCallEvidence,
+      evidence_sha256: execution.providerToolCallEvidenceSha256,
+    }),
+  );
+}
+
 export async function runLc4Qualification(input: Readonly<{
   root: string;
   repositoryRoot: string;
@@ -764,9 +791,12 @@ export async function runLc4Qualification(input: Readonly<{
   const dependencies = input.dependencies ?? defaultDependencies;
   const now = input.now ?? (() => new Date());
   assertLc4QualificationAuthorization({ artifact: input.authorization, trustRoot: input.trustRoot, plan, now: now() });
-  const credentials = await exactSourceAndCredentials({ plan, repositoryRoot, dependencies });
   const attemptId = input.attemptId ?? input.authorization.body.authorization_id;
   requireSafeId(attemptId, "LC4 qualification attempt ID");
+  if (attemptId !== input.authorization.body.authorization_id) {
+    throw new Error("LC4 qualification attempt ID must equal the signed one-shot authorization ID");
+  }
+  const credentials = await exactSourceAndCredentials({ plan, repositoryRoot, dependencies });
   const attemptsRoot = resolve(root, "attempts");
   const partial = resolve(attemptsRoot, `${attemptId}.partial`);
   const complete = resolve(attemptsRoot, `${attemptId}.complete`);
@@ -958,6 +988,7 @@ export async function runLc4Qualification(input: Readonly<{
         callerAudioBytes: 0,
         responseGenerationRequested: false,
         responseGenerationEvidenceSha256: sha256Hex(`harshas-amazing-call-center/lc4-dev-audio-provider-failure/v1\n${provider}`),
+        providerToolCallEvidence: null,
         providerToolCallEvidenceSha256: null,
         sanitizedFailureEvidence,
         failureEvidenceSha256: lc4DevAudioCanaryFailureEvidenceSha256(sanitizedFailureEvidence),
@@ -982,11 +1013,14 @@ export async function runLc4Qualification(input: Readonly<{
         execution.delivery === null
         || execution.callerAudioBytes !== planned.caller_audio_bytes
         || !execution.responseGenerationRequested
+        || execution.providerToolCallEvidence === null
         || execution.providerToolCallEvidenceSha256 === null
       ))) {
       throw new Error(`LC4 ${provider} DEV audio canary execution differs from the immutable plan`);
     }
+    assertLc4DevAudioCanaryExecutionEvidence(execution);
     await retainDevAudioFailureEvidence(partial, execution);
+    await retainDevAudioToolCallEvidence(partial, execution);
     const retained = await retainCanaryEvidence(partial, execution, "-dev-audio");
     retainedDevResults.push(Object.freeze({
       provider,
