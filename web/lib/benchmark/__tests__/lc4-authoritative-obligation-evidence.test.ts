@@ -1,11 +1,12 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_AUTHORITY_EVIDENCE_VERSION,
   compileLc4AuthoritativeObligationManifest,
   createLc4AuthorityEvents,
   createLc4AuthoritativeObligationEpisodeArtifact,
+  createLc4AuthorityManifestRegistry,
   replayLc4AuthoritativeObligationEvidence,
   summarizeLc4AuthoritativeObligationEvidence,
   type Lc4AuthoritativeObligationManifest,
@@ -75,6 +76,16 @@ function passingEntries(manifest: Lc4AuthoritativeObligationManifest) {
   return entries;
 }
 
+function authorityRoots(events: ReturnType<typeof createLc4AuthorityEvents>, registrySha256 = sha256Hex("registry"), assignmentSha256 = sha256Hex("assignment")) {
+  return Object.freeze({
+    retained_ledger_head_sha256: sha256Hex("ledger-head"),
+    ledger_replay_sha256: sha256Hex("ledger-replay"),
+    normalized_event_set_sha256: sha256Hex(canonicalJson(events)),
+    manifest_registry_sha256: registrySha256,
+    episode_subject_assignment_sha256: assignmentSha256,
+  });
+}
+
 describe("LC4 authoritative obligation evidence", () => {
   it("mechanically freezes the complete tool, worker, revision, reconciliation, confirmation, and terminal oracle", () => {
     const { manifest, payload } = fixture();
@@ -98,6 +109,7 @@ describe("LC4 authoritative obligation evidence", () => {
       episodeSubjectSha256: sha256Hex("opaque-episode-subject"),
       events: createLc4AuthorityEvents(entries),
       signer,
+      authorityRoots: authorityRoots(createLc4AuthorityEvents(entries)),
     });
     expect(JSON.stringify(artifact)).not.toMatch(/openai|gemini|xai|native|hacc/i);
     const passed = replayLc4AuthoritativeObligationEvidence({ manifest, artifact, trust });
@@ -117,6 +129,7 @@ describe("LC4 authoritative obligation evidence", () => {
       episodeSubjectSha256: sha256Hex("opaque-episode-subject-failed"),
       events: createLc4AuthorityEvents(changed),
       signer,
+      authorityRoots: authorityRoots(createLc4AuthorityEvents(changed)),
     });
     const failed = replayLc4AuthoritativeObligationEvidence({ manifest, artifact: failedArtifact, trust });
     expect(failed.verdict).toBe("fail");
@@ -133,6 +146,7 @@ describe("LC4 authoritative obligation evidence", () => {
       events,
       signer,
       completeSources: { tool: false },
+      authorityRoots: authorityRoots(events),
     });
     expect(replayLc4AuthoritativeObligationEvidence({ manifest, artifact: incomplete, trust })).toMatchObject({
       verdict: "evidence_invalid",
@@ -144,6 +158,7 @@ describe("LC4 authoritative obligation evidence", () => {
       episodeSubjectSha256: sha256Hex("opaque-tampered"),
       events,
       signer,
+      authorityRoots: authorityRoots(events),
     });
     const tampered = Object.freeze({
       ...complete,
@@ -177,5 +192,35 @@ describe("LC4 authoritative obligation evidence", () => {
     });
     expect(summary).not.toMatchObject({ passed: 0, evaluated: 8 });
     expect(replays.some((replay) => replay.verdict === "pass")).toBe(false);
+  }, 30_000);
+
+  it("selects from a closed manifest registry and rejects cross-episode substitution", () => {
+    const { manifest, signer, trust } = fixture();
+    const subject = sha256Hex("assigned-episode");
+    const events = createLc4AuthorityEvents(passingEntries(manifest));
+    const registry = createLc4AuthorityManifestRegistry({
+      manifests: [manifest],
+      assignments: [{ episode_subject_sha256: subject, manifest_sha256: manifest.manifest_sha256 }],
+    });
+    const artifact = createLc4AuthoritativeObligationEpisodeArtifact({
+      manifest,
+      episodeSubjectSha256: subject,
+      events,
+      signer,
+      authorityRoots: authorityRoots(events, registry.registry_sha256, registry.assignment_sha256),
+    });
+    const valid = replayLc4AuthoritativeObligationEvidence({
+      manifest,
+      artifact,
+      trust,
+      expectedEpisodeSubjectSha256: subject,
+    });
+    expect(valid.verdict).toBe("pass");
+    expect(replayLc4AuthoritativeObligationEvidence({
+      manifest,
+      artifact,
+      trust,
+      expectedEpisodeSubjectSha256: sha256Hex("different-episode"),
+    }).verdict).toBe("evidence_invalid");
   }, 30_000);
 });

@@ -16,6 +16,10 @@ export type Lc4DevReplayArtifactKind =
   | "listener_evidence"
   | "repair_decision"
   | "repair_playback"
+  | "caller_branch_decision"
+  | "authority_source_checkpoint"
+  | "authority_obligation_manifest"
+  | "authority_episode_artifact"
   | "opportunity_finalization"
   | "segment_finalization"
   | "episode_finalization";
@@ -57,6 +61,8 @@ export type Lc4DevReplayEvidenceStore = Readonly<{
   }>): Promise<Lc4DevReplayArtifactReference>;
   assertResolvable(reference: Lc4DevReplayArtifactReference): Promise<void>;
   resolveJson(reference: Lc4DevReplayArtifactReference): Promise<JsonValue>;
+  /** Immutable process-local inventory. Every entry is still CAS-verified on use. */
+  retainedReferences(kind?: Lc4DevReplayArtifactKind): readonly Lc4DevReplayArtifactReference[];
 }>;
 
 export type Lc4DevReplayLedgerEvent = Readonly<{
@@ -120,6 +126,7 @@ function assertReferenceShape(value: Lc4DevReplayArtifactReference): void {
  * side index whose loss could make a syntactically valid ledger non-replayable.
  */
 export function createLc4DevReplayEvidenceStore(cas: Lc4DevReplayCasPort): Lc4DevReplayEvidenceStore {
+  const retainedReferences: Lc4DevReplayArtifactReference[] = [];
   const assertResolvable = async (value: Lc4DevReplayArtifactReference): Promise<void> => {
     assertReferenceShape(value);
     const bytes = await cas.get(value.evidence_sha256);
@@ -164,6 +171,7 @@ export function createLc4DevReplayEvidenceStore(cas: Lc4DevReplayCasPort): Lc4De
         domain_prefix: "",
       });
       await assertResolvable(retained);
+      retainedReferences.push(retained);
       return retained;
     },
     retainJson: async ({ kind, body: inputBody, domain_prefix = "", expected_evidence_sha256 }) => {
@@ -189,6 +197,7 @@ export function createLc4DevReplayEvidenceStore(cas: Lc4DevReplayCasPort): Lc4De
         domain_prefix,
       });
       await assertResolvable(retained);
+      retainedReferences.push(retained);
       return retained;
     },
     assertResolvable,
@@ -198,6 +207,9 @@ export function createLc4DevReplayEvidenceStore(cas: Lc4DevReplayCasPort): Lc4De
       const bytes = await cas.get(value.evidence_sha256);
       return immutableJson(JSON.parse(Buffer.from(bytes).toString("utf8").slice(value.domain_prefix.length))) as JsonValue;
     },
+    retainedReferences: (kind) => Object.freeze(retainedReferences
+      .filter((entry) => kind === undefined || entry.kind === kind)
+      .map((entry) => immutableJson(entry) as unknown as Lc4DevReplayArtifactReference)),
   });
 }
 

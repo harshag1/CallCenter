@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artifacts";
 import {
   createLc4DevReplayEvidenceStore,
+  type Lc4DevReplayLedgerEvent,
   type Lc4DevReplayEvidenceStore,
 } from "./lc4-development-evidence-retention";
 import type {
@@ -22,6 +23,16 @@ import type {
 } from "./lc4-development-realtime-contract";
 import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-playback";
 import type { Lc4DevGatewayExecutor } from "./lc4-development-gateway-bridge";
+import {
+  LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+  assertLc4DevCallerBranchDecision,
+  lc4DevBranchedOpportunity,
+  type Lc4DevCallerBranchAuthority,
+  type Lc4DevCallerBranchAudioBinding,
+  type Lc4DevCallerBranchMatrixArtifact,
+  type Lc4DevPriorMutationReceipt,
+} from "./lc4-development-caller-branch";
+import type { BenchmarkKernelAttestationSigner } from "./kernel-attestation";
 import type {
   Lc4ListenerPlaybackAuthority,
   Lc4PinnedListenerEvaluator,
@@ -269,6 +280,7 @@ export type Lc4HashChainedLedgerWriter = Readonly<{
   genesis_sha256: string;
   path: string;
   append(event: Lc4DevImmutableLedgerEvent): Promise<void>;
+  events(): readonly Lc4DevReplayLedgerEvent[];
   close(): Promise<void>;
 }>;
 
@@ -291,6 +303,7 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
   let sequence = 0;
   let previous: string | null = null;
   let closed = false;
+  const retainedEvents: Lc4DevReplayLedgerEvent[] = [];
   let queue = Promise.resolve();
 
   const append = async (event: Lc4DevImmutableLedgerEvent): Promise<void> => {
@@ -310,6 +323,7 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
       await handle.sync();
       sequence = event.sequence;
       previous = event.event_sha256;
+      retainedEvents.push(freeze(event) as unknown as Lc4DevReplayLedgerEvent);
     });
     queue = operation.catch(() => undefined);
     return operation;
@@ -319,6 +333,7 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
     genesis_sha256: input.genesis_sha256,
     path,
     append,
+    events: () => Object.freeze(retainedEvents.map((entry) => freeze(entry))),
     close: async () => {
       await queue;
       if (closed) return;
@@ -535,7 +550,15 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   cas_root_dir: string;
   ledger_path: string;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
+  caller_branch: Readonly<{
+    matrix: Lc4DevCallerBranchMatrixArtifact;
+    authority: Lc4DevCallerBranchAuthority;
+    trust: Readonly<{ key_id: string; public_key_pem: string }>;
+    load(binding: Lc4DevCallerBranchAudioBinding): Promise<Uint8Array>;
+  }>;
+  authority_signer: BenchmarkKernelAttestationSigner;
   control: Lc4DevExecutableMechanismControl & Readonly<{
+    callerBranchPriorReceipt(episodeId: string): Lc4DevPriorMutationReceipt;
     snapshot(episodeId: string): Readonly<{
       episode_id: string;
       arm: "native" | "hacc";
@@ -666,6 +689,44 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
           throw new Error("LC4-DEV caller PCM source differs from the prepare-bound audio CAS object");
         }
         return pcm;
+      },
+    }),
+    caller_branch: Object.freeze({
+      matrix: input.caller_branch.matrix,
+      trust: input.caller_branch.trust,
+      select: async ({ episode, canonical_opportunity }: Parameters<Lc4DevLiveRunnerDependencies["caller_branch"]["select"]>[0]) => {
+        const decision = input.caller_branch.authority.decide({
+          episode_id: episode.episode_id,
+          provider: episode.provider,
+          opportunity: canonical_opportunity,
+          prior_receipt: input.control.callerBranchPriorReceipt(episode.episode_id),
+        });
+        assertLc4DevCallerBranchDecision({
+          decision,
+          matrix: input.caller_branch.matrix,
+          trust: input.caller_branch.trust,
+        });
+        const binding = input.caller_branch.matrix.audio_bindings.find((entry) =>
+          entry.provider === episode.provider && entry.prior_outcome === decision.prior_outcome
+        );
+        if (!binding) throw new Error("LC4-DEV caller branch decision has no pre-frozen PCM binding");
+        const pcm = await input.caller_branch.load(binding);
+        if (pcm.byteLength !== decision.pcm_byte_length || sha256Hex(pcm) !== decision.pcm_sha256) {
+          throw new Error("LC4-DEV selected caller branch PCM differs from its signed decision");
+        }
+        const { decision_sha256: claimed, ...signed } = decision;
+        const evidence = await replayEvidence.retainJson({
+          kind: "caller_branch_decision",
+          body: signed as unknown as JsonValue,
+          domain_prefix: LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+          expected_evidence_sha256: claimed,
+        });
+        return Object.freeze({
+          decision,
+          opportunity: lc4DevBranchedOpportunity(canonical_opportunity, decision),
+          pcm,
+          evidence,
+        });
       },
     }),
     retention: Object.freeze({

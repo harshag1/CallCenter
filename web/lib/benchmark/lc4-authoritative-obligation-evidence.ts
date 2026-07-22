@@ -18,6 +18,8 @@ const SOURCE_HEAD_DOMAIN = "hacc/lc4/authoritative-obligation-source-head/v1\n";
 const ARTIFACT_DOMAIN = "hacc/lc4/authoritative-obligation-artifact/v1\n";
 const SIGNATURE_DOMAIN = "hacc/lc4/authoritative-obligation-signature/v1\n";
 const REPLAY_DOMAIN = "hacc/lc4/authoritative-obligation-replay/v1\n";
+const REGISTRY_DOMAIN = "hacc/lc4/authoritative-obligation-registry/v1\n";
+const ASSIGNMENT_DOMAIN = "hacc/lc4/authoritative-obligation-assignment/v1\n";
 
 export const LC4_AUTHORITY_EVIDENCE_VERSION = "lc4-authoritative-obligation-evidence-v1" as const;
 export const LC4_AUTHORITY_VERIFIER_SHA256 = sha256Hex(
@@ -103,6 +105,7 @@ export type Lc4AuthoritativeObligationEpisodeArtifact = Readonly<{
   episode_subject_sha256: string;
   events: readonly Lc4AuthorityEvent[];
   source_heads: Readonly<Record<Lc4AuthoritySource, Lc4AuthoritySourceHead>>;
+  authority_roots: Lc4AuthorityUpstreamRoots;
   artifact_sha256: string;
   signature: Readonly<{
     algorithm: "ed25519";
@@ -110,6 +113,26 @@ export type Lc4AuthoritativeObligationEpisodeArtifact = Readonly<{
     public_key_sha256: string;
     signature_base64: string;
   }>;
+}>;
+
+export type Lc4AuthorityUpstreamRoots = Readonly<{
+  retained_ledger_head_sha256: string;
+  ledger_replay_sha256: string;
+  normalized_event_set_sha256: string;
+  manifest_registry_sha256: string;
+  episode_subject_assignment_sha256: string;
+}>;
+
+export type Lc4AuthorityManifestRegistry = Readonly<{
+  schema_version: 1;
+  registry_type: "lc4_authority_manifest_registry";
+  manifests: readonly Lc4AuthoritativeObligationManifest[];
+  assignments: readonly Readonly<{
+    episode_subject_sha256: string;
+    manifest_sha256: string;
+  }>[];
+  assignment_sha256: string;
+  registry_sha256: string;
 }>;
 
 export type Lc4AuthorityObligationResult = Readonly<{
@@ -348,6 +371,7 @@ export function createLc4AuthoritativeObligationEpisodeArtifact(input: Readonly<
   events: readonly Lc4AuthorityEvent[];
   signer: BenchmarkKernelAttestationSigner;
   completeSources?: Partial<Record<Lc4AuthoritySource, boolean>>;
+  authorityRoots: Lc4AuthorityUpstreamRoots;
 }>): Lc4AuthoritativeObligationEpisodeArtifact {
   assertLc4AuthoritativeObligationManifest(input.manifest);
   sha(input.episodeSubjectSha256, "LC4 authority episode subject");
@@ -355,6 +379,10 @@ export function createLc4AuthoritativeObligationEpisodeArtifact(input: Readonly<
   safeId(input.signer.keyId, "LC4 authority signer key ID");
   sha(input.signer.publicKeySha256, "LC4 authority signer public key hash");
   assertAuthorityEventChain(input.events);
+  for (const [label, value] of Object.entries(input.authorityRoots)) sha(value, `LC4 authority ${label}`);
+  if (input.authorityRoots.normalized_event_set_sha256 !== sha256Hex(canonicalJson(input.events))) {
+    throw new Error("LC4 authority normalized event-set root differs from its events");
+  }
   const sources = ["tool", "worker", "fact", "confirmation", "terminal"] as const;
   const sourceHeads = Object.freeze(Object.fromEntries(sources.map((source) => [
     source,
@@ -368,6 +396,7 @@ export function createLc4AuthoritativeObligationEpisodeArtifact(input: Readonly<
     episode_subject_sha256: input.episodeSubjectSha256,
     events: Object.freeze([...input.events]),
     source_heads: sourceHeads,
+    authority_roots: Object.freeze({ ...input.authorityRoots }),
   });
   const artifactSha256 = sha256Hex(`${ARTIFACT_DOMAIN}${canonicalJson(body)}`);
   return Object.freeze({
@@ -380,6 +409,48 @@ export function createLc4AuthoritativeObligationEpisodeArtifact(input: Readonly<
       signature_base64: input.signer.sign(`${SIGNATURE_DOMAIN}${artifactSha256}`),
     }),
   });
+}
+
+export function createLc4AuthorityManifestRegistry(input: Readonly<{
+  manifests: readonly Lc4AuthoritativeObligationManifest[];
+  assignments: readonly Readonly<{ episode_subject_sha256: string; manifest_sha256: string }>[];
+}>): Lc4AuthorityManifestRegistry {
+  if (input.manifests.length < 1 || input.assignments.length < 1) {
+    throw new Error("LC4 authority registry requires manifests and opaque episode assignments");
+  }
+  for (const manifest of input.manifests) assertLc4AuthoritativeObligationManifest(manifest);
+  const manifestHashes = input.manifests.map((entry) => entry.manifest_sha256);
+  if (new Set(manifestHashes).size !== manifestHashes.length) throw new Error("LC4 authority registry repeats a manifest");
+  const assignments = [...input.assignments]
+    .map((entry) => Object.freeze({
+      episode_subject_sha256: sha(entry.episode_subject_sha256, "LC4 authority assigned episode subject"),
+      manifest_sha256: sha(entry.manifest_sha256, "LC4 authority assigned manifest"),
+    }))
+    .sort((left, right) => left.episode_subject_sha256.localeCompare(right.episode_subject_sha256));
+  if (new Set(assignments.map((entry) => entry.episode_subject_sha256)).size !== assignments.length) {
+    throw new Error("LC4 authority registry repeats an episode subject");
+  }
+  if (assignments.some((entry) => !manifestHashes.includes(entry.manifest_sha256))) {
+    throw new Error("LC4 authority assignment references an unknown manifest");
+  }
+  const manifests = Object.freeze([...input.manifests].sort((left, right) => left.manifest_sha256.localeCompare(right.manifest_sha256)));
+  const assignmentSha256 = sha256Hex(`${ASSIGNMENT_DOMAIN}${canonicalJson(assignments)}`);
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    registry_type: "lc4_authority_manifest_registry" as const,
+    manifests,
+    assignments: Object.freeze(assignments),
+    assignment_sha256: assignmentSha256,
+  });
+  return Object.freeze({ ...body, registry_sha256: sha256Hex(`${REGISTRY_DOMAIN}${canonicalJson(body)}`) });
+}
+
+function assertLc4AuthorityManifestRegistry(registry: Lc4AuthorityManifestRegistry): void {
+  const rebuilt = createLc4AuthorityManifestRegistry({ manifests: registry.manifests, assignments: registry.assignments });
+  if (registry.schema_version !== 1 || registry.registry_type !== "lc4_authority_manifest_registry"
+    || registry.assignment_sha256 !== rebuilt.assignment_sha256 || registry.registry_sha256 !== rebuilt.registry_sha256) {
+    throw new Error("LC4 authority registry hash or header mismatch");
+  }
 }
 
 function assertLc4AuthoritativeObligationManifest(manifest: Lc4AuthoritativeObligationManifest): void {
@@ -444,6 +515,8 @@ export function replayLc4AuthoritativeObligationEvidence(input: Readonly<{
   manifest: Lc4AuthoritativeObligationManifest;
   artifact: unknown;
   trust: BenchmarkKernelAttestationTrust;
+  expectedAuthorityRoots?: Partial<Lc4AuthorityUpstreamRoots>;
+  expectedEpisodeSubjectSha256?: string;
 }>): Lc4AuthorityEvidenceReplay {
   if (input.artifact === null || input.artifact === undefined) {
     return invalidReplay(["authority_evidence_missing"], true);
@@ -458,7 +531,19 @@ export function replayLc4AuthoritativeObligationEvidence(input: Readonly<{
       || artifact.evidence_version !== LC4_AUTHORITY_EVIDENCE_VERSION) throw new Error("authority artifact header mismatch");
     if (artifact.manifest_sha256 !== input.manifest.manifest_sha256) throw new Error("authority manifest binding mismatch");
     sha(artifact.episode_subject_sha256, "authority episode subject");
+    if (input.expectedEpisodeSubjectSha256 !== undefined
+      && artifact.episode_subject_sha256 !== input.expectedEpisodeSubjectSha256) throw new Error("authority episode subject assignment mismatch");
     assertAuthorityEventChain(artifact.events);
+    for (const [label, value] of Object.entries(artifact.authority_roots ?? {})) sha(value, `authority ${label}`);
+    if (!artifact.authority_roots
+      || artifact.authority_roots.normalized_event_set_sha256 !== sha256Hex(canonicalJson(artifact.events))) {
+      throw new Error("authority normalized event-set root mismatch");
+    }
+    for (const [label, expected] of Object.entries(input.expectedAuthorityRoots ?? {})) {
+      if (artifact.authority_roots[label as keyof Lc4AuthorityUpstreamRoots] !== expected) {
+        throw new Error(`authority upstream ${label} mismatch`);
+      }
+    }
     for (const source of ["tool", "worker", "fact", "confirmation", "terminal"] as const) {
       const expected = sourceHead(source, artifact.events, artifact.source_heads[source]?.complete === true);
       const actual = artifact.source_heads[source];
@@ -576,11 +661,51 @@ export function summarizeLc4AuthoritativeObligationEvidence(
 
 /** Adapter for the blinded LC4 report replayer contract. Invalid evidence blocks scoring. */
 export function createLc4AuthoritativeObligationEvidenceReplayer(input: Readonly<{
-  manifest: Lc4AuthoritativeObligationManifest;
+  manifest?: Lc4AuthoritativeObligationManifest;
+  registry?: Lc4AuthorityManifestRegistry;
   trust: BenchmarkKernelAttestationTrust;
 }>): Lc4EvidenceReplayer<"authority"> {
   return (artifact: JsonValue) => {
-    const replay = replayLc4AuthoritativeObligationEvidence({ manifest: input.manifest, artifact, trust: input.trust });
+    let manifest: Lc4AuthoritativeObligationManifest;
+    let expectedSubject: string | undefined;
+    try {
+      if (input.registry) {
+        assertLc4AuthorityManifestRegistry(input.registry);
+        if (typeof artifact !== "object" || artifact === null || Array.isArray(artifact)) throw new Error("authority artifact is not an object");
+        const candidate = artifact as unknown as Lc4AuthoritativeObligationEpisodeArtifact;
+        manifest = input.registry.manifests.find((entry) => entry.manifest_sha256 === candidate.manifest_sha256)!;
+        if (!manifest) throw new Error("authority artifact references an unregistered manifest");
+        const assignment = input.registry.assignments.find((entry) => entry.episode_subject_sha256 === candidate.episode_subject_sha256);
+        if (!assignment || assignment.manifest_sha256 !== manifest.manifest_sha256) throw new Error("authority artifact has no registered episode assignment");
+        if (candidate.authority_roots?.manifest_registry_sha256 !== input.registry.registry_sha256
+          || candidate.authority_roots?.episode_subject_assignment_sha256 !== input.registry.assignment_sha256) {
+          throw new Error("authority artifact registry roots mismatch");
+        }
+        expectedSubject = assignment.episode_subject_sha256;
+      } else if (input.manifest) manifest = input.manifest;
+      else throw new Error("authority evidence replayer requires a manifest registry");
+    } catch (error) {
+      const replay = invalidReplay([error instanceof Error ? error.message : String(error)], false);
+      return Object.freeze({
+        verifierSha256: LC4_AUTHORITY_VERIFIER_SHA256,
+        replaySha256: replay.replay_sha256,
+        valid: false,
+        errors: replay.errors,
+        derivation: Object.freeze({
+          domain: "authority" as const,
+          usefulConjuncts: Object.freeze({ terminal_world: false, latest_revision_authority: false, external_effect_integrity: false, authoritative_tool_world_obligations: false }),
+          authorityVerdict: "evidence_invalid" as const,
+          criticalExternalEffectBreach: false,
+          terminalEvidence: Object.freeze({ scenario_invalid: false, system_failure: false, harness_deadlock: false, mission_complete: false, absorbing_model_policy_attempt: false }),
+        }),
+      });
+    }
+    const replay = replayLc4AuthoritativeObligationEvidence({
+      manifest,
+      artifact,
+      trust: input.trust,
+      ...(expectedSubject ? { expectedEpisodeSubjectSha256: expectedSubject } : {}),
+    });
     const pass = replay.verdict === "pass";
     return Object.freeze({
       verifierSha256: LC4_AUTHORITY_VERIFIER_SHA256,
