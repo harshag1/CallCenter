@@ -52,7 +52,7 @@ export type Lc4DevAudioToolchain = Readonly<{
 }>;
 
 export type Lc4DevAudioRendererIdentity = Readonly<{
-  renderer: "macos-say-ffmpeg-loudnorm-v1" | "injected-test-renderer";
+  renderer: "macos-say-ffmpeg-loudnorm-v2" | "injected-test-renderer";
   identity_sha256: string;
   toolchain: Lc4DevAudioToolchain | null;
   voice: typeof LC4_DEV_PINNED_VOICE;
@@ -360,11 +360,17 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
       })),
     ];
     for (const item of sources) {
-      const rendered = await input.renderer.render({
-        text: item.text,
-        sourceTextSha256: item.sourceTextSha256,
-        workspace,
-      });
+      let rendered: Awaited<ReturnType<Lc4DevAudioRenderer["render"]>>;
+      try {
+        rendered = await input.renderer.render({
+          text: item.text,
+          sourceTextSha256: item.sourceTextSha256,
+          workspace,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "unknown renderer failure";
+        throw new Error(`LC4-DEV audio rendering failed for ${item.kind} source ${item.id} (${item.sourceTextSha256}): ${reason}`);
+      }
       const master = inspectPcm(rendered.master48k, 48_000);
       const pcm16k = inspectPcm(rendered.pcm16k, 16_000);
       const pcm24k = inspectPcm(rendered.pcm24k, 24_000);
@@ -580,8 +586,12 @@ function runCommand(input: Readonly<{
     child.stderr.on("data", collect(stderr));
     child.on("error", () => finish(new Error("LC4-DEV local audio command could not start")));
     child.on("close", (code: number | null) => {
-      if (code !== 0 || byteCount > MAX_COMMAND_OUTPUT_BYTES) finish(new Error("LC4-DEV local audio command failed"));
-      else finish(undefined, { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+      if (code !== 0 || byteCount > MAX_COMMAND_OUTPUT_BYTES) {
+        const stderrBytes = Buffer.concat(stderr);
+        const executable = input.command.endsWith("/say") ? "say" : input.command.endsWith("/ffmpeg") ? "ffmpeg" : "unknown";
+        const diagnostic = stderrBytes.toString("utf8").replace(/[\r\n]+/gu, " ").slice(0, 256);
+        finish(new Error(`LC4-DEV local audio command failed (executable=${executable}, exit=${code ?? "signal"}, output_bytes=${byteCount}, stderr_sha256=${sha256Hex(stderrBytes)}, diagnostic=${JSON.stringify(diagnostic)})`));
+      } else finish(undefined, { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
     });
     child.stdin.end(input.stdin);
   });
@@ -621,7 +631,7 @@ export async function createPinnedMacOsLc4DevAudioRenderer(toolchain: Lc4DevAudi
     normalization: "ffmpeg-loudnorm-I-20-LRA-7-TP-3" as const,
   };
   const identity: Lc4DevAudioRendererIdentity = Object.freeze({
-    renderer: "macos-say-ffmpeg-loudnorm-v1",
+    renderer: "macos-say-ffmpeg-loudnorm-v2",
     identity_sha256: sha256Hex(`${TOOLCHAIN_DOMAIN}${canonicalJson(identityBody)}`),
     ...identityBody,
   });
@@ -653,6 +663,7 @@ export async function createPinnedMacOsLc4DevAudioRenderer(toolchain: Lc4DevAudi
       if (!expectedHashes.includes(sourceTextSha256)) throw new Error("LC4-DEV source text commitment mismatch");
       const stem = join(workspace, sourceTextSha256);
       const aiff = `${stem}.aiff`;
+      const decoded = `${stem}.decoded.48000.pcm`;
       const master = `${stem}.48000.pcm`;
       const pcm16k = `${stem}.16000.pcm`;
       const pcm24k = `${stem}.24000.pcm`;
@@ -671,8 +682,17 @@ export async function createPinnedMacOsLc4DevAudioRenderer(toolchain: Lc4DevAudi
           command: toolchain.ffmpeg_path,
           args: [
             "-nostdin", "-loglevel", "error", "-nostats", "-n", "-i", aiff,
-            "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact",
-            "-af", "loudnorm=I=-20:LRA=7:TP=-3,aresample=48000:resampler=soxr:precision=28:dither_method=none",
+            "-map_metadata", "-1",
+            "-af", "aresample=48000:resampler=soxr:precision=28:dither_method=none",
+            "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "48000", decoded,
+          ],
+        });
+        await runCommand({
+          command: toolchain.ffmpeg_path,
+          args: [
+            "-nostdin", "-loglevel", "error", "-nostats", "-n",
+            "-f", "s16le", "-ar", "48000", "-ac", "1", "-i", decoded,
+            "-af", "loudnorm=I=-20:LRA=7:TP=-3",
             "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "48000", master,
           ],
         });
@@ -694,7 +714,7 @@ export async function createPinnedMacOsLc4DevAudioRenderer(toolchain: Lc4DevAudi
           pcm24k: new Uint8Array(await readFile(pcm24k)),
         });
       } finally {
-        await Promise.all([aiff, master, pcm16k, pcm24k].map((path) => rm(path, { force: true })));
+        await Promise.all([aiff, decoded, master, pcm16k, pcm24k].map((path) => rm(path, { force: true })));
       }
     },
   });
