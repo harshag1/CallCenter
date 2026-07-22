@@ -1,5 +1,10 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
 import { createLc4PowerPlanArtifact } from "./lc4-power-plan";
+import type { Lc4GeneratedHeldoutTemplate } from "./lc4-heldout-commitment";
+import {
+  assertLc4GenericScenarioPayload,
+  type Lc4GenericScenarioPayload,
+} from "./lc4-heldout-generator";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   assertLc4ProviderProfileManifest,
@@ -21,6 +26,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const SCHEDULE_DOMAIN = "harshas-amazing-call-center/lc4-production-schedule-shape/v1\n";
 const EPISODE_DOMAIN = "harshas-amazing-call-center/lc4-production-episode-manifest/v1\n";
 const QUALIFICATION_DOMAIN = "harshas-amazing-call-center/lc4-production-qualification-gate/v1\n";
+const GENERATOR_JOIN_CONTRACT_DOMAIN = "harshas-amazing-call-center/lc4-generator-schedule-join-contract/v1\n";
+const GENERATOR_JOIN_DOMAIN = "harshas-amazing-call-center/lc4-generator-schedule-join/v1\n";
 
 export type Lc4Arm = "native" | "hacc";
 
@@ -92,6 +99,7 @@ export type Lc4ProductionScheduleShape = Readonly<{
   logical_segments_per_episode: 3;
   profile_manifest_sha256: string;
   power_plan_sha256: string;
+  generator_join_contract_sha256: string;
   scheduling_ceiling_micro_usd: 900_000_000;
   maximum_scheduled_reservations_micro_usd: number;
   pair_shapes: readonly Lc4PairShape[];
@@ -150,6 +158,7 @@ function profileFor(provider: LiveStsProvider): Lc4ProviderExecutionProfile {
 
 function scheduleBody() {
   const power = createLc4PowerPlanArtifact();
+  const generatorJoinContract = lc4GeneratorJoinContract(power);
   const assignments = [...power.randomization.assignments].sort((left, right) => {
     const template = left.template_id.localeCompare(right.template_id);
     if (template !== 0) return template;
@@ -208,11 +217,199 @@ function scheduleBody() {
     logical_segments_per_episode: LC4_SEGMENTS_PER_EPISODE,
     profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     power_plan_sha256: power.artifact_sha256,
+    generator_join_contract_sha256: generatorJoinContract.contract_sha256,
     scheduling_ceiling_micro_usd: LC4_SCHEDULING_CEILING_MICRO_USD,
     maximum_scheduled_reservations_micro_usd: maximumReservations,
     pair_shapes: Object.freeze(pairShapes),
     episode_shapes: Object.freeze(episodeShapes),
   });
+}
+
+type Lc4PowerPlan = ReturnType<typeof createLc4PowerPlanArtifact>;
+
+type Lc4ExpectedTemplateVocabulary = Readonly<{
+  template_id: string;
+  family_slot: number;
+  structural_variant_slot: number;
+  family: string;
+  structural_variant: string;
+  tts_voice_slot: string;
+  pair_ids: readonly string[];
+}>;
+
+function expectedTemplateVocabulary(power: Lc4PowerPlan): readonly Lc4ExpectedTemplateVocabulary[] {
+  const byTemplate = new Map<string, Lc4ExpectedTemplateVocabulary>();
+  for (const assignment of power.randomization.assignments) {
+    const familySlot = power.schedule.families.indexOf(assignment.family) + 1;
+    const variantSlot = power.schedule.structural_variants.indexOf(assignment.structural_variant) + 1;
+    if (familySlot < 1 || variantSlot < 1) throw new Error("LC4 power assignment uses vocabulary outside its frozen schedule");
+    const canonicalTemplateId = `lc4-template-${String((familySlot - 1) * 4 + variantSlot).padStart(2, "0")}`;
+    if (assignment.template_id !== canonicalTemplateId) throw new Error("LC4 power-plan template ID differs from its family/variant slot");
+    const existing = byTemplate.get(assignment.template_id);
+    if (!existing) {
+      byTemplate.set(assignment.template_id, Object.freeze({
+        template_id: assignment.template_id,
+        family_slot: familySlot,
+        structural_variant_slot: variantSlot,
+        family: assignment.family,
+        structural_variant: assignment.structural_variant,
+        tts_voice_slot: assignment.tts_voice_slot,
+        pair_ids: Object.freeze([assignment.pair_id]),
+      }));
+      continue;
+    }
+    if (
+      existing.family_slot !== familySlot
+      || existing.structural_variant_slot !== variantSlot
+      || existing.family !== assignment.family
+      || existing.structural_variant !== assignment.structural_variant
+      || existing.tts_voice_slot !== assignment.tts_voice_slot
+      || existing.pair_ids.includes(assignment.pair_id)
+    ) throw new Error("LC4 power-plan provider assignments disagree on template vocabulary");
+    byTemplate.set(assignment.template_id, Object.freeze({
+      ...existing,
+      pair_ids: Object.freeze([...existing.pair_ids, assignment.pair_id]),
+    }));
+  }
+  const expected = [...byTemplate.values()]
+    .map((entry) => Object.freeze({ ...entry, pair_ids: Object.freeze([...entry.pair_ids].sort()) }))
+    .sort((left, right) => left.template_id.localeCompare(right.template_id));
+  if (expected.length !== 24 || expected.some((entry) => entry.pair_ids.length !== 3)) {
+    throw new Error("LC4 power plan does not define an exact 24-template/three-provider vocabulary");
+  }
+  return Object.freeze(expected);
+}
+
+function lc4GeneratorJoinContract(power: Lc4PowerPlan) {
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    protocol_id: LC4_RUNNER_PROTOCOL,
+    power_plan_sha256: power.artifact_sha256,
+    expected_templates: expectedTemplateVocabulary(power),
+  });
+  return Object.freeze({
+    ...body,
+    contract_sha256: sha256Hex(`${GENERATOR_JOIN_CONTRACT_DOMAIN}${canonicalJson(body)}`),
+  });
+}
+
+export type Lc4HeldoutScheduleJoin = Readonly<{
+  schema_version: 1;
+  protocol_id: typeof LC4_RUNNER_PROTOCOL;
+  power_plan_sha256: string;
+  join_contract_sha256: string;
+  template_count: 24;
+  bindings: readonly Readonly<{
+    template_id: string;
+    family_slot: number;
+    structural_variant_slot: number;
+    family: string;
+    structural_variant: string;
+    tts_voice_slot: string;
+    payload_content_sha256: string;
+    canonical_caller_source_manifest_sha256: string;
+    canonical_stage_manifest_sha256: string;
+    pair_ids: readonly string[];
+    binding_sha256: string;
+  }>[];
+  join_sha256: string;
+}>;
+
+/**
+ * Join a custody-supplied generated corpus to the independently committed
+ * power-plan allocation. The function neither generates nor unseals a corpus;
+ * it accepts an already-authorized typed boundary and fails on every missing,
+ * duplicate, extra, renamed, re-slotted, or semantically drifted template.
+ */
+export function joinLc4HeldoutTemplatesToSchedule(
+  templates: readonly Lc4GeneratedHeldoutTemplate[],
+): Lc4HeldoutScheduleJoin {
+  const power = createLc4PowerPlanArtifact();
+  const contract = lc4GeneratorJoinContract(power);
+  if (templates.length !== 24) throw new Error("LC4 held-out schedule join requires exactly 24 templates");
+  const byId = new Map<string, Lc4GeneratedHeldoutTemplate>();
+  for (const template of templates) {
+    if (byId.has(template.template_id)) throw new Error(`LC4 held-out schedule join contains duplicate template ${template.template_id}`);
+    byId.set(template.template_id, template);
+  }
+  const expectedIds = contract.expected_templates.map((template) => template.template_id);
+  const actualIds = [...byId.keys()].sort();
+  if (canonicalJson(actualIds) !== canonicalJson(expectedIds)) {
+    throw new Error("LC4 held-out generator template IDs are not an exact bijection with the power plan");
+  }
+  const bindings = contract.expected_templates.map((expected) => {
+    const generated = byId.get(expected.template_id)!;
+    assertLc4GenericScenarioPayload(generated.payload);
+    const payload: Lc4GenericScenarioPayload = generated.payload;
+    if (
+      generated.family_slot !== expected.family_slot
+      || generated.structural_variant_slot !== expected.structural_variant_slot
+      || payload.template_id !== expected.template_id
+      || payload.tts_voice_slot !== expected.tts_voice_slot
+      || payload.family !== expected.family
+      || payload.structural_variant !== expected.structural_variant
+    ) {
+      throw new Error(`LC4 held-out generator vocabulary drifted for ${expected.template_id}`);
+    }
+    const body = Object.freeze({
+      template_id: expected.template_id,
+      family_slot: expected.family_slot,
+      structural_variant_slot: expected.structural_variant_slot,
+      family: expected.family,
+      structural_variant: expected.structural_variant,
+      tts_voice_slot: expected.tts_voice_slot,
+      payload_content_sha256: payload.content_sha256,
+      canonical_caller_source_manifest_sha256: sha256Hex(`hacc-lc4/canonical-caller-source-manifest/v1\n${canonicalJson(
+        payload.opportunities.map((opportunity) => ({
+          opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
+          act: opportunity.act,
+          goal_id: opportunity.goal_id,
+          stage_id: opportunity.stage_id,
+          source_id: opportunity.canonical_caller_utterance.id,
+          source_text_sha256: opportunity.canonical_caller_utterance.source_text_sha256,
+          fact_bindings: opportunity.canonical_caller_utterance.fact_bindings.map((binding) => ({
+            fact_key: binding.fact_key,
+            fact_id: binding.fact_id,
+            fact_version: binding.fact_version,
+            binding_role: binding.binding_role,
+            expected_value_sha256: binding.expected_value_sha256,
+          })),
+          registrations: opportunity.registrations,
+        })),
+      )}`),
+      canonical_stage_manifest_sha256: sha256Hex(`hacc-lc4/canonical-stage-manifest/v1\n${canonicalJson({
+        opportunities: payload.opportunities.map((opportunity) => ({
+          opportunity_id: opportunity.id,
+          index: opportunity.index,
+          stage_id: opportunity.stage_id,
+        })),
+        checkpoints: payload.flow_checkpoints.map((checkpoint) => ({
+          checkpoint_id: checkpoint.id,
+          opportunity: checkpoint.opportunity,
+          goal_id: checkpoint.goal_id,
+        })),
+        blockers: payload.normative_blockers.map((blocker) => ({
+          stage_id: blocker.stage_id,
+          deadline_opportunity: blocker.deadline_opportunity,
+        })),
+      })}`),
+      pair_ids: expected.pair_ids,
+    });
+    return Object.freeze({
+      ...body,
+      binding_sha256: sha256Hex(`hacc-lc4/generator-schedule-template-binding/v1\n${canonicalJson(body)}`),
+    });
+  });
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    protocol_id: LC4_RUNNER_PROTOCOL,
+    power_plan_sha256: power.artifact_sha256,
+    join_contract_sha256: contract.contract_sha256,
+    template_count: 24 as const,
+    bindings: Object.freeze(bindings),
+  });
+  return deepFreeze({ ...body, join_sha256: sha256Hex(`${GENERATOR_JOIN_DOMAIN}${canonicalJson(body)}`) });
 }
 
 export function compileLc4ProductionScheduleShape(): Lc4ProductionScheduleShape {
@@ -332,6 +529,7 @@ export type Lc4EpisodeManifest = Readonly<{
   caller_fixture_manifest_sha256: string;
   condition_suite_sha256: string;
   parity_manifest_sha256: string;
+  generator_schedule_join_sha256: string;
   qualification: Lc4QualificationGateReceipt;
   budget_reservation: Lc4BudgetReservationReceipt;
   opportunities: readonly Lc4OpportunityBinding[];
@@ -353,6 +551,7 @@ export function createLc4EpisodeManifest(input: Readonly<{
   caller_fixture_manifest_sha256: string;
   condition_suite_sha256: string;
   parity_manifest_sha256: string;
+  generator_schedule_join_sha256?: string;
   qualification: Lc4QualificationGateReceipt;
   budget_reservation: Lc4BudgetReservationReceipt;
   opportunities: readonly Lc4OpportunityBinding[];
@@ -361,6 +560,8 @@ export function createLc4EpisodeManifest(input: Readonly<{
   if (!episode) throw new Error("episode is absent from the frozen LC4 schedule");
   if (input.schedule.provider_calls_authorized !== false) throw new Error("LC4 foundation cannot authorize provider execution");
   if (!/^[a-f0-9]{40}$/.test(input.source_commit)) throw new Error("episode source commit must be a full Git SHA-1");
+  const generatorScheduleJoinSha256 = input.generator_schedule_join_sha256
+    ?? input.schedule.generator_join_contract_sha256;
   for (const [label, value] of Object.entries({
     source_tree_sha256: input.source_tree_sha256,
     preregistration_sha256: input.preregistration_sha256,
@@ -370,6 +571,7 @@ export function createLc4EpisodeManifest(input: Readonly<{
     caller_fixture_manifest_sha256: input.caller_fixture_manifest_sha256,
     condition_suite_sha256: input.condition_suite_sha256,
     parity_manifest_sha256: input.parity_manifest_sha256,
+    generator_schedule_join_sha256: generatorScheduleJoinSha256,
   })) requireHash(value, label);
   if (
     input.budget_reservation.status !== "reserved"
@@ -415,6 +617,7 @@ export function createLc4EpisodeManifest(input: Readonly<{
     caller_fixture_manifest_sha256: input.caller_fixture_manifest_sha256,
     condition_suite_sha256: input.condition_suite_sha256,
     parity_manifest_sha256: input.parity_manifest_sha256,
+    generator_schedule_join_sha256: generatorScheduleJoinSha256,
     qualification: input.qualification,
     budget_reservation: input.budget_reservation,
     opportunities: Object.freeze([...input.opportunities]),
@@ -521,6 +724,7 @@ export async function executeLc4ProviderFreeEpisode(input: Readonly<{
     caller_fixture_manifest_sha256: input.manifest.caller_fixture_manifest_sha256,
     condition_suite_sha256: input.manifest.condition_suite_sha256,
     parity_manifest_sha256: input.manifest.parity_manifest_sha256,
+    generator_schedule_join_sha256: input.manifest.generator_schedule_join_sha256,
     qualification: input.manifest.qualification,
     budget_reservation: input.manifest.budget_reservation,
     opportunities: input.manifest.opportunities,

@@ -20,6 +20,9 @@ const CAPTURE_CHUNK_DOMAIN = "hacc/lc4/listener-output-chunk-receipt/v1\n";
 const CAPTURE_DOMAIN = "hacc/lc4/listener-output-capture/v1\n";
 const CHUNK_SEQUENCE_DOMAIN = "hacc/lc4/listener-output-chunk-sequence/v1\n";
 const PLAYBACK_DOMAIN = "hacc/lc4/listener-playback-receipt/v1\n";
+const SEMANTIC_OPPORTUNITY_DOMAIN = "hacc/lc4/listener-semantic-opportunity/v1\n";
+const SEMANTIC_REGISTRY_DOMAIN = "hacc/lc4/listener-semantic-registry/v1\n";
+const SEMANTIC_REGISTRY_MANIFEST_DOMAIN = "hacc/lc4/listener-semantic-registry-manifest/v1\n";
 const SEMANTIC_PLAN_DOMAIN = "hacc/lc4/listener-semantic-plan/v1\n";
 const SEMANTIC_REPLAY_DOMAIN = "hacc/lc4/listener-semantic-replay/v1\n";
 const RECORD_DOMAIN = "hacc/lc4/listener-evidence-record/v1\n";
@@ -138,13 +141,41 @@ export type Lc4ListenerSemanticCriterion = Readonly<{
 
 export type Lc4ListenerSemanticPlan = Readonly<{
   schema_version: 1;
+  template_id: string;
+  protocol_sha256: string;
+  schedule_sha256: string;
+  registry_sha256: string;
+  registry_manifest_sha256: string;
+  opportunities: readonly Readonly<{
+    opportunity_id: string;
+    criteria: readonly Lc4ListenerSemanticCriterion[];
+    criterion_plan_sha256: string;
+  }>[];
+  plan_sha256: string;
+}>;
+
+export type Lc4FrozenListenerSemanticRegistry = Readonly<{
+  schema_version: 1;
+  template_id: string;
   protocol_sha256: string;
   schedule_sha256: string;
   opportunities: readonly Readonly<{
     opportunity_id: string;
     criteria: readonly Lc4ListenerSemanticCriterion[];
+    criterion_plan_sha256: string;
   }>[];
-  plan_sha256: string;
+  registry_sha256: string;
+}>;
+
+export type Lc4FrozenListenerSemanticRegistryManifest = Readonly<{
+  schema_version: 1;
+  protocol_sha256: string;
+  entries: readonly Readonly<{
+    template_id: string;
+    schedule_sha256: string;
+    registry_sha256: string;
+  }>[];
+  manifest_sha256: string;
 }>;
 
 export type Lc4ListenerSemanticReplay = Readonly<{
@@ -179,6 +210,7 @@ export type Lc4ListenerDisposition =
 export type Lc4ListenerEvidenceRecord = Readonly<{
   schema_version: 1;
   opportunity_id: string;
+  criterion_plan_sha256: string;
   turn: number;
   response_id: string | null;
   disposition: Lc4ListenerDisposition;
@@ -197,9 +229,12 @@ export type Lc4ListenerEvidenceArtifact = Readonly<{
   schema_version: 1;
   evidence_version: typeof LC4_LISTENER_EVIDENCE_VERSION;
   run_id: string;
+  template_id: string;
   protocol_sha256: string;
   schedule_sha256: string;
   semantic_plan_sha256: string;
+  semantic_registry_sha256: string;
+  semantic_registry_manifest_sha256: string;
   asr_contract_sha256: string;
   calibration_sha256: string;
   records: readonly Lc4ListenerEvidenceRecord[];
@@ -525,27 +560,45 @@ function semanticPlanBody(plan: Lc4ListenerSemanticPlan) {
   return body;
 }
 
-export function createLc4ListenerSemanticPlan(input: Readonly<{
-  protocolSha256: string;
-  scheduleSha256: string;
-  opportunities: Lc4ListenerSemanticPlan["opportunities"];
-}>): Lc4ListenerSemanticPlan {
-  sha(input.protocolSha256, "LC4 semantic protocol hash");
-  sha(input.scheduleSha256, "LC4 semantic schedule hash");
+function semanticRegistryBody(registry: Lc4FrozenListenerSemanticRegistry) {
+  const body: Record<string, unknown> = { ...registry };
+  delete body.registry_sha256;
+  return body;
+}
+
+function semanticOpportunityHash(input: Readonly<{
+  templateId: string;
+  opportunityId: string;
+  criteria: readonly Lc4ListenerSemanticCriterion[];
+}>): string {
+  return hash(SEMANTIC_OPPORTUNITY_DOMAIN, {
+    template_id: input.templateId,
+    opportunity_id: input.opportunityId,
+    criteria: input.criteria,
+  });
+}
+
+function normalizeSemanticOpportunities(input: Readonly<{
+  templateId: string;
+  opportunities: readonly Readonly<{
+    opportunity_id: string;
+    criteria: readonly Lc4ListenerSemanticCriterion[];
+  }>[];
+}>): Lc4FrozenListenerSemanticRegistry["opportunities"] {
   if (input.opportunities.length < 1 || input.opportunities.length > 100_000) {
-    throw new Error("LC4 semantic plan requires opportunities");
+    throw new Error("LC4 semantic registry requires opportunities");
   }
   const opportunityIds = new Set<string>();
-  const opportunities = input.opportunities.map((opportunity) => {
+  return Object.freeze(input.opportunities.map((opportunity) => {
     safeId(opportunity.opportunity_id, "LC4 semantic opportunity ID");
-    if (opportunityIds.has(opportunity.opportunity_id)) throw new Error("LC4 semantic plan repeats an opportunity");
+    if (opportunityIds.has(opportunity.opportunity_id)) throw new Error("LC4 semantic registry repeats an opportunity");
     opportunityIds.add(opportunity.opportunity_id);
     const criterionIds = new Set<string>();
     const blockerPrecedence = new Set<number>();
     if (opportunity.criteria.length > 128) throw new Error("LC4 semantic opportunity exceeds 128 criteria");
-    const criteria = opportunity.criteria.map((criterion: Lc4ListenerSemanticCriterion) => {
+    const criteria = Object.freeze(opportunity.criteria.map((criterion: Lc4ListenerSemanticCriterion) => {
       safeId(criterion.criterion_id, "LC4 semantic criterion ID");
-      if (criterionIds.has(criterion.criterion_id)) throw new Error("LC4 semantic plan repeats a criterion");
+      if (criterionIds.has(criterion.criterion_id)) throw new Error("LC4 semantic registry repeats a criterion");
       criterionIds.add(criterion.criterion_id);
       if (!SEMANTIC_OPERATORS.has(criterion.operator)) throw new Error("LC4 semantic criterion operator is invalid");
       if (!Array.isArray(criterion.phrases) || criterion.phrases.length < 1
@@ -557,18 +610,146 @@ export function createLc4ListenerSemanticPlan(input: Readonly<{
       if (criterion.crp_blocker) {
         if (!CRP_BLOCKERS.has(criterion.crp_blocker.code)) throw new Error("LC4 semantic criterion has an invalid CRP blocker");
         positiveInteger(criterion.crp_blocker.precedence, "LC4 CRP blocker precedence");
-        if (blockerPrecedence.has(criterion.crp_blocker.precedence)) throw new Error("LC4 semantic plan repeats CRP precedence");
+        if (blockerPrecedence.has(criterion.crp_blocker.precedence)) throw new Error("LC4 semantic registry repeats CRP precedence");
         blockerPrecedence.add(criterion.crp_blocker.precedence);
       }
       return Object.freeze({ ...criterion, phrases: Object.freeze([...criterion.phrases]) });
+    }));
+    return Object.freeze({
+      opportunity_id: opportunity.opportunity_id,
+      criteria,
+      criterion_plan_sha256: semanticOpportunityHash({
+        templateId: input.templateId,
+        opportunityId: opportunity.opportunity_id,
+        criteria,
+      }),
     });
-    return Object.freeze({ opportunity_id: opportunity.opportunity_id, criteria: Object.freeze(criteria) });
-  });
+  }));
+}
+
+/** Called only by the deterministic generator before the template is sealed. */
+export function createLc4FrozenListenerSemanticRegistry(input: Readonly<{
+  templateId: string;
+  protocolSha256: string;
+  scheduleSha256: string;
+  opportunities: readonly Readonly<{
+    opportunity_id: string;
+    criteria: readonly Lc4ListenerSemanticCriterion[];
+  }>[];
+}>): Lc4FrozenListenerSemanticRegistry {
+  const templateId = safeId(input.templateId, "LC4 semantic template ID");
+  sha(input.protocolSha256, "LC4 semantic protocol hash");
+  sha(input.scheduleSha256, "LC4 semantic schedule hash");
+  const opportunities = normalizeSemanticOpportunities({ templateId, opportunities: input.opportunities });
   const body = Object.freeze({
     schema_version: 1 as const,
+    template_id: templateId,
     protocol_sha256: input.protocolSha256,
     schedule_sha256: input.scheduleSha256,
-    opportunities: Object.freeze(opportunities),
+    opportunities,
+  });
+  return Object.freeze({ ...body, registry_sha256: hash(SEMANTIC_REGISTRY_DOMAIN, body) });
+}
+
+function semanticRegistryManifestBody(manifest: Lc4FrozenListenerSemanticRegistryManifest) {
+  const body: Record<string, unknown> = { ...manifest };
+  delete body.manifest_sha256;
+  return body;
+}
+
+function assertFrozenSemanticRegistryExact(registry: Lc4FrozenListenerSemanticRegistry): void {
+  if (registry.schema_version !== 1) throw new Error("LC4 frozen semantic registry schema mismatch");
+  const templateId = safeId(registry.template_id, "LC4 frozen semantic registry template ID");
+  sha(registry.protocol_sha256, "LC4 frozen semantic registry protocol hash");
+  sha(registry.schedule_sha256, "LC4 frozen semantic registry schedule hash");
+  const normalized = normalizeSemanticOpportunities({
+    templateId,
+    opportunities: registry.opportunities,
+  });
+  if (canonicalJson(normalized) !== canonicalJson(registry.opportunities)) {
+    throw new Error("LC4 frozen semantic registry contains dynamic or invalid criteria");
+  }
+  if (registry.registry_sha256 !== hash(SEMANTIC_REGISTRY_DOMAIN, semanticRegistryBody(registry))) {
+    throw new Error("LC4 frozen semantic registry hash mismatch");
+  }
+}
+
+function assertFrozenSemanticRegistryManifestExact(manifest: Lc4FrozenListenerSemanticRegistryManifest): void {
+  if (manifest.schema_version !== 1 || manifest.entries.length < 1 || manifest.entries.length > 10_000) {
+    throw new Error("LC4 frozen semantic registry manifest schema or bounds mismatch");
+  }
+  sha(manifest.protocol_sha256, "LC4 frozen semantic registry manifest protocol hash");
+  const templateIds = new Set<string>();
+  for (const entry of manifest.entries) {
+    safeId(entry.template_id, "LC4 frozen semantic registry manifest template ID");
+    sha(entry.schedule_sha256, "LC4 frozen semantic registry manifest schedule hash");
+    sha(entry.registry_sha256, "LC4 frozen semantic registry manifest registry hash");
+    if (templateIds.has(entry.template_id)) throw new Error("LC4 frozen semantic registry manifest repeats a template");
+    templateIds.add(entry.template_id);
+  }
+  const sorted = [...manifest.entries].sort((left, right) => left.template_id.localeCompare(right.template_id));
+  if (canonicalJson(sorted) !== canonicalJson(manifest.entries)) {
+    throw new Error("LC4 frozen semantic registry manifest entries are not canonical");
+  }
+  if (manifest.manifest_sha256 !== hash(SEMANTIC_REGISTRY_MANIFEST_DOMAIN, semanticRegistryManifestBody(manifest))) {
+    throw new Error("LC4 frozen semantic registry manifest hash mismatch");
+  }
+}
+
+/** Root committed by the held-out sealer before any provider session opens. */
+export function createLc4FrozenListenerSemanticRegistryManifest(
+  registries: readonly Lc4FrozenListenerSemanticRegistry[],
+): Lc4FrozenListenerSemanticRegistryManifest {
+  if (!Array.isArray(registries) || registries.length < 1 || registries.length > 10_000) {
+    throw new Error("LC4 semantic registry manifest requires bounded template registries");
+  }
+  const protocolSha256 = sha(registries[0]!.protocol_sha256, "LC4 semantic registry manifest protocol hash");
+  const entries = [...registries]
+    .map((registry) => {
+      assertFrozenSemanticRegistryExact(registry);
+      if (registry.protocol_sha256 !== protocolSha256) {
+        throw new Error("LC4 semantic registry manifest contains an invalid registry");
+      }
+      return Object.freeze({
+        template_id: safeId(registry.template_id, "LC4 semantic registry template ID"),
+        schedule_sha256: sha(registry.schedule_sha256, "LC4 semantic registry schedule hash"),
+        registry_sha256: registry.registry_sha256,
+      });
+    })
+    .sort((left, right) => left.template_id.localeCompare(right.template_id));
+  if (new Set(entries.map((entry) => entry.template_id)).size !== entries.length) {
+    throw new Error("LC4 semantic registry manifest repeats a template");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    protocol_sha256: protocolSha256,
+    entries: Object.freeze(entries),
+  });
+  return Object.freeze({ ...body, manifest_sha256: hash(SEMANTIC_REGISTRY_MANIFEST_DOMAIN, body) });
+}
+
+/** Derive the only admissible online plan from a sealed generator registry. */
+export function createLc4ListenerSemanticPlan(
+  registry: Lc4FrozenListenerSemanticRegistry,
+  manifest: Lc4FrozenListenerSemanticRegistryManifest,
+): Lc4ListenerSemanticPlan {
+  assertFrozenSemanticRegistryExact(registry);
+  assertFrozenSemanticRegistryManifestExact(manifest);
+  const manifestEntry = manifest.entries.find((entry) => entry.template_id === registry.template_id);
+  if (!manifestEntry
+    || manifest.protocol_sha256 !== registry.protocol_sha256
+    || manifestEntry.schedule_sha256 !== registry.schedule_sha256
+    || manifestEntry.registry_sha256 !== registry.registry_sha256) {
+    throw new Error("LC4 semantic criteria are not present in the sealed registry manifest");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    template_id: registry.template_id,
+    protocol_sha256: registry.protocol_sha256,
+    schedule_sha256: registry.schedule_sha256,
+    registry_sha256: registry.registry_sha256,
+    registry_manifest_sha256: manifest.manifest_sha256,
+    opportunities: registry.opportunities,
   });
   return Object.freeze({ ...body, plan_sha256: hash(SEMANTIC_PLAN_DOMAIN, body) });
 }
@@ -610,6 +791,11 @@ export function replayLc4ListenerSemantics(input: Readonly<{
   }
   const opportunity = input.plan.opportunities.find((candidate) => candidate.opportunity_id === input.opportunityId);
   if (!opportunity) throw new Error(`LC4 semantic plan omits ${input.opportunityId}`);
+  if (opportunity.criterion_plan_sha256 !== semanticOpportunityHash({
+    templateId: input.plan.template_id,
+    opportunityId: opportunity.opportunity_id,
+    criteria: opportunity.criteria,
+  })) throw new Error(`LC4 semantic criteria for ${input.opportunityId} differ from the frozen registry`);
   const verified = input.observation?.status === "verified";
   const criteria = opportunity.criteria.map((criterion) => Object.freeze({
     criterion_id: criterion.criterion_id,
@@ -639,6 +825,12 @@ function makeRecord(input: Omit<Lc4ListenerEvidenceRecord, "schema_version" | "r
   return Object.freeze({ ...body, record_sha256: hash(RECORD_DOMAIN, body) });
 }
 
+function criterionPlanSha256(plan: Lc4ListenerSemanticPlan, opportunityId: string): string {
+  const opportunity = plan.opportunities.find((candidate) => candidate.opportunity_id === opportunityId);
+  if (!opportunity) throw new Error(`LC4 frozen semantic registry omits ${opportunityId}`);
+  return opportunity.criterion_plan_sha256;
+}
+
 function failureRecord(input: Readonly<{
   opportunity: Lc4ListenerPipelineOpportunity;
   plan: Lc4ListenerSemanticPlan;
@@ -651,6 +843,7 @@ function failureRecord(input: Readonly<{
 }>): Lc4ListenerEvidenceRecord {
   return makeRecord({
     opportunity_id: input.opportunity.opportunityId,
+    criterion_plan_sha256: criterionPlanSha256(input.plan, input.opportunity.opportunityId),
     turn: input.opportunity.turn,
     response_id: input.responseId ?? null,
     disposition: input.disposition,
@@ -915,6 +1108,7 @@ export async function createLc4ListenerEvidenceArtifact(input: Readonly<{
       const verified = observation.status === "verified";
       records.push(makeRecord({
         opportunity_id: opportunity.opportunityId,
+        criterion_plan_sha256: criterionPlanSha256(input.semanticPlan, opportunity.opportunityId),
         turn: opportunity.turn,
         response_id: capture.response_id,
         disposition: partial
@@ -952,9 +1146,12 @@ export async function createLc4ListenerEvidenceArtifact(input: Readonly<{
     schema_version: 1 as const,
     evidence_version: LC4_LISTENER_EVIDENCE_VERSION,
     run_id: runId,
+    template_id: input.semanticPlan.template_id,
     protocol_sha256: input.protocolSha256,
     schedule_sha256: input.scheduleSha256,
     semantic_plan_sha256: input.semanticPlan.plan_sha256,
+    semantic_registry_sha256: input.semanticPlan.registry_sha256,
+    semantic_registry_manifest_sha256: input.semanticPlan.registry_manifest_sha256,
     asr_contract_sha256: independentAsrContractSha256(input.asrContract),
     calibration_sha256: independentAsrCalibrationSha256(input.asrCalibration.summary),
     records: frozenRecords,
@@ -976,6 +1173,9 @@ export function verifyLc4ListenerEvidenceArtifact(input: Readonly<{
     errors.push("LC4 listener artifact schema/version mismatch");
   }
   if (artifact.semantic_plan_sha256 !== input.semanticPlan.plan_sha256
+    || artifact.template_id !== input.semanticPlan.template_id
+    || artifact.semantic_registry_sha256 !== input.semanticPlan.registry_sha256
+    || artifact.semantic_registry_manifest_sha256 !== input.semanticPlan.registry_manifest_sha256
     || artifact.protocol_sha256 !== input.semanticPlan.protocol_sha256
     || artifact.schedule_sha256 !== input.semanticPlan.schedule_sha256) {
     errors.push("LC4 listener artifact semantic-plan binding mismatch");
@@ -990,6 +1190,10 @@ export function verifyLc4ListenerEvidenceArtifact(input: Readonly<{
     errors.push("LC4 listener artifact opportunity inventory mismatch");
   }
   for (const record of artifact.records) {
+    const frozenOpportunity = input.semanticPlan.opportunities.find((entry) => entry.opportunity_id === record.opportunity_id);
+    if (!frozenOpportunity || record.criterion_plan_sha256 !== frozenOpportunity.criterion_plan_sha256) {
+      errors.push(`LC4 listener record ${record.opportunity_id} criterion-plan binding mismatch`);
+    }
     const recordBody: Record<string, unknown> = { ...record };
     delete recordBody.record_sha256;
     if (record.record_sha256 !== hash(RECORD_DOMAIN, recordBody)) errors.push(`LC4 listener record ${record.opportunity_id} hash mismatch`);

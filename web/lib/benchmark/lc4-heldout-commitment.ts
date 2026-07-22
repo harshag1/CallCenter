@@ -1,6 +1,10 @@
 import { createCipheriv } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artifacts";
+import {
+  createLc4FrozenListenerSemanticRegistryManifest,
+  type Lc4FrozenListenerSemanticRegistry,
+} from "./lc4-listener-evidence";
 
 export const LC4_HELDOUT_COMMITMENT_PROTOCOL = "HACC-LC4-HELDOUT-COMMITMENT-v1" as const;
 export const LC4_HELDOUT_CORPUS_PROTOCOL = "HACC-LC4-v1" as const;
@@ -56,6 +60,9 @@ const CommitmentContextBaseSchema = z.object({
   corpus_protocol: z.literal(LC4_HELDOUT_CORPUS_PROTOCOL),
   status: z.literal("sealed-not-unsealed"),
   held_out: z.literal(true),
+  held_out_scope: z.literal("seed-derived-content-values-and-surface-realization"),
+  topology_status: z.literal("public-and-development-exercised"),
+  domain_vocabulary_status: z.literal("public-in-frozen-power-plan"),
   preregistration_status: z.literal("not-preregistered"),
   provider_calls_authorized: z.literal(false),
   created_at: z.string().datetime(),
@@ -70,6 +77,7 @@ const CommitmentContextBaseSchema = z.object({
     template_count: z.literal(LC4_HELDOUT_TEMPLATE_COUNT),
     canonical_byte_length: z.number().int().positive().max(MAX_CANONICAL_CORPUS_BYTES),
     plaintext_commitment_sha256: Sha256Schema,
+    listener_semantic_registry_manifest_sha256: Sha256Schema,
   }).strict(),
   custody: z.object({
     seed_custodian_id: IdentifierSchema,
@@ -233,6 +241,9 @@ function contextFromManifest(manifest: Lc4HeldoutCommitmentManifest): Lc4Heldout
     corpus_protocol: manifest.corpus_protocol,
     status: manifest.status,
     held_out: manifest.held_out,
+    held_out_scope: manifest.held_out_scope,
+    topology_status: manifest.topology_status,
+    domain_vocabulary_status: manifest.domain_vocabulary_status,
     preregistration_status: manifest.preregistration_status,
     provider_calls_authorized: manifest.provider_calls_authorized,
     created_at: manifest.created_at,
@@ -289,6 +300,23 @@ export function sealLc4HeldoutCandidate(input: Lc4HeldoutSealInput): Lc4SealedHe
       throw new Error("held-out generator failed without exposing its internal error");
     }
     const templates = normalizeTemplates(generated);
+    const listenerSemanticRegistries = templates.flatMap((template) => {
+      const payload = template.payload as Record<string, unknown>;
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return [];
+      if (payload.listener_semantic_registry === undefined) return [];
+      if (payload.listener_semantic_registry === null
+          || typeof payload.listener_semantic_registry !== "object"
+          || Array.isArray(payload.listener_semantic_registry)) {
+        throw new Error("held-out template has an invalid frozen listener semantic registry");
+      }
+      return [payload.listener_semantic_registry as Lc4FrozenListenerSemanticRegistry];
+    });
+    if (listenerSemanticRegistries.length !== 0 && listenerSemanticRegistries.length !== templates.length) {
+      throw new Error("held-out corpus mixes templates with and without frozen listener semantic registries");
+    }
+    const listenerSemanticRegistryManifestSha256 = listenerSemanticRegistries.length === 0
+      ? hashDomain("lc4-listener-semantic-registry-absent", "none")
+      : createLc4FrozenListenerSemanticRegistryManifest(listenerSemanticRegistries).manifest_sha256;
     const corpus = immutable({
       schema_version: 1,
       corpus_protocol: LC4_HELDOUT_CORPUS_PROTOCOL,
@@ -306,6 +334,9 @@ export function sealLc4HeldoutCandidate(input: Lc4HeldoutSealInput): Lc4SealedHe
       corpus_protocol: LC4_HELDOUT_CORPUS_PROTOCOL,
       status: "sealed-not-unsealed",
       held_out: true,
+      held_out_scope: "seed-derived-content-values-and-surface-realization",
+      topology_status: "public-and-development-exercised",
+      domain_vocabulary_status: "public-in-frozen-power-plan",
       preregistration_status: "not-preregistered",
       provider_calls_authorized: false,
       created_at: input.createdAt,
@@ -320,6 +351,7 @@ export function sealLc4HeldoutCandidate(input: Lc4HeldoutSealInput): Lc4SealedHe
         template_count: LC4_HELDOUT_TEMPLATE_COUNT,
         canonical_byte_length: plaintext.byteLength,
         plaintext_commitment_sha256: hashDomain("lc4-heldout-plaintext", plaintext),
+        listener_semantic_registry_manifest_sha256: listenerSemanticRegistryManifestSha256,
       },
       custody: {
         ...custody,

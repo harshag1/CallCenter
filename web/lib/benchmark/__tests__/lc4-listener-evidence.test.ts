@@ -17,6 +17,8 @@ import {
 } from "../audible-evidence";
 import {
   createLc4CapturedOutput,
+  createLc4FrozenListenerSemanticRegistry,
+  createLc4FrozenListenerSemanticRegistryManifest,
   createLc4ListenerEvidenceArtifact,
   createLc4ListenerSemanticPlan,
   createLc4PlaybackReceipt,
@@ -184,7 +186,8 @@ beforeAll(async () => {
 });
 
 function semanticPlan(opportunityIds: readonly string[]) {
-  return createLc4ListenerSemanticPlan({
+  const registry = createLc4FrozenListenerSemanticRegistry({
+    templateId: "lc4-template-01",
     protocolSha256: PROTOCOL_SHA256,
     scheduleSha256: SCHEDULE_SHA256,
     opportunities: opportunityIds.map((opportunityId) => ({
@@ -207,6 +210,8 @@ function semanticPlan(opportunityIds: readonly string[]) {
       ]),
     })),
   });
+  const manifest = createLc4FrozenListenerSemanticRegistryManifest([registry]);
+  return createLc4ListenerSemanticPlan(registry, manifest);
 }
 
 function capture(input: Readonly<{
@@ -314,6 +319,7 @@ describe("LC4 listener-heard evidence pipeline", () => {
     });
 
     expect(artifact.records[0]).toMatchObject({
+      criterion_plan_sha256: plan.opportunities[0]!.criterion_plan_sha256,
       disposition: "heard_verified",
       played_byte_end: 16,
       semantic_replay: {
@@ -331,6 +337,11 @@ describe("LC4 listener-heard evidence pipeline", () => {
       all_required_semantic_criteria_pass: true,
       failed_opportunity_ids: [],
       unverifiable_opportunity_ids: [],
+    });
+    expect(artifact).toMatchObject({
+      template_id: plan.template_id,
+      semantic_registry_sha256: plan.registry_sha256,
+      semantic_registry_manifest_sha256: plan.registry_manifest_sha256,
     });
     expect(lc4ListenerEvidenceForCrp(artifact, "opportunity-1")).toMatchObject({
       status: "verified",
@@ -520,5 +531,42 @@ describe("LC4 listener-heard evidence pipeline", () => {
       final_required_criteria_pass: false,
     });
     expect(semanticFailure.final_scorer.failed_opportunity_ids).toEqual(["opportunity-1"]);
+  });
+
+  it("rejects semantic criteria created after the frozen registry manifest", () => {
+    const frozen = createLc4FrozenListenerSemanticRegistry({
+      templateId: "lc4-template-01",
+      protocolSha256: PROTOCOL_SHA256,
+      scheduleSha256: SCHEDULE_SHA256,
+      opportunities: [{
+        opportunity_id: "opportunity-1",
+        criteria: [{
+          criterion_id: "frozen-criterion",
+          operator: "contains_any",
+          phrases: ["frozen before provider execution"],
+          required_for_final_scorer: true,
+          crp_blocker: { code: "subject_or_goal_unresolved", precedence: 1 },
+        }],
+      }],
+    });
+    const sealedManifest = createLc4FrozenListenerSemanticRegistryManifest([frozen]);
+    const postHoc = createLc4FrozenListenerSemanticRegistry({
+      templateId: frozen.template_id,
+      protocolSha256: frozen.protocol_sha256,
+      scheduleSha256: frozen.schedule_sha256,
+      opportunities: [{
+        opportunity_id: "opportunity-1",
+        criteria: [{
+          criterion_id: "post-hoc-criterion",
+          operator: "contains_any",
+          phrases: ["phrase selected after observing the response"],
+          required_for_final_scorer: true,
+          crp_blocker: { code: "subject_or_goal_unresolved", precedence: 1 },
+        }],
+      }],
+    });
+
+    expect(() => createLc4ListenerSemanticPlan(postHoc, sealedManifest))
+      .toThrow(/not present in the sealed registry manifest/);
   });
 });

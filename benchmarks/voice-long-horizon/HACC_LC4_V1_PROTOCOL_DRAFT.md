@@ -11,7 +11,8 @@
 
 ## Registered question proposed for a future freeze
 
-> On entirely new long-call tasks, does the same realtime model complete more
+> On seed-instantiated long-call cases whose values and surface realization
+> were unavailable in plaintext during development, does the same realtime model complete more
 > useful voice missions behind HACC than through a strong provider-native
 > implementation, without increasing critical external-effect breaches?
 
@@ -31,14 +32,19 @@ outcomes.
 
 Generic public schemas and runtime primitives may be shared only after an
 explicit source-level audit proves that no v6 task content or answer entered the
-LC4 held-out corpus. The final LC4 generator, evaluator, prompts, arm compiler,
-and analysis code must be frozen before held-out plaintext or outcomes are
-available to benchmark developers.
+LC4 corpus. LC4's held-out scope is deliberately narrow: seed-derived case
+values and surface realization are hidden, while the six-by-four topology,
+domain vocabulary, power-plan identities, and development-seed structure are
+public and development-exercised. LC4 must not be described as a wholly unseen
+topology or wholly unseen task-family benchmark. The final LC4 generator,
+evaluator, prompts, arm compiler, and analysis code must be frozen before
+held-out plaintext or outcomes are available to benchmark developers.
 
 The proposed held-out process is:
 
 1. Build and mutation-test the task generator, generic evaluator, runner, and
-   development analogs using domains outside the six LC4 families below.
+   public topology using the permanently excluded development seed. Do not use
+   final seed-derived values or surface realizations during development.
 2. Have an independent operator or sealed process choose a cryptographic seed,
    generate the 24 final cases, and publish a ciphertext and manifest
    commitment without exposing plaintext.
@@ -53,8 +59,8 @@ The proposed held-out process is:
 
 ## Proposed held-out task suite
 
-Create **24 independent task templates**, with four structurally distinct
-templates in each of six new families:
+Create **24 independent seed-instantiated task templates**, with four
+structurally distinct templates in each of six publicly declared families:
 
 1. **Freight exception and customs rerouting** — route, service level,
    temperature or handling constraints, customs clearance, carrier quotes, and

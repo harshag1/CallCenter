@@ -8,6 +8,7 @@ import {
   LC4_POLICY_MAX_TOKENS,
   LC4_POLICY_MIN_TOKENS,
   LC4_PRIMARY_CONJUNCTS,
+  LC4_POWER_PLAN_TTS_VOICE_SLOTS_BY_TEMPLATE,
   LC4_TERMINAL_CLASSES,
   assertLc4ConfirmatorySeedNotDevelopment,
   assertLc4GenericScenarioPayload,
@@ -16,6 +17,8 @@ import {
   type Lc4GenericScenarioPayload,
 } from "../lc4-heldout-generator";
 import { sealLc4HeldoutCandidate, verifyLc4HeldoutCommitment } from "../lc4-heldout-commitment";
+import { createLc4FrozenListenerSemanticRegistryManifest } from "../lc4-listener-evidence";
+import { createLc4PowerPlanArtifact } from "../lc4-power-plan";
 
 function generator(mode: "development-test-only" | "sealed-custody-only" = "development-test-only") {
   return createLc4GenericHeldoutGenerator({
@@ -78,8 +81,55 @@ describe("LC4 generic held-out scenario generator", () => {
       expect(payload.normative_blockers.every((stage) => canonicalJson(stage.ordered_codes) === canonicalJson(LC4_NORMATIVE_BLOCKER_CODES))).toBe(true);
       expect(payload.repair_library).toHaveLength(192);
       expect(payload.repair_library.every((repair) => repair.pcm_status === "not-rendered")).toBe(true);
+      expect(payload.listener_semantic_registry).toMatchObject({
+        template_id: payload.template_id,
+        opportunities: expect.any(Array),
+      });
+      expect(payload.listener_semantic_registry.opportunities).toHaveLength(60);
+      expect(payload.listener_semantic_registry.opportunities.map((item) => item.opportunity_id))
+        .toEqual(payload.opportunities.map((item) => item.id));
+      expect(payload.listener_semantic_registry.opportunities.every((item) => /^[a-f0-9]{64}$/.test(item.criterion_plan_sha256))).toBe(true);
       expect(payload.scoring.primary_conjuncts).toEqual(LC4_PRIMARY_CONJUNCTS);
       expect(payload.scoring.terminal_classes_by_precedence).toEqual(LC4_TERMINAL_CLASSES);
+    }
+  }, 30_000);
+
+  it("joins every generated identity and voice exactly to the frozen power plan", () => {
+    const generatedTemplates = generated();
+    const planTemplates = createLc4PowerPlanArtifact().randomization.assignments
+      .filter((assignment) => assignment.provider === "openai")
+      .map(({ template_id, family, structural_variant, tts_voice_slot }) => ({ template_id, family, structural_variant, tts_voice_slot }));
+    expect(generatedTemplates.map((template) => {
+      const payload = template.payload as Lc4GenericScenarioPayload;
+      return {
+        template_id: template.template_id,
+        family: payload.family,
+        structural_variant: payload.structural_variant,
+        tts_voice_slot: payload.tts_voice_slot,
+      };
+    })).toEqual(planTemplates);
+    expect(generatedTemplates.map((template) => (template.payload as Lc4GenericScenarioPayload).tts_voice_slot)).toEqual(LC4_POWER_PLAN_TTS_VOICE_SLOTS_BY_TEMPLATE);
+  }, 30_000);
+
+  it("binds exact caller audio sources, canonical stages, and versioned facts without leaking probe answers", () => {
+    for (const payload of payloads()) {
+      for (const [index, opportunity] of payload.opportunities.entries()) {
+        const source = opportunity.canonical_caller_utterance;
+        const expectedStage = payload.normative_blockers.find((stage) => stage.deadline_opportunity >= index + 1)?.stage_id ?? "checkpoint.12";
+        expect(opportunity.id).toBe(`opportunity.${String(index + 1).padStart(3, "0")}`);
+        expect(source.opportunity_id).toBe(opportunity.id);
+        expect(source.stage_id).toBe(expectedStage);
+        expect(opportunity.stage_id).toBe(expectedStage);
+        expect(source.source_text_sha256).toBe(sha256Hex(source.text));
+        for (const binding of source.fact_bindings) {
+          expect(binding.fact_id).toBe(`fact.${binding.fact_key}.v${binding.fact_version}`);
+          if (binding.binding_role === "introduce" || binding.binding_role === "correct") expect(source.text).toContain(canonicalJson(binding.expected_value));
+          if (binding.binding_role === "recall") expect(source.text).not.toContain(canonicalJson(binding.expected_value));
+        }
+      }
+      expect(payload.opportunities.filter((item) => item.canonical_caller_utterance.fact_bindings.some((binding) => binding.binding_role === "introduce"))).toHaveLength(10);
+      expect(payload.opportunities.filter((item) => item.canonical_caller_utterance.fact_bindings.some((binding) => binding.binding_role === "correct"))).toHaveLength(4);
+      expect(payload.opportunities.filter((item) => item.canonical_caller_utterance.fact_bindings.some((binding) => binding.binding_role === "recall"))).toHaveLength(12);
     }
   }, 30_000);
 
@@ -132,7 +182,22 @@ describe("LC4 generic held-out scenario generator", () => {
     const opportunity = mutablePayload();
     ((opportunity.opportunities as Array<Record<string, unknown>>)[0]!.registrations as string[]).pop();
     rehash(opportunity);
-    mutations.push({ payload: opportunity, expected: /fact-introduction requires exactly 10/ });
+    mutations.push({ payload: opportunity, expected: /fact-introduction (?:requires exactly 10|does not have exactly one)/ });
+
+    const callerSource = mutablePayload();
+    (((callerSource.opportunities as Array<Record<string, unknown>>)[0]!.canonical_caller_utterance as Record<string, unknown>)).stage_id = "checkpoint.12";
+    rehash(callerSource);
+    mutations.push({ payload: callerSource, expected: /stage identity is not canonical/ });
+
+    const templateIdentity = mutablePayload();
+    templateIdentity.template_id = "lc4-template-24";
+    rehash(templateIdentity);
+    mutations.push({ payload: templateIdentity, expected: /power-plan template identity/ });
+
+    const voiceIdentity = mutablePayload();
+    voiceIdentity.tts_voice_slot = "tts-slot-3";
+    rehash(voiceIdentity);
+    mutations.push({ payload: voiceIdentity, expected: /power-plan voice assignment/ });
 
     const tools = mutablePayload();
     (tools.logical_tools as unknown[]).pop();
@@ -169,6 +234,13 @@ describe("LC4 generic held-out scenario generator", () => {
     rehash(scoring);
     mutations.push({ payload: scoring, expected: /scoring contract drifted/ });
 
+    const semanticRegistry = mutablePayload();
+    const registryOpportunities = ((semanticRegistry.listener_semantic_registry as Record<string, unknown>).opportunities as Array<Record<string, unknown>>);
+    const firstCriteria = registryOpportunities.find((item) => (item.criteria as unknown[]).length > 0)!.criteria as Array<Record<string, unknown>>;
+    (firstCriteria[0]!.phrases as string[])[0] = "post-hoc phrase selected after outcome inspection";
+    rehash(semanticRegistry);
+    mutations.push({ payload: semanticRegistry, expected: /listener semantic registry hash or criterion plan mismatch/ });
+
     for (const mutation of mutations) {
       expect(() => assertLc4GenericScenarioPayload(mutation.payload)).toThrow(mutation.expected);
     }
@@ -199,6 +271,11 @@ describe("LC4 generic held-out scenario generator", () => {
     expect(publicBytes).not.toContain("freight-customs");
     expect(publicBytes).not.toContain("Rule 1.1");
     expect(publicBytes).not.toContain("synthetic bonded shipment");
+    const expectedRegistryRoot = createLc4FrozenListenerSemanticRegistryManifest(
+      payloads().map((payload) => payload.listener_semantic_registry),
+    ).manifest_sha256;
+    expect(sealed.manifest.corpus.listener_semantic_registry_manifest_sha256).toBe(expectedRegistryRoot);
+    expect(publicBytes).not.toContain("post-hoc phrase");
     expect(verifyLc4HeldoutCommitment(sealed, sealed.manifest.manifest_sha256).valid).toBe(true);
   }, 30_000);
 });

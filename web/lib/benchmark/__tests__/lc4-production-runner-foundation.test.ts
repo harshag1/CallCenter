@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../artifacts";
 import {
+  LC4_DEVELOPMENT_TEST_SEED_BYTES,
+  createLc4GenericHeldoutGenerator,
+} from "../lc4-heldout-generator";
+import {
   LC4_RUNNER_PROTOCOL,
   compileLc4ProductionScheduleShape,
   createLc4EpisodeManifest,
   createLc4QualificationGateReceipt,
   executeLc4ProviderFreeEpisode,
+  joinLc4HeldoutTemplatesToSchedule,
   reserveLc4ProviderFreeEpisodeBudget,
   type Lc4AudioRetentionAdapter,
   type Lc4AttemptAdapter,
@@ -18,6 +23,14 @@ import {
 
 const HASH = "a".repeat(64);
 const COMMIT = "b".repeat(40);
+
+function generatedTemplates() {
+  return createLc4GenericHeldoutGenerator({
+    executionMode: "development-test-only",
+    generatorSourceSha256: "a".repeat(64),
+    corpusSchemaSha256: "b".repeat(64),
+  }).generate(new Uint8Array(LC4_DEVELOPMENT_TEST_SEED_BYTES));
+}
 
 function qualification() {
   return createLc4QualificationGateReceipt({
@@ -74,6 +87,7 @@ function manifest(): Lc4EpisodeManifest {
     caller_fixture_manifest_sha256: "7".repeat(64),
     condition_suite_sha256: "8".repeat(64),
     parity_manifest_sha256: "9".repeat(64),
+    generator_schedule_join_sha256: "0".repeat(64),
     qualification: qualification(),
     budget_reservation: {
       ...reservationBody,
@@ -110,6 +124,47 @@ describe("LC4 production runner foundation", () => {
       expect(episodes.map((episode) => episode.arm)).toEqual([...pair.arm_order]);
       expect(new Set(episodes.map((episode) => episode.provider_profile.provider_profile_sha256)).size).toBe(1);
     }
+  });
+
+  it("joins the generator and power plan through an exact 24-template bijection", () => {
+    const joined = joinLc4HeldoutTemplatesToSchedule(generatedTemplates());
+    expect(joined.template_count).toBe(24);
+    expect(joined.bindings).toHaveLength(24);
+    expect(joined.bindings.map((binding) => binding.template_id)).toEqual(
+      Array.from({ length: 24 }, (_, index) => `lc4-template-${String(index + 1).padStart(2, "0")}`),
+    );
+    expect(joined.bindings.every((binding) => binding.pair_ids.length === 3)).toBe(true);
+    expect(joined.bindings.every((binding) =>
+      /^[a-f0-9]{64}$/.test(binding.canonical_caller_source_manifest_sha256)
+      && /^[a-f0-9]{64}$/.test(binding.canonical_stage_manifest_sha256)
+    )).toBe(true);
+    expect(new Set(joined.bindings.flatMap((binding) => binding.pair_ids))).toHaveLength(72);
+    expect(joined.join_sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("fails closed on missing, duplicate, or renamed generator template IDs", () => {
+    const templates = generatedTemplates();
+    expect(() => joinLc4HeldoutTemplatesToSchedule(templates.slice(1))).toThrow("exactly 24");
+    expect(() => joinLc4HeldoutTemplatesToSchedule([templates[0], ...templates.slice(0, 23)])).toThrow("duplicate template");
+    expect(() => joinLc4HeldoutTemplatesToSchedule([
+      { ...templates[0], template_id: "lc4-template-99" },
+      ...templates.slice(1),
+    ])).toThrow("exact bijection");
+  });
+
+  it("fails closed on family, structural-variant, or slot vocabulary drift", () => {
+    const templates = generatedTemplates();
+    const familyDrift = [...templates];
+    familyDrift[0] = { ...templates[0], payload: templates[4].payload };
+    expect(() => joinLc4HeldoutTemplatesToSchedule(familyDrift)).toThrow("vocabulary drifted");
+
+    const variantDrift = [...templates];
+    variantDrift[0] = { ...templates[0], payload: templates[1].payload };
+    expect(() => joinLc4HeldoutTemplatesToSchedule(variantDrift)).toThrow("vocabulary drifted");
+
+    const slotDrift = [...templates];
+    slotDrift[0] = { ...templates[0], family_slot: 2 };
+    expect(() => joinLc4HeldoutTemplatesToSchedule(slotDrift)).toThrow("vocabulary drifted");
   });
 
   it("requires conditional qualification to carry a passing three-provider tool canary", () => {
@@ -151,6 +206,7 @@ describe("LC4 production runner foundation", () => {
       caller_fixture_manifest_sha256: value.caller_fixture_manifest_sha256,
       condition_suite_sha256: value.condition_suite_sha256,
       parity_manifest_sha256: value.parity_manifest_sha256,
+      generator_schedule_join_sha256: value.generator_schedule_join_sha256,
       qualification: value.qualification,
       budget_reservation: value.budget_reservation,
       opportunities: value.opportunities.slice(1),

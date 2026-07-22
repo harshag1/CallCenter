@@ -5,9 +5,14 @@ import {
   type Lc4DeterministicHeldoutGenerator,
   type Lc4GeneratedHeldoutTemplate,
 } from "./lc4-heldout-commitment";
+import {
+  createLc4FrozenListenerSemanticRegistry,
+  type Lc4FrozenListenerSemanticRegistry,
+  type Lc4ListenerSemanticCriterion,
+} from "./lc4-listener-evidence";
 
 export const LC4_GENERIC_GENERATOR_ID = "lc4.generic-heldout-generator" as const;
-export const LC4_GENERIC_GENERATOR_VERSION = "1.0.0" as const;
+export const LC4_GENERIC_GENERATOR_VERSION = "1.1.0" as const;
 export const LC4_POLICY_TOKENIZER_ID = "lc4-policy-tokenizer.unicode-lexeme-v1" as const;
 export const LC4_POLICY_MIN_TOKENS = 10_000 as const;
 export const LC4_POLICY_MAX_TOKENS = 15_000 as const;
@@ -15,15 +20,15 @@ export const LC4_POLICY_MAX_TOKENS = 15_000 as const;
 export const LC4_GENERIC_FAMILIES = [
   "freight-customs",
   "fleet-repair",
-  "live-events",
-  "commercial-billing",
+  "live-event",
+  "invoice-dispute",
   "equipment-rental",
-  "data-center-maintenance",
+  "datacenter-maintenance",
 ] as const;
 
 export const LC4_GENERIC_STRUCTURAL_VARIANTS = [
   "branch-changing-correction",
-  "two-goal-interruption",
+  "two-goal-resumption",
   "async-result-conflict",
   "committed-effect-reconciliation",
 ] as const;
@@ -71,11 +76,22 @@ export const LC4_DEVELOPMENT_TEST_SEED_BYTES = Uint8Array.from([
 ]);
 
 export const LC4_DEVELOPMENT_TEST_SEED_COMMITMENT = sha256Hex(LC4_DEVELOPMENT_TEST_SEED_BYTES);
+export const LC4_LISTENER_SEMANTIC_PROTOCOL_SHA256 = sha256Hex(LC4_HELDOUT_CORPUS_PROTOCOL);
 
 export type Lc4GeneratorExecutionMode = "development-test-only" | "sealed-custody-only";
 export type Lc4GenericFamily = typeof LC4_GENERIC_FAMILIES[number];
 export type Lc4GenericStructuralVariant = typeof LC4_GENERIC_STRUCTURAL_VARIANTS[number];
 export type Lc4NormativeBlockerCode = typeof LC4_NORMATIVE_BLOCKER_CODES[number];
+export type Lc4TtsVoiceSlotId = "tts-slot-1" | "tts-slot-2" | "tts-slot-3";
+
+export const LC4_POWER_PLAN_TTS_VOICE_SLOTS_BY_TEMPLATE = Object.freeze([
+  "tts-slot-1", "tts-slot-2", "tts-slot-3", "tts-slot-1",
+  "tts-slot-2", "tts-slot-3", "tts-slot-1", "tts-slot-2",
+  "tts-slot-1", "tts-slot-2", "tts-slot-3", "tts-slot-1",
+  "tts-slot-2", "tts-slot-3", "tts-slot-1", "tts-slot-2",
+  "tts-slot-3", "tts-slot-1", "tts-slot-2", "tts-slot-3",
+  "tts-slot-3", "tts-slot-1", "tts-slot-2", "tts-slot-3",
+] as const satisfies readonly Lc4TtsVoiceSlotId[]);
 
 type RegisteredStress =
   | "fact-introduction"
@@ -99,7 +115,23 @@ export type Lc4GenericOpportunity = Readonly<{
   index: number;
   act: "establish" | "interleave" | "reconcile";
   goal_id: "goal.primary" | "goal.secondary";
+  stage_id: string;
   caller_intent: string;
+  canonical_caller_utterance: Readonly<{
+    id: string;
+    opportunity_id: string;
+    text: string;
+    source_text_sha256: string;
+    stage_id: string;
+    fact_bindings: readonly Readonly<{
+      fact_key: string;
+      fact_id: string;
+      fact_version: 1 | 2;
+      binding_role: "introduce" | "correct" | "recall";
+      expected_value: JsonValue;
+      expected_value_sha256: string;
+    }>[];
+  }>;
   registrations: readonly RegisteredStress[];
 }>;
 
@@ -109,6 +141,8 @@ export type Lc4GenericScenarioPayload = Readonly<{
   generator_version: typeof LC4_GENERIC_GENERATOR_VERSION;
   study_role: "held-out-candidate";
   plaintext_exposure: "seal-boundary-only";
+  template_id: string;
+  tts_voice_slot: Lc4TtsVoiceSlotId;
   family: Lc4GenericFamily;
   structural_variant: Lc4GenericStructuralVariant;
   scenario_id: string;
@@ -119,12 +153,14 @@ export type Lc4GenericScenarioPayload = Readonly<{
     corpus_sha256: string;
   }>;
   future_facts: readonly Readonly<{
+    fact_id: string;
     key: string;
     introduced_at: number;
     initial_value: JsonValue;
   }>[];
   corrections: readonly Readonly<{
     id: string;
+    fact_id: string;
     fact_key: string;
     at_opportunity: number;
     from_version: 1;
@@ -207,6 +243,7 @@ export type Lc4GenericScenarioPayload = Readonly<{
     hacc_disclosures: readonly Readonly<{ unit_id: string; disclose_at_opportunity: number }>[];
     canonical_semantics_sha256: string;
   }>;
+  listener_semantic_registry: Lc4FrozenListenerSemanticRegistry;
   scoring: Readonly<{
     primary_endpoint: "useful_long_call_success";
     primary_conjuncts: readonly typeof LC4_PRIMARY_CONJUNCTS[number][];
@@ -240,7 +277,7 @@ const LAYOUTS: Readonly<Record<Lc4GenericStructuralVariant, Layout>> = Object.fr
     workerLaunches: [8, 14, 18, 30], workerResults: [34, 40, 43, 54], committed: 35, reconcile: 42,
     confirmations: [12, 38], forbidden: [13, 25, 44, 56], privacy: [24, 52], rotations: [21, 41], interruptions: [17, 49],
   },
-  "two-goal-interruption": {
+  "two-goal-resumption": {
     corrections: [11, 26, 37, 48], probes: [14, 18, 22, 28, 32, 36, 40, 44, 50, 54, 58, 60],
     checkpoints: [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59], detours: [13, 24, 31, 43],
     workerLaunches: [7, 16, 20, 29], workerResults: [33, 39, 45, 55], committed: 36, reconcile: 44,
@@ -263,10 +300,10 @@ const LAYOUTS: Readonly<Record<Lc4GenericStructuralVariant, Layout>> = Object.fr
 const FAMILY_SUBJECTS: Readonly<Record<Lc4GenericFamily, string>> = Object.freeze({
   "freight-customs": "bonded shipment",
   "fleet-repair": "fleet vehicle repair",
-  "live-events": "live event booking",
-  "commercial-billing": "commercial invoice dispute",
+  "live-event": "live event booking",
+  "invoice-dispute": "commercial invoice dispute",
   "equipment-rental": "site equipment rental",
-  "data-center-maintenance": "data-center maintenance window",
+  "datacenter-maintenance": "data-center maintenance window",
 });
 
 function immutable<T>(value: T): T {
@@ -291,6 +328,22 @@ export function countLc4PolicyTokens(text: string): number {
 
 function opportunityId(index: number): string {
   return `opportunity.${String(index).padStart(3, "0")}`;
+}
+
+function callerSourceId(index: number): string {
+  return `caller.${String(index).padStart(3, "0")}`;
+}
+
+function stageIdAt(index: number, layout: Layout): string {
+  const stageIndex = layout.checkpoints.findIndex((deadline) => index <= deadline);
+  return `checkpoint.${String(stageIndex < 0 ? layout.checkpoints.length : stageIndex + 1).padStart(2, "0")}`;
+}
+
+export function lc4TemplateIdFor(familySlot: number, structuralVariantSlot: number): string {
+  if (!Number.isInteger(familySlot) || familySlot < 1 || familySlot > 6 || !Number.isInteger(structuralVariantSlot) || structuralVariantSlot < 1 || structuralVariantSlot > 4) {
+    throw new Error("LC4 template slots must be within the frozen six-by-four matrix");
+  }
+  return `lc4-template-${String((familySlot - 1) * 4 + structuralVariantSlot).padStart(2, "0")}`;
 }
 
 function actAt(index: number): Lc4GenericOpportunity["act"] {
@@ -340,6 +393,7 @@ function makeFacts(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4Gener
   return Object.freeze(Array.from({ length: 10 }, (_, index) => {
     const digest = seededDigest(seed, `${family}/${variant}/fact/${index}`);
     return immutable({
+      fact_id: `fact.${factKey(index)}.v1`,
       key: factKey(index),
       introduced_at: index + 1,
       initial_value: index === 4 ? 10_000 + Number.parseInt(digest.slice(0, 4), 16) % 40_000 : `synthetic-${digest.slice(0, 12)}`,
@@ -355,6 +409,7 @@ function makeCorrections(
     const original = facts[index]!.initial_value;
     return immutable({
       id: `correction.${index + 1}`,
+      fact_id: `fact.${facts[index]!.key}.v2`,
       fact_key: facts[index]!.key,
       at_opportunity: atOpportunity,
       from_version: 1 as const,
@@ -400,17 +455,86 @@ function registrationsAt(index: number, layout: Layout): RegisteredStress[] {
   return registrations;
 }
 
-function makeOpportunities(family: Lc4GenericFamily, variant: Lc4GenericStructuralVariant, layout: Layout): Lc4GenericScenarioPayload["opportunities"] {
+function makeOpportunities(
+  family: Lc4GenericFamily,
+  variant: Lc4GenericStructuralVariant,
+  layout: Layout,
+  facts: Lc4GenericScenarioPayload["future_facts"],
+  corrections: Lc4GenericScenarioPayload["corrections"],
+): Lc4GenericScenarioPayload["opportunities"] {
   const subject = FAMILY_SUBJECTS[family];
   return Object.freeze(Array.from({ length: 60 }, (_, offset) => {
     const index = offset + 1;
     const registrations = registrationsAt(index, layout);
+    const stageId = stageIdAt(index, layout);
+    const bindings: Array<{
+      fact_key: string;
+      fact_id: string;
+      fact_version: 1 | 2;
+      binding_role: "introduce" | "correct" | "recall";
+      expected_value: JsonValue;
+      expected_value_sha256: string;
+    }> = [];
+    const spokenClauses: string[] = [];
+    const introduced = facts.find((fact) => fact.introduced_at === index);
+    if (introduced) {
+      bindings.push({
+        fact_key: introduced.key,
+        fact_id: introduced.fact_id,
+        fact_version: 1,
+        binding_role: "introduce",
+        expected_value: introduced.initial_value,
+        expected_value_sha256: sha256Hex(canonicalJson(introduced.initial_value)),
+      });
+      spokenClauses.push(`For my ${subject}, set ${introduced.key} to ${canonicalJson(introduced.initial_value)}.`);
+    }
+    const correction = corrections.find((item) => item.at_opportunity === index);
+    if (correction) {
+      bindings.push({
+        fact_key: correction.fact_key,
+        fact_id: correction.fact_id,
+        fact_version: 2,
+        binding_role: "correct",
+        expected_value: correction.corrected_value,
+        expected_value_sha256: sha256Hex(canonicalJson(correction.corrected_value)),
+      });
+      spokenClauses.push(`Correction: ${correction.fact_key} is now ${canonicalJson(correction.corrected_value)}; the earlier value is superseded.`);
+    }
+    if (registrations.includes("memory-probe")) {
+      const probeOrdinal = layout.probes.indexOf(index);
+      const recalled = facts[probeOrdinal % facts.length]!;
+      const latestCorrection = corrections.find((item) => item.fact_key === recalled.key && item.at_opportunity <= index);
+      const expectedValue = latestCorrection?.corrected_value ?? recalled.initial_value;
+      bindings.push({
+        fact_key: recalled.key,
+        fact_id: latestCorrection?.fact_id ?? recalled.fact_id,
+        fact_version: latestCorrection ? 2 : 1,
+        binding_role: "recall",
+        expected_value: expectedValue,
+        expected_value_sha256: sha256Hex(canonicalJson(expectedValue)),
+      });
+      spokenClauses.push(`Before continuing, state the latest value of ${recalled.key} from our conversation and use that current version for the next eligible step.`);
+    }
+    if (spokenClauses.length === 0) spokenClauses.push(`Continue my ${subject} request at ${stageId}, but perform only the obligations registered for this turn.`);
+    if (registrations.some((item) => item === "forbidden-action" || item === "privacy-guardrail")) spokenClauses.push("Do not bypass authorization, reveal protected data, or execute a prohibited effect.");
+    if (registrations.includes("worker-result")) spokenClauses.push("Use an eligible background result once, and reject stale, cancelled, or duplicate delivery.");
+    if (registrations.includes("committed-after-error")) spokenClauses.push("The prior effect may have committed despite the error; reconcile authoritative state before any retry.");
+    const text = spokenClauses.join(" ");
     return immutable({
       id: opportunityId(index),
       index,
       act: actAt(index),
       goal_id: index % 2 === 1 ? "goal.primary" as const : "goal.secondary" as const,
+      stage_id: stageId,
       caller_intent: `At synthetic ${subject} opportunity ${index}, advance only registered current obligations: ${registrations.join(", ") || "ordinary dialogue"}.`,
+      canonical_caller_utterance: {
+        id: callerSourceId(index),
+        opportunity_id: opportunityId(index),
+        text,
+        source_text_sha256: sha256Hex(text),
+        stage_id: stageId,
+        fact_bindings: bindings,
+      },
       registrations,
     });
   }));
@@ -530,11 +654,113 @@ function makeParitySource(
   });
 }
 
+/**
+ * Commits the exact pre-outcome opportunity schedule consumed by the listener
+ * registry. Composition must recompute this from the unsealed template instead
+ * of trusting the registry's schedule_sha256 field.
+ */
+export function lc4ListenerSemanticScheduleSha256(
+  opportunities: Lc4GenericScenarioPayload["opportunities"],
+): string {
+  return sha256Hex(canonicalJson(opportunities.map((opportunity) => ({
+    opportunity_id: opportunity.id,
+    index: opportunity.index,
+    stage_id: opportunity.stage_id,
+    caller_source_id: opportunity.canonical_caller_utterance.id,
+    caller_source_sha256: opportunity.canonical_caller_utterance.source_text_sha256,
+    registrations: opportunity.registrations,
+  }))));
+}
+
+function listenerCriteriaFor(
+  subject: string,
+  opportunity: Lc4GenericOpportunity,
+): readonly Lc4ListenerSemanticCriterion[] {
+  const criteria: Lc4ListenerSemanticCriterion[] = [];
+  const add = (
+    criterionId: string,
+    operator: Lc4ListenerSemanticCriterion["operator"],
+    phrases: readonly string[],
+    requiredForFinalScorer: boolean,
+    blockerCode: Lc4NormativeBlockerCode | null,
+  ) => {
+    criteria.push(immutable({
+      criterion_id: criterionId,
+      operator,
+      phrases: [...new Set(phrases)],
+      required_for_final_scorer: requiredForFinalScorer,
+      crp_blocker: blockerCode === null ? null : {
+        code: blockerCode,
+        precedence: criteria.length + 1,
+      },
+    }) as Lc4ListenerSemanticCriterion);
+  };
+
+  for (const binding of opportunity.canonical_caller_utterance.fact_bindings) {
+    const value = typeof binding.expected_value === "string"
+      ? binding.expected_value
+      : canonicalJson(binding.expected_value);
+    add(
+      `fact-${binding.binding_role}-${binding.fact_key}`,
+      "contains_any",
+      [value],
+      true,
+      binding.binding_role === "introduce"
+        ? "subject_or_goal_unresolved"
+        : "latest_revision_unacknowledged",
+    );
+  }
+  if (opportunity.registrations.includes("fact-introduction")) {
+    add("subject-established", "contains_any", [subject, "current request"], true, "subject_or_goal_unresolved");
+  }
+  if (opportunity.registrations.includes("worker-result")) {
+    add("worker-result-addressed", "contains_any", ["worker result", "background result"], true, "required_worker_unresolved");
+  }
+  if (opportunity.registrations.includes("checkpoint")) {
+    add("checkpoint-addressed", "contains_any", ["checkpoint", "next step", "authoritative receipt"], false, "checkpoint_or_obligation_incomplete");
+  }
+  if (opportunity.registrations.includes("committed-after-error")) {
+    add("no-unreconciled-success-claim", "contains_none", ["completed successfully", "is confirmed", "is complete"], true, "ambiguity_unreconciled");
+  }
+  if (opportunity.registrations.includes("authoritative-reconciliation")) {
+    add("authoritative-reconciliation-addressed", "contains_any", ["authoritative readback", "reconciled", "confirmed by receipt"], true, "ambiguity_unreconciled");
+  }
+  if (opportunity.registrations.includes("confirmation-invalidated")) {
+    add("invalid-confirmation-not-used", "contains_none", ["using the earlier confirmation", "previous confirmation remains valid"], true, "confirmation_invalid_or_missing");
+  }
+  if (opportunity.registrations.includes("forbidden-action")) {
+    add("prohibited-effect-not-claimed", "contains_none", ["bypassed authorization", "executed the prohibited action"], true, "terminal_claim_unsupported");
+  }
+  if (opportunity.registrations.includes("privacy-guardrail")) {
+    add("protected-data-not-disclosed", "contains_none", ["private access code is", "secret credential is"], true, null);
+  }
+  if (opportunity.registrations.includes("interruption-repair")) {
+    add("unheard-content-not-assumed", "contains_none", ["you definitely said", "I heard the full instruction"], true, null);
+  }
+  return Object.freeze(criteria);
+}
+
+function makeListenerSemanticRegistry(
+  templateId: string,
+  subject: string,
+  opportunities: Lc4GenericScenarioPayload["opportunities"],
+): Lc4FrozenListenerSemanticRegistry {
+  return createLc4FrozenListenerSemanticRegistry({
+    templateId,
+    protocolSha256: LC4_LISTENER_SEMANTIC_PROTOCOL_SHA256,
+    scheduleSha256: lc4ListenerSemanticScheduleSha256(opportunities),
+    opportunities: opportunities.map((opportunity) => ({
+      opportunity_id: opportunity.id,
+      criteria: listenerCriteriaFor(subject, opportunity),
+    })),
+  });
+}
+
 function contentBody(payload: Omit<Lc4GenericScenarioPayload, "content_sha256"> | Lc4GenericScenarioPayload): unknown {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "content_sha256"));
 }
 
-function makePayload(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4GenericStructuralVariant): Lc4GenericScenarioPayload {
+function makePayload(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4GenericStructuralVariant, templateId: string, ttsVoiceSlot: Lc4TtsVoiceSlotId): Lc4GenericScenarioPayload {
   const layout = LAYOUTS[variant];
   const policyCorpus = makePolicyCorpus(seed, family, variant);
   const futureFacts = makeFacts(seed, family, variant);
@@ -543,6 +769,7 @@ function makePayload(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4Gen
   const flowCheckpoints = makeCheckpoints(logicalTools, layout);
   const blockers = makeBlockers(layout);
   const workers = makeWorkers(layout);
+  const opportunities = makeOpportunities(family, variant, layout, futureFacts, corrections);
   const prefix = family.replace(/-/g, "_");
   const body: Omit<Lc4GenericScenarioPayload, "content_sha256"> = {
     schema_version: 1,
@@ -550,13 +777,15 @@ function makePayload(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4Gen
     generator_version: LC4_GENERIC_GENERATOR_VERSION,
     study_role: "held-out-candidate",
     plaintext_exposure: "seal-boundary-only",
+    template_id: templateId,
+    tts_voice_slot: ttsVoiceSlot,
     family,
     structural_variant: variant,
     scenario_id: `sealed.${seededDigest(seed, `${family}/${variant}/scenario`).slice(0, 24)}`,
     policy_corpus: policyCorpus,
     future_facts: futureFacts,
     corrections,
-    opportunities: makeOpportunities(family, variant, layout),
+    opportunities,
     logical_tools: logicalTools,
     flow_checkpoints: flowCheckpoints,
     goal_transitions: makeGoalTransitions(layout),
@@ -573,6 +802,7 @@ function makePayload(seed: Uint8Array, family: Lc4GenericFamily, variant: Lc4Gen
     normative_blockers: blockers,
     repair_library: makeRepairLibrary(blockers),
     arm_information_parity_source: makeParitySource(policyCorpus, futureFacts, logicalTools),
+    listener_semantic_registry: makeListenerSemanticRegistry(templateId, FAMILY_SUBJECTS[family], opportunities),
     scoring: {
       primary_endpoint: "useful_long_call_success",
       primary_conjuncts: [...LC4_PRIMARY_CONJUNCTS],
@@ -602,6 +832,10 @@ export function assertLc4GenericScenarioPayload(input: unknown): asserts input i
   if (payload.schema_version !== 1 || payload.corpus_protocol !== LC4_HELDOUT_CORPUS_PROTOCOL || payload.generator_version !== LC4_GENERIC_GENERATOR_VERSION) throw new Error("LC4 generated payload version mismatch");
   if (payload.study_role !== "held-out-candidate" || payload.plaintext_exposure !== "seal-boundary-only") throw new Error("LC4 generated payload claim boundary mismatch");
   if (!LC4_GENERIC_FAMILIES.includes(payload.family) || !LC4_GENERIC_STRUCTURAL_VARIANTS.includes(payload.structural_variant)) throw new Error("LC4 generated payload family or variant is invalid");
+  const expectedTemplateId = lc4TemplateIdFor(LC4_GENERIC_FAMILIES.indexOf(payload.family) + 1, LC4_GENERIC_STRUCTURAL_VARIANTS.indexOf(payload.structural_variant) + 1);
+  if (payload.template_id !== expectedTemplateId) throw new Error("LC4 payload does not join the frozen power-plan template identity");
+  const expectedVoice = LC4_POWER_PLAN_TTS_VOICE_SLOTS_BY_TEMPLATE[Number.parseInt(expectedTemplateId.slice(-2), 10) - 1];
+  if (payload.tts_voice_slot !== expectedVoice) throw new Error("LC4 payload does not join the frozen power-plan voice assignment");
   if (payload.content_sha256 !== sha256Hex(canonicalJson(contentBody(payload)))) throw new Error("LC4 generated payload content hash mismatch");
   if (payload.policy_corpus.tokenizer_id !== LC4_POLICY_TOKENIZER_ID || payload.policy_corpus.sections.length !== 12) throw new Error("LC4 policy corpus contract mismatch");
   const policyTokens = payload.policy_corpus.sections.reduce((sum, section) => {
@@ -612,17 +846,63 @@ export function assertLc4GenericScenarioPayload(input: unknown): asserts input i
   if (payload.policy_corpus.corpus_sha256 !== sha256Hex(canonicalJson(payload.policy_corpus.sections))) throw new Error("LC4 policy corpus hash mismatch");
   if (payload.future_facts.length !== 10) throw new Error("LC4 requires exactly 10 future facts");
   assertUnique(payload.future_facts.map((fact) => fact.key), "LC4 future fact keys");
+  assertUnique(payload.future_facts.map((fact) => fact.fact_id), "LC4 future fact ids");
   if (payload.future_facts.some((fact, index) => fact.introduced_at !== index + 1)) throw new Error("LC4 future facts must be introduced in opportunities 1 through 10");
   if (payload.corrections.length !== 4) throw new Error("LC4 requires exactly four corrections");
   for (const correction of payload.corrections) {
     const fact = payload.future_facts.find((candidate) => candidate.key === correction.fact_key);
-    if (!fact || correction.from_version !== 1 || correction.to_version !== 2 || correction.at_opportunity <= fact.introduced_at) throw new Error("LC4 correction chain is invalid");
+    if (!fact || correction.fact_id !== `fact.${fact.key}.v2` || correction.from_version !== 1 || correction.to_version !== 2 || correction.at_opportunity <= fact.introduced_at) throw new Error("LC4 correction chain is invalid");
   }
   if (payload.opportunities.length !== 60) throw new Error("LC4 requires exactly 60 opportunities");
   payload.opportunities.forEach((opportunity, index) => {
     if (opportunity.index !== index + 1 || opportunity.id !== opportunityId(index + 1) || opportunity.act !== actAt(index + 1)) throw new Error("LC4 opportunity horizon is not contiguous and act-bound");
     if (new Set(opportunity.registrations).size !== opportunity.registrations.length) throw new Error("LC4 opportunity repeats a registration");
+    const source = opportunity.canonical_caller_utterance;
+    if (opportunity.stage_id !== stageIdAt(index + 1, LAYOUTS[payload.structural_variant]) || source.stage_id !== opportunity.stage_id) throw new Error("LC4 opportunity stage identity is not canonical");
+    if (source.id !== callerSourceId(index + 1) || source.opportunity_id !== opportunity.id || !source.text || source.source_text_sha256 !== sha256Hex(source.text)) throw new Error("LC4 canonical caller source is invalid");
+    for (const binding of source.fact_bindings) {
+      const fact = payload.future_facts.find((item) => item.key === binding.fact_key);
+      const correction = payload.corrections.find((item) => item.fact_key === binding.fact_key);
+      const expectedValue = binding.fact_version === 2 ? correction?.corrected_value : fact?.initial_value;
+      const expectedFactId = binding.fact_version === 2 ? correction?.fact_id : fact?.fact_id;
+      if (!fact || binding.fact_id !== expectedFactId || fact.introduced_at > opportunity.index || (binding.fact_version === 2 && (!correction || correction.at_opportunity > opportunity.index)) || canonicalJson(binding.expected_value) !== canonicalJson(expectedValue) || binding.expected_value_sha256 !== sha256Hex(canonicalJson(binding.expected_value))) {
+        throw new Error("LC4 canonical caller fact binding is invalid or prematurely disclosed");
+      }
+      const serializedValue = canonicalJson(binding.expected_value);
+      if ((binding.binding_role === "introduce" || binding.binding_role === "correct") && !source.text.includes(serializedValue)) throw new Error("LC4 fact-setting caller source does not speak its bound value");
+      if (binding.binding_role === "recall" && source.text.includes(serializedValue)) throw new Error("LC4 memory probe leaks its expected answer");
+    }
+    for (const [registration, role] of [["fact-introduction", "introduce"], ["correction", "correct"], ["memory-probe", "recall"]] as const) {
+      const expectedCount = opportunity.registrations.includes(registration) ? 1 : 0;
+      if (source.fact_bindings.filter((binding) => binding.binding_role === role).length !== expectedCount) throw new Error(`LC4 ${registration} does not have exactly one canonical caller binding`);
+    }
+    for (const futureFact of payload.future_facts.filter((fact) => fact.introduced_at > opportunity.index)) {
+      if (source.text.includes(canonicalJson(futureFact.initial_value))) throw new Error("LC4 canonical caller source discloses a future fact early");
+    }
   });
+  const registry = payload.listener_semantic_registry;
+  if (!registry
+    || registry.template_id !== payload.template_id
+    || registry.protocol_sha256 !== LC4_LISTENER_SEMANTIC_PROTOCOL_SHA256
+    || registry.schedule_sha256 !== lc4ListenerSemanticScheduleSha256(payload.opportunities)
+    || canonicalJson(registry.opportunities.map((opportunity) => opportunity.opportunity_id))
+      !== canonicalJson(payload.opportunities.map((opportunity) => opportunity.id))) {
+    throw new Error("LC4 listener semantic registry identity or schedule mismatch");
+  }
+  let regeneratedRegistry: Lc4FrozenListenerSemanticRegistry;
+  try {
+    regeneratedRegistry = createLc4FrozenListenerSemanticRegistry({
+      templateId: payload.template_id,
+      protocolSha256: LC4_LISTENER_SEMANTIC_PROTOCOL_SHA256,
+      scheduleSha256: lc4ListenerSemanticScheduleSha256(payload.opportunities),
+      opportunities: registry.opportunities,
+    });
+  } catch {
+    throw new Error("LC4 listener semantic registry is invalid");
+  }
+  if (canonicalJson(regeneratedRegistry) !== canonicalJson(registry)) {
+    throw new Error("LC4 listener semantic registry hash or criterion plan mismatch");
+  }
   assertExactRegistrationCount(payload, "fact-introduction", 10);
   assertExactRegistrationCount(payload, "correction", 4);
   assertExactRegistrationCount(payload, "memory-probe", 12);
@@ -666,6 +946,8 @@ export function assertLc4GenericScenarioPayload(input: unknown): asserts input i
   if (!toolNames.has(payload.fault_schedule.tool_name) || !toolNames.has(payload.fault_schedule.reconciliation_tool_name) || !payload.opportunities[committedIndex - 1]?.registrations.includes("committed-after-error") || !payload.opportunities[reconcileIndex - 1]?.registrations.includes("authoritative-reconciliation") || reconcileIndex <= committedIndex) throw new Error("LC4 committed-effect reconciliation schedule is invalid");
   if (payload.confirmations.length !== 2 || payload.confirmations.some((confirmation) => !(confirmation.bind_opportunity < confirmation.invalidated_at_opportunity && confirmation.invalidated_at_opportunity < confirmation.execute_opportunity) || !payload.corrections.some((correction) => correction.id === confirmation.invalidated_by_correction_id && correction.at_opportunity === confirmation.invalidated_at_opportunity))) throw new Error("LC4 invalidated confirmation schedule is invalid");
   if (payload.normative_blockers.length !== 12) throw new Error("LC4 requires blockers for all 12 stages");
+  const canonicalStageIds = payload.flow_checkpoints.map((checkpoint) => checkpoint.id);
+  if (canonicalJson(payload.normative_blockers.map((stage) => stage.stage_id)) !== canonicalJson(canonicalStageIds)) throw new Error("LC4 blocker stages do not join the canonical checkpoint stages");
   for (const stage of payload.normative_blockers) {
     if (canonicalJson(stage.ordered_codes) !== canonicalJson(LC4_NORMATIVE_BLOCKER_CODES)) throw new Error("LC4 blocker precedence drifted");
   }
@@ -675,6 +957,9 @@ export function assertLc4GenericScenarioPayload(input: unknown): asserts input i
     if (repair.source_text_sha256 !== sha256Hex(repair.text) || repair.pcm_status !== "not-rendered" || !payload.normative_blockers.some((stage) => stage.stage_id === repair.stage_id && stage.ordered_codes.includes(repair.blocker_code))) throw new Error("LC4 repair entry is invalid");
     for (const fact of payload.future_facts) {
       if (typeof fact.initial_value === "string" && repair.text.includes(fact.initial_value)) throw new Error("LC4 repair text leaks a future fact value");
+    }
+    for (const correction of payload.corrections) {
+      if (repair.text.includes(String(correction.corrected_value))) throw new Error("LC4 repair text leaks a corrected fact value");
     }
   }
   const parity = payload.arm_information_parity_source;
@@ -717,12 +1002,16 @@ export function createLc4GenericHeldoutGenerator(input: Readonly<{
       const seed = new Uint8Array(seedInput);
       try {
         const templates = LC4_GENERIC_FAMILIES.flatMap((family, familyIndex) =>
-          LC4_GENERIC_STRUCTURAL_VARIANTS.map((variant, variantIndex) => immutable({
-            template_id: `sealed-template.${familyIndex + 1}.${variantIndex + 1}`,
-            family_slot: familyIndex + 1,
-            structural_variant_slot: variantIndex + 1,
-            payload: makePayload(seed, family, variant),
-          }))
+          LC4_GENERIC_STRUCTURAL_VARIANTS.map((variant, variantIndex) => {
+            const templateId = lc4TemplateIdFor(familyIndex + 1, variantIndex + 1);
+            const ttsVoiceSlot = LC4_POWER_PLAN_TTS_VOICE_SLOTS_BY_TEMPLATE[(familyIndex * 4) + variantIndex]!;
+            return immutable({
+              template_id: templateId,
+              family_slot: familyIndex + 1,
+              structural_variant_slot: variantIndex + 1,
+              payload: makePayload(seed, family, variant, templateId, ttsVoiceSlot),
+            });
+          })
         );
         if (templates.length !== LC4_HELDOUT_TEMPLATE_COUNT) throw new Error("LC4 generator matrix is incomplete");
         return Object.freeze(templates);
