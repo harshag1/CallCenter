@@ -49,9 +49,16 @@ const IMPLEMENTATION_PATHS = Object.freeze([
   "web/lib/realtime/client/gemini-live.ts",
 ]);
 
+export type ProviderEnvironmentSource =
+  | Readonly<{ mode: "combined"; path: string }>
+  | Readonly<{
+      mode: "split";
+      paths: Readonly<Record<LiveStsProvider, string>>;
+    }>;
+
 type Arguments = Readonly<{
   outputRoot: string;
-  providerEnvFile: string;
+  providerEnvironment: ProviderEnvironmentSource;
   capturePrivateKey: string;
   captureKeyId: string;
   expectedCaptureAuthoritySha256: string;
@@ -68,60 +75,81 @@ type ToolchainEvidence = Readonly<{
   captureAuthoritySha256: string;
 }>;
 
-function flag(name: string): string {
-  const matches = process.argv.reduce<number[]>((indices, value, index) => {
+function flag(argv: readonly string[], name: string): string {
+  const matches = argv.reduce<number[]>((indices, value, index) => {
     if (value === name) indices.push(index);
     return indices;
   }, []);
   if (matches.length !== 1) throw new Error(`${name} must be supplied exactly once`);
-  const value = process.argv[matches[0] + 1];
+  const value = argv[matches[0] + 1];
   if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
   return value;
 }
 
-function optionalFlag(name: string): string | undefined {
-  if (!process.argv.includes(name)) return undefined;
-  return flag(name);
+function optionalFlag(argv: readonly string[], name: string): string | undefined {
+  if (!argv.includes(name)) return undefined;
+  return flag(argv, name);
 }
 
-function absoluteFlag(name: string): string {
-  const value = flag(name);
+function absoluteFlag(argv: readonly string[], name: string): string {
+  const value = flag(argv, name);
   if (!isAbsolute(value) || resolve(value) !== value) {
     throw new Error(`${name} must be an absolute normalized path`);
   }
   return value;
 }
 
-function argumentsFromProcess(): Arguments {
+export function parseOutputVoiceCaptureArguments(argv: readonly string[]): Arguments {
   const knownFlags = new Set([
     "--output-root",
     "--provider-env-file",
+    "--openai-env-file",
+    "--gemini-env-file",
+    "--xai-env-file",
     "--capture-private-key",
     "--capture-key-id",
     "--expected-capture-authority-sha256",
     "--response-timeout-ms",
   ]);
-  for (let index = 2; index < process.argv.length; index += 2) {
-    if (!knownFlags.has(process.argv[index]) || process.argv[index + 1] === undefined) {
+  for (let index = 2; index < argv.length; index += 2) {
+    if (!knownFlags.has(argv[index]) || argv[index + 1] === undefined) {
       throw new Error("output-voice capture received an unknown or incomplete argument");
     }
   }
-  const responseTimeout = optionalFlag("--response-timeout-ms");
+  const responseTimeout = optionalFlag(argv, "--response-timeout-ms");
   const responseTimeoutMs = responseTimeout === undefined ? undefined : Number(responseTimeout);
   if (responseTimeoutMs !== undefined
     && (!Number.isSafeInteger(responseTimeoutMs) || responseTimeoutMs < 1_000 || responseTimeoutMs > 120_000)) {
     throw new Error("--response-timeout-ms must be an integer between 1000 and 120000");
   }
-  const captureKeyId = flag("--capture-key-id");
+  const captureKeyId = flag(argv, "--capture-key-id");
   if (!SAFE_KEY_ID.test(captureKeyId)) throw new Error("--capture-key-id is unsafe");
-  const expectedCaptureAuthoritySha256 = flag("--expected-capture-authority-sha256");
+  const expectedCaptureAuthoritySha256 = flag(argv, "--expected-capture-authority-sha256");
   if (!SHA256.test(expectedCaptureAuthoritySha256)) {
     throw new Error("--expected-capture-authority-sha256 must be one lowercase SHA-256");
   }
+  const hasCombined = argv.includes("--provider-env-file");
+  const providerFlags = ["--openai-env-file", "--gemini-env-file", "--xai-env-file"] as const;
+  const providerFlagCount = providerFlags.filter((name) => argv.includes(name)).length;
+  if ((hasCombined && providerFlagCount > 0) || (!hasCombined && providerFlagCount !== providerFlags.length)) {
+    throw new Error(
+      "supply either --provider-env-file or exactly all three provider-specific environment files",
+    );
+  }
+  const providerEnvironment: ProviderEnvironmentSource = hasCombined
+    ? Object.freeze({ mode: "combined", path: absoluteFlag(argv, "--provider-env-file") })
+    : Object.freeze({
+        mode: "split",
+        paths: Object.freeze({
+          openai: absoluteFlag(argv, "--openai-env-file"),
+          gemini: absoluteFlag(argv, "--gemini-env-file"),
+          xai: absoluteFlag(argv, "--xai-env-file"),
+        }),
+      });
   return Object.freeze({
-    outputRoot: absoluteFlag("--output-root"),
-    providerEnvFile: absoluteFlag("--provider-env-file"),
-    capturePrivateKey: absoluteFlag("--capture-private-key"),
+    outputRoot: absoluteFlag(argv, "--output-root"),
+    providerEnvironment,
+    capturePrivateKey: absoluteFlag(argv, "--capture-private-key"),
     captureKeyId,
     expectedCaptureAuthoritySha256,
     ...(responseTimeoutMs === undefined ? {} : { responseTimeoutMs }),
@@ -131,7 +159,7 @@ function argumentsFromProcess(): Arguments {
 async function assertPrivateRegularFile(path: string, label: string): Promise<void> {
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file`);
-  if ((metadata.mode & 0o077) !== 0) throw new Error(`${label} must not be accessible by group or other users`);
+  if ((metadata.mode & 0o777) !== 0o600) throw new Error(`${label} must have mode 0600`);
 }
 
 async function assertOutputDoesNotExist(outputRoot: string): Promise<void> {
@@ -145,31 +173,55 @@ async function assertOutputDoesNotExist(outputRoot: string): Promise<void> {
   if (!parent.isDirectory()) throw new Error("--output-root parent is not a directory");
 }
 
-function parseProviderCredentials(text: string): Readonly<Record<LiveStsProvider, string>> {
-  const values: Record<string, string> = {};
+function requestedEnvironmentValue(text: string, requestedName: string): string | undefined {
+  let requestedValue: string | undefined;
   for (const rawLine of text.split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/u.exec(line);
     if (!match) continue;
+    if (match[1] !== requestedName) continue;
     let value = match[2].trim();
     if ((value.startsWith("\"") && value.endsWith("\""))
       || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    values[match[1]] = value;
+    requestedValue = value;
   }
-  const credentials = {
-    openai: values.OPENAI_API_KEY,
-    gemini: values.GEMINI_API_KEY,
-    xai: values.XAI_API_KEY,
-  };
+  return requestedValue;
+}
+
+export function parseProviderCredentials(
+  inputs: Readonly<Record<LiveStsProvider, string>>,
+): Readonly<Record<LiveStsProvider, string>> {
+  const credentials = Object.freeze({
+    openai: requestedEnvironmentValue(inputs.openai, "OPENAI_API_KEY"),
+    gemini: requestedEnvironmentValue(inputs.gemini, "GEMINI_API_KEY"),
+    xai: requestedEnvironmentValue(inputs.xai, "XAI_API_KEY"),
+  });
   for (const provider of ["openai", "gemini", "xai"] as const) {
     if (!credentials[provider] || credentials[provider].length < 12) {
       throw new Error(`explicit provider environment lacks the ${provider} credential`);
     }
   }
   return Object.freeze(credentials as Record<LiveStsProvider, string>);
+}
+
+export async function loadProviderCredentials(
+  source: ProviderEnvironmentSource,
+): Promise<Readonly<Record<LiveStsProvider, string>>> {
+  if (source.mode === "combined") {
+    await assertPrivateRegularFile(source.path, "provider environment file");
+    const text = await readFile(source.path, "utf8");
+    return parseProviderCredentials({ openai: text, gemini: text, xai: text });
+  }
+  const inputs = {} as Record<LiveStsProvider, string>;
+  for (const provider of ["openai", "gemini", "xai"] as const) {
+    const path = source.paths[provider];
+    await assertPrivateRegularFile(path, `${provider} environment file`);
+    inputs[provider] = await readFile(path, "utf8");
+  }
+  return parseProviderCredentials(inputs);
 }
 
 async function gitOutput(...args: string[]): Promise<string> {
@@ -272,10 +324,9 @@ async function publishCapture(input: Readonly<{
 
 async function main(): Promise<void> {
   process.umask(0o077);
-  const args = argumentsFromProcess();
+  const args = parseOutputVoiceCaptureArguments(process.argv);
   await assertOutputDoesNotExist(args.outputRoot);
-  await assertPrivateRegularFile(args.providerEnvFile, "provider environment file");
-  const credentials = parseProviderCredentials(await readFile(args.providerEnvFile, "utf8"));
+  const credentials = await loadProviderCredentials(args.providerEnvironment);
   const signer = await captureSigner(args);
   const toolchain = await toolchainEvidence(args.expectedCaptureAuthoritySha256);
   // No filesystem artifact is created until all 18 signed captures validate.
@@ -305,7 +356,7 @@ async function main(): Promise<void> {
   })}\n`);
 }
 
-main().catch(() => {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(() => {
   // Provider/library error text can contain user or provider material. Keep the
   // public CLI failure stable and credential-neutral; detailed proof stays in
   // the sanitized wire evidence only after a complete atomic publication.
