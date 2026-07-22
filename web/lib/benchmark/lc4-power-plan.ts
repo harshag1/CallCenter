@@ -40,6 +40,63 @@ function countBy<T>(values: readonly T[], key: (value: T) => string): Readonly<R
   return Object.freeze(Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right))));
 }
 
+function enumerateConstrainedProviderSupport<TRow extends Readonly<{
+  template_id: string;
+  family: string;
+  structural_variant: string;
+  tts_voice_slot: string;
+}>>(templates: readonly TRow[]): readonly string[] {
+  const ordered = [...templates].sort((left, right) => left.template_id.localeCompare(right.template_id));
+  const familyGroups = FAMILIES.map((family) => ordered
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => row.family === family)
+    .map(({ index }) => index));
+  const support: string[] = [];
+  const selected = new Set<number>();
+
+  function visit(familyIndex: number): void {
+    if (familyIndex === familyGroups.length) {
+      const rows = ordered.filter((_, index) => selected.has(index));
+      if (VARIANTS.some((variant) => rows.filter((row) => row.structural_variant === variant).length !== 3)) return;
+      if (TTS_VOICE_SLOTS.some((voice) => rows.filter((row) => row.tts_voice_slot === voice).length !== 4)) return;
+      support.push(ordered.map((_, index) => selected.has(index) ? "1" : "0").join(""));
+      return;
+    }
+    const group = familyGroups[familyIndex];
+    for (let left = 0; left < group.length; left += 1) {
+      for (let right = left + 1; right < group.length; right += 1) {
+        selected.add(group[left]);
+        selected.add(group[right]);
+        visit(familyIndex + 1);
+        selected.delete(group[left]);
+        selected.delete(group[right]);
+      }
+    }
+  }
+
+  visit(0);
+  return Object.freeze(support.sort());
+}
+
+function selectUniformSupportIndex(provider: string, supportSize: number) {
+  if (!Number.isSafeInteger(supportSize) || supportSize <= 0) throw new Error("supportSize must be positive");
+  const range = BigInt(1) << BigInt(256);
+  const size = BigInt(supportSize);
+  const rejectionLimit = range - (range % size);
+  for (let counter = 0; counter < 1_000; counter += 1) {
+    const digest = sha256Hex(`${LC4_POWER_PLAN_SEED}\nconstrained-provider-allocation\n${provider}\n${counter}`);
+    const value = BigInt(`0x${digest}`);
+    if (value < rejectionLimit) {
+      return Object.freeze({
+        support_index: Number(value % size),
+        sha256_digest: digest,
+        rejection_counter: counter,
+      });
+    }
+  }
+  throw new Error("SHA-256 rejection sampler did not terminate within 1,000 draws");
+}
+
 function powerScenario(haccOnly: number, nativeOnly: number) {
   const discordance = haccOnly + nativeOnly;
   const riskDifference = haccOnly - nativeOnly;
@@ -80,7 +137,6 @@ export function createLc4PowerPlanArtifact() {
   const voiceOrder = seededOrder(TTS_VOICE_SLOTS, "tts-voice-slot-order");
   const familyRank = new Map(familyOrder.map((value, index) => [value, index]));
   const variantRank = new Map(variantOrder.map((value, index) => [value, index]));
-  const providerRank = new Map(providerOrder.map((value, index) => [value, index]));
 
   const templates = FAMILIES.flatMap((family, familyIndex) => VARIANTS.map((variant, variantIndex) => {
     const randomizedFamilyRank = familyRank.get(family)!;
@@ -96,12 +152,24 @@ export function createLc4PowerPlanArtifact() {
       randomized_variant_rank: randomizedVariantRank + 1,
     });
   }));
+  const constrainedSupport = enumerateConstrainedProviderSupport(templates);
+  const providerSelections = Object.freeze(Object.fromEntries(PROVIDERS.map((provider) => {
+    const selection = selectUniformSupportIndex(provider, constrainedSupport.length);
+    return [provider, Object.freeze({
+      ...selection,
+      native_first_bitstring: constrainedSupport[selection.support_index],
+    })];
+  })) as Record<(typeof PROVIDERS)[number], Readonly<{
+    support_index: number;
+    sha256_digest: string;
+    rejection_counter: number;
+    native_first_bitstring: string;
+  }>>);
+  const templateIndex = new Map([...templates]
+    .sort((left, right) => left.template_id.localeCompare(right.template_id))
+    .map((template, index) => [template.template_id, index]));
   const assignments = templates.flatMap((template) => PROVIDERS.map((provider) => {
-    const ab = (
-      template.randomized_family_rank - 1
-      + template.randomized_variant_rank - 1
-      + providerRank.get(provider)!
-    ) % 2 === 0;
+    const nativeFirst = providerSelections[provider].native_first_bitstring[templateIndex.get(template.template_id)!] === "1";
     return Object.freeze({
       pair_id: `${template.template_id}-${provider}`,
       template_id: template.template_id,
@@ -109,7 +177,7 @@ export function createLc4PowerPlanArtifact() {
       family: template.family,
       structural_variant: template.structural_variant,
       tts_voice_slot: template.tts_voice_slot,
-      arm_order: Object.freeze(ab ? ["native", "hacc"] as const : ["hacc", "native"] as const),
+      arm_order: Object.freeze(nativeFirst ? ["native", "hacc"] as const : ["hacc", "native"] as const),
       provider_execution_order: template.provider_execution_order,
     });
   }));
@@ -150,8 +218,11 @@ export function createLc4PowerPlanArtifact() {
     }),
     randomization: Object.freeze({
       seed: LC4_POWER_PLAN_SEED,
-      method: "seeded constrained rank-parity allocation with exact marginal balance",
+      method: "provider-independent SHA-256 rejection-sampled selection from the complete constrained support",
       arm_labels: Object.freeze(["native", "hacc"] as const),
+      provider_support_size: constrainedSupport.length,
+      joint_support_size: (BigInt(constrainedSupport.length) ** BigInt(PROVIDERS.length)).toString(),
+      provider_selections: providerSelections,
       provider_execution_method: "seeded provider order rotated as a three-period Latin square",
       assignments: Object.freeze(assignments),
       balance,
@@ -159,11 +230,11 @@ export function createLc4PowerPlanArtifact() {
     }),
     primary_analysis: Object.freeze({
       estimand: "equal-provider-weight paired risk difference in bounded useful completion",
-      null_test: "planned exact provider-stratified constrained paired randomization test; executable enumeration required before preregistration",
+      null_test: "exact provider-stratified constrained paired randomization test implemented by HACC-LC4-CONSTRAINED-INFERENCE-v1",
       statistic: "mean of the three provider-specific paired risk differences",
       randomization_unit: "provider-template pair",
-      randomization_support_size: "not 2^72 because exact marginal balance constrains assignments; support must be derived from the frozen allocation generator before preregistration",
-      interval: "paired template-cluster bootstrap over 24 templates",
+      randomization_support_size: "504 assignments/provider and 128,024,064 joint assignments; not 2^72 because frozen margins constrain allocation",
+      interval: "100,000-draw paired template-cluster percentile bootstrap over 24 templates with a frozen DKW Monte Carlo error bound",
       provider_specific_rows: "descriptive; n=24 pairs/provider is not powered for provider-specific claims",
       missingness: "all opened or missing episodes remain ITT failures; no retries",
     }),
@@ -184,7 +255,7 @@ export function createLc4PowerPlanArtifact() {
     }),
     claim_boundaries: Object.freeze([
       "The exact calculations do not include provider heterogeneity, the template-cluster bootstrap decision rule, missingness, safety conjunctions, or multiplicity.",
-      "The exact McNemar power calculation is not power for the still-unimplemented constrained randomization test.",
+      "The exact McNemar power calculation is not power for the executable constrained randomization test or the clustered final decision rule.",
       "The design-effect rows are sensitivity diagnostics, not confirmatory power guarantees.",
       "A favorable pooled result does not establish success for every provider, and provider-specific rows remain descriptive.",
       "LC3 outcomes are development evidence and were not used to choose LC4 power assumptions or resize the schedule.",

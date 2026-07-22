@@ -23,6 +23,8 @@ describe("outcome-blind LC4 power and randomization plan", () => {
   it("freezes 24 templates, 72 provider pairs, 144 episodes, and exact balance", () => {
     const artifact = createLc4PowerPlanArtifact();
     expect(artifact.randomization.assignments).toHaveLength(72);
+    expect(artifact.randomization.provider_support_size).toBe(504);
+    expect(artifact.randomization.joint_support_size).toBe("128024064");
     expect(new Set(artifact.randomization.assignments.map((item) => item.pair_id))).toHaveLength(72);
     expect(new Set(artifact.randomization.assignments.map((item) => item.template_id))).toHaveLength(24);
     expect(artifact.schedule).toMatchObject({
@@ -50,6 +52,11 @@ describe("outcome-blind LC4 power and randomization plan", () => {
         expect(stratum).toHaveLength(8);
         expect(stratum.filter((item) => item.arm_order[0] === "native")).toHaveLength(4);
       }
+      expect([...rows]
+        .sort((left, right) => left.template_id.localeCompare(right.template_id))
+        .map((item) => item.arm_order[0] === "native" ? "1" : "0")
+        .join("")).toBe(artifact.randomization.provider_selections[provider].native_first_bitstring);
+      expect(artifact.randomization.provider_selections[provider].rejection_counter).toBe(0);
     }
     for (const provider of ["openai", "gemini", "xai"] as const) {
       for (let position = 0; position < 3; position += 1) {
@@ -86,8 +93,8 @@ describe("outcome-blind LC4 power and randomization plan", () => {
       "../benchmarks/voice-long-horizon/HACC_LC4_POWER_PLAN_V1.json",
     ), "utf8"));
     expect(checkedIn).toEqual(generated);
-    expect(generated.artifact_sha256).toBe("2f55bb8cae3185a1b04235ca62a174fcfb6f67600500fb3725c3be28e07bfd90");
-    expect(generated.randomization.allocation_sha256).toBe("af8cb6c4a464c5e57f7807106e936ae6e7eb65647d0f82d1694ff95f49cb432d");
+    expect(generated.artifact_sha256).toBe("3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c");
+    expect(generated.randomization.allocation_sha256).toBe("c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba");
     const body = Object.fromEntries(Object.entries(generated).filter(([key]) => key !== "artifact_sha256"));
     expect(generated.artifact_sha256).toBe(sha256Hex(
       `harshas-amazing-call-center/lc4-power-plan/v1\n${canonicalJson(body)}`,

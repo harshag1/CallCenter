@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "artifact_id": "HACC-LC4-CONSTRAINED-INFERENCE-v1",
+  "protocol_id": "HACC-LC4-v1",
+  "status": "outcome-blind executable inference artifact; not a preregistration or run authorization",
+  "created_at": "2026-07-21T00:00:00.000Z",
+  "binds": {
+    "power_plan_artifact_id": "HACC-LC4-POWER-v1",
+    "power_plan_artifact_sha256": "3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c",
+    "allocation_sha256": "c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba"
+  },
+  "constrained_randomization": {
+    "implemented": true,
+    "assignment_indicator": "1 means Native-first; 0 means HACC-first",
+    "per_provider_constraints": [
+      "exactly 2 Native-first templates in each 4-template family",
+      "exactly 3 Native-first templates in each 6-template structural variant",
+      "exactly 4 Native-first templates in each 8-template TTS slot"
+    ],
+    "provider_assignment_mechanism": "independent uniform draw from the complete constrained support within each provider",
+    "provider_support_size": 504,
+    "joint_support_size": "128024064",
+    "support_sha256": "f9c1c1002953b054a61d730bf43eded184299f3cb40a0bd120a09329f2d7db3b",
+    "test": "exact two-sided Fisher randomization test of the sharp null using provider-frequency convolution",
+    "statistic": "equal-weight mean of three provider-specific paired risk differences"
+  },
+  "template_cluster_interval": {
+    "implemented": true,
+    "method": "paired template-cluster percentile bootstrap; each draw preserves all three provider pairs",
+    "clusters": 24,
+    "providers_per_cluster": 3,
+    "iterations": 100000,
+    "confidence_level": 0.95,
+    "seed": "hacc-lc4-template-cluster-bootstrap-20260721-v1",
+    "monte_carlo_confidence": 0.999,
+    "monte_carlo_cdf_error_bound": 0.006164779987778186,
+    "error_bound_scope": "bounds simulation CDF error only; does not bound statistical interval coverage error"
+  },
+  "synthetic_mechanics_check": {
+    "evidentiary_value": "none; deterministic synthetic values exercise the frozen implementation and are not provider outcomes",
+    "observation_sha256": "abebc1b886f5264455bd5b8086deb2197db4f2e93a8f14b8cb3cc6d3a31b1f79",
+    "exact_test": {
+      "method": "exact_provider_stratified_constrained_paired_randomization_two_sided",
+      "null_hypothesis": "sharp null of no HACC effect for every provider-template pair",
+      "statistic": "equal_provider_weight_paired_risk_difference",
+      "estimate": 0.3194444444444445,
+      "provider_rows": [
+        {
+          "provider": "openai",
+          "pairs": 24,
+          "paired_risk_difference": 0.2916666666666667
+        },
+        {
+          "provider": "gemini",
+          "pairs": 24,
+          "paired_risk_difference": 0.375
+        },
+        {
+          "provider": "xai",
+          "pairs": 24,
+          "paired_risk_difference": 0.2916666666666667
+        }
+      ],
+      "observed_integer_sum": 23,
+      "provider_support_size": 504,
+      "joint_support_size": "128024064",
+      "extreme_assignments": "1408",
+      "exact_p_value": 0.000010997932388710922,
+      "support_sha256": "f9c1c1002953b054a61d730bf43eded184299f3cb40a0bd120a09329f2d7db3b"
+    },
+    "cluster_interval": {
+      "method": "paired_template_cluster_percentile_bootstrap",
+      "estimate": 0.3194444444444445,
+      "confidence_level": 0.95,
+      "interval": {
+        "lower": 0.2083333333333333,
+        "upper": 0.44444444444444436
+      },
+      "clusters": 24,
+      "providers_per_cluster": 3,
+      "iterations": 100000,
+      "seed": "hacc-lc4-template-cluster-bootstrap-20260721-v1",
+      "monte_carlo_error": {
+        "method": "Dvoretzky-Kiefer-Wolfowitz uniform empirical CDF bound",
+        "confidence": 0.999,
+        "cdf_error_bound": 0.006164779987778186,
+        "lower_endpoint_quantile_range": {
+          "from_probability": 0.018835220012221834,
+          "to_probability": 0.03116477998777821,
+          "from_value": 0.19444444444444442,
+          "to_value": 0.20833333333333334
+        },
+        "upper_endpoint_quantile_range": {
+          "from_probability": 0.9688352200122218,
+          "to_probability": 0.9811647799877782,
+          "from_value": 0.4305555555555556,
+          "to_value": 0.4444444444444444
+        },
+        "scope": "bounds simulation CDF error only; does not bound statistical interval coverage error"
+      }
+    }
+  },
+  "claim_boundaries": [
+    "The exact p-value is valid for the sharp null under the frozen constrained arm-order mechanism; it is not a power calculation or a test of a superiority margin.",
+    "The cluster percentile interval has 24 independent template clusters; the DKW bound covers only Monte Carlo CDF error and cannot guarantee finite-sample coverage.",
+    "Missingness, safety conjunctions, multiplicity, provider drift, and endpoint construction still require final preregistration rules.",
+    "The synthetic mechanics check has no efficacy or provider-comparison evidentiary value.",
+    "This artifact authorizes zero provider calls and zero efficacy claims."
+  ],
+  "artifact_sha256": "84ff4802dc2379ce59b98300fede35465cd37591dc3b0bdfc8bf277e6090e9b1"
+}

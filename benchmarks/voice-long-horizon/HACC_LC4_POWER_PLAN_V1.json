@@ -43,11 +43,33 @@
   },
   "randomization": {
     "seed": "hacc-lc4-power-plan-20260721-v1",
-    "method": "seeded constrained rank-parity allocation with exact marginal balance",
+    "method": "provider-independent SHA-256 rejection-sampled selection from the complete constrained support",
     "arm_labels": [
       "native",
       "hacc"
     ],
+    "provider_support_size": 504,
+    "joint_support_size": "128024064",
+    "provider_selections": {
+      "openai": {
+        "support_index": 303,
+        "sha256_digest": "2246f57e000415bd658b8a91b9fa944d75769cbdc6c35116c5c855228dfb3cef",
+        "rejection_counter": 0,
+        "native_first_bitstring": "100111000011010101101010"
+      },
+      "gemini": {
+        "support_index": 438,
+        "sha256_digest": "fec4edccaeeacc2dab43420c80419162849f48354ed22f6aebb31dc06bf08b4e",
+        "rejection_counter": 0,
+        "native_first_bitstring": "110001010011101000111100"
+      },
+      "xai": {
+        "support_index": 227,
+        "sha256_digest": "8230cd492df90a5422be36fb777a9c5cb9cd61894e8a0059d3fc31207a3cda53",
+        "rejection_counter": 0,
+        "native_first_bitstring": "011010100011100101011100"
+      }
+    },
     "provider_execution_method": "seeded provider order rotated as a three-period Latin square",
     "assignments": [
       {
@@ -109,8 +131,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -143,8 +165,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "xai",
@@ -211,8 +233,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -245,8 +267,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -262,8 +284,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "xai",
@@ -313,8 +335,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -330,8 +352,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -347,8 +369,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -364,8 +386,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -381,8 +403,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -398,8 +420,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -415,8 +437,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -500,8 +522,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -551,8 +573,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -602,8 +624,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "xai",
@@ -653,8 +675,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -670,8 +692,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -704,8 +726,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -738,8 +760,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -789,8 +811,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -806,8 +828,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -823,8 +845,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -874,8 +896,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -891,8 +913,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -942,8 +964,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -959,8 +981,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -976,8 +998,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -993,8 +1015,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -1010,8 +1032,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "openai",
@@ -1044,8 +1066,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "xai",
@@ -1078,8 +1100,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -1095,8 +1117,8 @@
         "structural_variant": "branch-changing-correction",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "gemini",
@@ -1146,8 +1168,8 @@
         "structural_variant": "two-goal-resumption",
         "tts_voice_slot": "tts-slot-1",
         "arm_order": [
-          "hacc",
-          "native"
+          "native",
+          "hacc"
         ],
         "provider_execution_order": [
           "openai",
@@ -1197,8 +1219,8 @@
         "structural_variant": "async-result-conflict",
         "tts_voice_slot": "tts-slot-2",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "xai",
@@ -1231,8 +1253,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -1248,8 +1270,8 @@
         "structural_variant": "committed-effect-reconciliation",
         "tts_voice_slot": "tts-slot-3",
         "arm_order": [
-          "native",
-          "hacc"
+          "hacc",
+          "native"
         ],
         "provider_execution_order": [
           "gemini",
@@ -1380,15 +1402,15 @@
         "xai/position-3": 8
       }
     },
-    "allocation_sha256": "af8cb6c4a464c5e57f7807106e936ae6e7eb65647d0f82d1694ff95f49cb432d"
+    "allocation_sha256": "c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba"
   },
   "primary_analysis": {
     "estimand": "equal-provider-weight paired risk difference in bounded useful completion",
-    "null_test": "planned exact provider-stratified constrained paired randomization test; executable enumeration required before preregistration",
+    "null_test": "exact provider-stratified constrained paired randomization test implemented by HACC-LC4-CONSTRAINED-INFERENCE-v1",
     "statistic": "mean of the three provider-specific paired risk differences",
     "randomization_unit": "provider-template pair",
-    "randomization_support_size": "not 2^72 because exact marginal balance constrains assignments; support must be derived from the frozen allocation generator before preregistration",
-    "interval": "paired template-cluster bootstrap over 24 templates",
+    "randomization_support_size": "504 assignments/provider and 128,024,064 joint assignments; not 2^72 because frozen margins constrain allocation",
+    "interval": "100,000-draw paired template-cluster percentile bootstrap over 24 templates with a frozen DKW Monte Carlo error bound",
     "provider_specific_rows": "descriptive; n=24 pairs/provider is not powered for provider-specific claims",
     "missingness": "all opened or missing episodes remain ITT failures; no retries"
   },
@@ -1512,11 +1534,11 @@
   },
   "claim_boundaries": [
     "The exact calculations do not include provider heterogeneity, the template-cluster bootstrap decision rule, missingness, safety conjunctions, or multiplicity.",
-    "The exact McNemar power calculation is not power for the still-unimplemented constrained randomization test.",
+    "The exact McNemar power calculation is not power for the executable constrained randomization test or the clustered final decision rule.",
     "The design-effect rows are sensitivity diagnostics, not confirmatory power guarantees.",
     "A favorable pooled result does not establish success for every provider, and provider-specific rows remain descriptive.",
     "LC3 outcomes are development evidence and were not used to choose LC4 power assumptions or resize the schedule.",
     "This artifact authorizes zero provider calls and zero efficacy claims."
   ],
-  "artifact_sha256": "2f55bb8cae3185a1b04235ca62a174fcfb6f67600500fb3725c3be28e07bfd90"
+  "artifact_sha256": "3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c"
 }

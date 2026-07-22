@@ -4,9 +4,11 @@ Status: **planning artifact only; not a preregistration, provider-call authoriza
 
 Machine artifact: [`HACC_LC4_POWER_PLAN_V1.json`](./HACC_LC4_POWER_PLAN_V1.json)
 
-Artifact SHA-256: `2f55bb8cae3185a1b04235ca62a174fcfb6f67600500fb3725c3be28e07bfd90`
+Artifact SHA-256: `3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c`
 
-Allocation SHA-256: `af8cb6c4a464c5e57f7807106e936ae6e7eb65647d0f82d1694ff95f49cb432d`
+Allocation SHA-256: `c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba`
+
+Executable inference artifact: [`HACC_LC4_CONSTRAINED_INFERENCE_V1.json`](./HACC_LC4_CONSTRAINED_INFERENCE_V1.json)
 
 ## Design
 
@@ -15,9 +17,10 @@ strata, 72 matched Native/HACC pairs, 144 episodes, and 8,640 scheduled caller
 opportunities. Each provider contributes exactly 24 pairs.
 
 The allocation uses the prospective seed
-`hacc-lc4-power-plan-20260721-v1`. Seeded family, structural-variant, provider,
-and TTS-slot ranks feed a constrained parity allocation. This produces, within
-each provider:
+`hacc-lc4-power-plan-20260721-v1`. For each provider, the implementation
+enumerates the complete support satisfying every frozen balance margin, then
+uses SHA-256 rejection sampling to select one support member without modulo
+bias. Provider selections use distinct domain-separated digests. This produces:
 
 - 12 Native-first and 12 HACC-first pairs;
 - two of each order in every four-template family;
@@ -26,9 +29,10 @@ each provider:
 - eight appearances in each provider execution position through a rotated
   three-period Latin square.
 
-This is constrained randomization, so exact marginal balance induces dependence
-between assignments. The final protocol should say that directly instead of
-claiming unconstrained independent arm-order randomization.
+There are exactly 504 eligible allocations per provider and `504^3 =
+128,024,064` joint allocations. The provider draws are independent, while the
+24 assignments within each provider are necessarily dependent because of the
+balance constraints.
 
 ## Exact paired calculation
 
@@ -70,10 +74,11 @@ decision rule.
 
 The sensitivity makes the boundary concrete: 72 nominal pairs are not enough
 to promise high power when provider outcomes are strongly correlated within
-templates. Before final preregistration, the complete provider-stratified,
-clustered, missingness-aware, conjunctive decision rule still needs a frozen
-simulation or exact calculation. If that design does not fit the budget, LC4
-must remain descriptive; its sample cannot be reduced and called conclusive.
+templates. The exact constrained null test and deterministic cluster interval
+are now executable, but this planning calculation is still not power for the
+full missingness-aware, safety-conjunctive decision rule. If that design does
+not fit the budget, LC4 must remain descriptive; its sample cannot be reduced
+and called conclusive.
 
 ## Planned analysis and claim boundary
 
@@ -82,10 +87,13 @@ provider-specific paired risk differences in bounded useful completion. The
 planned primary null test is an exact provider-stratified constrained paired
 randomization test; the interval resamples the 24 templates as clusters.
 Because exact balance constrains assignment, its support is not the unrestricted
-`2^72` sign-flip space. Executable enumeration of the frozen constrained
-allocation support remains a prerequisite for final registration.
-Provider-specific rows remain descriptive at 24 pairs each unless separately
-powered.
+`2^72` sign-flip space. The executable inference artifact enumerates all 504
+provider allocations and evaluates all 128,024,064 joint allocations exactly
+by integer frequency convolution. Its 100,000-draw interval resamples the 24
+whole template clusters and publishes a 99.9%-confidence DKW bound of
+`0.006164779987778186` on Monte Carlo CDF error. That bound does not cover
+statistical interval coverage error. Provider-specific rows remain descriptive
+at 24 pairs each unless separately powered.
 
 No LC3 outcome, treatment-effect estimate, favorable provider subset, or
 post-outcome endpoint was used to choose these alternatives or the 72-pair

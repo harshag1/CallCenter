@@ -421,9 +421,9 @@ catalog membership, HACC grant, or actual admission outcome.
 
 ## Proposed randomization and analysis
 
-- Randomize Native/HACC order independently inside every provider-template
-  pair.
-- Balance AB/BA by provider, family, TTS voice, and structural variant.
+- Independently for each provider, select one Native/HACC order vector from the
+  complete constrained support using the frozen SHA-256 rejection sampler.
+- Balance AB/BA exactly by provider, family, TTS voice, and structural variant.
 - Execute paired arms adjacently and freeze provider execution order with a
   Latin-square schedule.
 - Use all 72 matched pairs for the equal-provider-weight primary paired risk
@@ -458,11 +458,12 @@ An exact paired calculation for 72 pairs gives approximately:
   10%.
 
 Both alternatives represent a minimally important paired improvement of 25
-percentage points. These analytic calculations do not account fully for
-template clustering or provider heterogeneity. Before preregistration, a
-versioned numerical artifact must reproduce the exact calculations and run a
-cluster-aware sensitivity analysis. The intended inferential claim remains the
-pooled equal-provider-weight effect; provider rows remain descriptive.
+percentage points. The versioned power artifact reproduces the exact
+calculations and cluster sensitivities; the bound inference artifact implements
+the complete constrained null distribution and 24-template cluster interval.
+The analytic power rows still do not account fully for template clustering or
+provider heterogeneity. The intended inferential claim remains the pooled
+equal-provider-weight effect; provider rows remain descriptive.
 
 ## Fail-closed execution rules
 
