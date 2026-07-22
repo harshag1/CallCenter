@@ -6,15 +6,15 @@ Artifact hashes below are lowercase SHA-256 of canonical JSON (`sha256Hex(canoni
 
 | Family | Turns | Tools | Oracle calls | Receipts / effects / events | Scenario artifact SHA-256 | Compiled-suite artifact SHA-256 |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| Travel disruption | 32 | 13 | 15 | 15 / 34 / 184 | `8414b7dae384be786c8e898077dd3e6c53ada08f1003e04aa1ae87527f393481` | `e8542c7b2633fc0a4b13eb5116f5bee9c184f71a32bd0511adbbdf7895a80130` |
-| Travel disruption | 64 | 13 | 15 | 15 / 34 / 184 | `3ffadfae67fb54e3c4c53f4871db2204572451ba4b1c670d87d82e9a53e01ddf` | `4f157bb811c7615d3b06a22a6c5e64e044c83f43af655c3c26bc83d6b9d8adae` |
-| Travel disruption | 120 | 13 | 15 | 15 / 34 / 184 | `c4b893e39f431a4fc6438fec392eeca5c98ce82941f82c8a7fabc969aea932dd` | `899d6ae4b4487df22057725f42c8bbcc599f9d4d84a6f964402a1fb359dd972c` |
-| Home-health coordination | 32 | 17 | 18 | 18 / 33 / 200 | `ae1cfab74806def68f2ceb86fd83230c9bf07af9429eceed54376a90379d1e3c` | `20d4707c0afd524743888de6bbd4a88deadba524d15fd1c42d52afa37f24c000` |
-| Home-health coordination | 64 | 17 | 18 | 18 / 33 / 200 | `2ca3ac087464b6cde0d2b9dd91ce8538faa7e683b9d4ebf4a579f7033386ff94` | `c12cd8e1388e62c1dc1eb73a896ea883d494985e9a7a1e7388a7d3e36f42de48` |
-| Home-health coordination | 120 | 17 | 18 | 18 / 33 / 200 | `066c6d6d9c003afeca447a81839a179ddb1076b0a0b37961e175d3ebc9a08b54` | `321bb24bd583313118b14c875585f67c949e997b6d107d8a2a8218bb8d734b31` |
-| Field-service escalation | 32 | 15 | 16 | 16 / 37 / 200 | `ab8ca22b99ca362139465bb780feb4a8e65f8b083ae58211a74f99b6fe36b2ce` | `c0dd173a0278459675bfcfaec6978e8669d3171fe0141e9af30369c5c4d1d1df` |
-| Field-service escalation | 64 | 15 | 16 | 16 / 37 / 200 | `90ad4ccef3423540b40f0629b951f932c386d46509108891f114f907ebdd0710` | `d081d5ceaa33b19698ed14e9536a445023dbd95f5fcbc391768492aaaeecc888` |
-| Field-service escalation | 120 | 15 | 16 | 16 / 37 / 200 | `86736a39e5146dfd41a4eb477a937b81c0fc35c4e2fe399aa6b72d4b412c122d` | `563219a998167c611eff34e122b3f6f6eb40094e428bab57f68f1cf1a34cbe87` |
+| Travel disruption | 32 | 13 | 15 | 15 / 34 / 184 | `8414b7dae384be786c8e898077dd3e6c53ada08f1003e04aa1ae87527f393481` | `807ae8b1f72cfe414691b7454f9e051943f1858995f29ee4a9c9690eaee96636` |
+| Travel disruption | 64 | 13 | 15 | 15 / 34 / 184 | `3ffadfae67fb54e3c4c53f4871db2204572451ba4b1c670d87d82e9a53e01ddf` | `5f8745d5be10e1a0d76c06a04413ce5e343de67669a1ef07887f8b51744d5174` |
+| Travel disruption | 120 | 13 | 15 | 15 / 34 / 184 | `c4b893e39f431a4fc6438fec392eeca5c98ce82941f82c8a7fabc969aea932dd` | `ade158fb0e793f45bf2a5bbb9c4dbee566fe6a6045c3289f65642a5419d7cea3` |
+| Home-health coordination | 32 | 17 | 18 | 18 / 33 / 200 | `ae1cfab74806def68f2ceb86fd83230c9bf07af9429eceed54376a90379d1e3c` | `7055ed006a6f5740c641d054905b1fb6eb53468715d6afd67afd2579a2d9d7cf` |
+| Home-health coordination | 64 | 17 | 18 | 18 / 33 / 200 | `2ca3ac087464b6cde0d2b9dd91ce8538faa7e683b9d4ebf4a579f7033386ff94` | `c3301f99f6ef21b10b0a9c525034dd23104141db57692048af9eff585a7f0165` |
+| Home-health coordination | 120 | 17 | 18 | 18 / 33 / 200 | `066c6d6d9c003afeca447a81839a179ddb1076b0a0b37961e175d3ebc9a08b54` | `936b97df410dd378d0ba5f68922a53d1fbb4e0e74af59f6754ccda5d63febc9f` |
+| Field-service escalation | 32 | 15 | 16 | 16 / 37 / 200 | `ab8ca22b99ca362139465bb780feb4a8e65f8b083ae58211a74f99b6fe36b2ce` | `410d0ec334a5de4059da2d7d47ca76dca5dfb9055a30c6a262ef57c3f85317ca` |
+| Field-service escalation | 64 | 15 | 16 | 16 / 37 / 200 | `90ad4ccef3423540b40f0629b951f932c386d46509108891f114f907ebdd0710` | `a86c87240c67821f6130d762577e78ba0b56c9688d0dec809d64807026303090` |
+| Field-service escalation | 120 | 15 | 16 | 16 / 37 / 200 | `86736a39e5146dfd41a4eb477a937b81c0fc35c4e2fe399aa6b72d4b412c122d` | `78afe6e1b60ec641dfa18b296f3501c6c5e29d43b65cac6e1b8de57f6e276a42` |
 
 Semantic leaf-tool hashes are intentionally stable across 32/64/120 within each family:
 
