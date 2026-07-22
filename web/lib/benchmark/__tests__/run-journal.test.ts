@@ -13,6 +13,12 @@ const roots: string[] = [];
 const PLAN_HASH = "a".repeat(64);
 const MANIFEST_HASH = "b".repeat(64);
 const BUDGET_HASH = "c".repeat(64);
+// Every append deliberately performs three serialized durability barriers:
+// journal fsync, head-file fsync, and parent-directory fsync. A small burst is
+// sufficient to prove that concurrent callers are ordered; using 50 here made
+// the unit suite an accidental disk-throughput benchmark and crossed Vitest's
+// 5-second timeout only when other workers contended for the same filesystem.
+const CONCURRENT_APPEND_PROBE_COUNT = 8;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -36,13 +42,23 @@ function options(root: string, secret = "sk-super-secret-provider-key") {
 }
 
 describe("crash-durable redacted run journal", () => {
-  it("creates the partial before work and fsyncs a verifiable hash chain", async () => {
+  it("creates the partial before work and serializes concurrent appends into a verifiable hash chain", async () => {
     const root = await outputRoot();
     const journal = await CrashDurableRunJournal.create(options(root));
-    await Promise.all(Array.from({ length: 50 }, (_, index) => journal.append("provider.normalized", { index })));
+    await Promise.all(Array.from(
+      { length: CONCURRENT_APPEND_PROBE_COUNT },
+      (_, index) => journal.append("provider.normalized", { index }),
+    ));
 
     const verification = await verifyRunJournal(journal.paths.journal);
-    expect(verification).toMatchObject({ valid: true, event_count: 51 });
+    expect(verification).toMatchObject({ valid: true, event_count: CONCURRENT_APPEND_PROBE_COUNT + 1 });
+    const events = (await readFile(journal.paths.journal, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event_type: string; payload: { index?: number } });
+    expect(events.slice(1).map((event) => event.payload.index)).toEqual(
+      Array.from({ length: CONCURRENT_APPEND_PROBE_COUNT }, (_, index) => index),
+    );
     expect(await readFile(journal.paths.plan, "utf8")).toBe("{\"plan\":\"offline\"}\n");
   });
 
