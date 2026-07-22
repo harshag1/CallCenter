@@ -13,7 +13,6 @@ import {
   type Predicate,
   type PrerequisiteEvidence,
   type ToolDefinition,
-  type ToolInvocation,
   type ValueSource,
   type VisibleToolResult,
   type WorldAssertion,
@@ -289,6 +288,41 @@ function setResultValueAtPath(root: Record<string, JsonValue>, path: string, val
 function resolveValue(source: ValueSource, context: ToolWorldPredicateContext): ResolvedJson {
   if ("literal" in source) return { present: true, value: source.literal };
   return lookupValueAtPath(context[source.source], source.path);
+}
+
+/**
+ * Project only directly proven spoken aliases onto scenario-owned canonical
+ * facts. Raw model arguments remain untouched in receipts and predicate
+ * evidence; the projection is used only for semantic identity and authoritative
+ * effect/result materialization. Genuinely different content never projects.
+ */
+function canonicalArgumentProjection(
+  tool: ToolDefinition,
+  admissionContext: ToolWorldPredicateContext
+): Record<string, JsonValue> {
+  const canonicalByPath = new Map<string, Map<string, JsonValue>>();
+  for (const predicate of tool.prerequisites) {
+    if (!predicate.right || !["identifier_equals", "alias_equals"].includes(predicate.operator)) continue;
+    if (!("source" in predicate.left) || predicate.left.source !== "arguments") continue;
+    if ("source" in predicate.right && predicate.right.source !== "world") continue;
+    if (!evaluateToolWorldPredicate(predicate, admissionContext).passed) continue;
+    const canonical = resolveValue(predicate.right, admissionContext);
+    if (!canonical.present) continue;
+    const values = canonicalByPath.get(predicate.left.path) ?? new Map<string, JsonValue>();
+    values.set(canonicalJson(canonical.value), canonical.value);
+    canonicalByPath.set(predicate.left.path, values);
+  }
+
+  const projected = structuredClone(admissionContext.arguments);
+  for (const [path, distinct] of canonicalByPath) {
+    if (distinct.size !== 1) {
+      throw new ToolWorldDefinitionError(
+        `tool "${tool.name}" argument "${path}" resolves to conflicting canonical facts`
+      );
+    }
+    setResultValueAtPath(projected, path, structuredClone(distinct.values().next().value as JsonValue));
+  }
+  return projected;
 }
 
 function deepEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
@@ -725,16 +759,7 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       const runtime = admissionRuntime(admission, receipt);
       const argumentIssues = validateArguments(tool, receipt.arguments);
       const recomputedSemanticKey = argumentIssues.length === 0
-        ? semanticKey(tool, {
-          invocation_id: receipt.invocation_id,
-          tool: receipt.tool,
-          arguments: receipt.arguments,
-          turn: receipt.turn,
-          ...(receipt.idempotency_key ? { idempotency_key: receipt.idempotency_key } : {}),
-          ...(receipt.semantic_opportunity_id
-            ? { semantic_opportunity_id: receipt.semantic_opportunity_id }
-            : {}),
-        }, { world: replayedFacts, arguments: receipt.arguments, runtime })
+        ? semanticKey(tool, { world: replayedFacts, arguments: receipt.arguments, runtime })
         : undefined;
       if (
         argumentIssues.length > 0
@@ -828,6 +853,12 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
         arguments: receipt.arguments,
         runtime: admissionRuntime(admission, receipt),
       };
+      const admittedFacts = admissionFacts.get(admission.admission_id);
+      if (!admittedFacts) {
+        throw new ToolWorldDefinitionError(`effect "${effect.effect_id}" has no admission fact snapshot`);
+      }
+      const admissionContext: ToolWorldPredicateContext = { ...context, world: admittedFacts };
+      context.arguments = canonicalArgumentProjection(tool, admissionContext);
       const before = lookupValueAtPath(replayedFacts, effect.path);
       const resolved = resolveValue(effectSpec.value, context);
       if (
@@ -1011,15 +1042,10 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
         };
         const expectedSemanticKey = argumentIssues.length === 0
           ? semanticKey(tool, {
-            invocation_id: receipt.invocation_id,
-            tool: receipt.tool,
+            world: replayedFacts,
             arguments: receipt.arguments,
-            turn: receipt.turn,
-            ...(receipt.idempotency_key ? { idempotency_key: receipt.idempotency_key } : {}),
-            ...(receipt.semantic_opportunity_id
-              ? { semantic_opportunity_id: receipt.semantic_opportunity_id }
-              : {}),
-          }, { world: replayedFacts, arguments: receipt.arguments, runtime: rejectionRuntime })
+            runtime: rejectionRuntime,
+          })
           : `invalid:${tool.name}:${canonicalJson(receipt.arguments)}`;
         let expectedVisible: VisibleToolResult | undefined;
         let expectedEvidence: PrerequisiteEvidence[] = [];
@@ -1073,10 +1099,20 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       }
 
       if (receipt.status === "succeeded" || receipt.status === "committed_after_error") {
+        const admittedFacts = admission ? admissionFacts.get(admission.admission_id) : undefined;
+        if (!admission || !admittedFacts) {
+          throw new ToolWorldDefinitionError(`receipt "${receipt.receipt_id}" has no admission fact snapshot`);
+        }
+        const runtime = admissionRuntime(admission, receipt);
+        const rawAdmissionContext: ToolWorldPredicateContext = {
+          world: admittedFacts,
+          arguments: receipt.arguments,
+          runtime,
+        };
         const expectedResult = materializeResult(tool, {
           world: replayedFacts,
-          arguments: receipt.arguments,
-          runtime: admissionRuntime(admission!, receipt),
+          arguments: canonicalArgumentProjection(tool, rawAdmissionContext),
+          runtime,
         });
         if (!deepEqual(expectedResult, receipt.authoritative_result)) {
           throw new ToolWorldDefinitionError(`receipt "${receipt.receipt_id}" authoritative result differs from bound world state`);
@@ -1226,10 +1262,12 @@ function validateArguments(tool: ToolDefinition, args: Record<string, JsonValue>
   return issues;
 }
 
-function semanticKey(tool: ToolDefinition, invocation: ToolInvocation, context: ToolWorldPredicateContext): string {
+function semanticKey(tool: ToolDefinition, context: ToolWorldPredicateContext): string {
+  const canonicalArguments = canonicalArgumentProjection(tool, context);
+  const canonicalContext: ToolWorldPredicateContext = { ...context, arguments: canonicalArguments };
   const resolved = tool.semantic_key.length > 0
-    ? tool.semantic_key.map((source) => resolveValue(source, context))
-    : [{ present: true as const, value: invocation.arguments }];
+    ? tool.semantic_key.map((source) => resolveValue(source, canonicalContext))
+    : [{ present: true as const, value: canonicalArguments }];
   const missingIndex = resolved.findIndex((value) => !value.present);
   if (missingIndex >= 0) {
     throw new ToolWorldDefinitionError(
@@ -1425,7 +1463,7 @@ export function executeTool(
     arguments: invocation.arguments,
     runtime: preliminaryRuntime,
   };
-  const key = semanticKey(tool, invocation, preliminaryContext);
+  const key = semanticKey(tool, preliminaryContext);
 
   // Reconcile a previously committed semantic intent before looking at mutable current prerequisites.
   const priorReceipt = tool.kind === "mutation"
@@ -1595,7 +1633,11 @@ export function executeTool(
   }
 
   const nextFacts = structuredClone(state.facts);
-  const effectContext: ToolWorldPredicateContext = { ...context, world: nextFacts };
+  const effectContext: ToolWorldPredicateContext = {
+    ...context,
+    world: nextFacts,
+    arguments: canonicalArgumentProjection(tool, context),
+  };
   const stagedEffects: Array<Omit<WorldEffect, "event_sequence">> = [];
   for (const [index, effectSpec] of tool.effects.entries()) {
     const before = lookupValueAtPath(nextFacts, effectSpec.path);

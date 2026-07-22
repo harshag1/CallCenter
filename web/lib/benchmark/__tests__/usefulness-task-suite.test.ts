@@ -246,6 +246,9 @@ describe("voice task reliability development suite", () => {
       turn: 14,
     });
     expect(accepted.receipt.status).toBe("succeeded");
+    expect(accepted.receipt.arguments.clearance_token).toBe("FAC accommodation 993");
+    expect(accepted.state.facts.clearance_id).toBe("FAC-ACCOM-993");
+    expect(accepted.receipt.authoritative_result).toEqual({ clearance_id: "FAC-ACCOM-993" });
 
     const rejected = executeTool(task.scenario, world, {
       invocation_id: "campus-clearance-spoken-alias-rejected",
@@ -264,6 +267,140 @@ describe("voice task reliability development suite", () => {
       )!.prerequisites.find((prerequisite) => prerequisite.id === "clearance_token_matches")!;
       expect(otherClearance.operator, family).toBe("identifier_equals");
       expect(otherClearance.aliases, family).toBeUndefined();
+    }
+  });
+
+  it("commits accepted spoken aliases as canonical facts with byte-identical raw and HACC semantics", () => {
+    const cases = [
+      { family: "museum", aliases: ["crate A71"], canonical: "CRATE-A71", nearMiss: "crate A72" },
+      {
+        family: "campus",
+        aliases: ["CHEM 318 practical", "CHEM318 practical"],
+        canonical: "CHEM-318-PRACTICAL",
+        nearMiss: "CHEM 319 practical",
+      },
+      { family: "water", aliases: ["daycare"], canonical: "HYD-14-DAYCARE", nearMiss: "upstream" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+        candidate.family === testCase.family && candidate.complexity_band === "short"
+      )!;
+      const calls = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) =>
+        candidate.family === testCase.family
+      )!.oracleInvocations;
+      let prerequisiteWorld = createToolWorld(task.scenario);
+      for (const invocation of calls.filter((candidate) => candidate.turn < 8)) {
+        prerequisiteWorld = executeTool(task.scenario, prerequisiteWorld, {
+          invocation_id: `canonical-${testCase.family}-${invocation.invocationId}`,
+          tool: invocation.tool,
+          arguments: invocation.arguments,
+          turn: invocation.turn,
+        }).state;
+      }
+      const correction = calls.find((invocation) => invocation.turn === 8)!;
+      for (const [aliasIndex, alias] of testCase.aliases.entries()) {
+        const invocation = {
+          invocation_id: `canonical-${testCase.family}-correction-${aliasIndex + 1}`,
+          tool: correction.tool,
+          arguments: { ...correction.arguments, subject: alias },
+          turn: 8,
+        };
+        const raw = executeTool(task.scenario, structuredClone(prerequisiteWorld), invocation);
+        const hacc = executeTool(task.scenario, structuredClone(prerequisiteWorld), invocation);
+
+        expect(raw.receipt.status, `${testCase.family}/${alias}`).toBe("succeeded");
+        expect(raw.receipt.arguments.subject, `${testCase.family}/${alias}`).toBe(alias);
+        expect(raw.state.facts.recorded_subject, `${testCase.family}/${alias}`).toBe(testCase.canonical);
+        expect(raw.receipt.authoritative_result, `${testCase.family}/${alias}`).toEqual({ subject: testCase.canonical });
+        expect(raw.state.effects.find((effect) => effect.path === "recorded_subject")?.after, `${testCase.family}/${alias}`)
+          .toBe(testCase.canonical);
+        expect(JSON.stringify(hacc), `${testCase.family}/${alias}`).toBe(JSON.stringify(raw));
+      }
+
+      const rejected = executeTool(task.scenario, structuredClone(prerequisiteWorld), {
+        tool: correction.tool,
+        invocation_id: `canonical-${testCase.family}-near-miss`,
+        arguments: { ...correction.arguments, subject: testCase.nearMiss },
+        turn: 8,
+      });
+      expect(rejected.receipt.status, testCase.family).toBe("rejected");
+      expect(rejected.state.facts.recorded_subject, testCase.family).toBeNull();
+      expect(rejected.state.effects.some((effect) => effect.path === "recorded_subject"), testCase.family).toBe(false);
+    }
+  });
+
+  it("uses canonical argument projections for mutation identity under both duplicate policies", () => {
+    const task = USEFULNESS_DEVELOPMENT_TASKS.find((candidate) =>
+      candidate.family === "campus" && candidate.complexity_band === "short"
+    )!;
+    const calls = PILOT_V2_DEVELOPMENT_SUITE.find((candidate) => candidate.family === "campus")!.oracleInvocations;
+    const correction = calls.find((invocation) => invocation.turn === 8)!;
+
+    for (const policy of ["return_prior", "reject"] as const) {
+      const scenario = structuredClone(task.scenario);
+      const correctionTool = scenario.tools.find((tool) => tool.name === correction.tool)!;
+      correctionTool.semantic_key = [
+        { literal: "record_correction" },
+        { source: "arguments", path: "case_id" },
+        { source: "arguments", path: "subject" },
+      ];
+      correctionTool.duplicate_policy = policy;
+
+      let world = createToolWorld(scenario);
+      for (const invocation of calls.filter((candidate) => candidate.turn < 8)) {
+        world = executeTool(scenario, world, {
+          invocation_id: `identity-${policy}-${invocation.invocationId}`,
+          tool: invocation.tool,
+          arguments: invocation.arguments,
+          turn: invocation.turn,
+        }).state;
+      }
+      const first = executeTool(scenario, world, {
+        invocation_id: `identity-${policy}-first`,
+        idempotency_key: `transport-${policy}-a`,
+        tool: correction.tool,
+        arguments: { ...correction.arguments, subject: "CHEM-318-PRACTICAL" },
+        turn: 8,
+      });
+      expect(first.receipt.status, policy).toBe("succeeded");
+      expect(first.receipt.semantic_key, policy).toContain("CHEM-318-PRACTICAL");
+      expect(first.state.facts.recorded_subject, policy).toBe("CHEM-318-PRACTICAL");
+
+      const alternate = executeTool(scenario, first.state, {
+        invocation_id: `identity-${policy}-alternate`,
+        idempotency_key: `transport-${policy}-b`,
+        tool: correction.tool,
+        arguments: { ...correction.arguments, subject: "CHEM318 practical" },
+        turn: 8,
+      });
+      expect(alternate.receipt.semantic_key, policy).toBe(first.receipt.semantic_key);
+      expect(alternate.receipt.arguments.subject, policy).toBe("CHEM318 practical");
+      expect(alternate.receipt.idempotency_key, policy).toBe(`transport-${policy}-b`);
+      expect(alternate.receipt.status, policy).toBe(policy === "return_prior" ? "deduplicated" : "rejected");
+      expect(
+        alternate.receipt.visible_result.ok ? null : alternate.receipt.visible_result.error.code,
+        policy,
+      ).toBe(policy === "return_prior" ? null : "duplicate_intent");
+      expect(alternate.state.facts.correction_count, policy).toBe(1);
+      expect(
+        alternate.state.effects.filter((effect) => effect.path === "recorded_subject"),
+        policy,
+      ).toHaveLength(1);
+
+      const nearMiss = executeTool(scenario, alternate.state, {
+        invocation_id: `identity-${policy}-near-miss`,
+        idempotency_key: `transport-${policy}-near-miss`,
+        tool: correction.tool,
+        arguments: { ...correction.arguments, subject: "CHEM 319 practical" },
+        turn: 8,
+      });
+      expect(nearMiss.receipt.status, policy).toBe("rejected");
+      expect(nearMiss.receipt.visible_result.ok ? null : nearMiss.receipt.visible_result.error.code, policy)
+        .toBe("prerequisite_failed");
+      expect(nearMiss.receipt.semantic_key, policy).not.toBe(first.receipt.semantic_key);
+      expect(nearMiss.state.facts.correction_count, policy).toBe(1);
+      expect(nearMiss.state.effects.filter((effect) => effect.path === "recorded_subject"), policy).toHaveLength(1);
     }
   });
 
