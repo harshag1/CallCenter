@@ -17,6 +17,16 @@ import {
 } from "./provider-qualification";
 import { executeProviderResponseToolCanary, type ResponseToolCanaryExecution } from "./provider-response-tool-canary";
 import {
+  LC4_DEV_AUDIO_CANARY_CONTROL_BYTES,
+  LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256,
+  LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
+  executeLc4DevAudioCanary,
+  lc4DevAudioCanaryFailureEvidenceSha256,
+  lc4DevAudioCanarySpecification,
+  type Lc4DevAudioCanaryExecution,
+  type Lc4DevAudioCanaryFailureEvidence,
+} from "./provider-dev-audio-canary";
+import {
   createProductionRealtimeClient,
   loadProductionRealtimeCredentials,
 } from "./production-realtime-provider";
@@ -33,6 +43,7 @@ import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   assertLc4ProviderProfileManifest,
 } from "./lc4-provider-profiles";
+import { LC4_DEV_SEMANTIC_GATEWAY_FUNCTION } from "./lc4-development-gateway-bridge";
 import {
   LOCAL_TOOL_PROXY_FUNCTION,
   type NormalizedRealtimeClient,
@@ -40,16 +51,19 @@ import {
   type RealtimeWireObservation,
 } from "../realtime/client/types";
 
-export const LC4_QUALIFICATION_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v1" as const;
-export const LC4_QUALIFICATION_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-DEVELOPMENT-AUTHORIZATION-v1" as const;
+export const LC4_QUALIFICATION_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v2" as const;
+export const LC4_QUALIFICATION_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-DEVELOPMENT-AUTHORIZATION-v2" as const;
 export const LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD = 3_000_000 as const;
 export const LC4_QUALIFICATION_MAXIMUM_PROVIDER_MICRO_USD = 1_000_000 as const;
+export const LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS = 6 as const;
+export const LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES = 5_120 as const;
 export const LC4_QUALIFICATION_PROVIDER_ORDER = Object.freeze(["openai", "gemini", "xai"] as const);
 
-const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v1\n";
-const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-development-authorization/v1\n";
-const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-development-authorization-artifact/v1\n";
-const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v1\n";
+const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v2\n";
+const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-development-authorization/v2\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-development-authorization-artifact/v2\n";
+const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v2\n";
+const DEV_AUDIO_CANARY_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-canary-artifact/v1\n";
 const CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
 const CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const SOURCE_TREE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-git-tree/v1\n";
@@ -76,6 +90,7 @@ export type Lc4QualificationPlan = Readonly<{
   source_tree_sha256: string;
   provider_profile_manifest_sha256: string;
   configuration_matrix_sha256: string;
+  dev_configuration_matrix_sha256: string;
   credential_set_sha256: string;
   credential_identities: readonly Readonly<{
     provider: LiveStsProvider;
@@ -84,12 +99,20 @@ export type Lc4QualificationPlan = Readonly<{
   targets: readonly Readonly<{
     provider: LiveStsProvider;
     model: string;
-    tool_schema_sha256: string;
-    caller_audio_bytes: 0;
+    zero_audio_tool_schema_sha256: string;
+    dev_audio_tool_schema_sha256: string;
+    packetizer_sha256: string;
+    audio_delivery_profile_sha256: string;
+    dev_control_bytes: typeof LC4_DEV_AUDIO_CANARY_CONTROL_BYTES;
+    dev_control_sha256: string;
+    dev_control_source_sha256: typeof LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256;
+    caller_audio_bytes: number;
+    caller_audio_sha256: string;
+    response_generations: 2;
     maximum_micro_usd: typeof LC4_QUALIFICATION_MAXIMUM_PROVIDER_MICRO_USD;
     paid_retry_allowed: false;
   }>[];
-  execution_scope: "development_only_exact_model_handshake_then_zero_audio_static_gateway_canary";
+  execution_scope: "development_only_exact_model_handshake_zero_audio_gateway_then_exact_dev_schema_packetized_audio_canary";
   maximum_total_micro_usd: typeof LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD;
   provider_calls_authorized: false;
   authorization_required: "pinned_ed25519_development_artifact";
@@ -102,18 +125,19 @@ export type Lc4QualificationAuthorizationBody = Readonly<{
   authorization_id: string;
   authorization_nonce_sha256: string;
   protocol_id: "HACC-LC4-v1";
-  purpose: "lc4_development_exact_model_qualification_and_static_gateway_canary";
+  purpose: "lc4_development_exact_model_zero_audio_and_exact_dev_schema_audio_canaries";
   plan_sha256: string;
   source_commit: string;
   source_tree_sha256: string;
   provider_profile_manifest_sha256: string;
   configuration_matrix_sha256: string;
+  dev_configuration_matrix_sha256: string;
   credential_set_sha256: string;
   authorized_providers: readonly ["openai", "gemini", "xai"];
   authorized_models: Readonly<Record<LiveStsProvider, string>>;
   maximum_total_micro_usd: typeof LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD;
-  zero_caller_audio: true;
-  maximum_response_generations: 3;
+  caller_audio_bytes: typeof LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES;
+  maximum_response_generations: typeof LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS;
   paid_retry_allowed: false;
   not_before: string;
   expires_at: string;
@@ -165,7 +189,8 @@ export type Lc4QualificationTerminalArtifact = Readonly<{
   status: "passed" | "failed";
   qualification_artifact_sha256: string;
   response_tool_canary_artifact_sha256: string | null;
-  caller_audio_bytes: 0;
+  dev_audio_canary_artifact_sha256: string | null;
+  caller_audio_bytes: number;
   response_generations_attempted: number;
   paid_retries_attempted: 0;
   maximum_total_micro_usd: typeof LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD;
@@ -179,6 +204,29 @@ export type Lc4QualificationTerminalArtifact = Readonly<{
     usage_event_count: number;
     usage_evidence_sha256: string;
     provider_tool_call_evidence_sha256: string | null;
+  }>[];
+  dev_audio_results: readonly Readonly<{
+    provider: LiveStsProvider;
+    model: string;
+    status: "passed" | "failed";
+    code: Lc4DevAudioCanaryExecution["code"];
+    caller_audio_bytes: number;
+    response_generation_requested: boolean;
+    tool_schema_sha256: string;
+    packetizer_sha256: string;
+    audio_delivery_profile_sha256: string;
+    control_bytes: number;
+    control_sha256: string;
+    audio_sha256: string;
+    delivery_complete: boolean;
+    chunk_count: number;
+    wire_observation_count: number;
+    wire_evidence_sha256: string;
+    usage_event_count: number;
+    usage_evidence_sha256: string;
+    response_generation_evidence_sha256: string;
+    provider_tool_call_evidence_sha256: string | null;
+    failure_evidence_sha256: string;
   }>[];
   terminal_sha256: string;
 }>;
@@ -204,6 +252,15 @@ type RunnerDependencies = Readonly<{
     timeoutMs?: number;
     now?: () => Date;
   }>): Promise<ResponseToolCanaryExecution>;
+  executeDevAudioCanary(input: Readonly<{
+    provider: LiveStsProvider;
+    model: string;
+    client: NormalizedRealtimeClient;
+    sampleRateHz: number;
+    profile: typeof DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE;
+    timeoutMs?: number;
+    now?: () => Date;
+  }>): Promise<Lc4DevAudioCanaryExecution>;
 }>;
 
 const defaultDependencies: RunnerDependencies = Object.freeze({
@@ -211,6 +268,7 @@ const defaultDependencies: RunnerDependencies = Object.freeze({
   loadCredentials: loadProductionRealtimeCredentials,
   createClient: createProductionRealtimeClient,
   executeCanary: executeProviderResponseToolCanary,
+  executeDevAudioCanary: executeLc4DevAudioCanary,
 });
 
 function requireSha256(value: unknown, label: string): asserts value is string {
@@ -274,6 +332,35 @@ function targetConfiguration(provider: LiveStsProvider): TrialSessionConfigurati
   });
 }
 
+function devAudioTargetConfiguration(provider: LiveStsProvider): TrialSessionConfiguration {
+  const spec = LIVE_STS_PROVIDER_SPECS[provider];
+  const instructions = [
+    "You are participating in the public HACC-LC4-DEV municipal oral-history voice-agent mechanism test.",
+    "Treat all caller details as fictional benchmark data. Speak naturally and follow only the context available in this turn.",
+    "Never claim an external action completed without an authoritative tool receipt. Use capability_gateway for every tool request.",
+    "This is development mechanism evidence only, never confirmatory efficacy evidence.",
+  ].join(" ");
+  const renderedCapabilitySnapshot = "<lc4_dev_gateway scope=\"qualification.exact_schema_audio\" />";
+  const audioDeliveryProfile = DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE;
+  return Object.freeze({
+    provider,
+    model: spec.model,
+    conditionId: "host-managed-harness" as const,
+    instructions,
+    initialPrompt: instructions,
+    renderedCapabilitySnapshot,
+    providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
+    conditionHash: sha256Hex(`harshas-amazing-call-center/lc4-qualification-dev-audio-condition/v1\n${provider}\n${instructions}`),
+    inputAudioFormat: Object.freeze({
+      encoding: "pcm16" as const,
+      sampleRateHz: spec.sampleRateHz,
+      channels: 1 as const,
+    }),
+    audioDeliveryProfile,
+    audioDeliveryProfileHash: trialAudioDeliveryProfileHash(audioDeliveryProfile),
+  });
+}
+
 export function createLc4QualificationTargets(): readonly ProviderQualificationTarget[] {
   assertLc4ProviderProfileManifest(LC4_PROVIDER_PROFILE_MANIFEST);
   return Object.freeze(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => {
@@ -286,8 +373,51 @@ export function createLc4QualificationTargets(): readonly ProviderQualificationT
   }));
 }
 
+export function createLc4DevAudioQualificationTargets(): readonly ProviderQualificationTarget[] {
+  assertLc4ProviderProfileManifest(LC4_PROVIDER_PROFILE_MANIFEST);
+  return Object.freeze(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => {
+    const configuration = devAudioTargetConfiguration(provider);
+    const frozen = LC4_PROVIDER_PROFILE_MANIFEST.providers[provider];
+    if (configuration.model !== frozen.model
+      || configuration.inputAudioFormat.sampleRateHz !== frozen.input_sample_rate_hz
+      || canonicalJson(configuration.providerTools) !== canonicalJson([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION])) {
+      throw new Error(`LC4 ${provider} DEV audio qualification target differs from the frozen execution path`);
+    }
+    return Object.freeze({ provider, model: configuration.model, configuration });
+  }));
+}
+
 function planSha256(body: Omit<Lc4QualificationPlan, "plan_sha256">): string {
   return sha256Hex(`${PLAN_DOMAIN}${canonicalJson(body)}`);
+}
+
+function qualificationPlanTargets(
+  targets: readonly ProviderQualificationTarget[],
+  devTargets: readonly ProviderQualificationTarget[],
+): Lc4QualificationPlan["targets"] {
+  const requirements = providerResponseToolCanaryRequirements(targets);
+  return Object.freeze(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => {
+    const requirement = requirements.find((candidate) => candidate.provider === provider);
+    const devTarget = devTargets.find((candidate) => candidate.provider === provider);
+    if (!requirement || !devTarget) throw new Error(`LC4 ${provider} qualification requirement is missing`);
+    const specification = lc4DevAudioCanarySpecification(provider, devTarget.model, devTarget.configuration.inputAudioFormat.sampleRateHz);
+    return Object.freeze({
+      provider,
+      model: devTarget.model,
+      zero_audio_tool_schema_sha256: requirement.toolSchemaSha256,
+      dev_audio_tool_schema_sha256: specification.tool_schema_sha256,
+      packetizer_sha256: LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
+      audio_delivery_profile_sha256: devTarget.configuration.audioDeliveryProfileHash,
+      dev_control_bytes: LC4_DEV_AUDIO_CANARY_CONTROL_BYTES,
+      dev_control_sha256: specification.control_sha256,
+      dev_control_source_sha256: LC4_DEV_AUDIO_CANARY_CONTROL_SOURCE_SHA256,
+      caller_audio_bytes: specification.audio_bytes,
+      caller_audio_sha256: specification.audio_sha256,
+      response_generations: 2 as const,
+      maximum_micro_usd: LC4_QUALIFICATION_MAXIMUM_PROVIDER_MICRO_USD,
+      paid_retry_allowed: false as const,
+    });
+  }));
 }
 
 export function assertLc4QualificationPlan(value: Lc4QualificationPlan): void {
@@ -302,31 +432,23 @@ export function assertLc4QualificationPlan(value: Lc4QualificationPlan): void {
   requireSha256(value.source_tree_sha256, "LC4 qualification source tree");
   requireSha256(value.provider_profile_manifest_sha256, "LC4 provider profile manifest");
   requireSha256(value.configuration_matrix_sha256, "LC4 qualification matrix");
+  requireSha256(value.dev_configuration_matrix_sha256, "LC4 DEV audio qualification matrix");
   requireSha256(value.credential_set_sha256, "LC4 credential set");
   if (
     value.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
     || value.maximum_total_micro_usd !== LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD
     || value.provider_calls_authorized !== false
     || value.authorization_required !== "pinned_ed25519_development_artifact"
-    || value.execution_scope !== "development_only_exact_model_handshake_then_zero_audio_static_gateway_canary"
+    || value.execution_scope !== "development_only_exact_model_handshake_zero_audio_gateway_then_exact_dev_schema_packetized_audio_canary"
   ) throw new Error("LC4 qualification plan weakened a frozen execution boundary");
   const targets = createLc4QualificationTargets();
-  const requirements = providerResponseToolCanaryRequirements(targets);
-  const expectedTargets = LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => {
-    const requirement = requirements.find((candidate) => candidate.provider === provider);
-    if (!requirement) throw new Error(`LC4 ${provider} qualification tool requirement is missing`);
-    return {
-      provider,
-      model: LIVE_STS_PROVIDER_SPECS[provider].model,
-      tool_schema_sha256: requirement.toolSchemaSha256,
-      caller_audio_bytes: 0,
-      maximum_micro_usd: LC4_QUALIFICATION_MAXIMUM_PROVIDER_MICRO_USD,
-      paid_retry_allowed: false,
-    };
-  });
+  const devTargets = createLc4DevAudioQualificationTargets();
+  const expectedTargets = qualificationPlanTargets(targets, devTargets);
   if (
     canonicalJson(value.targets) !== canonicalJson(expectedTargets)
     || value.configuration_matrix_sha256 !== providerQualificationMatrixSha256(targets)
+    || value.dev_configuration_matrix_sha256 !== providerQualificationMatrixSha256(devTargets)
+    || value.targets.reduce((sum, target) => sum + target.caller_audio_bytes, 0) !== LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES
     || value.credential_identities.length !== 3
     || canonicalJson(value.credential_identities.map((identity) => identity.provider)) !== canonicalJson(LC4_QUALIFICATION_PROVIDER_ORDER)
     || value.credential_identities.some((identity) => !SHA256.test(identity.credential_sha256))
@@ -399,7 +521,7 @@ export async function prepareLc4Qualification(input: Readonly<{
   const planId = input.planId ?? randomUUID();
   requireSafeId(planId, "LC4 qualification plan ID");
   const targets = createLc4QualificationTargets();
-  const requirements = providerResponseToolCanaryRequirements(targets);
+  const devTargets = createLc4DevAudioQualificationTargets();
   const credentialIdentities = Object.freeze(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => credentialIdentity(provider, credentials[provider])));
   const body = Object.freeze({
     schema_version: 1 as const,
@@ -412,21 +534,11 @@ export async function prepareLc4Qualification(input: Readonly<{
     source_tree_sha256: source.source_tree_sha256,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     configuration_matrix_sha256: providerQualificationMatrixSha256(targets),
+    dev_configuration_matrix_sha256: providerQualificationMatrixSha256(devTargets),
     credential_set_sha256: credentialSetSha256(credentials),
     credential_identities: credentialIdentities,
-    targets: Object.freeze(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => {
-      const requirement = requirements.find((candidate) => candidate.provider === provider);
-      if (!requirement) throw new Error(`LC4 ${provider} response-tool canary requirement is missing`);
-      return Object.freeze({
-        provider,
-        model: LIVE_STS_PROVIDER_SPECS[provider].model,
-        tool_schema_sha256: requirement.toolSchemaSha256,
-        caller_audio_bytes: 0 as const,
-        maximum_micro_usd: LC4_QUALIFICATION_MAXIMUM_PROVIDER_MICRO_USD,
-        paid_retry_allowed: false as const,
-      });
-    })),
-    execution_scope: "development_only_exact_model_handshake_then_zero_audio_static_gateway_canary" as const,
+    targets: qualificationPlanTargets(targets, devTargets),
+    execution_scope: "development_only_exact_model_handshake_zero_audio_gateway_then_exact_dev_schema_packetized_audio_canary" as const,
     maximum_total_micro_usd: LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD,
     provider_calls_authorized: false as const,
     authorization_required: "pinned_ed25519_development_artifact" as const,
@@ -461,7 +573,7 @@ export function assertLc4QualificationAuthorization(input: Readonly<{
     body.schema_version !== 1
     || body.authorization_version !== LC4_QUALIFICATION_AUTHORIZATION_VERSION
     || body.protocol_id !== "HACC-LC4-v1"
-    || body.purpose !== "lc4_development_exact_model_qualification_and_static_gateway_canary"
+    || body.purpose !== "lc4_development_exact_model_zero_audio_and_exact_dev_schema_audio_canaries"
   ) throw new Error("LC4 qualification authorization schema, protocol, or purpose is unsupported");
   requireSafeId(body.authorization_id, "LC4 qualification authorization ID");
   for (const [label, digest] of Object.entries({
@@ -470,6 +582,7 @@ export function assertLc4QualificationAuthorization(input: Readonly<{
     source_tree_sha256: body.source_tree_sha256,
     provider_profile_manifest_sha256: body.provider_profile_manifest_sha256,
     configuration_matrix_sha256: body.configuration_matrix_sha256,
+    dev_configuration_matrix_sha256: body.dev_configuration_matrix_sha256,
     credential_set_sha256: body.credential_set_sha256,
   })) requireSha256(digest, label);
   if (!SHA1.test(body.source_commit)) throw new Error("LC4 qualification authorization source commit is invalid");
@@ -479,6 +592,7 @@ export function assertLc4QualificationAuthorization(input: Readonly<{
     || body.source_tree_sha256 !== plan.source_tree_sha256
     || body.provider_profile_manifest_sha256 !== plan.provider_profile_manifest_sha256
     || body.configuration_matrix_sha256 !== plan.configuration_matrix_sha256
+    || body.dev_configuration_matrix_sha256 !== plan.dev_configuration_matrix_sha256
     || body.credential_set_sha256 !== plan.credential_set_sha256
   ) throw new Error("LC4 qualification authorization differs from the immutable plan");
   const expectedModels = Object.fromEntries(LC4_QUALIFICATION_PROVIDER_ORDER.map((provider) => [provider, LIVE_STS_PROVIDER_SPECS[provider].model]));
@@ -486,8 +600,8 @@ export function assertLc4QualificationAuthorization(input: Readonly<{
     canonicalJson(body.authorized_providers) !== canonicalJson(LC4_QUALIFICATION_PROVIDER_ORDER)
     || canonicalJson(body.authorized_models) !== canonicalJson(expectedModels)
     || body.maximum_total_micro_usd !== LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD
-    || body.zero_caller_audio !== true
-    || body.maximum_response_generations !== 3
+    || body.caller_audio_bytes !== LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES
+    || body.maximum_response_generations !== LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS
     || body.paid_retry_allowed !== false
   ) throw new Error("LC4 qualification authorization weakened the frozen development-only boundary");
   const notBefore = requireCanonicalIso(body.not_before, "LC4 qualification authorization start");
@@ -571,7 +685,8 @@ async function exactSourceAndCredentials(input: Readonly<{
 
 async function retainCanaryEvidence(
   partial: string,
-  execution: ResponseToolCanaryExecution,
+  execution: Pick<ResponseToolCanaryExecution | Lc4DevAudioCanaryExecution, "provider" | "wireObservations" | "usage">,
+  suffix = "",
 ): Promise<Readonly<{
   wire_observation_count: number;
   wire_evidence_sha256: string;
@@ -583,8 +698,8 @@ async function retainCanaryEvidence(
   const wireEncoded = wire.map((item) => canonicalJson(item)).join("\n");
   const usageEncoded = usage.map((item) => canonicalJson(item)).join("\n");
   await Promise.all([
-    writeFile(resolve(partial, `${execution.provider}-wire.jsonl`), wireEncoded ? `${wireEncoded}\n` : "", { flag: "wx", mode: 0o400 }),
-    writeFile(resolve(partial, `${execution.provider}-usage.jsonl`), usageEncoded ? `${usageEncoded}\n` : "", { flag: "wx", mode: 0o400 }),
+    writeFile(resolve(partial, `${execution.provider}${suffix}-wire.jsonl`), wireEncoded ? `${wireEncoded}\n` : "", { flag: "wx", mode: 0o400 }),
+    writeFile(resolve(partial, `${execution.provider}${suffix}-usage.jsonl`), usageEncoded ? `${usageEncoded}\n` : "", { flag: "wx", mode: 0o400 }),
   ]);
   return Object.freeze({
     wire_observation_count: wire.length,
@@ -592,6 +707,45 @@ async function retainCanaryEvidence(
     usage_event_count: usage.length,
     usage_evidence_sha256: sha256Hex(usageEncoded),
   });
+}
+
+async function retainDevAudioCanaryArtifact(input: Readonly<{
+  partial: string;
+  attemptId: string;
+  plan: Lc4QualificationPlan;
+  results: Lc4QualificationTerminalArtifact["dev_audio_results"];
+}>): Promise<string> {
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    canary_version: "HACC-LC4-DEV-AUDIO-CANARY-v1" as const,
+    attempt_id: input.attemptId,
+    plan_sha256: input.plan.plan_sha256,
+    source_commit: input.plan.source_commit,
+    source_tree_sha256: input.plan.source_tree_sha256,
+    dev_configuration_matrix_sha256: input.plan.dev_configuration_matrix_sha256,
+    packetizer_sha256: LC4_DEV_AUDIO_CANARY_PACKETIZER_SHA256,
+    status: input.results.every((result) => result.status === "passed") ? "passed" as const : "failed" as const,
+    results: input.results,
+  });
+  const artifactSha256 = sha256Hex(`${DEV_AUDIO_CANARY_DOMAIN}${canonicalJson(body)}`);
+  await writeImmutableJson(resolve(input.partial, "dev-audio-canary.json"), Object.freeze({ ...body, artifact_sha256: artifactSha256 }));
+  return artifactSha256;
+}
+
+async function retainDevAudioFailureEvidence(
+  partial: string,
+  execution: Lc4DevAudioCanaryExecution,
+): Promise<void> {
+  if (lc4DevAudioCanaryFailureEvidenceSha256(execution.sanitizedFailureEvidence) !== execution.failureEvidenceSha256) {
+    throw new Error(`LC4 ${execution.provider} DEV audio failure evidence hash mismatch`);
+  }
+  await writeImmutableJson(
+    resolve(partial, `${execution.provider}-dev-audio-outcome.json`),
+    Object.freeze({
+      ...execution.sanitizedFailureEvidence,
+      failure_evidence_sha256: execution.failureEvidenceSha256,
+    }),
+  );
 }
 
 export async function runLc4Qualification(input: Readonly<{
@@ -635,13 +789,14 @@ export async function runLc4Qualification(input: Readonly<{
     authorization_artifact_sha256: input.authorization.artifact_sha256,
     attempted_at: attemptedAt,
     provider_order: LC4_QUALIFICATION_PROVIDER_ORDER,
-    caller_audio_bytes: 0,
+    caller_audio_bytes: LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES,
     maximum_total_micro_usd: LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD,
-    maximum_response_generations: 3,
+    maximum_response_generations: LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS,
     paid_retry_allowed: false,
     intent_sha256: sha256Hex(canonicalJson({ attemptId, plan: plan.plan_sha256, authorization: input.authorization.artifact_sha256 })),
   }));
   const targets = createLc4QualificationTargets();
+  const devTargets = createLc4DevAudioQualificationTargets();
   let qualification: ProviderQualificationArtifact;
   try {
     qualification = await qualifyProviders({
@@ -673,11 +828,13 @@ export async function runLc4Qualification(input: Readonly<{
       status: "failed" as const,
       qualification_artifact_sha256: qualification.artifactSha256,
       response_tool_canary_artifact_sha256: null,
-      caller_audio_bytes: 0 as const,
+      dev_audio_canary_artifact_sha256: null,
+      caller_audio_bytes: 0,
       response_generations_attempted: 0,
       paid_retries_attempted: 0 as const,
       maximum_total_micro_usd: LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD,
       results: Object.freeze([]),
+      dev_audio_results: Object.freeze([]),
     });
     const terminal = Object.freeze({ ...body, terminal_sha256: terminalSha256(body) });
     await writeImmutableJson(resolve(partial, "terminal.json"), terminal);
@@ -753,6 +910,112 @@ export async function runLc4Qualification(input: Readonly<{
     canaryId: attemptId,
   });
   assertProviderResponseToolCanaryArtifactIntegrity(responseCanary, targets);
+  const retainedDevResults: Lc4QualificationTerminalArtifact["dev_audio_results"][number][] = [];
+  for (const provider of LC4_QUALIFICATION_PROVIDER_ORDER) {
+    const target = devTargets.find((candidate) => candidate.provider === provider);
+    const planned = plan.targets.find((candidate) => candidate.provider === provider);
+    if (!target || !planned) throw new Error(`LC4 ${provider} DEV audio canary target is missing`);
+    let execution: Lc4DevAudioCanaryExecution;
+    try {
+      execution = await dependencies.executeDevAudioCanary({
+        provider,
+        model: target.model,
+        client: dependencies.createClient(provider, target.configuration, credentials[provider]),
+        sampleRateHz: target.configuration.inputAudioFormat.sampleRateHz,
+        profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+        timeoutMs: 30_000,
+        now,
+      });
+    } catch {
+      const specification = lc4DevAudioCanarySpecification(provider, target.model, target.configuration.inputAudioFormat.sampleRateHz);
+      const sanitizedFailureEvidence: Lc4DevAudioCanaryFailureEvidence = Object.freeze({
+        schema_version: 1 as const,
+        provider,
+        model: target.model,
+        status: "failed" as const,
+        code: "response_generation_failed" as const,
+        failure_class: "response_generation_failed" as const,
+        primary: true as const,
+        operation_order: Object.freeze([]),
+        input_audio: Object.freeze({
+          bytes: 0,
+          chunks: 0,
+          sha256: specification.audio_sha256,
+          complete: false,
+        }),
+        response: Object.freeze({ requested: false, gateway_call_observed: false }),
+        wire: Object.freeze({ count: 0, terminal_type: null, terminal_observation_sha256: null }),
+      });
+      execution = Object.freeze({
+        provider,
+        model: target.model,
+        attemptedAt: now().toISOString(),
+        completedAt: now().toISOString(),
+        status: "failed" as const,
+        code: "response_generation_failed" as const,
+        specification,
+        delivery: null,
+        callerAudioBytes: 0,
+        responseGenerationRequested: false,
+        responseGenerationEvidenceSha256: sha256Hex(`harshas-amazing-call-center/lc4-dev-audio-provider-failure/v1\n${provider}`),
+        providerToolCallEvidenceSha256: null,
+        sanitizedFailureEvidence,
+        failureEvidenceSha256: lc4DevAudioCanaryFailureEvidenceSha256(sanitizedFailureEvidence),
+        wireObservations: Object.freeze([]),
+        usage: Object.freeze([]),
+      });
+    }
+    if (execution.provider !== provider
+      || execution.model !== target.model
+      || canonicalJson(execution.specification) !== canonicalJson(lc4DevAudioCanarySpecification(provider, target.model, target.configuration.inputAudioFormat.sampleRateHz))
+      || execution.specification.tool_schema_sha256 !== planned.dev_audio_tool_schema_sha256
+      || execution.specification.audio_sha256 !== planned.caller_audio_sha256
+      || execution.specification.audio_bytes !== planned.caller_audio_bytes
+      || execution.specification.control_bytes !== planned.dev_control_bytes
+      || execution.specification.control_sha256 !== planned.dev_control_sha256
+      || execution.specification.control_source_sha256 !== planned.dev_control_source_sha256
+      || (execution.delivery !== null && (
+        execution.delivery.packetizer_sha256 !== planned.packetizer_sha256
+        || execution.delivery.delivery_profile_sha256 !== planned.audio_delivery_profile_sha256
+      ))
+      || (execution.status === "passed" && (
+        execution.delivery === null
+        || execution.callerAudioBytes !== planned.caller_audio_bytes
+        || !execution.responseGenerationRequested
+        || execution.providerToolCallEvidenceSha256 === null
+      ))) {
+      throw new Error(`LC4 ${provider} DEV audio canary execution differs from the immutable plan`);
+    }
+    await retainDevAudioFailureEvidence(partial, execution);
+    const retained = await retainCanaryEvidence(partial, execution, "-dev-audio");
+    retainedDevResults.push(Object.freeze({
+      provider,
+      model: target.model,
+      status: execution.status,
+      code: execution.code,
+      caller_audio_bytes: execution.callerAudioBytes,
+      response_generation_requested: execution.responseGenerationRequested,
+      tool_schema_sha256: execution.specification.tool_schema_sha256,
+      packetizer_sha256: planned.packetizer_sha256,
+      audio_delivery_profile_sha256: planned.audio_delivery_profile_sha256,
+      control_bytes: execution.specification.control_bytes,
+      control_sha256: execution.specification.control_sha256,
+      audio_sha256: execution.specification.audio_sha256,
+      delivery_complete: execution.delivery !== null,
+      chunk_count: execution.delivery?.chunk_count ?? 0,
+      ...retained,
+      response_generation_evidence_sha256: execution.responseGenerationEvidenceSha256,
+      provider_tool_call_evidence_sha256: execution.providerToolCallEvidenceSha256,
+      failure_evidence_sha256: execution.failureEvidenceSha256,
+    }));
+  }
+  const devAudioCanaryArtifactSha256 = await retainDevAudioCanaryArtifact({
+    partial,
+    attemptId,
+    plan,
+    results: Object.freeze(retainedDevResults),
+  });
+  const devAudioStatus = retainedDevResults.every((result) => result.status === "passed");
   const body = Object.freeze({
     schema_version: 1 as const,
     runner_version: LC4_QUALIFICATION_RUNNER_VERSION,
@@ -763,14 +1026,16 @@ export async function runLc4Qualification(input: Readonly<{
     source_tree_sha256: plan.source_tree_sha256,
     attempted_at: attemptedAt,
     completed_at: now().toISOString(),
-    status: responseCanary.status,
+    status: responseCanary.status === "passed" && devAudioStatus ? "passed" as const : "failed" as const,
     qualification_artifact_sha256: qualification.artifactSha256,
     response_tool_canary_artifact_sha256: responseCanary.artifactSha256,
-    caller_audio_bytes: 0 as const,
-    response_generations_attempted: canaryResults.length,
+    dev_audio_canary_artifact_sha256: devAudioCanaryArtifactSha256,
+    caller_audio_bytes: retainedDevResults.reduce((sum, result) => sum + result.caller_audio_bytes, 0),
+    response_generations_attempted: canaryResults.length + retainedDevResults.filter((result) => result.response_generation_requested).length,
     paid_retries_attempted: 0 as const,
     maximum_total_micro_usd: LC4_QUALIFICATION_MAXIMUM_TOTAL_MICRO_USD,
     results: Object.freeze(retainedResults),
+    dev_audio_results: Object.freeze(retainedDevResults),
   });
   const terminal = Object.freeze({ ...body, terminal_sha256: terminalSha256(body) });
   await writeImmutableJson(resolve(partial, "terminal.json"), terminal);
@@ -824,7 +1089,8 @@ export async function reportLc4Qualification(root: string): Promise<Readonly<Rec
     source_tree_sha256: plan.source_tree_sha256,
     provider_models: Object.fromEntries(plan.targets.map((target) => [target.provider, target.model])),
     maximum_total_usd: plan.maximum_total_micro_usd / 1_000_000,
-    caller_audio_bytes: 0,
+    caller_audio_bytes: LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES,
+    maximum_response_generations: LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS,
     completed_attempts: terminals.length,
     incomplete_attempts: partial.length,
     paid_retry_allowed: false,
@@ -860,8 +1126,8 @@ export async function runLc4QualificationCli(
         execution_authorized_by_source: false,
         execution_requires: "valid_plan_bound_pinned_ed25519_development_authorization",
         environment_override_authorizes_execution: false,
-        caller_audio_bytes: 0,
-        maximum_response_generations: 3,
+        caller_audio_bytes: LC4_QUALIFICATION_TOTAL_CALLER_AUDIO_BYTES,
+        maximum_response_generations: LC4_QUALIFICATION_MAXIMUM_RESPONSE_GENERATIONS,
         paid_retry_allowed: false,
         maximum_total_usd: 3,
         prepared_plan_sha256: preparedPlanSha256,
