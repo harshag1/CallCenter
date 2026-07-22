@@ -162,8 +162,10 @@ class ReadyQualificationClient implements NormalizedRealtimeClient {
       predecessor = observation.observationSha256;
       return observation;
     };
-    for (const listener of this.#wireListeners) listener(wire("outbound", 1, "session.update"));
-    for (const listener of this.#wireListeners) listener(wire("inbound", 2, "session.updated"));
+    const requestWireType = this.provider === "gemini" ? "setup" : "session.update";
+    const acknowledgementWireType = this.provider === "gemini" ? "setupComplete" : "session.updated";
+    for (const listener of this.#wireListeners) listener(wire("outbound", 1, requestWireType));
+    for (const listener of this.#wireListeners) listener(wire("inbound", 2, acknowledgementWireType));
     const event = Object.freeze({
       type: "session.ready" as const,
       provider: this.provider,
@@ -573,6 +575,26 @@ describe("LC4 exact-model qualification runner", () => {
     expect(clients).toHaveLength(9);
     expect(everyClientConstructedAfterBudgetOpen).toBe(true);
     expect(clients.every((client) => client.forbiddenAudioCalls === 0)).toBe(true);
+    const retainedQualification = JSON.parse(await readFile(
+      join(evidenceRoot, "qualifications", "2026-07-21T22-00-00-000Z-development-static-gateway-canary-001.json"),
+      "utf8",
+    )) as Readonly<{
+      results: readonly Readonly<{
+        provider: LiveStsProvider;
+        setupWireEvidence?: Readonly<{
+          provider: LiveStsProvider;
+          connectionEpoch: number;
+          requestWireType: string;
+          acknowledgementWireType: string;
+        }>;
+      }>[];
+    }>;
+    expect(retainedQualification.results.find((result) => result.provider === "gemini")?.setupWireEvidence).toMatchObject({
+      provider: "gemini",
+      connectionEpoch: 1,
+      requestWireType: "setup",
+      acknowledgementWireType: "setupComplete",
+    });
     const complete = join(evidenceRoot, "attempts", `${valid.authorization.body.authorization_id}.complete`);
     const retainedUsage = await readFile(join(complete, "openai-usage.jsonl"), "utf8");
     expect(retainedUsage).not.toContain("never-retained-verbatim");
