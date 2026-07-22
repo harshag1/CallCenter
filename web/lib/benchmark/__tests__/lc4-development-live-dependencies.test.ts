@@ -13,6 +13,7 @@ import {
   createLc4PinnedListenerManifestSha256,
   createLc4PinnedListenerSink,
   lc4DevLedgerGenesisSha256,
+  replayLc4DevAuthorityReport,
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
 import {
@@ -25,7 +26,10 @@ import {
   createLc4HeadlessListenerPlaybackAuthority,
 } from "../lc4-development-headless-listener-authority";
 import type { Lc4DevImmutableLedgerEvent, Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
-import { createBenchmarkKernelAttestationSigner } from "../kernel-attestation";
+import {
+  benchmarkKernelAttestationPublicKeyFingerprint,
+  createBenchmarkKernelAttestationSigner,
+} from "../kernel-attestation";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 
@@ -79,6 +83,27 @@ async function ledgerEvent(
 }
 
 describe("LC4-DEV concrete live dependencies", () => {
+  it("keeps a retained run with no authority terminal DAG unscorable, never 0/N", async () => {
+    const root = await temporaryDirectory();
+    await createLc4ImmutableCas(join(root, "cas"));
+    const keys = generateKeyPairSync("ed25519");
+    const publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const report = await replayLc4DevAuthorityReport({
+      run: { ledger: [], ledger_head_sha256: null } as never,
+      preflight: {
+        authority_trust_root_sha256: benchmarkKernelAttestationPublicKeyFingerprint(publicKeyPem),
+        authorization: {
+          authority_public_key_spki_base64: keys.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+        },
+      } as never,
+      cas_root_dir: join(root, "cas"),
+    });
+    expect(report).toMatchObject({
+      status: "unscorable_missing_authority_evidence",
+      passed: null,
+      evaluated: null,
+    });
+  });
   it("reports every schema and transport gap instead of treating corpus prose as executable control", () => {
     const audit = auditLc4PublicDevLiveReadiness();
     expect(audit.ready).toBe(false);
@@ -132,6 +157,8 @@ describe("LC4-DEV concrete live dependencies", () => {
     await expect(ledgerEvent(evidence, 3, first.event_sha256).then((event) => writer.append(event))).rejects.toThrow("forks, repeats, or skips");
     await expect(writer.append({ ...second, event_sha256: HASH })).rejects.toThrow("event hash is invalid");
     await writer.append(second);
+    expect(writer.events()).toEqual([first, second]);
+    expect(evidence.retainedReferences("ledger_payload")).toHaveLength(3);
     await writer.close();
     await expect(verifyLc4DevReplayLedger([first, second], evidence)).resolves.toMatchObject({
       event_count: 2,

@@ -4,8 +4,10 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_AUTHORITY_EVIDENCE_VERSION,
   compileLc4AuthoritativeObligationManifest,
+  compileLc4DevelopmentAuthoritativeObligationManifest,
   createLc4AuthorityEvents,
   createLc4AuthoritativeObligationEpisodeArtifact,
+  createLc4AuthoritativeObligationEvidenceReplayer,
   createLc4AuthorityManifestRegistry,
   replayLc4AuthoritativeObligationEvidence,
   summarizeLc4AuthoritativeObligationEvidence,
@@ -23,6 +25,7 @@ import {
   createBenchmarkKernelAttestationSigner,
   type BenchmarkKernelAttestationTrust,
 } from "../kernel-attestation";
+import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 
 function fixture() {
   const payload = createLc4GenericHeldoutGenerator({
@@ -81,12 +84,28 @@ function authorityRoots(events: ReturnType<typeof createLc4AuthorityEvents>, reg
     retained_ledger_head_sha256: sha256Hex("ledger-head"),
     ledger_replay_sha256: sha256Hex("ledger-replay"),
     normalized_event_set_sha256: sha256Hex(canonicalJson(events)),
+    source_checkpoint_evidence_sha256: sha256Hex("source-checkpoint"),
     manifest_registry_sha256: registrySha256,
     episode_subject_assignment_sha256: assignmentSha256,
   });
 }
 
 describe("LC4 authoritative obligation evidence", () => {
+  it("precompiles the public DEV conditional oracle as exactly 42 obligations", () => {
+    const manifest = compileLc4DevelopmentAuthoritativeObligationManifest(
+      createLc4PublicDevelopmentCorpus(),
+      sha256Hex("signed-five-row-caller-branch-matrix"),
+    );
+    expect(manifest.obligation_count).toBe(42);
+    expect(manifest.obligations.filter((entry) => entry.kind === "tool_outcome_exact")).toHaveLength(14);
+    expect(manifest.obligations.filter((entry) => entry.kind === "conditional_mutation_outcome")).toHaveLength(1);
+    expect(manifest.obligations.filter((entry) => entry.kind === "forbidden_effect_never_committed")).toHaveLength(9);
+    expect(manifest.obligations.filter((entry) => entry.kind === "worker_disposition_exact")).toHaveLength(4);
+    expect(manifest.obligations.filter((entry) => entry.kind === "latest_fact_revision")).toHaveLength(10);
+    expect(manifest.obligations.filter((entry) => entry.kind === "conditional_reconciliation_matrix")).toHaveLength(1);
+    expect(manifest.obligations.filter((entry) => entry.kind === "invalidated_confirmation_never_used")).toHaveLength(2);
+    expect(manifest.obligations.filter((entry) => entry.kind === "terminal_world_complete")).toHaveLength(1);
+  });
   it("mechanically freezes the complete tool, worker, revision, reconciliation, confirmation, and terminal oracle", () => {
     const { manifest, payload } = fixture();
     expect(manifest.compiler_version).toBe(LC4_AUTHORITY_EVIDENCE_VERSION);
@@ -111,7 +130,7 @@ describe("LC4 authoritative obligation evidence", () => {
       signer,
       authorityRoots: authorityRoots(createLc4AuthorityEvents(entries)),
     });
-    expect(JSON.stringify(artifact)).not.toMatch(/openai|gemini|xai|native|hacc/i);
+    expect(JSON.stringify(artifact)).not.toMatch(/"(?:provider|arm|model|voice)"/i);
     const passed = replayLc4AuthoritativeObligationEvidence({ manifest, artifact, trust });
     expect(passed).toMatchObject({
       verdict: "pass",
@@ -216,6 +235,13 @@ describe("LC4 authoritative obligation evidence", () => {
       expectedEpisodeSubjectSha256: subject,
     });
     expect(valid.verdict).toBe("pass");
+    expect(createLc4AuthoritativeObligationEvidenceReplayer({ registry, trust })(artifact as never, {
+      domain: "authority",
+      artifactSha256: sha256Hex(canonicalJson(artifact)),
+    })).toMatchObject({
+      valid: true,
+      derivation: { usefulConjuncts: { authoritative_tool_world_obligations: true } },
+    });
     expect(replayLc4AuthoritativeObligationEvidence({
       manifest,
       artifact,
