@@ -318,7 +318,7 @@ function verifySnapshot(snapshot: Lc4WorkerSnapshot): void {
     previous = actual;
   });
   if (snapshot.head_sha256 !== previous) throw new Error("worker snapshot head mismatch");
-  const receiptIds = new Set(snapshot.receipts.map((receipt) => receipt.receipt_id));
+  const receiptsById = new Map(snapshot.receipts.map((receipt) => [receipt.receipt_id, receipt]));
   const jobIds = new Set<string>();
   const requestIds = new Set<string>();
   for (const job of snapshot.jobs) {
@@ -326,28 +326,70 @@ function verifySnapshot(snapshot: Lc4WorkerSnapshot): void {
     if (jobIds.has(job.job_id) || requestIds.has(job.request_id)) throw new Error("worker snapshot contains duplicate jobs");
     jobIds.add(job.job_id);
     requestIds.add(job.request_id);
-    if (!receiptIds.has(job.job_receipt_id) || job.lineage.some((lineage) => !receiptIds.has(lineage.receipt_id))) {
+    const jobReceipt = receiptsById.get(job.job_receipt_id);
+    if (
+      jobReceipt?.kind !== "job.started"
+      || jobReceipt.job_id !== job.job_id
+      || job.lineage.some((lineage) => {
+        const receipt = receiptsById.get(lineage.receipt_id);
+        return !receipt
+          || receipt.job_id !== job.job_id
+          || (receipt.kind !== "lineage.bound" && receipt.kind !== "lineage.rehydrated");
+      })
+    ) {
       throw new Error("worker job lineage references a missing receipt");
     }
-    if (job.attempts.length === 0 || job.attempts.some((attempt) =>
-      !receiptIds.has(attempt.started_receipt_id) || !receiptIds.has(attempt.lease.issued_receipt_id)
-    )) throw new Error("worker attempt references a missing receipt");
+    if (job.attempts.length === 0 || job.attempts.some((attempt) => {
+      const started = receiptsById.get(attempt.started_receipt_id);
+      const lease = receiptsById.get(attempt.lease.issued_receipt_id);
+      return started?.kind !== "attempt.started"
+        || started.job_id !== job.job_id
+        || lease?.kind !== "lease.issued"
+        || lease.job_id !== job.job_id;
+    })) throw new Error("worker attempt references a missing receipt");
     const resultTerminal = job.status === "succeeded" || job.status === "failed";
     if (
       (job.status === "running" && (job.terminal_result !== null || job.terminal_receipt_id !== null))
       || (job.status === "cancelled" && (job.terminal_result !== null || job.terminal_receipt_id === null))
       || (resultTerminal && (job.terminal_result === null || job.terminal_receipt_id === null))
     ) throw new Error("worker terminal evidence is incomplete");
-    if (job.terminal_receipt_id && !receiptIds.has(job.terminal_receipt_id)) {
+    const terminalReceipt = job.terminal_receipt_id
+      ? receiptsById.get(job.terminal_receipt_id)
+      : undefined;
+    if (
+      job.terminal_receipt_id
+      && (!terminalReceipt || terminalReceipt.job_id !== job.job_id)
+    ) {
       throw new Error("worker terminal receipt is missing");
     }
-    if (job.terminal_result && !receiptIds.has(job.terminal_result.accepted_receipt_id)) {
-      throw new Error("worker terminal result references a missing receipt");
+    if (
+      job.status === "cancelled"
+      && terminalReceipt?.kind !== "job.cancelled"
+    ) throw new Error("cancelled worker terminal receipt has the wrong kind");
+    if (job.terminal_result) {
+      const accepted = receiptsById.get(job.terminal_result.accepted_receipt_id);
+      if (
+        accepted?.kind !== "result.accepted"
+        || accepted.job_id !== job.job_id
+        || job.terminal_receipt_id !== job.terminal_result.accepted_receipt_id
+        || accepted.body.result_id !== job.terminal_result.result_id
+        || accepted.body.outcome !== job.terminal_result.outcome
+        || accepted.body.payload_sha256 !== job.terminal_result.payload_sha256
+        || accepted.body.attempt_id !== job.terminal_result.accepted_attempt_id
+        || accepted.body.lease_id !== job.terminal_result.accepted_lease_id
+      ) {
+        throw new Error("worker terminal result references a missing receipt");
+      }
     }
   }
   if (snapshot.worker_events.some((event, index) => event.ordinal !== index + 1)) {
     throw new Error("worker event ordinals are not contiguous");
   }
+}
+
+/** Validate durable worker evidence without creating a session or mutating lineage. */
+export function assertLc4WorkerSnapshot(snapshot: Lc4WorkerSnapshot): void {
+  verifySnapshot(snapshot);
 }
 
 function mutableState(snapshot?: Lc4WorkerSnapshot): MutableState {
