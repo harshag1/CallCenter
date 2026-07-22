@@ -50,8 +50,8 @@ import {
   type KernelTranscript,
 } from "../kernel-transcript";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
-import { createToolWorld } from "../tool-world";
-import { longUsefulnessTask } from "../long-call-live-experiment";
+import { createToolWorld, evaluateScenarioWorld } from "../tool-world";
+import { longUsefulnessTask, type LongCallFamily } from "../long-call-live-experiment";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -756,6 +756,214 @@ async function runMuseumFrontierDisclosure(
     budget: trialBudget.value,
   });
   return { condition, result, submittedOutputs, taskTurns, toolRound };
+}
+
+type CanarySnapshot = Readonly<{
+  scope: string;
+  capability_epoch: number;
+  actions: readonly Readonly<{ name: string }>[];
+}>;
+
+function renderedCanarySnapshot(output: unknown): CanarySnapshot | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  const rendered = (output as Record<string, unknown>).capability_snapshot;
+  if (typeof rendered !== "string") return null;
+  const lines = rendered.split("\n");
+  if (lines.length !== 3 || lines[0] !== "<capability_snapshot>" || lines[2] !== "</capability_snapshot>") {
+    throw new Error("release canary received a malformed capability snapshot envelope");
+  }
+  const parsed = JSON.parse(lines[1]) as CanarySnapshot;
+  if (
+    typeof parsed.scope !== "string"
+    || !Number.isSafeInteger(parsed.capability_epoch)
+    || !Array.isArray(parsed.actions)
+    || parsed.actions.some((action) => !action || typeof action.name !== "string")
+  ) throw new Error("release canary received a malformed provider capability snapshot");
+  return parsed;
+}
+
+function canaryArguments(
+  action: string,
+  task: ReturnType<typeof longUsefulnessTask>,
+): Record<string, string | number> {
+  const facts = task.scenario.initial_facts as Record<string, unknown>;
+  const sourceByArgument = {
+    case_id: "case_id",
+    actor_id: "actor_id",
+    verification_pin: "verification_pin",
+    subject: "corrected_subject",
+    primary_constraint: "expected_primary_constraint",
+    numeric_limit: "expected_numeric_limit",
+    action_code: "expected_reversible_action_code",
+    clearance_token: "expected_clearance_token",
+    authorization_code: "expected_authorization_code",
+  } as const;
+  const tool = task.scenario.tools.find((candidate) => candidate.name === action);
+  if (!tool) throw new Error(`release canary cannot resolve tool ${action}`);
+  return Object.fromEntries(tool.arguments.map((argument) => {
+    const source = sourceByArgument[argument.name as keyof typeof sourceByArgument];
+    const value = source ? facts[source] : undefined;
+    if (typeof value !== "string" && typeof value !== "number") {
+      throw new Error(`release canary has no authoritative argument binding for ${action}.${argument.name}`);
+    }
+    return [argument.name, value];
+  }));
+}
+
+function stepToolOrder(flow: unknown): ReadonlyMap<string, readonly string[]> {
+  const parsed = AgentFlowSchema.parse(flow);
+  const ordered = new Map<string, readonly string[]>();
+  const visit = (steps: typeof parsed.nodes[number]["steps"], prefix: string): void => {
+    for (const step of steps ?? []) {
+      const path = `${prefix}.${step.id}`;
+      ordered.set(`step:${path}`, Object.freeze([...(step.tools ?? [])]));
+      visit(step.steps, path);
+    }
+  };
+  for (const node of parsed.nodes) visit(node.steps, node.id);
+  return ordered;
+}
+
+/** Provider-free v5 release canary over the real orchestrator and attested kernel. */
+async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
+  const task = longUsefulnessTask(family);
+  const suite = compileConditionSuite(task.compiler_input);
+  const condition = suite.conditions["host-managed-harness"];
+  const runId = `host-managed-v5-release-canary-${family}`;
+  const taskTurns: readonly CallerAudioTurn[] = Object.freeze(
+    task.scenario.caller.turns.map((turn, index) => Object.freeze({
+      turnId: turn.id,
+      audio: Object.freeze({ ...AUDIO_FORMAT, data: Uint8Array.from([index + 1, 0]) }),
+    }))
+  );
+  const taskAudio = createPairedAudioManifest({
+    pairId: TEST_ATTESTATION_EVIDENCE.pairId,
+    scenario: task.scenario,
+    callerTurns: taskTurns,
+  });
+  const kernel = createInMemoryBenchmarkGatewayKernel({
+    flow: AgentFlowSchema.parse(task.compiler_input.flow),
+    expectedFlowHash: suite.flowHash,
+    expectedScenarioHash: suite.scenarioHash,
+    expectedConditionHash: condition.conditionHash,
+    grantBindingHash: suite.sourceHash,
+    leaseSubjectId: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+    evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+    signer: TEST_ATTESTATION_SIGNER,
+    capabilitySecret: `orchestrator-v5-${family}-release-canary-secret-at-least-thirty-two-characters`,
+    clock: {
+      nowMs: () => Date.parse("2026-07-20T20:00:00.000Z"),
+      nowIso: () => "2026-07-20T20:00:00.000Z",
+    },
+  });
+  const orderedTools = stepToolOrder(task.compiler_input.flow);
+  const semanticTools = new Set(task.scenario.tools.map((tool) => tool.name));
+  const completedActions = new Set<string>();
+  const disclosedTargets = new Set<string>();
+  const refreshes: Array<Readonly<{ turn: number; snapshot: CanarySnapshot }>> = [];
+  let selectedTopic = false;
+  let currentSnapshot: CanarySnapshot | null = null;
+  let pendingAction: string | null = null;
+  let currentTurn = 0;
+  let responseOrdinal = 0;
+  let toolRound = 0;
+
+  const client = new FakeRealtimeClient({
+    onTurn(fake) {
+      currentTurn += 1;
+      const responseId = `${runId}-turn-${currentTurn}`;
+      fake.emit(event("response.started", { responseId }));
+      pendingAction = "flow.get_state";
+      fake.emit(event("tool.calls", {
+        responseId,
+        calls: [gatewayCall(`${runId}-refresh-${currentTurn}`, "flow.get_state", {})],
+      }));
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+    onToolResults(fake, results) {
+      toolRound += 1;
+      if (toolRound > 96) throw new Error(`${family} release canary exceeded its deterministic tool-round bound`);
+      if (results.length !== 1 || !pendingAction) throw new Error(`${family} release canary lost its single-action binding`);
+      const output = results[0].output;
+      const outputRecord = output && typeof output === "object" && !Array.isArray(output)
+        ? output as Record<string, unknown>
+        : null;
+      const gatewayResultValue = outputRecord?.gateway_result ?? output;
+      const gatewayResult = gatewayResultValue && typeof gatewayResultValue === "object" && !Array.isArray(gatewayResultValue)
+        ? gatewayResultValue as Record<string, unknown>
+        : null;
+      const disclosure = outputRecord?.progressive_disclosure;
+      if (disclosure && typeof disclosure === "object" && !Array.isArray(disclosure)) {
+        const target = (disclosure as Record<string, unknown>).target;
+        if (typeof target !== "string") throw new Error(`${family} release canary received a disclosure without a target`);
+        disclosedTargets.add(target);
+      }
+      const rotated = renderedCanarySnapshot(output);
+      if (rotated) currentSnapshot = rotated;
+      if (pendingAction === "flow.get_state") {
+        if (!rotated) throw new Error(`${family} release canary refresh omitted its capability snapshot`);
+        refreshes.push(Object.freeze({ turn: currentTurn, snapshot: rotated }));
+      } else if (pendingAction === "flow.select_topic") {
+        if (gatewayResult?.ok !== true) throw new Error(`${family} release canary could not select its topic`);
+        selectedTopic = true;
+      } else if (semanticTools.has(pendingAction)) {
+        if (gatewayResult?.ok === true || disclosure) completedActions.add(pendingAction);
+      }
+
+      const responseId = `${runId}-tool-${++responseOrdinal}`;
+      fake.emit(event("response.started", { responseId }));
+      const visible = new Set(currentSnapshot?.actions.map((action) => action.name) ?? []);
+      let nextAction: string | null = null;
+      let args: Record<string, string | number> = {};
+      if (!selectedTopic && visible.has("flow.select_topic")) {
+        nextAction = "flow.select_topic";
+        args = { topic_id: family === "museum" ? "museum_case" : family === "campus" ? "campus_case" : "water_case" };
+      } else if (currentSnapshot?.scope.startsWith("step:")) {
+        const order = orderedTools.get(currentSnapshot.scope);
+        if (!order) throw new Error(`${family} release canary reached unknown scope ${currentSnapshot.scope}`);
+        nextAction = order.find((action) => visible.has(action) && !completedActions.has(action)) ?? null;
+        if (nextAction) args = canaryArguments(nextAction, task);
+      }
+      pendingAction = nextAction;
+      if (nextAction) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-${nextAction}-${toolRound}`, nextAction, args)],
+        }));
+      }
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+  });
+  const journal = new CollectingJournal();
+  const trialBudget = budget(runId);
+  const result = await runBenchmarkTrial({
+    runId,
+    model: TEST_ATTESTATION_EVIDENCE.model,
+    scenario: task.scenario,
+    ...runtimeBindings(client, { condition, kernel }),
+    callerTurns: taskTurns,
+    pairedAudio: taskAudio,
+    journal,
+    limits: {
+      ...limits,
+      maxTurns: taskTurns.length,
+      maxSessionMs: 10_000,
+      maxInputAudioBytes: taskTurns.length * 2,
+      maxToolCalls: 96,
+    },
+    budget: trialBudget.value,
+  });
+  return Object.freeze({
+    condition,
+    result,
+    journal,
+    completedActions,
+    disclosedTargets,
+    refreshes,
+    expectedStepTargets: Object.freeze(condition.disclosures
+      .map((candidate) => candidate.target)
+      .filter((target) => target.startsWith("step:"))),
+  });
 }
 
 function rawE2eClient(): FakeRealtimeClient {
@@ -1473,6 +1681,38 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(rendered).toContain('"name":"flow.get_state"');
     expect(rendered).not.toContain('"name":"verify_museum_registrar"');
   });
+
+  it.each(["museum", "campus", "water"] as const)(
+    "runs the provider-free v5 %s release canary across every step target and caller frontier",
+    async (family) => {
+      const canary = await runHostManagedLongCallReleaseCanary(family);
+      expect(canary.result.status, JSON.stringify(canary.result.errors)).toBe("completed");
+      expect(canary.result.errors).toEqual([]);
+      expect(canary.result.counters.turnsSent).toBe(20);
+      expect(canary.completedActions).toEqual(new Set(
+        longUsefulnessTask(family).scenario.tools.map((tool) => tool.name)
+      ));
+      expect([...canary.disclosedTargets].filter((target) => target.startsWith("step:")).sort())
+        .toEqual([...canary.expectedStepTargets].sort());
+      expect(canary.refreshes.map((refresh) => refresh.turn)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1)
+      );
+      expect(canary.refreshes.every((refresh) =>
+        refresh.snapshot.actions.some((action) => action.name === "flow.get_state")
+      )).toBe(true);
+      expect(canary.refreshes.every((refresh) =>
+        !refresh.snapshot.actions.some((action) => action.name === "flow.complete_step")
+      )).toBe(true);
+      expect(canary.journal.appended.filter((entry) =>
+        entry.event_type === "caller.capability_refresh_required"
+      )).toHaveLength(20);
+      expect(evaluateScenarioWorld(longUsefulnessTask(family).scenario, canary.result.world).success
+        .every((assertion) => assertion.passed)).toBe(true);
+      expect(canary.result.artifacts.files.some((file) => file.path === "kernel-transcript.jsonl")).toBe(true);
+      expect(canary.result.kernelAttestation.transcript_reference.transcript_entry_count).toBeGreaterThan(20);
+    },
+    20_000,
+  );
 
   it("rejects an active-step subset containing a capability compiled for a different target", async () => {
     const { result, submittedOutputs, toolRound } = await runMuseumFrontierDisclosure(
