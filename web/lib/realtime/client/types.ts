@@ -72,6 +72,43 @@ export function isLocalToolProxyFunction(value: unknown): boolean {
   return jsonContractEqual(value, LOCAL_TOOL_PROXY_FUNCTION);
 }
 
+/**
+ * Accept the canonical open catalog proxy or a stricter closed-enum variant.
+ * Closed variants must preserve the exact envelope keys and may only narrow
+ * `tool_name`; provider adapters still derive provenance from the wire.
+ */
+export function isSafeLocalToolProxyFunction(value: unknown): boolean {
+  if (isLocalToolProxyFunction(value)) return true;
+  if (!isPlainRecord(value)
+    || value.type !== "function"
+    || value.name !== LOCAL_TOOL_PROXY_FUNCTION_NAME
+    || typeof value.description !== "string"
+    || !isPlainRecord(value.parameters)) return false;
+  const parameters = value.parameters;
+  if (parameters.type !== "object"
+    || parameters.additionalProperties !== false
+    || !isPlainRecord(parameters.properties)
+    || !Array.isArray(parameters.required)
+    || parameters.required.length !== 2
+    || parameters.required[0] !== "tool_name"
+    || parameters.required[1] !== "arguments") return false;
+  const propertyKeys = Object.keys(parameters.properties).sort();
+  if (propertyKeys.length !== 2 || propertyKeys[0] !== "arguments" || propertyKeys[1] !== "tool_name") return false;
+  const toolName = parameters.properties.tool_name;
+  const arguments_ = parameters.properties.arguments;
+  if (!isPlainRecord(toolName)
+    || toolName.type !== "string"
+    || !Array.isArray(toolName.enum)
+    || toolName.enum.length === 0
+    || new Set(toolName.enum).size !== toolName.enum.length
+    || toolName.enum.some((item) => typeof item !== "string" || !/^[a-z][a-z0-9_]{1,63}$/u.test(item))) return false;
+  return isPlainRecord(arguments_)
+    && arguments_.type === "object"
+    && arguments_.additionalProperties === false
+    && isPlainRecord(arguments_.properties)
+    && Object.keys(arguments_.properties).length === 0;
+}
+
 export type ProviderToolCallProvenance = Readonly<{
   schemaVersion: 1;
   provider: Extract<ServerRealtimeProvider, "openai" | "xai">;

@@ -1,4 +1,6 @@
 import { canonicalJson, sha256Hex } from "./artifacts";
+import type { JsonValue } from "./artifacts";
+import type { Lc4DevReplayEvidenceStore } from "./lc4-development-evidence-retention";
 import { createLc4CapturedOutput, type Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
@@ -22,6 +24,8 @@ import type {
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
 import {
+  isLc4DevSemanticGatewayFunction,
+  LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
@@ -39,7 +43,7 @@ import type {
   NormalizedRealtimeEvent,
   RealtimeWireObservation,
 } from "../realtime/client/types";
-import { isLocalToolProxyFunction, LOCAL_TOOL_PROXY_FUNCTION } from "../realtime/client/types";
+import { isLocalToolProxyFunction } from "../realtime/client/types";
 
 export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v1" as const;
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
@@ -48,6 +52,9 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-continuity-packet/v1\n";
 const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-rotation-state-packet/v1\n";
 const ROTATION_FACT_SET_DOMAIN = "harshas-amazing-call-center/lc4-rotation-fact-set/v1\n";
+const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n";
+const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
+const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v1\n";
 const NATIVE_CONTINUITY_SOURCES = new Set([
   "listener_heard_caller",
   "listener_heard_assistant",
@@ -341,11 +348,22 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   rotation_substantive_fact_set_sha256: string | null;
   response_control_kind: "native_context" | "hacc_response_plan";
   response_plan_sha256: string | null;
+  response_plan_body: HaccResponsePlan | null;
+  terminal_response_plan_sha256: string;
+  terminal_response_control_sha256: string;
+  rendered_control_context: string;
   response_plan_delivery_sha256: string;
+  requested_runtime_identity: Readonly<{ provider: LiveStsProvider; model: string; voice: string }>;
+  effective_runtime_identity: Readonly<{ provider: LiveStsProvider; model: string; voice: string }>;
   output_capture: Lc4CapturedOutput;
   wire_observations: readonly Lc4SanitizedWireObservation[];
   wire_observation_set_sha256: string;
-  /** Present only for HACC-LC4-DEV; never contains arguments, results, or native IDs. */
+  /**
+   * Present only for HACC-LC4-DEV. Compact receipts are content-free; the
+   * explicitly separated authority projections retain sanitized model versus
+   * effective arguments and provider-visible results for replay. Neither form
+   * retains raw provider call/response IDs or credentials.
+   */
   dev_gateway_receipt_set: Lc4DevGatewayReceiptSet | null;
   operation_order: readonly [
     "caller_pcm_appended",
@@ -360,6 +378,7 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   playback_kind?: "canonical" | "repair";
   repair_decision_receipt_sha256?: string | null;
   dev_listener_result?: Awaited<ReturnType<Lc4DevelopmentListenerSink["accept"]>> | null;
+  replay_projection: JsonValue;
 }>;
 
 export type Lc4ListenerEvidenceHandoff = Readonly<{
@@ -411,11 +430,12 @@ export type Lc4RealtimeSegmentSession = Readonly<{
     opportunity_id: string;
     decision_receipt_sha256: string;
     repair_played: boolean;
-  }>): Promise<Readonly<{ opportunity_receipt_sha256: string }>>;
+  }>): Promise<Readonly<{ opportunity_receipt_sha256: string; finalization_body: JsonValue }>>;
   close(): Promise<Readonly<{
     session_ordinal: number;
     segment_ordinal: 1 | 2 | 3;
     rotation_receipt_sha256: string;
+    finalization_body: JsonValue;
   }>>;
 }>;
 
@@ -453,7 +473,9 @@ function assertExactProfile(input: Lc4OpenRealtimeSegmentInput): void {
     || input.configuration.inputAudioFormat.encoding !== "pcm16"
     || input.configuration.inputAudioFormat.channels !== 1
     || input.configuration.providerTools.length !== 1
-    || !isLocalToolProxyFunction(input.configuration.providerTools[0])
+    || !(input.manifest.protocol_id === "HACC-LC4-DEV-v1"
+      ? isLc4DevSemanticGatewayFunction(input.configuration.providerTools[0])
+      : isLocalToolProxyFunction(input.configuration.providerTools[0]))
   ) throw new Error("LC4 realtime segment differs from its frozen production provider profile");
 }
 
@@ -751,6 +773,14 @@ export class Lc4RealtimeProviderBridge {
           const devGatewayReceiptSet = devGateway
             ? await devGateway.finishOpportunity()
             : null;
+          const terminalGatewayReceipt = devGatewayReceiptSet?.receipts.at(-1) ?? null;
+          const initialResponseControlSha256 = exchangeInput.response_control.kind === "hacc_response_plan"
+            ? exchangeInput.response_control.plan.plan_sha256
+            : exchangeInput.response_control.instructions_sha256;
+          const terminalResponsePlanSha256 = terminalGatewayReceipt?.post_transition_response_plan_sha256
+            ?? initialResponseControlSha256;
+          const terminalResponseControlSha256 = terminalGatewayReceipt?.post_transition_response_control_sha256
+            ?? initialResponseControlSha256;
           const chunks = outputByResponse.get(activeResponseId) ?? [];
           const pcm = concatenate(chunks);
           if (pcm.byteLength === 0) throw new Error("LC4 provider response produced no PCM output");
@@ -770,7 +800,7 @@ export class Lc4RealtimeProviderBridge {
           );
           const listenerResult = await input.listener.accept({
             capture,
-            response_plan_sha256: responsePlan?.plan_sha256 ?? null,
+            response_plan_sha256: terminalResponsePlanSha256,
             wire_observation_set_sha256: wireObservationSetSha256,
           });
           operationOrder.push("listener_evidence_handed_off");
@@ -792,7 +822,21 @@ export class Lc4RealtimeProviderBridge {
             rotation_substantive_fact_set_sha256: rotationContext.substantive_fact_set_sha256,
             response_control_kind: exchangeInput.response_control.kind,
             response_plan_sha256: responsePlan?.plan_sha256 ?? null,
+            response_plan_body: responsePlan,
+            terminal_response_plan_sha256: terminalResponsePlanSha256,
+            terminal_response_control_sha256: terminalResponseControlSha256,
+            rendered_control_context: renderedControl,
             response_plan_delivery_sha256: sha256Hex(renderedControl),
+            requested_runtime_identity: Object.freeze({
+              provider: input.configuration.provider,
+              model: input.configuration.model,
+              voice: input.profile.voice,
+            }),
+            effective_runtime_identity: Object.freeze({
+              provider: effectiveConfiguration.provider,
+              model: effectiveConfiguration.model,
+              voice: input.profile.voice,
+            }),
             output_capture: capture,
             wire_observations: opportunityWire,
             wire_observation_set_sha256: wireObservationSetSha256,
@@ -804,14 +848,16 @@ export class Lc4RealtimeProviderBridge {
               dev_listener_result: listenerResult ?? null,
             } : {}),
           });
+          const replayProjection = Object.freeze({
+            ...body,
+            output_capture: { ...capture, chunks: capture.chunks.map((chunk) => chunk.receipt) },
+          }) as unknown as JsonValue;
           const evidence = Object.freeze({
             ...body,
             evidence_sha256: sha256Hex(
-              `harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n${canonicalJson({
-                ...body,
-                output_capture: { ...capture, chunks: capture.chunks.map((chunk) => chunk.receipt) },
-              })}`,
+              `harshas-amazing-call-center/lc4-provider-exchange-evidence/v1\n${canonicalJson(replayProjection)}`,
             ),
+            replay_projection: replayProjection,
           });
           if (input.manifest.protocol_id === "HACC-LC4-DEV-v1") {
             pendingDevOpportunity = playbackKind === "canonical"
@@ -832,15 +878,19 @@ export class Lc4RealtimeProviderBridge {
           || finalizeInput.repair_played !== pendingDevOpportunity.repair_played) {
           throw new Error("LC4-DEV opportunity finalize differs from the repair decision or playback phase");
         }
-        const opportunityReceiptSha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n${canonicalJson({
+        const finalizationBody = Object.freeze({
           opportunity_id: finalizeInput.opportunity_id,
           canonical_evidence_sha256: pendingDevOpportunity.canonical_evidence_sha256,
           decision_receipt_sha256: finalizeInput.decision_receipt_sha256,
           repair_played: finalizeInput.repair_played,
-        })}`);
+        });
+        const opportunityReceiptSha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n${canonicalJson(finalizationBody)}`);
         opportunityOrdinal += 1;
         pendingDevOpportunity = null;
-        return Object.freeze({ opportunity_receipt_sha256: opportunityReceiptSha256 });
+        return Object.freeze({
+          opportunity_receipt_sha256: opportunityReceiptSha256,
+          finalization_body: finalizationBody as unknown as JsonValue,
+        });
       } : undefined,
       close: async () => {
         if (closed) throw new Error("LC4 realtime segment session is already closed");
@@ -875,6 +925,7 @@ export class Lc4RealtimeProviderBridge {
           session_ordinal: sessionOrdinal,
           segment_ordinal: input.segment.ordinal,
           rotation_receipt_sha256: receipt,
+          finalization_body: body as unknown as JsonValue,
         });
       },
     });
@@ -974,7 +1025,7 @@ function devConfiguration(episode: Lc4DevLiveEpisodePlan, preflightSha256: strin
     instructions: base,
     initialPrompt: base,
     renderedCapabilitySnapshot: `<lc4_dev_gateway preflight_sha256="${preflightSha256}" />`,
-    providerTools: Object.freeze([LOCAL_TOOL_PROXY_FUNCTION]),
+    providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
     conditionHash: sha256Hex(`${LC4_DEV_CONFIGURATION_DOMAIN}${canonicalJson(body)}`),
     inputAudioFormat: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: profile.input_sample_rate_hz, channels: 1 as const }),
     audioDeliveryProfile: delivery,
@@ -1041,6 +1092,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   credentials: Readonly<Record<LiveStsProvider, string>>;
   listener: Lc4DevelopmentListenerSink;
   gateway_executor: Lc4DevGatewayExecutor;
+  evidence: Lc4DevReplayEvidenceStore;
   now?: () => Date;
 }>): Lc4DevelopmentRealtimeAdapter {
   const now = input.now ?? (() => new Date());
@@ -1207,10 +1259,25 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           playback_kind: exchangeInput.playback_kind,
           ...(exchangeInput.repair_binding ? { repair_binding: exchangeInput.repair_binding } : {}),
         });
+        if (exchangeInput.playback_kind === "canonical") {
+          runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
+            previous: runtime!.response_plan_chain_head_sha256,
+            provider_exchange_sha256: evidence.evidence_sha256,
+            terminal_response_plan_sha256: evidence.terminal_response_plan_sha256,
+            terminal_response_control_sha256: evidence.terminal_response_control_sha256,
+          })}`);
+        }
         const listenerResult = evidence.dev_listener_result;
         if (!listenerResult || evidence.playback_kind !== exchangeInput.playback_kind) {
           throw new Error("LC4-DEV exchange completed without phase-bound listener evidence");
         }
+        const providerExchangeEvidence = await input.evidence.retainJson({
+          kind: "provider_exchange",
+          body: evidence.replay_projection,
+          domain_prefix: PROVIDER_EXCHANGE_EVIDENCE_DOMAIN,
+          expected_evidence_sha256: evidence.evidence_sha256,
+        });
+        await input.evidence.assertResolvable(listenerResult.listener_evidence);
         if (exchangeInput.playback_kind === "canonical") {
           pendingOpportunity = Object.freeze({
             opportunity: exchangeInput.opportunity,
@@ -1227,6 +1294,9 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           listener_evidence_sha256: listenerResult.listener_evidence_sha256,
           repair_projection: listenerResult.repair_projection,
           playback_authority_receipt_sha256: listenerResult.playback_authority_receipt_sha256,
+          provider_exchange_projection: evidence.replay_projection,
+          provider_exchange_evidence: providerExchangeEvidence,
+          listener_evidence: listenerResult.listener_evidence,
         });
       };
       return Object.freeze({
@@ -1261,18 +1331,36 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             throw new Error("LC4-DEV opportunity finalize differs from the adapter FSM");
           }
           const receipt = await bridgeSession.finalizeOpportunity!({ opportunity_id, decision_receipt_sha256, repair_played });
+          const opportunityFinalization = await input.evidence.retainJson({
+            kind: "opportunity_finalization",
+            body: receipt.finalization_body,
+            domain_prefix: OPPORTUNITY_FINALIZATION_DOMAIN,
+            expected_evidence_sha256: receipt.opportunity_receipt_sha256,
+          });
           pendingOpportunity = null;
-          return receipt;
+          return Object.freeze({
+            opportunity_receipt_sha256: receipt.opportunity_receipt_sha256,
+            opportunity_finalization: opportunityFinalization,
+          });
         },
         close: async () => {
           if (closed) throw new Error("LC4-DEV adapter session is already closed");
           if (pendingOpportunity) throw new Error("LC4-DEV adapter cannot close with an unfinalized opportunity");
           closed = true;
           const receipt = await bridgeSession.close();
+          const segmentFinalization = await input.evidence.retainJson({
+            kind: "segment_finalization",
+            body: receipt.finalization_body,
+            domain_prefix: SEGMENT_FINALIZATION_DOMAIN,
+            expected_evidence_sha256: receipt.rotation_receipt_sha256,
+          });
           runtime!.previous_rotation_receipt_sha256 = receipt.rotation_receipt_sha256;
           if (segment_ordinal < 3) runtime!.next_segment = (segment_ordinal + 1) as 2 | 3;
           else runtimes.delete(episode.episode_id);
-          return Object.freeze({ rotation_receipt_sha256: receipt.rotation_receipt_sha256 });
+          return Object.freeze({
+            rotation_receipt_sha256: receipt.rotation_receipt_sha256,
+            segment_finalization: segmentFinalization,
+          });
         },
       });
     },

@@ -102,7 +102,9 @@ describe("LC4-DEV municipal executable control plane", () => {
     const haccContinuity: string[] = [];
     const gatewayReceipts: string[] = [];
     const gatewayReceiptsByArm = { native: [] as string[], hacc: [] as string[] };
-    let nativeReconciliationHandle: string | null = null;
+    const landmarkActionsByArm = { native: [] as string[], hacc: [] as string[] };
+    const semanticActionsByArm = { native: [] as string[], hacc: [] as string[] };
+    let haccAmbiguousPlanSha256: string | null = null;
     for (const arm of ["native", "hacc"] as const) {
       const plan = episode(arm);
       let previous: string | null = null;
@@ -119,6 +121,34 @@ describe("LC4-DEV municipal executable control plane", () => {
           for (const call of calls) {
             callSequence += 1;
             expect(call.opportunity_id).toBe(opportunity.id);
+            expect(call.target_arguments).toEqual({});
+            if ([30, 35, 42, 43].includes(opportunity.index)) {
+              const hiddenArgument: Readonly<Record<string, string>> = call.target_tool === "archive.submit_transcript_request"
+                ? { request_id: "model-forged-request" }
+                : call.target_tool === "archive.reconcile_transcript_request"
+                  ? { invocation_id: "model-forged-invocation" }
+                  : { model_owned_slot: "forbidden" };
+              const rejected = await control.gateway_executor.execute({
+                bridge_version: "lc4-dev-gateway-bridge-v1",
+                episode_id: plan.episode_id,
+                opportunity_id: opportunity.id,
+                opportunity_index: opportunity.index,
+                provider: plan.provider,
+                arm: plan.arm,
+                provider_call_id: `test.${plan.arm}.${opportunity.id}.hidden.${callSequence}`,
+                provider_response_id: `response.${plan.arm}.${opportunity.id}`,
+                semantic_intent: call.semantic_intent,
+                target_tool: call.target_tool,
+                target_arguments: hiddenArgument,
+                request_sha256: sha256Hex(`request:${plan.arm}:${opportunity.id}:hidden:${callSequence}`),
+                provider_provenance_sha256: sha256Hex(`provenance:${plan.arm}:${opportunity.id}:hidden:${callSequence}`),
+              });
+              expect(rejected).toMatchObject({
+                disposition: "rejected",
+                provider_output: { code: "host_bound_argument_override" },
+                authority_projection: { effective_arguments: null },
+              });
+            }
             const gateway = await control.gateway_executor.execute({
               bridge_version: "lc4-dev-gateway-bridge-v1",
               episode_id: plan.episode_id,
@@ -128,6 +158,7 @@ describe("LC4-DEV municipal executable control plane", () => {
               arm: plan.arm,
               provider_call_id: `test.${plan.arm}.${opportunity.id}.${callSequence}`,
               provider_response_id: `response.${plan.arm}.${opportunity.id}`,
+              semantic_intent: call.semantic_intent,
               target_tool: call.target_tool,
               target_arguments: call.target_arguments,
               request_sha256: sha256Hex(`request:${plan.arm}:${opportunity.id}:${callSequence}`),
@@ -137,18 +168,63 @@ describe("LC4-DEV municipal executable control plane", () => {
               ? receipt.response_control.plan.eligible_actions.join(",")
               : "native-full";
             expect(gateway.disposition, `${plan.arm}:${opportunity.id}:${call.target_tool}:eligible=${eligible}:${JSON.stringify(gateway.provider_output)}`).not.toBe("rejected");
+            semanticActionsByArm[arm].push(`${call.semantic_intent}:${call.target_tool}`);
+            if ([30, 35, 42, 43].includes(opportunity.index)) {
+              landmarkActionsByArm[arm].push(`${opportunity.index}:${call.semantic_intent}:${call.target_tool}`);
+              expect(gateway.authority_projection.model_arguments).toEqual({});
+              expect(gateway.authority_projection.effective_arguments).not.toEqual({});
+              expect(gateway.authority_projection.post_transition_response_plan_sha256).toMatch(/^[a-f0-9]{64}$/u);
+              expect(gateway.authority_projection.post_transition_response_control_sha256).toMatch(/^[a-f0-9]{64}$/u);
+            }
+            if (plan.arm === "hacc" && opportunity.index === 35
+              && call.target_tool === "archive.submit_transcript_request") {
+              expect(gateway.provider_output).toMatchObject({
+                authoritative_outcome: { outcome_classification: "indeterminate_reconciliation_required" },
+                speech_directive: "reconcile_before_any_terminal_claim",
+                hacc_response_plan: {
+                  recovery_state: "ambiguity_quarantine",
+                  response_mode: "reconcile",
+                  prohibited_claims: expect.arrayContaining([
+                    "retry_ambiguous_commit",
+                    "terminal_success_while_reconciliation_pending",
+                  ]),
+                },
+              });
+              haccAmbiguousPlanSha256 = gateway.authority_projection.post_transition_response_plan_sha256;
+            }
+            if (plan.arm === "hacc" && opportunity.index === 42
+              && call.target_tool === "archive.reconcile_transcript_request") {
+              expect(gateway.provider_output).toMatchObject({
+                authoritative_outcome: { receipt_status: "succeeded" },
+                speech_directive: "confirm_only_from_authoritative_reconciliation_receipt",
+                hacc_response_plan: {
+                  recovery_state: "none",
+                  eligible_actions: expect.arrayContaining([
+                    "archive.observe_worker_result",
+                    "archive.complete_stage",
+                  ]),
+                },
+              });
+              expect(gateway.authority_projection.post_transition_response_plan_sha256).not.toBe(haccAmbiguousPlanSha256);
+            }
             if (plan.arm === "native" && call.target_tool === "archive.submit_transcript_request") {
               expect(gateway.provider_output).toMatchObject({
-                ok: false,
-                reconciliation: { required: true, invocation_id: expect.any(String) },
+                gateway_result: {
+                  ok: false,
+                  reconciliation: { required: true, source: "host_bound_from_authoritative_mutation_receipt" },
+                },
+                authoritative_outcome: { outcome_classification: "indeterminate_reconciliation_required" },
+                speech_directive: "reconcile_before_any_terminal_claim",
+                response_control: { kind: "native_context" },
               });
-              nativeReconciliationHandle = (gateway.provider_output as {
-                reconciliation?: { invocation_id?: string };
-              }).reconciliation?.invocation_id ?? null;
-              expect(nativeReconciliationHandle).toMatch(/^native\./u);
             }
             if (plan.arm === "native" && call.target_tool === "archive.reconcile_transcript_request") {
-              expect(call.target_arguments).toEqual({ invocation_id: nativeReconciliationHandle });
+              expect(call.target_arguments).toEqual({});
+              expect(gateway.provider_output).toMatchObject({
+                authoritative_outcome: { receipt_status: "succeeded" },
+                speech_directive: "confirm_only_from_authoritative_reconciliation_receipt",
+                response_control: { kind: "native_context" },
+              });
             }
             gatewayReceipts.push(gateway.authoritative_receipt_sha256);
             gatewayReceiptsByArm[arm].push(gateway.authoritative_receipt_sha256);
@@ -180,13 +256,25 @@ describe("LC4-DEV municipal executable control plane", () => {
       expect(snapshot.world.facts.transcript_request_attempts).toBe(1);
       expect(snapshot.world.facts.room_reservation_count).toBe(0);
       expect(snapshot.repair_state.plan_sha256).toMatch(/^[a-f0-9]{64}$/u);
-      expect(snapshot.pending_gateway_actions).toBe(0);
+      expect(snapshot.pending_gateway_actions, JSON.stringify(snapshot.pending_gateway_obligations)).toBe(0);
     }
     expect(native.common_state_sha256).toBe(hacc.common_state_sha256);
+    // Quarantine deliberately orders reconciliation before unrelated pending
+    // effects. Prove arm-neutral semantics by comparing the complete semantic
+    // action multiset, while the equal final authoritative state and equal
+    // receipt cardinality below prove no effect was changed, dropped, or
+    // duplicated by that safety-preserving reorder.
+    expect([...semanticActionsByArm.hacc].sort()).toEqual([...semanticActionsByArm.native].sort());
+    expect(landmarkActionsByArm.hacc).toEqual(expect.arrayContaining([
+      "30:launch_async_worker:archive.launch_worker",
+      "30:complete_current_stage:archive.complete_stage",
+      "35:submit_accessible_transcript:archive.submit_transcript_request",
+      "42:reconcile_accessible_transcript:archive.reconcile_transcript_request",
+      "43:record_async_worker_result:archive.observe_worker_result",
+    ]));
     expect(gatewayReceipts.length).toBeGreaterThan(10);
-    // HACC performs one additional authoritative flow.get_state read after
-    // ambiguity reconciliation; native receives equivalent state inline.
-    expect(gatewayReceiptsByArm.hacc.length).toBe(gatewayReceiptsByArm.native.length + 1);
+    expect(gatewayReceiptsByArm.hacc.length).toBe(gatewayReceiptsByArm.native.length);
+    expect(hacc.world.facts).toEqual(native.world.facts);
     expect(new Set(gatewayReceipts).size).toBe(gatewayReceipts.length);
     expect(native.gateway_transcript_sha256).not.toBe(hacc.gateway_transcript_sha256);
     expect(control.manifest.native_information_parity).toBe("full_equivalent_policy_and_accumulated_public_state");
@@ -226,8 +314,9 @@ describe("LC4-DEV municipal executable control plane", () => {
           arm: plan.arm,
           provider_call_id: `test.missing-mutation.late-submit.${callSequence}`,
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          semantic_intent: "submit_accessible_transcript",
           target_tool: "archive.submit_transcript_request",
-          target_arguments: { request_id: "lc4-dev-accessible-transcript" },
+          target_arguments: {},
           request_sha256: sha256Hex(`request:missing-mutation:late-submit:${callSequence}`),
           provider_provenance_sha256: sha256Hex(`provenance:missing-mutation:late-submit:${callSequence}`),
         });
@@ -241,8 +330,9 @@ describe("LC4-DEV municipal executable control plane", () => {
           arm: plan.arm,
           provider_call_id: `test.missing-mutation.reconcile.${callSequence}`,
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          semantic_intent: "reconcile_accessible_transcript",
           target_tool: "archive.reconcile_transcript_request",
-          target_arguments: { invocation_id: "world.fabricated" },
+          target_arguments: {},
           request_sha256: sha256Hex(`request:missing-mutation:reconcile:${callSequence}`),
           provider_provenance_sha256: sha256Hex(`provenance:missing-mutation:reconcile:${callSequence}`),
         });
@@ -261,6 +351,7 @@ describe("LC4-DEV municipal executable control plane", () => {
           arm: plan.arm,
           provider_call_id: `test.missing-mutation.${opportunity.id}.${callSequence}`,
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
+          semantic_intent: call.semantic_intent,
           target_tool: call.target_tool,
           target_arguments: call.target_arguments,
           request_sha256: sha256Hex(`request:missing-mutation:${opportunity.id}:${callSequence}`),
@@ -277,16 +368,8 @@ describe("LC4-DEV municipal executable control plane", () => {
     expect(rejectedReconciliation).toMatchObject({
       disposition: "rejected",
       provider_output: {
-        gateway_result: { ok: false, code: "reconciliation_source_missing" },
-        hacc_response_plan: {
-          capability_catalog: {
-            actions: expect.arrayContaining([expect.objectContaining({
-              name: "archive.reconcile_transcript_request",
-              description: expect.stringContaining("Host-bound arguments (omit them): invocation_id"),
-              input_schema: expect.objectContaining({ properties: {}, required: [] }),
-            })]),
-          },
-        },
+        ok: false,
+        code: "reconciliation_source_missing",
       },
     });
     const snapshot = control.snapshot(plan.episode_id);

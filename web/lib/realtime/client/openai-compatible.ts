@@ -18,7 +18,7 @@ import {
   LOCAL_TOOL_PROXY_FUNCTION_NAME,
   PROVIDER_PROVENANCE_META_KEY,
   experimentalProviderDirectMcpEnabled,
-  isLocalToolProxyFunction,
+  isSafeLocalToolProxyFunction,
 } from "./types";
 import type {
   LocalToolProxyDispatch,
@@ -240,13 +240,13 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (namedLocalProxyTools.length > 1) {
       throw new Error("Realtime session cannot declare the local capability gateway more than once");
     }
-    if (namedLocalProxyTools.length === 1 && !isLocalToolProxyFunction(namedLocalProxyTools[0])) {
-      throw new Error("Realtime session must declare the exact local capability gateway contract");
+    if (namedLocalProxyTools.length === 1 && !isSafeLocalToolProxyFunction(namedLocalProxyTools[0])) {
+      throw new Error("Realtime session must declare the exact local capability gateway contract or an exact closed semantic gateway contract");
     }
     this.localToolProxyEnabled = namedLocalProxyTools.length === 1;
     if (
       this.localToolProxyEnabled
-      && configuredTools.some((tool) => record(tool).type === "function" && !isLocalToolProxyFunction(tool))
+      && configuredTools.some((tool) => record(tool).type === "function" && !isSafeLocalToolProxyFunction(tool))
     ) {
       throw new Error("Local capability gateway mode cannot expose additional provider-native functions");
     }

@@ -201,7 +201,10 @@ export function createHaccResponsePlan(input: Readonly<{
   if (input.speechGuardrailPacket.privacy_directive === "never_repeat_verification_secrets") {
     prohibited.add("repeat_verification_secrets");
   }
-  if (input.speechGuardrailPacket.terminal_directive === "do_not_claim_terminal_success_without_authoritative_receipt") {
+  if (activeQuarantines.length > 0) {
+    prohibited.add("terminal_success_while_reconciliation_pending");
+    prohibited.add("retry_ambiguous_commit");
+  } else if (input.speechGuardrailPacket.terminal_directive === "do_not_claim_terminal_success_without_authoritative_receipt") {
     prohibited.add("terminal_success_without_authoritative_receipt");
   } else if (input.speechGuardrailPacket.terminal_directive === "ambiguity_quarantine_reconcile_before_terminal_claim") {
     prohibited.add("terminal_success_while_reconciliation_pending");

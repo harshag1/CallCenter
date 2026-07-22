@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentFlowSchema } from "../../flow";
 import { createFlowExecutionState, type FlowExecutionState } from "../../flow-runtime";
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import { compileConditionSuite } from "../condition-compiler";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
@@ -15,8 +15,12 @@ import {
   type Lc4RotationContext,
   type Lc4StrongNativeContinuityPacket,
 } from "../lc4-production-provider-adapter";
-import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
+import {
+  LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+  type Lc4DevGatewayExecutor,
+} from "../lc4-development-gateway-bridge";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
@@ -53,8 +57,30 @@ import {
 } from "../../realtime/client/types";
 
 const HASH = "a".repeat(64);
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 const COMMIT = "b".repeat(40);
 const ORACLE_SECRET = "ORACLE-PLAINTEXT-MUST-NOT-LEAK";
+
+function replayEvidenceFixture() {
+  const objects = new Map<string, Uint8Array>();
+  return createLc4DevReplayEvidenceStore({
+    async put(bytes) {
+      const retained = Uint8Array.from(bytes);
+      const artifactSha256 = sha256Hex(retained);
+      objects.set(artifactSha256, retained);
+      return Object.freeze({
+        artifact_sha256: artifactSha256,
+        byte_length: retained.byteLength,
+        receipt_sha256: sha256Hex(`fixture-cas:${artifactSha256}:${retained.byteLength}`),
+      });
+    },
+    async get(artifactSha256) {
+      const retained = objects.get(artifactSha256);
+      if (retained === undefined) throw new Error(`fixture CAS object is missing: ${artifactSha256}`);
+      return Uint8Array.from(retained);
+    },
+  });
+}
 
 function opportunities(): readonly Lc4OpportunityBinding[] {
   return Object.freeze(Array.from({ length: 60 }, (_, index) => {
@@ -324,8 +350,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             calls: [{
               callId: "call-2",
               name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
-              argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: "PUBLIC-18" } }),
-              argumentsJson: { tool_name: "records.lookup", arguments: { record_id: "PUBLIC-18" } },
+              argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+              argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
               responseId,
               terminalWireType: "toolCall",
             }],
@@ -371,8 +397,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             calls: [{
               callId: "call-1",
               name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
-              argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } }),
-              argumentsJson: { tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } },
+              argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+              argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
               responseId,
               terminalWireType: "toolCall",
             }],
@@ -398,8 +424,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
               request: {
                 method: "tools/call",
                 params: {
-                  name: "records.lookup",
-                  arguments: { record_id: "PUBLIC-17" },
+                  name: "complete_current_stage",
+                  arguments: {},
                   _meta: {
                     [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "call-1",
                     [PROVIDER_PROVENANCE_META_KEY]: provenance,
@@ -573,15 +599,50 @@ describe("LC4 production realtime adapter bridge", () => {
       manifest_sha256: "d".repeat(64),
       async execute(input) {
         executed.push(`${input.arm}:${input.target_tool}`);
-        return {
-          provider_output: { ok: true, receipt: "PUBLIC-RESULT" },
+        const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };
+        const projectionBody = {
+          schema_version: 1 as const,
+          bridge_version: "lc4-dev-gateway-bridge-v1" as const,
+          redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
+          episode_id: input.episode_id,
+          opportunity_id: input.opportunity_id,
+          opportunity_index: input.opportunity_index,
+          provider: input.provider,
+          arm: input.arm,
+          semantic_intent: input.semantic_intent,
+          target_tool: input.target_tool,
+          provider_call_id_sha256: sha256Hex(input.provider_call_id),
+          provider_response_id_sha256: sha256Hex(input.provider_response_id),
+          request_sha256: input.request_sha256,
+          provider_provenance_sha256: input.provider_provenance_sha256,
+          model_arguments: input.target_arguments,
+          effective_arguments: {},
+          provider_output: providerOutput,
+          authoritative_receipt: { ok: true },
+          authoritative_tool_world_receipt: null,
+          post_transition_response_plan_sha256: null,
+          post_transition_response_control_sha256: null,
           authoritative_receipt_sha256: "e".repeat(64),
           control_plane_head_sha256: "f".repeat(64),
           disposition: "executed" as const,
         };
+        return {
+          provider_output: providerOutput,
+          authoritative_receipt_sha256: "e".repeat(64),
+          control_plane_head_sha256: "f".repeat(64),
+          disposition: "executed" as const,
+          authority_projection: {
+            ...projectionBody,
+            projection_sha256: sha256Hex(`${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(projectionBody)}`),
+          },
+        };
       },
     });
     const events: string[] = [];
+    const listenerEvidence = await replayEvidenceFixture().retainJson({
+      kind: "listener_evidence",
+      body: Object.freeze({ fixture: "dev-listener-evidence", provider }),
+    });
     let fake: FakeRealtimeClient | null = null;
     const bridge = new Lc4RealtimeProviderBridge((provider) => {
       fake = new FakeRealtimeClient(provider, events, true);
@@ -591,13 +652,17 @@ describe("LC4 production realtime adapter bridge", () => {
       manifest: devManifest,
       segment: base.episode_shape.segments[0]!,
       profile: base.episode_shape.provider_profile,
-      configuration: configuration(base),
+      configuration: Object.freeze({
+        ...configuration(base),
+        providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
+      }),
       rotation_context: null,
       listener: {
         async accept() {
           events.push("listener");
           return {
-            listener_evidence_sha256: sha256Hex("dev-listener-evidence"),
+            listener_evidence_sha256: listenerEvidence.evidence_sha256,
+            listener_evidence: listenerEvidence,
             repair_projection: createLc4DevArmBlindRepairProjection({
               opportunity_id: corpus.opportunities[0]!.id,
               listener_status: "verified",
@@ -619,16 +684,17 @@ describe("LC4 production realtime adapter bridge", () => {
     });
 
     expect(executed).toEqual(provider === "gemini"
-      ? ["hacc:records.lookup", "hacc:records.lookup"]
-      : ["hacc:records.lookup"]);
+      ? ["hacc:archive.complete_stage", "hacc:archive.complete_stage"]
+      : ["hacc:archive.complete_stage"]);
     expect(events).toEqual(provider === "gemini"
       ? ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "submit:false", "create", "listener"]
       : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
     expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
-    expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-17");
-    expect(JSON.stringify(evidence.dev_gateway_receipt_set)).not.toContain("PUBLIC-RESULT");
+    expect(JSON.stringify(evidence.dev_gateway_receipt_set?.receipts)).not.toContain("PUBLIC-17");
+    expect(JSON.stringify(evidence.dev_gateway_receipt_set?.receipts)).not.toContain("PUBLIC-RESULT");
+    expect(JSON.stringify(evidence.dev_gateway_receipt_set?.authority_projections)).toContain("PUBLIC-RESULT");
     await session.finalizeOpportunity!({
       opportunity_id: corpus.opportunities[0]!.id,
       decision_receipt_sha256: sha256Hex("dev-no-repair-decision"),

@@ -717,6 +717,88 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     }
   }
 
+  /**
+   * Recompile the model-visible plan immediately after an authoritative tool
+   * transition. The returned binding ties the fresh plan to the receipt that
+   * caused it. Capability rotation remains owned by the underlying Flow
+   * transition/quarantine logic so transcript state continuity is preserved.
+   */
+  rebindResponsePlanAfterTransition(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    world: ToolWorldState;
+    transitionReceiptSha256: string;
+    previousTransitionBindingSha256: string | null;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    responsePlan: HaccResponsePlan;
+    transitionBindingSha256: string;
+  }> {
+    const run = this.#requireRun(input.condition);
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") {
+      throw new Error("post-transition response-plan binding is exclusive to host-managed conditions");
+    }
+    if (input.runId !== run.runId || canonicalJson(input.scenario) !== canonicalJson(run.scenario)) {
+      throw new Error("post-transition response-plan binding differs from the initialized run or scenario");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(input.transitionReceiptSha256)) {
+      throw new Error("post-transition response-plan binding requires a receipt SHA-256");
+    }
+    if (input.previousTransitionBindingSha256 !== null
+      && !/^[a-f0-9]{64}$/u.test(input.previousTransitionBindingSha256)) {
+      throw new Error("post-transition response-plan chain head must be null or a SHA-256");
+    }
+    const world = parseBoundToolWorldState(run.scenario, input.world);
+    if (worldStateHash(world) !== run.worldHeadHash || canonicalJson(world) !== canonicalJson(run.world)) {
+      throw new Error("post-transition response-plan world differs from the authoritative kernel head");
+    }
+    if (!run.flowState) throw new Error("post-transition response-plan binding requires durable Flow state");
+    const checkpoint = mutationCheckpoint(run);
+    try {
+      const frontier = computeAdmissibilityFrontier({
+        condition: run.condition,
+        scenario: run.scenario,
+        world: run.world,
+        turn: run.committedTurn,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+      });
+      if (!run.lastSnapshot) throw new Error("post-transition response-plan binding lacks a provider snapshot");
+      const capabilitySnapshot = run.lastSnapshot;
+      const responsePlan = createHaccResponsePlan({
+        flow: this.#flow,
+        state: run.flowState,
+        conditionSha256: run.condition.conditionHash,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+        snapshot: capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+        quarantines: [...run.ambiguityQuarantines.values()],
+        speechGuardrailPacket: run.speechGuardrailPacket,
+        revision: run.responsePlanRevision,
+        previousPlanSha256: run.responsePlan?.plan_sha256 ?? null,
+      });
+      const transitionBindingSha256 = sha256Hex(canonicalJson({
+        domain: "harshas-amazing-call-center/post-transition-response-plan/v1",
+        run_id: run.runId,
+        turn: run.committedTurn,
+        previous_transition_binding_sha256: input.previousTransitionBindingSha256,
+        transition_receipt_sha256: input.transitionReceiptSha256,
+        plan_sha256: responsePlan.plan_sha256,
+        capability_epoch: responsePlan.capability_epoch,
+      }));
+      return Object.freeze({
+        capabilitySnapshot,
+        responsePlan,
+        transitionBindingSha256,
+      });
+    } catch (error) {
+      restoreMutationCheckpoint(run, checkpoint);
+      throw error;
+    }
+  }
+
   /** Deeply immutable, grant-free replay material for artifact persistence. */
   transcript(): PublicKernelTranscript {
     const run = this.#run;
@@ -1520,8 +1602,9 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     run: KernelRun,
     reconciliationFlowReceiptId: string,
     reconciliationWorldReceipt: ToolExecution["receipt"],
-  ): void {
+  ): boolean {
     if (!run.flowState) throw new Error("ambiguity release requires durable Flow state");
+    let releasedAny = false;
     for (const [flowReceiptId, quarantine] of run.ambiguityQuarantines) {
       if (
         quarantine.status !== "reconciliation_required"
@@ -1540,7 +1623,9 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       }
       run.flowState = released.state;
       run.ambiguityQuarantines.set(flowReceiptId, released.quarantine);
+      releasedAny = true;
     }
+    return releasedAny;
   }
 
   #isDesignatedQuarantineReconciliation(run: KernelRun, action: string): boolean {
@@ -1878,7 +1963,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         ? { result, ...this.#suppressFailedReconciliationRetry(run) }
         : { result };
     }
-    this.#releaseQuarantinesFromReadback(run, receiptId, execution.receipt);
+    const releasedQuarantine = this.#releaseQuarantinesFromReadback(run, receiptId, execution.receipt);
     const result = success(
       input.call.action,
       receiptId,
@@ -1886,7 +1971,14 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       execution.disposition === "deduplicated" ? "deduplicated" : "executed"
     );
     const advanced = this.#autoAdvanceCompletedStep(run);
-    return { result, ...(advanced ?? {}) };
+    // A successful readback can release a reconciliation-only quarantine
+    // without completing the current Flow step. Rotate the provider catalog
+    // inside this invocation so its transcript post-capability head and the
+    // immediately rebound response plan both reflect the released frontier.
+    const releasedRotation = releasedQuarantine && !advanced
+      ? this.#rotation(run, run.target === "$base" ? undefined : run.target)
+      : null;
+    return { result, ...(advanced ?? releasedRotation ?? {}) };
   }
 
   #toolExecutionOutcome(run: KernelRun, action: string, execution: ToolExecution): BenchmarkGatewayOutcome {

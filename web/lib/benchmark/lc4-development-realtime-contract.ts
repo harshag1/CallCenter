@@ -1,4 +1,6 @@
 import type { Lc4CapturedOutput } from "./lc4-listener-evidence";
+import type { JsonValue } from "./artifacts";
+import type { Lc4DevReplayArtifactReference } from "./lc4-development-evidence-retention";
 import type { Lc4DevArmBlindRepairProjection } from "./lc4-development-headless-listener-authority";
 import type { Lc4DevRepairDecisionReceipt, Lc4DevRepairPlayback } from "./lc4-development-repair-playback";
 import type { Lc4DevControlReceipt, Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
@@ -12,6 +14,9 @@ export type Lc4DevExchangeEvidence = Readonly<{
   listener_evidence_sha256: string;
   repair_projection: Lc4DevArmBlindRepairProjection;
   playback_authority_receipt_sha256: string;
+  provider_exchange_projection: JsonValue;
+  provider_exchange_evidence: Lc4DevReplayArtifactReference;
+  listener_evidence: Lc4DevReplayArtifactReference;
 }>;
 
 export type Lc4DevelopmentRealtimeSession = Readonly<{
@@ -30,8 +35,14 @@ export type Lc4DevelopmentRealtimeSession = Readonly<{
     opportunity_id: string;
     decision_receipt_sha256: string;
     repair_played: boolean;
-  }>): Promise<Readonly<{ opportunity_receipt_sha256: string }>>;
-  close(): Promise<Readonly<{ rotation_receipt_sha256: string }>>;
+  }>): Promise<Readonly<{
+    opportunity_receipt_sha256: string;
+    opportunity_finalization: Lc4DevReplayArtifactReference;
+  }>>;
+  close(): Promise<Readonly<{
+    rotation_receipt_sha256: string;
+    segment_finalization: Lc4DevReplayArtifactReference;
+  }>>;
 }>;
 
 export type Lc4DevelopmentRealtimeAdapter = Readonly<{
@@ -57,5 +68,6 @@ export type Lc4DevelopmentListenerSink = Readonly<{
     listener_evidence_sha256: string;
     repair_projection: Lc4DevArmBlindRepairProjection;
     playback_authority_receipt_sha256: string;
+    listener_evidence: Lc4DevReplayArtifactReference;
   }>>;
 }>;

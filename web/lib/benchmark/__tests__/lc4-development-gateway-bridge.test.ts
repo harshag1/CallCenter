@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import {
+  LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+  LC4_DEV_SEMANTIC_INTENTS,
   Lc4DevGatewayTurnCoordinator,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
@@ -20,6 +22,7 @@ import {
 } from "../../realtime/client/types";
 
 const HASH = "a".repeat(64);
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 const opportunity = createLc4PublicDevelopmentCorpus().opportunities[0]!;
 
 function episode(provider: "openai" | "gemini" | "xai", arm: "native" | "hacc"): Lc4DevLiveEpisodePlan {
@@ -68,11 +71,44 @@ function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor 
     manifest_sha256: "b".repeat(64),
     async execute(input: Lc4DevGatewayExecutionInput) {
       inputs.push(input);
-      return Object.freeze({
-        provider_output: { ok: true, public_receipt: `receipt-${inputs.length}` },
-        authoritative_receipt_sha256: sha256Hex(`authority:${inputs.length}`),
-        control_plane_head_sha256: sha256Hex(`head:${inputs.length}`),
+      const providerOutput = { ok: true, public_receipt: `receipt-${inputs.length}` };
+      const authoritativeReceiptSha256 = sha256Hex(`authority:${inputs.length}`);
+      const controlPlaneHeadSha256 = sha256Hex(`head:${inputs.length}`);
+      const projectionBody = {
+        schema_version: 1 as const,
+        bridge_version: "lc4-dev-gateway-bridge-v1" as const,
+        redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
+        episode_id: input.episode_id,
+        opportunity_id: input.opportunity_id,
+        opportunity_index: input.opportunity_index,
+        provider: input.provider,
+        arm: input.arm,
+        semantic_intent: input.semantic_intent,
+        target_tool: input.target_tool,
+        provider_call_id_sha256: sha256Hex(input.provider_call_id),
+        provider_response_id_sha256: sha256Hex(input.provider_response_id),
+        request_sha256: input.request_sha256,
+        provider_provenance_sha256: input.provider_provenance_sha256,
+        model_arguments: input.target_arguments,
+        effective_arguments: {},
+        provider_output: providerOutput,
+        authoritative_receipt: { ok: true },
+        authoritative_tool_world_receipt: null,
+        post_transition_response_plan_sha256: null,
+        post_transition_response_control_sha256: null,
+        authoritative_receipt_sha256: authoritativeReceiptSha256,
+        control_plane_head_sha256: controlPlaneHeadSha256,
         disposition: "executed" as const,
+      };
+      return Object.freeze({
+        provider_output: providerOutput,
+        authoritative_receipt_sha256: authoritativeReceiptSha256,
+        control_plane_head_sha256: controlPlaneHeadSha256,
+        disposition: "executed" as const,
+        authority_projection: Object.freeze({
+          ...projectionBody,
+          projection_sha256: sha256Hex(`${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(projectionBody)}`),
+        }),
       });
     },
   });
@@ -103,8 +139,8 @@ function dispatchEvent(
       request: {
         method: "tools/call",
         params: {
-          name: "records.lookup",
-          arguments: { record_id: "PUBLIC-17" },
+          name: "complete_current_stage",
+          arguments: {},
           _meta: {
             [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: callId,
             [PROVIDER_PROVENANCE_META_KEY]: provenance,
@@ -116,6 +152,19 @@ function dispatchEvent(
 }
 
 describe("LC4-DEV provider-neutral gateway bridge", () => {
+  it("exposes one stable provider function with a closed semantic intent enum and no model slots", () => {
+    expect(LC4_DEV_SEMANTIC_GATEWAY_FUNCTION).toMatchObject({
+      name: "capability_gateway",
+      parameters: {
+        additionalProperties: false,
+        properties: {
+          tool_name: { enum: LC4_DEV_SEMANTIC_INTENTS },
+          arguments: { additionalProperties: false, properties: {} },
+        },
+      },
+    });
+  });
+
   it("routes provenance-bound OpenAI dispatch and continues only after an authoritative result batch", async () => {
     const client = new FakeClient("openai");
     const inputs: Lc4DevGatewayExecutionInput[] = [];
@@ -131,14 +180,15 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     expect(inputs[0]).toMatchObject({
       arm: "hacc",
       provider: "openai",
-      target_tool: "records.lookup",
-      target_arguments: { record_id: "PUBLIC-17" },
+      semantic_intent: "complete_current_stage",
+      target_tool: "archive.complete_stage",
+      target_arguments: {},
     });
     expect(client.operations).toEqual(["submit:false", "create"]);
     expect(client.submitted[0]?.createResponse).toBe(false);
     expect(evidence.receipts).toHaveLength(1);
-    expect(JSON.stringify(evidence)).not.toContain("PUBLIC-17");
-    expect(JSON.stringify(evidence)).not.toContain("public_receipt");
+    expect(JSON.stringify(evidence.receipts)).not.toContain("public_receipt");
+    expect(evidence.authority_projections[0]?.provider_output).toEqual({ ok: true, public_receipt: "receipt-1" });
     expect(evidence.receipt_set_sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
 
@@ -156,8 +206,8 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       calls: [{
         callId: "gemini-call-1",
         name: "capability_gateway",
-        argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } }),
-        argumentsJson: { tool_name: "records.lookup", arguments: { record_id: "PUBLIC-17" } },
+        argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+        argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
         responseId: "gemini-response-1",
         terminalWireType: "toolCall",
       }],
@@ -175,7 +225,7 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     const coordinator = new Lc4DevGatewayTurnCoordinator({ client, executor: executor(inputs), onFatal: (error) => failures.push(error) });
     coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
 
-    for (const [callId, recordId] of [["gemini-call-1", "PUBLIC-17"], ["gemini-call-2", "PUBLIC-18"]] as const) {
+    for (const [callId, intent] of [["gemini-call-1", "complete_current_stage"], ["gemini-call-2", "reserve_archive_room"]] as const) {
       coordinator.observe({
         type: "tool.calls",
         provider: "gemini",
@@ -185,8 +235,8 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         calls: [{
           callId,
           name: "capability_gateway",
-          argumentsText: JSON.stringify({ tool_name: "records.lookup", arguments: { record_id: recordId } }),
-          argumentsJson: { tool_name: "records.lookup", arguments: { record_id: recordId } },
+          argumentsText: JSON.stringify({ tool_name: intent, arguments: {} }),
+          argumentsJson: { tool_name: intent, arguments: {} },
           responseId: "gemini-response-1",
           terminalWireType: "toolCall",
         }],
@@ -248,6 +298,40 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     });
     await expect(coordinator.finishOpportunity()).rejects.toThrow("outside capability_gateway");
     expect(failures).toHaveLength(1);
+    expect(client.submitted).toEqual([]);
+  });
+
+  it.each([
+    { tool_name: "archive.complete_stage", arguments: {} },
+    { tool_name: "complete_current_stage", arguments: { stage_id: "stage.intake" } },
+  ])("rejects open action names and hidden argument overrides before execution", async ({ tool_name, arguments: args }) => {
+    const client = new FakeClient("gemini");
+    const failures: Error[] = [];
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+    coordinator.observe({
+      type: "tool.calls",
+      provider: "gemini",
+      receivedAtMs: 1,
+      wireType: "toolCall",
+      responseId: "gemini-response-bad",
+      calls: [{
+        callId: "gemini-call-bad",
+        name: "capability_gateway",
+        argumentsText: JSON.stringify({ tool_name, arguments: args }),
+        argumentsJson: { tool_name, arguments: args },
+        responseId: "gemini-response-bad",
+        terminalWireType: "toolCall",
+      }],
+    });
+    await expect(coordinator.finishOpportunity()).rejects.toThrow();
+    expect(failures).toHaveLength(1);
+    expect(inputs).toEqual([]);
     expect(client.submitted).toEqual([]);
   });
 });

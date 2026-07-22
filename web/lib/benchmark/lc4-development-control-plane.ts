@@ -29,9 +29,12 @@ import {
   type Lc4DevRepairAudioManifest,
 } from "./lc4-development-audio-materializer";
 import type { Lc4DevExecutableMechanismControl } from "./lc4-development-live-dependencies";
-import type {
-  Lc4DevGatewayExecutor,
-  Lc4DevGatewayExecutionInput,
+import {
+  LC4_DEV_INTENT_ACTION_MAP,
+  lc4DevSemanticIntentForAction,
+  type Lc4DevGatewayExecutor,
+  type Lc4DevGatewayExecutionInput,
+  type Lc4DevSemanticIntent,
 } from "./lc4-development-gateway-bridge";
 import type {
   Lc4DevControlReceipt,
@@ -49,6 +52,7 @@ import { createToolWorld, executeTool, type ToolWorldState } from "./tool-world"
 const CONTROL_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-manifest/v1\n";
 const CONTROL_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n";
 const GATEWAY_EXECUTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-gateway-execution/v1\n";
+const GATEWAY_AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 const CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-dev-arm-common-continuity/v1\n";
 const NATIVE_TRANSCRIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-control-transcript/v1\n";
 const NATIVE_CONTEXT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-context/v1\n";
@@ -405,9 +409,9 @@ type EpisodeState = {
   pendingGatewayActions: LogicalAction[];
   nativeTranscriptHead: string;
   lastResponsePlanSha256: string | null;
+  lastTransitionBindingSha256: string | null;
   lastPreviousExchangeSha256: string | null;
   originalMutationInvocationId: string | null;
-  refreshRequiredAfterReconciliation: boolean;
 };
 
 export type Lc4DevMunicipalControlManifest = Readonly<{
@@ -439,6 +443,13 @@ export type Lc4DevMunicipalControlSnapshot = Readonly<{
   repair_state: ConversationalRepairState;
   gateway_transcript_sha256: string;
   pending_gateway_actions: number;
+  pending_gateway_obligations: readonly Readonly<{
+    semantic_intent: Lc4DevSemanticIntent;
+    target_tool: string;
+    effective_arguments: Readonly<Record<string, JsonValue>>;
+    registered_opportunity_id: string;
+    registered_opportunity_index: number;
+  }>[];
 }>;
 
 export type Lc4DevMunicipalControlPlane = Lc4DevExecutableMechanismControl & Readonly<{
@@ -450,6 +461,7 @@ export type Lc4DevMunicipalControlPlane = Lc4DevExecutableMechanismControl & Rea
   /** Provider-free driver only. Never serialize these oracle-bound calls into model context. */
   development_pending_calls(episodeId: string): readonly Readonly<{
     opportunity_id: string;
+    semantic_intent: Lc4DevSemanticIntent;
     target_tool: string;
     target_arguments: Readonly<Record<string, JsonValue>>;
   }>[];
@@ -637,6 +649,8 @@ function gatewayExecute(
   result: CapabilityGatewayResult;
   provider_output: JsonValue;
   invocation_id: string | null;
+  effective_arguments: Readonly<Record<string, JsonValue>> | null;
+  authoritative_tool_world_receipt: JsonValue | null;
 }> {
   if (!state.kernel || !state.snapshot) throw new Error("LC4-DEV HACC gateway state is unavailable");
   const available = capability(state.snapshot, input.action);
@@ -650,10 +664,18 @@ function gatewayExecute(
       retriable: false,
       current_capability_epoch: state.snapshot.capability_epoch,
     };
-    return freeze({ result, provider_output: result, invocation_id: null });
+    return freeze({
+      result,
+      provider_output: result,
+      invocation_id: null,
+      effective_arguments: null,
+      authoritative_tool_world_receipt: null,
+    });
   }
   let acceptedWorld: ToolWorldState | null = null;
   let invocationId: string | null = null;
+  let effectiveArguments: Readonly<Record<string, JsonValue>> | null = null;
+  let authoritativeToolWorldReceipt: JsonValue | null = null;
   const outcome = state.kernel.invoke({
     providerCallId: input.providerCallId,
     call: { action: input.action, arguments: input.arguments, capability_grant: available.capability_grant },
@@ -662,6 +684,7 @@ function gatewayExecute(
     turn: input.opportunity.index,
     world: state.world,
     executeLeaf: (request) => {
+      effectiveArguments = freeze(valueJson(request.arguments) as Record<string, JsonValue>);
       invocationId = `world.${state.episode.episode_id}.${input.opportunity.id}.${sha256Hex(input.providerCallId).slice(0, 12)}`;
       const execution = executeTool(LC4_DEV_MUNICIPAL_SCENARIO, state.world, {
         invocation_id: invocationId,
@@ -671,6 +694,7 @@ function gatewayExecute(
         semantic_opportunity_id: input.opportunity.id,
         ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
       });
+      authoritativeToolWorldReceipt = valueJson(execution.receipt);
       acceptedWorld = execution.state;
       return execution;
     },
@@ -680,16 +704,69 @@ function gatewayExecute(
     state.snapshot = outcome.capabilitySnapshot ?? outcome.disclosure!.snapshot;
   }
   const providerOutput = outcome.providerVisibleOutput === undefined ? outcome.result : outcome.providerVisibleOutput;
-  return freeze({ result: outcome.result, provider_output: providerOutput, invocation_id: invocationId });
+  return freeze({
+    result: outcome.result,
+    provider_output: providerOutput,
+    invocation_id: invocationId,
+    effective_arguments: effectiveArguments,
+    authoritative_tool_world_receipt: authoritativeToolWorldReceipt,
+  });
 }
 
 function reconcileArguments(state: EpisodeState): Readonly<Record<string, JsonValue>> | null {
-  // Reconciliation is model-owned and may be requested even when the model
-  // omitted the mutation that would have created its authoritative invocation
-  // identity. That is an agent failure, not an infrastructure failure.
   return state.originalMutationInvocationId
     ? { invocation_id: state.originalMutationInvocationId }
     : null;
+}
+
+function hostArgumentsForLogicalAction(
+  state: EpisodeState,
+  logical: LogicalAction,
+): Readonly<Record<string, JsonValue>> | null {
+  if (logical.action === "archive.reconcile_transcript_request") return reconcileArguments(state);
+  return logical.arguments;
+}
+
+function gatewayResultOnly(providerOutput: JsonValue): JsonValue {
+  if (providerOutput !== null && typeof providerOutput === "object" && !Array.isArray(providerOutput)
+    && Object.prototype.hasOwnProperty.call(providerOutput, "gateway_result")) {
+    return (providerOutput as Record<string, JsonValue>).gateway_result ?? null;
+  }
+  return providerOutput;
+}
+
+function postTransitionSpeechDirective(
+  action: string,
+  receipt: JsonValue,
+): "reconcile_before_any_terminal_claim" | "confirm_only_from_authoritative_reconciliation_receipt" | "speak_only_receipt_backed_outcome" {
+  const status = receipt !== null && typeof receipt === "object" && !Array.isArray(receipt)
+    ? (receipt as Record<string, JsonValue>).status
+    : null;
+  if (status === "committed_after_error") return "reconcile_before_any_terminal_claim";
+  if (action === "archive.reconcile_transcript_request" && (status === "succeeded" || status === "deduplicated")) {
+    return "confirm_only_from_authoritative_reconciliation_receipt";
+  }
+  return "speak_only_receipt_backed_outcome";
+}
+
+function receiptDerivedAuthoritativeOutcome(receipt: JsonValue): JsonValue {
+  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+    throw new Error("LC4-DEV accepted transition lacks an authoritative ToolWorld receipt");
+  }
+  const record = receipt as Record<string, JsonValue>;
+  const receiptSha256 = sha256Hex(canonicalJson(receipt));
+  return valueJson({
+    source: "authoritative_tool_world_receipt",
+    receipt_sha256: receiptSha256,
+    receipt_status: record.status ?? null,
+    effect_committed: record.committed ?? null,
+    authoritative_result_sha256: record.authoritative_result === undefined
+      ? null
+      : sha256Hex(canonicalJson(record.authoritative_result)),
+    outcome_classification: record.status === "committed_after_error"
+      ? "indeterminate_reconciliation_required"
+      : "receipt_terminal",
+  });
 }
 
 function dueStageCompletions(state: EpisodeState, opportunity: Lc4PublicDevOpportunity): LogicalAction[] {
@@ -795,9 +872,9 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       pendingGatewayActions: [],
       nativeTranscriptHead: hash(NATIVE_TRANSCRIPT_DOMAIN, { manifest_sha256: manifest.manifest_sha256, episode_id: episode.episode_id, genesis: true }),
       lastResponsePlanSha256: null,
+      lastTransitionBindingSha256: null,
       lastPreviousExchangeSha256: null,
       originalMutationInvocationId: null,
-      refreshRequiredAfterReconciliation: false,
     };
     if (episode.arm === "hacc") {
       const evidenceBinding: BenchmarkKernelEvidenceBinding = {
@@ -946,51 +1023,38 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         throw new Error("LC4-DEV gateway call references a non-current corpus opportunity");
       }
       const targetArguments = valueJson(request.target_arguments) as Record<string, JsonValue>;
+      const mappedAction = LC4_DEV_INTENT_ACTION_MAP[request.semantic_intent];
       const exactOpportunityAction = request.target_tool === "archive.submit_transcript_request"
         || request.target_tool === "archive.reconcile_transcript_request";
       const pendingForAction = state.pendingGatewayActions.filter((logical) => logical.action === request.target_tool);
-      const pendingForCurrentOpportunity = exactOpportunityAction
-        ? pendingForAction.filter((logical) => logical.opportunity.id === opportunity.id)
-        : pendingForAction;
-      const pendingIndex = state.pendingGatewayActions.findIndex((logical) => {
-        if (logical.action !== request.target_tool
-          || (exactOpportunityAction && logical.opportunity.id !== opportunity.id)) return false;
-        const expectedArguments = logical.action === "archive.reconcile_transcript_request"
-          ? state.episode.arm === "hacc"
-            ? {}
-            : reconcileArguments(state)
-          : logical.arguments;
-        return expectedArguments !== null
-          && canonicalJson(expectedArguments) === canonicalJson(targetArguments);
-      });
+      const pendingIndex = state.pendingGatewayActions.findIndex((logical) =>
+        logical.action === request.target_tool
+        && (!exactOpportunityAction || logical.opportunity.id === opportunity.id)
+      );
+      const pendingLogicalAction = pendingIndex >= 0 ? state.pendingGatewayActions[pendingIndex]! : null;
+      const hostBoundArguments = pendingLogicalAction
+        ? hostArgumentsForLogicalAction(state, pendingLogicalAction)
+        : null;
 
       let providerOutput: JsonValue;
       let authoritativeReceipt: unknown;
       let disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
       let accepted = false;
       let invocationId: string | null = null;
-      const requiredReconciliationArguments = request.target_tool === "archive.reconcile_transcript_request"
-        && state.episode.arm === "native"
-        ? reconcileArguments(state)
-        : null;
-      const reconciliationBindingFailure = request.target_tool === "archive.reconcile_transcript_request"
-        && state.episode.arm === "native"
-        ? requiredReconciliationArguments === null
-          ? "reconciliation_source_missing"
-          : canonicalJson(requiredReconciliationArguments) !== canonicalJson(targetArguments)
-            ? "reconciliation_identity_mismatch"
-            : null
-        : null;
-      const logicalActionBindingFailure = pendingIndex < 0
-        && pendingForCurrentOpportunity.length > 0
-        && !(state.episode.arm === "hacc" && request.target_tool === "archive.reconcile_transcript_request")
-        ? "logical_action_arguments_mismatch"
-        : pendingForCurrentOpportunity.length === 0
-          && exactOpportunityAction
-          && pendingForAction.some((logical) => logical.opportunity.index < opportunity.index)
-          ? "missed_opportunity_window"
-          : null;
-      const controlBindingFailure = reconciliationBindingFailure ?? logicalActionBindingFailure;
+      let effectiveArguments: Readonly<Record<string, JsonValue>> | null = null;
+      let authoritativeToolWorldReceipt: JsonValue | null = null;
+      const controlBindingFailure = mappedAction !== request.target_tool
+        ? "semantic_intent_action_mismatch"
+        : Object.keys(targetArguments).length > 0
+          ? "host_bound_argument_override"
+          : request.target_tool === "archive.reconcile_transcript_request" && hostBoundArguments === null
+              ? "reconciliation_source_missing"
+              : pendingIndex < 0 && exactOpportunityAction
+                && pendingForAction.some((logical) => logical.opportunity.index < opportunity.index)
+                ? "missed_opportunity_window"
+                : pendingIndex < 0
+                  ? "semantic_intent_not_due"
+                  : null;
       if (controlBindingFailure) {
         const result: CapabilityGatewayResult = {
           ok: false,
@@ -999,11 +1063,13 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           code: controlBindingFailure,
           message: controlBindingFailure === "reconciliation_source_missing"
             ? "Authoritative reconciliation is unavailable because no source mutation receipt exists"
-            : controlBindingFailure === "reconciliation_identity_mismatch"
-              ? "Reconciliation identity differs from the host-bound source mutation receipt"
-              : controlBindingFailure === "missed_opportunity_window"
-                ? "The exact benchmark opportunity for this logical action has passed"
-                : "Logical action arguments differ from the exact benchmark opportunity contract",
+            : controlBindingFailure === "host_bound_argument_override"
+              ? "The model must not supply host-bound LC4-DEV arguments"
+            : controlBindingFailure === "missed_opportunity_window"
+              ? "The exact benchmark opportunity for this logical action has passed"
+              : controlBindingFailure === "semantic_intent_action_mismatch"
+                ? "The semantic intent does not map to the requested implementation action"
+                : "The semantic intent is not due at the current benchmark opportunity",
           retriable: false,
           ...(state.snapshot ? { current_capability_epoch: state.snapshot.capability_epoch } : {}),
         };
@@ -1011,14 +1077,17 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         authoritativeReceipt = result;
         disposition = "rejected";
       } else if (state.episode.arm === "native") {
+        if (hostBoundArguments === null) throw new Error("LC4-DEV Native intent has no host-bound action payload");
         const execution = executeTool(LC4_DEV_MUNICIPAL_SCENARIO, state.world, {
           invocation_id: `native.${state.episode.episode_id}.${opportunity.id}.${sha256Hex(request.provider_call_id).slice(0, 12)}`,
           tool: request.target_tool,
-          arguments: targetArguments,
+          arguments: hostBoundArguments,
           turn: opportunity.index,
           semantic_opportunity_id: opportunity.id,
         });
         state.world = execution.state;
+        effectiveArguments = freeze(hostBoundArguments);
+        authoritativeToolWorldReceipt = valueJson(execution.receipt);
         invocationId = execution.receipt.invocation_id;
         const committedAfterError = execution.receipt.status === "committed_after_error";
         providerOutput = committedAfterError
@@ -1026,7 +1095,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
               ...execution.visible_result,
               reconciliation: {
                 required: true,
-                invocation_id: execution.receipt.invocation_id,
+                source: "host_bound_from_authoritative_mutation_receipt",
               },
             })
           : execution.visible_result;
@@ -1045,13 +1114,18 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           world_receipt_sha256: sha256Hex(canonicalJson(execution.receipt)),
         });
       } else {
+        if (hostBoundArguments === null) throw new Error("LC4-DEV HACC intent has no host-bound action payload");
         const execution = gatewayExecute(state, {
           providerCallId: request.provider_call_id,
           action: request.target_tool,
-          arguments: targetArguments,
+          arguments: request.target_tool === "archive.reconcile_transcript_request"
+            ? {}
+            : hostBoundArguments,
           opportunity,
         });
         invocationId = execution.invocation_id;
+        effectiveArguments = execution.effective_arguments;
+        authoritativeToolWorldReceipt = execution.authoritative_tool_world_receipt;
         providerOutput = execution.provider_output;
         authoritativeReceipt = execution.result;
         disposition = execution.result.ok
@@ -1073,10 +1147,65 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           state.common.effectStatus = "reconciled";
         }
       }
-      if (state.episode.arm === "hacc" && accepted && request.target_tool === "archive.reconcile_transcript_request") {
-        state.refreshRequiredAfterReconciliation = true;
-      } else if (state.episode.arm === "hacc" && accepted && request.target_tool === "flow.get_state") {
-        state.refreshRequiredAfterReconciliation = false;
+      let postTransitionResponsePlanSha256: string | null = null;
+      let postTransitionResponseControlSha256: string | null = null;
+      if (accepted) {
+        if (authoritativeToolWorldReceipt === null) {
+          throw new Error("LC4-DEV accepted transition lacks its authoritative ToolWorld receipt");
+        }
+        const authoritativeOutcome = receiptDerivedAuthoritativeOutcome(authoritativeToolWorldReceipt);
+        const speechDirective = postTransitionSpeechDirective(request.target_tool, authoritativeToolWorldReceipt);
+        const transitionReceiptSha256 = sha256Hex(canonicalJson(authoritativeToolWorldReceipt));
+        if (state.episode.arm === "hacc") {
+          if (!state.kernel) throw new Error("LC4-DEV HACC transition lacks its kernel");
+          const rebound = state.kernel.rebindResponsePlanAfterTransition({
+            runId: state.episode.episode_id,
+            condition: state.condition,
+            scenario: LC4_DEV_MUNICIPAL_SCENARIO,
+            world: state.world,
+            transitionReceiptSha256,
+            previousTransitionBindingSha256: state.lastTransitionBindingSha256,
+          });
+          state.snapshot = rebound.capabilitySnapshot;
+          state.lastResponsePlanSha256 = rebound.responsePlan.plan_sha256;
+          state.lastTransitionBindingSha256 = rebound.transitionBindingSha256;
+          const responseControl = freeze({
+            kind: "hacc_response_plan" as const,
+            plan: rebound.responsePlan,
+            transition_binding_sha256: rebound.transitionBindingSha256,
+          });
+          postTransitionResponsePlanSha256 = rebound.responsePlan.plan_sha256;
+          postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
+          providerOutput = valueJson({
+            gateway_result: gatewayResultOnly(providerOutput),
+            authoritative_outcome: authoritativeOutcome,
+            speech_directive: speechDirective,
+            response_control: responseControl,
+            hacc_response_plan: rebound.responsePlan,
+          });
+        } else {
+          const instructions = nativeContext(state, opportunity);
+          const responseControl = freeze({
+            kind: "native_context" as const,
+            instructions,
+            instructions_sha256: sha256Hex(instructions),
+            transition_receipt_sha256: transitionReceiptSha256,
+          });
+          postTransitionResponsePlanSha256 = responseControl.instructions_sha256;
+          postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
+          providerOutput = valueJson({
+            gateway_result: gatewayResultOnly(providerOutput),
+            authoritative_outcome: authoritativeOutcome,
+            speech_directive: speechDirective,
+            response_control: responseControl,
+          });
+          state.nativeTranscriptHead = hash(NATIVE_TRANSCRIPT_DOMAIN, {
+            previous_head_sha256: state.nativeTranscriptHead,
+            opportunity_id: opportunity.id,
+            transition_receipt_sha256: transitionReceiptSha256,
+            response_control_sha256: postTransitionResponseControlSha256,
+          });
+        }
       }
       const controlPlaneHead = state.kernel
         ? state.kernel.transcriptReference().transcript_head_sha256
@@ -1092,11 +1221,42 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         control_plane_head_sha256: controlPlaneHead,
         disposition,
       });
+      const authorityProjectionBody = {
+        schema_version: 1 as const,
+        bridge_version: "lc4-dev-gateway-bridge-v1" as const,
+        redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
+        episode_id: state.episode.episode_id,
+        opportunity_id: opportunity.id,
+        opportunity_index: opportunity.index,
+        provider: state.episode.provider,
+        arm: state.episode.arm,
+        semantic_intent: request.semantic_intent,
+        target_tool: request.target_tool,
+        provider_call_id_sha256: sha256Hex(request.provider_call_id),
+        provider_response_id_sha256: sha256Hex(request.provider_response_id),
+        request_sha256: request.request_sha256,
+        provider_provenance_sha256: request.provider_provenance_sha256,
+        model_arguments: freeze(targetArguments),
+        effective_arguments: effectiveArguments,
+        provider_output: valueJson(providerOutput),
+        authoritative_receipt: valueJson(authoritativeReceipt),
+        authoritative_tool_world_receipt: authoritativeToolWorldReceipt,
+        post_transition_response_plan_sha256: postTransitionResponsePlanSha256,
+        post_transition_response_control_sha256: postTransitionResponseControlSha256,
+        authoritative_receipt_sha256: authoritativeReceiptSha256,
+        control_plane_head_sha256: controlPlaneHead,
+        disposition,
+      };
+      const authorityProjection = freeze({
+        ...authorityProjectionBody,
+        projection_sha256: hash(GATEWAY_AUTHORITY_PROJECTION_DOMAIN, authorityProjectionBody),
+      });
       return freeze({
         provider_output: providerOutput,
         authoritative_receipt_sha256: authoritativeReceiptSha256,
         control_plane_head_sha256: controlPlaneHead,
         disposition,
+        authority_projection: authorityProjection,
       });
     },
   });
@@ -1114,9 +1274,6 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       const state = episodes.get(episodeId);
       if (!state) throw new Error("LC4-DEV control episode has not started");
       const currentOpportunityId = corpus.opportunities[state.common.opportunities - 1]!.id;
-      if (state.refreshRequiredAfterReconciliation && state.snapshot && capability(state.snapshot, "flow.get_state")) {
-        return freeze([{ opportunity_id: currentOpportunityId, target_tool: "flow.get_state", target_arguments: {} }]);
-      }
       const executable = state.pendingGatewayActions
         .filter((logical) => {
           const exactWindow = logical.action === "archive.submit_transcript_request"
@@ -1130,12 +1287,9 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         })
         .map((logical) => ({
         opportunity_id: currentOpportunityId,
+        semantic_intent: lc4DevSemanticIntentForAction(logical.action),
         target_tool: logical.action,
-        target_arguments: logical.action === "archive.reconcile_transcript_request"
-          ? state.episode.arm === "hacc"
-            ? {}
-            : reconcileArguments(state)!
-          : logical.arguments,
+        target_arguments: {},
         }));
       return freeze(executable);
     },
@@ -1155,6 +1309,15 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         repair_state: state.repairState,
         gateway_transcript_sha256: gatewayTranscriptSha256,
         pending_gateway_actions: state.pendingGatewayActions.length,
+        pending_gateway_obligations: state.pendingGatewayActions.map((logical) => ({
+          semantic_intent: lc4DevSemanticIntentForAction(logical.action),
+          target_tool: logical.action,
+          effective_arguments: logical.action === "archive.reconcile_transcript_request"
+            ? reconcileArguments(state) ?? logical.arguments
+            : logical.arguments,
+          registered_opportunity_id: logical.opportunity.id,
+          registered_opportunity_index: logical.opportunity.index,
+        })),
       });
     },
   });

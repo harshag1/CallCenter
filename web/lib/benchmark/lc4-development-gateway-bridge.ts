@@ -1,5 +1,6 @@
+import { z } from "zod";
 import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artifacts";
-import { CapabilityGatewayCallSchema } from "./capability-gateway";
+import type { ProviderFunctionTool } from "./capability-gateway";
 import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import type { Lc4PublicDevOpportunity } from "./lc4-public-development-corpus";
 import type {
@@ -8,6 +9,7 @@ import type {
   RealtimeToolCall,
   RealtimeToolResult,
 } from "../realtime/client/types";
+import { LOCAL_TOOL_PROXY_FUNCTION_NAME } from "../realtime/client/types";
 
 export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v1" as const;
 
@@ -17,6 +19,90 @@ const MAX_TOOL_CALLS_PER_BATCH = 16;
 const MAX_PROVIDER_RESULT_BYTES = 64 * 1024;
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v1\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v1\n";
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+
+export const LC4_DEV_SEMANTIC_INTENTS = Object.freeze([
+  "launch_async_worker",
+  "record_async_worker_result",
+  "submit_accessible_transcript",
+  "reconcile_accessible_transcript",
+  "complete_current_stage",
+  "reserve_archive_room",
+] as const);
+
+export type Lc4DevSemanticIntent = typeof LC4_DEV_SEMANTIC_INTENTS[number];
+
+export const LC4_DEV_INTENT_ACTION_MAP: Readonly<Record<Lc4DevSemanticIntent, string>> = Object.freeze({
+  launch_async_worker: "archive.launch_worker",
+  record_async_worker_result: "archive.observe_worker_result",
+  submit_accessible_transcript: "archive.submit_transcript_request",
+  reconcile_accessible_transcript: "archive.reconcile_transcript_request",
+  complete_current_stage: "archive.complete_stage",
+  reserve_archive_room: "archive.reserve_room",
+});
+
+/**
+ * LC4-DEV's provider surface is one stable function plus one closed semantic
+ * intent. All current action payloads are host/oracle-owned, so the model has
+ * no admissible slots. This prevents benchmark driver state from leaking into
+ * provider-authored arguments.
+ */
+export const LC4_DEV_SEMANTIC_GATEWAY_FUNCTION = immutableJson({
+  type: "function",
+  name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  description: [
+    "Request one LC4-DEV semantic intent from the closed enum.",
+    "Pass an empty arguments object; the host binds every current benchmark slot.",
+    "Never supply request identities, worker envelopes, reconciliation sources, receipts, or provider provenance.",
+  ].join(" "),
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      tool_name: {
+        type: "string",
+        description: "Closed semantic intent, not an implementation action name.",
+        enum: LC4_DEV_SEMANTIC_INTENTS,
+      },
+      arguments: {
+        type: "object",
+        description: "No model-owned slots exist in LC4-DEV v1.",
+        additionalProperties: false,
+        properties: {},
+      },
+    },
+    required: ["tool_name", "arguments"],
+  },
+}) as unknown as ProviderFunctionTool;
+
+export function isLc4DevSemanticGatewayFunction(value: unknown): boolean {
+  return canonicalJson(value) === canonicalJson(LC4_DEV_SEMANTIC_GATEWAY_FUNCTION);
+}
+
+const Lc4DevSemanticCallSchema = z.object({
+  tool_name: z.enum(LC4_DEV_SEMANTIC_INTENTS),
+  arguments: z.object({}).strict(),
+}).strict();
+
+function normalizeSemanticCall(input: unknown): Readonly<{
+  semantic_intent: Lc4DevSemanticIntent;
+  target_tool: string;
+  target_arguments: Readonly<Record<string, JsonValue>>;
+}> {
+  const parsed = Lc4DevSemanticCallSchema.parse(input);
+  return Object.freeze({
+    semantic_intent: parsed.tool_name,
+    target_tool: LC4_DEV_INTENT_ACTION_MAP[parsed.tool_name],
+    target_arguments: Object.freeze({}),
+  });
+}
+
+export function lc4DevSemanticIntentForAction(action: string): Lc4DevSemanticIntent {
+  const match = Object.entries(LC4_DEV_INTENT_ACTION_MAP)
+    .find(([, candidate]) => candidate === action)?.[0] as Lc4DevSemanticIntent | undefined;
+  if (!match) throw new Error(`LC4-DEV action ${action} has no closed semantic intent`);
+  return match;
+}
 
 type Arm = Lc4DevLiveEpisodePlan["arm"];
 
@@ -29,6 +115,7 @@ export type Lc4DevGatewayExecutionInput = Readonly<{
   arm: Arm;
   provider_call_id: string;
   provider_response_id: string;
+  semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   target_arguments: Readonly<Record<string, JsonValue>>;
   request_sha256: string;
@@ -48,7 +135,43 @@ export type Lc4DevGatewayExecutor = Readonly<{
     authoritative_receipt_sha256: string;
     control_plane_head_sha256: string;
     disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
+    authority_projection: Lc4DevGatewayAuthorityProjection;
   }>>;
+}>;
+
+/**
+ * Replay-complete, DEV-public authority projection. Raw provider call/response
+ * identities and credentials are excluded; model-visible public arguments,
+ * the host-effective arguments, provider-visible result, and authoritative
+ * ToolWorld receipt are retained so an independent process can recompute the
+ * dispatch and world transition rather than trusting summary hashes.
+ */
+export type Lc4DevGatewayAuthorityProjection = Readonly<{
+  schema_version: 1;
+  bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
+  redaction: "public_dev_authority_no_raw_provider_ids_or_credentials";
+  episode_id: string;
+  opportunity_id: string;
+  opportunity_index: number;
+  provider: Lc4DevLiveEpisodePlan["provider"];
+  arm: Arm;
+  semantic_intent: Lc4DevSemanticIntent;
+  target_tool: string;
+  provider_call_id_sha256: string;
+  provider_response_id_sha256: string;
+  request_sha256: string;
+  provider_provenance_sha256: string;
+  model_arguments: Readonly<Record<string, JsonValue>>;
+  effective_arguments: Readonly<Record<string, JsonValue>> | null;
+  provider_output: JsonValue;
+  authoritative_receipt: JsonValue;
+  authoritative_tool_world_receipt: JsonValue | null;
+  post_transition_response_plan_sha256: string | null;
+  post_transition_response_control_sha256: string | null;
+  authoritative_receipt_sha256: string;
+  control_plane_head_sha256: string;
+  disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
+  projection_sha256: string;
 }>;
 
 /** Content-free evidence: arguments, results, prompts, transcripts, and IDs are hashes only. */
@@ -60,12 +183,15 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   arm: Arm;
   batch_ordinal: number;
   call_ordinal: number;
+  semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   provider_call_id_sha256: string;
   provider_response_id_sha256: string;
   request_sha256: string;
   provider_provenance_sha256: string;
   provider_output_sha256: string;
+  post_transition_response_plan_sha256: string | null;
+  post_transition_response_control_sha256: string | null;
   authoritative_receipt_sha256: string;
   control_plane_head_sha256: string;
   disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
@@ -74,6 +200,7 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
 
 export type Lc4DevGatewayReceiptSet = Readonly<{
   receipts: readonly Lc4DevSanitizedGatewayReceipt[];
+  authority_projections: readonly Lc4DevGatewayAuthorityProjection[];
   receipt_set_sha256: string;
 }>;
 
@@ -85,6 +212,7 @@ type OpportunityContext = Readonly<{
 type ExecutableCall = Readonly<{
   call_id: string;
   response_id: string;
+  semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   target_arguments: Readonly<Record<string, JsonValue>>;
   request_sha256: string;
@@ -115,10 +243,10 @@ function normalizedGeminiCall(call: RealtimeToolCall): ExecutableCall {
   if (call.argumentsError || call.argumentsJson === null) {
     throw new Error("LC4-DEV Gemini capability_gateway arguments are malformed");
   }
-  const parsed = CapabilityGatewayCallSchema.parse(call.argumentsJson);
+  const parsed = normalizeSemanticCall(call.argumentsJson);
   const requestBody = {
     method: "tools/call" as const,
-    params: { name: parsed.tool_name, arguments: parsed.arguments },
+    params: { name: parsed.semantic_intent, arguments: parsed.target_arguments },
   };
   const provenance = {
     provider: "gemini" as const,
@@ -131,8 +259,9 @@ function normalizedGeminiCall(call: RealtimeToolCall): ExecutableCall {
   return freeze({
     call_id: call.callId,
     response_id: call.responseId,
-    target_tool: parsed.tool_name,
-    target_arguments: parsed.arguments,
+    semantic_intent: parsed.semantic_intent,
+    target_tool: parsed.target_tool,
+    target_arguments: parsed.target_arguments,
     request_sha256: sha256Hex(canonicalJson(requestBody)),
     provider_provenance_sha256: sha256Hex(canonicalJson(provenance)),
   });
@@ -145,14 +274,21 @@ function callsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
   if (event.type === "tool.dispatch") {
     return Object.freeze({
       response_id: event.responseId,
-      calls: Object.freeze(event.dispatches.map((dispatch) => freeze({
-        call_id: dispatch.callId,
-        response_id: event.responseId,
-        target_tool: dispatch.request.params.name,
-        target_arguments: dispatch.request.params.arguments as Readonly<Record<string, JsonValue>>,
-        request_sha256: sha256Hex(canonicalJson(dispatch.request)),
-        provider_provenance_sha256: sha256Hex(canonicalJson(dispatch.provenance)),
-      }))),
+      calls: Object.freeze(event.dispatches.map((dispatch) => {
+        const parsed = normalizeSemanticCall({
+          tool_name: dispatch.request.params.name,
+          arguments: dispatch.request.params.arguments,
+        });
+        return freeze({
+          call_id: dispatch.callId,
+          response_id: event.responseId,
+          semantic_intent: parsed.semantic_intent,
+          target_tool: parsed.target_tool,
+          target_arguments: parsed.target_arguments,
+          request_sha256: sha256Hex(canonicalJson(dispatch.request)),
+          provider_provenance_sha256: sha256Hex(canonicalJson(dispatch.provenance)),
+        });
+      })),
     });
   }
   if (event.type === "tool.calls" && event.provider === "gemini") {
@@ -179,6 +315,7 @@ export class Lc4DevGatewayTurnCoordinator {
   #fatal: Error | null = null;
   #batchOrdinal = 0;
   #receipts: Lc4DevSanitizedGatewayReceipt[] = [];
+  #authorityProjections: Lc4DevGatewayAuthorityProjection[] = [];
   #toolResponseIds = new Set<string>();
   #seenCallIds = new Set<string>();
 
@@ -196,7 +333,7 @@ export class Lc4DevGatewayTurnCoordinator {
   beginOpportunity(context: OpportunityContext): void {
     if (this.#context !== null) throw new Error("LC4-DEV gateway coordinator already has an active opportunity");
     if (this.#fatal) throw this.#fatal;
-    if (this.#batchOrdinal !== 0 || this.#receipts.length !== 0 || this.#toolResponseIds.size !== 0) {
+    if (this.#batchOrdinal !== 0 || this.#receipts.length !== 0 || this.#authorityProjections.length !== 0 || this.#toolResponseIds.size !== 0) {
       throw new Error("LC4-DEV gateway coordinator state was not sealed after the prior opportunity");
     }
     this.#context = context;
@@ -261,14 +398,16 @@ export class Lc4DevGatewayTurnCoordinator {
     await this.#queue;
     if (this.#fatal) throw this.#fatal;
     const receipts = Object.freeze([...this.#receipts]);
-    const receiptSetSha256 = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson(receipts)}`);
+    const authorityProjections = Object.freeze([...this.#authorityProjections]);
+    const receiptSetSha256 = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson({ receipts, authority_projections: authorityProjections })}`);
     this.#context = null;
     this.#batchOrdinal = 0;
     this.#receipts = [];
+    this.#authorityProjections = [];
     this.#toolResponseIds = new Set();
     this.#seenCallIds = new Set();
     this.#queue = Promise.resolve();
-    return Object.freeze({ receipts, receipt_set_sha256: receiptSetSha256 });
+    return Object.freeze({ receipts, authority_projections: authorityProjections, receipt_set_sha256: receiptSetSha256 });
   }
 
   async #executeBatch(
@@ -289,6 +428,7 @@ export class Lc4DevGatewayTurnCoordinator {
         arm: context.episode.arm,
         provider_call_id: call.call_id,
         provider_response_id: call.response_id,
+        semantic_intent: call.semantic_intent,
         target_tool: call.target_tool,
         target_arguments: call.target_arguments,
         request_sha256: call.request_sha256,
@@ -296,6 +436,29 @@ export class Lc4DevGatewayTurnCoordinator {
       }));
       requireHash(outcome.authoritative_receipt_sha256, "LC4-DEV authoritative gateway receipt");
       requireHash(outcome.control_plane_head_sha256, "LC4-DEV control plane head");
+      requireHash(outcome.authority_projection.projection_sha256, "LC4-DEV gateway authority projection");
+      if (outcome.authority_projection.post_transition_response_plan_sha256 !== null) {
+        requireHash(outcome.authority_projection.post_transition_response_plan_sha256, "LC4-DEV post-transition response plan");
+      }
+      if (outcome.authority_projection.post_transition_response_control_sha256 !== null) {
+        requireHash(outcome.authority_projection.post_transition_response_control_sha256, "LC4-DEV post-transition response control");
+      }
+      const { projection_sha256: claimedProjection, ...projectionBody } = outcome.authority_projection;
+      if (claimedProjection !== sha256Hex(`${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(projectionBody)}`)
+        || outcome.authority_projection.episode_id !== context.episode.episode_id
+        || outcome.authority_projection.opportunity_id !== context.opportunity.id
+        || outcome.authority_projection.provider_call_id_sha256 !== sha256Hex(call.call_id)
+        || outcome.authority_projection.provider_response_id_sha256 !== sha256Hex(call.response_id)
+        || outcome.authority_projection.request_sha256 !== call.request_sha256
+        || outcome.authority_projection.provider_provenance_sha256 !== call.provider_provenance_sha256
+        || outcome.authority_projection.semantic_intent !== call.semantic_intent
+        || outcome.authority_projection.target_tool !== call.target_tool
+        || outcome.authority_projection.authoritative_receipt_sha256 !== outcome.authoritative_receipt_sha256
+        || outcome.authority_projection.control_plane_head_sha256 !== outcome.control_plane_head_sha256
+        || outcome.authority_projection.disposition !== outcome.disposition
+        || canonicalJson(outcome.authority_projection.model_arguments) !== canonicalJson(call.target_arguments)) {
+        throw new Error("LC4-DEV gateway authority projection does not replay the exact provider dispatch");
+      }
       const providerOutput = providerOutputSnapshot(outcome.provider_output);
       results.push({ callId: call.call_id, output: providerOutput });
       const body = freeze({
@@ -306,12 +469,15 @@ export class Lc4DevGatewayTurnCoordinator {
         arm: context.episode.arm,
         batch_ordinal: batchOrdinal,
         call_ordinal: index + 1,
+        semantic_intent: call.semantic_intent,
         target_tool: call.target_tool,
         provider_call_id_sha256: sha256Hex(call.call_id),
         provider_response_id_sha256: sha256Hex(call.response_id),
         request_sha256: call.request_sha256,
         provider_provenance_sha256: call.provider_provenance_sha256,
         provider_output_sha256: sha256Hex(canonicalJson(providerOutput)),
+        post_transition_response_plan_sha256: outcome.authority_projection.post_transition_response_plan_sha256,
+        post_transition_response_control_sha256: outcome.authority_projection.post_transition_response_control_sha256,
         authoritative_receipt_sha256: outcome.authoritative_receipt_sha256,
         control_plane_head_sha256: outcome.control_plane_head_sha256,
         disposition: outcome.disposition,
@@ -320,6 +486,7 @@ export class Lc4DevGatewayTurnCoordinator {
         ...body,
         receipt_sha256: sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`),
       }));
+      this.#authorityProjections.push(freeze(outcome.authority_projection));
     }
     // Every adapter has a different default. Passing false removes ambiguity;
     // the host requests exactly one continuation only after the full batch is sent.
