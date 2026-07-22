@@ -55,7 +55,7 @@ The artifact schedules exactly one Native/HACC pair for each of `openai`,
 source-corpus root, and caller voice slot. Arm order alternates by provider; it
 does not change scenario content.
 
-Before a live canary, render all 60 opportunity utterances and all 12 possible
+Before a live canary, render all 60 opportunity utterances and all 24 possible
 CRP-1 repair utterances from the exact committed source strings. The source
 format is mono 24 kHz signed 16-bit little-endian PCM. Bind every source PCM
 hash and deterministic provider-rendition hash before the first provider

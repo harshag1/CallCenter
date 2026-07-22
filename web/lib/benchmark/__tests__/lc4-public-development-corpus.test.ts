@@ -73,7 +73,14 @@ describe("LC4 public mechanism-development corpus", () => {
 
   it("precommits arm-blind repairs and an exact final-state oracle", () => {
     const corpus = createLc4PublicDevelopmentCorpus();
-    expect(corpus.repair_policy.library).toHaveLength(12);
+    expect(corpus.repair_policy.library).toHaveLength(24);
+    for (const stage of new Set(corpus.repair_policy.library.map((repair) => repair.stage_id))) {
+      const stageRepairs = corpus.repair_policy.library.filter((repair) => repair.stage_id === stage);
+      expect(stageRepairs).toHaveLength(4);
+      for (const blocker of new Set(stageRepairs.map((repair) => repair.blocker_code))) {
+        expect(stageRepairs.filter((repair) => repair.blocker_code === blocker).map((repair) => repair.repair_ordinal)).toEqual([1, 2]);
+      }
+    }
     expect(new Set(corpus.repair_policy.library.map((row) => row.stage_id)).size).toBe(6);
     expect(corpus.repair_policy.maximum_repairs_per_episode).toBe(4);
     expect(corpus.repair_policy.repairs_do_not_extend_horizon).toBe(true);

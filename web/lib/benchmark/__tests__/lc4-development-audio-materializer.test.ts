@@ -58,7 +58,7 @@ afterEach(async () => {
 });
 
 describe("LC4-DEV audio materializer", () => {
-  it("publishes exact immutable 48 kHz masters, 180 caller bindings, and 36 repair bindings", async () => {
+  it("publishes exact immutable 48 kHz masters, 180 caller bindings, and 72 repair bindings", async () => {
     const parent = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-audio-"));
     roots.push(parent);
     const outputRoot = join(parent, "published");
@@ -66,8 +66,8 @@ describe("LC4-DEV audio materializer", () => {
     expect(() => assertLc4DevAudioArtifacts(result)).not.toThrow();
     expect(result.manifest.canonical_sources).toHaveLength(60);
     expect(result.manifest.caller_audio_bindings).toHaveLength(180);
-    expect(result.repairManifest.repair_sources).toHaveLength(12);
-    expect(result.repairManifest.repair_audio_bindings).toHaveLength(36);
+    expect(result.repairManifest.repair_sources).toHaveLength(24);
+    expect(result.repairManifest.repair_audio_bindings).toHaveLength(72);
     expect(result.manifest.canonical_sources.every((source) => source.master_48khz.sample_rate_hz === 48_000)).toBe(true);
     expect(result.manifest.caller_audio_bindings.slice(0, 60).every((binding) => binding.provider === "openai" && binding.sample_rate_hz === 24_000)).toBe(true);
     expect(result.manifest.caller_audio_bindings.slice(60, 120).every((binding) => binding.provider === "gemini" && binding.sample_rate_hz === 16_000)).toBe(true);

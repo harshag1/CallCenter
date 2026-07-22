@@ -135,8 +135,8 @@ export type Lc4DevRepairAudioManifest = Readonly<{
   provider_profile_manifest_sha256: string;
   repair_sources: readonly Lc4DevRepairAudioSource[];
   repair_audio_bindings: readonly Lc4DevRepairAudioBinding[];
-  source_count: 12;
-  logical_provider_binding_count: 36;
+  source_count: 24;
+  logical_provider_binding_count: 72;
   maximum_repairs_per_stage: 2;
   maximum_repairs_per_episode: 4;
   repairs_extend_canonical_horizon: false;
@@ -158,10 +158,10 @@ export type Lc4DevAudioManifest = Readonly<{
   repair_manifest_sha256: string;
   counts: Readonly<{
     canonical_sources: 60;
-    repair_sources: 12;
-    source_masters_48khz: 72;
+    repair_sources: 24;
+    source_masters_48khz: 84;
     logical_caller_bindings: 180;
-    logical_repair_bindings: 36;
+    logical_repair_bindings: 72;
   }>;
   manifest_sha256: string;
 }>;
@@ -310,8 +310,8 @@ function repairManifest(input: Readonly<{
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     repair_sources: Object.freeze([...input.sources]),
     repair_audio_bindings: Object.freeze(bindings),
-    source_count: 12 as const,
-    logical_provider_binding_count: 36 as const,
+    source_count: 24 as const,
+    logical_provider_binding_count: 72 as const,
     maximum_repairs_per_stage: 2 as const,
     maximum_repairs_per_episode: 4 as const,
     repairs_extend_canonical_horizon: false as const,
@@ -430,10 +430,10 @@ export async function materializeLc4DevelopmentAudio(input: Readonly<{
       repair_manifest_sha256: repairs.repair_manifest_sha256,
       counts: Object.freeze({
         canonical_sources: 60 as const,
-        repair_sources: 12 as const,
-        source_masters_48khz: 72 as const,
+        repair_sources: 24 as const,
+        source_masters_48khz: 84 as const,
         logical_caller_bindings: 180 as const,
-        logical_repair_bindings: 36 as const,
+        logical_repair_bindings: 72 as const,
       }),
     };
     const manifest = freeze({ ...body, manifest_sha256: sha256Hex(`${MANIFEST_DOMAIN}${canonicalJson(body)}`) });
@@ -486,7 +486,7 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
   if (input.manifest.canonical_sources.length !== 60 || input.manifest.caller_audio_bindings.length !== 180) {
     throw new Error("LC4-DEV canonical audio coverage is incomplete");
   }
-  if (input.repairManifest.repair_sources.length !== 12 || input.repairManifest.repair_audio_bindings.length !== 36) {
+  if (input.repairManifest.repair_sources.length !== 24 || input.repairManifest.repair_audio_bindings.length !== 72) {
     throw new Error("LC4-DEV repair audio coverage is incomplete");
   }
   for (const [providerIndex, provider] of (["openai", "gemini", "xai"] as const).entries()) {
@@ -507,7 +507,7 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
     });
   }
   for (const [providerIndex, provider] of (["openai", "gemini", "xai"] as const).entries()) {
-    const offset = providerIndex * 12;
+    const offset = providerIndex * 24;
     corpus.repair_policy.library.forEach((repair, index) => {
       const source = input.repairManifest.repair_sources[index];
       const binding = input.repairManifest.repair_audio_bindings[offset + index];

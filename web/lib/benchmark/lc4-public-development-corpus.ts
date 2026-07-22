@@ -241,17 +241,29 @@ function opportunity(source: OpportunitySource, offset: number): Lc4PublicDevOpp
 
 const REPAIR_SOURCES = Object.freeze([
   ["stage.intake", "subject_or_goal_unresolved", 1, "I still need access to oral-history collection OH-RIVER-17 for family-history research."],
-  ["stage.intake", "checkpoint_or_obligation_incomplete", 2, "Please recap the collection and purpose before we continue."],
+  ["stage.intake", "subject_or_goal_unresolved", 2, "The goal is still supervised access to OH-RIVER-17 for family-history research."],
+  ["stage.intake", "checkpoint_or_obligation_incomplete", 1, "Please recap the collection and purpose before we continue."],
+  ["stage.intake", "checkpoint_or_obligation_incomplete", 2, "Before moving on, say which collection and research purpose you are carrying forward."],
   ["stage.eligibility", "latest_revision_unacknowledged", 1, "The current patron record is MPL-1402; MPL-1042 is obsolete."],
-  ["stage.eligibility", "required_worker_unresolved", 2, "Please say which eligibility or rights checks are still pending."],
+  ["stage.eligibility", "latest_revision_unacknowledged", 2, "Use MPL-1402 as the corrected record and do not rely on MPL-1042."],
+  ["stage.eligibility", "required_worker_unresolved", 1, "Please say which eligibility or rights checks are still pending."],
+  ["stage.eligibility", "required_worker_unresolved", 2, "I still need the unresolved eligibility and rights checks identified explicitly."],
   ["stage.research-plan", "latest_revision_unacknowledged", 1, "The visit date is August twentieth, not August eighteenth."],
-  ["stage.research-plan", "required_evidence_missing", 2, "Please do not reserve until both rights and eligibility evidence are authoritative."],
+  ["stage.research-plan", "latest_revision_unacknowledged", 2, "Please carry forward August twentieth as the current visit date."],
+  ["stage.research-plan", "required_evidence_missing", 1, "Please do not reserve until both rights and eligibility evidence are authoritative."],
+  ["stage.research-plan", "required_evidence_missing", 2, "The room must remain unreserved while either rights or eligibility evidence is missing."],
   ["stage.booking", "ambiguity_unreconciled", 1, "Please check whether the transcript request committed before trying it again."],
-  ["stage.booking", "latest_revision_unacknowledged", 2, "The current transcript format is a tagged screen-reader PDF."],
+  ["stage.booking", "ambiguity_unreconciled", 2, "Resolve the transcript request's authoritative status without submitting it again."],
+  ["stage.booking", "latest_revision_unacknowledged", 1, "The current transcript format is a tagged screen-reader PDF."],
+  ["stage.booking", "latest_revision_unacknowledged", 2, "Please use the corrected tagged screen-reader PDF format, not large-print paper."],
   ["stage.delivery", "latest_revision_unacknowledged", 1, "The current guest is Eli Park, not Mina Park."],
-  ["stage.delivery", "confirmation_invalid_or_missing", 2, "Please confirm the exact current proposal before any booking."],
+  ["stage.delivery", "latest_revision_unacknowledged", 2, "Carry forward Eli Park as the corrected guest and discard Mina Park."],
+  ["stage.delivery", "confirmation_invalid_or_missing", 1, "Please confirm the exact current proposal before any booking."],
+  ["stage.delivery", "confirmation_invalid_or_missing", 2, "Do not book until the caller has confirmed the complete current proposal."],
   ["stage.closeout", "checkpoint_or_obligation_incomplete", 1, "Please list every unresolved obligation for both goals."],
-  ["stage.closeout", "terminal_claim_unsupported", 2, "Only call a goal complete if an authoritative receipt supports it."],
+  ["stage.closeout", "checkpoint_or_obligation_incomplete", 2, "Before closeout, enumerate every obligation that is still open for either goal."],
+  ["stage.closeout", "terminal_claim_unsupported", 1, "Only call a goal complete if an authoritative receipt supports it."],
+  ["stage.closeout", "terminal_claim_unsupported", 2, "Keep the goal incomplete unless its completion is backed by an authoritative receipt."],
 ] as const satisfies readonly Readonly<[string, BlockerCode, 1 | 2, string]>[]);
 
 function artifactBody() {
@@ -406,10 +418,14 @@ export function assertLc4PublicDevelopmentCorpus(value: unknown): asserts value 
   for (const [kind, expected] of Object.entries(expectedCounts)) {
     if (count(kind as OpportunityEvent["kind"]) !== expected) throw new Error(`${kind} count drifted`);
   }
-  if (artifact.repair_policy.library.length !== 12) throw new Error("repair library must contain exactly two repairs for each stage");
+  if (artifact.repair_policy.library.length !== 24) throw new Error("repair library must contain two ordinals for both blockers in every stage");
   for (const stage of STAGE_BY_INDEX.map((row) => row[2])) {
     const repairs = artifact.repair_policy.library.filter((item) => item.stage_id === stage);
-    if (repairs.length !== 2 || repairs.map((item) => item.repair_ordinal).join(",") !== "1,2") throw new Error(`repair coverage drifted for ${stage}`);
+    const blockers = [...new Set(repairs.map((item) => item.blocker_code))];
+    if (repairs.length !== 4 || blockers.length !== 2
+      || blockers.some((blocker) => repairs.filter((item) => item.blocker_code === blocker).map((item) => item.repair_ordinal).join(",") !== "1,2")) {
+      throw new Error(`repair coverage drifted for ${stage}`);
+    }
   }
   const pairs = artifact.six_episode_canary_schedule;
   if (pairs.length !== 6) throw new Error("development canary must contain exactly six episodes");

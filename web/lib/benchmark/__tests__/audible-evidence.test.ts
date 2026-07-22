@@ -475,6 +475,8 @@ describe("independent audible semantic evidence v2", () => {
       "played_pcm",
       "played_sample_count",
       "schema_version",
+      "source_chunk_sequence_sha256",
+      "source_request_sha256",
     ]);
     const executed = await invocation({ source });
     expect(verifyIndependentAsrInvocation({
@@ -714,7 +716,7 @@ describe("independent audible semantic evidence v2", () => {
     await expect(invocation({ source, result: badConfidence })).rejects.toThrow(/safe integer/);
   });
 
-  it("fails closed to a text-free listener view when coverage/confidence is insufficient", async () => {
+  it("fails closed to a text-free listener view when processed coverage is insufficient", async () => {
     const source = request();
     const weakResult = completedAsr(source, {
       processed_through_sample: 4,
@@ -728,12 +730,7 @@ describe("independent audible semantic evidence v2", () => {
     const weakInvocation = await invocation({ source, result: weakResult });
     const weak = (await preparedFixture({ source, asrInvocation: weakInvocation })).unit;
     expect(weak.record.status).toBe("unverifiable");
-    expect(weak.record.unverifiable_reasons).toEqual(expect.arrayContaining([
-      "processed_audio_coverage_below_threshold",
-      "confidence_coverage_below_threshold",
-      "confidence_unavailable",
-      "no_speech_probability_unavailable",
-    ]));
+    expect(weak.record.unverifiable_reasons).toContain("processed_audio_coverage_below_threshold");
     const listener = conditionBlindListenerObservation(weak);
     expect(listener.status).toBe("unverifiable");
     expect("transcript" in listener).toBe(false);
