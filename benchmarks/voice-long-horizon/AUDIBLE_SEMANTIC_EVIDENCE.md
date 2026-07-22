@@ -4,6 +4,13 @@ Status: architecture under adversarial review; **not eligible for C4 or public e
 
 This lane answers a narrow but essential question: what did an independent, pinned ASR system recover from the exact PCM prefix available to the benchmark listener? It must not substitute provider response text, generated-but-unplayed audio, or a freshly signed assertion for audible evidence.
 
+The future-run-only long-call claim-classification rules selected after the
+HACC-LC3-v8 red-team review are documented in
+[`AUDIO_SEMANTIC_SCORER_HARDENING.md`](./AUDIO_SEMANTIC_SCORER_HARDENING.md).
+They explicitly separate affirmative violations, category/status hard
+negatives, unresolved critical ASR, and missing evidence. They do not authorize
+retroactive v8 rescoring.
+
 ## Current claim boundary
 
 `verifyAudibleSemanticEvidence()` deliberately returns:

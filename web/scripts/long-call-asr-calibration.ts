@@ -22,7 +22,7 @@ const PLAN_FILE = "experiment-plan.json";
 const OUTPUT_DIRECTORY = "asr-calibration-evidence";
 const OUTPUT_FILE = "asr-calibration.json";
 const PLAN_DOMAIN = "harshas-amazing-call-center/long-call-plan/v1\n";
-const RECEIPTS_MANIFEST_DOMAIN = "hacc/long-call-asr-calibration-receipts/v1\n";
+const RECEIPTS_MANIFEST_DOMAIN = "hacc/long-call-asr-calibration-receipts/v2\n";
 const SAFE_RELATIVE_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 function flag(name: string): string {
@@ -105,6 +105,23 @@ function calibrationMarkdown(artifact: Readonly<{
     criticalSlotFalseNegatives: number;
     semanticSlotFalsePositives: number;
   }>;
+  callerMetrics: Readonly<{
+    plannedFixtures: number;
+    completedFixtures: number;
+    fixtureCoverage: number;
+    wordErrorRate: number;
+    criticalSlotFalseNegatives: number;
+    semanticSlotFalsePositives: number;
+  }>;
+  outputVoiceMetrics: readonly Readonly<{
+    routeId: string;
+    plannedFixtures: number;
+    completedFixtures: number;
+    fixtureCoverage: number;
+    wordErrorRate: number;
+    criticalSlotFalseNegatives: number;
+    semanticSlotFalsePositives: number;
+  }>[];
   thresholds: Readonly<{
     maximumWordErrorRate: number;
     requiredFixtureCoverage: number;
@@ -112,22 +129,29 @@ function calibrationMarkdown(artifact: Readonly<{
     maximumSemanticSlotFalsePositives: number;
   }>;
   fixtureManifestSha256: string;
+  outputVoiceCalibrationManifestSha256: string;
   asrConfigSha256: string;
   receiptsManifestSha256: string;
   artifactSha256: string;
 }>): string {
   const percent = (value: number): string => `${(value * 100).toFixed(2)}%`;
-  return `# HACC-LC3 caller ASR calibration\n\n` +
+  const outputRows = artifact.outputVoiceMetrics.map((metrics) =>
+    `| Output ${metrics.routeId} | ${metrics.completedFixtures}/${metrics.plannedFixtures} (${percent(metrics.fixtureCoverage)}); WER ${percent(metrics.wordErrorRate)}; FN ${metrics.criticalSlotFalseNegatives}; FP ${metrics.semanticSlotFalsePositives} | 100% coverage; WER <= ${percent(artifact.thresholds.maximumWordErrorRate)}; FN 0; FP 0 |`
+  ).join("\n");
+  return `# HACC-LC3 ASR calibration\n\n` +
     `Gate: **${artifact.gatePass ? "PASS" : "FAIL"}**\n\n` +
     `| Check | Result | Preregistered threshold |\n` +
     `| --- | ---: | ---: |\n` +
     `| Frozen 24 kHz fixture coverage | ${artifact.metrics.completedFixtures}/${artifact.metrics.plannedFixtures} (${percent(artifact.metrics.fixtureCoverage)}) | ${percent(artifact.thresholds.requiredFixtureCoverage)} |\n` +
     `| Micro-averaged word error rate | ${artifact.metrics.totalWordErrors}/${artifact.metrics.totalReferenceWords} (${percent(artifact.metrics.wordErrorRate)}) | <= ${percent(artifact.thresholds.maximumWordErrorRate)} |\n` +
     `| Critical corrected-ID / numeric-limit slots | ${artifact.metrics.detectedCriticalSlots}/${artifact.metrics.expectedCriticalSlots} | 0 false negatives |\n` +
-    `| Semantic slot false positives | ${artifact.metrics.semanticSlotFalsePositives} | 0 |\n\n` +
+    `| Semantic slot false positives | ${artifact.metrics.semanticSlotFalsePositives} | 0 |\n` +
+    `| Caller fixture stratum | ${artifact.callerMetrics.completedFixtures}/${artifact.callerMetrics.plannedFixtures} (${percent(artifact.callerMetrics.fixtureCoverage)}); WER ${percent(artifact.callerMetrics.wordErrorRate)}; FN ${artifact.callerMetrics.criticalSlotFalseNegatives}; FP ${artifact.callerMetrics.semanticSlotFalsePositives} | 100% coverage; WER <= ${percent(artifact.thresholds.maximumWordErrorRate)}; FN 0; FP 0 |\n` +
+    `${outputRows}\n\n` +
     `Normalization is frozen as Unicode NFKD, lowercase, diacritic removal, ampersand expansion, apostrophe deletion, punctuation removal, spoken-cardinal conversion, decimal digit splitting, and joining consecutive spelled letters. WER is Levenshtein word distance summed over all fixtures divided by the summed normalized reference-word count.\n\n` +
-    `Selection is deterministic: caller turns 1, 4, 9, 14, 17, and 20 from each of three task families and each of three macOS TTS voices (54 fixtures total; six per family-by-voice stratum).\n\n` +
+    `Selection is deterministic: caller turns 1, 4, 9, 14, 17, and 20 from every frozen caller family-by-voice stratum, plus six known-label critical-slot fixtures for each exact provider/model/output-voice route. Publication requires every stratum and every output voice to pass independently.\n\n` +
     `- Fixture manifest SHA-256: \`${artifact.fixtureManifestSha256}\`\n` +
+    `- Output-voice fixture manifest SHA-256: \`${artifact.outputVoiceCalibrationManifestSha256}\`\n` +
     `- Prepared ASR config SHA-256: \`${artifact.asrConfigSha256}\`\n` +
     `- Receipt manifest SHA-256: \`${artifact.receiptsManifestSha256}\`\n` +
     `- Calibration artifact SHA-256: \`${artifact.artifactSha256}\`\n`;
@@ -158,16 +182,18 @@ async function main(): Promise<void> {
   await mkdir(resolve(stagingDirectory, "receipts"), { recursive: true, mode: 0o700 });
 
   const toolchain = await prepareWhisperCppAsrToolchain({
-    batchId: `${plan.experimentId}-caller-calibration`,
+    batchId: `${plan.experimentId}-asr-calibration-v2`,
     config,
   });
   const transcripts: LongCallAsrCalibrationTranscript[] = [];
   const receiptEntries: Array<Readonly<{
+    calibrationKind: "caller" | "provider_output";
     calibrationUnitId: string;
     path: string;
     receiptSha256: string;
     transcriptSha256: string;
     fixtureSha256: string;
+    outputVoiceRoute: string | null;
   }>> = [];
   const receiptPaths: string[] = [];
   let invocationError: unknown;
@@ -206,11 +232,56 @@ async function main(): Promise<void> {
         playedAudioSha256: run.receipt.source_played_audio_sha256,
       }));
       receiptEntries.push(Object.freeze({
+        calibrationKind: "caller" as const,
         calibrationUnitId: fixture.calibrationUnitId,
         path: relativeReceiptPath,
         receiptSha256: run.receipt.receipt_sha256,
         transcriptSha256: sha256Hex(run.receipt.result.transcript),
         fixtureSha256: fixture.sha256,
+        outputVoiceRoute: null,
+      }));
+    }
+    for (const [index, fixture] of calibrationPlan.outputVoiceFixtures.entries()) {
+      const pcm = new Uint8Array(await readFile(safeFixturePath(root, fixture.path)));
+      if (pcm.byteLength !== fixture.byteLength || sha256Hex(pcm) !== fixture.sha256) {
+        throw new Error(`frozen output-voice fixture bytes mismatch: ${fixture.path}`);
+      }
+      const run = await runPreparedWhisperCppAsr({
+        toolchain,
+        source: {
+          runId: `${plan.experimentId}-output-voice-calibration`,
+          unitId: fixture.calibrationUnitId,
+          invocationId: fixture.calibrationUnitId,
+          sourceRequestSha256: fixture.referenceTextSha256,
+          sourceChunkSequenceSha256: fixture.sha256,
+          pcm16Mono24khz: pcm,
+        },
+      });
+      if (run.receipt.toolchain_verification.mode !== "prepared_batch"
+        || run.receipt.toolchain_verification.batch_id !== toolchain.batchId
+        || run.receipt.input.pcm_sha256 !== fixture.sha256
+        || run.receipt.source_played_audio_sha256 !== fixture.sha256) {
+        throw new Error(`output-voice ASR receipt binding mismatch: ${fixture.calibrationUnitId}`);
+      }
+      const ordinal = calibrationPlan.callerFixtureCount + index + 1;
+      const relativeReceiptPath = `receipts/${String(ordinal).padStart(2, "0")}-${fixture.calibrationUnitId}.json`;
+      const receiptPath = resolve(stagingDirectory, relativeReceiptPath);
+      await writeFile(receiptPath, run.canonicalReceiptJson, { flag: "wx", mode: 0o600 });
+      receiptPaths.push(receiptPath);
+      transcripts.push(Object.freeze({
+        calibrationUnitId: fixture.calibrationUnitId,
+        transcript: run.receipt.result.transcript,
+        receiptSha256: run.receipt.receipt_sha256,
+        playedAudioSha256: run.receipt.source_played_audio_sha256,
+      }));
+      receiptEntries.push(Object.freeze({
+        calibrationKind: "provider_output" as const,
+        calibrationUnitId: fixture.calibrationUnitId,
+        path: relativeReceiptPath,
+        receiptSha256: run.receipt.receipt_sha256,
+        transcriptSha256: sha256Hex(run.receipt.result.transcript),
+        fixtureSha256: fixture.sha256,
+        outputVoiceRoute: `${fixture.provider}/${fixture.model}/${fixture.voice}`,
       }));
     }
   } catch (error) {
@@ -229,6 +300,7 @@ async function main(): Promise<void> {
       calibrationId: LONG_CALL_ASR_CALIBRATION_ID,
       experimentPlanSha256: plan.planSha256,
       calibrationPlanSha256: calibrationPlan.calibrationPlanSha256,
+      outputVoiceCalibrationManifestSha256: plan.outputVoiceCalibrationManifestSha256,
       asrConfigSha256: toolchain.configSha256,
       completedInvocations: receiptEntries.length,
       batchFinalization: batchFinalization ?? null,
@@ -248,6 +320,7 @@ async function main(): Promise<void> {
     experimentId: plan.experimentId,
     experimentPlanSha256: plan.planSha256,
     fixtureManifestSha256: plan.fixtureManifestSha256,
+    outputVoiceCalibrationManifestSha256: plan.outputVoiceCalibrationManifestSha256,
     calibrationPlanSha256: calibrationPlan.calibrationPlanSha256,
     asrConfigSha256: toolchain.configSha256,
     batchFinalization,
