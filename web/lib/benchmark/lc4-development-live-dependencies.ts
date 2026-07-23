@@ -565,6 +565,26 @@ export type Lc4DevLiveDependencyBundle = Readonly<{
   finalize(): Promise<void>;
 }>;
 
+export function assertLc4DevFinalControlHorizon(
+  snapshot: Readonly<{
+    episode_id: string;
+    arm: "native" | "hacc";
+    opportunities: number;
+    pending_gateway_actions: number;
+    pending_gateway_obligations: readonly unknown[];
+  }>,
+  episode: Pick<Lc4DevLiveEpisodePlan, "episode_id" | "arm">,
+): void {
+  // Unresolved actions are benchmark outcomes, not missing evidence. Native
+  // agents are expected to sometimes leave obligations pending; finalization
+  // must preserve and score that state instead of censoring the failed cell.
+  if (snapshot.episode_id !== episode.episode_id
+    || snapshot.arm !== episode.arm
+    || snapshot.opportunities !== 60) {
+    throw new Error("LC4-DEV final control snapshot identity or horizon differs from the episode");
+  }
+}
+
 function objectValue(value: unknown, label: string): Record<string, JsonValue> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${label} must be a retained JSON object`);
@@ -732,13 +752,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     requireSha256(ledger_head_before_terminal_sha256, "LC4-DEV pre-terminal ledger head");
     for (const segment of segment_finalizations) await replayEvidence.assertResolvable(segment);
     const snapshot = freeze(input.control.snapshot(episode.episode_id));
-    if (snapshot.episode_id !== episode.episode_id
-      || snapshot.arm !== episode.arm
-      || snapshot.opportunities !== 60
-      || snapshot.pending_gateway_actions !== 0
-      || snapshot.pending_gateway_obligations.length !== 0) {
-      throw new Error("LC4-DEV final control snapshot is incomplete or differs from the episode");
-    }
+    assertLc4DevFinalControlHorizon(snapshot, episode);
     requireSha256(snapshot.common_state_sha256, "LC4-DEV final common state");
     requireSha256(snapshot.gateway_transcript_sha256, "LC4-DEV final gateway transcript");
     const ledgerReplay = await verifyLc4DevReplayLedger(ledger.events(), replayEvidence);

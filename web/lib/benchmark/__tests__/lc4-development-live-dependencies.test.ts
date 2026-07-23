@@ -17,6 +17,7 @@ import {
 } from "../lc4-authoritative-obligation-evidence";
 import {
   auditLc4PublicDevLiveReadiness,
+  assertLc4DevFinalControlHorizon,
   createLc4DevelopmentLiveDependencies,
   createLc4HashChainedLedgerWriter,
   createLc4ImmutableCas,
@@ -338,6 +339,22 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
 }
 
 describe("LC4-DEV concrete live dependencies", () => {
+  it("finalizes a complete horizon without censoring unresolved benchmark obligations", () => {
+    const episode = { episode_id: "lc4-dev-openai-native", arm: "native" as const };
+    expect(() => assertLc4DevFinalControlHorizon({
+      ...episode,
+      opportunities: 60,
+      pending_gateway_actions: 2,
+      pending_gateway_obligations: [{ target_tool: "archive.complete_stage" }],
+    }, episode)).not.toThrow();
+    expect(() => assertLc4DevFinalControlHorizon({
+      ...episode,
+      opportunities: 59,
+      pending_gateway_actions: 0,
+      pending_gateway_obligations: [],
+    }, episode)).toThrow("identity or horizon differs");
+  });
+
   it("accepts the operator's v2 preflight in the real dependency factory and rejects a v1 operator genesis", async () => {
     const root = await temporaryDirectory();
     const { dag, options } = liveDependencyFactoryFixture(root);
