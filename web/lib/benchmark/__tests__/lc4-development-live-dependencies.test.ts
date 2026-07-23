@@ -704,6 +704,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       playback_authority: playbackAuthority,
       cas,
     });
+    const failedPcm = Uint8Array.from([1, 2, 3, 4]);
     const capture = createLc4CapturedOutput({
       runId: "lc4-dev-openai-native",
       opportunityId: corpus.opportunities[0]!.id,
@@ -711,7 +712,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       provider: "openai",
       surface: "server_realtime_pcm",
       sampleRateHz: 24_000,
-      chunks: [{ chunkId: "chunk-1", pcm: Uint8Array.from([1, 2, 3, 4]) }],
+      chunks: [{ chunkId: "chunk-1", pcm: failedPcm }],
     });
     const episode: Lc4DevLiveEpisodePlan = {
       episode_id: "lc4-dev-openai-native", pair_id: "lc4-dev-openai", pair_position: 1,
@@ -725,5 +726,6 @@ describe("LC4-DEV concrete live dependencies", () => {
       response_plan_sha256: null,
       wire_observation_set_sha256: "b".repeat(64),
     })).rejects.toThrow("did not attest consumption of the exact complete captured PCM");
+    expect(await cas.get(sha256Hex(failedPcm))).toEqual(failedPcm);
   });
 });

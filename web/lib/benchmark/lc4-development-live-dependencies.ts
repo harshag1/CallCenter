@@ -449,12 +449,27 @@ export function createLc4PinnedListenerSink(input: Readonly<{
       const generatedPcm = pcmFromCapture(capture);
       const criterion = input.criteria[opportunity.index - 1];
       if (!criterion || criterion.opportunity_id !== opportunity.id) throw new Error("LC4-DEV listener criterion binding is missing");
-      const handoff = await input.playback_authority.consume({
-        capture,
-        pcm: generatedPcm.slice(),
-        criterion_plan_sha256: criterion.criterion_plan_sha256,
-        evaluator: input.evaluator,
-      });
+      let handoff: Awaited<ReturnType<Lc4ListenerPlaybackAuthority["consume"]>>;
+      try {
+        handoff = await input.playback_authority.consume({
+          capture,
+          pcm: generatedPcm.slice(),
+          criterion_plan_sha256: criterion.criterion_plan_sha256,
+          evaluator: input.evaluator,
+        });
+      } catch (error) {
+        // A listener failure used to discard the only replayable copy of the
+        // provider output. Retain the exact capture under the output hash
+        // already committed by failure evidence, so a failed paid turn can be
+        // diagnosed offline without another provider call.
+        await replayEvidence.retainBytes({
+          kind: "assistant_pcm",
+          bytes: generatedPcm,
+          expected_evidence_sha256: capture.generated_pcm_sha256,
+          media_type: "audio/pcm",
+        });
+        throw error;
+      }
       const evaluation = handoff.evaluation;
       if (!evaluation.repair_projection) throw new Error("LC4-DEV listener evaluator omitted its arm-blind repair projection");
       for (const digest of [
