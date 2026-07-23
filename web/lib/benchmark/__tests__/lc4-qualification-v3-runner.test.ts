@@ -70,7 +70,12 @@ import {
   withXaiServerVadPcmSession,
   xaiServerVadTransportParitySha256,
 } from "../../realtime/client/openai-compatible";
-import { LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 } from "../xai-server-vad";
+import {
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+  LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
+} from "../xai-server-vad";
 import {
   replayProviderToolRoundtrip,
   projectRoundtripInputAudioEvidence,
@@ -371,6 +376,20 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     const ack = observe("inbound", "session.updated");
     const inputAudio = observe("outbound", "input_audio_buffer.append", Object.freeze({}), inputAudioProjection);
     const speechStart = observe("inbound", "input_audio_buffer.speech_started");
+    const suffixFrame = new Uint8Array(LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz * 2 / 50);
+    const suffixFrameSha256 = sha256Hex(suffixFrame);
+    const silenceTail = Object.freeze(Array.from(
+      { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count },
+      () => observe("outbound", "input_audio_buffer.append", Object.freeze({}), {
+        audio: Object.freeze({
+          direction: "input" as const,
+          validCanonicalBase64: true,
+          sha256: suffixFrameSha256,
+          byteLength: suffixFrame.byteLength,
+          format: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: 24_000, channels: 1 as const }),
+        }),
+      }),
+    ));
     const speechStop = observe("inbound", "input_audio_buffer.speech_stopped");
     const commit = observe("inbound", "input_audio_buffer.committed");
     const rootResponse = observe("inbound", "response.created", {
@@ -397,7 +416,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     const terminal = observe("inbound", "response.done", { responseIdSha256: continuationResponseIdSha256 }, {
       terminal: { status: "completed" }, usage: { totalTokens: 8 },
     });
-    return { control, ack, inputAudio, speechStart, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, outputAudio, terminal };
+    return { control, ack, inputAudio, speechStart, silenceTail, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, outputAudio, terminal };
   })() : null;
   const commonWire = input.provider !== "xai" ? (() => {
     const inputAudio = observe(
@@ -480,6 +499,26 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     frame_bytes: input.audioObject.byte_length,
     tail_bytes: input.audioObject.byte_length,
     sample_rate_hz: input.audioObject.sample_rate_hz,
+    ...(input.provider !== "xai" ? {} : {
+      transport_suffix: {
+        purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+        policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+        pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+        audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+        duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+        chunk_sha256s: Object.freeze(Array.from(
+          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count },
+          () => sha256Hex(new Uint8Array(960)),
+        )),
+        chunk_list_sha256: roundtripInputAudioChunkListSha256(Array.from(
+          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count },
+          () => sha256Hex(new Uint8Array(960)),
+        )),
+        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+        frame_bytes: 960,
+        tail_bytes: 960,
+      },
+    }),
   });
   const outputAudioEvidence = projectRoundtripOutputAudioEvidence({
     provider: input.provider,
@@ -581,6 +620,31 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   assertLc4S2sRoundtripExecution(execution);
   return execution;
+}
+
+function failedRetainedExecution(
+  input: Parameters<NonNullable<Parameters<typeof runLc4QualificationV3>[0]["dependencies"]>["executeRoundtrip"]>[0],
+): Lc4S2sRoundtripExecution {
+  const passing = passedExecution(input);
+  const { evidence_sha256: discardedEvidenceSha256, ...passingBody } = passing;
+  expect(discardedEvidenceSha256).toMatch(/^[a-f0-9]{64}$/u);
+  const body = Object.freeze({
+    ...passingBody,
+    status: "failed" as const,
+    failure_class: "provider_error" as const,
+    replay_summary: input.provider === "openai" ? passing.replay_summary : null,
+    replay_causal_binding: input.provider === "openai" ? passing.replay_causal_binding : null,
+    public_execution_sha256: null,
+    replay_sha256: null,
+  });
+  const failed = Object.freeze({
+    ...body,
+    evidence_sha256: sha256Hex(
+      `harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(body)}`,
+    ),
+  });
+  assertLc4S2sRoundtripExecution(failed);
+  return failed;
 }
 
 describe("LC4 qualification v3 signed runner", () => {
@@ -831,6 +895,18 @@ describe("LC4 qualification v3 signed runner", () => {
         benchmark_ready: true,
       },
     });
+    const gateB = JSON.parse(await readFile(
+      join(root, "attempts", `${authBody.authorization_id}.complete`, "xai-server-vad-gate-b-binding.json"),
+      "utf8",
+    )) as { body?: never } & Record<string, unknown>;
+    expect(gateB).toMatchObject({
+      caller_audio_bytes: plan.body.targets.find((target) => target.provider === "xai")?.caller_audio_bytes,
+      server_vad_silence_tail_policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+      server_vad_silence_tail_pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+      server_vad_silence_tail_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+      server_vad_silence_tail_observation_list_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      silence_tail_precedes_speech_stop_verified: true,
+    });
     const envelope = JSON.parse(await readFile(join(root, "attempts", `${authBody.authorization_id}.complete`, "qualification-package-envelope.json"), "utf8")) as { body: { self_excluded: boolean; entries: { path: string }[] } };
     expect(envelope.body.self_excluded).toBe(true);
     expect(envelope.body.entries.map((entry) => entry.path)).not.toContain("qualification-package-envelope.json");
@@ -867,6 +943,80 @@ describe("LC4 qualification v3 signed runner", () => {
     await writeFile(riskPath, `${canonicalJson({ ...risk, policy_sha256: "0".repeat(64) })}\n`);
     await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
       .rejects.toThrow(/qualification package|risk artifact/u);
+  });
+
+  it("reports three retained failed executions without inventing replay-success hashes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-all-failed-"));
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
+    roots.push(root, repositoryRoot);
+    const authority = keys();
+    const terminalKey = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const plan = await prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId: "qualification-v3-all-failed-plan",
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+    const authorization = authorizationFor(
+      plan,
+      authority.privatePem,
+      terminalKey,
+      "qualification-v3-all-failed-attempt",
+    );
+    const terminal = await runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => NOW,
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+        createClient: (provider) => new SetupClient(provider, true),
+        executeRoundtrip: async (input) => failedRetainedExecution(input),
+      },
+    });
+    expect(terminal.body).toMatchObject({
+      status: "failed",
+      provider_sessions_opened: 6,
+      paid_sessions_opened: 3,
+      generation_phases_attempted: 6,
+      tool_roundtrips_attempted: 3,
+    });
+    expect(terminal.body.results).toHaveLength(3);
+    expect(terminal.body.roundtrip_evidence_sha256).toHaveLength(3);
+    expect(terminal.body.roundtrip_public_execution_sha256).toEqual([]);
+    expect(terminal.body.roundtrip_replay_sha256).toEqual([]);
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .resolves.toMatchObject({
+        complete_attempts: 1,
+        fully_replay_verified_complete_attempts: 0,
+        retained_completed_executions: 3,
+        replay_verified_completed_executions: 0,
+        legacy_replay_valid_under_current_verifier_executions: 1,
+        legacy_nullable_replay_hash_array_attempts: 0,
+        latest: {
+          status: "failed",
+          results: [
+            { provider: "openai", status: "failed" },
+            { provider: "gemini", status: "failed" },
+            { provider: "xai", status: "failed" },
+          ],
+          roundtrip_public_execution_sha256: [],
+          roundtrip_replay_sha256: [],
+        },
+      });
   });
 
   it("reports a sealed pre-retention runner exception without setup acceptance and rejects tampering", async () => {

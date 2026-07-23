@@ -36,6 +36,9 @@ import {
 import { realtimeToolFrontierSha256 } from "../realtime/client/openai-compatible";
 import {
   LC4_XAI_SERVER_VAD_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 import {
@@ -1006,6 +1009,43 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       tail_bytes: receipt.tail_byte_length,
       scheduled_offsets_ms: freeze(receipt.chunks.map((chunk) => chunk.scheduled_offset_ms)),
     });
+    operations.push("preregistered_pcm_paced_20ms");
+    let transportSuffixPlan: ReturnType<typeof packetizeRealtimePcm16> | null = null;
+    if (input.provider === "xai") {
+      if (input.audio.sampleRateHz !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz
+        || input.profile.chunkMs !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms) {
+        failure = "audio_delivery_contract_failed";
+        throw new Error("xAI server-VAD silence-tail profile does not match the frozen transport policy");
+      }
+      const suffixAudio = freeze({
+        encoding: "pcm16" as const,
+        sampleRateHz: LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz,
+        channels: 1 as const,
+        data: new Uint8Array(LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length),
+      });
+      if (sha256Hex(suffixAudio.data) !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256) {
+        failure = "audio_delivery_contract_failed";
+        throw new Error("xAI server-VAD silence-tail PCM failed its frozen hash");
+      }
+      transportSuffixPlan = packetizeRealtimePcm16(suffixAudio, input.profile);
+      const suffixReceipt = await deliverRealtimePcm16({
+        client: input.client,
+        audio: suffixAudio,
+        profile: input.profile,
+        runtime: input.runtime ?? SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
+        signal: input.signal ?? new AbortController().signal,
+      });
+      if (suffixReceipt.total_byte_length !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+        || suffixReceipt.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+        || suffixReceipt.chunk_count !== transportSuffixPlan.frames.length
+        || suffixReceipt.frame_byte_length !== plan.frame_byte_length
+        || suffixReceipt.tail_byte_length !== plan.frame_byte_length
+        || suffixReceipt.chunks.some((chunk, index) => chunk.scheduled_offset_ms !== index * 20)) {
+        failure = "audio_delivery_contract_failed";
+        throw new Error("xAI server-VAD silence-tail delivery contract failed");
+      }
+      operations.push("deterministic_server_vad_silence_tail_paced_20ms");
+    }
     inputAudioEvidence = projectRoundtripInputAudioEvidence(wire, {
       chunk_sha256s: freeze(plan.frames.map((frame) => sha256Hex(frame.data))),
       chunk_list_sha256: roundtripInputAudioChunkListSha256(
@@ -1019,12 +1059,27 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       frame_bytes: delivery.frame_bytes,
       tail_bytes: delivery.tail_bytes,
       sample_rate_hz: input.audio.sampleRateHz,
+      ...(transportSuffixPlan === null ? {} : {
+        transport_suffix: {
+          purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+          policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+          pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+          audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+          duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+          chunk_sha256s: freeze(transportSuffixPlan.frames.map((frame) => sha256Hex(frame.data))),
+          chunk_list_sha256: roundtripInputAudioChunkListSha256(
+            transportSuffixPlan.frames.map((frame) => sha256Hex(frame.data)),
+          ),
+          chunk_count: transportSuffixPlan.frames.length,
+          frame_bytes: transportSuffixPlan.frame_byte_length,
+          tail_bytes: transportSuffixPlan.tail_byte_length,
+        },
+      }),
     });
     if (inputAudioEvidence === null) {
       failure = "input_audio_replay_invalid";
       throw new Error("wire-observed input audio differs from preregistered delivery");
     }
-    operations.push("preregistered_pcm_paced_20ms");
     if (input.provider !== "xai") {
       input.client.prepareResponse({
         additionalInstructions: LC4_S2S_COMPACT_CONTROL,
@@ -1425,6 +1480,33 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       || inputAudio.sample_rate_hz !== execution.audio.sample_rate_hz) {
       throw new Error("passing LC4 S2S roundtrip input/output audio binding is invalid");
     }
+    const suffix = inputAudio.transport_suffix;
+    if (execution.provider === "xai") {
+      const callerLastObservation = execution.wire_observations.findIndex((observation) => (
+        observation.observationSha256 === inputAudio.observation_sha256s.at(-1)
+      ));
+      const suffixFirstObservation = execution.wire_observations.findIndex((observation) => (
+        observation.observationSha256 === suffix?.observation_sha256s[0]
+      ));
+      if (suffix === undefined
+        || suffix.purpose !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose
+        || suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
+        || suffix.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
+        || suffix.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+        || suffix.duration_ms !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms
+        || suffix.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+        || suffix.frame_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz
+          * 2 * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms / 1_000
+        || suffix.tail_bytes !== suffix.frame_bytes
+        || suffix.chunk_sha256s.length !== suffix.chunk_count
+        || suffix.observation_sha256s.length !== suffix.chunk_count
+        || callerLastObservation < 0
+        || suffixFirstObservation <= callerLastObservation) {
+        throw new Error("passing xAI LC4 S2S roundtrip lacks the frozen server-VAD silence tail");
+      }
+    } else if (suffix !== undefined) {
+      throw new Error("non-xAI LC4 S2S roundtrip cannot contain a server-VAD silence tail");
+    }
     const replay = replayProviderToolRoundtrip({
       expected: { provider: execution.provider, model: execution.model },
       summary: execution.replay_summary!,
@@ -1448,6 +1530,8 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     ));
     const speechStart = index(execution.server_vad_speech_start_observation_sha256);
     const speechStop = index(execution.server_vad_speech_stop_observation_sha256);
+    const silenceTailLast = index(execution.input_audio_evidence?.transport_suffix
+      ?.observation_sha256s.at(-1) ?? null);
     const commit = index(execution.server_vad_auto_commit_observation_sha256);
     const rootResponse = index(execution.server_vad_auto_response_observation_sha256);
     const toolResult = index(execution.tool_result_evidence_sha256 === null
@@ -1468,8 +1552,9 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       || execution.server_vad_transport_disclosure_sha256 !== LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256
       || !execution.transport_parity_sha256
       || execution.tool_frontier_sha256 !== realtimeToolFrontierSha256([LC4_S2S_TOOL])
-      || [control, ack, firstAudio, speechStart, speechStop, commit, rootResponse, toolResult].some((value) => value < 0)
-      || !(control < ack && ack < firstAudio && firstAudio < speechStart && speechStart < speechStop
+      || [control, ack, firstAudio, speechStart, silenceTailLast, speechStop, commit, rootResponse, toolResult].some((value) => value < 0)
+      || !(control < ack && ack < firstAudio && firstAudio < speechStart && speechStart <= silenceTailLast
+        && silenceTailLast < speechStop
         && speechStop < commit && commit < rootResponse && rootResponse < toolResult)
       || forbiddenCommit
       || responseCreates.length !== 1

@@ -134,20 +134,47 @@ function openAiPacket(options: Readonly<{
   const continuation = realtimeWireIdentitySha256("response", "response-openai-continuation");
   const itemId = realtimeWireIdentitySha256("item", "item-openai-1");
   const completedCall = gatewayCall(callId, origin, options.multiFrameCall ? itemId : undefined);
+  const responseOmittedCall = Object.fromEntries(Object.entries(completedCall).filter(
+    ([key]) => key !== "responseIdSha256",
+  ));
+  const incompleteCall = {
+    gateway: "capability_gateway",
+    callIdSha256: callId,
+    responseIdSha256: origin,
+    itemIdSha256: itemId,
+    argumentsSha256: sha256Hex(""),
+    argumentsBytes: 0,
+    argumentsJsonValid: false,
+  };
+  const responseOmittedIncompleteCall = Object.fromEntries(Object.entries(incompleteCall).filter(
+    ([key]) => key !== "responseIdSha256",
+  ));
   const callFrames: WireSeed[] = options.multiFrameCall ? [
     {
       direction: "inbound",
       wireType: "response.output_item.added",
       identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [incompleteCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "conversation.item.added",
+      identities: { callIdSha256: callId, itemIdSha256: itemId },
+      projection: { gatewayCalls: [responseOmittedIncompleteCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.function_call_arguments.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
       projection: { gatewayCalls: [completedCall] },
     },
     {
       direction: "inbound",
-      wireType: "response.output_item.done",
-      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      wireType: "conversation.item.done",
+      identities: { callIdSha256: callId, itemIdSha256: itemId },
       projection: {
         gatewayCalls: [{
-          ...completedCall,
+          ...responseOmittedCall,
           ...(options.conflictingTerminalProjection
             ? { targetArgumentsSha256: H("f") }
             : {}),
@@ -156,11 +183,18 @@ function openAiPacket(options: Readonly<{
     },
     {
       direction: "inbound",
+      wireType: "response.output_item.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [completedCall] },
+    },
+    {
+      direction: "inbound",
       wireType: "response.done",
       identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
       projection: {
         gatewayCalls: [completedCall],
         terminal: { status: "completed" },
+        usage: { totalTokens: 4 },
       },
     },
   ] : [{
@@ -554,7 +588,7 @@ describe("provider tool roundtrip offline replay", () => {
     expect(publicJson).not.toContain("response-openai-continuation");
   });
 
-  it("deduplicates one OpenAI call projected across item-added, item-done, and response-done", () => {
+  it("deduplicates one OpenAI call across its full six-frame lifecycle", () => {
     const input = openAiPacket({ multiFrameCall: true });
     const replay = replayProviderToolRoundtrip(input);
 
@@ -562,7 +596,11 @@ describe("provider tool roundtrip offline replay", () => {
     expect(replay.errors).toEqual([]);
     expect(input.wire_observations.filter((observation) => (
       Array.isArray(observation.projection.gatewayCalls)
-    ))).toHaveLength(3);
+    ))).toHaveLength(6);
+    expect(input.wire_observations.filter((observation) => (
+      observation.projection.usage !== undefined
+    ))).toHaveLength(2);
+    expect(input.sanitized_usage).toHaveLength(1);
     expect(replay.public_execution?.call_observation_sha256)
       .toBe(input.summary.call.observation_sha256);
     expect(input.wire_observations.find((observation) => (

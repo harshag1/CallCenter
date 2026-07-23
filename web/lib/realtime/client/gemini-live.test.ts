@@ -381,7 +381,7 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent).toHaveLength(sentBefore);
   });
 
-  it("binds a real wire-shaped tool round trip to one local triggered response", async () => {
+  it("binds a real wire-shaped tool round trip to distinct local call and continuation phases", async () => {
     const observations: RealtimeWireObservation[] = [];
     const test = harness({ executeCapabilityGateway: undefined });
     test.client.onWireObservation((observation) => observations.push(observation));
@@ -444,28 +444,55 @@ describe("GeminiLiveClient", () => {
         generationComplete: true,
       },
     });
-    test.socket.receive({ serverContent: { turnComplete: true } });
+    test.socket.receive({
+      serverContent: { turnComplete: true },
+      usageMetadata: {
+        promptTokenCount: 753,
+        responseTokenCount: 77,
+        totalTokenCount: 1_514,
+      },
+    });
     await settle();
 
-    const localResponseId = call?.responseId;
-    expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
+    const callResponseId = call?.responseId;
+    const started = test.events.filter((event) => event.type === "response.started");
+    expect(started).toHaveLength(2);
+    const continuationResponseId = started[1]?.type === "response.started"
+      ? started[1].responseId
+      : undefined;
+    expect(continuationResponseId).toMatch(/^gemini-local-response-1-1-continuation-2$/);
+    expect(continuationResponseId).not.toBe(callResponseId);
     expect(test.events).toContainEqual(expect.objectContaining({
       type: "tool.results.submitted",
-      responseId: localResponseId,
+      responseId: callResponseId,
       responseIdSource: "client_local",
       callIds: ["provider-call-roundtrip"],
       continuationRequested: true,
     }));
     expect(test.events).toContainEqual(expect.objectContaining({
       type: "output.audio",
-      responseId: localResponseId,
+      responseId: continuationResponseId,
     }));
     expect(test.events).toContainEqual(expect.objectContaining({
       type: "response.completed",
-      responseId: localResponseId,
+      responseId: continuationResponseId,
       responseIdSource: "client_local",
       status: "completed",
     }));
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "usage",
+      scope: "response",
+      responseId: continuationResponseId,
+      usage: expect.objectContaining({ totalTokens: 1_514 }),
+    }));
+    const terminal = test.events.find((event) => (
+      event.type === "response.completed" && event.responseId === continuationResponseId
+    ));
+    const usage = test.events.find((event) => (
+      event.type === "usage" && event.responseId === continuationResponseId
+    ));
+    expect(terminal?.wireObservation).toEqual(usage?.wireObservation);
+    expect(terminal?.wireObservation).toMatchObject({ availability: "observed" });
     expect(observations.map((entry) => `${entry.direction}:${entry.wireType}`)).toEqual([
       "outbound:setup",
       "inbound:setupComplete",

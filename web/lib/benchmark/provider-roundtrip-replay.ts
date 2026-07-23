@@ -62,7 +62,34 @@ export type RoundtripInputAudioEvidence = Readonly<{
   frame_bytes: number;
   tail_bytes: number;
   sample_rate_hz: number;
+  /** Provider-transport delimiter; distinct from and excluded from caller audio. */
+  transport_suffix?: RoundtripInputAudioTransportSuffixEvidence;
 }>;
+
+export type RoundtripInputAudioTransportSuffixEvidence = Readonly<{
+  purpose: "server_vad_end_of_speech_delimiter";
+  policy_sha256: string;
+  pcm_sha256: string;
+  audio_bytes: number;
+  duration_ms: number;
+  chunk_sha256s: readonly string[];
+  chunk_list_sha256: string;
+  chunk_count: number;
+  frame_bytes: number;
+  tail_bytes: number;
+  observation_sha256s: readonly string[];
+  observation_list_sha256: string;
+}>;
+
+type RoundtripInputAudioTransportSuffixPlan = Omit<
+  RoundtripInputAudioTransportSuffixEvidence,
+  "observation_sha256s" | "observation_list_sha256"
+>;
+
+type RoundtripInputAudioProjectionPlan = Omit<
+  RoundtripInputAudioEvidence,
+  "observation_sha256s" | "observation_list_sha256" | "transport_suffix"
+> & Readonly<{ transport_suffix?: RoundtripInputAudioTransportSuffixPlan }>;
 
 export type RoundtripOutputAudioEvidence = Readonly<{
   observation_sha256s: readonly string[];
@@ -394,8 +421,7 @@ function projectedPcmChunks(
 
 export function projectRoundtripInputAudioEvidence(
   wire: readonly RealtimeWireObservation[],
-  expected: Readonly<Omit<RoundtripInputAudioEvidence,
-    "observation_sha256s" | "observation_list_sha256">>,
+  expected: RoundtripInputAudioProjectionPlan,
 ): RoundtripInputAudioEvidence | null {
   if (!SHA256.test(expected.audio_sha256)
     || !SHA256.test(expected.delivery_profile_sha256)
@@ -417,13 +443,30 @@ export function projectRoundtripInputAudioEvidence(
     && (observation.wireType === "input_audio_buffer.append"
       || observation.wireType === "realtimeInput.audio")
   ));
-  if (observations.length !== expected.chunk_count) return null;
+  const suffix = expected.transport_suffix;
+  if (suffix !== undefined && (
+    suffix.purpose !== "server_vad_end_of_speech_delimiter"
+    || !SHA256.test(suffix.policy_sha256)
+    || !SHA256.test(suffix.pcm_sha256)
+    || !Number.isSafeInteger(suffix.audio_bytes) || suffix.audio_bytes <= 0
+    || !Number.isSafeInteger(suffix.duration_ms) || suffix.duration_ms <= 0
+    || !Number.isSafeInteger(suffix.chunk_count) || suffix.chunk_count <= 0
+    || !Number.isSafeInteger(suffix.frame_bytes) || suffix.frame_bytes <= 0
+    || !Number.isSafeInteger(suffix.tail_bytes) || suffix.tail_bytes <= 0
+    || suffix.tail_bytes > suffix.frame_bytes
+    || !Array.isArray(suffix.chunk_sha256s)
+    || suffix.chunk_sha256s.length !== suffix.chunk_count
+    || suffix.chunk_sha256s.some((hash) => !SHA256.test(hash))
+    || suffix.chunk_list_sha256 !== roundtripInputAudioChunkListSha256(suffix.chunk_sha256s)
+  )) return null;
+  const suffixChunkCount = suffix?.chunk_count ?? 0;
+  if (observations.length !== expected.chunk_count + suffixChunkCount) return null;
   let totalBytes = 0;
-  for (const [index, observation] of observations.entries()) {
+  for (const [index, observation] of observations.slice(0, expected.chunk_count).entries()) {
     const chunks = projectedPcmChunks(observation, "input");
     if (!chunks || chunks.length !== 1) return null;
     const chunk = chunks[0]!;
-    const expectedBytes = index === observations.length - 1
+    const expectedBytes = index === expected.chunk_count - 1
       ? expected.tail_bytes
       : expected.frame_bytes;
     if (chunk.byte_length !== expectedBytes
@@ -432,13 +475,50 @@ export function projectRoundtripInputAudioEvidence(
     totalBytes += chunk.byte_length;
   }
   if (totalBytes !== expected.audio_bytes) return null;
-  const observationSha256s = observations.map(({ observationSha256 }) => observationSha256);
+  const callerObservations = observations.slice(0, expected.chunk_count);
+  const observationSha256s = callerObservations.map(({ observationSha256 }) => observationSha256);
+  let transportSuffix: RoundtripInputAudioTransportSuffixEvidence | undefined;
+  if (suffix !== undefined) {
+    const suffixObservations = observations.slice(expected.chunk_count);
+    let suffixBytes = 0;
+    for (const [index, observation] of suffixObservations.entries()) {
+      const chunks = projectedPcmChunks(observation, "input");
+      if (!chunks || chunks.length !== 1) return null;
+      const chunk = chunks[0]!;
+      const expectedBytes = index === suffixObservations.length - 1
+        ? suffix.tail_bytes
+        : suffix.frame_bytes;
+      if (chunk.byte_length !== expectedBytes
+        || chunk.sample_rate_hz !== expected.sample_rate_hz
+        || chunk.sha256 !== suffix.chunk_sha256s[index]) return null;
+      suffixBytes += chunk.byte_length;
+    }
+    if (suffixBytes !== suffix.audio_bytes) return null;
+    const suffixObservationSha256s = suffixObservations.map(({ observationSha256 }) => observationSha256);
+    transportSuffix = deepFreeze({
+      ...suffix,
+      observation_sha256s: suffixObservationSha256s,
+      observation_list_sha256: sha256Hex(
+        `${INPUT_AUDIO_OBSERVATION_LIST_DOMAIN}${canonicalJson(suffixObservationSha256s)}`,
+      ),
+    });
+  }
   return deepFreeze({
-    ...expected,
+    chunk_sha256s: expected.chunk_sha256s,
+    chunk_list_sha256: expected.chunk_list_sha256,
+    audio_sha256: expected.audio_sha256,
+    delivery_profile_sha256: expected.delivery_profile_sha256,
+    packetizer_sha256: expected.packetizer_sha256,
+    audio_bytes: expected.audio_bytes,
+    chunk_count: expected.chunk_count,
+    frame_bytes: expected.frame_bytes,
+    tail_bytes: expected.tail_bytes,
+    sample_rate_hz: expected.sample_rate_hz,
     observation_sha256s: observationSha256s,
     observation_list_sha256: sha256Hex(
       `${INPUT_AUDIO_OBSERVATION_LIST_DOMAIN}${canonicalJson(observationSha256s)}`,
     ),
+    ...(transportSuffix === undefined ? {} : { transport_suffix: transportSuffix }),
   });
 }
 
@@ -597,10 +677,12 @@ function selectGatewayCallProjection(
     for (const key of GATEWAY_CALL_IDENTITY_KEYS) {
       const candidateValue = candidate.item[key];
       const acceptedValue = accepted.item[key];
-      if (terminal
-        ? candidateValue !== acceptedValue
-        : candidateValue !== undefined && acceptedValue !== undefined
-          && candidateValue !== acceptedValue) return true;
+      // Some lifecycle frames (notably conversation.item.done) omit the
+      // response identity even though adjacent response-scoped frames bind the
+      // same call and item. Treat omission as non-authoritative; a different
+      // value is still a hard identity conflict.
+      if (candidateValue !== undefined && acceptedValue !== undefined
+        && candidateValue !== acceptedValue) return true;
     }
     if (!terminal) {
       // Item-added is a progress snapshot and may legitimately contain empty
@@ -618,7 +700,8 @@ function selectGatewayCallProjection(
       candidate.fact.index > accepted.fact.index
       && TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(candidate.fact.observation.wireType)
       && !GATEWAY_CALL_IDENTITY_KEYS.some((key) => (
-        candidate.item[key] !== accepted.item[key]
+        candidate.item[key] !== undefined && accepted.item[key] !== undefined
+        && candidate.item[key] !== accepted.item[key]
       ))
       && !GATEWAY_CALL_SEMANTIC_KEYS.some((key) => (
         candidate.item[key] !== accepted.item[key]
@@ -814,6 +897,19 @@ export function replayProviderToolRoundtrip(
     for (const hash of summary.input_audio.chunk_sha256s) {
       pushHashError(errors, hash, "summary_input_audio_chunk_invalid");
     }
+    if (summary.input_audio.transport_suffix !== undefined) {
+      const suffix = summary.input_audio.transport_suffix;
+      pushHashError(errors, suffix.policy_sha256, "summary_input_audio_suffix_policy_invalid");
+      pushHashError(errors, suffix.pcm_sha256, "summary_input_audio_suffix_pcm_invalid");
+      pushHashError(errors, suffix.observation_list_sha256, "summary_input_audio_suffix_observation_list_invalid");
+      pushHashError(errors, suffix.chunk_list_sha256, "summary_input_audio_suffix_chunk_list_invalid");
+      for (const hash of suffix.observation_sha256s) {
+        pushHashError(errors, hash, "summary_input_audio_suffix_observation_invalid");
+      }
+      for (const hash of suffix.chunk_sha256s) {
+        pushHashError(errors, hash, "summary_input_audio_suffix_chunk_invalid");
+      }
+    }
     for (const hash of summary.output_audio.observation_sha256s) {
       pushHashError(errors, hash, "summary_output_audio_observation_invalid");
     }
@@ -875,6 +971,20 @@ export function replayProviderToolRoundtrip(
       frame_bytes: summary.input_audio.frame_bytes,
       tail_bytes: summary.input_audio.tail_bytes,
       sample_rate_hz: summary.input_audio.sample_rate_hz,
+      ...(summary.input_audio.transport_suffix === undefined ? {} : {
+        transport_suffix: {
+          purpose: summary.input_audio.transport_suffix.purpose,
+          policy_sha256: summary.input_audio.transport_suffix.policy_sha256,
+          pcm_sha256: summary.input_audio.transport_suffix.pcm_sha256,
+          audio_bytes: summary.input_audio.transport_suffix.audio_bytes,
+          duration_ms: summary.input_audio.transport_suffix.duration_ms,
+          chunk_sha256s: summary.input_audio.transport_suffix.chunk_sha256s,
+          chunk_list_sha256: summary.input_audio.transport_suffix.chunk_list_sha256,
+          chunk_count: summary.input_audio.transport_suffix.chunk_count,
+          frame_bytes: summary.input_audio.transport_suffix.frame_bytes,
+          tail_bytes: summary.input_audio.transport_suffix.tail_bytes,
+        },
+      }),
     };
     const projectedInputAudio = projectRoundtripInputAudioEvidence(wire, expectedInputAudio);
     if (projectedInputAudio === null
@@ -1060,7 +1170,28 @@ export function replayProviderToolRoundtrip(
       .filter((fact): fact is typeof fact & { counters: Record<string, number> } => fact.counters !== null);
     const reportedUsage = usage.filter((entry) => entry.source === "provider_reported");
     const measuredUsage = usage.filter((entry) => entry.source === "client_measured_wire_pcm");
-    if (providerUsageFacts.length !== reportedUsage.length) errors.push("provider_usage_count_mismatch");
+    if (summary.provider !== "gemini") {
+      const allowedProviderUsageResponseIds = new Set([
+        summary.call.response_id_sha256,
+        summary.continuation.response_id_sha256,
+      ]);
+      if (providerUsageFacts.some(({ observation }) => (
+        !observation.identities.responseIdSha256
+        || !allowedProviderUsageResponseIds.has(observation.identities.responseIdSha256)
+      ))) errors.push("provider_usage_response_binding_invalid");
+      const providerUsageCounts = new Map<string, number>();
+      for (const { observation } of providerUsageFacts) {
+        const responseId = observation.identities.responseIdSha256;
+        if (responseId) {
+          providerUsageCounts.set(responseId, (providerUsageCounts.get(responseId) ?? 0) + 1);
+        }
+      }
+      if ([...providerUsageCounts.values()].some((count) => count !== 1)) {
+        errors.push("provider_usage_count_mismatch");
+      }
+    } else if (providerUsageFacts.length !== reportedUsage.length) {
+      errors.push("provider_usage_count_mismatch");
+    }
     for (const entry of reportedUsage) {
       if (!entry.provider_usage_observation_sha256
         || entry.contributing_wire_observation_sha256s.length !== 1

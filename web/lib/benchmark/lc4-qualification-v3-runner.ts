@@ -79,6 +79,11 @@ import {
   type RoundtripSanitizedUsage,
 } from "./provider-roundtrip-replay";
 import {
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+} from "./xai-server-vad";
+import {
   createLc4QualificationPayloadManifestV5,
   createSignedLc4QualificationPackageEnvelopeV5,
   readLc4QualificationPackageDirectoryV5,
@@ -452,8 +457,15 @@ export type Lc4XaiServerVadGateBBindingArtifact = Readonly<{
   matching_gateway_result_evidence_sha256: string;
   public_execution_sha256: string;
   replay_sha256: string;
+  caller_audio_sha256?: string;
+  caller_audio_bytes?: number;
+  server_vad_silence_tail_policy_sha256?: string;
+  server_vad_silence_tail_pcm_sha256?: string;
+  server_vad_silence_tail_bytes?: number;
+  server_vad_silence_tail_observation_list_sha256?: string;
   dynamic_update_provider_echo: "unverifiable" | "verified";
   ordered_vad_verified: true;
+  silence_tail_precedes_speech_stop_verified?: true;
   exact_gateway_call_verified: true;
   matching_gateway_result_verified: true;
   sole_continuation_terminal_usage_verified: true;
@@ -791,7 +803,10 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
   });
 }
 
-function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskArtifact): void {
+function assertXaiServerVadGateARiskArtifact(
+  artifact: Lc4XaiServerVadGateARiskArtifact,
+  expectedProviderProfileManifestSha256 = LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+): void {
   const { risk_sha256, ...body } = artifact;
   const setupWire = artifact.setup_wire_evidence;
   const setupFailure = artifact.setup_failure_evidence;
@@ -806,7 +821,7 @@ function assertXaiServerVadGateARiskArtifact(artifact: Lc4XaiServerVadGateARiskA
     || artifact.policy_sha256 !== XAI_SERVER_VAD_CONDITIONAL_POLICY_SHA256
     || artifact.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
     || !SHA256.test(artifact.production_session_payload_sha256)
-    || artifact.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
+    || artifact.provider_profile_manifest_sha256 !== expectedProviderProfileManifestSha256
     || canonicalJson(artifact.transcription_policy) !== canonicalJson({ requested: false, host_consumed: false, verification: "not_requested" })
     || canonicalJson(artifact.idle_timeout_policy) !== canonicalJson({ requested: false, effective_basis: "documented_default", exact_setting_verified: false })
     || artifact.initial_snapshot_disposition !== "provider_default_snapshot_only_not_update_echo"
@@ -875,6 +890,13 @@ function createXaiServerVadGateBBindingArtifact(input: Readonly<{
     && !Array.isArray(update.projection.dynamicControl)
     ? update.projection.dynamicControl as Record<string, unknown>
     : null;
+  const silenceTail = execution.input_audio_evidence?.transport_suffix;
+  const silenceTailLast = execution.wire_observations.findIndex((observation) => (
+    observation.observationSha256 === silenceTail?.observation_sha256s.at(-1)
+  ));
+  const speechStop = execution.wire_observations.findIndex((observation) => (
+    observation.observationSha256 === execution.server_vad_speech_stop_observation_sha256
+  ));
   if (!update || !acknowledgement
     || update.direction !== "outbound" || update.wireType !== "session.update"
     || acknowledgement.direction !== "inbound" || acknowledgement.wireType !== "session.updated"
@@ -890,7 +912,12 @@ function createXaiServerVadGateBBindingArtifact(input: Readonly<{
     || execution.provider_tool_call_evidence_sha256 === null
     || execution.tool_result_evidence_sha256 === null
     || execution.public_execution_sha256 === null
-    || execution.replay_sha256 === null) {
+    || execution.replay_sha256 === null
+    || silenceTail === undefined
+    || silenceTail.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
+    || silenceTail.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
+    || silenceTail.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+    || silenceTailLast < 0 || speechStop <= silenceTailLast) {
     throw new Error("xAI Gate B binding lacks same-epoch payload and roundtrip evidence");
   }
   const withoutHash = freeze({
@@ -912,8 +939,15 @@ function createXaiServerVadGateBBindingArtifact(input: Readonly<{
     matching_gateway_result_evidence_sha256: execution.tool_result_evidence_sha256,
     public_execution_sha256: execution.public_execution_sha256,
     replay_sha256: execution.replay_sha256,
+    caller_audio_sha256: execution.audio.sha256,
+    caller_audio_bytes: execution.audio.byte_length,
+    server_vad_silence_tail_policy_sha256: silenceTail.policy_sha256,
+    server_vad_silence_tail_pcm_sha256: silenceTail.pcm_sha256,
+    server_vad_silence_tail_bytes: silenceTail.audio_bytes,
+    server_vad_silence_tail_observation_list_sha256: silenceTail.observation_list_sha256,
     dynamic_update_provider_echo: dynamicUpdateProviderEcho,
     ordered_vad_verified: true as const,
+    silence_tail_precedes_speech_stop_verified: true as const,
     exact_gateway_call_verified: true as const,
     matching_gateway_result_verified: true as const,
     sole_continuation_terminal_usage_verified: true as const,
@@ -945,7 +979,19 @@ function assertXaiServerVadGateBBindingArtifact(input: Readonly<{
     || input.artifact.matching_gateway_result_evidence_sha256 !== input.execution.tool_result_evidence_sha256
     || input.artifact.public_execution_sha256 !== input.execution.public_execution_sha256
     || input.artifact.replay_sha256 !== input.execution.replay_sha256
+    || input.artifact.caller_audio_sha256 !== input.execution.audio.sha256
+    || input.artifact.caller_audio_bytes !== input.execution.audio.byte_length
+    || input.artifact.caller_audio_bytes !== input.execution.delivery?.audio_bytes
+    || input.artifact.server_vad_silence_tail_policy_sha256
+      !== input.execution.input_audio_evidence?.transport_suffix?.policy_sha256
+    || input.artifact.server_vad_silence_tail_pcm_sha256
+      !== input.execution.input_audio_evidence?.transport_suffix?.pcm_sha256
+    || input.artifact.server_vad_silence_tail_bytes
+      !== input.execution.input_audio_evidence?.transport_suffix?.audio_bytes
+    || input.artifact.server_vad_silence_tail_observation_list_sha256
+      !== input.execution.input_audio_evidence?.transport_suffix?.observation_list_sha256
     || input.artifact.ordered_vad_verified !== true
+    || input.artifact.silence_tail_precedes_speech_stop_verified !== true
     || input.artifact.exact_gateway_call_verified !== true
     || input.artifact.matching_gateway_result_verified !== true
     || input.artifact.sole_continuation_terminal_usage_verified !== true) {
@@ -972,12 +1018,14 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
     throw new Error("LC4 qualification retained xAI roundtrip binding failed integrity");
   }
   const index = (digest: string | null) => wire.findIndex((observation) => observation.observationSha256 === digest);
+  const silenceTail = summary.input_audio_evidence?.transport_suffix;
   const ordered = [
     summary.per_turn_session_update_observation_sha256,
     summary.per_turn_session_ack_observation_sha256,
     wire.find((observation) => observation.direction === "outbound"
       && observation.wireType === "input_audio_buffer.append")?.observationSha256 ?? null,
     summary.server_vad_speech_start_observation_sha256,
+    silenceTail?.observation_sha256s.at(-1) ?? null,
     summary.server_vad_speech_stop_observation_sha256,
     summary.server_vad_auto_commit_observation_sha256,
     summary.server_vad_auto_response_observation_sha256,
@@ -988,6 +1036,11 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
     && observation.wireType === "response.create");
   if (summary.turn_boundary_mode !== "provider_native_server_vad"
     || summary.server_vad_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
+    || silenceTail?.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
+    || silenceTail.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
+    || silenceTail.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+    || summary.input_audio_evidence?.audio_bytes !== summary.delivery?.audio_bytes
+    || summary.input_audio_evidence?.audio_sha256 !== summary.audio.sha256
     || ordered.some((position) => position < 0)
     || ordered.some((position, index_) => index_ > 0 && position <= ordered[index_ - 1]!)
     || forbiddenCommit
@@ -1011,27 +1064,60 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
   }
 }
 
-function assertRetainedProviderReplayEvidence(input: Readonly<{
+function assertRetainedProviderExecutionEvidence(input: Readonly<{
   provider: LiveStsProvider;
   summary: RetainedRoundtripSummary;
   wire: readonly RealtimeWireObservation[];
   usage: readonly RoundtripSanitizedUsage[];
   terminalResult: Lc4QualificationV3TerminalBody["results"][number];
-  terminalPublicExecutionSha256: string;
-  terminalReplaySha256: string;
-}>): void {
+}>): Readonly<{
+  replayVerified: boolean;
+  replayValidUnderCurrentVerifierOnly: boolean;
+  publicExecutionSha256: string | null;
+  replaySha256: string | null;
+}> {
   const { summary, wire, usage, terminalResult } = input;
   if (summary.provider !== input.provider
     || summary.model !== terminalResult.model
-    || summary.status !== "passed"
-    || summary.failure_class !== "none"
-    || summary.replay_summary === null
-    || summary.replay_causal_binding === null
+    || summary.status !== terminalResult.status
+    || summary.failure_class !== terminalResult.failure_class
+    || summary.evidence_sha256 !== terminalResult.evidence_sha256
     || summary.wire_observation_count !== wire.length
-    || summary.usage_event_count !== usage.length
     || terminalResult.wire_observation_count !== wire.length
-    || terminalResult.usage_event_count !== usage.length) {
-    throw new Error(`LC4 qualification retained ${input.provider} replay inputs differ from terminal`);
+    || terminalResult.usage_event_count !== summary.usage_event_count
+    || terminalResult.caller_audio_bytes !== (summary.delivery?.audio_bytes ?? 0)
+    || !verifyRealtimeWireObservationChain(wire).valid
+    || (summary.public_execution_sha256 === null) !== (summary.replay_sha256 === null)) {
+    throw new Error(`LC4 qualification retained ${input.provider} execution differs from terminal`);
+  }
+  if (summary.public_execution_sha256 === null) {
+    if (summary.status === "passed") {
+      throw new Error(`LC4 qualification retained ${input.provider} passing execution lacks replay evidence`);
+    }
+    if ((summary.replay_summary === null) !== (summary.replay_causal_binding === null)) {
+      throw new Error(`LC4 qualification retained ${input.provider} partial replay inputs are invalid`);
+    }
+    // A later replayer may validate evidence that the source-commit runner
+    // rejected. Record that diagnostic without retroactively promoting it:
+    // source-commit-signed public/replay hashes remain the replay authority.
+    const currentReplay = summary.replay_summary === null || summary.replay_causal_binding === null
+      ? null
+      : replayProviderToolRoundtrip({
+          expected: { provider: input.provider, model: summary.model },
+          summary: summary.replay_summary,
+          wire_observations: wire,
+          sanitized_usage: usage,
+          causal_binding: summary.replay_causal_binding,
+        });
+    return freeze({
+      replayVerified: false,
+      replayValidUnderCurrentVerifierOnly: currentReplay?.valid === true,
+      publicExecutionSha256: null,
+      replaySha256: null,
+    });
+  }
+  if (summary.replay_summary === null || summary.replay_causal_binding === null) {
+    throw new Error(`LC4 qualification retained ${input.provider} replay hashes lack replay inputs`);
   }
   const replay = replayProviderToolRoundtrip({
     expected: { provider: input.provider, model: summary.model },
@@ -1042,11 +1128,15 @@ function assertRetainedProviderReplayEvidence(input: Readonly<{
   });
   if (!replay.valid
     || replay.public_execution_sha256 !== summary.public_execution_sha256
-    || replay.replay_sha256 !== summary.replay_sha256
-    || replay.public_execution_sha256 !== input.terminalPublicExecutionSha256
-    || replay.replay_sha256 !== input.terminalReplaySha256) {
+    || replay.replay_sha256 !== summary.replay_sha256) {
     throw new Error(`LC4 qualification retained ${input.provider} replay failed integrity`);
   }
+  return freeze({
+    replayVerified: true,
+    replayValidUnderCurrentVerifierOnly: false,
+    publicExecutionSha256: replay.public_execution_sha256,
+    replaySha256: replay.replay_sha256,
+  });
 }
 
 function keyIdentity(privateKeyPem: string): Readonly<{
@@ -2188,8 +2278,15 @@ export async function runLc4QualificationV3(input: Readonly<{
     setup_qualification_artifact_sha256: setupArtifact!.artifactSha256,
     control_size_diagnostic_sha256: plan.body.control_size_diagnostic.diagnostic_sha256,
     roundtrip_evidence_sha256: freeze(executions.map((execution) => execution.evidence_sha256)),
-    roundtrip_public_execution_sha256: freeze(executions.map((execution) => execution.public_execution_sha256!)),
-    roundtrip_replay_sha256: freeze(executions.map((execution) => execution.replay_sha256!)),
+    // These arrays are replay-success indexes, not positional execution slots.
+    // Failed retained executions remain bound by roundtrip_evidence_sha256 and
+    // results, but must never materialize runtime nulls in a string[] schema.
+    roundtrip_public_execution_sha256: freeze(executions.flatMap((execution) => (
+      execution.public_execution_sha256 === null ? [] : [execution.public_execution_sha256]
+    ))),
+    roundtrip_replay_sha256: freeze(executions.flatMap((execution) => (
+      execution.replay_sha256 === null ? [] : [execution.replay_sha256]
+    ))),
     payload_root_sha256: payloadManifest.payload_root_sha256,
     package_bindings: packageBindings,
     budget_evidence_sha256: budgetEvidence!.evidence_sha256,
@@ -2289,7 +2386,11 @@ export async function reportLc4QualificationV3(input: Readonly<{
   let sealedPreRetentionRunnerExceptions = 0;
   let sealedMidPaidRunnerExceptions = 0;
   let replayVerifiedCompletedExecutions = 0;
+  let retainedCompletedExecutions = 0;
+  let legacyReplayValidUnderCurrentVerifierExecutions = 0;
+  let fullyReplayVerifiedCompleteAttempts = 0;
   let legacyCompletedOnlyPackageBindings = 0;
+  let legacyNullableReplayHashArrayAttempts = 0;
   const completeIds = new Set<string>();
   for (const name of completeNames) {
     const attemptId = name.slice(0, -".complete".length);
@@ -2355,6 +2456,31 @@ export async function reportLc4QualificationV3(input: Readonly<{
     });
     const packageBindings = terminal.body.package_bindings;
     const replayedExecutionCount = terminal.body.results.length;
+    const rawPublicExecutionHashes = terminal.body.roundtrip_public_execution_sha256 as readonly unknown[];
+    const rawReplayHashes = terminal.body.roundtrip_replay_sha256 as readonly unknown[];
+    const legacyNullableReplayHashArrays = terminal.body.status === "failed"
+      && rawPublicExecutionHashes.length === replayedExecutionCount
+      && rawReplayHashes.length === replayedExecutionCount
+      && rawPublicExecutionHashes.some((value) => value === null)
+      && rawPublicExecutionHashes.every((value, index) => (
+        (value === null && rawReplayHashes[index] === null)
+        || (typeof value === "string" && SHA256.test(value)
+          && typeof rawReplayHashes[index] === "string" && SHA256.test(rawReplayHashes[index] as string))
+      ));
+    const publicExecutionHashes = rawPublicExecutionHashes.filter(
+      (value): value is string => typeof value === "string" && SHA256.test(value),
+    );
+    const replayHashes = rawReplayHashes.filter(
+      (value): value is string => typeof value === "string" && SHA256.test(value),
+    );
+    if ((!legacyNullableReplayHashArrays && (
+      publicExecutionHashes.length !== rawPublicExecutionHashes.length
+      || replayHashes.length !== rawReplayHashes.length
+    )) || publicExecutionHashes.length !== replayHashes.length) {
+      throw new Error("LC4 qualification replay-success hash indexes are invalid");
+    }
+    if (legacyNullableReplayHashArrays) legacyNullableReplayHashArrayAttempts += 1;
+    let attemptReplayVerifiedExecutions = 0;
     const runnerException = /^runner_exception:[a-f0-9]{64}$/u.test(
       terminal.body.primary_failure_class ?? "",
     );
@@ -2387,14 +2513,12 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || packageBindings.retry_count !== terminal.body.paid_retries_attempted
       || packageBindings.reconnect_count !== 0
       || packageBindings.replay_artifact_sha256 !== sha256Hex(
-        `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(terminal.body.roundtrip_replay_sha256)}`,
+        `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHashes)}`,
       )) {
       throw new Error("LC4 qualification signed package bindings differ from terminal authority");
     }
     if (legacyCompletedOnlyBindings) legacyCompletedOnlyPackageBindings += 1;
     if (terminal.body.roundtrip_evidence_sha256.length !== replayedExecutionCount
-      || terminal.body.roundtrip_public_execution_sha256.length !== replayedExecutionCount
-      || terminal.body.roundtrip_replay_sha256.length !== replayedExecutionCount
       || terminal.body.paid_sessions_opened < replayedExecutionCount
       || terminal.body.generation_phases_attempted !== terminal.body.paid_sessions_opened * 2
       || terminal.body.tool_roundtrips_attempted !== terminal.body.paid_sessions_opened) {
@@ -2449,21 +2573,41 @@ export async function reportLc4QualificationV3(input: Readonly<{
       if (!terminalResult || terminalResult.provider !== provider) {
         throw new Error("LC4 qualification terminal provider order is not canonical");
       }
-      assertRetainedProviderReplayEvidence({
+      if (terminal.body.roundtrip_evidence_sha256[providerIndex] !== terminalResult.evidence_sha256) {
+        throw new Error(`LC4 qualification retained ${provider} evidence index differs from terminal result`);
+      }
+      const retainedExecution = assertRetainedProviderExecutionEvidence({
         provider,
         summary,
         wire: retainedWire,
         usage: retainedUsage,
         terminalResult,
-        terminalPublicExecutionSha256: terminal.body.roundtrip_public_execution_sha256[providerIndex]!,
-        terminalReplaySha256: terminal.body.roundtrip_replay_sha256[providerIndex]!,
       });
+      if (legacyNullableReplayHashArrays) {
+        if (rawPublicExecutionHashes[providerIndex] !== retainedExecution.publicExecutionSha256
+          || rawReplayHashes[providerIndex] !== retainedExecution.replaySha256) {
+          throw new Error(`LC4 qualification legacy ${provider} replay slot differs from retained execution`);
+        }
+      } else if (retainedExecution.replayVerified) {
+        if (publicExecutionHashes[attemptReplayVerifiedExecutions] !== retainedExecution.publicExecutionSha256
+          || replayHashes[attemptReplayVerifiedExecutions] !== retainedExecution.replaySha256) {
+          throw new Error(`LC4 qualification ${provider} replay-success index differs from retained execution`);
+        }
+      }
+      if (retainedExecution.replayVerified) attemptReplayVerifiedExecutions += 1;
+      if (retainedExecution.replayValidUnderCurrentVerifierOnly) {
+        legacyReplayValidUnderCurrentVerifierExecutions += 1;
+      }
       const paidHead = retainedWire.at(-1)?.observationSha256;
       if (!paidHead) throw new Error(`LC4 qualification ${provider} replay has no terminal chain head`);
       paidReplayHeads.push(paidHead);
       paidReplayEventCount += retainedWire.length;
     }
-    replayVerifiedCompletedExecutions += paidReplayHeads.length;
+    if (attemptReplayVerifiedExecutions !== publicExecutionHashes.length) {
+      throw new Error("LC4 qualification replay-success indexes contain unbound hashes");
+    }
+    replayVerifiedCompletedExecutions += attemptReplayVerifiedExecutions;
+    retainedCompletedExecutions += paidReplayHeads.length;
     const retainedPaths = new Set(retainedPackage.files.map((file) => file.path));
     const setupQualification = retainedPaths.has("setup-acceptance.json")
       ? await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"))
@@ -2472,7 +2616,10 @@ export async function reportLc4QualificationV3(input: Readonly<{
     const gateBBinding = serverVad.gate_b_binding_sha256 === null
       ? null
       : await readJson<Lc4XaiServerVadGateBBindingArtifact>(resolve(directory, "xai-server-vad-gate-b-binding.json"));
-    assertXaiServerVadGateARiskArtifact(gateARisk);
+    assertXaiServerVadGateARiskArtifact(
+      gateARisk,
+      plan.body.provider_profile_manifest_sha256,
+    );
     if (setupQualification === null) {
       const retainedGateAWire =
         gateARisk.setup_wire_evidence ?? gateARisk.setup_failure_evidence;
@@ -2882,6 +3029,12 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || budgetEvidence.terminal_outcome !== (terminal.body.status === "passed" ? "completed" : "failed")) {
       throw new Error("LC4 qualification v3 terminal budget binding failed integrity");
     }
+    if (setupQualification !== null
+      && terminal.body.results.length === LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+      && terminal.body.results.length === terminal.body.paid_sessions_opened
+      && attemptReplayVerifiedExecutions === terminal.body.results.length) {
+      fullyReplayVerifiedCompleteAttempts += 1;
+    }
     completeIds.add(attemptId);
     verified.push(terminal);
   }
@@ -2902,12 +3055,15 @@ export async function reportLc4QualificationV3(input: Readonly<{
     refused_attempts: refusals.size,
     stranded_invocations: strandedInvocationIds.length,
     complete_attempts: verified.length,
-    fully_replay_verified_complete_attempts:
-      verified.length - sealedPreRetentionRunnerExceptions - sealedMidPaidRunnerExceptions,
+    fully_replay_verified_complete_attempts: fullyReplayVerifiedCompleteAttempts,
     sealed_pre_retention_runner_exceptions: sealedPreRetentionRunnerExceptions,
     sealed_mid_paid_runner_exceptions: sealedMidPaidRunnerExceptions,
     replay_verified_completed_executions: replayVerifiedCompletedExecutions,
+    retained_completed_executions: retainedCompletedExecutions,
+    legacy_replay_valid_under_current_verifier_executions:
+      legacyReplayValidUnderCurrentVerifierExecutions,
     legacy_completed_only_package_bindings: legacyCompletedOnlyPackageBindings,
+    legacy_nullable_replay_hash_array_attempts: legacyNullableReplayHashArrayAttempts,
     partial_attempts: partialIds.size,
     gate_c_qualification_gate: false,
     maximum_total_usd: 3,

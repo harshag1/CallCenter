@@ -2519,8 +2519,20 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       if (!active || active.phase !== "awaiting_tool_result") {
         throw new Error("Gemini tool response has no causally pending provider tool call");
       }
+      // Gemini Live has no provider response IDs and does not emit a second
+      // response-start frame after a function response. Model that documented
+      // wire absence locally: the outbound toolResponse closes the call phase
+      // and arms a distinct continuation phase. The next provider content,
+      // terminal, and usage events are therefore bound to this new client-local
+      // identity instead of being incorrectly attributed to the tool-call phase.
+      const localResponseId = `gemini-local-response-${this.connectionEpoch}-${this.inputTurn}-continuation-${this.responseCounter + 1}`;
+      this.currentResponseId = localResponseId;
+      this.responseStarted = false;
+      this.responseFinished = false;
+      this.currentResponseInterrupted = false;
       this.generationTrigger = Object.freeze({
         ...active,
+        localResponseId,
         trigger,
         clientMessageOrdinal: sent.clientMessageOrdinal,
         ...(sent.observation ? { triggerObservationSha256: sent.observation.observationSha256 } : {}),
