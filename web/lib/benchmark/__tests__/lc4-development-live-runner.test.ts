@@ -364,7 +364,7 @@ function qualificationFixture() {
     artifactDomain: "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n",
   }) as Lc4QualificationV3AuthorizationArtifact;
 
-  const setupResults: ProviderQualificationArtifact["results"] = setupTargets.map((target) => {
+  const setupResults: ProviderQualificationArtifact["results"] = Object.freeze(setupTargets.map((target) => {
     let predecessor: string | null = null;
     const wire = (direction: "outbound" | "inbound", sequence: number, wireType: string) => {
       const projection = Object.freeze({ direction, wireType });
@@ -437,7 +437,15 @@ function qualificationFixture() {
       observations,
     }),
   });
-  });
+  }).sort((left, right) => left.provider.localeCompare(right.provider)));
+  const setupCredentialSetSha256 = sha256Hex(
+    `harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(
+      credentialIdentities.map(({ provider, credential_sha256 }) => ({
+        provider,
+        credentialSha256: credential_sha256,
+      })),
+    )}`,
+  );
   const setupBody = {
     schemaVersion: 3 as const,
     qualificationId: "lc4-dev-v3-setup",
@@ -445,7 +453,7 @@ function qualificationFixture() {
     planSha256: plan.body.plan_sha256,
     sourceCommit: source.source_commit,
     configurationMatrixSha256: unsignedPlanBody.setup_configuration_matrix_sha256,
-    credentialSetSha256: unsignedPlanBody.credential_set_sha256,
+    credentialSetSha256: setupCredentialSetSha256,
     probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation" as const,
     attemptedAt: "2026-07-21T20:01:00.000Z",
     completedAt: "2026-07-21T20:01:03.000Z",

@@ -36,7 +36,9 @@ import type { LiveStsProvider } from "./live-sts-development-experiment";
 import type { RealtimeWireObservation } from "../realtime/client/types";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 import {
+  projectRoundtripPreToolOutputQuarantineEvidence,
   replayProviderToolRoundtrip,
+  type RoundtripPreToolOutputQuarantineEvidence,
   type RoundtripSanitizedUsage,
 } from "./provider-roundtrip-replay";
 import {
@@ -84,6 +86,95 @@ type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observation
   wire_observation_count: number;
   usage_event_count: number;
 }>;
+
+export function assertLc4DevRetainedRoundtripLogCardinality(input: Readonly<{
+  provider: LiveStsProvider;
+  summary_wire_observation_count: number;
+  summary_raw_usage_event_count: number;
+  retained_wire_observation_count: number;
+  retained_sanitized_usage_event_count: number;
+}>): void {
+  if (!Number.isSafeInteger(input.summary_raw_usage_event_count)
+    || input.summary_raw_usage_event_count < 1) {
+    throw new Error(`LC4-DEV qualification v3 ${input.provider} retained Gate B raw usage count is invalid`);
+  }
+  if (input.summary_wire_observation_count !== input.retained_wire_observation_count) {
+    throw new Error(`LC4-DEV qualification v3 ${input.provider} retained Gate B wire count differs from its log`);
+  }
+  // `usage_event_count` commits the raw normalized provider/client events.
+  // The retained JSONL is a distinct replay projection: one sanitized,
+  // terminal-bound usage record per passing provider roundtrip.
+  if (input.retained_sanitized_usage_event_count !== 1) {
+    throw new Error(`LC4-DEV qualification v3 ${input.provider} retained Gate B sanitized usage log must contain exactly one event`);
+  }
+}
+
+export function lc4DevProjectionContainsAssistantOutput(
+  projection: unknown,
+  wireType = "unknown",
+): boolean {
+  if (!projection || typeof projection !== "object" || Array.isArray(projection)) return false;
+  const projected = projection as Readonly<Record<string, unknown>>;
+  if (projected.audio !== undefined) return true;
+  if (projected.text === undefined) return false;
+  // Gemini and OpenAI-compatible transports encode caller transcription with
+  // different redacted kinds. Exempt only their exact caller-side shapes;
+  // mixed, malformed, and unknown text remains possible assistant output.
+  return !Array.isArray(projected.text)
+    || projected.text.length === 0
+    || !projected.text.every((entry) => (
+      entry !== null
+      && typeof entry === "object"
+      && !Array.isArray(entry)
+      && ((entry as Readonly<Record<string, unknown>>).kind === "input_transcript"
+        || (wireType.startsWith("conversation.item.input_audio_transcription.")
+          && (entry as Readonly<Record<string, unknown>>).kind === "transcript"))
+    ));
+}
+
+export function lc4DevPreToolOutputIsExactlyQuarantined(input: Readonly<{
+  provider: LiveStsProvider;
+  pre_call_output_observation_sha256s: readonly string[];
+  retained_quarantine: RoundtripPreToolOutputQuarantineEvidence | null;
+  replayed_quarantine: RoundtripPreToolOutputQuarantineEvidence | null;
+}>): boolean {
+  if (input.pre_call_output_observation_sha256s.length === 0) return true;
+  const retained = input.retained_quarantine;
+  const replayed = input.replayed_quarantine;
+  return input.provider === "xai"
+    && retained !== null
+    && replayed !== null
+    && retained.disposition === "suppressed_never_caller_playable"
+    && retained.released_audio_bytes === 0
+    && canonicalJson(input.pre_call_output_observation_sha256s)
+      === canonicalJson(retained.observation_sha256s)
+    && canonicalJson(replayed) === canonicalJson(retained);
+}
+
+export function lc4DevRetainedUsageMatchesProviderBoundary(input: Readonly<{
+  provider: LiveStsProvider;
+  usage: readonly Readonly<{
+    source: string;
+    terminal_observation_sha256: string;
+    provider_usage_observation_sha256: string | null;
+  }>[];
+  terminal_observation_sha256: string;
+  provider_usage_observed_on_wire: boolean;
+}>): boolean {
+  if (input.usage.length !== 1) return false;
+  const usage = input.usage[0]!;
+  if (usage.terminal_observation_sha256 !== input.terminal_observation_sha256) return false;
+  if (usage.source === "provider_reported") {
+    return input.provider_usage_observed_on_wire
+      && usage.provider_usage_observation_sha256 !== null;
+  }
+  if (usage.source === "client_measured_wire_pcm") {
+    return input.provider === "xai"
+      && !input.provider_usage_observed_on_wire
+      && usage.provider_usage_observation_sha256 === null;
+  }
+  return false;
+}
 
 export type Lc4DevQualificationV3SpokenEvidence = Readonly<{
   provider: LiveStsProvider;
@@ -236,9 +327,13 @@ function assertReport(value: unknown): asserts value is QualificationReport {
   }
 }
 
-function assertProviderOrder(values: readonly Readonly<{ provider: LiveStsProvider; model: string }>[], label: string): void {
-  if (canonicalJson(values.map(({ provider }) => provider)) !== canonicalJson(LC4_QUALIFICATION_V3_PROVIDER_ORDER)) {
-    throw new Error(`${label} is not in exact OpenAI, Gemini, xAI order`);
+function assertProviderOrder(
+  values: readonly Readonly<{ provider: LiveStsProvider; model: string }>[],
+  label: string,
+  expectedOrder: readonly LiveStsProvider[] = LC4_QUALIFICATION_V3_PROVIDER_ORDER,
+): void {
+  if (canonicalJson(values.map(({ provider }) => provider)) !== canonicalJson(expectedOrder)) {
+    throw new Error(`${label} is not in its exact producer order`);
   }
   for (const value of values) {
     if (value.model !== LC4_PROVIDER_PROFILE_MANIFEST.providers[value.provider].model) {
@@ -258,7 +353,8 @@ function requestedConfigurationSha256(target: ReturnType<typeof createLc4Qualifi
 function assertClosedLoopWire(
   provider: LiveStsProvider,
   wire: readonly RealtimeWireObservation[],
-  usage: readonly Readonly<Record<string, unknown>>[],
+  usage: readonly RoundtripSanitizedUsage[],
+  preToolOutputQuarantine: RoundtripPreToolOutputQuarantineEvidence | null,
 ): void {
   const call = wire.findIndex((entry) => entry.direction === "inbound"
     && entry.identities.callIdSha256 !== undefined
@@ -283,13 +379,30 @@ function assertClosedLoopWire(
   const usageOnWire = wire.slice(terminal).some((entry) => typeof entry.projection === "object"
     && entry.projection !== null
     && "usage" in entry.projection);
-  if (!usageOnWire || usage.length === 0) throw new Error(`LC4-DEV qualification v3 ${provider} retained evidence lacks post-tool usage`);
-  const prematureSpeech = wire.slice(0, call).some((entry) => {
-    if (entry.direction !== "inbound" || typeof entry.projection !== "object" || entry.projection === null) return false;
-    const projection = entry.projection as Record<string, unknown>;
-    return projection.audio !== undefined || projection.text !== undefined;
-  });
-  if (prematureSpeech) throw new Error(`LC4-DEV qualification v3 ${provider} spoke before its required tool call`);
+  if (!lc4DevRetainedUsageMatchesProviderBoundary({
+    provider,
+    usage,
+    terminal_observation_sha256: wire[terminal]!.observationSha256,
+    provider_usage_observed_on_wire: usageOnWire,
+  })) throw new Error(`LC4-DEV qualification v3 ${provider} retained evidence lacks provider-valid post-tool usage`);
+  const preCallOutputObservationSha256s = wire.slice(0, call)
+    .filter((entry) => entry.direction === "inbound"
+      && lc4DevProjectionContainsAssistantOutput(entry.projection, entry.wireType))
+    .map((entry) => entry.observationSha256);
+  const replayedQuarantine = preToolOutputQuarantine === null ? null
+    : projectRoundtripPreToolOutputQuarantineEvidence({
+        provider,
+        wire,
+        response_started_observation_sha256: preToolOutputQuarantine.response_started_observation_sha256,
+        terminal_observation_sha256: preToolOutputQuarantine.terminal_observation_sha256,
+        response_id_sha256: preToolOutputQuarantine.response_id_sha256,
+      });
+  if (!lc4DevPreToolOutputIsExactlyQuarantined({
+    provider,
+    pre_call_output_observation_sha256s: preCallOutputObservationSha256s,
+    retained_quarantine: preToolOutputQuarantine,
+    replayed_quarantine: replayedQuarantine,
+  })) throw new Error(`LC4-DEV qualification v3 ${provider} emitted unquarantined output before its required tool call`);
 }
 
 function expectedXaiGateAClassification(
@@ -432,9 +545,22 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
   const expectedTargets = createLc4QualificationV3Targets();
   assertProviderOrder(plan.targets, "LC4-DEV qualification v3 plan targets");
   assertProviderOrder(terminal.results, "LC4-DEV qualification v3 terminal results");
-  assertProviderOrder(input.setup_qualification.results, "LC4-DEV qualification v3 Gate A results");
+  // The setup qualification artifact has its own deterministic lexical
+  // provider ordering; the qv3 plan/terminal/spoken artifacts use execution
+  // order. Preserve both producer contracts instead of conflating them.
+  assertProviderOrder(
+    input.setup_qualification.results,
+    "LC4-DEV qualification v3 Gate A results",
+    Object.freeze([...LC4_QUALIFICATION_V3_PROVIDER_ORDER].sort()),
+  );
   assertProviderOrder(input.spoken_gate_evidence, "LC4-DEV qualification v3 Gate B results");
   const credentialSetFromPlan = sha256Hex(`harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(plan.credential_identities)}`);
+  const setupCredentialSetFromPlan = sha256Hex(`harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(
+    plan.credential_identities.map(({ provider, credential_sha256 }) => ({
+      provider,
+      credentialSha256: credential_sha256,
+    })),
+  )}`);
 
   if (plan.protocol_id !== "HACC-LC4-v1"
     || plan.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
@@ -443,7 +569,10 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     || input.setup_qualification.planSha256 !== plan.plan_sha256
     || input.setup_qualification.sourceCommit !== plan.source.source_commit
     || input.setup_qualification.configurationMatrixSha256 !== plan.setup_configuration_matrix_sha256
-    || input.setup_qualification.credentialSetSha256 !== plan.credential_set_sha256
+    // The setup qualifier commits the same per-provider credential digests
+    // using its camelCase producer schema. Recompute that exact schema from
+    // the signed plan instead of comparing two differently shaped set hashes.
+    || input.setup_qualification.credentialSetSha256 !== setupCredentialSetFromPlan
     || input.setup_qualification.artifactSha256 !== terminal.setup_qualification_artifact_sha256
     || input.setup_qualification.results.length !== 3
     || input.setup_qualification.results.some((result) => result.status !== "passed")
@@ -522,10 +651,11 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
   for (const [index, provider] of LC4_QUALIFICATION_V3_PROVIDER_ORDER.entries()) {
     const target = plan.targets[index]!;
     const expected = expectedTargets[index]!;
-    const setup = input.setup_qualification.results[index]!;
+    const setup = input.setup_qualification.results.find((candidate) => candidate.provider === provider);
     const spoken = input.spoken_gate_evidence[index]!;
     const result = terminal.results[index]!;
-    if (target.provider !== provider
+    if (setup === undefined
+      || target.provider !== provider
       || target.model !== expected.model
       || target.sample_rate_hz !== expected.configuration.inputAudioFormat.sampleRateHz
       || setup.provider !== provider
@@ -555,7 +685,8 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
 
   const xai = terminal.server_vad_qualification;
   const xaiResult = terminal.results[2]!;
-  const xaiSetup = input.setup_qualification.results[2]!;
+  const xaiSetup = input.setup_qualification.results.find((result) => result.provider === "xai");
+  if (xaiSetup === undefined) throw new Error("LC4-DEV qualification v3 lacks xAI Gate A evidence");
   const expectedXaiGateA = expectedXaiGateAClassification(xaiSetup);
   if (xai.provider !== "xai"
     || xai.requested_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
@@ -769,9 +900,13 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
       readJsonLines<RoundtripSanitizedUsage>(usagePath),
     ]);
     const { wire_observation_count, usage_event_count } = summary;
-    if (wire_observation_count !== wire.length || usage_event_count !== usage.length) {
-      throw new Error(`LC4-DEV qualification v3 ${provider} retained Gate B counts differ from their logs`);
-    }
+    assertLc4DevRetainedRoundtripLogCardinality({
+      provider,
+      summary_wire_observation_count: wire_observation_count,
+      summary_raw_usage_event_count: usage_event_count,
+      retained_wire_observation_count: wire.length,
+      retained_sanitized_usage_event_count: usage.length,
+    });
     if (summary.provider !== provider
       || summary.status !== "passed"
       || summary.failure_class !== "none"
@@ -791,7 +926,7 @@ export async function loadLc4DevRetainedQualificationV3(input: Readonly<{
       || !verifyRealtimeWireObservationChain(wire).valid) {
       throw new Error(`LC4-DEV qualification v3 ${provider} spoken Gate B did not pass`);
     }
-    assertClosedLoopWire(provider, wire, usage);
+    assertClosedLoopWire(provider, wire, usage, summary.pre_tool_output_quarantine);
     if (summary.replay_summary === null || summary.replay_causal_binding === null) {
       throw new Error(`LC4-DEV qualification v3 ${provider} lacks replay-complete causal evidence`);
     }
