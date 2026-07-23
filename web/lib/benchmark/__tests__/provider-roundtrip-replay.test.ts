@@ -85,11 +85,12 @@ function withRebuiltWire(
   return { ...input, wire_observations: wire(input.summary.provider, nextSeeds) };
 }
 
-function gatewayCall(callId: string, responseId?: string) {
+function gatewayCall(callId: string, responseId?: string, itemId?: string) {
   return {
     gateway: "capability_gateway",
     callIdSha256: callId,
     ...(responseId ? { responseIdSha256: responseId } : {}),
+    ...(itemId ? { itemIdSha256: itemId } : {}),
     argumentsSha256: H("a"),
     argumentsBytes: 67,
     argumentsJsonValid: true,
@@ -124,10 +125,50 @@ function providerReportedUsage(
   };
 }
 
-function openAiPacket(): ProviderRoundtripReplayInput {
+function openAiPacket(options: Readonly<{
+  multiFrameCall?: boolean;
+  conflictingTerminalProjection?: boolean;
+}> = {}): ProviderRoundtripReplayInput {
   const callId = realtimeWireIdentitySha256("call", "call-openai-1");
   const origin = realtimeWireIdentitySha256("response", "response-openai-origin");
   const continuation = realtimeWireIdentitySha256("response", "response-openai-continuation");
+  const itemId = realtimeWireIdentitySha256("item", "item-openai-1");
+  const completedCall = gatewayCall(callId, origin, options.multiFrameCall ? itemId : undefined);
+  const callFrames: WireSeed[] = options.multiFrameCall ? [
+    {
+      direction: "inbound",
+      wireType: "response.output_item.added",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [completedCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.output_item.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: {
+        gatewayCalls: [{
+          ...completedCall,
+          ...(options.conflictingTerminalProjection
+            ? { targetArgumentsSha256: H("f") }
+            : {}),
+        }],
+      },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: {
+        gatewayCalls: [completedCall],
+        terminal: { status: "completed" },
+      },
+    },
+  ] : [{
+    direction: "inbound",
+    wireType: "response.function_call_arguments.done",
+    identities: { callIdSha256: callId, responseIdSha256: origin },
+    projection: { gatewayCalls: [completedCall] },
+  }];
   const observations = wire("openai", [
     {
       direction: "outbound",
@@ -141,12 +182,7 @@ function openAiPacket(): ProviderRoundtripReplayInput {
     },
     { direction: "outbound", wireType: "response.create", projection: { dynamicControl: { sha256: H("1") } } },
     { direction: "inbound", wireType: "response.created", identities: { responseIdSha256: origin } },
-    {
-      direction: "inbound",
-      wireType: "response.function_call_arguments.done",
-      identities: { callIdSha256: callId, responseIdSha256: origin },
-      projection: { gatewayCalls: [gatewayCall(callId, origin)] },
-    },
+    ...callFrames,
     {
       direction: "outbound",
       wireType: "conversation.item.create",
@@ -176,7 +212,12 @@ function openAiPacket(): ProviderRoundtripReplayInput {
       projection: { terminal: { status: "completed" }, usage: { totalTokens: 8 } },
     },
   ]);
-  const usage = providerReportedUsage(continuation, observations[8]!, { totalTokens: 8 });
+  const callIndex = 2 + callFrames.length;
+  const resultIndex = callIndex + 1;
+  const continuationRequestIndex = callIndex + 2;
+  const continuationStartIndex = callIndex + 3;
+  const terminalIndex = callIndex + 5;
+  const usage = providerReportedUsage(continuation, observations[terminalIndex]!, { totalTokens: 8 });
   const inputAudio = projectRoundtripInputAudioEvidence(observations, {
     chunk_sha256s: [H("9")], chunk_list_sha256: roundtripInputAudioChunkListSha256([H("9")]),
     audio_sha256: H("7"), delivery_profile_sha256: H("6"), packetizer_sha256: H("5"),
@@ -184,8 +225,8 @@ function openAiPacket(): ProviderRoundtripReplayInput {
   })!;
   const outputAudio = projectRoundtripOutputAudioEvidence({
     provider: "openai", wire: observations,
-    continuation_start_observation_sha256: observations[6]!.observationSha256,
-    terminal_observation_sha256: observations[8]!.observationSha256,
+    continuation_start_observation_sha256: observations[continuationStartIndex]!.observationSha256,
+    terminal_observation_sha256: observations[terminalIndex]!.observationSha256,
     continuation_response_id_sha256: continuation,
   })!;
   const summary: RoundtripReplaySummary = {
@@ -194,19 +235,19 @@ function openAiPacket(): ProviderRoundtripReplayInput {
     model: "gpt-realtime-2.1",
     connection_epoch: 1,
     call: {
-      observation_sha256: observations[3]!.observationSha256,
+      observation_sha256: observations[callIndex]!.observationSha256,
       call_id_sha256: callId,
       response_id_sha256: origin,
     },
-    result: { observation_sha256: observations[4]!.observationSha256, call_id_sha256: callId },
+    result: { observation_sha256: observations[resultIndex]!.observationSha256, call_id_sha256: callId },
     continuation: {
-      request_observation_sha256: observations[5]!.observationSha256,
+      request_observation_sha256: observations[continuationRequestIndex]!.observationSha256,
       origin_response_id_sha256: origin,
-      started_observation_sha256: observations[6]!.observationSha256,
+      started_observation_sha256: observations[continuationStartIndex]!.observationSha256,
       response_id_sha256: continuation,
     },
     terminal: {
-      observation_sha256: observations[8]!.observationSha256,
+      observation_sha256: observations[terminalIndex]!.observationSha256,
       response_id_sha256: continuation,
       status: "completed",
     },
@@ -511,6 +552,32 @@ describe("provider tool roundtrip offline replay", () => {
     expect(publicJson).not.toContain(input.summary.model);
     expect(publicJson).not.toContain("call-openai-1");
     expect(publicJson).not.toContain("response-openai-continuation");
+  });
+
+  it("deduplicates one OpenAI call projected across item-added, item-done, and response-done", () => {
+    const input = openAiPacket({ multiFrameCall: true });
+    const replay = replayProviderToolRoundtrip(input);
+
+    expect(replay.valid).toBe(true);
+    expect(replay.errors).toEqual([]);
+    expect(input.wire_observations.filter((observation) => (
+      Array.isArray(observation.projection.gatewayCalls)
+    ))).toHaveLength(3);
+    expect(replay.public_execution?.call_observation_sha256)
+      .toBe(input.summary.call.observation_sha256);
+    expect(input.wire_observations.find((observation) => (
+      observation.observationSha256 === input.summary.call.observation_sha256
+    ))?.wireType).toBe("response.done");
+  });
+
+  it("rejects a mutated terminal projection of a repeated OpenAI call", () => {
+    const replay = replayProviderToolRoundtrip(openAiPacket({
+      multiFrameCall: true,
+      conflictingTerminalProjection: true,
+    }));
+
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("gateway_call_projection_conflict");
   });
 
   it.each([

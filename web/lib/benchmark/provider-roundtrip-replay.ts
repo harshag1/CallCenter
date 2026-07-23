@@ -523,6 +523,114 @@ function factsWithProjectionArray(
     .map((item) => ({ fact: { observation, index }, item })));
 }
 
+type GatewayProjectionFact = Readonly<{
+  fact: WireFact;
+  item: Record<string, unknown>;
+}>;
+
+const TERMINAL_GATEWAY_CALL_WIRE_TYPES = new Set([
+  "toolCall",
+  "response.function_call_arguments.done",
+  "response.output_item.done",
+  "conversation.item.done",
+  "response.done",
+  "response.completed",
+]);
+
+const GATEWAY_CALL_IDENTITY_KEYS = [
+  "gateway",
+  "callIdSha256",
+  "responseIdSha256",
+  "itemIdSha256",
+] as const;
+
+const GATEWAY_CALL_SEMANTIC_KEYS = [
+  "argumentsSha256",
+  "argumentsBytes",
+  "argumentsJsonValid",
+  "targetToolNameSha256",
+  "targetArgumentsSha256",
+] as const;
+
+/**
+ * OpenAI-compatible providers project one native function call on several
+ * lifecycle frames (item-added, item-done, then response-done). Those frames
+ * are observations of one provider call, not three executable calls. Select
+ * the exact observation admitted by the executor while proving every other
+ * terminal projection is the same call with the same completed semantics.
+ */
+function selectGatewayCallProjection(
+  calls: readonly GatewayProjectionFact[],
+  summary: RoundtripReplaySummary,
+  errors: string[],
+): GatewayProjectionFact | undefined {
+  const exactlyAccepted = calls.find(({ fact }) => (
+    fact.observation.observationSha256 === summary.call.observation_sha256
+  ));
+  const callIds = new Set(calls.map(({ item }) => item.callIdSha256));
+  if (calls.length === 0 || callIds.size !== 1
+    || !callIds.has(summary.call.call_id_sha256)) {
+    errors.push("gateway_call_count_not_exactly_one");
+  }
+  if (!exactlyAccepted) {
+    errors.push("gateway_call_binding_invalid");
+  }
+  // Keep validating a malformed packet after a stale summary reference so the
+  // replay reports the independently observable semantic fault as well.
+  const accepted = exactlyAccepted ?? calls.find((candidate) => (
+    candidate.item.callIdSha256 === summary.call.call_id_sha256
+    && TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(candidate.fact.observation.wireType)
+  )) ?? calls.find(({ item }) => item.callIdSha256 === summary.call.call_id_sha256);
+  if (!accepted) return undefined;
+  const terminalWireTypes = calls
+    .filter(({ fact }) => TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(fact.observation.wireType))
+    .map(({ fact }) => fact.observation.wireType);
+  if (new Set(terminalWireTypes).size !== terminalWireTypes.length) {
+    errors.push("gateway_call_count_not_exactly_one");
+  }
+
+  const conflicts = calls.some((candidate) => {
+    if (candidate === accepted) return false;
+    const terminal = TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(
+      candidate.fact.observation.wireType,
+    );
+    for (const key of GATEWAY_CALL_IDENTITY_KEYS) {
+      const candidateValue = candidate.item[key];
+      const acceptedValue = accepted.item[key];
+      if (terminal
+        ? candidateValue !== acceptedValue
+        : candidateValue !== undefined && acceptedValue !== undefined
+          && candidateValue !== acceptedValue) return true;
+    }
+    if (!terminal) {
+      // Item-added is a progress snapshot and may legitimately contain empty
+      // or incomplete arguments. Identity is still immutable, but only a
+      // valid complete projection is comparable to terminal semantics.
+      if (candidate.item.argumentsJsonValid !== true) return false;
+    }
+    return GATEWAY_CALL_SEMANTIC_KEYS.some((key) => (
+      candidate.item[key] !== accepted.item[key]
+    ));
+  });
+  if (conflicts) errors.push("gateway_call_projection_conflict");
+  if (!TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(accepted.fact.observation.wireType)) {
+    const laterTerminalCorroboration = calls.some((candidate) => (
+      candidate.fact.index > accepted.fact.index
+      && TERMINAL_GATEWAY_CALL_WIRE_TYPES.has(candidate.fact.observation.wireType)
+      && !GATEWAY_CALL_IDENTITY_KEYS.some((key) => (
+        candidate.item[key] !== accepted.item[key]
+      ))
+      && !GATEWAY_CALL_SEMANTIC_KEYS.some((key) => (
+        candidate.item[key] !== accepted.item[key]
+      ))
+    ));
+    if (!laterTerminalCorroboration) {
+      errors.push("gateway_call_accepted_projection_not_terminal");
+    }
+  }
+  return accepted;
+}
+
 function pushHashError(errors: string[], value: unknown, code: string): value is string {
   if (typeof value !== "string" || !SHA256.test(value)) {
     errors.push(code);
@@ -787,9 +895,8 @@ export function replayProviderToolRoundtrip(
 
     const calls = factsWithProjectionArray(wire, "gatewayCalls");
     const results = factsWithProjectionArray(wire, "gatewayResults");
-    if (calls.length !== 1) errors.push("gateway_call_count_not_exactly_one");
     if (results.length !== 1) errors.push("gateway_result_count_not_exactly_one");
-    const call = calls[0];
+    const call = selectGatewayCallProjection(calls, summary, errors);
     const result = results[0];
     let semanticHashes: QualificationSemanticHashes | null = null;
     if (call) {

@@ -80,6 +80,36 @@ function exactServerVadAcknowledgement() {
   });
 }
 
+function gatewayCallProjection(callId: string, responseId: string) {
+  return Object.freeze({
+    gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+    callIdSha256: realtimeWireIdentitySha256("call", callId),
+    responseIdSha256: realtimeWireIdentitySha256("response", responseId),
+    argumentsSha256: sha256Hex(canonicalJson({
+      tool_name: "complete_current_stage",
+      arguments: {},
+    })),
+    argumentsBytes: Buffer.byteLength(canonicalJson({
+      tool_name: "complete_current_stage",
+      arguments: {},
+    })),
+    argumentsJsonValid: true,
+    targetToolNameSha256: realtimeWireIdentitySha256("target-tool", "complete_current_stage"),
+    targetArgumentsSha256: sha256Hex(canonicalJson({})),
+  });
+}
+
+function gatewayResultProjection(callId: string) {
+  const result = { ok: true, qualification_stage: "completed" };
+  return Object.freeze({
+    gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+    callIdSha256: realtimeWireIdentitySha256("call", callId),
+    resultSha256: sha256Hex(canonicalJson(result)),
+    resultBytes: Buffer.byteLength(canonicalJson(result)),
+    resultJsonValid: true,
+  });
+}
+
 class RoundtripClient implements NormalizedRealtimeClient {
   readonly provider;
   state: "idle" | "ready" | "closed" = "idle";
@@ -102,6 +132,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly providerUsageCounters: Readonly<Record<string, number>> | null;
   readonly continuationUsageResponseId: "continuation" | "initial";
   readonly malformedInputAudioProjection: boolean;
+  readonly omitContinuationRequestWire: boolean;
+  readonly emitOpenAiMultiFrameCall: boolean;
   appendedBytes = 0;
   responseCount = 0;
   readonly responseToolChoices: unknown[] = [];
@@ -125,6 +157,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
     providerUsageCounters?: Readonly<Record<string, number>> | null;
     continuationUsageResponseId?: "continuation" | "initial";
     malformedInputAudioProjection?: boolean;
+    omitContinuationRequestWire?: boolean;
+    emitOpenAiMultiFrameCall?: boolean;
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -149,6 +183,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
       : options.providerUsageCounters;
     this.continuationUsageResponseId = options.continuationUsageResponseId ?? "continuation";
     this.malformedInputAudioProjection = options.malformedInputAudioProjection === true;
+    this.omitContinuationRequestWire = options.omitContinuationRequestWire === true;
+    this.emitOpenAiMultiFrameCall = options.emitOpenAiMultiFrameCall === true;
   }
 
   get serverVadTransportParitySha256() {
@@ -223,10 +259,30 @@ class RoundtripClient implements NormalizedRealtimeClient {
       });
       return;
     }
+    if (this.provider === "openai" && this.emitOpenAiMultiFrameCall) {
+      this.#observe(
+        "inbound",
+        "response.output_item.added",
+        {
+          responseIdSha256: realtimeWireIdentitySha256("response", responseId),
+          callIdSha256: realtimeWireIdentitySha256("call", callId),
+        },
+        {
+          gatewayCalls: [{
+            ...gatewayCallProjection(callId, responseId),
+            argumentsSha256: sha256Hex(""),
+            argumentsBytes: 0,
+            argumentsJsonValid: false,
+          }],
+        },
+      );
+    }
     const observation = this.#observe(
       "inbound",
       this.provider === "gemini"
         ? "toolCall"
+        : this.provider === "openai" && this.emitOpenAiMultiFrameCall
+          ? "response.output_item.done"
         : this.localGatewayDispatchMode !== "none"
           ? "response.done"
           : "response.function_call_arguments.done",
@@ -236,7 +292,22 @@ class RoundtripClient implements NormalizedRealtimeClient {
             responseIdSha256: realtimeWireIdentitySha256("response", responseId),
             callIdSha256: realtimeWireIdentitySha256("call", callId),
           },
+      { gatewayCalls: [gatewayCallProjection(callId, responseId)] },
     );
+    if (this.provider === "openai" && this.emitOpenAiMultiFrameCall) {
+      this.#observe(
+        "inbound",
+        "response.done",
+        {
+          responseIdSha256: realtimeWireIdentitySha256("response", responseId),
+          callIdSha256: realtimeWireIdentitySha256("call", callId),
+        },
+        {
+          gatewayCalls: [gatewayCallProjection(callId, responseId)],
+          terminal: { status: "completed" },
+        },
+      );
+    }
     const wireObservation = {
       availability: "observed" as const,
       connectionEpoch: 1,
@@ -609,7 +680,10 @@ class RoundtripClient implements NormalizedRealtimeClient {
   createResponse(overrides: Record<string, unknown> = {}) {
     this.responseToolChoices.push(overrides.tool_choice);
     this.responseCount += 1;
-    this.#observe("outbound", "response.create", {}, this.pendingControl && !this.omitDynamicControl ? { dynamicControl: this.pendingControl } : {});
+    const isContinuation = this.pendingContinuation;
+    if (!isContinuation || !this.omitContinuationRequestWire) {
+      this.#observe("outbound", "response.create", {}, this.pendingControl && !this.omitDynamicControl ? { dynamicControl: this.pendingControl } : {});
+    }
     this.pendingControl = null;
     if (this.pendingContinuation) {
       this.#emit({
@@ -625,9 +699,12 @@ class RoundtripClient implements NormalizedRealtimeClient {
   submitToolResults(results: readonly { callId: string; output: unknown }[]) {
     const callId = `${this.provider}-call`;
     expect(results).toEqual([{ callId, output: { ok: true, qualification_stage: "completed" } }]);
-    this.#observe("outbound", this.provider === "gemini" ? "toolResponse" : "conversation.item.create", {
-      callIdSha256: realtimeWireIdentitySha256("call", callId),
-    });
+    this.#observe(
+      "outbound",
+      this.provider === "gemini" ? "toolResponse" : "conversation.item.create",
+      { callIdSha256: realtimeWireIdentitySha256("call", callId) },
+      { gatewayResults: [gatewayResultProjection(callId)] },
+    );
     if (!this.omitToolResultEvent) {
       this.#emit({
         type: "tool.results.submitted", provider: this.provider, receivedAtMs: 4,
@@ -724,6 +801,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         post_tool_usage_observed: true,
         tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
       });
+      expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
       expect(client.appendedBytes).toBe(artifact.provider_renditions[provider].byte_length);
       if (provider === "openai") {
         expect(execution.operation_order.indexOf("caller_audio_commit_acknowledged"))
@@ -737,6 +815,40 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       }
     });
   }
+
+  it("binds an OpenAI multi-frame call to the exact accepted terminal candidate", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai",
+      model: "openai-model",
+      client: new RoundtripClient("openai", { emitOpenAiMultiFrameCall: true }),
+      audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution).toMatchObject({ status: "passed", failure_class: "none" });
+    const callFrames = execution.wire_observations.filter((observation) => (
+      Array.isArray(observation.projection.gatewayCalls)
+    ));
+    expect(callFrames.map(({ wireType }) => wireType)).toEqual([
+      "response.output_item.added",
+      "response.output_item.done",
+      "response.done",
+    ]);
+    expect(execution.replay_summary?.call.observation_sha256)
+      .toBe(callFrames[1]?.observationSha256);
+    expect(execution.replay_summary?.call.observation_sha256)
+      .not.toBe(callFrames[0]?.observationSha256);
+    expect(execution.replay_causal_binding?.call_observation_sha256)
+      .toBe(callFrames[1]?.observationSha256);
+    expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+  });
 
   it("labels xAI close-time wire-PCM metering from its normalized source across many chunks", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
@@ -843,6 +955,15 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
 
     expect(execution.sanitized_usage).toEqual([]);
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "post_tool_usage_evidence_invalid",
+      post_tool_usage_observed: true,
+      replay_summary: null,
+      replay_causal_binding: null,
+    });
+    expect(execution.wire_observations.length).toBeGreaterThan(0);
+    expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
     expect(execution.public_execution_sha256).toBeNull();
   });
 
@@ -894,6 +1015,36 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     expect(execution.status).toBe("failed");
     expect(execution.failure_class).toBe("post_tool_usage_missing");
     expect(execution.sanitized_usage).toEqual([]);
+  });
+
+  it("retains a failed execution when the continuation lacks a wire-observed causal request", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai",
+      model: "openai-model",
+      client: new RoundtripClient("openai", { omitContinuationRequestWire: true }),
+      audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 1_000,
+    });
+
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "causal_replay_evidence_invalid",
+      post_tool_usage_observed: true,
+      replay_summary: null,
+      replay_causal_binding: null,
+      public_execution_sha256: null,
+      replay_sha256: null,
+    });
+    expect(execution.sanitized_usage).toHaveLength(1);
+    expect(execution.wire_observations.length).toBeGreaterThan(0);
+    expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
   });
 
   for (const variant of [
@@ -1114,12 +1265,17 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
     const { evidence_sha256: originalEvidenceSha256, ...body } = execution;
     expect(originalEvidenceSha256).toMatch(/^[a-f0-9]{64}$/u);
-    const fabricatedBody = Object.freeze({ ...body, wire_observations: Object.freeze([]) });
+    const fabricatedBody = Object.freeze({
+      ...body,
+      status: "passed" as const,
+      failure_class: "none" as const,
+      wire_observations: Object.freeze([]),
+    });
     const fabricated = Object.freeze({
       ...fabricatedBody,
       evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(fabricatedBody)}`),
     });
-    expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("lacks closed-loop evidence");
+    expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow("replay evidence failed integrity");
   });
 
   it("rejects a call whose compact dynamic control is absent from wire evidence", async () => {

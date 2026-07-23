@@ -2140,9 +2140,13 @@ export async function runLc4QualificationV3(input: Readonly<{
     budget_evidence_sha256: budgetEvidence!.evidence_sha256,
     budget_final_head_sha256: budgetEvidence!.final_head_sha256,
     provider_session_count: providerSessionsOpened,
-    paid_session_count: executions.length,
-    generation_phase_count: executions.length * 2,
-    tool_roundtrip_count: executions.length,
+    // These are admission counters, not replay counters. A provider session can
+    // be admitted (and therefore spend-bearing) before the adapter returns an
+    // execution artifact. The retained result/replay arrays below separately
+    // bind the executions that completed far enough to be replayed.
+    paid_session_count: paidSessionsOpened,
+    generation_phase_count: generationPhasesAttempted,
+    tool_roundtrip_count: toolRoundtripsAttempted,
     retry_count: 0,
     reconnect_count: reconnectCount,
     replay_artifact_sha256: replayArtifactSha256,
@@ -2283,6 +2287,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
 
   const verified: Lc4QualificationV3TerminalArtifact[] = [];
   let sealedPreRetentionRunnerExceptions = 0;
+  let sealedMidPaidRunnerExceptions = 0;
+  let replayVerifiedCompletedExecutions = 0;
+  let legacyCompletedOnlyPackageBindings = 0;
   const completeIds = new Set<string>();
   for (const name of completeNames) {
     const attemptId = name.slice(0, -".complete".length);
@@ -2347,6 +2354,24 @@ export async function reportLc4QualificationV3(input: Readonly<{
       },
     });
     const packageBindings = terminal.body.package_bindings;
+    const replayedExecutionCount = terminal.body.results.length;
+    const runnerException = /^runner_exception:[a-f0-9]{64}$/u.test(
+      terminal.body.primary_failure_class ?? "",
+    );
+    const attemptedCounterBindings =
+      packageBindings.paid_session_count === terminal.body.paid_sessions_opened
+      && packageBindings.generation_phase_count === terminal.body.generation_phases_attempted
+      && packageBindings.tool_roundtrip_count === terminal.body.tool_roundtrips_attempted;
+    // Compatibility for already sealed v6 exception packages emitted before
+    // admission counters were bound directly. Those packages signed completed
+    // replay counts (0/0/0 in a mid-first-paid-call exception) while the same
+    // terminal separately signed the truthful attempted counters. Accept only
+    // this narrow, internally consistent shape and expose it in the report.
+    const legacyCompletedOnlyBindings = runnerException
+      && replayedExecutionCount < terminal.body.paid_sessions_opened
+      && packageBindings.paid_session_count === replayedExecutionCount
+      && packageBindings.generation_phase_count === replayedExecutionCount * 2
+      && packageBindings.tool_roundtrip_count === replayedExecutionCount;
     if (packageBindings.attempt_id !== terminal.body.attempt_id
       || packageBindings.source_commit !== terminal.body.source_commit
       || packageBindings.source_tree_oid !== plan.body.source.source_tree_oid
@@ -2358,15 +2383,22 @@ export async function reportLc4QualificationV3(input: Readonly<{
       || packageBindings.budget_evidence_sha256 !== terminal.body.budget_evidence_sha256
       || packageBindings.budget_final_head_sha256 !== terminal.body.budget_final_head_sha256
       || packageBindings.provider_session_count !== terminal.body.provider_sessions_opened
-      || packageBindings.paid_session_count !== terminal.body.paid_sessions_opened
-      || packageBindings.generation_phase_count !== terminal.body.generation_phases_attempted
-      || packageBindings.tool_roundtrip_count !== terminal.body.tool_roundtrips_attempted
+      || (!attemptedCounterBindings && !legacyCompletedOnlyBindings)
       || packageBindings.retry_count !== terminal.body.paid_retries_attempted
       || packageBindings.reconnect_count !== 0
       || packageBindings.replay_artifact_sha256 !== sha256Hex(
         `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(terminal.body.roundtrip_replay_sha256)}`,
       )) {
       throw new Error("LC4 qualification signed package bindings differ from terminal authority");
+    }
+    if (legacyCompletedOnlyBindings) legacyCompletedOnlyPackageBindings += 1;
+    if (terminal.body.roundtrip_evidence_sha256.length !== replayedExecutionCount
+      || terminal.body.roundtrip_public_execution_sha256.length !== replayedExecutionCount
+      || terminal.body.roundtrip_replay_sha256.length !== replayedExecutionCount
+      || terminal.body.paid_sessions_opened < replayedExecutionCount
+      || terminal.body.generation_phases_attempted !== terminal.body.paid_sessions_opened * 2
+      || terminal.body.tool_roundtrips_attempted !== terminal.body.paid_sessions_opened) {
+      throw new Error("LC4 qualification attempted and replayed execution counters disagree");
     }
     const xaiResult = terminal.body.results.find((result) => result.provider === "xai");
     const serverVad = terminal.body.server_vad_qualification;
@@ -2431,6 +2463,7 @@ export async function reportLc4QualificationV3(input: Readonly<{
       paidReplayHeads.push(paidHead);
       paidReplayEventCount += retainedWire.length;
     }
+    replayVerifiedCompletedExecutions += paidReplayHeads.length;
     const retainedPaths = new Set(retainedPackage.files.map((file) => file.path));
     const setupQualification = retainedPaths.has("setup-acceptance.json")
       ? await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"))
@@ -2597,7 +2630,7 @@ export async function reportLc4QualificationV3(input: Readonly<{
           setupWireEvidence.length !==
             terminal.body.provider_sessions_opened -
               terminal.body.paid_sessions_opened ||
-          paidReplayHeads.length !== terminal.body.paid_sessions_opened ||
+          paidReplayHeads.length !== replayedExecutionCount ||
           packageBindings.provider_session_count !==
             terminal.body.provider_sessions_opened ||
           packageBindings.replay_event_count !== replayEventCount ||
@@ -2607,6 +2640,34 @@ export async function reportLc4QualificationV3(input: Readonly<{
             "LC4 qualification signed replay chain, session count, or event count differs from retained evidence",
           );
         }
+      }
+      const admittedButUnreplayedPaidSessions =
+        terminal.body.paid_sessions_opened - replayedExecutionCount;
+      if (admittedButUnreplayedPaidSessions !== 0) {
+        const replayedCallerAudioBytes = terminal.body.results.reduce(
+          (total, result) => total + result.caller_audio_bytes,
+          0,
+        );
+        if (
+          admittedButUnreplayedPaidSessions !== 1 ||
+          !runnerException ||
+          terminal.body.status !== "failed" ||
+          terminal.body.provider_sessions_opened !==
+            setupWireEvidence.length + terminal.body.paid_sessions_opened ||
+          terminal.body.caller_audio_bytes !== replayedCallerAudioBytes ||
+          serverVad.gate_b_status !== "not_run" ||
+          serverVad.gate_b_evidence_sha256 !== null ||
+          serverVad.gate_b_binding_sha256 !== null ||
+          serverVad.gate_b_connection_epoch !== null ||
+          serverVad.operational_vad_verified ||
+          serverVad.benchmark_ready ||
+          gateBBinding !== null
+        ) {
+          throw new Error(
+            "LC4 qualification incomplete paid admission is outside the sealed mid-paid runner-exception boundary",
+          );
+        }
+        sealedMidPaidRunnerExceptions += 1;
       }
       const retainedXaiSetup = setupQualification.results.find(
         (result) => result.provider === "xai",
@@ -2841,8 +2902,12 @@ export async function reportLc4QualificationV3(input: Readonly<{
     refused_attempts: refusals.size,
     stranded_invocations: strandedInvocationIds.length,
     complete_attempts: verified.length,
-    fully_replay_verified_complete_attempts: verified.length - sealedPreRetentionRunnerExceptions,
+    fully_replay_verified_complete_attempts:
+      verified.length - sealedPreRetentionRunnerExceptions - sealedMidPaidRunnerExceptions,
     sealed_pre_retention_runner_exceptions: sealedPreRetentionRunnerExceptions,
+    sealed_mid_paid_runner_exceptions: sealedMidPaidRunnerExceptions,
+    replay_verified_completed_executions: replayVerifiedCompletedExecutions,
+    legacy_completed_only_package_bindings: legacyCompletedOnlyPackageBindings,
     partial_attempts: partialIds.size,
     gate_c_qualification_gate: false,
     maximum_total_usd: 3,

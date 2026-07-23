@@ -198,6 +198,8 @@ export type Lc4S2sRoundtripFailureClass =
   | "post_tool_output_audio_missing_or_invalid"
   | "post_tool_terminal_missing"
   | "post_tool_usage_missing"
+  | "post_tool_usage_evidence_invalid"
+  | "causal_replay_evidence_invalid"
   | "provider_error"
   | "timeout";
 
@@ -670,6 +672,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let providerAutoResponseObserved = false;
   let transportFailureDiagnostic: RealtimeTransportFailureDiagnostic | null = null;
   let toolCall: RealtimeToolCall | null = null;
+  let toolCallObservationSha256: string | null = null;
   let toolCallEvidenceSha256: string | null = null;
   let toolResultSubmitted = false;
   let toolResultEventObserved = false;
@@ -848,6 +851,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         return;
       }
       toolCall = candidate.call;
+      toolCallObservationSha256 = candidate.observationSha256;
       operations.push("exact_tool_call_observed");
       const callObservation = wire.find((item) => item.observationSha256 === candidate.observationSha256);
       const controlIndex = wire.findIndex((item) => item.observationSha256 === controlObservationSha256);
@@ -1113,7 +1117,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     failure = "post_tool_output_audio_missing_or_invalid";
   }
 
-  const passed = failure === "none"
+  const protocolPassed = failure === "none"
     && inputAudioEvidence !== null
     && outputAudioEvidence !== null
     && toolCall !== null
@@ -1122,7 +1126,6 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     && continuationObserved
     && terminalObserved
     && postToolUsageObserved;
-  if (!passed && failure === "none") failure = "provider_error";
   const retainedToolCall = toolCall as RealtimeToolCall | null;
   if (input.provider === "gemini" && toolResultWireObservationSha256 !== null) {
     continuationRequestObservationSha256 ??= toolResultWireObservationSha256;
@@ -1210,11 +1213,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     initial_response_id_sha256: callResponseIdSha256!,
     call_id_sha256: callIdSha256!,
     call_response_id_sha256: callResponseIdSha256!,
-    call_observation_sha256: wire.find((observation) => (
-      observation.identities.callIdSha256 === callIdSha256
-      && observation.direction === "inbound"
-      && observation.observationSha256 !== toolResultWireObservationSha256
-    ))?.observationSha256 ?? "",
+    call_observation_sha256: toolCallObservationSha256 ?? "",
     result_observation_sha256: toolResultWireObservationSha256!,
     continuation_request_observation_sha256: continuationRequestObservationSha256!,
     continuation_response_id_sha256: continuationResponseIdSha256!,
@@ -1272,6 +1271,38 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     sanitized_usage: sanitizedUsage,
     causal_binding: replayCausalBinding,
   });
+  const sanitizedUsageReady = sanitizedUsage.length === 1;
+  const causalReplayReady = replayCausalBinding !== null
+    && replaySummary !== null
+    && replay?.valid === true
+    && replay.public_execution_sha256 !== null
+    && replay.replay_sha256 !== null;
+  const closedLoopEvidenceReady = delivery !== null
+    && inputAudioEvidence !== null
+    && outputAudioEvidence !== null
+    && (input.provider === "xai"
+      ? providerAutoResponseObserved && !responseRequested
+      : responseRequested && !providerAutoResponseObserved)
+    && retainedToolCall !== null
+    && toolResultSubmitted
+    && toolResultEventObserved
+    && toolResultWireObservationSha256 !== null
+    && (input.provider === "gemini" || continuationRequested)
+    && continuationObserved
+    && terminalObserved
+    && postToolUsageObserved
+    && toolCallEvidenceSha256 !== null
+    && toolResultWireObservationSha256 !== null
+    && sanitizedUsageReady
+    && causalReplayReady;
+  const passed = protocolPassed && closedLoopEvidenceReady;
+  if (protocolPassed && !sanitizedUsageReady) {
+    failure = "post_tool_usage_evidence_invalid";
+  } else if (protocolPassed && !causalReplayReady) {
+    failure = "causal_replay_evidence_invalid";
+  } else if (!passed && failure === "none") {
+    failure = "provider_error";
+  }
   const failureBody = freeze({
     provider: input.provider,
     model: input.model,

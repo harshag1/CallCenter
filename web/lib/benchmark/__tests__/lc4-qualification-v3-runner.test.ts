@@ -922,8 +922,92 @@ describe("LC4 qualification v3 signed runner", () => {
       tool_roundtrips_attempted: 1,
       results: [],
     });
-
+    expect(originalTerminal.body.package_bindings).toMatchObject({
+      provider_session_count: 4,
+      paid_session_count: 1,
+      generation_phase_count: 2,
+      tool_roundtrip_count: 1,
+      replay_event_count: expect.any(Number),
+      replay_chain_head_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
     const directory = join(root, "attempts", `${authorization.body.authorization_id}.complete`);
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .resolves.toMatchObject({
+        complete_attempts: 1,
+        fully_replay_verified_complete_attempts: 0,
+        sealed_mid_paid_runner_exceptions: 1,
+        replay_verified_completed_executions: 0,
+        legacy_completed_only_package_bindings: 0,
+        latest: {
+          provider_sessions_opened: 4,
+          paid_sessions_opened: 1,
+          generation_phases_attempted: 2,
+          tool_roundtrips_attempted: 1,
+          package_bindings: {
+            provider_session_count: 4,
+            paid_session_count: 1,
+            generation_phase_count: 2,
+            tool_roundtrip_count: 1,
+          },
+        },
+      });
+
+    const terminalPath = join(directory, "terminal.json");
+    const envelopePath = join(directory, "qualification-package-envelope.json");
+    const originalTerminalBytes = await readFile(terminalPath);
+    const originalEnvelopeBytes = await readFile(envelopePath);
+    const { terminal_sha256: discardedMidPaidTerminalSha256, ...midPaidBody } = originalTerminal.body;
+    expect(discardedMidPaidTerminalSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const tamperedBindings = Object.freeze({
+      ...originalTerminal.body.package_bindings,
+      provider_session_count: 5,
+      paid_session_count: 2,
+      generation_phase_count: 4,
+      tool_roundtrip_count: 2,
+    }) satisfies Lc4QualificationPackageBindingsV5;
+    const tamperedBodyWithoutHash = Object.freeze({
+      ...midPaidBody,
+      package_bindings: tamperedBindings,
+      provider_sessions_opened: 5,
+      paid_sessions_opened: 2,
+      generation_phases_attempted: 4,
+      tool_roundtrips_attempted: 2,
+    });
+    const tamperedTerminal = signTestTerminal(Object.freeze({
+      ...tamperedBodyWithoutHash,
+      terminal_sha256: sha256Hex(
+        `${TEST_TERMINAL_DOMAIN}${canonicalJson(tamperedBodyWithoutHash)}`,
+      ),
+    }) satisfies Lc4QualificationV3TerminalBody, terminalKey.privatePem);
+    await chmod(terminalPath, 0o600);
+    await writeFile(terminalPath, `${canonicalJson(tamperedTerminal)}\n`, { mode: 0o400 });
+    const tamperedPackageFiles = await Promise.all((await readdir(directory))
+      .filter((path) => path !== "qualification-package-envelope.json")
+      .sort()
+      .map(async (path): Promise<Lc4QualificationPackageFile> => Object.freeze({
+        path,
+        bytes: await readFile(join(directory, path)),
+      })));
+    const tamperedEnvelope = createSignedLc4QualificationPackageEnvelopeV5({
+      files: tamperedPackageFiles,
+      terminalClaims: Object.freeze({
+        terminal_artifact_sha256: tamperedTerminal.artifact_sha256,
+        payload_root_sha256: tamperedTerminal.body.payload_root_sha256,
+        bindings: tamperedTerminal.body.package_bindings,
+      }),
+      terminalPath: "terminal.json",
+      envelopePath: "qualification-package-envelope.json",
+      authorityPrivateKeyPem: terminalKey.privatePem,
+    });
+    await chmod(envelopePath, 0o600);
+    await writeFile(envelopePath, `${canonicalJson(tamperedEnvelope)}\n`, { mode: 0o400 });
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .rejects.toThrow("incomplete paid admission");
+    await chmod(terminalPath, 0o600);
+    await writeFile(terminalPath, originalTerminalBytes, { mode: 0o400 });
+    await chmod(envelopePath, 0o600);
+    await writeFile(envelopePath, originalEnvelopeBytes, { mode: 0o400 });
+
     await unlink(join(directory, "setup-acceptance.json"));
     const evidenceFiles = await Promise.all((await readdir(directory))
       .filter((path) => path !== "terminal.json" && path !== "qualification-package-envelope.json")
@@ -943,6 +1027,9 @@ describe("LC4 qualification v3 signed runner", () => {
     const bindings = Object.freeze({
       ...originalTerminal.body.package_bindings,
       provider_session_count: 3,
+      paid_session_count: 0,
+      generation_phase_count: 0,
+      tool_roundtrip_count: 0,
     }) satisfies Lc4QualificationPackageBindingsV5;
     const { terminal_sha256: discardedTerminalSha256, ...originalBody } = originalTerminal.body;
     expect(discardedTerminalSha256).toMatch(/^[a-f0-9]{64}$/u);
