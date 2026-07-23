@@ -1613,13 +1613,18 @@ describe("LC4 production realtime adapter bridge", () => {
   it("keeps native context and the HACC response-plan intervention mutually exclusive", async () => {
     const value = manifest("native");
     const bridge = new Lc4RealtimeProviderBridge((provider) => new FakeRealtimeClient(provider, []));
+    let listenerResponsePlanSha256: string | null | undefined;
     const session = await bridge.openSegment({
       manifest: value,
       segment: value.episode_shape.segments[0]!,
       profile: value.episode_shape.provider_profile,
       configuration: configuration(value),
       rotation_context: null,
-      listener: { accept() {} },
+      listener: {
+        accept(handoff) {
+          listenerResponsePlanSha256 = handoff.response_plan_sha256;
+        },
+      },
     });
     await expect(session.exchange({
       opportunity_id: "op-01",
@@ -1633,6 +1638,7 @@ describe("LC4 production realtime adapter bridge", () => {
       response_control: { kind: "native_context", instructions: nativeContext, instructions_sha256: sha256Hex(nativeContext) },
     });
     expect(evidence).toMatchObject({ response_control_kind: "native_context", response_plan_sha256: null });
+    expect(listenerResponsePlanSha256).toBeNull();
     await session.close();
   });
 

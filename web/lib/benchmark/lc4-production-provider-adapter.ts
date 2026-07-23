@@ -1279,7 +1279,12 @@ export class Lc4RealtimeProviderBridge {
           diagnosticStage = "listener_handoff";
           const listenerResult = await input.listener.accept({
             capture,
-            response_plan_sha256: terminalResponsePlanSha256,
+            // Native carries a response-control commitment, not a HACC plan.
+            // Passing that control hash as a plan made the DEV listener reject
+            // every Native turn before ASR could run.
+            response_plan_sha256: exchangeInput.response_control.kind === "hacc_response_plan"
+              ? terminalResponsePlanSha256
+              : null,
             wire_observation_set_sha256: wireObservationSetSha256,
           });
           assertExchangeActive(exchangeSignal.signal);
