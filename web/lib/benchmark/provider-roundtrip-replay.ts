@@ -1406,20 +1406,37 @@ export function replayProviderToolRoundtrip(
       if (measured.provider_usage_observation_sha256 !== null) {
         errors.push("client_measured_usage_has_provider_reference");
       }
+      const continuationStartIndex = wire.findIndex(({ observationSha256 }) => (
+        observationSha256 === summary.continuation.started_observation_sha256
+      ));
+      const continuationTerminalIndex = wire.findIndex(({ observationSha256 }) => (
+        observationSha256 === summary.terminal.observation_sha256
+      ));
       const audioFacts = wire
-        .map((observation) => ({ observation, audio: wireAudioMinutes(observation) }))
+        .map((observation, index) => ({
+          observation,
+          index,
+          audio: wireAudioMinutes(observation),
+        }))
         .filter((fact): fact is typeof fact & { audio: NonNullable<ReturnType<typeof wireAudioMinutes>> } => (
-          fact.audio !== null
+          fact.index >= continuationStartIndex
+          && fact.index < continuationTerminalIndex
+          && fact.audio?.direction === "output"
+          && fact.observation.identities.responseIdSha256
+            === summary.continuation.response_id_sha256
         ));
       const expectedContributors = audioFacts.map(({ observation }) => observation.observationSha256);
       if (canonicalJson(expectedContributors)
         !== canonicalJson(measured.contributing_wire_observation_sha256s)) {
         errors.push("client_measured_usage_contributors_mismatch");
       }
-      const expectedCounters: Partial<Record<RoundtripUsageCounter, number>> = {};
+      const expectedCounters: Partial<Record<RoundtripUsageCounter, number>> = {
+        inputAudioMinutes: 0,
+        outputAudioMinutes: 0,
+      };
       for (const { audio } of audioFacts) {
-        const key = audio.direction === "input" ? "inputAudioMinutes" : "outputAudioMinutes";
-        expectedCounters[key] = (expectedCounters[key] ?? 0) + audio.minutes;
+        expectedCounters.outputAudioMinutes = (expectedCounters.outputAudioMinutes ?? 0)
+          + audio.minutes;
       }
       if (canonicalJson(expectedCounters) !== canonicalJson(measured.counters)) {
         errors.push("client_measured_usage_counters_mismatch");

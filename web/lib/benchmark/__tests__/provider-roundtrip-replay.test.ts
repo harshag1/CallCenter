@@ -375,11 +375,7 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       projection: { terminal: { status: "completed" } },
     },
   ]);
-  const contributors = [
-    observations[0]!.observationSha256,
-    observations[5]!.observationSha256,
-    observations[10]!.observationSha256,
-  ];
+  const contributors = [observations[10]!.observationSha256];
   const usage: RoundtripSanitizedUsage = {
     schema_version: 1,
     source: "client_measured_wire_pcm",
@@ -387,7 +383,7 @@ function xaiPacket(): ProviderRoundtripReplayInput {
     terminal_observation_sha256: observations[11]!.observationSha256,
     provider_usage_observation_sha256: null,
     contributing_wire_observation_sha256s: contributors,
-    counters: { inputAudioMinutes: 1 / 60, outputAudioMinutes: 1 / 60 },
+    counters: { inputAudioMinutes: 0, outputAudioMinutes: 1 / 120 },
   };
   const inputAudio = projectRoundtripInputAudioEvidence(observations, {
     chunk_sha256s: [H("9")], chunk_list_sha256: roundtripInputAudioChunkListSha256([H("9")]),
@@ -669,6 +665,32 @@ describe("provider tool roundtrip offline replay", () => {
     const replay = replayProviderToolRoundtrip(withRebuiltWire(input, nextSeeds));
     expect(replay.valid).toBe(false);
     expect(replay.errors).toContain("pre_tool_quarantine_replay_mismatch");
+  });
+
+  it("rejects quarantined root audio included in xAI continuation-scoped usage", () => {
+    const input = xaiPacket();
+    const contaminatedUsage: RoundtripSanitizedUsage = {
+      ...input.sanitized_usage[0]!,
+      contributing_wire_observation_sha256s: [
+        input.wire_observations[5]!.observationSha256,
+        input.wire_observations[10]!.observationSha256,
+      ],
+      counters: { inputAudioMinutes: 0, outputAudioMinutes: 1 / 60 },
+    };
+    const replay = replayProviderToolRoundtrip({
+      ...input,
+      summary: {
+        ...input.summary,
+        usage: {
+          ...input.summary.usage,
+          evidence_sha256: roundtripSanitizedUsageSha256(contaminatedUsage),
+        },
+      },
+      sanitized_usage: [contaminatedUsage],
+    });
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("client_measured_usage_contributors_mismatch");
+    expect(replay.errors).toContain("client_measured_usage_counters_mismatch");
   });
 
   it("deduplicates one OpenAI call across its full six-frame lifecycle", () => {

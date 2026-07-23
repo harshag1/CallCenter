@@ -473,6 +473,22 @@ class RoundtripClient implements NormalizedRealtimeClient {
       });
       if (this.provider === "xai") {
         this.#emit({
+          type: "usage",
+          provider: this.provider,
+          receivedAtMs: 4,
+          wireType: observation.wireType,
+          responseId,
+          scope: "response",
+          usage: {
+            inputAudioMinutes: this.appendedBytes / 2 / 24_000 / 60,
+            outputAudioMinutes: this.speechBeforeTool ? 2 / 2 / 24_000 / 60 : 0,
+            billableTextInputEvents: 0,
+            meteringSource: "client_measured",
+            raw: {},
+          },
+          wireObservation,
+        });
+        this.#emit({
           type: "response.completed",
           provider: this.provider,
           receivedAtMs: 4,
@@ -1166,21 +1182,18 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
   });
 
-  it("labels xAI close-time wire-PCM metering from its normalized source across many chunks", async () => {
+  it("binds xAI client metering to the distinct continuation response only", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
     roots.push(root);
     const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
     const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
-    const inputAudioMinutes = (
-      audio.data.byteLength + LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
-    ) / 2 / audio.sampleRateHz / 60;
     const outputAudioMinutes = 2 / 2 / 24_000 / 60;
     const execution = await executeLc4S2sToolRoundtrip({
       provider: "xai",
       model: "xai-model",
       client: new RoundtripClient("xai", {
         continuationUsage: {
-          inputAudioMinutes,
+          inputAudioMinutes: 0,
           outputAudioMinutes,
           billableTextInputEvents: 0,
           meteringSource: "client_measured",
@@ -1199,11 +1212,17 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     expect(execution.sanitized_usage[0]).toMatchObject({
       source: "client_measured_wire_pcm",
       provider_usage_observation_sha256: null,
-      counters: { inputAudioMinutes, outputAudioMinutes },
+      counters: { inputAudioMinutes: 0, outputAudioMinutes },
     });
     expect(execution.sanitized_usage[0]!.counters).not.toHaveProperty("billableTextInputEvents");
     expect(execution.sanitized_usage[0]!.contributing_wire_observation_sha256s)
-      .toHaveLength(61 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
+      .toEqual(execution.output_audio_evidence?.observation_sha256s);
+    expect(execution.usage).toHaveLength(2);
+    expect(execution.usage.map((entry) => entry.inputAudioMinutes)).toEqual([
+      (audio.data.byteLength + LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length)
+        / 2 / audio.sampleRateHz / 60,
+      0,
+    ]);
   });
 
   it("projects mixed xAI metering down to only the exact provider-reported wire counters", async () => {

@@ -558,31 +558,36 @@ function forcedToolChoice(provider: LiveStsProvider): Readonly<Record<string, un
 
 function wirePcmUsage(
   observations: readonly RealtimeWireObservation[],
+  scope: Readonly<{
+    responseIdSha256: string;
+    startedObservationSha256: string;
+    terminalObservationSha256: string;
+  }>,
 ): Readonly<{
   contributingObservationSha256s: readonly string[];
   counters: Readonly<Partial<Record<RoundtripUsageCounter, number>>>;
 }> | null {
+  const startIndex = observations.findIndex(({ observationSha256 }) => (
+    observationSha256 === scope.startedObservationSha256
+  ));
+  const terminalIndex = observations.findIndex(({ observationSha256 }) => (
+    observationSha256 === scope.terminalObservationSha256
+  ));
+  if (startIndex < 0 || terminalIndex <= startIndex) return null;
   const contributingObservationSha256s: string[] = [];
-  const meters: Record<"input" | "output", { bytes: number; sampleRateHz: number | null }> = {
-    input: { bytes: 0, sampleRateHz: null },
-    output: { bytes: 0, sampleRateHz: null },
-  };
-  for (const observation of observations) {
-    const expectedDirection = observation.direction === "outbound"
-        && observation.wireType === "input_audio_buffer.append"
-      ? "input"
-      : observation.direction === "inbound"
-          && (observation.wireType === "response.audio.delta"
-            || observation.wireType === "response.output_audio.delta")
-        ? "output"
-        : null;
-    if (expectedDirection === null) continue;
+  const meter = { bytes: 0, sampleRateHz: null as number | null };
+  for (const [index, observation] of observations.entries()) {
+    if (index < startIndex || index >= terminalIndex
+      || observation.direction !== "inbound"
+      || (observation.wireType !== "response.audio.delta"
+        && observation.wireType !== "response.output_audio.delta")) continue;
+    if (observation.identities.responseIdSha256 !== scope.responseIdSha256) return null;
     const value = observation.projection.audio;
     if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
     const audio = value as Record<string, unknown>;
     const chunks = Array.isArray(audio.chunks) ? audio.chunks : [audio];
     if ((audio.direction === "input" || audio.direction === "output")
-      && audio.direction !== expectedDirection) return null;
+      && audio.direction !== "output") return null;
     let observationBytes = 0;
     let observationSampleRateHz: number | null = null;
     for (const chunkValue of chunks) {
@@ -612,20 +617,17 @@ function wirePcmUsage(
       observationBytes += chunk.byteLength;
     }
     if (observationSampleRateHz === null) return null;
-    const meter = meters[expectedDirection];
     if (meter.sampleRateHz !== null && meter.sampleRateHz !== observationSampleRateHz) return null;
     meter.sampleRateHz = observationSampleRateHz;
     meter.bytes += observationBytes;
     contributingObservationSha256s.push(observation.observationSha256);
   }
   if (contributingObservationSha256s.length === 0) return null;
-  const counters: Partial<Record<RoundtripUsageCounter, number>> = {};
-  if (meters.input.sampleRateHz !== null) {
-    counters.inputAudioMinutes = meters.input.bytes / 2 / meters.input.sampleRateHz / 60;
-  }
-  if (meters.output.sampleRateHz !== null) {
-    counters.outputAudioMinutes = meters.output.bytes / 2 / meters.output.sampleRateHz / 60;
-  }
+  if (meter.sampleRateHz === null) return null;
+  const counters: Partial<Record<RoundtripUsageCounter, number>> = {
+    inputAudioMinutes: 0,
+    outputAudioMinutes: meter.bytes / 2 / meter.sampleRateHz / 60,
+  };
   return freeze({ contributingObservationSha256s, counters });
 }
 
@@ -1318,7 +1320,16 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         && typeof value === "number" && Number.isFinite(value) && value >= 0),
   ) as Partial<Record<RoundtripUsageCounter, number>>);
   const meteringSource = retainedUsageSnapshot?.meteringSource;
-  const measuredWirePcm = meteringSource === "client_measured" ? wirePcmUsage(wire) : null;
+  const measuredWirePcm = meteringSource === "client_measured"
+    && continuationResponseId !== null
+    && continuationStartObservationSha256 !== null
+    && terminalObservationSha256 !== null
+    ? wirePcmUsage(wire, {
+        responseIdSha256: realtimeWireIdentitySha256("response", continuationResponseId),
+        startedObservationSha256: continuationStartObservationSha256,
+        terminalObservationSha256,
+      })
+    : null;
   const providerUsageCounters = meteringSource === "provider_reported" || meteringSource === "mixed"
     ? providerWireUsage(wire, usageObservationSha256)
     : null;
