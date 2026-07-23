@@ -305,6 +305,20 @@ function xaiPacket(): ProviderRoundtripReplayInput {
   const callId = realtimeWireIdentitySha256("call", "call-xai-1");
   const origin = realtimeWireIdentitySha256("response", "response-xai-origin");
   const continuation = realtimeWireIdentitySha256("response", "response-xai-continuation");
+  const itemId = realtimeWireIdentitySha256("item", "item-xai-1");
+  const completedCall = gatewayCall(callId, origin, itemId);
+  const incompleteCall = {
+    gateway: "capability_gateway",
+    callIdSha256: callId,
+    responseIdSha256: origin,
+    itemIdSha256: itemId,
+    argumentsSha256: sha256Hex(""),
+    argumentsBytes: 0,
+    argumentsJsonValid: false,
+  };
+  const responseOmittedIncompleteCall = Object.fromEntries(Object.entries(incompleteCall).filter(
+    ([key]) => key !== "responseIdSha256",
+  ));
   const observations = wire("xai", [
     {
       direction: "outbound",
@@ -322,6 +336,12 @@ function xaiPacket(): ProviderRoundtripReplayInput {
     { direction: "inbound", wireType: "input_audio_buffer.speech_started" },
     { direction: "inbound", wireType: "input_audio_buffer.speech_stopped" },
     { direction: "inbound", wireType: "input_audio_buffer.committed" },
+    {
+      direction: "inbound",
+      wireType: "conversation.item.input_audio_transcription.completed",
+      identities: { itemIdSha256: realtimeWireIdentitySha256("item", "input-xai-1") },
+      projection: { terminal: { status: "completed" } },
+    },
     { direction: "inbound", wireType: "response.created", identities: { responseIdSha256: origin } },
     {
       direction: "inbound",
@@ -329,7 +349,6 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       identities: { responseIdSha256: origin },
       projection: {
         audio: {
-          direction: "output",
           validCanonicalBase64: true,
           sha256: H("7"),
           byteLength: 24_000,
@@ -339,10 +358,34 @@ function xaiPacket(): ProviderRoundtripReplayInput {
     },
     {
       direction: "inbound",
+      wireType: "response.output_item.added",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [incompleteCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "conversation.item.added",
+      identities: { callIdSha256: callId, itemIdSha256: itemId },
+      projection: { gatewayCalls: [responseOmittedIncompleteCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.function_call_arguments.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [completedCall] },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.output_item.done",
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
+      projection: { gatewayCalls: [completedCall] },
+    },
+    {
+      direction: "inbound",
       wireType: "response.done",
-      identities: { callIdSha256: callId, responseIdSha256: origin },
+      identities: { callIdSha256: callId, responseIdSha256: origin, itemIdSha256: itemId },
       projection: {
-        gatewayCalls: [gatewayCall(callId, origin)],
+        gatewayCalls: [completedCall],
         terminal: { status: "completed" },
       },
     },
@@ -360,7 +403,6 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       identities: { responseIdSha256: continuation },
       projection: {
         audio: {
-          direction: "output",
           validCanonicalBase64: true,
           sha256: H("8"),
           byteLength: 24_000,
@@ -375,12 +417,38 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       projection: { terminal: { status: "completed" } },
     },
   ]);
-  const contributors = [observations[10]!.observationSha256];
+  const rootStart = observations.find((observation) => (
+    observation.wireType === "response.created"
+    && observation.identities.responseIdSha256 === origin
+  ))!;
+  const rootTerminal = observations.find((observation) => (
+    observation.wireType === "response.done"
+    && observation.identities.responseIdSha256 === origin
+  ))!;
+  const result = observations.find((observation) => (
+    observation.wireType === "conversation.item.create"
+  ))!;
+  const continuationRequest = observations.find((observation) => (
+    observation.wireType === "response.create"
+  ))!;
+  const continuationStart = observations.find((observation) => (
+    observation.wireType === "response.created"
+    && observation.identities.responseIdSha256 === continuation
+  ))!;
+  const continuationAudio = observations.find((observation) => (
+    observation.wireType === "response.audio.delta"
+    && observation.identities.responseIdSha256 === continuation
+  ))!;
+  const continuationTerminal = observations.find((observation) => (
+    observation.wireType === "response.done"
+    && observation.identities.responseIdSha256 === continuation
+  ))!;
+  const contributors = [continuationAudio.observationSha256];
   const usage: RoundtripSanitizedUsage = {
     schema_version: 1,
     source: "client_measured_wire_pcm",
     response_id_sha256: continuation,
-    terminal_observation_sha256: observations[11]!.observationSha256,
+    terminal_observation_sha256: continuationTerminal.observationSha256,
     provider_usage_observation_sha256: null,
     contributing_wire_observation_sha256s: contributors,
     counters: { inputAudioMinutes: 0, outputAudioMinutes: 1 / 120 },
@@ -393,15 +461,15 @@ function xaiPacket(): ProviderRoundtripReplayInput {
   })!;
   const outputAudio = projectRoundtripOutputAudioEvidence({
     provider: "xai", wire: observations,
-    continuation_start_observation_sha256: observations[9]!.observationSha256,
-    terminal_observation_sha256: observations[11]!.observationSha256,
+    continuation_start_observation_sha256: continuationStart.observationSha256,
+    terminal_observation_sha256: continuationTerminal.observationSha256,
     continuation_response_id_sha256: continuation,
   })!;
   const preToolOutputQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
     provider: "xai",
     wire: observations,
-    response_started_observation_sha256: observations[4]!.observationSha256,
-    terminal_observation_sha256: observations[6]!.observationSha256,
+    response_started_observation_sha256: rootStart.observationSha256,
+    terminal_observation_sha256: rootTerminal.observationSha256,
     response_id_sha256: origin,
   })!;
   return {
@@ -412,19 +480,19 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       model: "grok-voice-think-fast-1.0",
       connection_epoch: 1,
       call: {
-        observation_sha256: observations[6]!.observationSha256,
+        observation_sha256: rootTerminal.observationSha256,
         call_id_sha256: callId,
         response_id_sha256: origin,
       },
-      result: { observation_sha256: observations[7]!.observationSha256, call_id_sha256: callId },
+      result: { observation_sha256: result.observationSha256, call_id_sha256: callId },
       continuation: {
-        request_observation_sha256: observations[8]!.observationSha256,
+        request_observation_sha256: continuationRequest.observationSha256,
         origin_response_id_sha256: origin,
-        started_observation_sha256: observations[9]!.observationSha256,
+        started_observation_sha256: continuationStart.observationSha256,
         response_id_sha256: continuation,
       },
       terminal: {
-        observation_sha256: observations[11]!.observationSha256,
+        observation_sha256: continuationTerminal.observationSha256,
         response_id_sha256: continuation,
         status: "completed",
       },
@@ -633,6 +701,42 @@ describe("provider tool roundtrip offline replay", () => {
       .toBe(input.summary.pre_tool_output_quarantine?.evidence_sha256);
   });
 
+  it("replays the retained xAI lifecycle shape with an independent transcript terminal and implicit audio direction", () => {
+    const input = xaiPacket();
+    const replay = replayProviderToolRoundtrip(input);
+    const transcriptTerminal = input.wire_observations.find((observation) => (
+      observation.wireType === "conversation.item.input_audio_transcription.completed"
+    ));
+    const continuationAudio = input.wire_observations.find((observation) => (
+      observation.observationSha256 === input.summary.output_audio.observation_sha256s[0]
+    ));
+    const acceptedCall = input.wire_observations.find((observation) => (
+      observation.observationSha256 === input.summary.call.observation_sha256
+    ));
+
+    expect(replay.valid).toBe(true);
+    expect(transcriptTerminal?.projection.terminal).toEqual({ status: "completed" });
+    expect(transcriptTerminal?.identities.responseIdSha256).toBeUndefined();
+    expect(continuationAudio?.projection.audio).not.toHaveProperty("direction");
+    expect(acceptedCall?.wireType).toBe("response.done");
+    expect(input.wire_observations.filter((observation) => (
+      Array.isArray(observation.projection.gatewayCalls)
+    ))).toHaveLength(5);
+  });
+
+  it("rejects a transcript terminal falsely rebound to a model response", () => {
+    const input = xaiPacket();
+    const replay = replayProviderToolRoundtrip(append(input, {
+      direction: "inbound",
+      wireType: "conversation.item.input_audio_transcription.completed",
+      identities: { responseIdSha256: input.summary.terminal.response_id_sha256 },
+      projection: { terminal: { status: "completed" } },
+    }));
+
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("transcript_terminal_response_binding_invalid");
+  });
+
   it("rejects a claimed xAI quarantine release or a missing quarantine receipt", () => {
     const input = xaiPacket();
     const quarantine = input.summary.pre_tool_output_quarantine!;
@@ -672,8 +776,8 @@ describe("provider tool roundtrip offline replay", () => {
     const contaminatedUsage: RoundtripSanitizedUsage = {
       ...input.sanitized_usage[0]!,
       contributing_wire_observation_sha256s: [
-        input.wire_observations[5]!.observationSha256,
-        input.wire_observations[10]!.observationSha256,
+        input.summary.pre_tool_output_quarantine!.observation_sha256s[0]!,
+        input.summary.output_audio.observation_sha256s[0]!,
       ],
       counters: { inputAudioMinutes: 0, outputAudioMinutes: 1 / 60 },
     };

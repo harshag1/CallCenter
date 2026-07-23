@@ -343,14 +343,32 @@ function terminalStatus(observation: RealtimeWireObservation): string | null {
   return typeof terminal?.status === "string" ? terminal.status : null;
 }
 
-function wireAudioMinutes(observation: RealtimeWireObservation): Readonly<{
+function isInputTranscriptTerminal(observation: RealtimeWireObservation): boolean {
+  return observation.direction === "inbound"
+    && observation.wireType === "conversation.item.input_audio_transcription.completed";
+}
+
+function wireAudioMeter(observation: RealtimeWireObservation): Readonly<{
   direction: "input" | "output";
-  minutes: number;
+  bytes: number;
+  sampleRateHz: number;
 }> | null {
   const audio = record(observation.projection.audio);
-  if (!audio || (audio.direction !== "input" && audio.direction !== "output")) return null;
+  if (!audio) return null;
+  const wireDirection = observation.direction === "inbound"
+    && (observation.wireType === "response.audio.delta"
+      || observation.wireType === "response.output_audio.delta")
+    ? "output"
+    : observation.direction === "outbound"
+      && (observation.wireType === "input_audio_buffer.append"
+        || observation.wireType === "realtimeInput.audio")
+      ? "input"
+      : null;
+  if (wireDirection === null
+    || (audio.direction !== undefined && audio.direction !== wireDirection)) return null;
   const chunks = Array.isArray(audio.chunks) ? audio.chunks : [audio];
-  let seconds = 0;
+  let bytes = 0;
+  let sampleRateHz: number | null = null;
   for (const chunkValue of chunks) {
     const chunk = record(chunkValue);
     const format = record(chunk?.format);
@@ -360,9 +378,11 @@ function wireAudioMinutes(observation: RealtimeWireObservation): Readonly<{
       || format.encoding !== "pcm16" || format.channels !== 1
       || typeof format.sampleRateHz !== "number" || !Number.isSafeInteger(format.sampleRateHz)
       || format.sampleRateHz <= 0) return null;
-    seconds += chunk.byteLength / 2 / format.sampleRateHz;
+    if (sampleRateHz !== null && sampleRateHz !== format.sampleRateHz) return null;
+    sampleRateHz = format.sampleRateHz;
+    bytes += chunk.byteLength;
   }
-  return { direction: audio.direction, minutes: seconds / 60 };
+  return sampleRateHz === null ? null : { direction: wireDirection, bytes, sampleRateHz };
 }
 
 function usageEvidenceSha256(usage: RoundtripSanitizedUsage): string {
@@ -1296,12 +1316,25 @@ export function replayProviderToolRoundtrip(
       errors.push("roundtrip_order_invalid");
     }
 
-    const terminalFacts = wire
+    const projectedTerminalFacts = wire
       .map((observation, index) => ({ observation, index }))
       .filter(({ observation }) => terminalStatus(observation) !== null);
-    if (terminalFacts.some(({ observation }) => terminalStatus(observation) !== "completed")) {
+    if (projectedTerminalFacts.some(({ observation }) => terminalStatus(observation) !== "completed")) {
       errors.push("noncompleted_terminal_retained");
     }
+    const transcriptTerminalFacts = projectedTerminalFacts.filter(({ observation }) => (
+      isInputTranscriptTerminal(observation)
+    ));
+    if (transcriptTerminalFacts.some(({ observation }) => (
+      observation.identities.responseIdSha256 !== undefined
+    ))) errors.push("transcript_terminal_response_binding_invalid");
+    // OpenAI-compatible wire evidence projects the transcript event's native
+    // `status: completed` into the generic terminal field. It terminates the
+    // caller transcript, not a model response, so retain and validate it
+    // independently instead of admitting it to the response-terminal census.
+    const terminalFacts = projectedTerminalFacts.filter(({ observation }) => (
+      !isInputTranscriptTerminal(observation)
+    ));
     if (summary.provider === "gemini") {
       if (terminalFacts.length !== 1
         || terminalFacts[0]?.observation.observationSha256 !== summary.terminal.observation_sha256) {
@@ -1416,9 +1449,9 @@ export function replayProviderToolRoundtrip(
         .map((observation, index) => ({
           observation,
           index,
-          audio: wireAudioMinutes(observation),
+          audio: wireAudioMeter(observation),
         }))
-        .filter((fact): fact is typeof fact & { audio: NonNullable<ReturnType<typeof wireAudioMinutes>> } => (
+        .filter((fact): fact is typeof fact & { audio: NonNullable<ReturnType<typeof wireAudioMeter>> } => (
           fact.index >= continuationStartIndex
           && fact.index < continuationTerminalIndex
           && fact.audio?.direction === "output"
@@ -1434,9 +1467,20 @@ export function replayProviderToolRoundtrip(
         inputAudioMinutes: 0,
         outputAudioMinutes: 0,
       };
+      let measuredOutputBytes = 0;
+      let measuredOutputSampleRateHz: number | null = null;
       for (const { audio } of audioFacts) {
-        expectedCounters.outputAudioMinutes = (expectedCounters.outputAudioMinutes ?? 0)
-          + audio.minutes;
+        if (measuredOutputSampleRateHz !== null
+          && measuredOutputSampleRateHz !== audio.sampleRateHz) {
+          errors.push("client_measured_usage_audio_format_mismatch");
+          continue;
+        }
+        measuredOutputSampleRateHz = audio.sampleRateHz;
+        measuredOutputBytes += audio.bytes;
+      }
+      if (measuredOutputSampleRateHz !== null) {
+        expectedCounters.outputAudioMinutes = measuredOutputBytes
+          / 2 / measuredOutputSampleRateHz / 60;
       }
       if (canonicalJson(expectedCounters) !== canonicalJson(measured.counters)) {
         errors.push("client_measured_usage_counters_mismatch");
