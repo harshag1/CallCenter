@@ -46,6 +46,37 @@ are the intended differences.
 - Temperature and reasoning controls are omitted for all matched arms. That is
   arm parity, not cross-provider equivalence: provider defaults may differ.
 
+## Frozen lifecycle evidence policies
+
+LC4 uses one provider-neutral causal requirement while preserving each API's
+actual lifecycle. A passing qualification roundtrip must bind the input trigger,
+one logical call, exact gateway result, distinct continuation, completed
+terminal, response-scoped usage, and post-tool output audio. The provider
+profiles satisfy that requirement differently:
+
+- OpenAI may emit equivalent projections of one function call across several
+  progress and terminal frames. Replay deduplicates only a single immutable call
+  identity with non-conflicting completed semantics, and retains the exact
+  accepted observation rather than selecting the first frame with a matching
+  call ID.
+- Gemini has no provider response ID for this path. Its outbound `toolResponse`
+  deterministically arms a new `client_local` continuation identity. Later
+  content, terminal, and provider-reported usage must bind to that identity on
+  the same connection epoch and input turn; this is host causal evidence, not a
+  claim that Gemini issued the ID.
+- xAI uses an explicitly disclosed zero-PCM end-of-speech delimiter after the
+  byte-exact caller audio. The delimiter is transport evidence, excluded from
+  caller-audio accounting, and must precede native speech stop, automatic
+  commit, and automatic initial response. Any root-response audio before the
+  terminal function call is retained in response-scoped quarantine with
+  `released_audio_bytes = 0`; only the explicit post-tool continuation may
+  provide caller-playable output.
+
+Missing, conflicting, reordered, or provenance-free lifecycle evidence makes
+the roundtrip fail closed. These rules test evidence integrity and provider
+mechanism compatibility for the frozen profile; they do not test Native versus
+HACC efficacy.
+
 ## Primary sources
 
 - OpenAI: [GPT-Realtime-2.1 model](https://developers.openai.com/api/docs/models/gpt-realtime-2.1) and [Realtime API reference](https://developers.openai.com/api/reference/resources/realtime).

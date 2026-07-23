@@ -32,6 +32,25 @@ Flow v2 is one orchestration kernel, not the architecture's ceiling. The experim
 
 Provider adapters do not change Flow state semantics. An opt-in [Realtime Provider Plugin v1 contract](../web/lib/realtime/plugins/README.md) now provides validated manifests, media/transport preflight, normalized event/tool-result hooks, and a conformance kit. Its built-in provider exports are transitional wrappers; the release-critical core registry still uses static provider wiring. Adding a provider to the stock application therefore still requires updating the provider ID/default/voice registry, browser transport, builder input enum, and integration metadata.
 
+### Provider lifecycle and replay authority
+
+Realtime APIs disagree about where a response begins and ends, whether a tool call is repeated across progress frames, and whether a provider response ID exists at all. The harness therefore treats provider normalization as an evidence boundary, not a lossy event-name translation. A replay-valid tool roundtrip must bind an ordered, hash-chained sequence containing:
+
+1. the exact input/generation trigger;
+2. one logical capability-gateway call and its accepted wire observation;
+3. the host's exact tool result;
+4. a distinct post-tool continuation trigger and response identity;
+5. continuation output, a completed terminal, and response-scoped usage; and
+6. the distinction between retained provider output and audio released as caller-playable.
+
+Provider-specific lifecycle policies satisfy that common shape without pretending that their wire semantics are identical:
+
+- **OpenAI:** one function call may appear in multiple item-added, item-done, argument-done, and response-done projections. Replay deduplicates only equivalent projections of the same call identity. A present conflicting identity, completed-argument mutation, duplicate terminal form, or missing accepted-observation binding fails closed.
+- **Gemini:** Live does not supply provider response IDs for this path. The outbound `toolResponse` closes the tool-call phase and deterministically arms a new client-local continuation identity. Subsequent provider content, terminal, and provider-reported usage must bind to that continuation and to the same connection epoch and input turn. The local identity is labeled `client_local`; it is never represented as a provider-issued ID.
+- **xAI:** the frozen qualification path uses provider-native `server_vad`. Caller PCM stays byte-exact and is accounted separately from a bounded, zero-PCM end-of-speech transport delimiter. Replay requires the acknowledged turn controls and ordered caller audio, delimiter, native speech stop, automatic commit, automatic initial response, tool result, and explicit post-tool continuation. Root-response audio observed before the tool call is retained only as suppressed quarantine evidence with zero released bytes; only the response-scoped continuation output is caller-playable.
+
+The common replay artifact retains only hashes, bounded counters, normalized provenance, and explicit identity-source labels. If a provider omits evidence needed by the common lifecycle, the harness records that limitation or a failed execution; it does not infer the missing event from a later success signal. This layer establishes mechanism integrity and reproducibility, not comparative model efficacy.
+
 ## Tool layers
 
 1. Core voice actions in `web/lib/mcp.ts`.

@@ -45,6 +45,12 @@ The result is a repeatable state machine that still leaves the realtime model fr
 
 Model IDs are configuration, not hardcoded architecture. Pin versioned model IDs for reproducible deployments and benchmarks; aliases such as `grok-voice-latest` can change underneath a running test program. See [provider details](docs/providers.md).
 
+### One lifecycle contract across different realtime APIs
+
+The adapters do more than rename events. They project each provider's wire protocol into a fail-closed causal lifecycle: caller input, one logical tool call, the exact host result, a distinct post-tool continuation, its terminal event, response-scoped usage, and caller-playable output. OpenAI's repeated progress and terminal frames are accepted only when they describe one equivalent logical call; Gemini's provider-ID absence is retained honestly and bridged with a trigger-bound client-local continuation identity; and xAI's provider-native VAD boundary is proved with separately classified transport evidence rather than counted as caller speech. Missing, ambiguous, reordered, or contradictory evidence makes the execution ineligible for a passing roundtrip artifact.
+
+These are horizontal integrity and replay abstractions, not claims that one provider behaves like another or that HACC improves model quality. See the [architecture](docs/architecture.md), [provider lifecycle details](docs/providers.md), and [frozen LC4 provider profiles](benchmarks/voice-long-horizon/LC4_PROVIDER_PROFILES.md).
+
 ## Evidence, not a superiority claim
 
 The repository includes a [long-horizon reliability benchmark](benchmarks/voice-long-horizon/README.md), a [decision-to-evidence ledger](benchmarks/voice-long-horizon/DECISION_EVIDENCE.md), and executable claim gates. The current public boundary is:

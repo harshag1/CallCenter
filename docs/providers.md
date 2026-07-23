@@ -28,6 +28,12 @@ Official documentation: [Voice Agent API](https://docs.x.ai/developers/model-cap
 
 Pin a versioned model for production regression control. The `latest` alias is convenient only for non-comparative development.
 
+### xAI lifecycle evidence
+
+The LC4 qualification adapter uses xAI's documented provider-native `server_vad` instead of sending a manual initial commit or `response.create`. After the per-turn controls and exact closed tool frontier are acknowledged, it sends the caller PCM unchanged, followed by a separately disclosed bounded zero-PCM delimiter so the streamed transport can expose the configured silence boundary. That delimiter is not caller speech and has its own policy, PCM, chunk, and wire-observation commitments. Replay requires native `speech_stopped`, automatic commit, and automatic response ordering before the tool call, then exactly one explicit post-tool continuation request.
+
+xAI can emit root-response audio before its terminal function-call projection. The benchmark path treats those bytes as response-scoped pre-tool output: they are hash-bound and retained in a quarantine receipt but are suppressed from caller playback (`released_audio_bytes: 0`). Only audio bound to the distinct post-tool continuation can satisfy the playable-output requirement. A missing delimiter, premature stop, reordered lifecycle, malformed PCM projection, or attempted release of quarantined audio invalidates the roundtrip evidence.
+
 ## OpenAI
 
 - Default: pinned `gpt-realtime-2.1`, with tool use.
@@ -37,6 +43,10 @@ Pin a versioned model for production regression control. The `latest` alias is c
 - Recommended built-in voices include `marin` and `cedar`.
 
 Official documentation: [`gpt-realtime-2.1`](https://developers.openai.com/api/docs/models/gpt-realtime-2.1), [Realtime guide](https://developers.openai.com/api/docs/guides/realtime), [Realtime API reference](https://developers.openai.com/api/reference/resources/realtime).
+
+### OpenAI lifecycle evidence
+
+OpenAI can project one logical function call across multiple progress and terminal frames. The replay layer groups them by call identity and accepts the lifecycle only when all authoritative completed projections agree on tool target and arguments. Omitted identity on a bounded progress/adjacent item frame is not invented; any identity that is present and conflicts is fatal. The retained call reference points to the exact accepted observation, while initial-response usage and post-tool continuation usage remain response-scoped rather than being collapsed into one session-global fact.
 
 ## Gemini
 
@@ -49,6 +59,10 @@ Official documentation: [`gpt-realtime-2.1`](https://developers.openai.com/api/d
 Official documentation: [Live API quickstart](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk), [capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities), [ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens), [tool use](https://ai.google.dev/gemini-api/docs/live-api/tools).
 
 Gemini Live and ephemeral tokens are preview APIs. The included Twilio bridge intentionally refuses Gemini calls because Twilio sends 8 kHz μ-law while Gemini consumes PCM. Add a tested transcoding adapter instead of treating incompatible bytes as audio. The supplied Gemini browser path does not imply Gemini PSTN support.
+
+### Gemini lifecycle evidence
+
+Gemini Live does not expose provider response IDs on this path. The adapter records that absence explicitly and creates deterministic client-local identities only for host-side causal bookkeeping. The outbound `toolResponse` is the exact boundary that closes the call phase and arms a distinct continuation identity; the next provider content, terminal, and usage events must bind to it on the same connection epoch and input turn. Usage is admissible only with provider-reported provenance and its exact wire observation. Missing continuation attribution or untrusted usage provenance fails closed instead of borrowing the initial response's local identity.
 
 ## Selecting a provider
 
@@ -78,6 +92,10 @@ Provider session creation and API acceptance are not audible completion, side-ef
 - Resend/Twilio create responses are `accepted`, not proof that an inbox/carrier/callee received the result.
 
 No supplied PSTN transport records audio. Browser recording is a separate consent-bound application feature.
+
+## Shared lifecycle invariant
+
+For all three providers, API acceptance or a completed terminal alone is insufficient. A passing roundtrip must replay the complete causal chain from trigger through logical call, exact result, distinct continuation, terminal, usage, and caller-playable audio. The chain preserves whether each identity is provider-issued or client-local and separates caller media, transport delimiters, retained-but-suppressed output, and released continuation output. These invariants are engineering evidence about the harness; they do not establish provider compatibility for an untested release or comparative voice-model efficacy.
 
 ## Adding a provider
 
