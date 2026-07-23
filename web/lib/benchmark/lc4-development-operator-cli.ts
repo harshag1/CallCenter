@@ -69,19 +69,23 @@ import {
   type Lc4DevRunLease,
   type Lc4DevRunPackage,
 } from "./lc4-development-budget";
+import {
+  LC4_DEV_OPERATOR_VERSION,
+  lc4DevSharedAuthorizationBindingSha256,
+  lc4DevSharedLedgerGenesisSha256,
+} from "./lc4-development-operator-contract";
+
+export { LC4_DEV_OPERATOR_VERSION } from "./lc4-development-operator-contract";
 
 const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const QUALIFICATION_CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const QUALIFICATION_CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
 const OPERATOR_INTENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-operator-intent/v1\n";
-const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v2\n";
-const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_ENV_BYTES = 1024 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
 
-export const LC4_DEV_OPERATOR_VERSION = "HACC-LC4-DEV-OPERATOR-v2" as const;
 export const LC4_DEV_OPERATOR_FILENAMES = Object.freeze({
   intent: "operator-intent.json",
   prepare: "prepare.json",
@@ -410,7 +414,7 @@ function authorization(input: Readonly<{
 type AuthorizationBodyWithoutLedgerGenesis = Omit<Lc4DevLiveAuthorizationBody, "immutable_ledger_genesis_sha256">;
 
 export function lc4DevOperatorAuthorizationBindingSha256(body: AuthorizationBodyWithoutLedgerGenesis): string {
-  return sha256Hex(`${AUTHORIZATION_BINDING_DOMAIN}${canonicalJson(body)}`);
+  return lc4DevSharedAuthorizationBindingSha256(body);
 }
 
 export function lc4DevOperatorLedgerGenesisSha256(input: Readonly<{
@@ -419,14 +423,7 @@ export function lc4DevOperatorLedgerGenesisSha256(input: Readonly<{
   authorization_binding_sha256: string;
   authority_public_key_fingerprint_sha256: string;
 }>): string {
-  assertHash(input.prepare_sha256, "LC4-DEV prepare hash");
-  assertHash(input.authorization_binding_sha256, "LC4-DEV authorization binding");
-  assertHash(input.authority_public_key_fingerprint_sha256, "LC4-DEV authority fingerprint");
-  return sha256Hex(`${LEDGER_GENESIS_DOMAIN}${canonicalJson({
-    schema_version: 2,
-    operator_version: LC4_DEV_OPERATOR_VERSION,
-    ...input,
-  })}`);
+  return lc4DevSharedLedgerGenesisSha256(input);
 }
 
 function authorizationBodyWithoutGenesis(input: Readonly<{

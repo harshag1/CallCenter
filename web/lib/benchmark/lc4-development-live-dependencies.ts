@@ -65,13 +65,14 @@ import {
   type Lc4PublicDevelopmentCorpus,
   type Lc4PublicDevOpportunity,
 } from "./lc4-public-development-corpus";
+import {
+  lc4DevSharedAuthorizationBindingSha256,
+  lc4DevSharedLedgerGenesisSha256,
+} from "./lc4-development-operator-contract";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
 const CAS_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
-const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v1\n";
-const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n";
 const LEDGER_INTENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-intent/v1\n";
 const LISTENER_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const DEPENDENCY_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-dependencies/v1\n";
@@ -92,10 +93,6 @@ function freeze<T>(value: T): T {
 
 function requireSha256(value: string, label: string): void {
   if (!SHA256.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
-}
-
-function requireSafeId(value: string, label: string): void {
-  if (!SAFE_ID.test(value)) throw new Error(`${label} must be a safe opaque identifier`);
 }
 
 function pcmFromCapture(capture: Lc4CapturedOutput): Uint8Array {
@@ -253,21 +250,13 @@ export function lc4DevLedgerGenesisSha256(input: Readonly<{
   authorization_binding_sha256: string;
   authority_public_key_fingerprint_sha256: string;
 }>): string {
-  requireSafeId(input.execution_id, "LC4-DEV ledger execution ID");
-  requireSha256(input.prepare_sha256, "LC4-DEV ledger prepare hash");
-  requireSha256(input.authorization_binding_sha256, "LC4-DEV ledger authorization binding");
-  requireSha256(input.authority_public_key_fingerprint_sha256, "LC4-DEV ledger authority fingerprint");
-  return hash(LEDGER_GENESIS_DOMAIN, {
-    schema_version: 2,
-    operator_version: "HACC-LC4-DEV-OPERATOR-v1",
-    ...input,
-  });
+  return lc4DevSharedLedgerGenesisSha256(input);
 }
 
 function authorizationBindingSha256(preflight: Lc4DevLivePreflightArtifact): string {
   const { immutable_ledger_genesis_sha256: _excluded, ...body } = preflight.authorization.body;
   void _excluded;
-  return hash(AUTHORIZATION_BINDING_DOMAIN, body);
+  return lc4DevSharedAuthorizationBindingSha256(body);
 }
 
 async function writeLedgerIntent(input: Readonly<{
