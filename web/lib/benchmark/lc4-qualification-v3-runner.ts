@@ -2765,7 +2765,9 @@ export async function reportLc4QualificationV3(input: Readonly<{
           (total, evidence) => total + evidence.observations.length,
           paidReplayEventCount,
         );
-        const replayChainHeadSha256 = replayHeads.some((head) => head === null)
+        const replayChainHeadSha256 = replayHeads.length === 0
+          ? null
+          : replayHeads.some((head) => head === null)
           ? null
           : sha256Hex(
               `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`,

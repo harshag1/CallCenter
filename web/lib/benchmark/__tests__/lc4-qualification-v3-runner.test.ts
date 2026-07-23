@@ -1466,6 +1466,79 @@ describe("LC4 qualification v3 signed runner", () => {
     await expect(lstat(join(root, "attempts"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("reports a zero-observation three-provider setup failure with a null replay head", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-zero-observation-"));
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
+    roots.push(root, repositoryRoot);
+    const authority = keys();
+    const terminalKey = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const plan = await prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId: "qualification-v3-zero-observation-plan",
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+    const authorization = authorizationFor(
+      plan,
+      authority.privatePem,
+      terminalKey,
+      "qualification-v3-zero-observation-attempt",
+    );
+    const terminal = await runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => NOW,
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+        createClient: (provider) => {
+          const client = new SetupClient(provider, true);
+          client.connect = async () => { throw new Error("synthetic transport failure before wire observation"); };
+          return client;
+        },
+        executeRoundtrip: async (input) => passedExecution(input),
+      },
+    });
+    expect(terminal.body).toMatchObject({
+      status: "failed",
+      primary_failure_class: "setup_acceptance_failed",
+      provider_sessions_opened: 3,
+      paid_sessions_opened: 0,
+      generation_phases_attempted: 0,
+      results: [],
+      package_bindings: {
+        replay_chain_head_sha256: null,
+        replay_event_count: 0,
+      },
+    });
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .resolves.toMatchObject({
+        complete_attempts: 1,
+        retained_completed_executions: 0,
+        replay_verified_completed_executions: 0,
+        fully_replay_verified_complete_attempts: 0,
+        latest: {
+          status: "failed",
+          primary_failure_class: "setup_acceptance_failed",
+          provider_sessions_opened: 3,
+          paid_sessions_opened: 0,
+        },
+      });
+  });
+
   it("strands authority and retains a signed refusal before budget or provider construction", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-refusal-"));
     const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
