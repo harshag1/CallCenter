@@ -33,13 +33,17 @@ import {
   realtimeWireIdentitySha256,
   verifyRealtimeWireObservationChain,
 } from "../realtime/client/wire-evidence";
-import { realtimeToolFrontierSha256 } from "../realtime/client/openai-compatible";
+import {
+  XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR,
+  realtimeToolFrontierSha256,
+} from "../realtime/client/openai-compatible";
 import {
   LC4_XAI_SERVER_VAD_SHA256,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
+  isAcceptedXaiServerVadSilenceTail,
 } from "./xai-server-vad";
 import {
   replayProviderToolRoundtrip,
@@ -1011,6 +1015,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     });
     operations.push("preregistered_pcm_paced_20ms");
     let transportSuffixPlan: ReturnType<typeof packetizeRealtimePcm16> | null = null;
+    let transportSuffixCompletion: "full_plan_delivered" | "provider_native_speech_stop" | null = null;
     if (input.provider === "xai") {
       if (input.audio.sampleRateHz !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz
         || input.profile.chunkMs !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms) {
@@ -1027,24 +1032,64 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         failure = "audio_delivery_contract_failed";
         throw new Error("xAI server-VAD silence-tail PCM failed its frozen hash");
       }
-      transportSuffixPlan = packetizeRealtimePcm16(suffixAudio, input.profile);
-      const suffixReceipt = await deliverRealtimePcm16({
-        client: input.client,
-        audio: suffixAudio,
-        profile: input.profile,
-        runtime: input.runtime ?? SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
-        signal: input.signal ?? new AbortController().signal,
-      });
-      if (suffixReceipt.total_byte_length !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
-        || suffixReceipt.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
-        || suffixReceipt.chunk_count !== transportSuffixPlan.frames.length
-        || suffixReceipt.frame_byte_length !== plan.frame_byte_length
-        || suffixReceipt.tail_byte_length !== plan.frame_byte_length
-        || suffixReceipt.chunks.some((chunk, index) => chunk.scheduled_offset_ms !== index * 20)) {
-        failure = "audio_delivery_contract_failed";
-        throw new Error("xAI server-VAD silence-tail delivery contract failed");
+      const fullTransportSuffixPlan = packetizeRealtimePcm16(suffixAudio, input.profile);
+      try {
+        const suffixReceipt = await deliverRealtimePcm16({
+          client: input.client,
+          audio: suffixAudio,
+          profile: input.profile,
+          runtime: input.runtime ?? SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
+          signal: input.signal ?? new AbortController().signal,
+        });
+        if (suffixReceipt.total_byte_length !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+          || suffixReceipt.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+          || suffixReceipt.chunk_count !== fullTransportSuffixPlan.frames.length
+          || suffixReceipt.frame_byte_length !== plan.frame_byte_length
+          || suffixReceipt.tail_byte_length !== plan.frame_byte_length
+          || suffixReceipt.chunks.some((chunk, index) => chunk.scheduled_offset_ms !== index * 20)) {
+          failure = "audio_delivery_contract_failed";
+          throw new Error("xAI server-VAD silence-tail delivery contract failed");
+        }
+        transportSuffixPlan = fullTransportSuffixPlan;
+        transportSuffixCompletion = "full_plan_delivered";
+      } catch (error) {
+        const appendedChunks = error instanceof RealtimeAudioDeliveryError
+          ? error.chunks_appended
+          : 0;
+        const appendedBytes = error instanceof RealtimeAudioDeliveryError
+          ? error.bytes_appended
+          : 0;
+        const expectedBytes = appendedChunks * fullTransportSuffixPlan.frame_byte_length;
+        const stopIndex = wire.findIndex(({ observationSha256 }) => (
+          observationSha256 === speechStopObservationSha256
+        ));
+        const lastAppendIndex = wire.findLastIndex((observation) => (
+          observation.direction === "outbound"
+          && observation.wireType === "input_audio_buffer.append"
+        ));
+        const providerStoppedCompletePrefix = error instanceof RealtimeAudioDeliveryError
+          && error.code === "append_failed"
+          && error.cause instanceof Error
+          && error.cause.message === XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR
+          && failure === "none"
+          && speechStopObservationSha256 !== null
+          && appendedChunks >= LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count
+          && appendedChunks < fullTransportSuffixPlan.frames.length
+          && appendedBytes === expectedBytes
+          && stopIndex > lastAppendIndex;
+        if (!providerStoppedCompletePrefix) throw error;
+        const frames = freeze(fullTransportSuffixPlan.frames.slice(0, appendedChunks));
+        transportSuffixPlan = freeze({
+          frame_byte_length: fullTransportSuffixPlan.frame_byte_length,
+          frames,
+          total_byte_length: appendedBytes,
+          tail_byte_length: fullTransportSuffixPlan.frame_byte_length,
+        });
+        transportSuffixCompletion = "provider_native_speech_stop";
       }
-      operations.push("deterministic_server_vad_silence_tail_paced_20ms");
+      operations.push(transportSuffixCompletion === "full_plan_delivered"
+        ? "deterministic_server_vad_silence_tail_paced_20ms"
+        : "server_vad_silence_tail_accepted_at_native_stop");
     }
     inputAudioEvidence = projectRoundtripInputAudioEvidence(wire, {
       chunk_sha256s: freeze(plan.frames.map((frame) => sha256Hex(frame.data))),
@@ -1062,10 +1107,12 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       ...(transportSuffixPlan === null ? {} : {
         transport_suffix: {
           purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+          completion: transportSuffixCompletion!,
           policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
-          pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
-          audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
-          duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+          pcm_sha256: sha256Hex(new Uint8Array(transportSuffixPlan.total_byte_length)),
+          audio_bytes: transportSuffixPlan.total_byte_length,
+          duration_ms: transportSuffixPlan.total_byte_length
+            / 2 / LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz * 1_000,
           chunk_sha256s: freeze(transportSuffixPlan.frames.map((frame) => sha256Hex(frame.data))),
           chunk_list_sha256: roundtripInputAudioChunkListSha256(
             transportSuffixPlan.frames.map((frame) => sha256Hex(frame.data)),
@@ -1491,13 +1538,7 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       if (suffix === undefined
         || suffix.purpose !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose
         || suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
-        || suffix.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
-        || suffix.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
-        || suffix.duration_ms !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms
-        || suffix.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
-        || suffix.frame_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz
-          * 2 * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms / 1_000
-        || suffix.tail_bytes !== suffix.frame_bytes
+        || !isAcceptedXaiServerVadSilenceTail(suffix)
         || suffix.chunk_sha256s.length !== suffix.chunk_count
         || suffix.observation_sha256s.length !== suffix.chunk_count
         || callerLastObservation < 0

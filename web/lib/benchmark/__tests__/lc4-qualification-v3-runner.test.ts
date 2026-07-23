@@ -502,6 +502,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     ...(input.provider !== "xai" ? {} : {
       transport_suffix: {
         purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+        completion: "full_plan_delivered" as const,
         policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
         pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
         audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,

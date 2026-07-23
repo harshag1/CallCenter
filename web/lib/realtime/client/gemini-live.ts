@@ -301,6 +301,7 @@ export function normalizeGeminiUsage(raw: Record<string, unknown>): NormalizedRe
     ...(inputTextTokens === undefined ? {} : { inputTextTokens }),
     ...(outputAudioTokens === undefined ? {} : { outputAudioTokens }),
     ...(outputTextTokens === undefined ? {} : { outputTextTokens }),
+    meteringSource: "provider_reported",
     raw,
   };
 }

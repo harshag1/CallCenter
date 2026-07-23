@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import type { LiveStsProvider } from "../live-sts-development-experiment";
 import { DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE } from "../orchestrator";
+import { replayProviderToolRoundtrip } from "../provider-roundtrip-replay";
 import {
   LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_SOURCE_TEXT,
@@ -38,6 +39,8 @@ import {
   realtimeWireProjectionSha256,
 } from "../../realtime/client/wire-evidence";
 import { createRealtimeTransportFailureDiagnostic } from "../../realtime/client/transport-diagnostics";
+import { normalizeGeminiUsage } from "../../realtime/client/gemini-live";
+import { XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR } from "../../realtime/client/openai-compatible";
 import {
   LC4_XAI_SERVER_VAD_SHA256,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL,
@@ -140,8 +143,11 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly omitContinuationRequestWire: boolean;
   readonly emitOpenAiMultiFrameCall: boolean;
   readonly geminiProviderNativeWireShape: boolean;
+  readonly serverVadStopAfterSuffixChunks: number;
+  readonly serverVadPostStopAppendError: "phase_guard" | "unrelated";
   appendedBytes = 0;
   speechStartEmitted = false;
+  serverVadStopped = false;
   responseCount = 0;
   readonly responseToolChoices: unknown[] = [];
   pendingControl: { sha256: string; byteLength: number; authority: string } | null = null;
@@ -167,6 +173,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
     omitContinuationRequestWire?: boolean;
     emitOpenAiMultiFrameCall?: boolean;
     geminiProviderNativeWireShape?: boolean;
+    serverVadStopAfterSuffixChunks?: number;
+    serverVadPostStopAppendError?: "phase_guard" | "unrelated";
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -194,6 +202,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
     this.omitContinuationRequestWire = options.omitContinuationRequestWire === true;
     this.emitOpenAiMultiFrameCall = options.emitOpenAiMultiFrameCall === true;
     this.geminiProviderNativeWireShape = options.geminiProviderNativeWireShape === true;
+    this.serverVadStopAfterSuffixChunks = options.serverVadStopAfterSuffixChunks
+      ?? LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count;
+    this.serverVadPostStopAppendError = options.serverVadPostStopAppendError ?? "phase_guard";
   }
 
   get serverVadTransportParitySha256() {
@@ -587,6 +598,11 @@ class RoundtripClient implements NormalizedRealtimeClient {
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio(audio: Pcm16Audio) {
+    if (this.provider === "xai" && this.serverVadStopped) {
+      throw new Error(this.serverVadPostStopAppendError === "phase_guard"
+        ? XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR
+        : "unrelated websocket append failure");
+    }
     this.appendedBytes += audio.data.byteLength;
     this.#observe(
       "outbound",
@@ -616,7 +632,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
         },
       });
     }
-    if (this.appendedBytes !== 24_000 * 1.2 * 2 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length) return;
+    if (this.appendedBytes !== 24_000 * 1.2 * 2
+      + this.serverVadStopAfterSuffixChunks * 960) return;
+    this.serverVadStopped = true;
     if (this.emitEarlyResponseOnCommit) {
       const early = this.#observe("inbound", "response.created", {
         responseIdSha256: realtimeWireIdentitySha256("response", "xai-early"),
@@ -899,6 +917,80 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
   }
 
+  it("accepts an exact zero-PCM suffix prefix when native xAI VAD owns the stop boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const acceptedChunks = 39;
+    const client = new RoundtripClient("xai", { serverVadStopAfterSuffixChunks: acceptedChunks });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model", client, audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+    });
+
+    expect(execution).toMatchObject({ status: "passed", failure_class: "none" });
+    expect(execution.input_audio_evidence?.transport_suffix).toMatchObject({
+      completion: "provider_native_speech_stop",
+      audio_bytes: acceptedChunks * 960,
+      duration_ms: acceptedChunks * 20,
+      chunk_count: acceptedChunks,
+      pcm_sha256: sha256Hex(new Uint8Array(acceptedChunks * 960)),
+    });
+    expect(client.appendedBytes).toBe(audio.data.byteLength + acceptedChunks * 960);
+    expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+    const replaySummary = execution.replay_summary!;
+    const malformedSummary = {
+      ...replaySummary,
+      input_audio: {
+        ...replaySummary.input_audio,
+        transport_suffix: {
+          ...replaySummary.input_audio.transport_suffix!,
+          completion: "full_plan_delivered" as const,
+        },
+      },
+    };
+    const replay = replayProviderToolRoundtrip({
+      expected: { provider: "xai", model: execution.model },
+      summary: malformedSummary,
+      wire_observations: execution.wire_observations,
+      sanitized_usage: execution.sanitized_usage,
+      causal_binding: execution.replay_causal_binding!,
+    });
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("summary_input_audio_suffix_completion_invalid");
+  });
+
+  for (const diagnostic of [
+    { id: "unrelated append failure", chunks: 39, error: "unrelated" as const },
+    {
+      id: "native stop before the configured minimum",
+      chunks: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count - 1,
+      error: "phase_guard" as const,
+    },
+  ]) {
+    it(`does not reclassify ${diagnostic.id} as successful delimiter completion`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+      roots.push(root);
+      const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+      const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+      const execution = await executeLc4S2sToolRoundtrip({
+        provider: "xai", model: "xai-model",
+        client: new RoundtripClient("xai", {
+          serverVadStopAfterSuffixChunks: diagnostic.chunks,
+          serverVadPostStopAppendError: diagnostic.error,
+        }),
+        audio, audioObject: artifact.provider_renditions.xai,
+        profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      });
+      expect(execution).toMatchObject({ status: "failed", failure_class: "audio_delivery_failed" });
+      expect(execution.input_audio_evidence).toBeNull();
+    });
+  }
+
   it("binds Gemini's provider-ID-free combined terminal and usage frame to the local continuation", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
     roots.push(root);
@@ -918,7 +1010,16 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       client: new RoundtripClient("gemini", {
         geminiProviderNativeWireShape: true,
         providerUsageCounters: counters,
-        continuationUsage: { ...counters, meteringSource: "provider_reported", raw: {} },
+        continuationUsage: normalizeGeminiUsage({
+          promptTokenCount: 1_437,
+          responseTokenCount: 77,
+          totalTokenCount: 1_514,
+          promptTokensDetails: [
+            { modality: "AUDIO", tokenCount: 482 },
+            { modality: "TEXT", tokenCount: 753 },
+          ],
+          responseTokensDetails: [{ modality: "AUDIO", tokenCount: 56 }],
+        }),
       }),
       audio,
       audioObject: artifact.provider_renditions.gemini,

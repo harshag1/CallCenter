@@ -7,6 +7,10 @@ import {
   realtimeWireIdentitySha256,
   verifyRealtimeWireObservationChain,
 } from "../realtime/client/wire-evidence";
+import {
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+  isAcceptedXaiServerVadSilenceTail,
+} from "./xai-server-vad";
 
 export const PROVIDER_ROUNDTRIP_REPLAY_VERSION =
   "HACC-PROVIDER-ROUNDTRIP-REPLAY-v3" as const;
@@ -68,6 +72,7 @@ export type RoundtripInputAudioEvidence = Readonly<{
 
 export type RoundtripInputAudioTransportSuffixEvidence = Readonly<{
   purpose: "server_vad_end_of_speech_delimiter";
+  completion: "full_plan_delivered" | "provider_native_speech_stop";
   policy_sha256: string;
   pcm_sha256: string;
   audio_bytes: number;
@@ -446,6 +451,8 @@ export function projectRoundtripInputAudioEvidence(
   const suffix = expected.transport_suffix;
   if (suffix !== undefined && (
     suffix.purpose !== "server_vad_end_of_speech_delimiter"
+    || (suffix.completion !== "full_plan_delivered"
+      && suffix.completion !== "provider_native_speech_stop")
     || !SHA256.test(suffix.policy_sha256)
     || !SHA256.test(suffix.pcm_sha256)
     || !Number.isSafeInteger(suffix.audio_bytes) || suffix.audio_bytes <= 0
@@ -909,6 +916,12 @@ export function replayProviderToolRoundtrip(
       for (const hash of suffix.chunk_sha256s) {
         pushHashError(errors, hash, "summary_input_audio_suffix_chunk_invalid");
       }
+      if (summary.provider !== "xai") {
+        errors.push("summary_input_audio_suffix_provider_invalid");
+      } else if (suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
+        || !isAcceptedXaiServerVadSilenceTail(suffix)) {
+        errors.push("summary_input_audio_suffix_completion_invalid");
+      }
     }
     for (const hash of summary.output_audio.observation_sha256s) {
       pushHashError(errors, hash, "summary_output_audio_observation_invalid");
@@ -974,6 +987,7 @@ export function replayProviderToolRoundtrip(
       ...(summary.input_audio.transport_suffix === undefined ? {} : {
         transport_suffix: {
           purpose: summary.input_audio.transport_suffix.purpose,
+          completion: summary.input_audio.transport_suffix.completion,
           policy_sha256: summary.input_audio.transport_suffix.policy_sha256,
           pcm_sha256: summary.input_audio.transport_suffix.pcm_sha256,
           audio_bytes: summary.input_audio.transport_suffix.audio_bytes,

@@ -79,9 +79,8 @@ import {
   type RoundtripSanitizedUsage,
 } from "./provider-roundtrip-replay";
 import {
-  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
-  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+  isAcceptedXaiServerVadSilenceTail,
 } from "./xai-server-vad";
 import {
   createLc4QualificationPayloadManifestV5,
@@ -915,8 +914,7 @@ function createXaiServerVadGateBBindingArtifact(input: Readonly<{
     || execution.replay_sha256 === null
     || silenceTail === undefined
     || silenceTail.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
-    || silenceTail.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
-    || silenceTail.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+    || !isAcceptedXaiServerVadSilenceTail(silenceTail)
     || silenceTailLast < 0 || speechStop <= silenceTailLast) {
     throw new Error("xAI Gate B binding lacks same-epoch payload and roundtrip evidence");
   }
@@ -1037,8 +1035,7 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
   if (summary.turn_boundary_mode !== "provider_native_server_vad"
     || summary.server_vad_setting_sha256 !== LC4_XAI_SERVER_VAD_SETTING_SHA256
     || silenceTail?.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
-    || silenceTail.pcm_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256
-    || silenceTail.audio_bytes !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+    || !isAcceptedXaiServerVadSilenceTail(silenceTail)
     || summary.input_audio_evidence?.audio_bytes !== summary.delivery?.audio_bytes
     || summary.input_audio_evidence?.audio_sha256 !== summary.audio.sha256
     || ordered.some((position) => position < 0)

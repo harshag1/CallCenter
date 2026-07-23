@@ -483,7 +483,10 @@ describe("GeminiLiveClient", () => {
       type: "usage",
       scope: "response",
       responseId: continuationResponseId,
-      usage: expect.objectContaining({ totalTokens: 1_514 }),
+      usage: expect.objectContaining({
+        totalTokens: 1_514,
+        meteringSource: "provider_reported",
+      }),
     }));
     const terminal = test.events.find((event) => (
       event.type === "response.completed" && event.responseId === continuationResponseId
@@ -1837,6 +1840,7 @@ describe("GeminiLiveClient", () => {
     expect(normalizeGeminiUsage({ promptTokenCount: 12, responseTokenCount: 4 })).toEqual({
       totalInputTokens: 12,
       totalOutputTokens: 4,
+      meteringSource: "provider_reported",
       raw: { promptTokenCount: 12, responseTokenCount: 4 },
     });
   });

@@ -50,6 +50,9 @@ import type {
 
 type OpenAICompatibleProvider = "openai" | "xai";
 
+export const XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR =
+  "A server-VAD turn must be acknowledged before audio and cannot receive audio after speech stopped" as const;
+
 export type OpenAICompatibleRealtimeClientOptions = {
   provider: OpenAICompatibleProvider;
   url: string;
@@ -410,7 +413,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       && (!this.pendingServerVadTurn
         || (this.pendingServerVadTurn.phase !== "ready_for_audio"
           && this.pendingServerVadTurn.phase !== "speech_started"))) {
-      throw new Error("A server-VAD turn must be acknowledged before audio and cannot receive audio after speech stopped");
+      throw new Error(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
     }
     if (this.pendingResponsePreparation) {
       throw new Error("Cannot append audio after preparing the next realtime response");
