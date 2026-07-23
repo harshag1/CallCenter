@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ import {
 } from "../lc4-authoritative-obligation-evidence";
 import {
   auditLc4PublicDevLiveReadiness,
+  createLc4DevelopmentLiveDependencies,
   createLc4HashChainedLedgerWriter,
   createLc4ImmutableCas,
   createLc4PinnedListenerManifestSha256,
@@ -25,6 +26,10 @@ import {
   replayLc4DevAuthorityReport,
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
+import {
+  createLc4DevOperatorAuthorizationDag,
+  type Lc4DevOperatorSigner,
+} from "../lc4-development-operator-cli";
 import {
   createLc4DevReplayEvidenceStore,
   verifyLc4DevReplayLedger,
@@ -42,6 +47,8 @@ import type {
   Lc4DevLivePreflightArtifact,
   Lc4DevLiveRunArtifact,
 } from "../lc4-development-live-runner";
+import { createLc4DevLivePrepareArtifact } from "../lc4-development-live-runner";
+import { LC4_PROVIDER_PROFILE_MANIFEST } from "../lc4-provider-profiles";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
   createBenchmarkKernelAttestationSigner,
@@ -67,6 +74,122 @@ function listenerAuthority() {
       publicKeyPem: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     }),
   });
+}
+
+function operatorSigner(): Lc4DevOperatorSigner {
+  const pair = generateKeyPairSync("ed25519");
+  const publicKeySpkiDer = pair.publicKey.export({ type: "spki", format: "der" });
+  return Object.freeze({
+    private_key: pair.privateKey,
+    public_key_spki_der: publicKeySpkiDer,
+    public_key_spki_pem: pair.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    private_key_pkcs8_pem: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    public_key_fingerprint_sha256: sha256Hex(publicKeySpkiDer),
+  });
+}
+
+function liveDependencyFactoryFixture(root: string) {
+  const corpus = createLc4PublicDevelopmentCorpus();
+  const audioBindings = (["openai", "gemini", "xai"] as const).flatMap((provider) =>
+    corpus.opportunities.map((opportunity) => ({
+      opportunity_id: opportunity.id,
+      provider,
+      pcm_sha256: sha256Hex(`factory-fixture:${provider}:${opportunity.id}`),
+      pcm_byte_length: 2,
+      sample_rate_hz: LC4_PROVIDER_PROFILE_MANIFEST.providers[provider].input_sample_rate_hz,
+      source_text_sha256: opportunity.canonical_caller_text_sha256,
+    })),
+  );
+  const prepare = createLc4DevLivePrepareArtifact({
+    execution_id: "lc4-dev-factory-contract-test",
+    created_at: "2026-07-22T06:00:00.000Z",
+    source_commit: "1".repeat(40),
+    source_tree_sha256: sha256Hex("lc4-dev-factory-contract-tree"),
+    audio_manifest_sha256: sha256Hex("lc4-dev-factory-contract-audio"),
+    audio_bindings: audioBindings,
+    corpus,
+  });
+  const playbackAuthority = listenerAuthority();
+  const evaluator = {
+    evaluator_contract_sha256: sha256Hex("lc4-dev-factory-evaluator-contract"),
+    evaluator_build_sha256: sha256Hex("lc4-dev-factory-evaluator-build"),
+    calibration_sha256: sha256Hex("lc4-dev-factory-evaluator-calibration"),
+    async evaluate() { throw new Error("factory construction must not evaluate provider audio"); },
+  } as Lc4PinnedListenerEvaluator;
+  const criteria = corpus.opportunities.map((opportunity) => Object.freeze({
+    opportunity_id: opportunity.id,
+    criterion_plan_sha256: sha256Hex(`factory-criterion:${opportunity.id}`),
+  }));
+  const listenerManifest = createLc4PinnedListenerManifestSha256({
+    corpus_sha256: corpus.artifact_sha256,
+    evaluator,
+    criteria,
+    playback_authority_manifest_sha256: playbackAuthority.authority_manifest_sha256,
+  });
+  const controlManifest = sha256Hex("lc4-dev-factory-control-manifest");
+  const authority = operatorSigner();
+  const dag = createLc4DevOperatorAuthorizationDag({
+    prepare,
+    qualification: {
+      terminal_root_sha256: sha256Hex("lc4-dev-factory-qualification-root"),
+      retained_artifact_sha256: sha256Hex("lc4-dev-factory-qualification-artifact"),
+    } as never,
+    credential_identity_set_sha256: sha256Hex("lc4-dev-factory-credentials"),
+    roots: {
+      control_plane_manifest_sha256: controlManifest,
+      listener_evidence_manifest_sha256: listenerManifest,
+      runtime_config_sha256: sha256Hex("lc4-dev-factory-runtime-config"),
+      asr_evaluator_build_sha256: evaluator.evaluator_build_sha256,
+      asr_evaluator_toolchain_sha256: sha256Hex("lc4-dev-factory-evaluator-toolchain"),
+    },
+    signer: authority,
+    authorization_nonce_sha256: sha256Hex("lc4-dev-factory-authorization-nonce"),
+    not_before: "2026-07-22T06:00:00.000Z",
+    expires_at: "2026-07-22T06:30:00.000Z",
+  });
+  const preflight = {
+    execution_id: prepare.execution_id,
+    prepare_sha256: prepare.prepare_sha256,
+    preflight_sha256: sha256Hex("lc4-dev-factory-preflight"),
+    authorization_artifact_sha256: dag.authorization.artifact_sha256,
+    immutable_ledger_genesis_sha256: dag.immutable_ledger_genesis_sha256,
+    authority_trust_root_sha256: authority.public_key_fingerprint_sha256,
+    control_plane_manifest_sha256: controlManifest,
+    listener_evidence_manifest_sha256: listenerManifest,
+    authorization: dag.authorization,
+  } as Lc4DevLivePreflightArtifact;
+  const authorityKeys = generateKeyPairSync("ed25519");
+  const authoritySigner = createBenchmarkKernelAttestationSigner({
+    keyId: "lc4-dev-factory-authority",
+    privateKeyPem: authorityKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  });
+  const options = {
+    prepare,
+    preflight,
+    corpus,
+    cas_root_dir: join(root, "cas"),
+    ledger_path: join(root, "ledger.jsonl"),
+    caller_audio: { async load() { throw new Error("factory construction must not load audio"); } },
+    caller_branch: {
+      matrix: { matrix_artifact_sha256: sha256Hex("lc4-dev-factory-branch-matrix") },
+      authority: {},
+      trust: { key_id: "factory-branch", public_key_pem: "unused" },
+      async load() { throw new Error("factory construction must not load branch audio"); },
+    },
+    authority_signer: authoritySigner,
+    control: {
+      kind: "gateway-flow-toolworld-crp-workers-v1",
+      manifest_sha256: controlManifest,
+      gateway_executor: {},
+    },
+    repair: { openai: {}, gemini: {}, xai: {} },
+    criteria,
+    evaluator,
+    playback_authority: playbackAuthority,
+    playback_authority_manifest_sha256: playbackAuthority.authority_manifest_sha256,
+    create_adapter() { return {}; },
+  } as unknown as Parameters<typeof createLc4DevelopmentLiveDependencies>[0];
+  return { dag, options };
 }
 
 async function temporaryDirectory(): Promise<string> {
@@ -215,6 +338,46 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
 }
 
 describe("LC4-DEV concrete live dependencies", () => {
+  it("accepts the operator's v2 preflight in the real dependency factory and rejects a v1 operator genesis", async () => {
+    const root = await temporaryDirectory();
+    const { dag, options } = liveDependencyFactoryFixture(root);
+    const dependencies = await createLc4DevelopmentLiveDependencies(options);
+    expect(dependencies.ledger.genesis_sha256).toBe(dag.immutable_ledger_genesis_sha256);
+    await dependencies.finalize();
+
+    const { immutable_ledger_genesis_sha256: _excluded, ...authorizationBody } = options.preflight.authorization.body;
+    void _excluded;
+    const authorizationBinding = sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-authorization-binding/v2\n${canonicalJson(authorizationBody)}`,
+    );
+    const legacyGenesis = sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n${canonicalJson({
+        schema_version: 2,
+        operator_version: "HACC-LC4-DEV-OPERATOR-v1",
+        execution_id: options.prepare.execution_id,
+        prepare_sha256: options.prepare.prepare_sha256,
+        authorization_binding_sha256: authorizationBinding,
+        authority_public_key_fingerprint_sha256: options.preflight.authority_trust_root_sha256,
+      })}`,
+    );
+    const stalePreflight = {
+      ...options.preflight,
+      immutable_ledger_genesis_sha256: legacyGenesis,
+      authorization: {
+        ...options.preflight.authorization,
+        body: { ...options.preflight.authorization.body, immutable_ledger_genesis_sha256: legacyGenesis },
+      },
+    };
+    await expect(createLc4DevelopmentLiveDependencies({
+      ...options,
+      preflight: stalePreflight,
+      cas_root_dir: join(root, "legacy-cas-must-not-exist"),
+      ledger_path: join(root, "legacy-ledger-must-not-exist.jsonl"),
+    })).rejects.toThrow("authorization binding or ledger genesis differs from preflight");
+    await expect(access(join(root, "legacy-cas-must-not-exist"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(join(root, "legacy-ledger-must-not-exist.jsonl"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("keeps a retained run with no authority terminal DAG unscorable, never 0/N", async () => {
     const root = await temporaryDirectory();
     await createLc4ImmutableCas(join(root, "cas"));
