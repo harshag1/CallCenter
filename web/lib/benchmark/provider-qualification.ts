@@ -687,8 +687,8 @@ function acknowledgementResult(
           ...(boundedXaiToolAlias ? { aliasNormalization: xaiToolAlias } : {}),
         })
       : undefined;
-    if (conditionalServerVad || voiceProof.status !== "verified") {
-      const initialSnapshotRequired = initialTurnExact || voiceProof.status !== "verified";
+    if (conditionalServerVad) {
+      const initialSnapshotRequired = initialTurnExact;
       return {
         status: "passed",
         code: initialSnapshotRequired
@@ -908,15 +908,20 @@ export function assertProviderQualificationArtifactIntegrity(
     throw new Error("provider qualification aggregate status is inconsistent");
   }
   for (const result of artifact.results) {
-    const conditionalServerVad = result.code === "acknowledged_unverifiable_server_vad"
-      || result.code === "initial_snapshot_exact_only";
+    const conditionalServerVad = result.turnBoundaryVerification === "requires_paid_behavioral_canary";
     if (conditionalServerVad !== (result.provider === "xai"
       && result.status === "passed"
+      && result.turnBoundaryVerification === "requires_paid_behavioral_canary"
       && (result.acknowledgementMode === "conditional_server_vad_echo"
         || result.acknowledgementMode === "initial_snapshot_exact_only")
-      && result.turnBoundaryVerification === "requires_paid_behavioral_canary")) {
+      && (result.code === "acknowledged_unverifiable_server_vad"
+        || result.code === "initial_snapshot_exact_only"))) {
       throw new Error("provider qualification server-VAD classification is inconsistent");
     }
+    if ((result.code === "acknowledged_unverifiable_server_vad") !== (
+      conditionalServerVad
+      && result.acknowledgementMode === "conditional_server_vad_echo"
+    )) throw new Error("provider qualification server-VAD acknowledgement mode is inconsistent");
     if (conditionalServerVad && (
       result.turnBoundaryEvidence?.requestedSettingSha256 !== XAI_SERVER_VAD_SETTING_SHA256
       || (result.turnBoundaryEvidence.acknowledgement !== "bounded_server_vad_omission"
@@ -927,19 +932,35 @@ export function assertProviderQualificationArtifactIntegrity(
       || result.acknowledgementSha256 !== acknowledgementSha256(result.configurationEvidence)
       || !validSetupWireEvidence(result.setupWireEvidence)
     )) throw new Error("provider qualification server-VAD omission evidence is inconsistent");
+    const retainedInitialEvidence = result.initialConfigurationEvidence;
+    const retainedVoiceProof = result.configurationEvidence?.fields.voice;
+    const initialTurnFallback = result.turnBoundaryEvidence?.acknowledgement === "initial_snapshot_exact_only"
+      && result.turnBoundaryVerification === "requires_paid_behavioral_canary"
+      && retainedInitialEvidence?.exactFields.includes("turn_detection") === true;
+    const initialVoiceFallback = retainedVoiceProof?.status === "unverifiable"
+      && retainedVoiceProof.contradiction === undefined
+      && retainedVoiceProof.omission?.kind === "field_omitted"
+      && canonicalJson(retainedVoiceProof.omission.paths) === canonicalJson(["voice"])
+      && retainedVoiceProof.omission.acknowledgedShape === "missing"
+      && retainedInitialEvidence?.exactFields.includes("voice") === true;
     if ((result.code === "initial_snapshot_exact_only") !== (
       result.acknowledgementMode === "initial_snapshot_exact_only"
-      && result.turnBoundaryEvidence?.acknowledgement === "initial_snapshot_exact_only"
-      && result.initialConfigurationEvidence?.exactFields.includes("turn_detection") === true
-      && result.initialConfigurationEvidence.scope === "provider_created_defaults_before_client_update"
-      && result.initialConfigurationEvidence.claimBoundary === "matching_initial_snapshot_does_not_acknowledge_later_session_update"
+      && initialTurnFallback
+      && retainedInitialEvidence?.scope === "provider_created_defaults_before_client_update"
+      && retainedInitialEvidence.claimBoundary === "matching_initial_snapshot_does_not_acknowledge_later_session_update"
       && result.setupWireEvidence !== undefined
       && result.configurationEvidence !== undefined
-      && canonicalJson(result.initialConfigurationEvidence) === canonicalJson(initialConfigurationEvidence(
+      && canonicalJson(retainedInitialEvidence) === canonicalJson(initialConfigurationEvidence(
         result.setupWireEvidence,
         result.configurationEvidence,
       ))
     )) throw new Error("provider qualification initial-exact evidence is inconsistent");
+    if (result.provider === "xai"
+      && result.status === "passed"
+      && retainedVoiceProof?.status === "unverifiable"
+      && !initialVoiceFallback) {
+      throw new Error("provider qualification initial voice fallback evidence is inconsistent");
+    }
     const retainedToolProof = result.configurationEvidence?.fields.tools;
     const retainedToolOmissions = retainedToolProof?.status === "unverifiable"
       && retainedToolProof.omission?.kind === "requested_paths_omitted"
@@ -949,6 +970,9 @@ export function assertProviderQualificationArtifactIntegrity(
     const acknowledgementObservation = result.setupWireEvidence?.observations.find((observation) => (
       observation.observationSha256 === result.setupWireEvidence?.acknowledgementObservationSha256
     ));
+    const retainedBoundaryOmissions = result.toolBoundaryEvidence === undefined
+      ? null
+      : sortedUniquePaths(result.toolBoundaryEvidence.omittedPaths);
     if (result.toolBoundaryEvidence !== undefined && (
       result.provider !== "xai"
       || result.status !== "passed"
@@ -958,7 +982,10 @@ export function assertProviderQualificationArtifactIntegrity(
       || result.toolBoundaryEvidence.exactFunctionTypeVerified !== true
       || (result.toolBoundaryEvidence.verification !== "bounded_gateway_metadata_omission_requires_paid_exact_call"
         && result.toolBoundaryEvidence.verification !== "xai_function_wire_alias_requires_paid_exact_call")
-      || boundedOmission(result.toolBoundaryEvidence.omittedPaths, XAI_GATEWAY_TOOL_OMITTED_PATH_SET) === null
+      || retainedBoundaryOmissions === null
+      || !retainedBoundaryOmissions.every((path) => XAI_GATEWAY_TOOL_OMITTED_PATH_SET.has(path))
+      || (result.toolBoundaryEvidence.verification === "bounded_gateway_metadata_omission_requires_paid_exact_call"
+        && retainedBoundaryOmissions.length === 0)
       || (result.toolBoundaryEvidence.verification === "bounded_gateway_metadata_omission_requires_paid_exact_call"
         && canonicalJson(result.toolBoundaryEvidence.omittedPaths) !== canonicalJson(retainedToolOmissions))
       || (result.toolBoundaryEvidence.verification === "xai_function_wire_alias_requires_paid_exact_call"

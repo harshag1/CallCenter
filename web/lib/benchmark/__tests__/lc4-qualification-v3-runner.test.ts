@@ -1,5 +1,5 @@
-import { generateKeyPairSync } from "node:crypto";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,7 +28,14 @@ import {
   type Lc4QualificationV3AuthorizationArtifact,
   type Lc4QualificationV3GitSource,
   type Lc4QualificationV3PlanArtifact,
+  type Lc4QualificationV3TerminalBody,
 } from "../lc4-qualification-v3-runner";
+import {
+  createLc4QualificationPayloadManifestV5,
+  createSignedLc4QualificationPackageEnvelopeV5,
+  type Lc4QualificationPackageBindingsV5,
+  type Lc4QualificationPackageFile,
+} from "../lc4-qualification-package-envelope";
 import {
   productionOpenAiCompatibleSessionUpdate,
   productionSessionPayloadParitySha256,
@@ -97,6 +104,29 @@ function keys() {
     privatePem,
     publicSpkiBase64: publicSpki.toString("base64"),
     fingerprint: sha256Hex(publicSpki),
+  });
+}
+
+const TEST_TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v6\n";
+const TEST_TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n";
+
+function signTestTerminal(body: Lc4QualificationV3TerminalBody, privateKeyPem: string) {
+  const privateKey = createPrivateKey(privateKeyPem);
+  const publicKey = createPublicKey(privateKey).export({ format: "der", type: "spki" });
+  const withoutHash = Object.freeze({
+    body,
+    authority_public_key_spki_base64: publicKey.toString("base64"),
+    authority_public_key_fingerprint_sha256: sha256Hex(publicKey),
+    signature_algorithm: "Ed25519" as const,
+    signature_base64: sign(
+      null,
+      Buffer.from(`${TEST_TERMINAL_DOMAIN}${canonicalJson(body)}`),
+      privateKey,
+    ).toString("base64"),
+  });
+  return Object.freeze({
+    ...withoutHash,
+    artifact_sha256: sha256Hex(`${TEST_TERMINAL_ARTIFACT_DOMAIN}${canonicalJson(withoutHash)}`),
   });
 }
 
@@ -835,6 +865,144 @@ describe("LC4 qualification v3 signed runner", () => {
     const risk = JSON.parse(await readFile(riskPath, "utf8")) as { policy_sha256: string };
     await chmod(riskPath, 0o600);
     await writeFile(riskPath, `${canonicalJson({ ...risk, policy_sha256: "0".repeat(64) })}\n`);
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .rejects.toThrow(/qualification package|risk artifact/u);
+  });
+
+  it("reports a sealed pre-retention runner exception without setup acceptance and rejects tampering", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-pre-setup-failure-"));
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-qualification-v3-repo-"));
+    roots.push(root, repositoryRoot);
+    const authority = keys();
+    const terminalKey = keys();
+    const audioModule = await import("../provider-s2s-tool-roundtrip");
+    const plan = await prepareLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorityPrivateKeyPem: authority.privatePem,
+      trustRootFingerprint: authority.fingerprint,
+      audioRenderer: renderer,
+      now: () => NOW,
+      planId: "qualification-v3-pre-setup-failure-plan",
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+      },
+    });
+    const authorization = authorizationFor(
+      plan,
+      authority.privatePem,
+      terminalKey,
+      "qualification-v3-pre-setup-failure-attempt",
+    );
+    const originalTerminal = await runLc4QualificationV3({
+      root,
+      repositoryRoot,
+      authorization,
+      trustRootFingerprint: authority.fingerprint,
+      terminalPrivateKeyPem: terminalKey.privatePem,
+      now: () => NOW,
+      dependencies: {
+        inspectGitSource: async () => SOURCE,
+        loadCredentials: async () => CREDENTIALS,
+        materializeAudio: audioModule.materializeLc4S2sAudioFixture,
+        createClient: (provider) => new SetupClient(provider, true),
+        executeRoundtrip: async () => {
+          throw new Error("synthetic post-setup runner exception");
+        },
+      },
+    });
+    expect(originalTerminal.body).toMatchObject({
+      status: "failed",
+      primary_failure_class: expect.stringMatching(/^runner_exception:[a-f0-9]{64}$/u),
+      provider_sessions_opened: 4,
+      paid_sessions_opened: 1,
+      generation_phases_attempted: 2,
+      tool_roundtrips_attempted: 1,
+      results: [],
+    });
+
+    const directory = join(root, "attempts", `${authorization.body.authorization_id}.complete`);
+    await unlink(join(directory, "setup-acceptance.json"));
+    const evidenceFiles = await Promise.all((await readdir(directory))
+      .filter((path) => path !== "terminal.json" && path !== "qualification-package-envelope.json")
+      .sort()
+      .map(async (path): Promise<Lc4QualificationPackageFile> => Object.freeze({
+        path,
+        bytes: await readFile(join(directory, path)),
+      })));
+    const payload = createLc4QualificationPayloadManifestV5({
+      files: Object.freeze([
+        ...evidenceFiles,
+        Object.freeze({ path: "terminal.json", bytes: Buffer.from("pending") }),
+      ]),
+      terminalPath: "terminal.json",
+      envelopePath: "qualification-package-envelope.json",
+    });
+    const bindings = Object.freeze({
+      ...originalTerminal.body.package_bindings,
+      provider_session_count: 3,
+    }) satisfies Lc4QualificationPackageBindingsV5;
+    const { terminal_sha256: discardedTerminalSha256, ...originalBody } = originalTerminal.body;
+    expect(discardedTerminalSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const bodyWithoutTerminalSha256 = Object.freeze({
+      ...originalBody,
+      payload_root_sha256: payload.payload_root_sha256,
+      package_bindings: bindings,
+      provider_sessions_opened: 3,
+      paid_sessions_opened: 0,
+      generation_phases_attempted: 0,
+      tool_roundtrips_attempted: 0,
+    });
+    const terminalBody = Object.freeze({
+      ...bodyWithoutTerminalSha256,
+      terminal_sha256: sha256Hex(`${TEST_TERMINAL_DOMAIN}${canonicalJson(bodyWithoutTerminalSha256)}`),
+    }) satisfies Lc4QualificationV3TerminalBody;
+    const terminal = signTestTerminal(terminalBody, terminalKey.privatePem);
+    await chmod(join(directory, "terminal.json"), 0o600);
+    await writeFile(join(directory, "terminal.json"), `${canonicalJson(terminal)}\n`, { mode: 0o400 });
+    const packageFiles = Object.freeze([
+      ...evidenceFiles,
+      Object.freeze({ path: "terminal.json", bytes: await readFile(join(directory, "terminal.json")) }),
+    ]);
+    const envelope = createSignedLc4QualificationPackageEnvelopeV5({
+      files: packageFiles,
+      terminalClaims: Object.freeze({
+        terminal_artifact_sha256: terminal.artifact_sha256,
+        payload_root_sha256: terminal.body.payload_root_sha256,
+        bindings: terminal.body.package_bindings,
+      }),
+      terminalPath: "terminal.json",
+      envelopePath: "qualification-package-envelope.json",
+      authorityPrivateKeyPem: terminalKey.privatePem,
+    });
+    await chmod(join(directory, "qualification-package-envelope.json"), 0o600);
+    await writeFile(
+      join(directory, "qualification-package-envelope.json"),
+      `${canonicalJson(envelope)}\n`,
+      { mode: 0o400 },
+    );
+
+    await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
+      .resolves.toMatchObject({
+        complete_attempts: 1,
+        fully_replay_verified_complete_attempts: 0,
+        sealed_pre_retention_runner_exceptions: 1,
+        latest: {
+          status: "failed",
+          primary_failure_class: expect.stringMatching(/^runner_exception:[a-f0-9]{64}$/u),
+          provider_sessions_opened: 3,
+          paid_sessions_opened: 0,
+          generation_phases_attempted: 0,
+          tool_roundtrips_attempted: 0,
+        },
+      });
+
+    const riskPath = join(directory, "xai-server-vad-gate-a-risk.json");
+    const risk = JSON.parse(await readFile(riskPath, "utf8")) as { risk_sha256: string };
+    await chmod(riskPath, 0o600);
+    await writeFile(riskPath, `${canonicalJson({ ...risk, risk_sha256: "0".repeat(64) })}\n`);
     await expect(reportLc4QualificationV3({ root, trustRootFingerprint: authority.fingerprint }))
       .rejects.toThrow(/qualification package|risk artifact/u);
   });

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertProviderQualificationArtifactIntegrity,
   assertRecentPassingProviderQualification,
   qualifyProviders,
   recordProviderResponseToolCanary,
@@ -738,6 +739,98 @@ describe("provider qualification", () => {
       code: "initial_snapshot_exact_only",
       initialConfigurationEvidence: { exactFields: ["turn_detection", "voice"] },
       configurationEvidence: { fields: { voice: { status: "unverifiable" } } },
+    });
+  });
+
+  it("does not relabel an exact post-update server-VAD echo when only voice uses initial evidence", async () => {
+    const prepared = await setup();
+    const base = xaiAcknowledgement();
+    const acknowledgement = Object.freeze({
+      ...base,
+      strictParityVerified: false,
+      paidBenchmarkReady: false,
+      session: Object.freeze({
+        status: "unverifiable" as const,
+        requestedSha256: H("a"),
+        acknowledgedSha256: H("b"),
+        acknowledgedBy: "session.updated" as const,
+        reason: "Provider session.updated omitted voice",
+        omission: Object.freeze({
+          kind: "requested_paths_omitted" as const,
+          paths: Object.freeze(["session.voice"]),
+          acknowledgedShape: "partial_value" as const,
+        }),
+      }),
+      fields: Object.freeze({
+        ...base.fields,
+        voice: Object.freeze({
+          status: "unverifiable" as const,
+          requestedSha256: H("a"),
+          reason: "Provider session.updated omitted voice",
+          omission: Object.freeze({
+            kind: "field_omitted" as const,
+            paths: Object.freeze(["voice"]),
+            acknowledgedShape: "missing" as const,
+          }),
+        }),
+        tools: Object.freeze({
+          ...base.fields.tools,
+          aliasNormalization: Object.freeze({
+            kind: "xai_function_tool_wire_alias_v1" as const,
+            policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+            sourcePaths: Object.freeze(["tools[0]", "tools[0].function"]),
+            keyInventory: Object.freeze([
+              Object.freeze({ path: "tools[0]", keys: Object.freeze(["function", "type"]) }),
+              Object.freeze({ path: "tools[0].function", keys: Object.freeze(["description", "name", "parameters"]) }),
+            ]),
+            canonicalSha256: H("1"),
+            claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required" as const,
+          }),
+        }),
+      }),
+    });
+    const artifact = await qualifyProviders({
+      ...prepared.input,
+      qualificationId: "xai-exact-vad-initial-voice-tool-alias",
+      targets: targets(true),
+      createClient: (target) => new QualificationClient(
+        target,
+        null,
+        true,
+        target.provider === "xai" ? acknowledgement : undefined,
+        Object.freeze({ outbound: 1, inbound: 1 }),
+        target.provider === "xai"
+          ? Object.freeze({
+              initialFieldSha256: Object.freeze({ voice: H("a") }),
+              acknowledgedToolCount: 1,
+            })
+          : undefined,
+      ),
+    });
+
+    expect(() => assertProviderQualificationArtifactIntegrity(artifact)).not.toThrow();
+    expect(artifact.status).toBe("conditional");
+    expect(artifact.results.find((result) => result.provider === "xai")).toMatchObject({
+      status: "passed",
+      code: "configuration_accepted_partial_echo",
+      acknowledgementMode: "partial_provider_echo",
+      turnBoundaryVerification: "verified_by_provider_echo",
+      turnBoundaryEvidence: {
+        acknowledgement: "verified_echo",
+        omittedPaths: [],
+        acknowledgedShape: "verified_value",
+      },
+      toolSchemaVerification: "requires_paid_response_canary",
+      toolBoundaryEvidence: {
+        verification: "xai_function_wire_alias_requires_paid_exact_call",
+      },
+      initialConfigurationEvidence: { exactFields: ["voice"] },
+      configurationEvidence: {
+        fields: {
+          voice: { status: "unverifiable" },
+          turn_detection: { status: "verified" },
+        },
+      },
     });
   });
 

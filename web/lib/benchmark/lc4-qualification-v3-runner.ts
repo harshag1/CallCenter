@@ -2282,6 +2282,7 @@ export async function reportLc4QualificationV3(input: Readonly<{
   }
 
   const verified: Lc4QualificationV3TerminalArtifact[] = [];
+  let sealedPreRetentionRunnerExceptions = 0;
   const completeIds = new Set<string>();
   for (const name of completeNames) {
     const attemptId = name.slice(0, -".complete".length);
@@ -2430,183 +2431,394 @@ export async function reportLc4QualificationV3(input: Readonly<{
       paidReplayHeads.push(paidHead);
       paidReplayEventCount += retainedWire.length;
     }
-    const setupQualification = await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"));
+    const retainedPaths = new Set(retainedPackage.files.map((file) => file.path));
+    const setupQualification = retainedPaths.has("setup-acceptance.json")
+      ? await readJson<ProviderQualificationArtifact>(resolve(directory, "setup-acceptance.json"))
+      : null;
     const gateARisk = await readJson<Lc4XaiServerVadGateARiskArtifact>(resolve(directory, "xai-server-vad-gate-a-risk.json"));
     const gateBBinding = serverVad.gate_b_binding_sha256 === null
       ? null
       : await readJson<Lc4XaiServerVadGateBBindingArtifact>(resolve(directory, "xai-server-vad-gate-b-binding.json"));
-    assertProviderQualificationArtifactIntegrity(setupQualification);
     assertXaiServerVadGateARiskArtifact(gateARisk);
-    const setupByProvider = new Map(setupQualification.results.map((result) => [result.provider, result]));
-    if (setupByProvider.size !== setupQualification.results.length) {
-      throw new Error("LC4 qualification setup replay contains a duplicate provider result");
-    }
-    const setupWireEvidence = LC4_QUALIFICATION_V3_PROVIDER_ORDER.flatMap((expectedProvider) => {
-      const result = setupByProvider.get(expectedProvider);
-      if (!result) throw new Error(`LC4 qualification setup replay lacks ${expectedProvider}`);
-      const evidence = result.setupWireEvidence;
-      if (terminal.body.status === "passed" && (
-        result.provider !== expectedProvider
-        || result.status !== "passed"
-        || evidence === undefined
-        || evidence.provider !== expectedProvider
-        || evidence.connectionEpoch !== 1
-        || evidence.observations.length < 2
-        || evidence.observations.some((observation) => observation.connectionEpoch !== 1)
-      )) throw new Error(`LC4 qualification ${expectedProvider} setup replay is not one exact epoch-1 session: ${canonicalJson({
-        actual_provider: result.provider,
-        status: result.status,
-        evidence_provider: evidence?.provider ?? null,
-        evidence_epoch: evidence?.connectionEpoch ?? null,
-        observation_count: evidence?.observations.length ?? 0,
-        observation_epochs: evidence?.observations.map((observation) => observation.connectionEpoch) ?? [],
-      })}`);
-      if (evidence !== undefined) return [{ provider: evidence.provider, observations: evidence.observations }];
-      if (result.setupFailureEvidence !== undefined) {
-        return [{ provider: result.setupFailureEvidence.provider, observations: result.setupFailureEvidence.observations }];
+    if (setupQualification === null) {
+      const retainedGateAWire =
+        gateARisk.setup_wire_evidence ?? gateARisk.setup_failure_evidence;
+      if (
+        terminal.body.status !== "failed" ||
+        !/^runner_exception:[a-f0-9]{64}$/u.test(
+          terminal.body.primary_failure_class ?? "",
+        ) ||
+        terminal.body.results.length !== 0 ||
+        terminal.body.roundtrip_evidence_sha256.length !== 0 ||
+        terminal.body.roundtrip_public_execution_sha256.length !== 0 ||
+        terminal.body.roundtrip_replay_sha256.length !== 0 ||
+        terminal.body.provider_sessions_opened !==
+          LC4_QUALIFICATION_V3_PROVIDER_ORDER.length ||
+        terminal.body.paid_sessions_opened !== 0 ||
+        terminal.body.generation_phases_attempted !== 0 ||
+        terminal.body.tool_roundtrips_attempted !== 0 ||
+        terminal.body.caller_audio_bytes !== 0 ||
+        terminal.body.paid_retries_attempted !== 0 ||
+        serverVad.gate_b_status !== "not_run" ||
+        serverVad.gate_b_evidence_sha256 !== null ||
+        serverVad.gate_b_binding_sha256 !== null ||
+        serverVad.gate_b_connection_epoch !== null ||
+        serverVad.operational_vad_verified ||
+        serverVad.benchmark_ready ||
+        gateBBinding !== null ||
+        retainedGateAWire === null ||
+        retainedGateAWire.observations.length === 0 ||
+        packageBindings.replay_event_count <
+          retainedGateAWire.observations.length +
+            (LC4_QUALIFICATION_V3_PROVIDER_ORDER.length - 1) * 2 ||
+        packageBindings.replay_chain_head_sha256 === null ||
+        packageBindings.reconnect_count !== 0
+      ) {
+        throw new Error(
+          "LC4 qualification setup acceptance is missing outside the sealed pre-retention runner-exception boundary",
+        );
       }
-      return [];
-    });
-    {
-      const setupReplayHeads = setupWireEvidence.flatMap((evidence) => {
-        const head = evidence.observations.at(-1)?.observationSha256;
-        return head === undefined ? [] : [head];
-      });
-      const replayHeads = [...setupReplayHeads, ...paidReplayHeads];
-      const replayEventCount = setupWireEvidence.reduce(
-        (total, evidence) => total + evidence.observations.length,
-        paidReplayEventCount,
+      if (
+        gateARisk.risk_sha256 !== serverVad.gate_a_risk_sha256 ||
+        gateARisk.source_commit !== plan.body.source.source_commit ||
+        gateARisk.plan_sha256 !== plan.body.plan_sha256 ||
+        gateARisk.configuration_matrix_sha256 !==
+          plan.body.setup_configuration_matrix_sha256 ||
+        gateARisk.provider_profile_manifest_sha256 !==
+          plan.body.provider_profile_manifest_sha256 ||
+        gateARisk.production_session_payload_sha256 !==
+          serverVad.production_session_payload_sha256 ||
+        retainedGateAWire.connectionEpoch !==
+          serverVad.gate_a_connection_epoch ||
+        serverVad.claims.operational_gateway !== "not_verified" ||
+        serverVad.claims.operational_server_vad !== "not_verified" ||
+        serverVad.claims.exact_gateway_name_and_arguments !== "not_verified" ||
+        serverVad.claims.matching_gateway_result !== "not_verified" ||
+        serverVad.claims.sole_post_tool_continuation_terminal_usage !==
+          "not_verified" ||
+        (serverVad.claims.full_gateway_schema === "verified_by_provider_echo" &&
+          gateARisk.field_evidence?.fields.tools.status !== "verified") ||
+        (serverVad.claims.gateway_description === "verified_by_provider_echo" &&
+          gateARisk.field_evidence?.fields.tools.status !== "verified") ||
+        (serverVad.claims.post_update_voice === "verified_by_provider_echo" &&
+          gateARisk.field_evidence?.fields.voice.status !== "verified") ||
+        serverVad.claims.exact_vad_parameters !==
+          (serverVad.gate_a_classification === "verified_by_provider_echo"
+            ? "verified_by_provider_echo"
+            : "unverifiable") ||
+        serverVad.claims.created_to_updated_session_identity !==
+          gateARisk.created_to_updated_session_identity ||
+        serverVad.claims.dynamic_update_configuration !== "not_verified"
+      ) {
+        throw new Error(
+          "LC4 qualification sealed pre-retention runner-exception evidence failed integrity",
+        );
+      }
+      sealedPreRetentionRunnerExceptions += 1;
+    } else {
+      assertProviderQualificationArtifactIntegrity(setupQualification);
+      const setupByProvider = new Map(
+        setupQualification.results.map((result) => [result.provider, result]),
       );
-      const replayChainHeadSha256 = replayHeads.some((head) => head === null)
-        ? null
-        : sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`);
-      if (setupWireEvidence.length !== terminal.body.provider_sessions_opened - terminal.body.paid_sessions_opened
-        || paidReplayHeads.length !== terminal.body.paid_sessions_opened
-        || packageBindings.provider_session_count !== terminal.body.provider_sessions_opened
-        || packageBindings.replay_event_count !== replayEventCount
-        || packageBindings.replay_chain_head_sha256 !== replayChainHeadSha256) {
-        throw new Error("LC4 qualification signed replay chain, session count, or event count differs from retained evidence");
+      if (setupByProvider.size !== setupQualification.results.length) {
+        throw new Error(
+          "LC4 qualification setup replay contains a duplicate provider result",
+        );
       }
-    }
-    const retainedXaiSetup = setupQualification.results.find((result) => result.provider === "xai");
-    if (setupQualification.artifactSha256 !== terminal.body.setup_qualification_artifact_sha256
-      || retainedXaiSetup === undefined
-      || setupQualification.planSha256 !== plan.body.plan_sha256
-      || setupQualification.sourceCommit !== plan.body.source.source_commit
-      || setupQualification.configurationMatrixSha256 !== plan.body.setup_configuration_matrix_sha256
-      || gateARisk.risk_sha256 !== serverVad.gate_a_risk_sha256
-      || gateARisk.source_commit !== plan.body.source.source_commit
-      || gateARisk.plan_sha256 !== plan.body.plan_sha256
-      || gateARisk.configuration_matrix_sha256 !== plan.body.setup_configuration_matrix_sha256
-      || gateARisk.provider_profile_manifest_sha256 !== plan.body.provider_profile_manifest_sha256
-      || gateARisk.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
-      || gateARisk.acknowledgement_sha256 !== retainedXaiSetup.acknowledgementSha256
-      || (gateARisk.setup_wire_evidence?.connectionEpoch
-        ?? gateARisk.setup_failure_evidence?.connectionEpoch
-        ?? null) !== serverVad.gate_a_connection_epoch
-      || serverVad.exact_setting_verified !== (serverVad.gate_a_classification === "verified_by_provider_echo")
-      || serverVad.operational_vad_verified !== (serverVad.gate_b_status === "behaviorally_verified")
-      || serverVad.gate_a_classification !== (retainedXaiSetup.turnBoundaryVerification === "verified_by_provider_echo"
-        ? "verified_by_provider_echo"
-        : (retainedXaiSetup.code === "acknowledged_unverifiable_server_vad"
-          || retainedXaiSetup.code === "initial_snapshot_exact_only")
-          ? "acknowledged_unverifiable_server_vad"
-          : "failed")) {
-      throw new Error("LC4 qualification retained xAI setup binding failed integrity");
-    }
-    const expectedClaims = freeze({
-      operational_gateway: gateBBinding === null ? "not_verified" as const : "verified" as const,
-      operational_server_vad: gateBBinding === null ? "not_verified" as const : "verified" as const,
-      exact_gateway_name_and_arguments: gateBBinding === null ? "not_verified" as const : "verified" as const,
-      matching_gateway_result: gateBBinding === null ? "not_verified" as const : "verified" as const,
-      sole_post_tool_continuation_terminal_usage: gateBBinding === null ? "not_verified" as const : "verified" as const,
-      full_gateway_schema: retainedXaiSetup.toolSchemaVerification === "verified_by_provider_echo"
-        && retainedXaiSetup.configurationEvidence?.fields.tools.status === "verified"
-        ? "verified_by_provider_echo" as const
-        : "unverifiable" as const,
-      gateway_description: retainedXaiSetup.toolSchemaVerification === "verified_by_provider_echo"
-        && retainedXaiSetup.configurationEvidence?.fields.tools.status === "verified"
-        ? "verified_by_provider_echo" as const
-        : "unverifiable" as const,
-      post_update_voice: retainedXaiSetup.configurationEvidence?.fields.voice.status === "verified"
-        ? "verified_by_provider_echo" as const
-        : "unverifiable" as const,
-      input_transcription: "not_requested" as const,
-      idle_timeout: "documented_default_not_independently_verified" as const,
-      exact_vad_parameters: serverVad.gate_a_classification === "verified_by_provider_echo"
-        ? "verified_by_provider_echo" as const
-        : "unverifiable" as const,
-      created_to_updated_session_identity: gateARisk.created_to_updated_session_identity,
-      dynamic_update_configuration: gateBBinding === null
-        ? "not_verified" as const
-        : gateBBinding.dynamic_update_provider_echo === "verified"
-          ? "verified_by_provider_echo" as const
-          : "behaviorally_verified_not_provider_echoed" as const,
-    });
-    if (canonicalJson(serverVad.claims) !== canonicalJson(expectedClaims)) {
-      throw new Error("LC4 qualification xAI machine-readable claims exceed retained evidence");
-    }
-    if (serverVad.benchmark_ready) {
-      if (!xaiResult) throw new Error("LC4 qualification terminal lacks xAI result");
-      const [xaiSummary, xaiWire, xaiUsage] = await Promise.all([
-        readJson<RetainedRoundtripSummary>(resolve(directory, "xai-spoken-roundtrip.json")),
-        readJsonLines<RealtimeWireObservation>(resolve(directory, "xai-spoken-roundtrip-wire.jsonl")),
-        readJsonLines<RoundtripSanitizedUsage>(resolve(directory, "xai-spoken-roundtrip-usage.jsonl")),
-      ]);
-      assertRetainedXaiServerVadEvidence({
-        summary: xaiSummary,
-        wire: xaiWire,
-        usage: xaiUsage,
-        terminalResult: xaiResult,
-        gateEvidenceSha256: serverVad.gate_b_evidence_sha256,
+      const setupWireEvidence = LC4_QUALIFICATION_V3_PROVIDER_ORDER.flatMap(
+        (expectedProvider) => {
+          const result = setupByProvider.get(expectedProvider);
+          if (!result)
+            throw new Error(
+              `LC4 qualification setup replay lacks ${expectedProvider}`,
+            );
+          const evidence = result.setupWireEvidence;
+          if (
+            terminal.body.status === "passed" &&
+            (result.provider !== expectedProvider ||
+              result.status !== "passed" ||
+              evidence === undefined ||
+              evidence.provider !== expectedProvider ||
+              evidence.connectionEpoch !== 1 ||
+              evidence.observations.length < 2 ||
+              evidence.observations.some(
+                (observation) => observation.connectionEpoch !== 1,
+              ))
+          )
+            throw new Error(
+              `LC4 qualification ${expectedProvider} setup replay is not one exact epoch-1 session: ${canonicalJson(
+                {
+                  actual_provider: result.provider,
+                  status: result.status,
+                  evidence_provider: evidence?.provider ?? null,
+                  evidence_epoch: evidence?.connectionEpoch ?? null,
+                  observation_count: evidence?.observations.length ?? 0,
+                  observation_epochs:
+                    evidence?.observations.map(
+                      (observation) => observation.connectionEpoch,
+                    ) ?? [],
+                },
+              )}`,
+            );
+          if (evidence !== undefined)
+            return [
+              {
+                provider: evidence.provider,
+                observations: evidence.observations,
+              },
+            ];
+          if (result.setupFailureEvidence !== undefined) {
+            return [
+              {
+                provider: result.setupFailureEvidence.provider,
+                observations: result.setupFailureEvidence.observations,
+              },
+            ];
+          }
+          return [];
+        },
+      );
+      {
+        const setupReplayHeads = setupWireEvidence.flatMap((evidence) => {
+          const head = evidence.observations.at(-1)?.observationSha256;
+          return head === undefined ? [] : [head];
+        });
+        const replayHeads = [...setupReplayHeads, ...paidReplayHeads];
+        const replayEventCount = setupWireEvidence.reduce(
+          (total, evidence) => total + evidence.observations.length,
+          paidReplayEventCount,
+        );
+        const replayChainHeadSha256 = replayHeads.some((head) => head === null)
+          ? null
+          : sha256Hex(
+              `${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(replayHeads)}`,
+            );
+        if (
+          setupWireEvidence.length !==
+            terminal.body.provider_sessions_opened -
+              terminal.body.paid_sessions_opened ||
+          paidReplayHeads.length !== terminal.body.paid_sessions_opened ||
+          packageBindings.provider_session_count !==
+            terminal.body.provider_sessions_opened ||
+          packageBindings.replay_event_count !== replayEventCount ||
+          packageBindings.replay_chain_head_sha256 !== replayChainHeadSha256
+        ) {
+          throw new Error(
+            "LC4 qualification signed replay chain, session count, or event count differs from retained evidence",
+          );
+        }
+      }
+      const retainedXaiSetup = setupQualification.results.find(
+        (result) => result.provider === "xai",
+      );
+      if (
+        setupQualification.artifactSha256 !==
+          terminal.body.setup_qualification_artifact_sha256 ||
+        retainedXaiSetup === undefined ||
+        setupQualification.planSha256 !== plan.body.plan_sha256 ||
+        setupQualification.sourceCommit !== plan.body.source.source_commit ||
+        setupQualification.configurationMatrixSha256 !==
+          plan.body.setup_configuration_matrix_sha256 ||
+        gateARisk.risk_sha256 !== serverVad.gate_a_risk_sha256 ||
+        gateARisk.source_commit !== plan.body.source.source_commit ||
+        gateARisk.plan_sha256 !== plan.body.plan_sha256 ||
+        gateARisk.configuration_matrix_sha256 !==
+          plan.body.setup_configuration_matrix_sha256 ||
+        gateARisk.provider_profile_manifest_sha256 !==
+          plan.body.provider_profile_manifest_sha256 ||
+        gateARisk.production_session_payload_sha256 !==
+          serverVad.production_session_payload_sha256 ||
+        gateARisk.acknowledgement_sha256 !==
+          retainedXaiSetup.acknowledgementSha256 ||
+        (gateARisk.setup_wire_evidence?.connectionEpoch ??
+          gateARisk.setup_failure_evidence?.connectionEpoch ??
+          null) !== serverVad.gate_a_connection_epoch ||
+        serverVad.exact_setting_verified !==
+          (serverVad.gate_a_classification === "verified_by_provider_echo") ||
+        serverVad.operational_vad_verified !==
+          (serverVad.gate_b_status === "behaviorally_verified") ||
+        serverVad.gate_a_classification !==
+          (retainedXaiSetup.turnBoundaryVerification ===
+          "verified_by_provider_echo"
+            ? "verified_by_provider_echo"
+            : retainedXaiSetup.code ===
+                  "acknowledged_unverifiable_server_vad" ||
+                retainedXaiSetup.code === "initial_snapshot_exact_only"
+              ? "acknowledged_unverifiable_server_vad"
+              : "failed")
+      ) {
+        throw new Error(
+          "LC4 qualification retained xAI setup binding failed integrity",
+        );
+      }
+      const expectedClaims = freeze({
+        operational_gateway:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : ("verified" as const),
+        operational_server_vad:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : ("verified" as const),
+        exact_gateway_name_and_arguments:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : ("verified" as const),
+        matching_gateway_result:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : ("verified" as const),
+        sole_post_tool_continuation_terminal_usage:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : ("verified" as const),
+        full_gateway_schema:
+          retainedXaiSetup.toolSchemaVerification ===
+            "verified_by_provider_echo" &&
+          retainedXaiSetup.configurationEvidence?.fields.tools.status ===
+            "verified"
+            ? ("verified_by_provider_echo" as const)
+            : ("unverifiable" as const),
+        gateway_description:
+          retainedXaiSetup.toolSchemaVerification ===
+            "verified_by_provider_echo" &&
+          retainedXaiSetup.configurationEvidence?.fields.tools.status ===
+            "verified"
+            ? ("verified_by_provider_echo" as const)
+            : ("unverifiable" as const),
+        post_update_voice:
+          retainedXaiSetup.configurationEvidence?.fields.voice.status ===
+          "verified"
+            ? ("verified_by_provider_echo" as const)
+            : ("unverifiable" as const),
+        input_transcription: "not_requested" as const,
+        idle_timeout: "documented_default_not_independently_verified" as const,
+        exact_vad_parameters:
+          serverVad.gate_a_classification === "verified_by_provider_echo"
+            ? ("verified_by_provider_echo" as const)
+            : ("unverifiable" as const),
+        created_to_updated_session_identity:
+          gateARisk.created_to_updated_session_identity,
+        dynamic_update_configuration:
+          gateBBinding === null
+            ? ("not_verified" as const)
+            : gateBBinding.dynamic_update_provider_echo === "verified"
+              ? ("verified_by_provider_echo" as const)
+              : ("behaviorally_verified_not_provider_echoed" as const),
       });
-      if (gateBBinding === null
-        || gateBBinding.binding_sha256 !== serverVad.gate_b_binding_sha256
-        || gateBBinding.gate_a_risk_sha256 !== gateARisk.risk_sha256
-        || gateBBinding.gate_b_execution_sha256 !== xaiSummary.evidence_sha256
-        || gateBBinding.production_session_payload_sha256 !== serverVad.production_session_payload_sha256
-        || gateBBinding.provider_profile_manifest_sha256 !== plan.body.provider_profile_manifest_sha256
-        || gateBBinding.transport_parity_sha256 !== plan.body.targets.find((target) => target.provider === "xai")
-          ?.xai_transport_parity_sha256
-        || gateBBinding.per_turn_session_update_observation_sha256 !== xaiSummary.per_turn_session_update_observation_sha256
-        || gateBBinding.per_turn_session_ack_observation_sha256 !== xaiSummary.per_turn_session_ack_observation_sha256
-        || gateBBinding.exact_gateway_call_evidence_sha256 !== xaiSummary.provider_tool_call_evidence_sha256
-        || gateBBinding.matching_gateway_result_evidence_sha256 !== xaiSummary.tool_result_evidence_sha256
-        || gateBBinding.public_execution_sha256 !== xaiSummary.public_execution_sha256
-        || gateBBinding.replay_sha256 !== xaiSummary.replay_sha256) {
-        throw new Error("LC4 qualification xAI Gate B binding differs from retained roundtrip");
+      if (canonicalJson(serverVad.claims) !== canonicalJson(expectedClaims)) {
+        throw new Error(
+          "LC4 qualification xAI machine-readable claims exceed retained evidence",
+        );
       }
-      const { binding_sha256, ...gateBBody } = gateBBinding;
-      if (binding_sha256 !== sha256Hex(`${XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN}${canonicalJson(gateBBody)}`)) {
-        throw new Error("LC4 qualification xAI Gate B binding hash failed integrity");
-      }
-      const matchingGateBObservations = xaiWire.filter((observation) => (
-        observation.observationSha256 === gateBBinding.per_turn_session_update_observation_sha256
-      ));
-      const firstGateBObservation = matchingGateBObservations[0];
-      const retainedDynamicControl = firstGateBObservation?.projection.dynamicControl !== null
-        && typeof firstGateBObservation?.projection.dynamicControl === "object"
-        && !Array.isArray(firstGateBObservation.projection.dynamicControl)
-        ? firstGateBObservation.projection.dynamicControl as Record<string, unknown>
-        : null;
-      if (matchingGateBObservations.length !== 1
-        || firstGateBObservation?.direction !== "outbound"
-        || firstGateBObservation.wireType !== "session.update"
-        || firstGateBObservation.connectionEpoch !== serverVad.gate_b_connection_epoch
-        || firstGateBObservation?.observationSha256 !== gateBBinding.per_turn_session_update_observation_sha256
-        || retainedDynamicControl?.sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
-        || retainedDynamicControl.byteLength !== Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8")
-        || retainedDynamicControl.authority !== "advisory_only_gateway_and_speech_gate_enforced"
-        || retainedDynamicControl.toolFrontierSha256 !== gateBBinding.tool_frontier_sha256
-        || retainedDynamicControl.transportParitySha256 !== gateBBinding.transport_parity_sha256
-        || retainedDynamicControl.delivery !== "session.update_before_audio") {
-        throw new Error("LC4 qualification xAI Gate B epoch is not terminal-bound");
+      if (serverVad.benchmark_ready) {
+        if (!xaiResult)
+          throw new Error("LC4 qualification terminal lacks xAI result");
+        const [xaiSummary, xaiWire, xaiUsage] = await Promise.all([
+          readJson<RetainedRoundtripSummary>(
+            resolve(directory, "xai-spoken-roundtrip.json"),
+          ),
+          readJsonLines<RealtimeWireObservation>(
+            resolve(directory, "xai-spoken-roundtrip-wire.jsonl"),
+          ),
+          readJsonLines<RoundtripSanitizedUsage>(
+            resolve(directory, "xai-spoken-roundtrip-usage.jsonl"),
+          ),
+        ]);
+        assertRetainedXaiServerVadEvidence({
+          summary: xaiSummary,
+          wire: xaiWire,
+          usage: xaiUsage,
+          terminalResult: xaiResult,
+          gateEvidenceSha256: serverVad.gate_b_evidence_sha256,
+        });
+        if (
+          gateBBinding === null ||
+          gateBBinding.binding_sha256 !== serverVad.gate_b_binding_sha256 ||
+          gateBBinding.gate_a_risk_sha256 !== gateARisk.risk_sha256 ||
+          gateBBinding.gate_b_execution_sha256 !== xaiSummary.evidence_sha256 ||
+          gateBBinding.production_session_payload_sha256 !==
+            serverVad.production_session_payload_sha256 ||
+          gateBBinding.provider_profile_manifest_sha256 !==
+            plan.body.provider_profile_manifest_sha256 ||
+          gateBBinding.transport_parity_sha256 !==
+            plan.body.targets.find((target) => target.provider === "xai")
+              ?.xai_transport_parity_sha256 ||
+          gateBBinding.per_turn_session_update_observation_sha256 !==
+            xaiSummary.per_turn_session_update_observation_sha256 ||
+          gateBBinding.per_turn_session_ack_observation_sha256 !==
+            xaiSummary.per_turn_session_ack_observation_sha256 ||
+          gateBBinding.exact_gateway_call_evidence_sha256 !==
+            xaiSummary.provider_tool_call_evidence_sha256 ||
+          gateBBinding.matching_gateway_result_evidence_sha256 !==
+            xaiSummary.tool_result_evidence_sha256 ||
+          gateBBinding.public_execution_sha256 !==
+            xaiSummary.public_execution_sha256 ||
+          gateBBinding.replay_sha256 !== xaiSummary.replay_sha256
+        ) {
+          throw new Error(
+            "LC4 qualification xAI Gate B binding differs from retained roundtrip",
+          );
+        }
+        const { binding_sha256, ...gateBBody } = gateBBinding;
+        if (
+          binding_sha256 !==
+          sha256Hex(
+            `${XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN}${canonicalJson(gateBBody)}`,
+          )
+        ) {
+          throw new Error(
+            "LC4 qualification xAI Gate B binding hash failed integrity",
+          );
+        }
+        const matchingGateBObservations = xaiWire.filter(
+          (observation) =>
+            observation.observationSha256 ===
+            gateBBinding.per_turn_session_update_observation_sha256,
+        );
+        const firstGateBObservation = matchingGateBObservations[0];
+        const retainedDynamicControl =
+          firstGateBObservation?.projection.dynamicControl !== null &&
+          typeof firstGateBObservation?.projection.dynamicControl ===
+            "object" &&
+          !Array.isArray(firstGateBObservation.projection.dynamicControl)
+            ? (firstGateBObservation.projection.dynamicControl as Record<
+                string,
+                unknown
+              >)
+            : null;
+        if (
+          matchingGateBObservations.length !== 1 ||
+          firstGateBObservation?.direction !== "outbound" ||
+          firstGateBObservation.wireType !== "session.update" ||
+          firstGateBObservation.connectionEpoch !==
+            serverVad.gate_b_connection_epoch ||
+          firstGateBObservation?.observationSha256 !==
+            gateBBinding.per_turn_session_update_observation_sha256 ||
+          retainedDynamicControl?.sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256 ||
+          retainedDynamicControl.byteLength !==
+            Buffer.byteLength(LC4_S2S_COMPACT_CONTROL, "utf8") ||
+          retainedDynamicControl.authority !==
+            "advisory_only_gateway_and_speech_gate_enforced" ||
+          retainedDynamicControl.toolFrontierSha256 !==
+            gateBBinding.tool_frontier_sha256 ||
+          retainedDynamicControl.transportParitySha256 !==
+            gateBBinding.transport_parity_sha256 ||
+          retainedDynamicControl.delivery !== "session.update_before_audio"
+        ) {
+          throw new Error(
+            "LC4 qualification xAI Gate B epoch is not terminal-bound",
+          );
+        }
       }
     }
-    const budgetEvidence = await readJson<Lc4QualificationBudgetEvidence>(resolve(directory, "budget-settlement.json"));
+    const budgetEvidence = await readJson<Lc4QualificationBudgetEvidence>(
+      resolve(directory, "budget-settlement.json"),
+    );
     assertLc4QualificationBudgetEvidence(budgetEvidence);
     if (budgetEvidence.evidence_sha256 !== terminal.body.budget_evidence_sha256
-      || budgetEvidence.final_head_sha256 !== terminal.body.budget_final_head_sha256) {
+      || budgetEvidence.final_head_sha256 !== terminal.body.budget_final_head_sha256
+      || budgetEvidence.terminal_outcome !== (terminal.body.status === "passed" ? "completed" : "failed")) {
       throw new Error("LC4 qualification v3 terminal budget binding failed integrity");
     }
     completeIds.add(attemptId);
@@ -2629,6 +2841,8 @@ export async function reportLc4QualificationV3(input: Readonly<{
     refused_attempts: refusals.size,
     stranded_invocations: strandedInvocationIds.length,
     complete_attempts: verified.length,
+    fully_replay_verified_complete_attempts: verified.length - sealedPreRetentionRunnerExceptions,
+    sealed_pre_retention_runner_exceptions: sealedPreRetentionRunnerExceptions,
     partial_attempts: partialIds.size,
     gate_c_qualification_gate: false,
     maximum_total_usd: 3,
