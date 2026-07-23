@@ -49,12 +49,14 @@ import {
   replayProviderToolRoundtrip,
   projectRoundtripInputAudioEvidence,
   projectRoundtripOutputAudioEvidence,
+  projectRoundtripPreToolOutputQuarantineEvidence,
   roundtripInputAudioChunkListSha256,
   roundtripCausalBindingSha256,
   roundtripSanitizedUsageSha256,
   type RoundtripCausalBinding,
   type RoundtripInputAudioEvidence,
   type RoundtripOutputAudioEvidence,
+  type RoundtripPreToolOutputQuarantineEvidence,
   type RoundtripReplaySummary,
   type RoundtripSanitizedUsage,
   type RoundtripUsageCounter,
@@ -234,6 +236,7 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   delivery: Lc4S2sRoundtripDeliveryReceipt | null;
   input_audio_evidence: RoundtripInputAudioEvidence | null;
   output_audio_evidence: RoundtripOutputAudioEvidence | null;
+  pre_tool_output_quarantine: RoundtripPreToolOutputQuarantineEvidence | null;
   compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
   tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
   response_generation_requested: boolean;
@@ -675,6 +678,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let delivery: Lc4S2sRoundtripDeliveryReceipt | null = null;
   let inputAudioEvidence: RoundtripInputAudioEvidence | null = null;
   let outputAudioEvidence: RoundtripOutputAudioEvidence | null = null;
+  let preToolOutputQuarantine: RoundtripPreToolOutputQuarantineEvidence | null = null;
   let responseRequested = false;
   let providerAutoResponseObserved = false;
   let transportFailureDiagnostic: RealtimeTransportFailureDiagnostic | null = null;
@@ -703,6 +707,10 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let speechStartObservationSha256: string | null = null;
   let speechStopObservationSha256: string | null = null;
   let autoResponseObservationSha256: string | null = null;
+  let rootResponseId: string | null = null;
+  let rootResponseStartedObservationSha256: string | null = null;
+  let rootResponseTerminalObservationSha256: string | null = null;
+  let toolSubmissionQueued = false;
   const toolFrontierSha256 = realtimeToolFrontierSha256([LC4_S2S_TOOL]);
   const transportParitySha256 = input.provider === "xai"
     ? input.client.serverVadTransportParitySha256 ?? null
@@ -767,6 +775,29 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       && terminalObserved
       && postToolUsageObserved) finish();
   };
+  const scheduleToolResultSubmission = () => {
+    if (toolSubmissionQueued || failure !== "none" || toolCall === null) return;
+    if (input.provider === "xai" && rootResponseTerminalObservationSha256 === null) return;
+    toolSubmissionQueued = true;
+    queueMicrotask(() => {
+      if (failure !== "none" || toolCall === null) return;
+      try {
+        toolResultSubmitted = true;
+        input.client.submitToolResults([{
+          callId: toolCall.callId,
+          output: { ok: true, qualification_stage: "completed" },
+        }], false);
+        operations.push("matching_tool_result_submitted");
+        if (input.provider !== "gemini") {
+          input.client.createResponse({ tool_choice: "none" });
+          operations.push("post_tool_continuation_requested");
+        }
+      } catch {
+        failure = "tool_result_submission_failed";
+        finish();
+      }
+    });
+  };
   const unsubscribeEvent = input.client.onEvent((event) => {
     if ((event.type === "error" || event.type === "connection.closed")
       && event.transportDiagnostic !== undefined
@@ -785,9 +816,24 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         return;
       }
       providerAutoResponseObserved = true;
+      rootResponseId = event.responseId;
+      rootResponseStartedObservationSha256 = event.wireObservation?.availability === "observed"
+        ? event.wireObservation.observationSha256
+        : autoResponseObservationSha256;
       operations.push("provider_auto_response_observed");
     }
     if (event.type === "output.audio" || event.type === "output.transcript") {
+      if (input.provider === "xai" && event.responseId === rootResponseId) {
+        if (rootResponseTerminalObservationSha256 !== null) {
+          failure = "provider_error";
+          finish();
+          return;
+        }
+        if (!operations.includes("pre_tool_output_quarantined")) {
+          operations.push("pre_tool_output_quarantined");
+        }
+        return;
+      }
       if (toolCall === null) {
         failure = "speech_before_tool";
         finish();
@@ -823,6 +869,11 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       operations.push("post_tool_continuation_request_observed");
     }
     if (event.type === "response.started" && toolResultWireObservationSha256 !== null) {
+      if (input.provider === "xai" && event.responseId === rootResponseId) {
+        failure = "provider_error";
+        finish();
+        return;
+      }
       continuationObserved = true;
       continuationResponseId ??= event.responseId;
       if (event.wireObservation?.availability === "observed") {
@@ -872,6 +923,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         : input.provider === "xai"
           ? candidate.call.responseIdSource === "provider"
             && speechStopObservationSha256 !== null
+            && rootResponseId !== null
+            && candidate.call.responseId === rootResponseId
           : candidate.call.responseIdSource === "provider";
       if (controlIndex < 0) {
         failure = "dynamic_control_not_wire_observed";
@@ -904,26 +957,30 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
             ? "server_vad_speech_stop_then_native_response_and_call_ids"
             : "response_create_then_native_response_and_call_ids",
       }));
-      queueMicrotask(() => {
-        if (failure !== "none" || toolCall === null) return;
-        try {
-          toolResultSubmitted = true;
-          input.client.submitToolResults([{
-            callId: toolCall.callId,
-            output: { ok: true, qualification_stage: "completed" },
-          }], false);
-          operations.push("matching_tool_result_submitted");
-          if (input.provider !== "gemini") {
-            input.client.createResponse({ tool_choice: "none" });
-            operations.push("post_tool_continuation_requested");
-          }
-        } catch {
-          failure = "tool_result_submission_failed";
-          finish();
-        }
-      });
+      scheduleToolResultSubmission();
     }
     if (event.type === "response.completed") {
+      if (input.provider === "xai" && event.responseId === rootResponseId
+        && toolResultWireObservationSha256 === null) {
+        if (event.status !== "completed"
+          || event.wireObservation?.availability !== "observed") {
+          failure = "provider_error";
+          finish();
+          return;
+        }
+        rootResponseTerminalObservationSha256 = event.wireObservation.observationSha256;
+        operations.push("pre_tool_root_terminal_observed");
+        if (toolCall === null) {
+          queueMicrotask(() => {
+            if (failure !== "none" || toolCall !== null) return;
+            failure = "wrong_tool";
+            finish();
+          });
+        } else {
+          scheduleToolResultSubmission();
+        }
+        return;
+      }
       if (toolCall === null) {
         // A provider adapter may derive a terminal call and completion from one
         // wire frame. Give every normalized sibling from that frame one turn to
@@ -936,6 +993,11 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         return;
       }
       if (toolResultWireObservationSha256 !== null && event.status === "completed") {
+        if (input.provider === "xai" && event.responseId === rootResponseId) {
+          failure = "provider_error";
+          finish();
+          return;
+        }
         terminalObserved = true;
         terminalResponseId = event.responseId;
         if (event.wireObservation?.availability === "observed") {
@@ -1198,6 +1260,18 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     unsubscribeWire?.();
   }
 
+  if (input.provider === "xai"
+    && rootResponseId !== null
+    && rootResponseStartedObservationSha256 !== null
+    && rootResponseTerminalObservationSha256 !== null) {
+    preToolOutputQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
+      provider: input.provider,
+      wire,
+      response_started_observation_sha256: rootResponseStartedObservationSha256,
+      terminal_observation_sha256: rootResponseTerminalObservationSha256,
+      response_id_sha256: realtimeWireIdentitySha256("response", rootResponseId),
+    });
+  }
   if (continuationStartObservationSha256 !== null
     && terminalObservationSha256 !== null
     && continuationResponseId !== null) {
@@ -1218,10 +1292,15 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   if (failure === "none" && outputAudioEvidence === null) {
     failure = "post_tool_output_audio_missing_or_invalid";
   }
+  if (failure === "none" && input.provider === "xai"
+    && preToolOutputQuarantine === null) {
+    failure = "causal_replay_evidence_invalid";
+  }
 
   const protocolPassed = failure === "none"
     && inputAudioEvidence !== null
     && outputAudioEvidence !== null
+    && (input.provider !== "xai" || preToolOutputQuarantine !== null)
     && toolCall !== null
     && toolResultSubmitted
     && toolResultWireObservationSha256 !== null
@@ -1365,6 +1444,9 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         }),
         input_audio: inputAudioEvidence,
         output_audio: outputAudioEvidence,
+        ...(preToolOutputQuarantine === null ? {} : {
+          pre_tool_output_quarantine: preToolOutputQuarantine,
+        }),
       });
   const replay = replaySummary === null ? null : replayProviderToolRoundtrip({
     expected: { provider: input.provider, model: input.model },
@@ -1427,6 +1509,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     delivery,
     input_audio_evidence: inputAudioEvidence,
     output_audio_evidence: outputAudioEvidence,
+    pre_tool_output_quarantine: preToolOutputQuarantine,
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: responseRequested,
@@ -1493,6 +1576,9 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.input_audio_evidence === null
     || execution.output_audio_evidence === null
     || (execution.provider === "xai"
+      ? execution.pre_tool_output_quarantine === null
+      : execution.pre_tool_output_quarantine !== null)
+    || (execution.provider === "xai"
       ? !execution.provider_auto_response_observed || execution.response_generation_requested
       : !execution.response_generation_requested || execution.provider_auto_response_observed)
     || !execution.tool_call_observed
@@ -1544,6 +1630,23 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
         || callerLastObservation < 0
         || suffixFirstObservation <= callerLastObservation) {
         throw new Error("passing xAI LC4 S2S roundtrip lacks the frozen server-VAD silence tail");
+      }
+      const quarantine = execution.pre_tool_output_quarantine!;
+      const projectedQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
+        provider: execution.provider,
+        wire: execution.wire_observations,
+        response_started_observation_sha256: quarantine.response_started_observation_sha256,
+        terminal_observation_sha256: quarantine.terminal_observation_sha256,
+        response_id_sha256: quarantine.response_id_sha256,
+      });
+      if (quarantine.disposition !== "suppressed_never_caller_playable"
+        || quarantine.released_audio_bytes !== 0
+        || projectedQuarantine === null
+        || canonicalJson(projectedQuarantine) !== canonicalJson(quarantine)
+        || execution.replay_summary!.pre_tool_output_quarantine === undefined
+        || canonicalJson(execution.replay_summary!.pre_tool_output_quarantine)
+          !== canonicalJson(quarantine)) {
+        throw new Error("passing xAI LC4 S2S roundtrip lacks exact pre-tool quarantine evidence");
       }
     } else if (suffix !== undefined) {
       throw new Error("non-xAI LC4 S2S roundtrip cannot contain a server-VAD silence tail");

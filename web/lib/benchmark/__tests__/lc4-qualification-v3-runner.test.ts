@@ -80,6 +80,7 @@ import {
   replayProviderToolRoundtrip,
   projectRoundtripInputAudioEvidence,
   projectRoundtripOutputAudioEvidence,
+  projectRoundtripPreToolOutputQuarantineEvidence,
   roundtripInputAudioChunkListSha256,
   roundtripCausalBindingSha256,
   roundtripSanitizedUsageSha256,
@@ -395,14 +396,14 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     const rootResponse = observe("inbound", "response.created", {
       responseIdSha256: initialResponseIdSha256,
     });
-    const call = observe("inbound", "response.function_call_arguments.done", {
+    const call = observe("inbound", "response.done", {
       responseIdSha256: initialResponseIdSha256, callIdSha256,
     }, { gatewayCalls: [{
       gateway: "capability_gateway", callIdSha256, responseIdSha256: initialResponseIdSha256,
       argumentsSha256: "a".repeat(64), argumentsBytes: 67, argumentsJsonValid: true,
       targetToolNameSha256: realtimeWireIdentitySha256("target-tool", "complete_current_stage"),
       targetArgumentsSha256: sha256Hex(canonicalJson({})),
-    }] });
+    }], terminal: { status: "completed" } });
     const result = observe("outbound", "conversation.item.create", { callIdSha256 }, {
       gatewayResults: [{
         gateway: "capability_gateway", callIdSha256,
@@ -530,6 +531,15 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   expect(inputAudioEvidence).not.toBeNull();
   expect(outputAudioEvidence).not.toBeNull();
+  const preToolOutputQuarantine = xaiWire === null ? null
+    : projectRoundtripPreToolOutputQuarantineEvidence({
+        provider: "xai",
+        wire,
+        response_started_observation_sha256: xaiWire.rootResponse.observationSha256,
+        terminal_observation_sha256: xaiWire.call.observationSha256,
+        response_id_sha256: initialResponseIdSha256,
+      });
+  if (input.provider === "xai") expect(preToolOutputQuarantine).not.toBeNull();
   const replaySummary = Object.freeze({
     schema_version: 1 as const,
     provider: input.provider,
@@ -547,6 +557,9 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     usage: Object.freeze({ evidence_sha256: roundtripSanitizedUsageSha256(sanitizedUsage), response_id_sha256: continuationResponseIdSha256 }),
     input_audio: inputAudioEvidence!,
     output_audio: outputAudioEvidence!,
+    ...(preToolOutputQuarantine === null ? {} : {
+      pre_tool_output_quarantine: preToolOutputQuarantine,
+    }),
   });
   const replay = replayProviderToolRoundtrip({
     expected: { provider: input.provider, model: input.model },
@@ -603,6 +616,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     tool_result_evidence_sha256: "5".repeat(64),
     input_audio_evidence: inputAudioEvidence,
     output_audio_evidence: outputAudioEvidence,
+    pre_tool_output_quarantine: preToolOutputQuarantine,
     wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
     replay_summary: replaySummary,

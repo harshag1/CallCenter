@@ -37,6 +37,12 @@ const OUTPUT_AUDIO_OBSERVATION_LIST_DOMAIN =
   "harshas-amazing-call-center/provider-roundtrip-output-audio-observations/v1\n";
 const OUTPUT_AUDIO_CONTENT_DOMAIN =
   "harshas-amazing-call-center/provider-roundtrip-output-audio-content/v1\n";
+const PRE_TOOL_QUARANTINE_OBSERVATION_LIST_DOMAIN =
+  "harshas-amazing-call-center/provider-roundtrip-pre-tool-quarantine-observations/v1\n";
+const PRE_TOOL_QUARANTINE_CONTENT_DOMAIN =
+  "harshas-amazing-call-center/provider-roundtrip-pre-tool-quarantine-content/v1\n";
+const PRE_TOOL_QUARANTINE_EVIDENCE_DOMAIN =
+  "harshas-amazing-call-center/provider-roundtrip-pre-tool-quarantine-evidence/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
@@ -106,6 +112,27 @@ export type RoundtripOutputAudioEvidence = Readonly<{
   response_id_sha256: string;
 }>;
 
+/**
+ * xAI can place the terminal function call in response.done after streaming the
+ * root response's audio. The host retains this content-free receipt while
+ * suppressing every byte; it is never continuation or caller-playable output.
+ */
+export type RoundtripPreToolOutputQuarantineEvidence = Readonly<{
+  schema_version: 1;
+  disposition: "suppressed_never_caller_playable";
+  response_id_sha256: string;
+  response_started_observation_sha256: string;
+  terminal_observation_sha256: string;
+  observation_sha256s: readonly string[];
+  observation_list_sha256: string;
+  audio_content_sha256: string;
+  audio_bytes: number;
+  audio_chunk_count: number;
+  sample_rate_hz: number | null;
+  released_audio_bytes: 0;
+  evidence_sha256: string;
+}>;
+
 export type RoundtripReplaySummary = Readonly<{
   schema_version: 1;
   provider: ServerRealtimeProvider;
@@ -137,6 +164,7 @@ export type RoundtripReplaySummary = Readonly<{
   }>;
   input_audio: RoundtripInputAudioEvidence;
   output_audio: RoundtripOutputAudioEvidence;
+  pre_tool_output_quarantine?: RoundtripPreToolOutputQuarantineEvidence;
 }>;
 
 export type RoundtripUsageCounter =
@@ -243,6 +271,10 @@ export type ProviderRoundtripPublicExecution = Readonly<{
   output_audio_content_sha256: string;
   output_audio_bytes: number;
   output_audio_chunk_count: number;
+  pre_tool_quarantine_evidence_sha256: string | null;
+  pre_tool_quarantine_observation_list_sha256: string | null;
+  pre_tool_quarantine_audio_bytes: number;
+  pre_tool_quarantine_released_audio_bytes: 0;
 }>;
 
 export type ProviderRoundtripReplayResult = Readonly<{
@@ -596,6 +628,88 @@ export function projectRoundtripOutputAudioEvidence(input: Readonly<{
   });
 }
 
+export function projectRoundtripPreToolOutputQuarantineEvidence(input: Readonly<{
+  provider: ServerRealtimeProvider;
+  wire: readonly RealtimeWireObservation[];
+  response_started_observation_sha256: string;
+  terminal_observation_sha256: string;
+  response_id_sha256: string;
+}>): RoundtripPreToolOutputQuarantineEvidence | null {
+  if (input.provider !== "xai" || !SHA256.test(input.response_id_sha256)) return null;
+  const startIndex = input.wire.findIndex(({ observationSha256 }) => (
+    observationSha256 === input.response_started_observation_sha256
+  ));
+  const terminalIndex = input.wire.findIndex(({ observationSha256 }) => (
+    observationSha256 === input.terminal_observation_sha256
+  ));
+  const start = input.wire[startIndex];
+  const terminal = input.wire[terminalIndex];
+  if (startIndex < 0 || terminalIndex <= startIndex
+    || start?.direction !== "inbound" || start.wireType !== "response.created"
+    || start.identities.responseIdSha256 !== input.response_id_sha256
+    || terminal?.direction !== "inbound"
+    || terminal.identities.responseIdSha256 !== input.response_id_sha256
+    || record(terminal.projection.terminal)?.status !== "completed") return null;
+  const candidates = input.wire
+    .map((observation, index) => ({ observation, index }))
+    .filter(({ observation, index }) => (
+      index > startIndex && index < terminalIndex
+      && observation.direction === "inbound"
+      && observation.identities.responseIdSha256 === input.response_id_sha256
+      && (record(observation.projection.audio) !== null
+        || Array.isArray(observation.projection.text))
+    ));
+  const audioContent: Array<Readonly<{
+    observation_sha256: string;
+    projection_sha256: string;
+    chunks: readonly PcmProjectionChunk[];
+  }>> = [];
+  let audioBytes = 0;
+  let audioChunkCount = 0;
+  let sampleRateHz: number | null = null;
+  for (const { observation } of candidates) {
+    if (record(observation.projection.audio) === null) continue;
+    const chunks = projectedPcmChunks(observation, "output");
+    if (!chunks) return null;
+    for (const chunk of chunks) {
+      if (sampleRateHz !== null && chunk.sample_rate_hz !== sampleRateHz) return null;
+      sampleRateHz = chunk.sample_rate_hz;
+      audioBytes += chunk.byte_length;
+      audioChunkCount += 1;
+    }
+    audioContent.push({
+      observation_sha256: observation.observationSha256,
+      projection_sha256: observation.projectionSha256,
+      chunks,
+    });
+  }
+  const observationSha256s = candidates.map(({ observation }) => observation.observationSha256);
+  const body = deepFreeze({
+    schema_version: 1 as const,
+    disposition: "suppressed_never_caller_playable" as const,
+    response_id_sha256: input.response_id_sha256,
+    response_started_observation_sha256: input.response_started_observation_sha256,
+    terminal_observation_sha256: input.terminal_observation_sha256,
+    observation_sha256s: observationSha256s,
+    observation_list_sha256: sha256Hex(
+      `${PRE_TOOL_QUARANTINE_OBSERVATION_LIST_DOMAIN}${canonicalJson(observationSha256s)}`,
+    ),
+    audio_content_sha256: sha256Hex(
+      `${PRE_TOOL_QUARANTINE_CONTENT_DOMAIN}${canonicalJson(audioContent)}`,
+    ),
+    audio_bytes: audioBytes,
+    audio_chunk_count: audioChunkCount,
+    sample_rate_hz: sampleRateHz,
+    released_audio_bytes: 0 as const,
+  });
+  return deepFreeze({
+    ...body,
+    evidence_sha256: sha256Hex(
+      `${PRE_TOOL_QUARANTINE_EVIDENCE_DOMAIN}${canonicalJson(body)}`,
+    ),
+  });
+}
+
 export function roundtripCausalBindingSha256(
   binding: Omit<RoundtripCausalBinding, "evidence_sha256">,
 ): string {
@@ -926,6 +1040,38 @@ export function replayProviderToolRoundtrip(
     for (const hash of summary.output_audio.observation_sha256s) {
       pushHashError(errors, hash, "summary_output_audio_observation_invalid");
     }
+    const preToolQuarantine = summary.pre_tool_output_quarantine;
+    if (summary.provider === "xai") {
+      if (preToolQuarantine === undefined) {
+        errors.push("xai_pre_tool_quarantine_missing");
+      } else {
+        for (const [value, code] of [
+          [preToolQuarantine.response_id_sha256, "pre_tool_quarantine_response_id_invalid"],
+          [preToolQuarantine.response_started_observation_sha256, "pre_tool_quarantine_start_invalid"],
+          [preToolQuarantine.terminal_observation_sha256, "pre_tool_quarantine_terminal_invalid"],
+          [preToolQuarantine.observation_list_sha256, "pre_tool_quarantine_observation_list_invalid"],
+          [preToolQuarantine.audio_content_sha256, "pre_tool_quarantine_audio_content_invalid"],
+          [preToolQuarantine.evidence_sha256, "pre_tool_quarantine_evidence_invalid"],
+        ] as const) pushHashError(errors, value, code);
+        for (const hash of preToolQuarantine.observation_sha256s) {
+          pushHashError(errors, hash, "pre_tool_quarantine_observation_invalid");
+        }
+        if (preToolQuarantine.schema_version !== 1
+          || preToolQuarantine.disposition !== "suppressed_never_caller_playable"
+          || preToolQuarantine.released_audio_bytes !== 0
+          || !Number.isSafeInteger(preToolQuarantine.audio_bytes)
+          || preToolQuarantine.audio_bytes < 0
+          || !Number.isSafeInteger(preToolQuarantine.audio_chunk_count)
+          || preToolQuarantine.audio_chunk_count < 0
+          || (preToolQuarantine.sample_rate_hz !== null
+            && (!Number.isSafeInteger(preToolQuarantine.sample_rate_hz)
+              || preToolQuarantine.sample_rate_hz <= 0))) {
+          errors.push("pre_tool_quarantine_contract_invalid");
+        }
+      }
+    } else if (preToolQuarantine !== undefined) {
+      errors.push("non_xai_pre_tool_quarantine_forbidden");
+    }
     if (summary.call.call_id_sha256 !== summary.result.call_id_sha256) {
       errors.push("call_result_id_mismatch");
     }
@@ -1015,6 +1161,28 @@ export function replayProviderToolRoundtrip(
     if (projectedOutputAudio === null
       || canonicalJson(projectedOutputAudio) !== canonicalJson(summary.output_audio)) {
       errors.push("output_audio_continuation_replay_mismatch");
+    }
+    if (summary.provider === "xai" && preToolQuarantine !== undefined) {
+      const projectedQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
+        provider: summary.provider,
+        wire,
+        response_started_observation_sha256: preToolQuarantine.response_started_observation_sha256,
+        terminal_observation_sha256: preToolQuarantine.terminal_observation_sha256,
+        response_id_sha256: preToolQuarantine.response_id_sha256,
+      });
+      if (projectedQuarantine === null
+        || canonicalJson(projectedQuarantine) !== canonicalJson(preToolQuarantine)
+        || preToolQuarantine.response_id_sha256 !== summary.call.response_id_sha256) {
+        errors.push("pre_tool_quarantine_replay_mismatch");
+      }
+      const quarantineTerminal = byHash.get(preToolQuarantine.terminal_observation_sha256);
+      const callObservation = byHash.get(summary.call.observation_sha256);
+      const continuationStart = byHash.get(summary.continuation.started_observation_sha256);
+      if (!quarantineTerminal || !callObservation || !continuationStart
+        || callObservation.index > quarantineTerminal.index
+        || quarantineTerminal.index >= continuationStart.index) {
+        errors.push("pre_tool_quarantine_lifecycle_order_invalid");
+      }
     }
 
     const calls = factsWithProjectionArray(wire, "gatewayCalls");
@@ -1328,6 +1496,13 @@ export function replayProviderToolRoundtrip(
       output_audio_content_sha256: summary.output_audio.content_sha256,
       output_audio_bytes: summary.output_audio.audio_bytes,
       output_audio_chunk_count: summary.output_audio.chunk_count,
+      pre_tool_quarantine_evidence_sha256:
+        summary.pre_tool_output_quarantine?.evidence_sha256 ?? null,
+      pre_tool_quarantine_observation_list_sha256:
+        summary.pre_tool_output_quarantine?.observation_list_sha256 ?? null,
+      pre_tool_quarantine_audio_bytes:
+        summary.pre_tool_output_quarantine?.audio_bytes ?? 0,
+      pre_tool_quarantine_released_audio_bytes: 0 as const,
     });
     const publicExecutionSha256 = sha256Hex(
       `${PUBLIC_EXECUTION_DOMAIN}${canonicalJson(publicExecution)}`,
@@ -1347,6 +1522,8 @@ export function replayProviderToolRoundtrip(
       input_audio_chunk_list_sha256: summary.input_audio.chunk_list_sha256,
       output_audio_observation_list_sha256: summary.output_audio.observation_list_sha256,
       output_audio_content_sha256: summary.output_audio.content_sha256,
+      pre_tool_quarantine_evidence_sha256:
+        summary.pre_tool_output_quarantine?.evidence_sha256 ?? null,
       public_execution_sha256: publicExecutionSha256,
     })}`);
     return deepFreeze({

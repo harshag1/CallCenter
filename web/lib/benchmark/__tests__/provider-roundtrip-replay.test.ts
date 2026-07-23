@@ -3,6 +3,7 @@ import {
   replayProviderToolRoundtrip,
   projectRoundtripInputAudioEvidence,
   projectRoundtripOutputAudioEvidence,
+  projectRoundtripPreToolOutputQuarantineEvidence,
   roundtripInputAudioChunkListSha256,
   roundtripCausalBindingSha256,
   roundtripSanitizedUsageSha256,
@@ -324,9 +325,26 @@ function xaiPacket(): ProviderRoundtripReplayInput {
     { direction: "inbound", wireType: "response.created", identities: { responseIdSha256: origin } },
     {
       direction: "inbound",
-      wireType: "response.function_call_arguments.done",
+      wireType: "response.audio.delta",
+      identities: { responseIdSha256: origin },
+      projection: {
+        audio: {
+          direction: "output",
+          validCanonicalBase64: true,
+          sha256: H("7"),
+          byteLength: 24_000,
+          format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+        },
+      },
+    },
+    {
+      direction: "inbound",
+      wireType: "response.done",
       identities: { callIdSha256: callId, responseIdSha256: origin },
-      projection: { gatewayCalls: [gatewayCall(callId, origin)] },
+      projection: {
+        gatewayCalls: [gatewayCall(callId, origin)],
+        terminal: { status: "completed" },
+      },
     },
     {
       direction: "outbound",
@@ -357,15 +375,19 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       projection: { terminal: { status: "completed" } },
     },
   ]);
-  const contributors = [observations[0]!.observationSha256, observations[9]!.observationSha256];
+  const contributors = [
+    observations[0]!.observationSha256,
+    observations[5]!.observationSha256,
+    observations[10]!.observationSha256,
+  ];
   const usage: RoundtripSanitizedUsage = {
     schema_version: 1,
     source: "client_measured_wire_pcm",
     response_id_sha256: continuation,
-    terminal_observation_sha256: observations[10]!.observationSha256,
+    terminal_observation_sha256: observations[11]!.observationSha256,
     provider_usage_observation_sha256: null,
     contributing_wire_observation_sha256s: contributors,
-    counters: { inputAudioMinutes: 1 / 60, outputAudioMinutes: 1 / 120 },
+    counters: { inputAudioMinutes: 1 / 60, outputAudioMinutes: 1 / 60 },
   };
   const inputAudio = projectRoundtripInputAudioEvidence(observations, {
     chunk_sha256s: [H("9")], chunk_list_sha256: roundtripInputAudioChunkListSha256([H("9")]),
@@ -375,9 +397,16 @@ function xaiPacket(): ProviderRoundtripReplayInput {
   })!;
   const outputAudio = projectRoundtripOutputAudioEvidence({
     provider: "xai", wire: observations,
-    continuation_start_observation_sha256: observations[8]!.observationSha256,
-    terminal_observation_sha256: observations[10]!.observationSha256,
+    continuation_start_observation_sha256: observations[9]!.observationSha256,
+    terminal_observation_sha256: observations[11]!.observationSha256,
     continuation_response_id_sha256: continuation,
+  })!;
+  const preToolOutputQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
+    provider: "xai",
+    wire: observations,
+    response_started_observation_sha256: observations[4]!.observationSha256,
+    terminal_observation_sha256: observations[6]!.observationSha256,
+    response_id_sha256: origin,
   })!;
   return {
     expected: { provider: "xai", model: "grok-voice-think-fast-1.0" },
@@ -387,19 +416,19 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       model: "grok-voice-think-fast-1.0",
       connection_epoch: 1,
       call: {
-        observation_sha256: observations[5]!.observationSha256,
+        observation_sha256: observations[6]!.observationSha256,
         call_id_sha256: callId,
         response_id_sha256: origin,
       },
-      result: { observation_sha256: observations[6]!.observationSha256, call_id_sha256: callId },
+      result: { observation_sha256: observations[7]!.observationSha256, call_id_sha256: callId },
       continuation: {
-        request_observation_sha256: observations[7]!.observationSha256,
+        request_observation_sha256: observations[8]!.observationSha256,
         origin_response_id_sha256: origin,
-        started_observation_sha256: observations[8]!.observationSha256,
+        started_observation_sha256: observations[9]!.observationSha256,
         response_id_sha256: continuation,
       },
       terminal: {
-        observation_sha256: observations[10]!.observationSha256,
+        observation_sha256: observations[11]!.observationSha256,
         response_id_sha256: continuation,
         status: "completed",
       },
@@ -409,6 +438,7 @@ function xaiPacket(): ProviderRoundtripReplayInput {
       },
       input_audio: inputAudio,
       output_audio: outputAudio,
+      pre_tool_output_quarantine: preToolOutputQuarantine,
     },
     wire_observations: observations,
     sanitized_usage: [usage],
@@ -586,6 +616,59 @@ describe("provider tool roundtrip offline replay", () => {
     expect(publicJson).not.toContain(input.summary.model);
     expect(publicJson).not.toContain("call-openai-1");
     expect(publicJson).not.toContain("response-openai-continuation");
+  });
+
+  it("binds xAI pre-tool audio as suppressed root-response quarantine, never playable output", () => {
+    const input = xaiPacket();
+    const replay = replayProviderToolRoundtrip(input);
+    expect(input.summary.pre_tool_output_quarantine).toMatchObject({
+      disposition: "suppressed_never_caller_playable",
+      audio_bytes: 24_000,
+      audio_chunk_count: 1,
+      released_audio_bytes: 0,
+      response_id_sha256: input.summary.call.response_id_sha256,
+    });
+    expect(replay.public_execution).toMatchObject({
+      pre_tool_quarantine_audio_bytes: 24_000,
+      pre_tool_quarantine_released_audio_bytes: 0,
+      output_audio_bytes: 24_000,
+    });
+    expect(replay.public_execution?.pre_tool_quarantine_evidence_sha256)
+      .toBe(input.summary.pre_tool_output_quarantine?.evidence_sha256);
+  });
+
+  it("rejects a claimed xAI quarantine release or a missing quarantine receipt", () => {
+    const input = xaiPacket();
+    const quarantine = input.summary.pre_tool_output_quarantine!;
+    const released = replayProviderToolRoundtrip({
+      ...input,
+      summary: {
+        ...input.summary,
+        pre_tool_output_quarantine: {
+          ...quarantine,
+          released_audio_bytes: 1 as 0,
+        },
+      },
+    });
+    expect(released.valid).toBe(false);
+    expect(released.errors).toContain("pre_tool_quarantine_contract_invalid");
+    const withoutQuarantine = { ...input.summary };
+    Reflect.deleteProperty(withoutQuarantine, "pre_tool_output_quarantine");
+    const missing = replayProviderToolRoundtrip({ ...input, summary: withoutQuarantine });
+    expect(missing.valid).toBe(false);
+    expect(missing.errors).toContain("xai_pre_tool_quarantine_missing");
+  });
+
+  it("rejects root audio that is omitted from or rebound outside the xAI quarantine", () => {
+    const input = xaiPacket();
+    const nextSeeds = seeds(input.wire_observations);
+    nextSeeds[5] = {
+      ...nextSeeds[5]!,
+      identities: { responseIdSha256: input.summary.continuation.response_id_sha256 },
+    };
+    const replay = replayProviderToolRoundtrip(withRebuiltWire(input, nextSeeds));
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("pre_tool_quarantine_replay_mismatch");
   });
 
   it("deduplicates one OpenAI call across its full six-frame lifecycle", () => {
