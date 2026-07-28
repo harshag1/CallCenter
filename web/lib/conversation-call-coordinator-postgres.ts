@@ -7,6 +7,7 @@ import {
   type ConversationCallWorkerStore,
 } from "./conversation-call-coordinator";
 import { createPostgresConversationRuntime } from "./conversation-runtime-postgres";
+import { deriveFlowActionInvocationId } from "./flow-runtime";
 import {
   reserveGovernedFlowActionAtomic,
   type GovernedFlowActionArgs,
@@ -57,7 +58,7 @@ export function createGovernedCallActionAuthority(): ConversationCallActionAutho
         {
           ...input.request.arguments,
           receiptId: input.deterministicUuid,
-          invocationId: input.idempotencyKey,
+          invocationId: deriveFlowActionInvocationId(input.idempotencyKey),
           // The receipt/invocation identities must replay deterministically.
           // The dispatch-owner token is a secret lease capability and must not
           // be derivable from public turn identities.

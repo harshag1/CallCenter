@@ -111,8 +111,9 @@ describe("PostgreSQL ConversationCallCoordinator composition", () => {
     const replay = mocks.reserve.mock.calls[1][2];
     expect(first).toMatchObject({
       receiptId: base.deterministicUuid,
-      invocationId: base.idempotencyKey,
     });
+    expect(first.invocationId).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(replay.invocationId).toBe(first.invocationId);
     expect(first.ownerToken).toMatch(/^[a-f0-9-]{36}$/);
     expect(replay.ownerToken).toMatch(/^[a-f0-9-]{36}$/);
     expect(replay.ownerToken).not.toBe(first.ownerToken);
