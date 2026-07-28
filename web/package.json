@@ -50,6 +50,7 @@
     "benchmark:lc4:statistics:generate": "tsx scripts/generate-lc4-statistical-artifacts.ts",
     "benchmark:lc4:dev": "tsx scripts/lc4-development-live.ts",
     "benchmark:lc4:dev:public-results": "tsx scripts/lc4-development-public-results.ts",
+    "benchmark:lc4:launch": "tsx scripts/lc4-launch-benchmark.ts",
     "benchmark:lc4:qualification": "tsx scripts/lc4-qualification.ts",
     "benchmark:lc4:qualification:operator": "tsx scripts/lc4-qualification-v3-operator.ts",
     "benchmark:lc4:qualification:status": "tsx scripts/lc4-qualification.ts status",
@@ -57,7 +58,8 @@
     "benchmark:lc4:qualification:authorize": "tsx scripts/lc4-qualification-v3-operator.ts authorize",
     "benchmark:lc4:qualification:run": "tsx scripts/lc4-qualification.ts run",
     "benchmark:lc4:qualification:report": "tsx scripts/lc4-qualification.ts report",
-    "benchmark:lc4:seal": "tsx scripts/lc4-seal-heldout.ts"
+    "benchmark:lc4:seal": "tsx scripts/lc4-seal-heldout.ts",
+    "flow:package": "tsx scripts/flow-package.ts"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

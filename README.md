@@ -45,10 +45,11 @@ The result is a repeatable state machine that still leaves the realtime model fr
 |---|---|
 | Flow v2, scoped MCP gateway, action receipts, and browser calling | Integrated into the current application path |
 | xAI/OpenAI Twilio bridge | Implemented as a bounded development transport; not production-qualified |
-| Durable conversation log, bounded context compiler, action-policy kernel, and governed worker store | Implemented and locally tested foundation; not yet the default provider/MCP path |
-| Mission runtime and provider plugin contract | Experimental or opt-in; not release-critical runtime authority |
+| Durable conversation log, bounded context compiler, action-policy kernel, governed worker store, and call-turn coordinator | Implemented and locally tested composition root; not yet the default provider/MCP route path |
+| Validated realtime provider registry | Protected OpenAI, xAI, and Gemini built-ins plus typed self-hosted registration |
+| Mission runtime | Experimental; not release-critical runtime authority |
 
-The default live path still uses Flow v2, the static provider registry, and the legacy `launch_task` implementation. The foundation APIs are available to integrators, but their existence is not evidence that live calls already receive durable context packets, governed worker results, or unified pre/post-action policy enforcement.
+The default live route path still uses Flow v2 and the legacy `launch_task` implementation. The provider registry is extensible, and a tested composition root now joins durable conversation state, Flow checkpoints, governed action reservations, atomic worker spawn, and fresh provider-neutral context packets. Existing call routes have not yet adopted that coordinator, so its existence is not evidence that ordinary live calls already receive those packets or governed worker results.
 
 ## Realtime provider matrix
 
@@ -190,7 +191,7 @@ Start with the tested [deep Flow v2 example pack](examples/flows/README.md). It 
 
 > Build a Flow v2 membership and returns agent. Keep routing tools minimal, verify identity before account actions, require durable IDs from every write, checkpoint after verification, add explicit failure paths, validate the flow, and list the action fixtures needed for receipt-backed scenario tests before attaching it.
 
-The builder's `validate_flow` primitive performs executable schema/topology checks. `test_flow_scenario` can walk receipt-free state transitions, but it does not currently synthesize action receipts; receipt-bound flows need action fixtures or integration tests. See [Flow v2](docs/flow-v2.md).
+The builder's `validate_flow` primitive performs executable schema/topology checks. `test_flow_scenario` can exercise receipt-backed actions, indeterminate dispatch, proof-backed reconciliation, disconnect/restart recovery, worker completion, and exact terminal assertions. Use the [Flow package CLI](docs/flow-import-export.md) to validate, dependency-check, export, and import deep examples without silently activating them. See [Flow v2](docs/flow-v2.md).
 
 ## Extend it
 
@@ -241,7 +242,7 @@ The example database URL uses plaintext only for local loopback Docker. Producti
 
 ## Project status
 
-This is an ambitious starting point, not a hosted compliance product. The conversation kernel, action-policy kernel, and worker store are implemented and locally tested primitives, but they are not yet one transactionally unified live-call path: Flow v2 remains the production action authority, the old `launch_task` implementation remains live, and worker-result delivery is not yet projected into provider context. Do not describe the architecture target as production integration. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN is not implemented and requires a tested transcoding bridge. Provider-native resumption is not treated as workflow authority; durable checkpoint recovery is application-owned. The included Twilio bridge is development/non-production for the evidence gaps above. Recording persistence is implemented for browser calls only—neither Twilio bridge path records PSTN audio. Operators must add admission policy, rate limiting, retention, consent, audit, incident response, and jurisdiction-specific controls before a public or consequential deployment.
+This is an ambitious starting point, not a hosted compliance product. The repository includes a tested composition root for the conversation kernel, Flow checkpoint authority, action reservations, governed worker spawn, and bounded provider packets, but existing live-call routes do not use it by default: Flow v2 remains the production action authority, the old `launch_task` implementation remains live, and worker-result delivery is not yet projected into ordinary provider sessions. Do not describe the architecture target as completed production integration. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN is not implemented and requires a tested transcoding bridge. Provider-native resumption is not treated as workflow authority; durable checkpoint recovery is application-owned. The included Twilio bridge is development/non-production for the evidence gaps above. Recording persistence is implemented for browser calls only—neither Twilio bridge path records PSTN audio. Operators must add admission policy, rate limiting, retention, consent, audit, incident response, and jurisdiction-specific controls before a public or consequential deployment.
 
 ## Contributing
 
