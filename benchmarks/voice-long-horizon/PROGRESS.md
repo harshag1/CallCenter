@@ -491,3 +491,50 @@ scoreable result and `/private/tmp` is not durable publication storage.
 
 No partial Native/HACC score is published. C4/C5 and every drift, memory,
 guardrail, or superiority claim remain **NO-GO**.
+
+## 2026-07-28 — Two further DEV roots exposed authority and branch-custody bugs
+
+The next fresh root, at source
+`deda084a14b803b40de1ef6835a80fe389bd0e1a`, completed 120/120 OpenAI
+canonical opportunities and 128/128 response generations with eight bounded
+repairs and zero retries. It failed after the HACC horizon because a rejected
+argument-free `archive.observe_worker_result` attempt had
+`effective_arguments: null`, but episode finalization treated it as an
+accepted worker observation. The retained run/report/package are
+`2a9fb6d0228d51df3af6f306868956a637230b178344a4fed36ed4f5a59f686e`,
+`234b88b9ff8016eb6cc7afc455d4240e3fc5473adec63b34077ff1cefffa491f`,
+and `55fa39c7d7dd2b30b4b6a7b8422c0c992cb0f1658a82245a08c32b90bd86c50d`.
+Commit `79501bb` now retains such attempts as failed `@unbound` authority
+events without satisfying obligations or crashing finalization.
+
+A new exact-source qualification passed all three provider gateways before the
+subsequent source-`79501bb50d8442b2e5c16db35fbb336061692f30` run. That DEV
+root completed both OpenAI episodes, validating the prior fix live, then
+stopped before Gemini HACC opportunity 42. It completed 161/162 submitted
+canonical opportunities, 173/174 requested generations, 173 provider calls,
+12 repairs, and zero retries.
+
+The stop revealed a separate custody bug: the signed caller scheduler selected
+the registered `no_call` status-followup branch, but the provider adapter
+compared its 248,840-byte PCM only with the 180,128-byte non-branch episode
+binding. Failure evidence
+`bafa7762fdcad13f171242fec1a32649fee1fab1f41428f0844ce8150c1830d1`
+shows the adapter rejected it at `pre_send_contract`, before any Gemini audio
+or response request. The retained run/report/package are
+`2b69e2551d50272477dd9c141d31e12267820f2fb69825aeadbe235480bf657c`,
+`f55c4524c7725cc475f98e8f99ba230d03f0c3b50d3c0eb0483a93e434f24238`,
+and `ac14cf464ab5fdb56d2bfc9b3d9be46d5972b844ea863ffcede46804ba762b6e`.
+
+Both reports are incomplete, claim-ineligible, and unscorable. The completed
+OpenAI episodes are not partial results. The exact failure analysis and custody
+hashes are retained in
+[HACC_LC4_DEV_FAILED_ATTEMPTS.md](evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md).
+At this attempt boundary, a new paid run was blocked until alternate branch
+audio could be accepted only through verified signed branch authority and
+provider-free mutation tests covered wrong opportunity, outcome, PCM
+hash/length, and sample rate.
+
+- Conservative DEV settlement delta: **$12.50**
+- Active reservations after both terminals: **$0.00**
+- Provider-reported and invoice-reconciled cost: **unavailable**
+- Public benchmark graph: **blocked**

@@ -137,3 +137,24 @@ The DEV run package, run, report, and budget evidence remain bound by
 and `7f82455c4bdd24a2ea5a5d580ffe1f25bee0194e4c0f9888d6e5b02d28328372`,
 respectively. The retained root replayed with
 `budget_replay_verified: true`, and active reservations are exactly **$0.00**.
+
+## 2026-07-28 — Subsequent LC4 DEV failure settlements
+
+The next two fresh six-episode roots also failed closed. Their machine reports
+both record `budget_replay_verified: true`; neither contains provider-reported
+or invoice-reconciled cost.
+
+| Source/run | Opened reservation outcomes | Conservative settlement | Active after terminal | Budget evidence / terminal head |
+|---|---|---:|---:|---|
+| `deda084a14b803b40de1ef6835a80fe389bd0e1a` / `2a9fb6d0228d51df3af6f306868956a637230b178344a4fed36ed4f5a59f686e` | OpenAI Native completed; OpenAI HACC failed during authority finalization; four unopened reservations cancelled | $5.00 | $0.00 | `8a5319fc8682415778c20c517ee56164902b01906ec5934e3ff764b67d846323` / `142c0864b57468022bd54ddeef2fb6c7cc6a098613da9bab3c5298b54a7f121f` |
+| `79501bb50d8442b2e5c16db35fbb336061692f30` / `2b69e2551d50272477dd9c141d31e12267820f2fb69825aeadbe235480bf657c` | Both OpenAI arms completed; Gemini HACC failed at a pre-send branch-audio contract; three unopened reservations cancelled | $7.50 | $0.00 | `dac04ce270a673f691c6dc5690625613d838bcc8f58504df4d5ec8b86245acae` / `ef3b7ca6ca36b34d311d0a891204af87c1e248b277d69570b90197c3caee6e5e` |
+
+The two roots add **$12.50** of pessimistic reservation settlement, not billed
+spend. Each opened reservation was settled at its full $2.50 maximum:
+
+- source `deda084`: two settled, four cancelled;
+- source `79501bb`: three settled, three cancelled.
+
+No reservation remains active. The incomplete roots are preserved as
+development failure evidence and cannot contribute provider efficacy scores or
+a public benchmark graph.

@@ -241,3 +241,142 @@ evidence, but `/private/tmp` is not durable publication storage. Its report is
 explicitly incomplete, claim-ineligible, and unscorable; no score from the two
 completed episodes may be extracted. C4/C5 and all HACC-superiority claims
 remain **NO-GO**.
+
+## 2026-07-28 six-episode attempt at `deda084`
+
+**Retained failure/mechanism evidence only. No partial score is admissible.**
+
+This fresh root ran from source commit
+`deda084a14b803b40de1ef6835a80fe389bd0e1a`. It completed the OpenAI Native
+episode and all 60 canonical OpenAI HACC opportunities, but failed while
+finalizing the HACC episode:
+
+- episodes started/completed/finalized: **2 / 1 / 1**;
+- canonical opportunities submitted/completed: **120 / 120**;
+- response generations requested/completed: **128 / 128**;
+- provider calls: **128**;
+- bounded repair playbacks: **8**;
+- paid retries: **0**.
+
+The retained opportunity-42 provider exchange
+`e4b1dd3886e2e07464a247a23719ab51089d7355ce2a730ca09cefbb9a562672`
+contains an OpenAI HACC request for `archive.observe_worker_result` with empty
+model arguments. The host correctly rejected the undisclosed action at
+capability epoch 44. Its authority projection records `disposition: rejected`,
+`model_arguments: {}`, and `effective_arguments: null`; projection
+`12888c1947abe59af3339392187b839c08962c79addc2b1151adbbc46cf3207a`.
+The episode-finalization path then treated that null effective argument set as
+an accepted worker-observation object and threw. The run's exact retained
+failure-message SHA-256,
+`bae40ad824d132df902e010126ece0ec1c6f6f338398606a72badaa61cac37f8`,
+maps to `LC4-DEV worker observation must be a retained JSON object`.
+
+This is a harness authority-projection bug, not an OpenAI model score. A
+rejected tool attempt must remain a scored failed authority event; it must not
+crash finalization and must not satisfy a worker obligation. Commit `79501bb`
+implements that fail-closed behavior by retaining rejected, argument-free
+attempts under a non-authoritative `@unbound` identity. That later code change
+does not retroactively make this attempt scoreable.
+
+Retained identities:
+
+- run: `2a9fb6d0228d51df3af6f306868956a637230b178344a4fed36ed4f5a59f686e`;
+- report:
+  `234b88b9ff8016eb6cc7afc455d4240e3fc5473adec63b34077ff1cefffa491f`;
+- run package:
+  `55fa39c7d7dd2b30b4b6a7b8422c0c992cb0f1658a82245a08c32b90bd86c50d`;
+- run ledger head:
+  `9db867994e83de030eabc63c0b34284f52a4d41c1841923f04d5e74a05cd0d0f`;
+- budget evidence:
+  `8a5319fc8682415778c20c517ee56164902b01906ec5934e3ff764b67d846323`;
+- budget terminal ledger head:
+  `142c0864b57468022bd54ddeef2fb6c7cc6a098613da9bab3c5298b54a7f121f`.
+
+The report is incomplete, claim-ineligible, and
+`unscorable_missing_authority_evidence`; it records five invalid authority
+packets and no task results. The filesystem ledger conservatively settled
+**$5.00** across the two opened OpenAI reservations, cancelled the four
+unopened reservations, and has **$0.00** active. No provider-reported cost was
+retained, so this is pessimistic reservation settlement rather than billed
+spend.
+
+The root is currently retained at
+`/private/tmp/hacc-lc4-dev-evidence-deda084-20260728T183654Z`.
+`/private/tmp` is not durable publication storage.
+
+## 2026-07-28 six-episode attempt at `79501bb`
+
+**Retained failure/mechanism evidence only. No partial score is admissible.**
+
+A fresh exact-source qualification passed the pinned OpenAI, Gemini, and xAI
+gateway paths before this run. The six-episode root then ran from source commit
+`79501bb50d8442b2e5c16db35fbb336061692f30` and recorded:
+
+- episodes started/completed/finalized: **3 / 2 / 2**;
+- canonical opportunities submitted/completed: **162 / 161**;
+- response generations requested/completed: **174 / 173**;
+- provider calls: **173**;
+- bounded repair playbacks: **12**;
+- paid retries: **0**.
+
+Both OpenAI episodes reached terminal completion, which confirms that the
+argument-free rejected-worker finalization crash above no longer reproduced.
+The run nevertheless stopped fail-closed before sending Gemini HACC
+opportunity 42.
+
+The signed caller-branch decision
+`a4e1867f8a4ae3887bb42e02d9058f5544a2c6cd50691087e755647db024d138`
+records the prior mutation outcome as `no_call` and selects the registered
+`status_followup` branch: 248,840 bytes of 16 kHz PCM with SHA-256
+`f3e2db59c84b652a955b34668c9a8ba8bcd1fded17024e606ce9b347d429bbd8`
+and source-text SHA-256
+`edfcab50cd6ee1cd781aa9dafdf3b22061c1f9f9db4a1e3175cb3275735ab172`.
+The frozen episode manifest's non-branch canonical binding for the same
+provider/opportunity is instead 180,128 bytes with PCM SHA-256
+`08b0d59c946eda69502edb5cda81befa8c0014b113de80ee3d0b91a2dcfea1ed`
+and source-text SHA-256
+`987cacd9682725100e36da3d0b596158c5d91bba262415ff820a4137ce14c661`.
+
+The runner retained the signed branch decision and selected PCM, but the
+provider adapter validated only against the static episode binding. It
+therefore rejected the legitimate branch-selected audio before provider
+delivery. Primary failure evidence
+`bafa7762fdcad13f171242fec1a32649fee1fab1f41428f0844ce8150c1830d1`
+records `failure_class: adapter_contract`, `failure_code: invalid_contract`,
+and `failure_stage: pre_send_contract`; zero PCM bytes were appended and no
+response generation was requested for that opportunity. The outer run records
+`failure_class: transport` and failure-message SHA-256
+`69e19763e753f86092c1615de18425a5c776f9dcef3f719432e016b61b498c3f`.
+
+This is a harness custody-contract bug, not a Gemini model outcome. A correction
+must accept alternate canonical audio only when the exact opportunity,
+prior-outcome branch, PCM identity, sample rate, and signed branch-decision
+authority all verify; simply bypassing the frozen audio binding would weaken
+the benchmark.
+
+Retained identities:
+
+- run: `2b69e2551d50272477dd9c141d31e12267820f2fb69825aeadbe235480bf657c`;
+- report:
+  `f55c4524c7725cc475f98e8f99ba230d03f0c3b50d3c0eb0483a93e434f24238`;
+- run package:
+  `ac14cf464ab5fdb56d2bfc9b3d9be46d5972b844ea863ffcede46804ba762b6e`;
+- run ledger head:
+  `f953555fe56c2bcb13ab055de06577b118d4a159250001b3591078599aa55012`;
+- budget evidence:
+  `dac04ce270a673f691c6dc5690625613d838bcc8f58504df4d5ec8b86245acae`;
+- budget terminal ledger head:
+  `ef3b7ca6ca36b34d311d0a891204af87c1e248b277d69570b90197c3caee6e5e`.
+
+The report is incomplete, claim-ineligible, and
+`unscorable_missing_authority_evidence`; it records four invalid authority
+packets and no task results. The filesystem ledger conservatively settled
+**$7.50** across the two completed OpenAI reservations and the failed Gemini
+HACC reservation, cancelled the three unopened reservations, and has **$0.00**
+active. No provider-reported cost was retained.
+
+The root is currently retained at
+`/private/tmp/hacc-lc4-dev-evidence-79501bb-20260728T190631Z`.
+The two completed OpenAI episodes cannot be extracted as a partial benchmark.
+No public graph or Native/HACC efficacy claim is authorized, and the temporary
+root must move to durable release storage before cleanup.
