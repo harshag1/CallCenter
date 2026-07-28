@@ -91,6 +91,30 @@ payloads, local paths, credentials, signing-key identities, and the removed
 heterogeneous aggregate bars. Publication fails unless all six cells complete
 all 360 registered opportunities and every authority artifact is scoreable.
 
+## Launch visual
+
+After the v2 public JSON exists, a separate provider-free command renders the
+minimal launch comparison:
+
+```bash
+cd web
+npm run benchmark:lc4:launch:visual -- publish \
+  --public-json /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.json \
+  --output-root /absolute/path/to/new-launch-visual-directory
+```
+
+It writes one immutable asset in SVG, PNG, and WebP form. The graph uses the
+registered recall-probe counts as its bars, prints every exact numerator and
+denominator, and includes the binary strict episode outcome without turning it
+into a pooled rate. Its footer is fixed to `360 registered opportunities across
+6 calls`.
+
+The renderer verifies the public artifact hash and the complete six-cell,
+360-opportunity, scorable-authority contract before creating its output
+directory. It refuses partial runs, schema drift, tampered metrics, missing
+denominators, symlinked inputs, and overwrites. No placeholder or fabricated
+launch asset is produced before a completed public JSON exists.
+
 ## Claim boundary
 
 The six-episode artifact is C3 descriptive development evidence. It may support

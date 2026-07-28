@@ -742,7 +742,7 @@ export async function scoreLc4LaunchBenchmarkEvidenceRoot(
   });
 }
 
-function assertPublicArtifact(artifact: Lc4LaunchBenchmarkArtifact): void {
+export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArtifact): void {
   const { benchmark_sha256: claimed, ...body } = artifact;
   if (!HASH.test(claimed) || claimed !== sha256Hex(`${BENCHMARK_DOMAIN}${canonicalJson(body)}`)) {
     throw new Error("LC4 launch benchmark artifact hash mismatch");
@@ -874,7 +874,7 @@ function rate(value: Metric): string {
 }
 
 export function renderLc4LaunchBenchmarkMarkdown(artifact: Lc4LaunchBenchmarkArtifact): string {
-  assertPublicArtifact(artifact);
+  assertLc4LaunchBenchmarkArtifact(artifact);
   const rows = artifact.cells.map((cell) =>
     `| ${cell.provider} | ${cell.model} | ${cell.arm === "hacc" ? "HACC" : "Native"} | ${rate(cell.metrics.positive_semantic_speech_checks)} | ${rate(cell.metrics.registered_recall_probes)} | ${rate(cell.metrics.corrected_fact_checks)} | ${rate(cell.metrics.flow_stage_checks)} | ${rate(cell.metrics.strict_episode_outcome)} |`
   ).join("\n");
@@ -909,7 +909,7 @@ export async function publishLc4LaunchBenchmark(input: Readonly<{
 }>): Promise<Lc4LaunchBenchmarkArtifact> {
   const outputRoot = absolute(input.output_root, "LC4 launch benchmark output root");
   const artifact = await scoreLc4LaunchBenchmarkEvidenceRoot(absolute(input.evidence_root, "LC4 launch benchmark evidence root"));
-  assertPublicArtifact(artifact);
+  assertLc4LaunchBenchmarkArtifact(artifact);
   await mkdir(outputRoot, { recursive: true, mode: 0o755 });
   const metadata = await lstat(outputRoot);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("LC4 launch benchmark output root must be a real directory");
@@ -929,9 +929,9 @@ export async function verifyPublishedLc4LaunchBenchmark(input: Readonly<{
   public_markdown: string;
 }>): Promise<Lc4LaunchBenchmarkArtifact> {
   const expected = await scoreLc4LaunchBenchmarkEvidenceRoot(absolute(input.evidence_root, "LC4 launch benchmark evidence root"));
-  assertPublicArtifact(expected);
+  assertLc4LaunchBenchmarkArtifact(expected);
   const published = JSON.parse(await readFile(absolute(input.public_json, "LC4 launch benchmark public JSON"), "utf8")) as Lc4LaunchBenchmarkArtifact;
-  assertPublicArtifact(published);
+  assertLc4LaunchBenchmarkArtifact(published);
   if (canonicalJson(expected) !== canonicalJson(published)) throw new Error("LC4 launch benchmark public JSON does not reproduce from evidence");
   const markdown = await readFile(absolute(input.public_markdown, "LC4 launch benchmark public Markdown"), "utf8");
   if (markdown !== renderLc4LaunchBenchmarkMarkdown(expected)) throw new Error("LC4 launch benchmark public Markdown does not reproduce from evidence");
