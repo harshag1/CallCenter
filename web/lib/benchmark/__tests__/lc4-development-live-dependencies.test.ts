@@ -17,6 +17,7 @@ import {
 } from "../lc4-authoritative-obligation-evidence";
 import {
   auditLc4PublicDevLiveReadiness,
+  assertLc4DevBranchExchangeCheckpoint,
   assertLc4DevFinalControlHorizon,
   createLc4DevelopmentLiveDependencies,
   createLc4HashChainedLedgerWriter,
@@ -28,6 +29,13 @@ import {
   replayLc4DevAuthorityReport,
   type Lc4PinnedListenerEvaluator,
 } from "../lc4-development-live-dependencies";
+import {
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
+  createLc4DevCallerBranchAuthority,
+  createLc4DevCallerBranchMatrixArtifact,
+  type Lc4DevCallerBranchAudioBinding,
+} from "../lc4-development-caller-branch";
 import {
   createLc4DevOperatorAuthorizationDag,
   type Lc4DevOperatorSigner,
@@ -340,6 +348,94 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
 }
 
 describe("LC4-DEV concrete live dependencies", () => {
+  it("joins every retained signed branch field to the exact episode, PCM, and provider exchange", () => {
+    const signer = operatorSigner();
+    const identity = {
+      key_id: "lc4-dev-branch-checkpoint-test",
+      private_key_pem: signer.private_key_pkcs8_pem,
+      public_key_pem: signer.public_key_spki_pem,
+    };
+    const bindings = (["openai", "gemini", "xai"] as const).flatMap((provider) =>
+      LC4_DEV_PRIOR_MUTATION_OUTCOMES.map((outcome): Lc4DevCallerBranchAudioBinding => {
+        const source = LC4_DEV_CALLER_BRANCH_SOURCES.find((candidate) => candidate.prior_outcome === outcome)!;
+        return {
+          prior_outcome: outcome,
+          provider,
+          opportunity_id: "lc4-dev-op-42",
+          source_id: source.source_id,
+          source_text_sha256: source.canonical_caller_text_sha256,
+          pcm_sha256: sha256Hex(`branch-checkpoint:${provider}:${outcome}`),
+          pcm_byte_length: 4,
+          sample_rate_hz: LC4_PROVIDER_PROFILE_MANIFEST.providers[provider].input_sample_rate_hz,
+          channels: 1,
+          encoding: "pcm16le",
+        };
+      }),
+    );
+    const matrix = createLc4DevCallerBranchMatrixArtifact({
+      audio_manifest_sha256: sha256Hex("branch-checkpoint-audio-manifest"),
+      audio_bindings: bindings,
+      signing_identity: identity,
+    });
+    const authority = createLc4DevCallerBranchAuthority({ matrix, signing_identity: identity });
+    const trust = { key_id: identity.key_id, public_key_pem: identity.public_key_pem };
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const profile = LC4_PROVIDER_PROFILE_MANIFEST.providers.openai;
+    const episode: Lc4DevLiveEpisodePlan = {
+      episode_id: "lc4-dev-openai-hacc-branch-checkpoint",
+      pair_id: "lc4-dev-openai-branch-checkpoint",
+      pair_position: 2,
+      provider: "openai",
+      arm: "hacc",
+      model: profile.model,
+      voice: profile.voice,
+      maximum_micro_usd: 1_000,
+      opportunity_binding_set_sha256: sha256Hex("branch-checkpoint-binding-set"),
+    };
+    const decide = (episodeId: string, provider: "openai" | "gemini" | "xai") => authority.decide({
+      episode_id: episodeId,
+      provider,
+      opportunity: corpus.opportunities[41]!,
+      prior_receipt: {
+        semantic_opportunity_id: "lc4-dev-op-35",
+        tool: "archive.submit_transcript_request",
+        outcome: "no_call",
+        receipt_sha256: null,
+      },
+    });
+    const decision = decide(episode.episode_id, "openai");
+    const providerExchange = {
+      opportunity_id: "lc4-dev-op-42",
+      provider: "openai",
+      caller_pcm_sha256: decision.pcm_sha256,
+      caller_pcm_byte_length: decision.pcm_byte_length,
+    };
+    const valid = {
+      decision,
+      matrix,
+      trust,
+      episode,
+      caller_pcm_sha256: decision.pcm_sha256,
+      caller_pcm_byte_length: decision.pcm_byte_length,
+      provider_exchange: providerExchange,
+    };
+    expect(() => assertLc4DevBranchExchangeCheckpoint(valid)).not.toThrow();
+    const mutations = [
+      { ...valid, decision: decide("lc4-dev-other-episode", "openai") },
+      { ...valid, decision: decide(episode.episode_id, "gemini") },
+      { ...valid, caller_pcm_sha256: sha256Hex("different-caller-pcm") },
+      { ...valid, caller_pcm_byte_length: 6 },
+      { ...valid, provider_exchange: { ...providerExchange, provider: "gemini" } },
+      { ...valid, provider_exchange: { ...providerExchange, caller_pcm_sha256: sha256Hex("different-wire-pcm") } },
+      { ...valid, provider_exchange: { ...providerExchange, caller_pcm_byte_length: 6 } },
+    ];
+    for (const mutation of mutations) {
+      expect(() => assertLc4DevBranchExchangeCheckpoint(mutation)).toThrow(
+        "retained signed branch body differs",
+      );
+    }
+  });
+
   it("finalizes a complete horizon without censoring unresolved benchmark obligations", () => {
     const episode = { episode_id: "lc4-dev-openai-native", arm: "native" as const };
     expect(() => assertLc4DevFinalControlHorizon({

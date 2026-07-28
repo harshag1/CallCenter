@@ -829,6 +829,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     caller_pcm_sha256: string | null;
     caller_pcm_byte_length: number;
     role: "primary_exchange" | "cleanup";
+    post_exchange_completed?: boolean;
     playback_kind?: "canonical" | "repair" | null;
     secondary_failure_evidence_sha256?: string | null;
   }>): Lc4DevFailureEvidence => {
@@ -838,9 +839,21 @@ export async function executeLc4DevLiveRun(input: Readonly<{
       evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
       redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
       failure_role: failureInput.role,
-      failure_stage: failureInput.role === "cleanup" ? "segment_close" : timedOut ? "provider_wait" : "pre_send_contract",
-      failure_code: failureInput.role === "cleanup" ? "segment_close_failed" : timedOut ? "provider_response_timeout" : "adapter_failure",
-      failure_class: failureInput.role === "cleanup" ? "cleanup" : timedOut ? "timeout" : "unknown",
+      failure_stage: failureInput.role === "cleanup"
+        ? "segment_close"
+        : failureInput.post_exchange_completed
+          ? "exchange_evidence"
+          : timedOut ? "provider_wait" : "pre_send_contract",
+      failure_code: failureInput.role === "cleanup"
+        ? "segment_close_failed"
+        : failureInput.post_exchange_completed
+          ? "evidence_assembly_failed"
+          : timedOut ? "provider_response_timeout" : "adapter_failure",
+      failure_class: failureInput.role === "cleanup"
+        ? "cleanup"
+        : failureInput.post_exchange_completed
+          ? "evidence_retention"
+          : timedOut ? "timeout" : "unknown",
       episode_id: failureInput.episode.episode_id,
       opportunity_id: failureInput.opportunity_id,
       provider: failureInput.episode.provider,
@@ -849,6 +862,9 @@ export async function executeLc4DevLiveRun(input: Readonly<{
       operation_order: Object.freeze([]),
       caller_pcm_sha256: failureInput.caller_pcm_sha256,
       caller_pcm_byte_length: failureInput.caller_pcm_byte_length,
+      // The local runner can prove that the adapter returned and accounts the
+      // paid generation in the run counters, but it must not fabricate the
+      // adapter's private wire progression in this secondary evidence record.
       caller_pcm_chunk_count: 0,
       caller_pcm_appended_chunk_count: 0,
       caller_pcm_appended_byte_length: 0,
@@ -980,6 +996,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               [callerReceipt.evidence, retainedControl.evidence, ...(branchDecisionEvidence ? [branchDecisionEvidence] : [])],
             );
             let exchange: Lc4DevExchangeEvidence;
+            let exchangeReturned = false;
             responseGenerationsRequested += 1;
             try {
               exchange = await bounded("opportunity-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeCanonical({
@@ -993,6 +1010,13 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                   },
                 } : {}),
               }));
+              exchangeReturned = true;
+              // A successfully returned exchange has already consumed one paid
+              // provider generation. Count it before replay/evidence checks so
+              // a local verification failure cannot under-report provider use.
+              providerCallsStarted += 1;
+              responseGenerationsCompleted += 1;
+              failureClass = "evidence";
               assertCallerBranchExchangeAuthority({
                 projection: exchange.provider_exchange_projection,
                 decision: branchDecision,
@@ -1000,8 +1024,6 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 caller_pcm_sha256: expectedCallerPcmSha256,
                 caller_pcm_byte_length: callerPcm.byteLength,
               });
-              providerCallsStarted += 1;
-              responseGenerationsCompleted += 1;
             } catch (error) {
               const failure = isLc4DevFailureEvidenceError(error)
                 ? error.failure
@@ -1012,6 +1034,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                     caller_pcm_sha256: expectedCallerPcmSha256,
                     caller_pcm_byte_length: callerPcm.byteLength,
                     role: "primary_exchange",
+                    post_exchange_completed: exchangeReturned,
                   });
               const retainedFailure = isLc4DevFailureEvidenceError(error) && error.retained_evidence !== null
                 ? error.retained_evidence
@@ -1020,8 +1043,10 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 throw new Error("LC4-DEV failure evidence is not retained under its failure hash");
               }
               await input.dependencies.evidence.assertResolvable(retainedFailure);
-              providerCallsStarted += Number(failure.response_generation_started);
-              responseGenerationsCompleted += Number(failure.response_completed);
+              if (!exchangeReturned) {
+                providerCallsStarted += Number(failure.response_generation_started);
+                responseGenerationsCompleted += Number(failure.response_completed);
+              }
               await append("opportunity_failed", episode.episode_id, opportunity.id, {
                 failure_evidence_sha256: failure.failure_evidence_sha256,
                 failure_stage: failure.failure_stage,

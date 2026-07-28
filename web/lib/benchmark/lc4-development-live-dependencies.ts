@@ -33,6 +33,7 @@ import {
   lc4DevBranchedOpportunity,
   type Lc4DevCallerBranchAuthority,
   type Lc4DevCallerBranchAudioBinding,
+  type Lc4DevCallerBranchDecision,
   type Lc4DevCallerBranchMatrixArtifact,
   type Lc4DevPriorMutationReceipt,
 } from "./lc4-development-caller-branch";
@@ -65,6 +66,7 @@ import {
   type Lc4PublicDevelopmentCorpus,
   type Lc4PublicDevOpportunity,
 } from "./lc4-public-development-corpus";
+import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
 import {
   lc4DevSharedAuthorizationBindingSha256,
   lc4DevSharedLedgerGenesisSha256,
@@ -592,6 +594,41 @@ function objectValue(value: unknown, label: string): Record<string, JsonValue> {
   return value as Record<string, JsonValue>;
 }
 
+/**
+ * Replays the signed branch decision against the concrete provider exchange.
+ * Digest membership alone is insufficient: every signed routing/audio field
+ * must agree with the episode and the bytes that actually crossed the wire.
+ */
+export function assertLc4DevBranchExchangeCheckpoint(input: Readonly<{
+  decision: Lc4DevCallerBranchDecision;
+  matrix: Lc4DevCallerBranchMatrixArtifact;
+  trust: Readonly<{ key_id: string; public_key_pem: string }>;
+  episode: Lc4DevLiveEpisodePlan;
+  caller_pcm_sha256: string;
+  caller_pcm_byte_length: number;
+  provider_exchange: JsonValue;
+}>): void {
+  assertLc4DevCallerBranchDecision({
+    decision: input.decision,
+    matrix: input.matrix,
+    trust: input.trust,
+  });
+  const exchange = objectValue(input.provider_exchange, "LC4-DEV branch provider exchange checkpoint");
+  if (input.decision.episode_id !== input.episode.episode_id
+    || input.decision.provider !== input.episode.provider
+    || input.decision.canonical_opportunity_id !== "lc4-dev-op-42"
+    || input.decision.canonical_ordinal !== 42
+    || input.decision.pcm_sha256 !== input.caller_pcm_sha256
+    || input.decision.pcm_sha256 !== exchange.caller_pcm_sha256
+    || input.decision.pcm_byte_length !== input.caller_pcm_byte_length
+    || input.decision.pcm_byte_length !== exchange.caller_pcm_byte_length
+    || input.decision.sample_rate_hz !== LC4_PROVIDER_PROFILE_MANIFEST.providers[input.episode.provider].input_sample_rate_hz
+    || exchange.opportunity_id !== input.decision.canonical_opportunity_id
+    || exchange.provider !== input.decision.provider) {
+    throw new Error("LC4-DEV retained signed branch body differs from its episode, caller PCM, or provider exchange");
+  }
+}
+
 export function lc4DevAuthorityToolSubject(projection: Record<string, JsonValue>): string {
   const tool = String(projection.target_tool);
   if (tool === "archive.reserve_room") return "safety@no-room-reservation";
@@ -827,6 +864,10 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     }
     if (branchCandidates.length !== 1) throw new Error("LC4-DEV authority finalization requires exactly one retained caller branch decision");
     const branch = branchCandidates[0]!;
+    const retainedBranchDecision = Object.freeze({
+      ...branch.body,
+      decision_sha256: branch.sha256,
+    }) as unknown as Lc4DevCallerBranchDecision;
     const branchSubmittedEvent = ledger.events().find((event) =>
       event.event_type === "audio_submitted"
       && event.episode_id === episode.episode_id
@@ -870,6 +911,15 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       "LC4-DEV op42 provider exchange branch authority",
     );
     const callerPcmByteLength = Number(branchExchange.caller_pcm_byte_length);
+    assertLc4DevBranchExchangeCheckpoint({
+      decision: retainedBranchDecision,
+      matrix: input.caller_branch.matrix,
+      trust: input.caller_branch.trust,
+      episode,
+      caller_pcm_sha256: callerPcmReference.evidence_sha256,
+      caller_pcm_byte_length: callerPcmByteLength,
+      provider_exchange: branchExchange,
+    });
     const expectedJoinSha256 = sha256Hex(
       `harshas-amazing-call-center/lc4-dev-caller-branch-exchange-join/v1\n${canonicalJson({
         opportunity_id: "lc4-dev-op-42",
@@ -880,6 +930,14 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       })}`,
     );
     if (branchExchange.opportunity_id !== "lc4-dev-op-42"
+      || retainedBranchDecision.episode_id !== episode.episode_id
+      || retainedBranchDecision.provider !== episode.provider
+      || retainedBranchDecision.canonical_opportunity_id !== "lc4-dev-op-42"
+      || retainedBranchDecision.canonical_ordinal !== 42
+      || retainedBranchDecision.pcm_sha256 !== callerPcmReference.evidence_sha256
+      || retainedBranchDecision.pcm_sha256 !== branchExchange.caller_pcm_sha256
+      || retainedBranchDecision.pcm_byte_length !== callerPcmByteLength
+      || retainedBranchDecision.sample_rate_hz !== LC4_PROVIDER_PROFILE_MANIFEST.providers[episode.provider].input_sample_rate_hz
       || branchExchange.caller_pcm_sha256 !== callerPcmReference.evidence_sha256
       || branchExchange.caller_branch_decision_sha256 !== branch.sha256
       || branchExchangeAuthority.decision_sha256 !== branch.sha256

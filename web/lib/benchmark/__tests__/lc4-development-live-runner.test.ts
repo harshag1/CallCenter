@@ -1525,6 +1525,103 @@ describe("LC4-DEV live runner", () => {
     expect(run.ledger.filter((event) => event.event_type === "episode_terminal")).toHaveLength(5);
   });
 
+  it("counts a returned paid exchange before rejecting mutated branch replay evidence", async () => {
+    const { pcm, prepare, preflight } = fixtures();
+    const evidence = memoryEvidence();
+    const adapter: Lc4DevelopmentRealtimeAdapter = {
+      kind: "lc4-development-realtime-v1",
+      factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+      preflight_sha256: preflight.preflight_sha256,
+      maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+      async openSegment({ episode, segment_ordinal }) {
+        return {
+          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+            const correct = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+            });
+            const projection = opportunity.index === 42
+              ? {
+                  ...correct,
+                  caller_branch_authority: {
+                    ...correct.caller_branch_authority!,
+                    source_text_sha256: sha256Hex("mutated-retained-branch-source"),
+                  },
+                }
+              : correct;
+            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
+            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+            });
+            return {
+              playback_kind: "canonical" as const,
+              opportunity_id: opportunity.id,
+              assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+              provider_exchange_sha256: providerEvidence.evidence_sha256,
+              listener_evidence_sha256: listenerEvidence.evidence_sha256,
+              repair_projection: repairProjection(opportunity.id),
+              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              provider_exchange_projection: projection,
+              provider_exchange_evidence: providerEvidence,
+              listener_evidence: listenerEvidence,
+            };
+          },
+          async exchangeRepair() { throw new Error("mutated replay fixture does not select repairs"); },
+          async finalizeOpportunity({ opportunity_id }) {
+            const retained = await testJsonEvidence(evidence, "opportunity_finalization", {
+              episode_id: episode.episode_id,
+              opportunity_id,
+            });
+            return { opportunity_receipt_sha256: retained.evidence_sha256, opportunity_finalization: retained };
+          },
+          async close() {
+            const retained = await testJsonEvidence(evidence, "segment_finalization", {
+              episode_id: episode.episode_id,
+              segment_ordinal,
+            });
+            return { rotation_receipt_sha256: retained.evidence_sha256, segment_finalization: retained };
+          },
+        };
+      },
+    };
+    const run = await executeLc4DevLiveRun({
+      prepare,
+      preflight,
+      dependencies: {
+        adapter,
+        ...retainedDependencies({
+          evidence,
+          pcm,
+          repair: noRepairDependencies(),
+          branch_outcome: "no_call",
+        }),
+        ledger: { async append() {} },
+        now: () => new Date(NOW),
+      },
+    });
+    expect(run).toMatchObject({
+      status: "failed",
+      failure_class: "evidence",
+      episodes_started: 1,
+      opportunities_submitted: 42,
+      opportunities_completed: 41,
+      provider_calls_started: 42,
+      response_generations_completed: 42,
+    });
+    const failed = run.ledger.find((event) =>
+      event.event_type === "opportunity_failed" && event.opportunity_id === "lc4-dev-op-42");
+    expect(failed).toBeDefined();
+    const retainedFailure = await evidence.resolveJson(
+      failed!.evidence_references.find((reference) => reference.kind === "failure_evidence")!,
+    );
+    expect(retainedFailure).toMatchObject({
+      failure_stage: "exchange_evidence",
+      failure_code: "evidence_assembly_failed",
+      failure_class: "evidence_retention",
+    });
+  });
+
   it("documents the exact safe source unlock instead of casting DEV as confirmatory", () => {
     expect(LC4_DEV_ADAPTER_BOUNDARY).toEqual(expect.objectContaining({
       code: "dev_specific_adapter_unlocked",
