@@ -358,6 +358,17 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.events.push("close");
     this.state = "closed";
   }
+  providerClose(code = 1011) {
+    this.state = "closed";
+    this.emit({
+      type: "connection.closed",
+      provider: this.provider,
+      receivedAtMs: 5,
+      wireType: "socket.close",
+      code,
+      clean: code === 1000,
+    });
+  }
   onEvent(listener: RealtimeEventListener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
@@ -740,6 +751,14 @@ class HangingRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class ProviderConnectionCloseRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => this.providerClose());
+  }
+}
+
 class AudioAppendFailureRealtimeClient extends FakeRealtimeClient {
   override appendInputAudio() {
     this.events.push("append");
@@ -824,6 +843,8 @@ async function openDevFailureFixture(input: Readonly<{
     session,
     opportunity_id: corpus.opportunities[0]!.id,
     caller_pcm: new Uint8Array([1, 7, 11, 13]),
+    next_opportunity_id: corpus.opportunities[1]!.id,
+    next_caller_pcm: new Uint8Array([2, 7, 11, 13]),
   });
 }
 
@@ -866,6 +887,94 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     expect(events).toEqual(["connect"]);
     await fixture.session.close();
+  });
+
+  it("classifies an idle provider disconnect on the next turn without inheriting prior response evidence", async () => {
+    const events: string[] = [];
+    const client = new FakeRealtimeClient("openai", events);
+    const fixture = await openDevFailureFixture({ client });
+    await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("provider-close-first-opportunity"),
+      repair_played: false,
+    });
+    client.providerClose();
+    const operationCount = events.length;
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.next_opportunity_id,
+      caller_pcm: fixture.next_caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "pre_send_contract",
+      failure_code: "provider_connection_closed",
+      failure_class: "provider_external",
+      caller_pcm_appended_byte_length: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+      output_pcm_byte_length: 0,
+      output_pcm_chunk_count: 0,
+      wire_observation_count: 0,
+      terminal_wire_type: "none",
+    });
+    expect(error.failure.operation_order).toEqual([]);
+    expect(events).toHaveLength(operationCount);
+    const cleanup = await caughtFailure(fixture.session.close());
+    expect(cleanup.failure).toMatchObject({
+      failure_role: "cleanup",
+      failure_code: "segment_close_failed",
+    });
+  });
+
+  it("never mints a rotation receipt after an idle provider disconnect", async () => {
+    const client = new FakeRealtimeClient("openai", []);
+    const fixture = await openDevFailureFixture({ client });
+    await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("provider-close-before-rotation"),
+      repair_played: false,
+    });
+    client.providerClose();
+    const cleanup = await caughtFailure(fixture.session.close());
+    expect(cleanup.failure).toMatchObject({
+      failure_role: "cleanup",
+      failure_stage: "segment_close",
+      failure_code: "segment_close_failed",
+      failure_class: "cleanup",
+    });
+  });
+
+  it("surfaces a provider disconnect during response wait without waiting for timeout", async () => {
+    const fixture = await openDevFailureFixture({
+      client: new ProviderConnectionCloseRealtimeClient("openai", []),
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "provider_wait",
+      failure_code: "provider_connection_closed",
+      failure_class: "provider_external",
+      response_generation_requested: true,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+    });
+    await caughtFailure(fixture.session.close());
   });
 
   it("retains provider-fatal evidence without provider plaintext or credentials", async () => {

@@ -20,10 +20,12 @@ import type {
   RealtimeWireObservationListener,
   SessionConfigurationAcknowledgement,
   RealtimeToolResult,
+  RealtimeTransportFailureDiagnostic,
   RealtimeWebSocket,
   RealtimeWebSocketFactory,
   RealtimeWireEventListener,
 } from "./types";
+import { createRealtimeTransportFailureDiagnostic } from "./transport-diagnostics";
 import {
   realtimeWireIdentitySha256,
   realtimeWireObservationReference,
@@ -1244,10 +1246,20 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
           }
         });
     });
-    socket.on("error", () => {
+    socket.on("error", (rawError) => {
       if (!this.isCurrentConnection(binding)) return;
       const error = new Error("Gemini Live WebSocket failed");
-      this.failActiveConnection(binding, error, "transport_error");
+      this.failActiveConnection(
+        binding,
+        error,
+        "transport_error",
+        createRealtimeTransportFailureDiagnostic({
+          origin: "websocket_error",
+          rawCode: isRecord(rawError) ? rawError.code : undefined,
+          message: error.message,
+          ...this.transportFailureLifecycle(),
+        }),
+      );
     });
     socket.on("close", (code, reason) => {
       if (!this.isCurrentConnection(binding)) return;
@@ -2584,6 +2596,12 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
 
   private handleClose(binding: ConnectionBinding, code?: number, reason?: string) {
     if (!this.isCurrentConnection(binding)) return;
+    const transportDiagnostic = createRealtimeTransportFailureDiagnostic({
+      origin: "websocket_close",
+      closeCode: code,
+      reason,
+      ...this.transportFailureLifecycle(),
+    });
     const wasConnecting = this.clientState === "connecting";
     const wasFailed = this.clientState === "failed";
     if (!wasFailed) this.clientState = "closed";
@@ -2608,6 +2626,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       ...(typeof code === "number" ? { code } : {}),
       ...(typeof reason === "string" ? { reason: this.sanitizeDiagnostic(reason) } : {}),
       ...(typeof code === "number" ? { clean: code === 1000 } : {}),
+      transportDiagnostic,
     }, "close", TRANSPORT_GENERATED_WIRE_ATTRIBUTION);
   }
 
@@ -2620,7 +2639,17 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.rejectPendingConnect(error);
   }
 
-  private failActiveConnection(binding: ConnectionBinding, error: Error, code: string) {
+  private failActiveConnection(
+    binding: ConnectionBinding,
+    error: Error,
+    code: string,
+    transportDiagnostic: RealtimeTransportFailureDiagnostic = createRealtimeTransportFailureDiagnostic({
+      origin: "client_transport",
+      rawCode: code,
+      message: error.message,
+      ...this.transportFailureLifecycle(),
+    }),
+  ) {
     if (!this.isCurrentConnection(binding)) return;
     this.clientState = "failed";
     this.clearConnectTimer();
@@ -2631,7 +2660,14 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     if (this.currentResponseId && !this.responseFinished) {
       this.completeResponse("failed", code, "client.transport", TRANSPORT_GENERATED_WIRE_ATTRIBUTION);
     }
-    this.emitError(error, true, undefined, code, TRANSPORT_GENERATED_WIRE_ATTRIBUTION);
+    this.emitError(
+      error,
+      true,
+      undefined,
+      code,
+      TRANSPORT_GENERATED_WIRE_ATTRIBUTION,
+      transportDiagnostic,
+    );
     try {
       if (binding.socket.terminate) binding.socket.terminate();
       else binding.socket.close(1002, "protocol violation");
@@ -2667,6 +2703,15 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private clearSessionTimer() {
     if (this.sessionTimer) clearTimeout(this.sessionTimer);
     this.sessionTimer = null;
+  }
+
+  private transportFailureLifecycle() {
+    const responseGenerationRequested = this.generationTrigger !== null;
+    return Object.freeze({
+      responseGenerationRequested,
+      responseGenerationStarted: responseGenerationRequested && this.responseStarted,
+      responseTerminalObserved: responseGenerationRequested && this.responseFinished,
+    });
   }
 
   private enforceSessionLimit(binding: ConnectionBinding) {
@@ -2752,6 +2797,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     raw?: unknown,
     code?: string,
     syntheticAttribution: RealtimeWireObservationAttribution = CLIENT_GENERATED_WIRE_ATTRIBUTION,
+    transportDiagnostic?: RealtimeTransportFailureDiagnostic,
   ) {
     this.emit({
       type: "error",
@@ -2759,6 +2805,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       fatal,
       ...(code ? { code } : {}),
       ...(isRecord(raw) ? { details: this.sanitizeDetails(raw) } : {}),
+      ...(transportDiagnostic ? { transportDiagnostic } : {}),
     }, "error", syntheticAttribution);
   }
 }

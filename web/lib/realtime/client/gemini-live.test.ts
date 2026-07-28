@@ -14,6 +14,7 @@ import {
   realtimeWireObservationReference,
   verifyRealtimeWireObservationChain,
 } from "./wire-evidence";
+import { assertRealtimeTransportFailureDiagnostic } from "./transport-diagnostics";
 import {
   buildGeminiFunctionDeclarations,
   buildGeminiLiveSetup,
@@ -1978,6 +1979,51 @@ describe("GeminiLiveClient", () => {
     expect(transport.events.some(
       (event) => event.type === "error" && event.message === "Gemini Live WebSocket failed",
     )).toBe(true);
+    const transportError = transport.events.find((event) => event.type === "error");
+    if (transportError?.type !== "error" || !transportError.transportDiagnostic) {
+      throw new Error("missing Gemini WebSocket failure diagnostic");
+    }
+    assertRealtimeTransportFailureDiagnostic(transportError.transportDiagnostic);
+    expect(transportError.transportDiagnostic).toMatchObject({
+      origin: "websocket_error",
+      category: "network",
+      responseGenerationRequested: false,
+      responseGenerationStarted: false,
+      responseTerminalObserved: false,
+    });
+  });
+
+  it("emits content-free lifecycle evidence when a server closes an active response", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=24000" } }],
+        },
+      },
+    });
+    await settle();
+    const privateReason = "provider internal trace private-close-SENTINEL";
+    test.socket.serverClose(1011, privateReason);
+    await settle();
+
+    const closed = test.events.find((event) => event.type === "connection.closed");
+    if (closed?.type !== "connection.closed" || !closed.transportDiagnostic) {
+      throw new Error("missing Gemini close diagnostic");
+    }
+    assertRealtimeTransportFailureDiagnostic(closed.transportDiagnostic);
+    expect(closed.transportDiagnostic).toMatchObject({
+      origin: "websocket_close",
+      category: "server_close",
+      closeCodeClass: "server_error",
+      responseGenerationRequested: true,
+      responseGenerationStarted: true,
+      responseTerminalObserved: false,
+    });
+    expect(closed.transportDiagnostic.reasonSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(closed.transportDiagnostic)).not.toContain(privateReason);
   });
 
   it("rejects a connection that closes before setup completes", async () => {

@@ -720,7 +720,7 @@ export class Lc4RealtimeProviderBridge {
     let currentOperationOrder: Lc4ProviderExchangeOperation[] | null = null;
     let serverVadPhase: "none" | "started" | "stopped" | "committed" | "responding" = "none";
     let terminalError: Error | null = null;
-    let terminalFailureCode: "provider_fatal" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
+    let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
           client,
@@ -824,6 +824,14 @@ export class Lc4RealtimeProviderBridge {
       if (event.type === "error" && event.fatal) {
         terminalError = new Error(`provider error: ${event.code ?? "unspecified"}`);
         terminalFailureCode = "provider_fatal";
+        waiters.get(currentOpportunity ?? "")?.();
+      }
+      if (event.type === "connection.closed") {
+        // Socket close reasons are provider-controlled plaintext. Preserve only
+        // the closed-vocabulary classification and let the realtime client's
+        // content-free transport diagnostic retain any finer attribution.
+        terminalError ??= new Error("provider realtime connection closed");
+        terminalFailureCode ??= "provider_connection_closed";
         waiters.get(currentOpportunity ?? "")?.();
       }
     });
@@ -1066,6 +1074,15 @@ export class Lc4RealtimeProviderBridge {
         const diagnosticWireStart = wire.length;
         const operationOrder: Lc4ProviderExchangeEvidence["operation_order"][number][] = [];
         let diagnosticStage: Lc4DevFailureStage = "pre_send_contract";
+        // Response tracking is opportunity-scoped. Reset it before even the
+        // pre-send session-state gate so a socket loss between turns cannot
+        // make the next failure inherit the prior turn's response ID or PCM.
+        activeResponseId = null;
+        rootResponseId = null;
+        outputByResponse.clear();
+        outputFormatByResponse.clear();
+        terminalByResponse.clear();
+        completedByResponse.clear();
         try {
         if (closed || !this.#active || client.state !== "ready") throw new Error("LC4 realtime segment session is not open");
         if (currentOpportunity !== null) throw new Error("LC4 realtime segment allows only one in-flight opportunity");
@@ -1123,8 +1140,6 @@ export class Lc4RealtimeProviderBridge {
         }
         const wireStart = wire.length;
         currentOpportunity = opportunityId;
-        activeResponseId = null;
-        rootResponseId = null;
         serverVadPhase = "none";
         currentOperationOrder = operationOrder;
         terminalError = null;
@@ -1386,7 +1401,11 @@ export class Lc4RealtimeProviderBridge {
             stage: diagnosticStage,
             operation_order: Object.freeze([...operationOrder]),
           });
-          throw new Lc4DevFailureEvidenceError(failureFromExchange(lastFailedExchange));
+          const failure = failureFromExchange(lastFailedExchange);
+          if (failure.failure_code === "provider_connection_closed") {
+            poisonSegment("LC4 provider connection closed");
+          }
+          throw new Lc4DevFailureEvidenceError(failure);
         }
       },
       finalizeOpportunity: input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? async (finalizeInput) => {
@@ -1430,6 +1449,17 @@ export class Lc4RealtimeProviderBridge {
           unsubscribeWire?.();
           this.#active = false;
           throw new Error("LC4 realtime segment aborted an in-flight opportunity without a rotation receipt");
+        }
+        if (client.state !== "ready") {
+          // A provider-closed socket cannot yield a controlled session-rotation
+          // receipt. Release local authority and surface cleanup evidence.
+          closed = true;
+          segmentAbort.abort();
+          if (client.state !== "closed") client.close(1011, "LC4 provider session unavailable before rotation");
+          unsubscribeEvent();
+          unsubscribeWire?.();
+          this.#active = false;
+          throw new Error("LC4 realtime segment lost provider readiness before rotation");
         }
         const hadUnfinalizedDevOpportunity = pendingDevOpportunity !== null;
         closed = true;

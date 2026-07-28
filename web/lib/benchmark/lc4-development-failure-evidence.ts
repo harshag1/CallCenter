@@ -26,6 +26,7 @@ export type Lc4DevFailureCode =
   | "server_vad_control_ack_failed"
   | "server_vad_protocol_failure"
   | "provider_fatal"
+  | "provider_connection_closed"
   | "provider_terminal_failed"
   | "provider_response_timeout"
   | "gateway_fatal"
@@ -136,6 +137,7 @@ const STAGES = new Set<Lc4DevFailureStage>([
 const CODES = new Set<Lc4DevFailureCode>([
   "invalid_contract", "audio_delivery_failed", "response_request_failed", "server_vad_control_ack_failed",
   "server_vad_protocol_failure", "provider_fatal",
+  "provider_connection_closed",
   "provider_terminal_failed", "provider_response_timeout", "gateway_fatal",
   "missing_terminal_response", "invalid_output_audio", "missing_output_audio",
   "listener_failed", "evidence_assembly_failed", "segment_close_failed", "adapter_failure",

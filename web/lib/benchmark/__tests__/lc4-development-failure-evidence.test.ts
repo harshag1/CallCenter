@@ -148,6 +148,35 @@ describe("LC4-DEV failure evidence", () => {
     });
   });
 
+  it("retains a closed-vocabulary provider disconnect before the next turn sends bytes", () => {
+    const evidence = createLc4DevFailureEvidence(body({
+      failure_stage: "pre_send_contract",
+      failure_code: "provider_connection_closed",
+      failure_class: "provider_external",
+      operation_order: [],
+      caller_pcm_byte_length: 4,
+      caller_pcm_chunk_count: 1,
+      caller_pcm_appended_chunk_count: 0,
+      caller_pcm_appended_byte_length: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+      wire_observation_count: 0,
+      terminal_wire_type: "none",
+      terminal_wire_type_sha256: null,
+      terminal_wire_observation_sha256: null,
+    }));
+    expect(evidence).toMatchObject({
+      failure_stage: "pre_send_contract",
+      failure_code: "provider_connection_closed",
+      failure_class: "provider_external",
+      output_pcm_byte_length: 0,
+    });
+    expect(new Lc4DevFailureEvidenceError(evidence).message)
+      .toBe("LC4-DEV exchange failed: provider_connection_closed");
+  });
+
   it("maps raw wire types to a closed non-plaintext vocabulary", () => {
     expect(classifyLc4DevTerminalWireType(null)).toBe("none");
     expect(classifyLc4DevTerminalWireType("response.failed")).toBe("response_terminal");
