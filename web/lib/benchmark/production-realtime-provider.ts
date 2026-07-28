@@ -73,6 +73,7 @@ export function createProductionRealtimeClient(
   provider: LiveStsProvider,
   configuration: TrialSessionConfiguration,
   apiKey: string,
+  options: Readonly<{ geminiMaxDynamicControlBytes?: number }> = {},
 ): NormalizedRealtimeClient {
   const spec = LIVE_STS_PROVIDER_SPECS[provider];
   if (configuration.provider !== provider) {
@@ -90,6 +91,9 @@ export function createProductionRealtimeClient(
       tools: configuration.providerTools,
       connectTimeoutMs: 15_000,
       maximumSessionDurationMs: 10 * 60_000,
+      ...(options.geminiMaxDynamicControlBytes === undefined
+        ? {}
+        : { maxDynamicControlBytes: options.geminiMaxDynamicControlBytes }),
     });
   }
   const sessionUpdate = productionOpenAiCompatibleSessionUpdate(provider, configuration);

@@ -22,6 +22,10 @@ import {
 } from "./lc4-development-asr-calibration-artifact";
 import { createLc4DevMunicipalControlPlane } from "./lc4-development-control-plane";
 import {
+  inspectLc4DevResponseControlSizes,
+  type Lc4DevResponseControlPreflightReport,
+} from "./lc4-development-response-control-preflight";
+import {
   createLc4HeadlessListenerAuthorityManifestSha256,
   createLc4HeadlessListenerPlaybackAuthority,
 } from "./lc4-development-headless-listener-authority";
@@ -240,6 +244,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
     asr_contract_sha256: whisper.contract_sha256,
   })}`);
   let runtimeComposition: Lc4DevDefaultRuntimeComposition | null = null;
+  let responseControlPreflight: Lc4DevResponseControlPreflightReport | null = null;
   const baseRuntimeComposition = {
     calibration_artifact_sha256: artifact.artifact_sha256,
     calibration_sha256: artifact.calibration_sha256,
@@ -308,7 +313,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
 
   return Object.freeze({
     kind: "lc4-dev-operator-runtime-v1" as const,
-    inspect: async ({ audio_manifest, repair_manifest, signer }) => {
+    inspect: async ({ prepare, audio_manifest, repair_manifest, signer }) => {
       const callerLoader = createLc4DevCallerAudioLoader({ outputRoot: audioRoot, manifest: audio_manifest });
       const loadRepairPcm = repairLoader(audioRoot, repair_manifest);
       await Promise.all([
@@ -328,6 +333,19 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       }
       runtimeComposition = composition;
       const built = mechanism({ audio_manifest, repair_manifest, signer });
+      if (responseControlPreflight === null) {
+        responseControlPreflight = await inspectLc4DevResponseControlSizes({
+          episodes: prepare.episodes,
+          create_control: () => mechanism({ audio_manifest, repair_manifest, signer }).control,
+        });
+      } else if (
+        responseControlPreflight.control_manifest_sha256
+        !== built.control.manifest_sha256
+      ) {
+        throw new Error(
+          "LC4-DEV response control preflight differs from the inspected control plane",
+        );
+      }
       return Object.freeze({
         control_plane_manifest_sha256: built.control.manifest_sha256,
         listener_evidence_manifest_sha256: built.listener_manifest_sha256,
@@ -351,6 +369,8 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       const built = mechanism({ audio_manifest, repair_manifest, signer });
       if (built.control.manifest_sha256 !== preflight.control_plane_manifest_sha256
         || built.listener_manifest_sha256 !== preflight.listener_evidence_manifest_sha256
+        || responseControlPreflight === null
+        || responseControlPreflight.control_manifest_sha256 !== built.control.manifest_sha256
         || runtimeComposition?.runtime_config_sha256 !== preflight.runtime_config_sha256
         || calibration.summary.evaluator_build_sha256 !== preflight.asr_evaluator_build_sha256
         || asrEvaluatorToolchainSha256 !== preflight.asr_evaluator_toolchain_sha256) {

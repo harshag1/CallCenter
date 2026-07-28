@@ -50,6 +50,7 @@ import {
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import { createProductionRealtimeClient } from "./production-realtime-provider";
 import type { Lc4DevBudgetLifecycle } from "./lc4-development-budget";
+import { LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES } from "./lc4-development-response-control-preflight";
 import { assertHaccResponsePlan, renderHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
@@ -1722,7 +1723,14 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         await input.budget_authority.beforeEpisodeSocketOpen(episode);
         runtime = {
           bridge: new Lc4RealtimeProviderBridge((provider, configuration) => (
-            createProductionRealtimeClient(provider, configuration, input.credentials[provider])
+            createProductionRealtimeClient(
+              provider,
+              configuration,
+              input.credentials[provider],
+              provider === "gemini" && episode.arm === "native"
+                ? { geminiMaxDynamicControlBytes: LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES }
+                : {},
+            )
           )),
           previous_rotation_receipt_sha256: null,
           flow_state_sha256: sha256Hex(`lc4-dev-flow-genesis\n${input.preflight.preflight_sha256}\n${episode.episode_id}`),

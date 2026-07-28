@@ -44,8 +44,8 @@ export const GEMINI_LIVE_DEFAULT_ENDPOINT =
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_TOOL_RESPONSE_BYTES = 1024 * 1024;
-const DEFAULT_MAX_DYNAMIC_CONTROL_BYTES = 4 * 1024;
-const HARD_MAX_DYNAMIC_CONTROL_BYTES = 16 * 1024;
+export const GEMINI_LIVE_DEFAULT_MAX_DYNAMIC_CONTROL_BYTES = 4 * 1024;
+export const GEMINI_LIVE_HARD_MAX_DYNAMIC_CONTROL_BYTES = 64 * 1024;
 const MAX_FUNCTION_CALLS_PER_BATCH = 64;
 const MAX_TRACKED_FUNCTION_CALL_IDS = 10_000;
 const CLIENT_GENERATED_WIRE_ATTRIBUTION = Object.freeze({
@@ -1097,7 +1097,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.maxIncomingMessageBytes = options.maxIncomingMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.maxToolResponseBytes = options.maxToolResponseBytes ?? DEFAULT_MAX_TOOL_RESPONSE_BYTES;
-    this.maxDynamicControlBytes = options.maxDynamicControlBytes ?? DEFAULT_MAX_DYNAMIC_CONTROL_BYTES;
+    this.maxDynamicControlBytes = options.maxDynamicControlBytes ?? GEMINI_LIVE_DEFAULT_MAX_DYNAMIC_CONTROL_BYTES;
     this.maximumTrackedToolCallIdentities = options.maximumTrackedToolCallIdentities
       ?? MAX_TRACKED_FUNCTION_CALL_IDS;
     this.maximumSessionDurationMs = options.maximumSessionDurationMs ?? GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS;
@@ -1112,9 +1112,9 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
     if (!Number.isInteger(this.maxDynamicControlBytes)
       || this.maxDynamicControlBytes <= 0
-      || this.maxDynamicControlBytes > HARD_MAX_DYNAMIC_CONTROL_BYTES) {
+      || this.maxDynamicControlBytes > GEMINI_LIVE_HARD_MAX_DYNAMIC_CONTROL_BYTES) {
       throw new Error(
-        `Gemini maxDynamicControlBytes must be from 1 to ${HARD_MAX_DYNAMIC_CONTROL_BYTES}`,
+        `Gemini maxDynamicControlBytes must be from 1 to ${GEMINI_LIVE_HARD_MAX_DYNAMIC_CONTROL_BYTES}`,
       );
     }
     if (!Number.isInteger(this.maximumTrackedToolCallIdentities)
