@@ -4,8 +4,8 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "7808fd68555d8521ef4fc3f07d03ec32204bb1df1183b81129551c4edae4a575",
-    "source_manifest_file_count": 279,
+    "source_manifest_sha256": "79e6bed80c72ca1c86d3882589716cb48b2e8643dd65862e1b83320aedbc6dbd",
+    "source_manifest_file_count": 280,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
       "web/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs}",
