@@ -130,9 +130,11 @@ describe("LC4-DEV failure evidence", () => {
         "caller_pcm_delivery_started",
         "server_vad_speech_started",
         "caller_pcm_delivery_completed",
+        "server_vad_silence_tail_delivery_started",
         "server_vad_speech_stopped",
         "caller_pcm_auto_committed",
         "response_generation_auto_started",
+        "server_vad_silence_tail_prefix_accepted",
         "response_generation_started",
         "response_terminal_observed",
       ],
@@ -146,6 +148,17 @@ describe("LC4-DEV failure evidence", () => {
       response_terminal_observed: true,
       response_completed: true,
     });
+    expect(() => createLc4DevFailureEvidence(body({
+      provider: "xai",
+      model: "grok-voice-think-fast-1.0",
+      operation_order: [
+        "caller_pcm_delivery_started",
+        "caller_pcm_delivery_completed",
+        "server_vad_silence_tail_delivery_started",
+        "server_vad_silence_tail_prefix_accepted",
+      ],
+      response_generation_requested: false,
+    }))).toThrow(/requires server_vad_speech_stopped/u);
   });
 
   it("retains a closed-vocabulary provider disconnect before the next turn sends bytes", () => {

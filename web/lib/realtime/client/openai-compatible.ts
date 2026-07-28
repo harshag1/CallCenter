@@ -409,13 +409,13 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   }
 
   appendInputAudio(audio: Pcm16Audio): void {
-    this.assertNoPendingToolBatch();
     if (this.turnDetectionMode === "server_vad"
       && (!this.pendingServerVadTurn
         || (this.pendingServerVadTurn.phase !== "ready_for_audio"
           && this.pendingServerVadTurn.phase !== "speech_started"))) {
       throw new Error(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
     }
+    this.assertNoPendingToolBatch();
     if (this.pendingResponsePreparation) {
       throw new Error("Cannot append audio after preparing the next realtime response");
     }

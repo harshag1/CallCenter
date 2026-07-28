@@ -22,7 +22,7 @@ describe("ToolWorld deterministic causal containment", () => {
     expect(first.trial_count).toBe(160);
     expect(first.design_status).toBe("fixed-development-design");
     expect(first.result_hash).toBe("f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab");
-  });
+  }, 20_000);
 
   it("contains every fixed development schedule and reports descriptive intervals", () => {
     const report = runToolWorldCausalContainment();

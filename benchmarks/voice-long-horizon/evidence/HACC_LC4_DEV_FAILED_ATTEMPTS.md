@@ -539,3 +539,75 @@ The next source version replaces pathname-only reads with descriptor-bound
 identity/link/mode and exact size after fsync, persists the primary terminal run
 before secondary cleanup, and atomically publishes terminal budget evidence
 with its run package. A new qualification and one-shot DEV root are mandatory.
+
+## 2026-07-28 six-episode attempt at `c0592ae`
+
+**Failed finite-clip xAI server-VAD turn. No partial score is admissible.**
+
+The exact-source qualification at
+`c0592aed6d770dd06cdecac15846e4b91dc7ebee` passed OpenAI
+`gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` with three paid sessions, six provider sessions,
+six generation phases, three tool round trips, and zero retries. Its trust
+artifact is
+`d3536c9c25fa727d7a1f97673e15bb2c9f8c84eab1d25717f38568118e55cfcf`;
+its terminal artifact is
+`d06f11a0066d606d6f0e2213b4813d94b0525d9a2d760f9c0951195bd4b356bf`.
+
+The DEV run then completed OpenAI Native, OpenAI HACC, Gemini HACC, and Gemini
+Native. Its terminal accounting records:
+
+- episodes started/completed: **5/4**;
+- canonical opportunities submitted/completed: **241/240**;
+- provider calls started/made: **256/256**;
+- response generations requested/completed: **257/256**;
+- registered repairs: **16**;
+- paid retries: **0**.
+
+On xAI Native opportunity 1, the adapter delivered all 197,100 bytes of caller
+PCM in 206 chunks. xAI emitted `input_audio_buffer.speech_started` but did not
+emit `input_audio_buffer.speech_stopped`, automatic commit, response start,
+output, or a terminal response before the bounded 45-second operation timeout.
+xAI HACC was cancelled without opening. The primary failure evidence hash is
+`9b367b950d06ddb22220374634b831c0aa3564931aeb992dab0c476ee4fb6943`,
+and the cleanup evidence hash is
+`17540699e8550d0f1d168e56eb9dfcf8c72b8842d69d50ab27eae17b3922b1b1`.
+
+Unlike `4e47774`, the hardened failure path retained its primary terminal run,
+budget evidence, and package:
+
+- run:
+  `0e2b0e1726bed14130f0bca1d2996a168d0f8cbd0f82c24070b578b7cc83b967`;
+- package:
+  `fe73edce47d78aabe227dfbedf548c6366fd0471b14cdec98f2ec5241d54de39`;
+- budget evidence:
+  `b051bd6a70b3635df956dfbec908d3d7dd689dd775bb18dc8cfbc9afb86b59af`;
+- budget terminal head:
+  `1f240ee49d7ca9e31db4b4e309270d5c17b3c50c97346f82d422365b67e22e5a`.
+
+The official failure report ran once. Its hash is
+`c562b13ac2961f257067608666d100a18eb72a40ad2440eed56fe78eff7ef071`;
+it records `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, `efficacy_claim_eligible: false`, and
+`budget_replay_verified: true`.
+
+The DEV ledger conservatively settled **$12.50** across the four completed
+reservations and failed xAI Native reservation, cancelled xAI HACC, and has
+**$0.00** active. The exact-source qualification separately settled **$3.00**.
+Cumulative LC4 conservative settlements are therefore **$55.50**. The earlier
+`4e47774` ledger's **$15.00 maximum** quarantined nonterminal authority remains
+outside the settled total and is neither reusable authority nor a provider
+invoice.
+
+The root cause is a source-proven transport composition mismatch:
+qualification already sent the frozen, separate, deterministic zero-PCM
+end-of-speech delimiter after preserving caller PCM byte-exact, while the DEV
+production adapter sent only the caller PCM and omitted that existing suffix.
+The finite clip therefore did not expose enough streamed silence for the
+configured native server VAD to close the turn.
+
+This diagnosis does not validate the current uncommitted remediation. The
+failed root is immutable and nonpublishable, cannot be retried or resumed, and
+contributes no Native/HACC score or graph. Any next paid attempt requires a new
+source commit, qualification, evidence root, keys, authorization, and full
+one-shot six-cell execution.

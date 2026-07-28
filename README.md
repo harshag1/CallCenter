@@ -81,7 +81,7 @@ The repository includes a [long-horizon reliability benchmark](benchmarks/voice-
 - **Context-substrate evidence:** across 1,000 seeded 500–2,000-turn schedules, a 2,048-byte kernel packet retained 13,000/13,000 registered policy, goal, fact, correction, and commitment units. An equally byte-bounded recent-turn window retained 83/13,000; unbounded history averaged 116,110 bytes. At 1,024 bytes the kernel failed closed on all 1,000 schedules instead of silently dropping control state. This is a deterministic retention comparison, not an STS model result. See [method and limits](benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md).
 - **C4/C5:** unavailable. This repository does not claim that models remember better, drift less, or that the framework outperforms raw OpenAI, xAI, Gemini, or voice agents generally.
 
-See [claim readiness](benchmarks/voice-long-horizon/CLAIM_READINESS_AUDIT.md) and the machine-readable [offline validation artifact](benchmarks/voice-long-horizon/OFFLINE_NUMERICAL_VALIDATION.json) for exact hashes, methods, and limitations.
+See the [historical July 16 claim-readiness audit snapshot](benchmarks/voice-long-horizon/CLAIM_READINESS_AUDIT.md) and the machine-readable [offline validation artifact](benchmarks/voice-long-horizon/OFFLINE_NUMERICAL_VALIDATION.json) for exact hashes, methods, and limitations.
 
 ## Architecture
 

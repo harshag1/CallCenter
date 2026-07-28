@@ -686,3 +686,63 @@ The same source cycle also corrected provider continuation control:
 No Native/HACC memory, drift, guardrail, or efficacy claim is authorized from
 this incomplete run. A new source commit, qualification, evidence root, keys,
 authorization, and full one-shot run are required.
+
+## 2026-07-28 — `c0592ae` qualification passed; finite xAI DEV clip failed closed
+
+The next exact-source qualification at
+`c0592aed6d770dd06cdecac15846e4b91dc7ebee` passed OpenAI
+`gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` with three paid sessions, six provider sessions,
+six generation phases, three tool round trips, and zero retries. Its trust
+artifact and terminal artifact are
+`d3536c9c25fa727d7a1f97673e15bb2c9f8c84eab1d25717f38568118e55cfcf`
+and
+`d06f11a0066d606d6f0e2213b4813d94b0525d9a2d760f9c0951195bd4b356bf`.
+
+The exact-source one-shot DEV attempt then recorded:
+
+- episodes started/completed: **5/4**;
+- canonical opportunities submitted/completed: **241/240**;
+- provider calls: **256**;
+- registered repairs: **16**;
+- paid retries: **0**.
+
+Both OpenAI arms and both Gemini arms completed their full 60-opportunity
+horizons. xAI Native opportunity 1 delivered all finite caller PCM and observed
+`input_audio_buffer.speech_started`, but the provider did not emit
+`input_audio_buffer.speech_stopped`, automatic commit, response start, output,
+or a terminal response before the bounded timeout. xAI HACC was cancelled
+without opening. The immutable failure run and package hashes are
+`0e2b0e1726bed14130f0bca1d2996a168d0f8cbd0f82c24070b578b7cc83b967`
+and
+`fe73edce47d78aabe227dfbedf548c6366fd0471b14cdec98f2ec5241d54de39`.
+
+The official report ran once and correctly remained incomplete:
+
+- report:
+  `c562b13ac2961f257067608666d100a18eb72a40ad2440eed56fe78eff7ef071`;
+- exact six-episode horizon: **false**;
+- evidence complete: **false**;
+- task results available: **false**;
+- efficacy claim eligible: **false**;
+- budget replay verified: **true**.
+
+The terminal filesystem ledger has **$0.00** active and conservatively settled
+**$12.50** for DEV. Together with the qualification's **$3.00**, cumulative LC4
+conservative settlements are **$55.50**. The earlier `4e47774` ledger still
+carries **$15.00 maximum** quarantined nonterminal authority outside that
+settled total.
+
+The failure was traced to a concrete composition mismatch. Qualification
+already appends the frozen, separate zero-PCM transport delimiter after the
+byte-exact xAI caller clip so native server VAD can observe the configured
+silence window. The DEV production adapter at `c0592ae` omitted that existing
+suffix and ended transport immediately after caller PCM. That explains why
+qualification completed while the finite DEV clip remained in
+`speech_started`.
+
+This diagnosis is not validation of any pending source change. The `c0592ae`
+root is failed, immutable, and nonpublishable; none of its completed cells may
+be extracted into a score or launch graph. A new source commit, qualification,
+evidence root, keys, authorization, and full one-shot six-cell run are required
+before any Native/HACC efficacy statement.

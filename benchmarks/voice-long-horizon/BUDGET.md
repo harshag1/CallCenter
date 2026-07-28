@@ -7,7 +7,7 @@
 - Protected contingency reserve: **$100.00 USD**
 - Current operational ceiling: **$270.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$40.00 USD**
+- LC4 conservative filesystem-ledger settlements: **$55.50 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$3.807615 USD**
@@ -91,7 +91,8 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 
 - **Retained estimated provider cost before HACC-LC3: $6.878733**
 - **Provider-billed cost: unreconciled**
-- **Active reservations: $0.00**
+- **Active reservations in terminal ledgers: $0.00; separately quarantined
+  nonterminal reservation authority: $15.00 maximum**
 - **Remaining HACC-LC3 reservation authority under current operational ceiling: $270.00 before sockets**
 - **Remaining automatically schedulable: $900.00**
 - **Protected reserve: $100.00**
@@ -111,7 +112,7 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $3.807615**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $40.00; these are pessimistic
+- **Cumulative LC4 conservative settlements: $55.50; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
@@ -210,3 +211,53 @@ place. A new source commit requires new qualification, evidence roots, keys,
 and authorization. Its budget is independently bounded; the quarantined
 ledger remains in the accounting record until provider billing can be
 reconciled.
+
+## 2026-07-28 — `c0592ae` qualification and failed finite-clip DEV settlement
+
+The exact-source qualification at
+`c0592aed6d770dd06cdecac15846e4b91dc7ebee` passed all three pinned provider
+gateways with three paid sessions and zero retries. It conservatively settled
+**$3.00**, bringing the settled total carried forward from `4e47774` to
+**$43.00** before the DEV attempt.
+
+The following one-shot DEV run started five episodes, completed four, submitted
+241 canonical opportunities, completed 240, made 256 provider calls, played 16
+registered repairs, and used zero paid retries. It failed on xAI Native
+opportunity 1: all finite caller PCM was delivered, xAI emitted
+`input_audio_buffer.speech_started`, but no server-VAD speech stop, automatic
+commit, or response arrived before the bounded timeout. The xAI HACC
+reservation never opened and was cancelled.
+
+| Run | Conservative settlement | Active reservations after terminal | Status | Evidence |
+|---|---:|---:|---|---|
+| LC4 qualification v3 | $3.00 | $0.00 | passed; three paid sessions, six provider sessions, six generation phases, three tool round trips, zero retries | budget evidence `e6b61808099c054b73b74757513631cb6513ad9cbd6af708adecf7d1ca9de52f`; final head `dcc105390b91394a4e8ca2a399fac080ec172b955fe38b76380f56af1bdd7909` |
+| LC4 six-episode DEV attempt | $12.50 | $0.00 | failed after five episodes started/four completed; xAI Native finite-clip server-VAD timeout at opportunity 1; zero retries | budget evidence `b051bd6a70b3635df956dfbec908d3d7dd689dd775bb18dc8cfbc9afb86b59af`; terminal head `1f240ee49d7ca9e31db4b4e309270d5c17b3c50c97346f82d422365b67e22e5a` |
+
+The DEV ledger settled the four completed OpenAI/Gemini reservations and the
+failed xAI Native reservation at their full conservative $2.50 maxima, then
+cancelled xAI HACC. Its **$12.50** is pessimistic reservation accounting, not a
+provider invoice. With the qualification, these two roots add **$15.50** to
+the prior **$40.00**, producing the **$55.50** cumulative LC4 conservative
+settlement reported above. The separate `4e47774` **$15.00** quarantined
+nonterminal authority remains outside that settled total and is not reusable
+authority.
+
+The DEV run, package, report, budget evidence, and terminal budget head are
+bound by `0e2b0e1726bed14130f0bca1d2996a168d0f8cbd0f82c24070b578b7cc83b967`,
+`fe73edce47d78aabe227dfbedf548c6366fd0471b14cdec98f2ec5241d54de39`,
+`c562b13ac2961f257067608666d100a18eb72a40ad2440eed56fe78eff7ef071`,
+`b051bd6a70b3635df956dfbec908d3d7dd689dd775bb18dc8cfbc9afb86b59af`,
+and `1f240ee49d7ca9e31db4b4e309270d5c17b3c50c97346f82d422365b67e22e5a`,
+respectively. The report replayed the budget ledger but is incomplete,
+exposes no task results, and sets `efficacy_claim_eligible: false`. No partial
+Native/HACC score or graph is admissible.
+
+Source inspection proved a transport-composition mismatch: the exact
+qualification path already delivered the frozen, separate, deterministic
+zero-PCM end-of-speech delimiter used to advance a finite xAI server-VAD clip,
+while the DEV production adapter delivered only the byte-exact caller PCM and
+omitted that existing benchmark transport suffix. This diagnosis does not
+validate the current uncommitted remediation or authorize a retry. The failed
+root is immutable and nonpublishable; the next paid attempt requires a new
+source commit, qualification, evidence root, keys, authorization, and complete
+one-shot run.

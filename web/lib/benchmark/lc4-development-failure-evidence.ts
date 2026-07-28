@@ -66,6 +66,9 @@ export type Lc4DevFailureOperation =
   | "response_plan_session_update_acknowledged"
   | "caller_pcm_delivery_started"
   | "caller_pcm_delivery_completed"
+  | "server_vad_silence_tail_delivery_started"
+  | "server_vad_silence_tail_delivery_completed"
+  | "server_vad_silence_tail_prefix_accepted"
   | "response_plan_prepared"
   | "caller_pcm_committed"
   | "caller_pcm_commit_acknowledged"
@@ -157,7 +160,9 @@ const GATEWAY_FATAL_CLASSES = new Set<Lc4DevFailureEvidenceBody["gateway_fatal_c
 ]);
 const OPERATIONS: readonly Lc4DevFailureOperation[] = Object.freeze([
   "response_plan_session_update_sent", "response_plan_session_update_acknowledged",
-  "caller_pcm_delivery_started", "caller_pcm_delivery_completed", "response_plan_prepared", "caller_pcm_committed",
+  "caller_pcm_delivery_started", "caller_pcm_delivery_completed",
+  "server_vad_silence_tail_delivery_started", "server_vad_silence_tail_delivery_completed",
+  "server_vad_silence_tail_prefix_accepted", "response_plan_prepared", "caller_pcm_committed",
   "caller_pcm_commit_acknowledged",
   "server_vad_speech_started", "server_vad_speech_stopped", "caller_pcm_auto_committed",
   "response_generation_requested", "response_generation_auto_started", "response_generation_started",
@@ -240,6 +245,10 @@ export function createLc4DevFailureEvidence(input: Lc4DevFailureEvidenceBody): L
   requireBefore("response_plan_session_update_sent", "response_plan_session_update_acknowledged");
   requireBefore("response_plan_session_update_acknowledged", "server_vad_speech_started");
   requireBefore("caller_pcm_delivery_started", "caller_pcm_delivery_completed");
+  requireBefore("caller_pcm_delivery_completed", "server_vad_silence_tail_delivery_started");
+  requireBefore("server_vad_silence_tail_delivery_started", "server_vad_silence_tail_delivery_completed");
+  requireBefore("server_vad_silence_tail_delivery_started", "server_vad_silence_tail_prefix_accepted");
+  requireBefore("server_vad_speech_stopped", "server_vad_silence_tail_prefix_accepted");
   requireBefore("caller_pcm_delivery_started", "server_vad_speech_started");
   requireBefore("server_vad_speech_started", "server_vad_speech_stopped");
   requireBefore("server_vad_speech_stopped", "caller_pcm_auto_committed");

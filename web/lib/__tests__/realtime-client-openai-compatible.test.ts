@@ -8,6 +8,7 @@ import {
 } from "../realtime/client/events";
 import {
   OpenAICompatibleRealtimeClient,
+  XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR,
   XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
   buildSessionConfigurationAcknowledgement,
   createOpenAIRealtimeClient,
@@ -1799,7 +1800,18 @@ describe("OpenAI-compatible realtime client", () => {
     socket.emit("message", JSON.stringify({
       type: "response.done",
       event_id: "response-done-1",
-      response: { id: "response-1", status: "completed", output: [], usage: { total_tokens: 1 } },
+      response: {
+        id: "response-1",
+        status: "completed",
+        output: [{
+          type: "function_call",
+          id: "item-tool-1",
+          call_id: "call-tool-1",
+          name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          arguments: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+        }],
+        usage: { total_tokens: 1 },
+      },
     }));
 
     expect(client.state).toBe("ready");
@@ -1814,6 +1826,15 @@ describe("OpenAI-compatible realtime client", () => {
         turnOrdinal: 1,
       }),
     }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool.calls",
+      responseId: "response-1",
+    }));
+    // The provider may finish a tool-bearing root response between silence
+    // delimiter frames. The post-stop guard must win over the now-pending tool
+    // batch so the adapter can recognize an exact accepted delimiter prefix.
+    expect(() => client.appendInputAudio({ ...PCM, data: new Uint8Array(960) }))
+      .toThrow(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
     const outboundTypes = socket.sent.map((frame) => JSON.parse(frame).type);
     expect(outboundTypes.filter((type) => type === "input_audio_buffer.commit")).toHaveLength(0);
     expect(outboundTypes.filter((type) => type === "response.create")).toHaveLength(0);

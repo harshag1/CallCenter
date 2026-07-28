@@ -65,6 +65,7 @@ import { assertHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
   deliverRealtimePcm16,
+  packetizeRealtimePcm16,
   RealtimeAudioDeliveryError,
   SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
   type RealtimeAudioDeliveryReceipt,
@@ -77,21 +78,28 @@ import {
   type RealtimeWireObservation,
 } from "../realtime/client/types";
 import { isLocalToolProxyFunction } from "../realtime/client/types";
-import { realtimeToolFrontierSha256 } from "../realtime/client/openai-compatible";
 import {
+  realtimeToolFrontierSha256,
+  XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR,
+} from "../realtime/client/openai-compatible";
+import {
+  isAcceptedXaiServerVadSilenceTail,
   LC4_XAI_SERVER_VAD_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 import { LC4_DEV_AUDIO_DELIVERY_PROFILE } from "./lc4-development-audio-contract";
 
-export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v2" as const;
+export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v3" as const;
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-continuity-packet/v1\n";
 const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-rotation-state-packet/v1\n";
 const ROTATION_FACT_SET_DOMAIN = "harshas-amazing-call-center/lc4-rotation-fact-set/v1\n";
-const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v2\n";
+const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v3\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
 const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v1\n";
 const NATIVE_CONTINUITY_SOURCES = new Set([
@@ -413,6 +421,7 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   tool_frontier_sha256: string;
   server_vad_setting_sha256: string | null;
   server_vad_transport_disclosure_sha256: string | null;
+  server_vad_transport_suffix: Lc4XaiServerVadTransportSuffixEvidence | null;
   per_turn_session_update_observation_sha256: string | null;
   per_turn_session_ack_observation_sha256: string | null;
   operation_order: readonly Lc4ProviderExchangeOperation[];
@@ -424,11 +433,29 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   replay_projection: JsonValue;
 }>;
 
+export type Lc4XaiServerVadTransportSuffixEvidence = Readonly<{
+  schema_version: 1;
+  purpose: typeof LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose;
+  completion: "full_plan_delivered" | "provider_native_speech_stop";
+  policy_sha256: string;
+  pcm_sha256: string;
+  audio_bytes: number;
+  duration_ms: number;
+  chunk_count: number;
+  frame_bytes: number;
+  tail_bytes: number;
+  delivery_profile_sha256: string;
+  scheduled_offsets_ms: readonly number[];
+}>;
+
 export type Lc4ProviderExchangeOperation =
   | "response_plan_session_update_sent"
   | "response_plan_session_update_acknowledged"
   | "caller_pcm_delivery_started"
   | "caller_pcm_delivery_completed"
+  | "server_vad_silence_tail_delivery_started"
+  | "server_vad_silence_tail_delivery_completed"
+  | "server_vad_silence_tail_prefix_accepted"
   | "response_plan_prepared"
   | "caller_pcm_committed"
   | "caller_pcm_commit_acknowledged"
@@ -644,6 +671,107 @@ function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+function createXaiServerVadTransportSuffixEvidence(input: Readonly<{
+  completion: Lc4XaiServerVadTransportSuffixEvidence["completion"];
+  chunk_count: number;
+  frame_bytes: number;
+  delivery_profile_sha256: string;
+}>): Lc4XaiServerVadTransportSuffixEvidence {
+  const audioBytes = input.chunk_count * input.frame_bytes;
+  const durationMs = audioBytes / 2 / LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz * 1_000;
+  const pcmSha256 = sha256Hex(new Uint8Array(audioBytes));
+  if (!isAcceptedXaiServerVadSilenceTail({
+    completion: input.completion,
+    pcm_sha256: pcmSha256,
+    audio_bytes: audioBytes,
+    duration_ms: durationMs,
+    chunk_count: input.chunk_count,
+    frame_bytes: input.frame_bytes,
+    tail_bytes: input.frame_bytes,
+  })) throw new Error("xAI server-VAD silence-tail delivery differs from the frozen transport policy");
+  return Object.freeze({
+    schema_version: 1 as const,
+    purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+    completion: input.completion,
+    policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+    pcm_sha256: pcmSha256,
+    audio_bytes: audioBytes,
+    duration_ms: durationMs,
+    chunk_count: input.chunk_count,
+    frame_bytes: input.frame_bytes,
+    tail_bytes: input.frame_bytes,
+    delivery_profile_sha256: input.delivery_profile_sha256,
+    scheduled_offsets_ms: Object.freeze(
+      Array.from({ length: input.chunk_count }, (_, index) => index * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms),
+    ),
+  });
+}
+
+async function deliverXaiServerVadTransportSuffix(input: Readonly<{
+  client: NormalizedRealtimeClient;
+  delivery_profile: TrialSessionConfiguration["audioDeliveryProfile"];
+  delivery_profile_sha256: string;
+  runtime: RealtimeAudioDeliveryRuntime;
+  signal: AbortSignal;
+  server_vad_phase(): "none" | "started" | "stopped" | "committed" | "responding";
+}>): Promise<Lc4XaiServerVadTransportSuffixEvidence> {
+  if (input.client.provider !== "xai"
+    || input.delivery_profile.chunkMs !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms) {
+    throw new Error("xAI server-VAD silence-tail delivery received an incompatible provider profile");
+  }
+  const suffixAudio = Object.freeze({
+    encoding: "pcm16" as const,
+    sampleRateHz: LC4_XAI_SERVER_VAD_SILENCE_TAIL.sample_rate_hz,
+    channels: 1 as const,
+    data: new Uint8Array(LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length),
+  });
+  if (sha256Hex(suffixAudio.data) !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256) {
+    throw new Error("xAI server-VAD silence-tail PCM differs from its frozen hash");
+  }
+  const plan = packetizeRealtimePcm16(suffixAudio, input.delivery_profile);
+  try {
+    const receipt = await deliverRealtimePcm16({
+      client: input.client,
+      audio: suffixAudio,
+      profile: input.delivery_profile,
+      runtime: input.runtime,
+      signal: input.signal,
+    });
+    if (receipt.total_byte_length !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length
+      || receipt.chunk_count !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+      || receipt.chunk_count !== plan.frames.length
+      || receipt.frame_byte_length !== plan.frame_byte_length
+      || receipt.tail_byte_length !== plan.frame_byte_length
+      || receipt.chunks.some((chunk, index) => (
+        chunk.byte_length !== plan.frame_byte_length
+        || chunk.scheduled_offset_ms !== index * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms
+      ))) throw new Error("xAI server-VAD silence-tail full delivery contract failed");
+    return createXaiServerVadTransportSuffixEvidence({
+      completion: "full_plan_delivered",
+      chunk_count: receipt.chunk_count,
+      frame_bytes: receipt.frame_byte_length,
+      delivery_profile_sha256: input.delivery_profile_sha256,
+    });
+  } catch (error) {
+    const phase = input.server_vad_phase();
+    const providerStoppedCompletePrefix = error instanceof RealtimeAudioDeliveryError
+      && error.code === "append_failed"
+      && error.cause instanceof Error
+      && error.cause.message === XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR
+      && (phase === "stopped" || phase === "committed" || phase === "responding")
+      && error.chunks_appended >= LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count
+      && error.chunks_appended < LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+      && error.bytes_appended === error.chunks_appended * plan.frame_byte_length;
+    if (!providerStoppedCompletePrefix) throw error;
+    return createXaiServerVadTransportSuffixEvidence({
+      completion: "provider_native_speech_stop",
+      chunk_count: error.chunks_appended,
+      frame_bytes: plan.frame_byte_length,
+      delivery_profile_sha256: input.delivery_profile_sha256,
+    });
+  }
 }
 
 function linkedAbortSignal(
@@ -949,6 +1077,10 @@ export class Lc4RealtimeProviderBridge {
       let failureClass: Lc4DevFailureClass;
       if (failureInput.error instanceof Lc4ProviderInputAudioDeliveryError) {
         failureStage = "audio_append";
+        failureCode = "audio_delivery_failed";
+        failureClass = "audio_delivery";
+      } else if (failureInput.stage === "audio_append"
+        && failureInput.error instanceof RealtimeAudioDeliveryError) {
         failureCode = "audio_delivery_failed";
         failureClass = "audio_delivery";
       } else if (gateway.fatal_class !== "none") {
@@ -1257,6 +1389,7 @@ export class Lc4RealtimeProviderBridge {
         }
         let perTurnSessionUpdateObservationSha256: string | null = null;
         let perTurnSessionAckObservationSha256: string | null = null;
+        let serverVadTransportSuffix: Lc4XaiServerVadTransportSuffixEvidence | null = null;
         const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
         try {
           if (client.provider === "xai") {
@@ -1319,7 +1452,22 @@ export class Lc4RealtimeProviderBridge {
           providerInputAppended = true;
           assertExchangeActive(exchangeSignal.signal);
           operationOrder.push("caller_pcm_delivery_completed");
-          if (client.provider !== "xai") {
+          if (client.provider === "xai") {
+            diagnosticStage = "audio_append";
+            operationOrder.push("server_vad_silence_tail_delivery_started");
+            serverVadTransportSuffix = await deliverXaiServerVadTransportSuffix({
+              client,
+              delivery_profile: input.configuration.audioDeliveryProfile,
+              delivery_profile_sha256: input.configuration.audioDeliveryProfileHash,
+              runtime: this.#audioDeliveryRuntime,
+              signal: exchangeSignal.signal,
+              server_vad_phase: () => serverVadPhase,
+            });
+            operationOrder.push(serverVadTransportSuffix.completion === "full_plan_delivered"
+              ? "server_vad_silence_tail_delivery_completed"
+              : "server_vad_silence_tail_prefix_accepted");
+            assertExchangeActive(exchangeSignal.signal);
+          } else {
             diagnosticStage = "response_prepare";
             client.prepareResponse({
               additionalInstructions: renderedControl,
@@ -1447,6 +1595,7 @@ export class Lc4RealtimeProviderBridge {
             server_vad_transport_disclosure_sha256: client.provider === "xai"
               ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256
               : null,
+            server_vad_transport_suffix: serverVadTransportSuffix,
             per_turn_session_update_observation_sha256: perTurnSessionUpdateObservationSha256,
             per_turn_session_ack_observation_sha256: perTurnSessionAckObservationSha256,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],

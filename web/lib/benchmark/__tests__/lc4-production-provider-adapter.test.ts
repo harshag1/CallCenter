@@ -70,7 +70,13 @@ import type {
   RealtimeWireObservation,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
-import { LC4_XAI_SERVER_VAD_SHA256 } from "../xai-server-vad";
+import {
+  LC4_XAI_SERVER_VAD_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+  LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+} from "../xai-server-vad";
+import { XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR } from "../../realtime/client/openai-compatible";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
   LOCAL_TOOL_PROXY_FUNCTION,
@@ -354,8 +360,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   #responseOrdinal = 0;
   #serverVadAutoResponse = false;
   #serverVadSpeechStarted = false;
-  #serverVadTimer: ReturnType<typeof setTimeout> | null = null;
-  readonly #emitVadStartDuringFirstAppend: boolean;
+  #serverVadStopped = false;
+  #serverVadConsecutiveSilenceChunks = 0;
+  readonly #serverVadStopAfterSilenceChunks: number | null;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
@@ -365,13 +372,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     events: string[],
     toolRoundtrip = false,
     terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled" = "completed",
-    emitVadStartDuringFirstAppend = false,
+    serverVadStopAfterSilenceChunks: number | null =
+      LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
   ) {
     this.provider = provider;
     this.events = events;
     this.#toolRoundtrip = toolRoundtrip;
     this.#terminalStatus = terminalStatus;
-    this.#emitVadStartDuringFirstAppend = emitVadStartDuringFirstAppend;
+    this.#serverVadStopAfterSilenceChunks = serverVadStopAfterSilenceChunks;
   }
 
   get serverVadTransportParitySha256() {
@@ -380,7 +388,6 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
   close() {
-    if (this.#serverVadTimer !== null) clearTimeout(this.#serverVadTimer);
     this.events.push("close");
     this.state = "closed";
   }
@@ -399,17 +406,21 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio(audio: Pcm16Audio) {
+    if (this.provider === "xai" && this.#serverVadStopped) {
+      throw new Error(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
+    }
     this.events.push("append");
     this.appendedAudio.push(Object.freeze({ ...audio, data: Uint8Array.from(audio.data) }));
     this.wire(this.provider === "xai" ? "input_audio_buffer.append" : "input_audio", { plaintext: ORACLE_SECRET });
     if (this.provider !== "xai") return;
-    if (this.#emitVadStartDuringFirstAppend && !this.#serverVadSpeechStarted) {
+    if (!this.#serverVadSpeechStarted) {
       this.#emitServerVadSpeechStarted();
     }
-    if (this.#serverVadTimer !== null) clearTimeout(this.#serverVadTimer);
-    this.#serverVadTimer = setTimeout(() => {
-      this.#serverVadTimer = null;
-      if (!this.#serverVadSpeechStarted) this.#emitServerVadSpeechStarted();
+    this.#serverVadConsecutiveSilenceChunks = audio.data.every((byte) => byte === 0)
+      ? this.#serverVadConsecutiveSilenceChunks + 1
+      : 0;
+    if (this.#serverVadStopAfterSilenceChunks !== null
+      && this.#serverVadConsecutiveSilenceChunks === this.#serverVadStopAfterSilenceChunks) {
       const stopped = this.wire("input_audio_buffer.speech_stopped", {}, "inbound");
       this.emit({
         type: "input.speech_activity", provider: "xai", receivedAtMs: 2,
@@ -422,9 +433,10 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         wireObservation: wireReference(committed),
       });
       this.#serverVadAutoResponse = true;
+      this.#serverVadStopped = true;
       this.createResponse();
       this.#serverVadSpeechStarted = false;
-    }, 0);
+    }
   }
   #emitServerVadSpeechStarted() {
     this.#serverVadSpeechStarted = true;
@@ -436,6 +448,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   }
   async prepareServerVadTurn(preparation: Parameters<NonNullable<NormalizedRealtimeClient["prepareServerVadTurn"]>>[0]) {
     if (this.provider !== "xai") throw new Error("server VAD is xAI-only in this fixture");
+    this.#serverVadStopped = false;
+    this.#serverVadConsecutiveSilenceChunks = 0;
     this.events.push("session-update");
     const outbound = this.wire("session.update", {
       dynamicControl: {
@@ -822,14 +836,15 @@ class AudioAppendFailureRealtimeClient extends FakeRealtimeClient {
 async function openDevFailureFixture(input: Readonly<{
   client: FakeRealtimeClient;
   listener?: Lc4ListenerEvidenceHandoff["accept"];
+  audioDeliveryRuntime?: ConstructorParameters<typeof Lc4RealtimeProviderBridge>[1];
 }>) {
-  const base = manifest("hacc", "openai");
+  const base = manifest("hacc", input.client.provider);
   const corpus = createLc4PublicDevelopmentCorpus();
   const episode: Lc4DevLiveEpisodePlan = Object.freeze({
-    episode_id: "lc4-dev-openai-hacc-failure-fixture",
-    pair_id: "lc4-dev-openai-failure-fixture",
+    episode_id: `lc4-dev-${input.client.provider}-hacc-failure-fixture`,
+    pair_id: `lc4-dev-${input.client.provider}-failure-fixture`,
     pair_position: 2,
-    provider: "openai",
+    provider: input.client.provider,
     arm: "hacc",
     model: base.episode_shape.provider_profile.model,
     voice: base.episode_shape.provider_profile.voice,
@@ -880,7 +895,7 @@ async function openDevFailureFixture(input: Readonly<{
     currentResponsePreparation: fixtureContinuationPreparation,
     async execute() { throw new Error("failure fixture gateway must not execute"); },
   });
-  const bridge = new Lc4RealtimeProviderBridge(() => input.client);
+  const bridge = new Lc4RealtimeProviderBridge(() => input.client, input.audioDeliveryRuntime);
   const session = await bridge.openSegment({
     manifest: devManifest,
     segment: base.episode_shape.segments[0]!,
@@ -1377,6 +1392,167 @@ describe("LC4 production realtime adapter bridge", () => {
     }
   });
 
+  it("delivers and replay-binds the full frozen xAI server-VAD silence tail without changing caller PCM", async () => {
+    let monotonicMs = 0;
+    const events: string[] = [];
+    const client = new FakeRealtimeClient(
+      "xai",
+      events,
+      false,
+      "completed",
+      LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+    );
+    const fixture = await openDevFailureFixture({
+      client,
+      audioDeliveryRuntime: {
+        monotonicNowMs: () => monotonicMs,
+        async sleep(delayMs, signal) {
+          if (signal.aborted) throw new Error("test delivery aborted");
+          monotonicMs += delayMs;
+        },
+      },
+    });
+    const evidence = await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    expect(evidence.input_audio_delivery).toMatchObject({
+      pcm_sha256: sha256Hex(fixture.caller_pcm),
+      total_byte_length: fixture.caller_pcm.byteLength,
+      chunk_count: 1,
+    });
+    expect(evidence.server_vad_transport_suffix).toMatchObject({
+      schema_version: 1,
+      purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+      completion: "full_plan_delivered",
+      policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+      pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+      audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+      duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+      chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+      frame_bytes: 960,
+      tail_bytes: 960,
+    });
+    expect(evidence.operation_order).toContain("server_vad_silence_tail_delivery_completed");
+    expect(events.filter((event) => event === "connect")).toHaveLength(1);
+    expect(events.filter((event) => event === "commit")).toHaveLength(0);
+    expect(events.filter((event) => event === "create")).toHaveLength(0);
+    expect(client.appendedAudio.slice(0, 1)[0]?.data).toEqual(fixture.caller_pcm);
+    expect(client.appendedAudio.slice(1)).toHaveLength(LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
+
+    const mutatedProjection = JSON.parse(JSON.stringify(evidence.replay_projection)) as Record<string, unknown>;
+    const suffix = mutatedProjection.server_vad_transport_suffix as Record<string, unknown>;
+    suffix.pcm_sha256 = "f".repeat(64);
+    await expect(replayEvidenceFixture().retainJson({
+      kind: "provider_exchange",
+      body: mutatedProjection as JsonValue,
+      domain_prefix: "harshas-amazing-call-center/lc4-provider-exchange-evidence/v3\n",
+      expected_evidence_sha256: evidence.evidence_sha256,
+    })).rejects.toThrow();
+
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("xai-full-tail-finalization"),
+      repair_played: false,
+    });
+    await fixture.session.close();
+  });
+
+  it("fails closed when xAI never reports speech stop after the full frozen silence tail", async () => {
+    vi.useFakeTimers();
+    try {
+      let monotonicMs = 0;
+      const events: string[] = [];
+      const client = new FakeRealtimeClient("xai", events, false, "completed", null);
+      const fixture = await openDevFailureFixture({
+        client,
+        audioDeliveryRuntime: {
+          monotonicNowMs: () => monotonicMs,
+          async sleep(delayMs, signal) {
+            if (signal.aborted) throw new Error("test delivery aborted");
+            monotonicMs += delayMs;
+          },
+        },
+      });
+      const pending = caughtFailure(fixture.session.exchange({
+        opportunity_id: fixture.opportunity_id,
+        caller_pcm: fixture.caller_pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      }));
+      await vi.advanceTimersByTimeAsync(45_000);
+      const error = await pending;
+      expect(error.failure).toMatchObject({
+        failure_stage: "provider_wait",
+        failure_code: "provider_response_timeout",
+        failure_class: "timeout",
+        caller_pcm_byte_length: fixture.caller_pcm.byteLength,
+        caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+        response_generation_requested: false,
+        response_generation_started: false,
+        response_completed: false,
+      });
+      expect(error.failure.operation_order).toEqual([
+        "response_plan_session_update_sent",
+        "response_plan_session_update_acknowledged",
+        "caller_pcm_delivery_started",
+        "server_vad_speech_started",
+        "caller_pcm_delivery_completed",
+        "server_vad_silence_tail_delivery_started",
+        "server_vad_silence_tail_delivery_completed",
+      ]);
+      expect(client.appendedAudio).toHaveLength(1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
+      expect(events.filter((event) => event === "connect")).toHaveLength(1);
+      expect(events.filter((event) => event === "commit")).toHaveLength(0);
+      expect(events.filter((event) => event === "create")).toHaveLength(0);
+      await caughtFailure(fixture.session.close());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects an xAI speech stop before the frozen minimum delimiter without fallback generation", async () => {
+    let monotonicMs = 0;
+    const events: string[] = [];
+    const client = new FakeRealtimeClient(
+      "xai",
+      events,
+      false,
+      "completed",
+      LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count - 1,
+    );
+    const fixture = await openDevFailureFixture({
+      client,
+      audioDeliveryRuntime: {
+        monotonicNowMs: () => monotonicMs,
+        async sleep(delayMs, signal) {
+          if (signal.aborted) throw new Error("test delivery aborted");
+          monotonicMs += delayMs;
+        },
+      },
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "audio_append",
+      failure_code: "audio_delivery_failed",
+      failure_class: "audio_delivery",
+      caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+    });
+    expect(error.failure.operation_order).toContain("server_vad_silence_tail_delivery_started");
+    expect(error.failure.operation_order).not.toContain("server_vad_silence_tail_prefix_accepted");
+    expect(client.appendedAudio).toHaveLength(
+      1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count - 1,
+    );
+    expect(events.filter((event) => event === "connect")).toHaveLength(1);
+    expect(events.filter((event) => event === "commit")).toHaveLength(0);
+    expect(events.filter((event) => event === "create")).toHaveLength(0);
+    await caughtFailure(fixture.session.close());
+  });
+
   it("retains partial output commitments when the listener handoff fails", async () => {
     const fixture = await openDevFailureFixture({
       client: new SynchronousHostCloseRealtimeClient("openai", []),
@@ -1535,7 +1711,7 @@ describe("LC4 production realtime adapter bridge", () => {
     let monotonicMs = 0;
     let fake: FakeRealtimeClient | null = null;
     const bridge = new Lc4RealtimeProviderBridge((clientProvider) => {
-      fake = new FakeRealtimeClient(clientProvider, events, false, "completed", clientProvider === "xai");
+      fake = new FakeRealtimeClient(clientProvider, events);
       return fake;
     }, {
       monotonicNowMs: () => monotonicMs,
@@ -1559,7 +1735,8 @@ describe("LC4 production realtime adapter bridge", () => {
       response_control: { kind: "hacc_response_plan", plan: responsePlan() },
     });
 
-    const delivered = fake!.appendedAudio;
+    const allDelivered = fake!.appendedAudio;
+    const delivered = allDelivered.slice(0, chunkCount);
     expect(delivered).toHaveLength(chunkCount);
     expect(delivered.slice(0, -1).every((chunk) => chunk.data.byteLength === frameBytes)).toBe(true);
     expect(delivered.at(-1)?.data.byteLength).toBe(tailBytes);
@@ -1569,7 +1746,9 @@ describe("LC4 production realtime adapter bridge", () => {
       && chunk.sampleRateHz === value.episode_shape.provider_profile.input_sample_rate_hz
     ))).toBe(true);
     expect(Buffer.concat(delivered.map((chunk) => Buffer.from(chunk.data))).equals(Buffer.from(pcm))).toBe(true);
-    expect(sleeps).toHaveLength(chunkCount - 1);
+    expect(sleeps).toHaveLength(provider === "xai"
+      ? chunkCount - 1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count
+      : chunkCount - 1);
     expect(sleeps.every((delay) => delay === 20)).toBe(true);
     expect(evidence.input_audio_delivery).toMatchObject({
       frame_byte_length: frameBytes,
@@ -1589,22 +1768,50 @@ describe("LC4 production realtime adapter bridge", () => {
       Array.from({ length: chunkCount }, () => "append"),
     );
     expect(events.slice(appendStart + chunkCount)).toEqual(provider === "xai"
-      ? ["listener"]
+      ? [...Array.from(
+          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
+          () => "append",
+        ), "listener"]
       : ["prepare", "commit", "create", "listener"]);
     if (provider === "xai") {
+      const suffix = allDelivered.slice(chunkCount);
+      expect(suffix).toHaveLength(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count);
+      expect(suffix.every((chunk) => chunk.data.every((byte) => byte === 0))).toBe(true);
+      expect(Buffer.concat(suffix.map((chunk) => Buffer.from(chunk.data))).byteLength)
+        .toBe(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length);
       expect(events.slice(1, 3)).toEqual(["session-update", "session-updated"]);
       expect(events.filter((event) => event === "commit")).toHaveLength(0);
       expect(events.filter((event) => event === "create")).toHaveLength(0);
       expect(evidence.transport_mode).toBe("provider_native_server_vad");
+      expect(evidence.input_audio_delivery.total_byte_length).toBe(pcm.byteLength);
+      expect(evidence.server_vad_transport_suffix).toEqual({
+        schema_version: 1,
+        purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
+        completion: "provider_native_speech_stop",
+        policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+        pcm_sha256: sha256Hex(new Uint8Array(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length)),
+        audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length,
+        duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_duration_ms,
+        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
+        frame_bytes: 960,
+        tail_bytes: 960,
+        delivery_profile_sha256: configuration(value).audioDeliveryProfileHash,
+        scheduled_offsets_ms: Array.from(
+          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
+          (_, index) => index * 20,
+        ),
+      });
       expect(evidence.operation_order).toEqual([
         "response_plan_session_update_sent",
         "response_plan_session_update_acknowledged",
         "caller_pcm_delivery_started",
         "server_vad_speech_started",
         "caller_pcm_delivery_completed",
+        "server_vad_silence_tail_delivery_started",
         "server_vad_speech_stopped",
         "caller_pcm_auto_committed",
         "response_generation_auto_started",
+        "server_vad_silence_tail_prefix_accepted",
         "assistant_pcm_captured",
         "listener_evidence_handed_off",
       ]);
@@ -1854,7 +2061,7 @@ describe("LC4 production realtime adapter bridge", () => {
     },
   );
 
-  it.each(["openai", "gemini"] as const)(
+  it.each(["openai", "gemini", "xai"] as const)(
     "keeps a DEV %s tool response intermediate, executes the injected gateway, and continues exactly once",
     async (provider) => {
     const base = manifest("hacc", provider);
@@ -1986,10 +2193,36 @@ describe("LC4 production realtime adapter bridge", () => {
       : ["hacc:archive.complete_stage"]);
     expect(events).toEqual(provider === "gemini"
       ? ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "submit:false", "create", "listener"]
-      : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
+      : provider === "xai"
+        ? [
+            "connect",
+            "session-update",
+            "session-updated",
+            ...Array.from(
+              { length: 1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
+              () => "append",
+            ),
+            "submit:false",
+            "create",
+            "listener",
+          ]
+        : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
     expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
+    if (provider === "xai") {
+      expect(evidence.server_vad_transport_suffix).toMatchObject({
+        completion: "provider_native_speech_stop",
+        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
+      });
+      expect(evidence.operation_order).toContain("server_vad_silence_tail_prefix_accepted");
+      expect(evidence.operation_order).not.toContain("response_generation_requested");
+      expect(events.filter((event) => event === "commit")).toHaveLength(0);
+      // The sole response.create is the required post-tool continuation, never
+      // a fallback initial generation after the provider-native VAD stop.
+      expect(events.filter((event) => event === "create")).toHaveLength(1);
+      expect(events.filter((event) => event === "connect")).toHaveLength(1);
+    }
     expect(JSON.stringify(evidence.dev_gateway_receipt_set?.receipts)).not.toContain("PUBLIC-17");
     expect(JSON.stringify(evidence.dev_gateway_receipt_set?.receipts)).not.toContain("PUBLIC-RESULT");
     expect(JSON.stringify(evidence.dev_gateway_receipt_set?.authority_projections)).toContain("PUBLIC-RESULT");
@@ -2235,7 +2468,7 @@ describe("LC4 production realtime adapter bridge", () => {
         await fixture.session.close();
       }
     }
-  });
+  }, 15_000);
 
   it("rejects opportunity 42 without signed branch authority before appending its PCM", async () => {
     const fixture = await openCallerBranchPreflight({ provider: "gemini", outcome: "no_call" });

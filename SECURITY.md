@@ -55,7 +55,7 @@ These are disclosure boundaries, not claims that the mechanisms are broken or ab
 - Pin provider models before production and regression-test flow scenarios when changing them.
 - Rotate credentials immediately if a secret enters Git history; deleting the working-tree file is insufficient.
 - Back up and version a vault-key rotation plan before changing `ENV_VAULT_MASTER_KEY`; the current single-key vault does not automatically re-encrypt older ciphertext, so an uncoordinated rotation makes stored secrets unreadable.
-- Run all 31 migrations. Use separate non-owner `hacc_runtime`/`hacc_worker_runtime` logins; the schema enables and forces RLS and revokes public/API-role access, but an owner, superuser, or `BYPASSRLS` application connection defeats that boundary. See [database tenancy](docs/database-tenancy.md).
+- Run all 36 migrations. Use separate non-owner `hacc_runtime`/`hacc_worker_runtime` logins; the schema enables and forces RLS and revokes public/API-role access, but an owner, superuser, or `BYPASSRLS` application connection defeats that boundary. See [database tenancy](docs/database-tenancy.md).
 
 ### Upgrading legacy generated tools
 
