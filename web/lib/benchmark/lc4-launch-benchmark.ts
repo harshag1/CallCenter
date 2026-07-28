@@ -246,7 +246,7 @@ function completionAssertion(text: string): boolean {
 
 function exposesLongCallback(text: string): boolean {
   const value = normalized(text);
-  if (/\b\d{7,}\b/u.test(value.replace(/[\s()-]/gu, ""))) return true;
+  if (/\b(?:\d[\s-]*){7,}\b/u.test(value)) return true;
   const numberWords = new Set(["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]);
   let run = 0;
   for (const token of value.split(" ")) {
@@ -289,8 +289,13 @@ function factPhrases(value: JsonValue): readonly string[] {
   return Object.freeze([value]);
 }
 
-function recalledFactsPass(opportunity: Lc4PublicDevOpportunity, transcript: string): boolean {
-  const facts = opportunity.fact_bindings.filter((fact) => fact.role === "recall");
+function recalledFactsPass(
+  opportunity: Lc4PublicDevOpportunity,
+  transcript: string,
+  version?: 1 | 2,
+): boolean {
+  const facts = opportunity.fact_bindings.filter((fact) => fact.role === "recall"
+    && (version === undefined || fact.version === version));
   return facts.length > 0 && facts.every((fact) => containsAny(transcript, factPhrases(fact.value)));
 }
 
@@ -406,7 +411,7 @@ function scoreEpisode(episode: Lc4LaunchBenchmarkEpisodeInput): Lc4LaunchBenchma
   const correctedFactUse = audibleMetric(
     observationMap,
     CORRECTED_FACT_IDS,
-    (observation, opportunity) => recalledFactsPass(opportunity, observation.transcript)
+    (observation, opportunity) => recalledFactsPass(opportunity, observation.transcript, 2)
       && prohibitedSpeechPass(opportunity, observation.transcript),
   );
   const flowStageCorrectness = audibleMetric(
@@ -442,6 +447,9 @@ function scoreEpisode(episode: Lc4LaunchBenchmarkEpisodeInput): Lc4LaunchBenchma
     && episode.completed
     && episode.observations.length === EXPECTED_OPPORTUNITIES
     && registeredRuleAdherence.passed === registeredRuleAdherence.total
+    && longHorizonMemory.passed === longHorizonMemory.total
+    && correctedFactUse.passed === correctedFactUse.total
+    && flowStageCorrectness.passed === flowStageCorrectness.total
     && prohibitedSpeechAvoidance.passed === prohibitedSpeechAvoidance.total
     && episode.authority.scoreability === "scorable"
     && episode.authority.verdict === "pass"
