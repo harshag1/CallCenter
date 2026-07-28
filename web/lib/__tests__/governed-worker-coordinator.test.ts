@@ -14,6 +14,8 @@ import type {
   VoiceToolExecutionContext,
   VoiceToolScope,
 } from "../voice-tools/types";
+import { composeVoiceToolPacks } from "../voice-tools/packs";
+import { VoiceToolRegistry } from "../voice-tools/registry";
 
 const ids = {
   conversation: "8916eb0a-5332-4f4c-a330-746c516e83b9",
@@ -368,5 +370,6 @@ describe("governed worker coordinator", () => {
       });
     expect(pack.tools.find(({ name }) => name === GOVERNED_WORKER_TOOL_NAMES.status)?.effect).toBe("read");
     expect(pack.tools.filter(({ effect }) => effect === "write")).toHaveLength(4);
+    expect(() => new VoiceToolRegistry(composeVoiceToolPacks([pack]))).not.toThrow();
   });
 });
