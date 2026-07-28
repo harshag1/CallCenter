@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+  LC4_DEV_INTENT_ACTION_MAP,
   LC4_DEV_SEMANTIC_INTENTS,
   Lc4DevGatewayTurnCoordinator,
+  lc4DevSemanticIntentsForActions,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
 } from "../lc4-development-gateway-bridge";
@@ -167,6 +169,15 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         },
       },
     });
+  });
+
+  it("projects internal actions to exact provider aliases and hides internal-only controls", () => {
+    expect(lc4DevSemanticIntentsForActions([
+      "flow.get_state",
+      ...Object.values(LC4_DEV_INTENT_ACTION_MAP),
+      "archive.private_future_action",
+    ])).toEqual(LC4_DEV_SEMANTIC_INTENTS);
+    expect(lc4DevSemanticIntentsForActions(["flow.get_state"])).toEqual([]);
   });
 
   it("routes provenance-bound OpenAI dispatch and continues only after an authoritative result batch", async () => {

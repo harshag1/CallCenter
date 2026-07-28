@@ -113,7 +113,9 @@ export function lc4DevSemanticIntentForAction(action: string): Lc4DevSemanticInt
   return match;
 }
 
-function semanticIntentsForActions(actions: readonly string[]): readonly Lc4DevSemanticIntent[] {
+export function lc4DevSemanticIntentsForActions(
+  actions: readonly string[],
+): readonly Lc4DevSemanticIntent[] {
   const actionSet = new Set(actions);
   return Object.freeze(
     LC4_DEV_SEMANTIC_INTENTS.filter((intent) => actionSet.has(LC4_DEV_INTENT_ACTION_MAP[intent])),
@@ -152,10 +154,10 @@ export function renderLc4DevHaccResponsePlan(
   } = providerView;
   const eligibleSemanticIntents = phase === "repair"
     ? Object.freeze([]) as readonly Lc4DevSemanticIntent[]
-    : semanticIntentsForActions(eligibleActions);
+    : lc4DevSemanticIntentsForActions(eligibleActions);
   const designatedReconciliationIntents = phase === "repair"
     ? Object.freeze([]) as readonly Lc4DevSemanticIntent[]
-    : semanticIntentsForActions(designatedReconciliationActions);
+    : lc4DevSemanticIntentsForActions(designatedReconciliationActions);
   const view = freeze({
     ...common,
     plan_type: "hacc-lc4-provider-response-plan.v1" as const,
