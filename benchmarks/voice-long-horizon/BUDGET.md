@@ -7,6 +7,8 @@
 - Protected contingency reserve: **$100.00 USD**
 - Current operational ceiling: **$270.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
+- LC4 conservative filesystem-ledger settlements: **$23.00 USD**
+- Active LC4 reservations: **$0.00 USD**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$3.807615 USD**
 - Recorded total program cash spend: **unreconciled**
@@ -108,7 +110,10 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 | 2026-07-21 | Fable / Claude Code | Durable long-conversation runtime architecture review | $0.495064 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-21-durable-voice-runtime-fable.md) |
 
 - **Cumulative auxiliary review spend: $3.807615**
-- **Cumulative total recorded program cash spend: $3.807615**
+- **Cumulative provider-billed voice spend: unreconciled**
+- **Cumulative LC4 conservative settlements: $23.00; these are pessimistic
+  reservation accounting, not provider invoices or cash-spend evidence**
+- **Cumulative total program cash spend: unreconciled**
 
 Changing the operational ceiling requires a dated ledger entry linking the exact release evidence, source commit, test/artifact IDs, and any unresolved accounting uncertainty. Spending the protected reserve additionally requires a prior entry in [DEVIATIONS.md](DEVIATIONS.md).
 

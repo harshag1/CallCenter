@@ -148,7 +148,10 @@ ALLOW_DEV_OTP_STDOUT=true
 
 Outside that exact loopback, stdout-only development exception, anonymous email OTP requires a trustworthy request-source boundary. Vercel selects its platform-overwritten `x-vercel-forwarded-for` automatically. A self-hosted deployment must set `AUTH_TRUSTED_CLIENT_IP_HEADER` to an allowed IP header its own edge overwrites; arbitrary client-supplied forwarding headers are unsafe. Without either boundary, OTP issuance fails closed with `429` before generating or sending a code.
 
-Open [http://localhost:3000](http://localhost:3000). The builder/operator chat currently uses xAI chat, so configure `XAI_API_KEY` to use that interface even when the live voice provider is OpenAI or Gemini.
+Open [http://localhost:3000](http://localhost:3000). Builder/operator chat defaults
+to xAI, but it can use xAI, OpenAI, or Gemini through the server-owned
+`HACC_BUILDER_PROVIDER` and optional `HACC_BUILDER_MODEL` settings. Configure
+the selected provider's API key; see [web/README.md](web/README.md).
 
 Gemini browser calls can run under the loopback-only development opt-in. xAI/OpenAI browser calls require a non-loopback public HTTPS gateway, while the deployment-funded session route intentionally denies non-loopback origins. Their browser transports are implemented, but exercising them through the stock web route now requires replacing that boundary with reviewed tenant BYOK or durable provider-budget authority; copying the development flag to a tunnel or deployment will not work.
 

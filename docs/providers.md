@@ -11,7 +11,10 @@ The repository's adapter and protocol tests are C1 engineering evidence. They do
 3. Select the provider on an agent version with `voice_provider`, optionally pin `voice_model`, and put supported tuning only in `provider_settings`.
 4. Start with a browser call. Treat PSTN as a separate deployment: the standalone bridge currently supports only OpenAI/xAI PCMU and remains development/non-production.
 
-The builder/operator chat itself currently uses xAI chat. `XAI_API_KEY` is therefore required for that interface even when an agent's realtime voice provider is OpenAI or Gemini.
+Builder/operator chat is provider-neutral and defaults to xAI. Set
+`HACC_BUILDER_PROVIDER` to `xai`, `openai`, or `gemini`, optionally pin
+`HACC_BUILDER_MODEL`, and provide the selected provider's server-side API key.
+This deployment setting is independent of an agent's realtime voice provider.
 
 The browser-session, builder, and onboarding-AI routes fail closed in production and at non-loopback origins even if `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` is copied there. xAI/OpenAI browser calls require a non-loopback public HTTPS gateway, so their implemented transports cannot be exercised through the stock deployment-funded web route until you add reviewed tenant BYOK or durable provider-budget authority. The credential-ingest API is for external tool/MCP credentials and must not be described as provider BYOK. Generic `HACC_ENABLE_*_EGRESS` switches do not relax this spend boundary.
 
