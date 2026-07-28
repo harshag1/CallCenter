@@ -6,24 +6,25 @@ import {
   GEMINI_PROVIDER_TRANSCRIPTION_POLICY,
 } from "../gemini-policy";
 import { assertPcm16Audio, base64ToPcm16, pcm16ToBase64 } from "./audio";
-import type {
-  NormalizedRealtimeClient,
-  NormalizedRealtimeEvent,
-  NormalizedRealtimeUsage,
-  Pcm16Audio,
-  RealtimeClientState,
-  RealtimeEventListener,
-  RealtimeResponseTerminalStatus,
-  RealtimeResponsePreparation,
-  RealtimeWireObservation,
-  RealtimeWireObservationAttribution,
-  RealtimeWireObservationListener,
-  SessionConfigurationAcknowledgement,
-  RealtimeToolResult,
-  RealtimeTransportFailureDiagnostic,
-  RealtimeWebSocket,
-  RealtimeWebSocketFactory,
-  RealtimeWireEventListener,
+import {
+  RealtimeDynamicControlLimitError,
+  type NormalizedRealtimeClient,
+  type NormalizedRealtimeEvent,
+  type NormalizedRealtimeUsage,
+  type Pcm16Audio,
+  type RealtimeClientState,
+  type RealtimeEventListener,
+  type RealtimeResponseTerminalStatus,
+  type RealtimeResponsePreparation,
+  type RealtimeWireObservation,
+  type RealtimeWireObservationAttribution,
+  type RealtimeWireObservationListener,
+  type SessionConfigurationAcknowledgement,
+  type RealtimeToolResult,
+  type RealtimeTransportFailureDiagnostic,
+  type RealtimeWebSocket,
+  type RealtimeWebSocketFactory,
+  type RealtimeWireEventListener,
 } from "./types";
 import { createRealtimeTransportFailureDiagnostic } from "./transport-diagnostics";
 import {
@@ -1330,9 +1331,11 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
     const controlBytes = textBytes(preparation.additionalInstructions);
     if (controlBytes > this.maxDynamicControlBytes) {
-      throw new Error(
-        `Gemini dynamic response control exceeded ${this.maxDynamicControlBytes} UTF-8 bytes`,
-      );
+      throw new RealtimeDynamicControlLimitError({
+        provider: "gemini",
+        actualBytes: controlBytes,
+        maximumBytes: this.maxDynamicControlBytes,
+      });
     }
     // Live setup is immutable. Dynamic advisory context travels through the
     // provider's ordered clientContent channel with turnComplete:false; caller

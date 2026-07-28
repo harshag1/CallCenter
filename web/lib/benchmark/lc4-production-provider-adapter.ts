@@ -60,10 +60,11 @@ import {
   type RealtimeAudioDeliveryReceipt,
   type RealtimeAudioDeliveryRuntime,
 } from "../realtime/audio-delivery";
-import type {
-  NormalizedRealtimeClient,
-  NormalizedRealtimeEvent,
-  RealtimeWireObservation,
+import {
+  RealtimeDynamicControlLimitError,
+  type NormalizedRealtimeClient,
+  type NormalizedRealtimeEvent,
+  type RealtimeWireObservation,
 } from "../realtime/client/types";
 import { isLocalToolProxyFunction } from "../realtime/client/types";
 import { realtimeToolFrontierSha256 } from "../realtime/client/openai-compatible";
@@ -948,6 +949,10 @@ export class Lc4RealtimeProviderBridge {
         failureClass = "adapter_contract";
       } else if (failureInput.stage === "server_vad_control_ack") {
         failureCode = "server_vad_control_ack_failed";
+        failureClass = "adapter_contract";
+      } else if (failureInput.stage === "response_prepare"
+        && failureInput.error instanceof RealtimeDynamicControlLimitError) {
+        failureCode = "response_control_too_large";
         failureClass = "adapter_contract";
       } else if (failureInput.stage === "response_prepare" || failureInput.stage === "audio_commit") {
         failureCode = "audio_delivery_failed";

@@ -4,11 +4,12 @@ import {
   CAPABILITY_GATEWAY_TOOL,
   type ProviderFunctionTool,
 } from "../../benchmark/capability-gateway";
-import type {
-  NormalizedRealtimeEvent,
-  RealtimeWebSocket,
-  RealtimeWebSocketFactory,
-  RealtimeWireObservation,
+import {
+  RealtimeDynamicControlLimitError,
+  type NormalizedRealtimeEvent,
+  type RealtimeWebSocket,
+  type RealtimeWebSocketFactory,
+  type RealtimeWireObservation,
 } from "./types";
 import {
   realtimeWireObservationReference,
@@ -374,11 +375,23 @@ describe("GeminiLiveClient", () => {
     test.client.appendInputAudio(inputAudio(1, 0));
     const sentBefore = test.socket.sent.length;
     const control = "x".repeat(4_097);
-    expect(() => test.client.prepareResponse({
-      additionalInstructions: control,
-      contextSha256: createHash("sha256").update(control).digest("hex"),
-      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
-    })).toThrow("exceeded 4096");
+    let error: unknown;
+    try {
+      test.client.prepareResponse({
+        additionalInstructions: control,
+        contextSha256: createHash("sha256").update(control).digest("hex"),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(RealtimeDynamicControlLimitError);
+    expect(error).toMatchObject({
+      provider: "gemini",
+      actualBytes: 4_097,
+      maximumBytes: 4_096,
+    });
+    expect((error as Error).message).toContain("provider limit is 4096");
     expect(test.socket.sent).toHaveLength(sentBefore);
   });
 

@@ -34,7 +34,10 @@ import {
   compiledConditionHash,
 } from "../condition-compiler";
 import { createInMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
-import { assertHaccResponsePlan, type HaccResponsePlan } from "../response-plan";
+import {
+  assertHaccProviderResponsePlanView,
+  type HaccProviderResponsePlanView,
+} from "../response-plan";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
@@ -806,7 +809,7 @@ function renderedCanarySnapshot(output: unknown): CanarySnapshot | null {
   return parsed;
 }
 
-function renderedResponsePlan(overrides: Record<string, unknown> | undefined): HaccResponsePlan {
+function renderedResponsePlan(overrides: Record<string, unknown> | undefined): HaccProviderResponsePlanView {
   const instructions = overrides?.instructions;
   if (typeof instructions !== "string") throw new Error("release canary did not receive response-plan instructions");
   const lines = instructions.split("\n");
@@ -815,7 +818,7 @@ function renderedResponsePlan(overrides: Record<string, unknown> | undefined): H
   if (start < 0 || end !== start + 2) {
     throw new Error("release canary received a malformed response-plan envelope");
   }
-  return assertHaccResponsePlan(JSON.parse(lines[start + 1]));
+  return assertHaccProviderResponsePlanView(JSON.parse(lines[start + 1]));
 }
 
 function canaryArguments(
@@ -897,7 +900,7 @@ async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
   const completedActions = new Set<string>();
   const disclosedTargets = new Set<string>();
   const refreshes: Array<Readonly<{ turn: number; snapshot: CanarySnapshot }>> = [];
-  const responsePlans: Array<Readonly<{ turn: number; plan: HaccResponsePlan }>> = [];
+  const responsePlans: Array<Readonly<{ turn: number; plan: HaccProviderResponsePlanView }>> = [];
   const guardrailPackets: Array<Readonly<{ action: string; packet: Record<string, unknown> }>> = [];
   let selectedTopic = false;
   let currentSnapshot: CanarySnapshot | null = null;

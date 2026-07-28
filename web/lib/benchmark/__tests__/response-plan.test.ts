@@ -10,7 +10,9 @@ import {
 } from "../speech-guardrail-packet";
 import {
   assertHaccResponsePlan,
+  assertHaccProviderResponsePlanView,
   createHaccResponsePlan,
+  renderHaccResponsePlan,
 } from "../response-plan";
 import { BenchmarkScenarioSchema, type JsonValue } from "../scenario-schema";
 import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
@@ -78,14 +80,18 @@ function privacyPacket() {
   return createHaccSpeechGuardrailPacket(verified, first.packet_sha256);
 }
 
-function plan(revision = 1, previousPlanSha256: string | null = null) {
+function plan(
+  revision = 1,
+  previousPlanSha256: string | null = null,
+  providerSnapshot: ProviderCapabilitySnapshot = snapshot,
+) {
   return createHaccResponsePlan({
     flow,
     state: secretBearingState(),
     conditionSha256: condition.conditionHash,
     target,
     catalogMode: "target",
-    snapshot,
+    snapshot: providerSnapshot,
     frontierEvidence,
     quarantines: [],
     speechGuardrailPacket: privacyPacket(),
@@ -162,5 +168,84 @@ describe("HACC state-derived response plan", () => {
     const deleted = { ...responsePlan } as Record<string, unknown>;
     delete deleted.prohibited_claims;
     expect(() => assertHaccResponsePlan(deleted)).toThrow();
+  });
+
+  it("renders a deterministic compact six-action provider view bound to the full plan", () => {
+    const actionNames = [
+      "check_membership_benefits",
+      "list_membership_plans",
+      "lookup_membership",
+      "pause_membership",
+      "quote_membership_renewal",
+      "renew_membership",
+    ];
+    const sixActionSnapshot: ProviderCapabilitySnapshot = {
+      gateway_version: 1,
+      scope: target,
+      capability_epoch: 7,
+      actions: actionNames.map((name, index) => ({
+        name,
+        description: [
+          `Production-like membership action ${index + 1}.`,
+          "Use only after host verification and preserve the quoted term, price, and member-visible restrictions.",
+          "The host gateway remains authoritative for admission, idempotency, mutation settlement, and receipt delivery.",
+        ].join(" "),
+        input_schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            membership_id: {
+              type: "string",
+              description: "Opaque public membership reference from the current verified call.",
+            },
+            confirmed_term: {
+              type: "string",
+              description: "Caller-confirmed renewal or pause term when this action requires it.",
+            },
+            quoted_price_minor_units: {
+              type: "integer",
+              description: "Exact caller-confirmed quoted price in minor currency units.",
+            },
+          },
+          required: ["membership_id"],
+        },
+        semantic_hash: index.toString(16).padStart(64, "0"),
+        capability_grant: `never-provider-visible-grant-${index}`,
+      })),
+    };
+    const authoritativePlan = plan(19, "f".repeat(64), sixActionSnapshot);
+    const fullEnvelope = `<hacc_response_plan>\n${JSON.stringify(authoritativePlan)}\n</hacc_response_plan>`;
+    const rendered = renderHaccResponsePlan(authoritativePlan);
+    const lines = rendered.split("\n");
+    const view = assertHaccProviderResponsePlanView(JSON.parse(lines[1]!), authoritativePlan);
+
+    expect(Buffer.byteLength(fullEnvelope, "utf8")).toBeGreaterThan(4_096);
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThan(2_048);
+    expect(renderHaccResponsePlan(authoritativePlan)).toBe(rendered);
+    expect(lines[0]).toBe("<hacc_response_plan>");
+    expect(lines[2]).toBe("</hacc_response_plan>");
+    expect(view).toMatchObject({
+      plan_sha256: authoritativePlan.plan_sha256,
+      previous_plan_sha256: authoritativePlan.previous_plan_sha256,
+      revision: authoritativePlan.revision,
+      capability_epoch: authoritativePlan.capability_epoch,
+      capability_catalog_sha256: authoritativePlan.capability_catalog_sha256,
+      target: authoritativePlan.target,
+      current_step: authoritativePlan.current_step,
+      response_mode: authoritativePlan.response_mode,
+      context_authority: authoritativePlan.context_authority,
+      eligible_actions: authoritativePlan.eligible_actions,
+      present_public_slots: authoritativePlan.present_public_slots,
+      missing_public_slots: authoritativePlan.missing_public_slots,
+      recovery_state: authoritativePlan.recovery_state,
+      designated_reconciliation_actions: authoritativePlan.designated_reconciliation_actions,
+      prohibited_claims: authoritativePlan.prohibited_claims,
+    });
+    expect(rendered).not.toContain("never-provider-visible-grant");
+    expect(rendered).not.toContain("quoted_price_minor_units");
+    expect(() => assertHaccProviderResponsePlanView({
+      ...view,
+      plan_sha256: "0".repeat(64),
+    }, authoritativePlan)).toThrow("differs from its authoritative plan");
   });
 });

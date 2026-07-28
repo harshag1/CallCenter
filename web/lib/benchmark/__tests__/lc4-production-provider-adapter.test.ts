@@ -61,6 +61,7 @@ import {
   LOCAL_TOOL_PROXY_FUNCTION,
   LOCAL_TOOL_PROXY_FUNCTION_NAME,
   PROVIDER_PROVENANCE_META_KEY,
+  RealtimeDynamicControlLimitError,
 } from "../../realtime/client/types";
 
 const HASH = "a".repeat(64);
@@ -862,6 +863,17 @@ class PrepareFailureRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class OversizedControlRealtimeClient extends FakeRealtimeClient {
+  override prepareResponse(preparation: RealtimeResponsePreparation) {
+    this.events.push("prepare");
+    throw new RealtimeDynamicControlLimitError({
+      provider: this.provider,
+      actualBytes: Buffer.byteLength(preparation.additionalInstructions, "utf8"),
+      maximumBytes: 512,
+    });
+  }
+}
+
 async function caughtFailure(promise: Promise<unknown>): Promise<Lc4DevFailureEvidenceError> {
   try {
     await promise;
@@ -894,6 +906,29 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     expect(events).toEqual(["connect"]);
     await fixture.session.close();
+  });
+
+  it("classifies response-control overflow distinctly from audio delivery failure", async () => {
+    const events: string[] = [];
+    const fixture = await openDevFailureFixture({
+      client: new OversizedControlRealtimeClient("openai", events),
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "response_prepare",
+      failure_code: "response_control_too_large",
+      failure_class: "adapter_contract",
+      caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+    });
+    expect(events).toEqual(["connect", "append", "prepare", "close"]);
+    await caughtFailure(fixture.session.close());
   });
 
   it("classifies an idle provider disconnect on the next turn without inheriting prior response evidence", async () => {
@@ -1202,11 +1237,16 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(evidence.output_capture.generated_byte_length).toBe(4);
     expect(handoffs).toHaveLength(1);
     const delivered = clients[0]?.preparations[0]?.additionalInstructions ?? "";
-    expect(delivered).toContain("\"capability_catalog\"");
-    for (const action of responsePlan().capability_catalog.actions) {
-      expect(delivered).toContain(`\"name\":\"${action.name}\"`);
-      expect(delivered).toContain(action.semantic_hash);
+    const authoritativePlan = responsePlan();
+    expect(delivered).toContain(`\"plan_sha256\":\"${authoritativePlan.plan_sha256}\"`);
+    expect(delivered).toContain(
+      `\"capability_catalog_sha256\":\"${authoritativePlan.capability_catalog_sha256}\"`,
+    );
+    for (const action of authoritativePlan.eligible_actions) {
+      expect(delivered).toContain(`\"${action}\"`);
     }
+    expect(delivered).not.toContain("\"capability_catalog\"");
+    expect(delivered).not.toContain("\"input_schema\"");
     expect(delivered).not.toContain("test-grant-");
     const encoded = JSON.stringify(evidence);
     expect(encoded).not.toContain(ORACLE_SECRET);

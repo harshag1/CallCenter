@@ -10,6 +10,7 @@ import type { HaccSpeechGuardrailPacket } from "./speech-guardrail-packet";
 
 export const HACC_RESPONSE_PLAN_KEY = "hacc_response_plan" as const;
 export const HACC_RESPONSE_PLAN_VERSION = "hacc-state-derived-response-plan.v1" as const;
+export const HACC_PROVIDER_RESPONSE_PLAN_VERSION = "hacc-provider-response-plan.v1" as const;
 
 const POLICY_DOMAIN = "harshas-amazing-call-center/benchmark-response-plan-policy/v1\n";
 const STATE_DOMAIN = "harshas-amazing-call-center/benchmark-response-plan-state/v1\n";
@@ -76,6 +77,35 @@ export const HaccResponsePlanSchema = z.object({
 }).strict();
 
 export type HaccResponsePlan = z.infer<typeof HaccResponsePlanSchema>;
+
+/**
+ * The provider needs the live operating instructions, not a second copy of
+ * every tool description and JSON schema already present in its function
+ * declaration. The full HaccResponsePlan remains the host-authoritative
+ * object. This compact projection carries the exact plan_sha256 commitment so
+ * retained wire evidence can always be joined back to that full object.
+ */
+export const HaccProviderResponsePlanViewSchema = z.object({
+  schema_version: z.literal(1),
+  plan_type: z.literal(HACC_PROVIDER_RESPONSE_PLAN_VERSION),
+  plan_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  previous_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  revision: z.number().int().positive(),
+  capability_epoch: z.number().int().nonnegative(),
+  capability_catalog_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  target: z.string().min(1),
+  current_step: z.string().min(1).nullable(),
+  response_mode: ResponseModeSchema,
+  context_authority: z.literal("advisory_only_gateway_and_speech_gate_enforced"),
+  eligible_actions: z.array(z.string().min(1)),
+  present_public_slots: z.array(z.string().min(1)),
+  missing_public_slots: z.array(z.string().min(1)),
+  recovery_state: RecoveryStateSchema,
+  designated_reconciliation_actions: z.array(z.string().min(1)),
+  prohibited_claims: z.array(ProhibitedClaimSchema),
+}).strict();
+
+export type HaccProviderResponsePlanView = z.infer<typeof HaccProviderResponsePlanViewSchema>;
 
 function domainHash(domain: string, value: unknown): string {
   return sha256Hex(`${domain}${canonicalJson(value)}`);
@@ -339,6 +369,64 @@ export function assertHaccResponsePlan(
   return plan;
 }
 
+function providerResponsePlanViewBody(plan: HaccResponsePlan): HaccProviderResponsePlanView {
+  return {
+    schema_version: 1,
+    plan_type: HACC_PROVIDER_RESPONSE_PLAN_VERSION,
+    plan_sha256: plan.plan_sha256,
+    previous_plan_sha256: plan.previous_plan_sha256,
+    revision: plan.revision,
+    capability_epoch: plan.capability_epoch,
+    capability_catalog_sha256: plan.capability_catalog_sha256,
+    target: plan.target,
+    current_step: plan.current_step,
+    response_mode: plan.response_mode,
+    context_authority: plan.context_authority,
+    eligible_actions: plan.eligible_actions,
+    present_public_slots: plan.present_public_slots,
+    missing_public_slots: plan.missing_public_slots,
+    recovery_state: plan.recovery_state,
+    designated_reconciliation_actions: plan.designated_reconciliation_actions,
+    prohibited_claims: plan.prohibited_claims,
+  };
+}
+
+export function createHaccProviderResponsePlanView(
+  authoritativePlan: HaccResponsePlan,
+): HaccProviderResponsePlanView {
+  const plan = assertHaccResponsePlan(authoritativePlan);
+  return immutableJson(providerResponsePlanViewBody(plan)) as unknown as HaccProviderResponsePlanView;
+}
+
+export function assertHaccProviderResponsePlanView(
+  input: unknown,
+  authoritativePlan?: HaccResponsePlan,
+): HaccProviderResponsePlanView {
+  const view = HaccProviderResponsePlanViewSchema.parse(input);
+  for (const [label, values] of [
+    ["eligible actions", view.eligible_actions],
+    ["present public slots", view.present_public_slots],
+    ["missing public slots", view.missing_public_slots],
+    ["designated reconciliation actions", view.designated_reconciliation_actions],
+    ["prohibited claims", view.prohibited_claims],
+  ] as const) {
+    if (canonicalJson(values) !== canonicalJson(sortedUnique(values))) {
+      throw new Error(`provider response plan ${label} are not sorted and unique`);
+    }
+  }
+  if (view.present_public_slots.some((slot) => view.missing_public_slots.includes(slot))) {
+    throw new Error("provider response plan public slot sets overlap");
+  }
+  if (authoritativePlan !== undefined) {
+    const plan = assertHaccResponsePlan(authoritativePlan);
+    if (canonicalJson(view) !== canonicalJson(providerResponsePlanViewBody(plan))) {
+      throw new Error("provider response plan differs from its authoritative plan");
+    }
+  }
+  return view;
+}
+
 export function renderHaccResponsePlan(plan: HaccResponsePlan): string {
-  return `<hacc_response_plan>\n${canonicalJson(plan)}\n</hacc_response_plan>`;
+  const view = createHaccProviderResponsePlanView(plan);
+  return `<hacc_response_plan>\n${canonicalJson(view)}\n</hacc_response_plan>`;
 }

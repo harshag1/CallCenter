@@ -602,6 +602,28 @@ export type RealtimeClientState =
   | "closed"
   | "failed";
 
+/** Fail-closed diagnostic for provider-specific per-turn control limits. */
+export class RealtimeDynamicControlLimitError extends Error {
+  readonly provider: ServerRealtimeProvider;
+  readonly actualBytes: number;
+  readonly maximumBytes: number;
+
+  constructor(input: Readonly<{
+    provider: ServerRealtimeProvider;
+    actualBytes: number;
+    maximumBytes: number;
+  }>) {
+    super(
+      `${input.provider} dynamic response control is ${input.actualBytes} UTF-8 bytes; `
+      + `provider limit is ${input.maximumBytes}`,
+    );
+    this.name = "RealtimeDynamicControlLimitError";
+    this.provider = input.provider;
+    this.actualBytes = input.actualBytes;
+    this.maximumBytes = input.maximumBytes;
+  }
+}
+
 /**
  * Host-authored, provider-neutral control context for exactly the next model
  * response. Adapters must deliver it before that provider can begin generation.
