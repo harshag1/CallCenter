@@ -23,6 +23,10 @@ There is exactly one `incoming_call` entry. `topic` nodes carry routing context 
 
 `max_step_entries` is an optional call-level circuit breaker across entries and retries. When omitted, Flow v2 does not add its own entry ceiling, so production callers should normally set it above the longest validated scenario and retain independent session, turn, tool-call, and cost limits.
 
+## Builder authoring contract
+
+The `create_flow` and `update_flow` builder tools publish the complete Flow v2 JSON contract instead of accepting an opaque object. The provider-facing schema is closed (`additionalProperties: false`), reference-free, and unrolled to the runtime's eight-level nesting limit. It exposes conditional transitions, receipt-backed output bindings, action policies, reconciliation, and host-bound arguments without relying on provider-specific schema references. The server still parses, normalizes, and semantically validates the submitted graph; the provider schema is an authoring aid, not the authority.
+
 A step may contain:
 
 - `entry`: explicitly mark a top-level step as selectable immediately after classification.
@@ -38,6 +42,72 @@ A step may contain:
 - `on_failure`: absolute recovery/escalation path.
 - `max_attempts`: retry ceiling, default 3.
 - `checkpoint`: persist a recovery marker after completion.
+
+`output_bindings` and `bound_arguments` serve different sides of the same receipt boundary. An output binding commits a successful action result into durable flow state. A bound argument prevents the model from supplying a sensitive or identity-bearing argument and makes the gateway derive it from an authoritative action receipt in the current step attempt:
+
+```json
+{
+  "id": "close",
+  "label": "Close case",
+  "instructions": "Resolve the case, confirm consent, then close it once.",
+  "tools": ["lookup_case", "close_case"],
+  "required_outputs": ["case_id", "closed"],
+  "output_bindings": [
+    {
+      "output": "case_id",
+      "tool": "lookup_case",
+      "result_path": "case.id",
+      "value_type": "string"
+    },
+    {
+      "output": "closed",
+      "tool": "close_case",
+      "result_path": "closed",
+      "value_type": "boolean"
+    }
+  ],
+  "action_policies": [
+    {
+      "tool": "lookup_case",
+      "max_calls": 2,
+      "idempotency": "per_arguments",
+      "effect": "read"
+    },
+    {
+      "tool": "close_case",
+      "max_calls": 1,
+      "idempotency": "per_call_arguments",
+      "effect": "write",
+      "bound_arguments": [
+        {
+          "argument": "case_id",
+          "source": {
+            "kind": "receipt_result",
+            "tool": "lookup_case",
+            "result_path": "case.id"
+          }
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "to": "cases.confirm",
+      "when": "the authoritative close result is true",
+      "condition": {
+        "output": "closed",
+        "operator": "equals",
+        "value": true
+      }
+    }
+  ],
+  "on_failure": "cases.escalate",
+  "max_attempts": 2,
+  "checkpoint": true
+}
+```
+
+In this example the model calls `lookup_case` first but omits `case_id` when it later calls `close_case`; the gateway injects the exact receipt-derived value. The `when` text helps the model explain the branch, while `condition` is the machine guard. Always bind an output used to authorize a consequential branch. Bound arguments are step-scoped because global actions have no active receipt frontier from which to derive them.
 
 ## Runtime lifecycle
 

@@ -22,7 +22,354 @@ import {
   proposeOperatorAction,
 } from "./operator-capability-policy";
 
-const FLOW_DOC = `Prefer Flow v2: {schema_version:2,always_tools?:[tool],tool_exposure:"gateway",nodes:[{id,label,kind:"incoming_call"|"topic"|"fallback",icon?,context?,tools?:[tool],steps?:[Step],support_number?,table?}],edges:[{from,to,when?}]}. Step is recursive: {id,label,instructions,context?,tools?:[tool],required_outputs?:[key],success_criteria?:[text],checkpoint?:boolean,max_attempts?:number,steps?:[Step],transitions?:[{to:"absolute.step.path",when?,label?}],on_failure?:"absolute.step.path"}. RULES: exactly one entry with no steps; topic steps may nest up to 8 levels; grant only the tools needed at each step; use required_outputs for deterministic completion; all transition targets are absolute paths; when recording data, grant write_table and require the durable row id/output.`;
+const TOOL_NAME_PATTERN = "^[a-z][a-z0-9_.-]{1,63}$";
+const FLOW_ID_PATTERN = "^[A-Za-z0-9_-]{1,64}$";
+const FLOW_MAX_STEP_DEPTH = 8;
+
+type JsonSchema = Record<string, unknown>;
+
+const stringArraySchema = (description: string): JsonSchema => ({
+  type: "array",
+  description,
+  items: { type: "string", minLength: 1 },
+});
+
+const toolArraySchema = (description: string): JsonSchema => ({
+  type: "array",
+  description,
+  items: { type: "string", pattern: TOOL_NAME_PATTERN },
+});
+
+const boundArgumentSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "A host-resolved argument. The voice model must omit this argument; the gateway copies it from a successful receipt in the current step attempt.",
+  properties: {
+    argument: {
+      type: "string",
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+      description: "Argument on the target tool that the model is not allowed to provide.",
+    },
+    source: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", enum: ["receipt_result"] },
+        tool: {
+          type: "string",
+          pattern: TOOL_NAME_PATTERN,
+          description: "Granted source tool whose successful current-attempt receipt is authoritative.",
+        },
+        result_path: {
+          type: "string",
+          minLength: 1,
+          maxLength: 512,
+          description: "Safe dot path in the source receipt result, or $ for the full result.",
+        },
+      },
+      required: ["kind", "tool", "result_path"],
+    },
+  },
+  required: ["argument", "source"],
+};
+
+const reconciliationValueSourceSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    source: {
+      type: "string",
+      enum: ["invocation_id", "call_id", "organization_id", "agent_id", "action_argument", "literal"],
+    },
+    path: {
+      type: "string",
+      minLength: 1,
+      maxLength: 512,
+      description: "Required only when source is action_argument.",
+    },
+    value: {
+      description: "Required only when source is literal; terminal discriminator literals must be scalar JSON.",
+    },
+  },
+  required: ["source"],
+};
+
+const reconciliationPredicateSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    resultPath: { type: "string", minLength: 1, maxLength: 512 },
+    equals: reconciliationValueSourceSchema,
+  },
+  required: ["resultPath", "equals"],
+};
+
+const reconciliationSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "Pinned authoritative read-back for an indeterminate write. Both terminal branches must echo invocation_id and contain distinct scalar literals on a shared discriminator path.",
+  properties: {
+    queryTool: {
+      type: "string",
+      pattern: TOOL_NAME_PATTERN,
+      description: "Distinct pinned read-only proof action.",
+    },
+    queryArguments: {
+      type: "object",
+      description: "Host-derived proof arguments. At least one value source must be invocation_id.",
+      additionalProperties: reconciliationValueSourceSchema,
+    },
+    committedWhen: {
+      type: "array",
+      minItems: 2,
+      maxItems: 16,
+      items: reconciliationPredicateSchema,
+    },
+    absentWhen: {
+      type: "array",
+      minItems: 2,
+      maxItems: 16,
+      items: reconciliationPredicateSchema,
+    },
+    queryOutputSchema: {
+      type: "object",
+      description: "Optional bounded JSON Schema for a proof action without its own pinned output schema.",
+    },
+    authoritativeResultPath: { type: "string", minLength: 1, maxLength: 512 },
+    authoritativeResultSchema: {
+      type: "object",
+      description: "Required only when the mutated action has no pinned output schema.",
+    },
+    maxProofAttempts: { type: "integer", minimum: 1, maximum: 10 },
+  },
+  required: [
+    "queryTool",
+    "queryArguments",
+    "committedWhen",
+    "absentWhen",
+    "authoritativeResultPath",
+  ],
+};
+
+const actionPolicySchema = (allowBoundArguments: boolean): JsonSchema => ({
+  type: "object",
+  additionalProperties: false,
+  description: "Server-enforced admission, replay, and effect policy for one granted action.",
+  properties: {
+    tool: { type: "string", pattern: TOOL_NAME_PATTERN },
+    max_calls: {
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+      description: "Maximum successful executions admitted in this policy scope.",
+    },
+    idempotency: {
+      type: "string",
+      enum: ["none", "per_step", "per_arguments", "per_call", "per_call_arguments"],
+      description: "Use a non-none scope for writes and opaque effects.",
+    },
+    effect: {
+      type: "string",
+      enum: ["read", "write", "opaque"],
+      description: "Immutable operator-authored effect classification.",
+    },
+    reconciliation: reconciliationSchema,
+    ...(allowBoundArguments ? {
+      bound_arguments: {
+        type: "array",
+        maxItems: 64,
+        description: "Arguments injected from authoritative receipts. They cannot be supplied or overridden by the model.",
+        items: boundArgumentSchema,
+      },
+    } : {}),
+  },
+  required: ["tool"],
+});
+
+const outputBindingSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "Commits a durable step output only from the named tool's successful receipt in the current attempt.",
+  properties: {
+    output: { type: "string", minLength: 1 },
+    tool: { type: "string", pattern: TOOL_NAME_PATTERN },
+    result_path: {
+      type: "string",
+      minLength: 1,
+      description: "Dot path inside the authoritative action result.",
+    },
+    value_type: {
+      type: "string",
+      enum: ["string", "number", "boolean", "object", "array"],
+      description: "Optional runtime type check before the value can be committed.",
+    },
+  },
+  required: ["output", "tool", "result_path"],
+};
+
+const transitionSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    to: {
+      type: "string",
+      minLength: 1,
+      description: "Absolute target path, including the topic node id (for example returns.verify.eligibility).",
+    },
+    label: { type: "string", minLength: 1 },
+    when: {
+      type: "string",
+      minLength: 1,
+      description: "Human-readable branch guidance. This text is not a machine guard.",
+    },
+    condition: {
+      type: "object",
+      additionalProperties: false,
+      description: "Machine-enforced condition over an output persisted by the step being completed. Receipt-bind consequential branch outputs.",
+      properties: {
+        output: { type: "string", minLength: 1 },
+        operator: { type: "string", enum: ["equals", "not_equals", "exists", "in"] },
+        value: {
+          description: "Required for equals/not_equals; an array is required for in; omit for exists.",
+        },
+      },
+      required: ["output", "operator"],
+    },
+  },
+  required: ["to"],
+};
+
+function flowStepSchema(depth: number): JsonSchema {
+  const properties: Record<string, unknown> = {
+    id: { type: "string", pattern: FLOW_ID_PATTERN },
+    label: { type: "string", minLength: 1 },
+    instructions: {
+      type: "string",
+      minLength: 1,
+      description: "Exact behavior disclosed only when this step is active.",
+    },
+    context: {
+      type: "string",
+      minLength: 1,
+      description: "Knowledge scoped to this step and its descendants.",
+    },
+    tools: toolArraySchema("Actions granted while this step or one of its descendants is active."),
+    required_outputs: stringArraySchema("Durable output keys that must be present before this step can complete."),
+    output_bindings: {
+      type: "array",
+      description: "Receipt-authoritative durable outputs. Use these for decisions and consequential completion state.",
+      items: outputBindingSchema,
+    },
+    action_policies: {
+      type: "array",
+      description: "Admission policies for granted actions, including host-bound arguments for chained operations.",
+      items: actionPolicySchema(true),
+    },
+    success_criteria: stringArraySchema("Reviewable completion criteria for the active step."),
+    transitions: {
+      type: "array",
+      description: "Explicit next-step branches. Targets are always absolute paths.",
+      items: transitionSchema,
+    },
+    on_failure: {
+      type: "string",
+      minLength: 1,
+      description: "Absolute recovery path unlocked only after max_attempts is reached.",
+    },
+    max_attempts: { type: "integer", minimum: 1, maximum: 10 },
+    checkpoint: {
+      type: "boolean",
+      description: "Persist a recovery marker after successful completion.",
+    },
+  };
+  if (depth === 1) {
+    properties.entry = {
+      type: "boolean",
+      description: "Marks this top-level step as directly selectable after classification.",
+    };
+  }
+  if (depth < FLOW_MAX_STEP_DEPTH) {
+    properties.steps = {
+      type: "array",
+      description: `Nested control steps (current depth ${depth}; maximum ${FLOW_MAX_STEP_DEPTH}). Children inherit node and ancestor tools but not sibling tools.`,
+      items: flowStepSchema(depth + 1),
+    };
+  }
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    required: ["id", "label", "instructions"],
+  };
+}
+
+/** Provider-facing authoring schema. It is deliberately reference-free and unrolled to
+ * the runtime's eight-level limit so every supported model receives the same contract. */
+export const FLOW_V2_AUTHORING_SCHEMA: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "Flow v2 progressive-disclosure graph. The server pins schema_version=2 and tool_exposure=gateway.",
+  properties: {
+    schema_version: { type: "integer", enum: [2] },
+    tool_exposure: { type: "string", enum: ["gateway"] },
+    max_step_entries: {
+      type: "integer",
+      minimum: 1,
+      maximum: 10_000,
+      description: "Call-level circuit breaker across all step entries and retries.",
+    },
+    always_tools: toolArraySchema("Rare actions available throughout the call, still gated by run_action."),
+    always_action_policies: {
+      type: "array",
+      description: "Policies for always_tools. Receipt-bound arguments are intentionally step-only and cannot be declared here.",
+      items: actionPolicySchema(false),
+    },
+    nodes: {
+      type: "array",
+      description: "Exactly one step-free incoming_call entry, one or more topic nodes, and an optional fallback.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string", pattern: FLOW_ID_PATTERN },
+          label: { type: "string", minLength: 1 },
+          kind: { type: "string", enum: ["incoming_call", "topic", "fallback"] },
+          icon: { type: "string" },
+          context: {
+            type: "string",
+            description: "Topic/fallback context disclosed only after routing.",
+          },
+          tools: toolArraySchema("Actions inherited by every active step in this topic."),
+          steps: {
+            type: "array",
+            description: "Recursive topic workflow. Steps are invalid on incoming_call nodes.",
+            items: flowStepSchema(1),
+          },
+          support_number: { type: "string" },
+          table: { type: "string" },
+        },
+        required: ["id", "label", "kind"],
+      },
+    },
+    edges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          from: { type: "string", minLength: 1 },
+          to: { type: "string", minLength: 1 },
+          label: { type: "string" },
+          when: { type: "string" },
+        },
+        required: ["from", "to"],
+      },
+    },
+  },
+  required: ["nodes", "edges"],
+};
+
+const FLOW_DOC = `Author Flow v2 as a progressive-disclosure state machine. Exactly one incoming_call node is step-free; topic steps can nest eight levels. Node and ancestor tools are inherited only while their descendant is active. required_outputs block completion. output_bindings commit values from successful current-attempt action receipts; use them for machine conditions. action_policies enforce max_calls, effect, idempotency, reconciliation, and bound_arguments. A bound argument is injected by the host from a prior receipt and MUST NOT be requested from the model. transitions use absolute paths; "when" is guidance while "condition" is enforced. on_failure unlocks only at max_attempts. Keep always_tools rare.`;
 const CAMPAIGN_REQUEST_PROPERTIES = Object.freeze({
   agent_id: { type: "string" },
   flow_id: { type: "string" },
@@ -76,11 +423,12 @@ export const createFlowTool: OperatorTool = {
   description: `Create a named outbound flow for a bot (separate from its inbound flow). Campaign calls run this flow with the same tool runtime (classify/steps/write_table/etc). ${FLOW_DOC}`,
   parameters: {
     type: "object",
+    additionalProperties: false,
     properties: {
       agent_id: { type: "string" },
       name: { type: "string", description: "Short name, e.g. 'Satisfaction Survey'" },
       persona: { type: "string", description: "2-3 sentences: who the agent is on this call and the call's goal." },
-      flow: { type: "object" },
+      flow: FLOW_V2_AUTHORING_SCHEMA,
     },
     required: ["agent_id", "name", "persona", "flow"],
   },
@@ -114,11 +462,12 @@ export const updateFlowTool: OperatorTool = {
   description: `Edit a named outbound flow (graph and/or persona). ${FLOW_DOC}`,
   parameters: {
     type: "object",
+    additionalProperties: false,
     properties: {
       flow_id: { type: "string" },
       name: { type: "string" },
       persona: { type: "string" },
-      flow: { type: "object" },
+      flow: FLOW_V2_AUTHORING_SCHEMA,
     },
     required: ["flow_id"],
   },
