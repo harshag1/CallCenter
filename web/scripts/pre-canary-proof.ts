@@ -276,16 +276,27 @@ async function main(): Promise<number> {
     !Array.isArray(skipInventory.entries)
     || !Number.isSafeInteger(skipInventory.total_skipped_suites_when_unconfigured)
     || !Number.isSafeInteger(skipInventory.total_skipped_tests_when_unconfigured)
+    || !Number.isSafeInteger(skipInventory.public_ci_required_suites)
+    || !Number.isSafeInteger(skipInventory.public_ci_required_tests)
+    || !Number.isSafeInteger(skipInventory.environment_qualified_suites)
+    || !Number.isSafeInteger(skipInventory.environment_qualified_tests)
     || skipInventory.total_skipped_suites_when_unconfigured !== skipInventory.entries.length
     || (skipInventory.total_skipped_suites_when_unconfigured as number) <= 0
     || (skipInventory.total_skipped_tests_when_unconfigured as number) <= 0
+    || (skipInventory.public_ci_required_suites as number)
+      + (skipInventory.environment_qualified_suites as number)
+      !== skipInventory.total_skipped_suites_when_unconfigured
+    || (skipInventory.public_ci_required_tests as number)
+      + (skipInventory.environment_qualified_tests as number)
+      !== skipInventory.total_skipped_tests_when_unconfigured
   ) {
     throw new Error("Gate 0 skip inventory has invalid conditional test totals");
   }
   const skipInventoryBinding = Object.freeze({
     sha256: sha256Hex(skipInventoryBytes),
-    test_file_count: skipInventory.total_skipped_suites_when_unconfigured as number,
-    test_count: skipInventory.total_skipped_tests_when_unconfigured as number,
+    pending_test_count: skipInventory.total_skipped_tests_when_unconfigured as number,
+    public_ci_test_file_count: skipInventory.public_ci_required_suites as number,
+    public_ci_test_count: skipInventory.public_ci_required_tests as number,
   });
   artifacts.push(await fileArtifact(
     "gate0.skip_inventory",
@@ -856,7 +867,7 @@ async function main(): Promise<number> {
         passed_tests: passedTests,
         failed_tests: failedTests,
         pending_tests: pendingTests,
-        expected_conditional_pending_tests: skipInventoryBinding.test_count,
+        expected_conditional_pending_tests: skipInventoryBinding.pending_test_count,
       }) && report.numFailedTestSuites === 0;
       artifacts.push(await fileArtifact(`${commandId}.report`, reportPath, "restricted_local", repositoryRoot));
       addCheck({
@@ -870,7 +881,7 @@ async function main(): Promise<number> {
           passed_tests: passedTests,
           failed_tests: failedTests,
           pending_tests: pendingTests,
-          expected_conditional_pending_tests: skipInventoryBinding.test_count,
+          expected_conditional_pending_tests: skipInventoryBinding.pending_test_count,
           conditional_inventory_sha256: skipInventoryBinding.sha256,
           failed_suites: typeof report.numFailedTestSuites === "number" ? report.numFailedTestSuites : -1,
         },
@@ -1099,12 +1110,12 @@ async function main(): Promise<number> {
             typeof conditionalDatabaseReport.test_file_count === "number"
               ? conditionalDatabaseReport.test_file_count
               : 0,
-          expected_test_file_count: skipInventoryBinding.test_file_count,
+          expected_test_file_count: skipInventoryBinding.public_ci_test_file_count,
           total_tests:
             typeof conditionalDatabaseReport.total_tests === "number"
               ? conditionalDatabaseReport.total_tests
               : 0,
-          expected_total_tests: skipInventoryBinding.test_count,
+          expected_total_tests: skipInventoryBinding.public_ci_test_count,
           passed_tests:
             typeof conditionalDatabaseReport.passed_tests === "number"
               ? conditionalDatabaseReport.passed_tests

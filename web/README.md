@@ -33,9 +33,11 @@ For anonymous email OTP, self-hosted deployments must set `AUTH_TRUSTED_CLIENT_I
 
 Useful commands:
 
-- `npm run check` — tests, lint, and TypeScript; 18 conditional PostgreSQL suites remain skipped unless their four integration database URLs are supplied.
+- `npm run check` — tests, lint, and TypeScript; 19 conditional PostgreSQL
+  suites require disposable database URLs, while two real-ASR suites require
+  the separately documented pinned local environment and release receipt.
 - `npm run build` — production Next.js build.
-- `npm run db:migrate` — apply the 31 ordered SQL migrations (`001`–`031`).
+- `npm run db:migrate` — apply the 36 ordered SQL migrations (`001`–`036`).
 - `npm run db:test-isolation` — prove the full migration/RLS/role chain in a disposable local cluster.
 - `npm run audit:public` — scan the publishable worktree and reachable Git history for release-secret patterns.
 - `npm run test:watch` — iterate on the pure flow/provider contracts.

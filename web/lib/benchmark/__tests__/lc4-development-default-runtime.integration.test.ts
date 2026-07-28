@@ -13,11 +13,12 @@ import { createLc4DevLivePrepareArtifact } from "../lc4-development-live-runner"
 import type { Lc4DevOperatorSigner } from "../lc4-development-operator-cli";
 
 const LC4_REAL_ASR_INTEGRATION = process.env.LC4_REAL_ASR_INTEGRATION;
-const AUDIO_ROOT =
-  process.env.LC4_DEV_AUDIO_ROOT ?? "/private/tmp/hacc-lc4-dev-audio-v7";
-const CALIBRATION_ROOT =
-  process.env.LC4_DEV_CALIBRATION_ROOT ??
-  "/private/tmp/hacc-lc4-dev-semantic-asr-calibration-v4";
+
+function requiredEnvironmentPath(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required when LC4_REAL_ASR_INTEGRATION is enabled`);
+  return value;
+}
 
 function operatorSigner(): Lc4DevOperatorSigner {
   const pair = generateKeyPairSync("ed25519");
@@ -39,23 +40,23 @@ describe.runIf(Boolean(LC4_REAL_ASR_INTEGRATION))(
   "LC4-DEV default operator runtime with retained local assets",
   () => {
     it("verifies every provider-free dependency and derives stable real control/listener roots", async () => {
+      const audioRoot = requiredEnvironmentPath("LC4_DEV_AUDIO_ROOT");
+      const calibrationRoot = requiredEnvironmentPath("LC4_DEV_CALIBRATION_ROOT");
       const [manifest, repairManifest] = await Promise.all([
-        readFile(`${AUDIO_ROOT}/manifest.json`, "utf8").then(
+        readFile(`${audioRoot}/manifest.json`, "utf8").then(
           (value) => JSON.parse(value) as Lc4DevAudioManifest,
         ),
-        readFile(`${AUDIO_ROOT}/repair-manifest.json`, "utf8").then(
+        readFile(`${audioRoot}/repair-manifest.json`, "utf8").then(
           (value) => JSON.parse(value) as Lc4DevRepairAudioManifest,
         ),
       ]);
       const runtime = await createLc4DevelopmentDefaultOperatorRuntime({
-        audio_root: AUDIO_ROOT,
-        semantic_calibration_root: CALIBRATION_ROOT,
-        asr_runner_private_key_source: `${CALIBRATION_ROOT}/runner-private-key.pem`,
-        whisper_cli_path:
-          "/opt/homebrew/Cellar/whisper-cpp/1.9.1/bin/whisper-cli",
-        whisper_model_path:
-          "/Users/harsha/.cache/hacc-benchmark/whisper/ggml-large-v3-turbo-q5_0.bin",
-        ffmpeg_path: "/opt/homebrew/Cellar/ffmpeg@7/7.1.3_2/bin/ffmpeg",
+        audio_root: audioRoot,
+        semantic_calibration_root: calibrationRoot,
+        asr_runner_private_key_source: `${calibrationRoot}/runner-private-key.pem`,
+        whisper_cli_path: requiredEnvironmentPath("LC4_DEV_WHISPER_CLI_PATH"),
+        whisper_model_path: requiredEnvironmentPath("LC4_DEV_WHISPER_MODEL_PATH"),
+        ffmpeg_path: requiredEnvironmentPath("LC4_DEV_FFMPEG_PATH"),
       });
       const prepare = createLc4DevLivePrepareArtifact({
         execution_id: "lc4-dev-default-runtime-provider-free-test",
@@ -66,21 +67,20 @@ describe.runIf(Boolean(LC4_REAL_ASR_INTEGRATION))(
         audio_bindings: manifest.caller_audio_bindings,
       });
       const signer = operatorSigner();
+      const evidenceRoot = requiredEnvironmentPath("LC4_DEV_EVIDENCE_ROOT");
       const first = await runtime.inspect({
         prepare,
         audio_manifest: manifest,
         repair_manifest: repairManifest,
         signer,
-        evidence_root:
-          "/private/tmp/lc4-dev-default-runtime-provider-free-test",
+        evidence_root: evidenceRoot,
       });
       const second = await runtime.inspect({
         prepare,
         audio_manifest: manifest,
         repair_manifest: repairManifest,
         signer,
-        evidence_root:
-          "/private/tmp/lc4-dev-default-runtime-provider-free-test",
+        evidence_root: evidenceRoot,
       });
       expect(first).toEqual(second);
       expect(first.control_plane_manifest_sha256).toMatch(/^[a-f0-9]{64}$/u);

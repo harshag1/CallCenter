@@ -320,9 +320,21 @@ All items are required:
 
 **Current Gate 1 decision: NO-GO until the packet records every item as passing at one commit.**
 
-The no-database test environment currently conditionally skips **18 integration suites containing 54 tests**. They are not silently counted as Gate 0 passes. The machine-readable [Gate 0 skip inventory](GATE0_SKIP_INVENTORY.json), rather than a duplicated prose table, is the source of truth for the exact paths, test counts, conditions, and `must_run` dispositions.
+The default environment currently leaves **21 conditional suites containing 59
+tests** pending. Nineteen PostgreSQL suites/56 tests are `must_run` in public CI
+and the disposable-database Gate 0 proof. Two real-ASR suites/three tests are
+explicitly `environment_qualified_release_receipt`: they require pinned binaries,
+model weights, retained PCM, calibration assets, and a source-scoped
+[real-ASR environment receipt](ASR_ENVIRONMENT_QUALIFICATION.md) before LC4
+results may be published. Neither class is silently counted as a pass. The
+machine-readable [Gate 0 skip inventory](GATE0_SKIP_INVENTORY.json) is the
+source of truth for exact paths, counts, conditions, and dispositions.
 
-Gate 0 requires a recorded database-backed run of all 18 suites/54 tests, or an explicit source-commit-scoped exclusion rationale showing why a suite cannot affect the transport packet. The benchmark/provider focused suites use no explicit `skip`/`todo`, but that does not convert these conditional database skips into coverage.
+Gate 0 requires a recorded database-backed run of all 19 suites/56 tests, or an
+explicit source-commit-scoped exclusion rationale showing why a suite cannot
+affect the transport packet. LC4 publication additionally requires the separate
+two-suite/three-test real-ASR receipt; a green hosted CI run cannot substitute
+for it.
 
 The tracked inventory binds its exact policy and enumerated test-source bytes with a canonical source-manifest SHA-256 recorded inside that machine-readable file; this audit deliberately does not duplicate the mutable digest. The inventory also does not embed `source_commit == HEAD`: a tracked file cannot self-reference the commit that contains itself. The external Gate 0 proof packet must bind the actual clean commit/tree, the inventory file SHA-256, the inventory's source-manifest hash, and the test-run result.
 

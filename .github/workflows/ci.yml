@@ -198,7 +198,7 @@ jobs:
           node scripts/migrate.mjs
           node scripts/migrate.mjs
 
-      - name: Run the exact 18-suite, 54-test conditional database inventory
+      - name: Run the database-backed suites declared by the checked-in Gate 0 inventory
         working-directory: web
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
@@ -206,51 +206,143 @@ jobs:
           FLOW_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
           SECURITY_MIGRATION_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
           AUTH_SECURITY_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
+          CONVERSATION_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
           CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/voice_agents
         run: |
-          mapfile -t test_files < <(
-            node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
+          ./node_modules/.bin/vitest run \
+            lib/benchmark/__tests__/gate0-skip-inventory.test.ts \
+            --maxWorkers=1
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
 
-          const inventory = JSON.parse(
-            readFileSync("../benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json", "utf8")
-          );
+          const inventoryPath = "../benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json";
+          const inventoryBytes = readFileSync(inventoryPath);
+          const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+          const databaseReasons = new Set([
+            "missing_postgresql_integration_environment",
+            "missing_postgresql_admin_integration_environment",
+          ]);
+          const environmentQualifiedReason =
+            "missing_local_asr_integration_environment";
           if (
-            inventory.total_skipped_suites_when_unconfigured !== 18
-            || inventory.total_skipped_tests_when_unconfigured !== 54
-            || inventory.entries.length !== 18
+            inventory.schema_version !== 1
+            || inventory.artifact_type !== "gate0_test_skip_inventory"
+            || !Array.isArray(inventory.entries)
+            || !Number.isSafeInteger(inventory.total_skipped_suites_when_unconfigured)
+            || !Number.isSafeInteger(inventory.total_skipped_tests_when_unconfigured)
+            || !Number.isSafeInteger(inventory.public_ci_required_suites)
+            || !Number.isSafeInteger(inventory.public_ci_required_tests)
+            || !Number.isSafeInteger(inventory.environment_qualified_suites)
+            || !Number.isSafeInteger(inventory.environment_qualified_tests)
+            || inventory.entries.length !== inventory.total_skipped_suites_when_unconfigured
           ) {
-            throw new Error("Gate 0 database inventory is not the expected 18 suites / 54 tests");
+            throw new Error("Gate 0 conditional-test inventory is malformed");
           }
+          const seenPaths = new Set();
+          let declaredTestTotal = 0;
+          let publicCiSuites = 0;
+          let publicCiTests = 0;
+          let environmentQualifiedSuites = 0;
+          let environmentQualifiedTests = 0;
           for (const entry of inventory.entries) {
-            if (entry.gate0_disposition !== "must_run" || !entry.path.startsWith("web/")) {
-              throw new Error("Gate 0 database inventory contains an invalid entry");
+            const databaseBacked = databaseReasons.has(entry?.reason_category);
+            const environmentQualified =
+              entry?.reason_category === environmentQualifiedReason;
+            if (
+              typeof entry?.path !== "string"
+              || !entry.path.startsWith("web/")
+              || seenPaths.has(entry.path)
+              || !Number.isSafeInteger(entry.test_count)
+              || entry.test_count <= 0
+              || (!databaseBacked && !environmentQualified)
+              || (databaseBacked && entry.gate0_disposition !== "must_run")
+              || (
+                environmentQualified
+                && entry.gate0_disposition !== "environment_qualified_release_receipt"
+              )
+            ) {
+              throw new Error("Gate 0 conditional-test inventory contains an invalid entry");
             }
-            process.stdout.write(`${entry.path.slice("web/".length)}\n`);
+            seenPaths.add(entry.path);
+            declaredTestTotal += entry.test_count;
+            if (databaseBacked) {
+              publicCiSuites += 1;
+              publicCiTests += entry.test_count;
+            } else {
+              environmentQualifiedSuites += 1;
+              environmentQualifiedTests += entry.test_count;
+            }
           }
+          if (
+            declaredTestTotal !== inventory.total_skipped_tests_when_unconfigured
+            || publicCiSuites !== inventory.public_ci_required_suites
+            || publicCiTests !== inventory.public_ci_required_tests
+            || environmentQualifiedSuites !== inventory.environment_qualified_suites
+            || environmentQualifiedTests !== inventory.environment_qualified_tests
+          ) {
+            throw new Error("Gate 0 conditional-test inventory total is inconsistent");
+          }
+
+          const selected = inventory.entries.filter((entry) =>
+            databaseReasons.has(entry.reason_category)
+          );
+          if (selected.length === 0) {
+            throw new Error("Gate 0 inventory declares no database-backed suites");
+          }
+          const selection = {
+            inventory_sha256: createHash("sha256").update(inventoryBytes).digest("hex"),
+            paths: selected.map((entry) => entry.path.slice("web/".length)),
+            suite_count: selected.length,
+            test_count: selected.reduce((total, entry) => total + entry.test_count, 0),
+          };
+          writeFileSync(".ci-gate0-database-selection.json", JSON.stringify(selection));
+          writeFileSync(".ci-gate0-database-files.txt", `${selection.paths.join("\n")}\n`);
           NODE
-          )
-          test "${#test_files[@]}" -eq 18
+          mapfile -t test_files < .ci-gate0-database-files.txt
+          test "${#test_files[@]}" -gt 0
           ./node_modules/.bin/vitest run "${test_files[@]}" \
             --maxWorkers=1 \
             --reporter=json \
             --outputFile=.ci-database-results.json
           node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
           import { readFileSync, rmSync } from "node:fs";
+          import { relative, resolve, sep } from "node:path";
 
           const reportPath = ".ci-database-results.json";
           const report = JSON.parse(readFileSync(reportPath, "utf8"));
+          const inventoryBytes = readFileSync(
+            "../benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json"
+          );
+          const selection = JSON.parse(
+            readFileSync(".ci-gate0-database-selection.json", "utf8")
+          );
+          const inventorySha256 = createHash("sha256")
+            .update(inventoryBytes)
+            .digest("hex");
+          const executedPaths = report.testResults
+            .map((result) => relative(process.cwd(), resolve(result.name)).split(sep).join("/"))
+            .sort();
+          const expectedPaths = [...selection.paths].sort();
           if (
-            report.success !== true
-            || report.numPassedTests !== 54
-            || report.numTotalTests !== 54
+            selection.inventory_sha256 !== inventorySha256
+            || report.success !== true
+            || report.numPassedTests !== selection.test_count
+            || report.numTotalTests !== selection.test_count
             || report.numFailedTests !== 0
             || report.numPendingTests !== 0
-            || report.testResults.length !== 18
+            || report.testResults.length !== selection.suite_count
+            || JSON.stringify(executedPaths) !== JSON.stringify(expectedPaths)
+            || report.testResults.some((result) => result.status !== "passed")
           ) {
-            throw new Error("conditional database suite did not execute exactly 18 files / 54 tests");
+            throw new Error(
+              "Gate 0 database-backed suites did not execute exactly as declared by the inventory"
+            );
           }
           rmSync(reportPath);
+          rmSync(".ci-gate0-database-selection.json");
+          rmSync(".ci-gate0-database-files.txt");
           NODE
 
       - name: Run tenant isolation, RLS, migration reapplication, and all conditional database suites

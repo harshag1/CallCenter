@@ -5,13 +5,28 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const { Client } = pg;
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
+// These relations deliberately expose no direct runtime table API. Their only
+// application write/read paths are narrowly granted SECURITY DEFINER
+// functions. Keep this inventory explicit: a newly added relation must either
+// receive the normal hacc_backend_all policy or be reviewed and added here with
+// the no-direct-CRUD assertions below.
+const FUNCTION_ONLY_RELATIONS = new Set([
+  "public.conversation_call_action_intents",
+  "public.flow_action_policy_decisions",
+  "public.voice_conversation_calls",
+  "public.voice_conversation_events",
+  "public.voice_conversation_inbox",
+  "public.voice_conversations",
+  "public.voice_worker_events",
+  "public.voice_worker_jobs",
+]);
 const IDS = Object.freeze({
   orgA: "00000000-0000-4000-8000-000000000001",
   orgB: "00000000-0000-4000-8000-000000000002",
@@ -81,21 +96,51 @@ async function runGate0ConditionalDatabaseTests({
       && Array.isArray(inventory.entries)
       && Number.isSafeInteger(inventory.total_skipped_suites_when_unconfigured)
       && Number.isSafeInteger(inventory.total_skipped_tests_when_unconfigured)
+      && Number.isSafeInteger(inventory.public_ci_required_suites)
+      && Number.isSafeInteger(inventory.public_ci_required_tests)
+      && Number.isSafeInteger(inventory.environment_qualified_suites)
+      && Number.isSafeInteger(inventory.environment_qualified_tests)
       && inventory.entries.length === inventory.total_skipped_suites_when_unconfigured,
     "Gate 0 conditional-test inventory is malformed"
   );
+  const databaseReasonCategories = new Set([
+    "missing_postgresql_integration_environment",
+    "missing_postgresql_admin_integration_environment",
+  ]);
+  const environmentQualifiedReason =
+    "missing_local_asr_integration_environment";
   const testFiles = [];
+  const seenPaths = new Set();
   let declaredTests = 0;
+  let declaredInventoryTests = 0;
+  let environmentQualifiedTests = 0;
+  let environmentQualifiedSuites = 0;
   for (const entry of inventory.entries) {
+    const databaseBacked = databaseReasonCategories.has(entry?.reason_category);
+    const environmentQualified =
+      entry?.reason_category === environmentQualifiedReason;
     invariant(
-      entry?.gate0_disposition === "must_run"
-        && typeof entry.path === "string"
+      typeof entry?.path === "string"
         && entry.path.startsWith("web/")
+        && !seenPaths.has(entry.path)
         && Number.isSafeInteger(entry.test_count)
         && entry.test_count > 0
-        && typeof entry.content_sha256 === "string",
+        && typeof entry.content_sha256 === "string"
+        && (databaseBacked || environmentQualified)
+        && (!databaseBacked || entry.gate0_disposition === "must_run")
+        && (
+          !environmentQualified
+          || entry.gate0_disposition === "environment_qualified_release_receipt"
+        ),
       "Gate 0 conditional-test inventory entry is malformed"
     );
+    seenPaths.add(entry.path);
+    declaredInventoryTests += entry.test_count;
+    if (!databaseBacked) {
+      environmentQualifiedSuites += 1;
+      environmentQualifiedTests += entry.test_count;
+      continue;
+    }
     const relativePath = entry.path.slice("web/".length);
     const source = await readFile(join(webRoot, relativePath));
     invariant(
@@ -106,9 +151,17 @@ async function runGate0ConditionalDatabaseTests({
     declaredTests += entry.test_count;
   }
   invariant(
-    declaredTests === inventory.total_skipped_tests_when_unconfigured,
+    declaredInventoryTests === inventory.total_skipped_tests_when_unconfigured,
     "Gate 0 conditional-test inventory total is inconsistent"
   );
+  invariant(
+    testFiles.length === inventory.public_ci_required_suites
+      && declaredTests === inventory.public_ci_required_tests
+      && environmentQualifiedSuites === inventory.environment_qualified_suites
+      && environmentQualifiedTests === inventory.environment_qualified_tests,
+    "Gate 0 conditional-test inventory classification totals are inconsistent"
+  );
+  invariant(testFiles.length > 0, "Gate 0 inventory declares no database-backed suites");
 
   const reportPath = join(root, "gate0-conditional-vitest.json");
   const databaseUrl =
@@ -136,6 +189,7 @@ async function runGate0ConditionalDatabaseTests({
           FLOW_INTEGRATION_DATABASE_URL: databaseUrl,
           SECURITY_MIGRATION_INTEGRATION_DATABASE_URL: adminDatabaseUrl,
           AUTH_SECURITY_INTEGRATION_DATABASE_URL: databaseUrl,
+          CONVERSATION_INTEGRATION_DATABASE_URL: databaseUrl,
           CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL: databaseUrl,
         },
         maxBuffer: 16 * 1024 * 1024,
@@ -197,6 +251,8 @@ async function runGate0ConditionalDatabaseTests({
   const executedFiles = Array.isArray(report.testResults)
     ? report.testResults.map((result) => result?.name).filter((name) => typeof name === "string")
     : [];
+  const expectedFiles = testFiles.map((path) => resolve(webRoot, path)).sort();
+  const normalizedExecutedFiles = executedFiles.map((path) => resolve(webRoot, path)).sort();
   invariant(
     report.success === true
       && report.numFailedTests === 0
@@ -205,6 +261,7 @@ async function runGate0ConditionalDatabaseTests({
       && report.numTotalTests === declaredTests
       && executedFiles.length === testFiles.length
       && new Set(executedFiles).size === testFiles.length
+      && JSON.stringify(normalizedExecutedFiles) === JSON.stringify(expectedFiles)
       && report.testResults.every((result) => result.status === "passed"),
     "Gate 0 conditional database tests did not execute completely"
   );
@@ -479,7 +536,31 @@ async function main() {
                   SELECT 1 FROM pg_policies p
                   WHERE p.schemaname = n.nspname AND p.tablename = c.relname
                     AND p.policyname = 'hacc_migration_owner_all'
-                ) AS owner_policy
+                ) AS owner_policy,
+                (
+                  has_table_privilege('hacc_backend', c.oid, 'SELECT')
+                  OR has_table_privilege('hacc_backend', c.oid, 'INSERT')
+                  OR has_table_privilege('hacc_backend', c.oid, 'UPDATE')
+                  OR has_table_privilege('hacc_backend', c.oid, 'DELETE')
+                ) AS backend_direct_crud,
+                (
+                  has_table_privilege('hacc_worker', c.oid, 'SELECT')
+                  OR has_table_privilege('hacc_worker', c.oid, 'INSERT')
+                  OR has_table_privilege('hacc_worker', c.oid, 'UPDATE')
+                  OR has_table_privilege('hacc_worker', c.oid, 'DELETE')
+                ) AS worker_direct_crud,
+                (
+                  has_table_privilege('hacc_runtime', c.oid, 'SELECT')
+                  OR has_table_privilege('hacc_runtime', c.oid, 'INSERT')
+                  OR has_table_privilege('hacc_runtime', c.oid, 'UPDATE')
+                  OR has_table_privilege('hacc_runtime', c.oid, 'DELETE')
+                ) AS backend_runtime_direct_crud,
+                (
+                  has_table_privilege('hacc_worker_runtime', c.oid, 'SELECT')
+                  OR has_table_privilege('hacc_worker_runtime', c.oid, 'INSERT')
+                  OR has_table_privilege('hacc_worker_runtime', c.oid, 'UPDATE')
+                  OR has_table_privilege('hacc_worker_runtime', c.oid, 'DELETE')
+                ) AS worker_runtime_direct_crud
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE c.relkind IN ('r','p')
@@ -487,18 +568,45 @@ async function main() {
            AND c.relname <> '_migrations'
          ORDER BY n.nspname, c.relname`
       );
-      const uncovered = inventory.rows.filter((row) =>
-        !row.relrowsecurity || !row.relforcerowsecurity || !row.backend_policy || !row.owner_policy
-      );
+      const observedFunctionOnlyRelations = new Set();
+      const uncovered = inventory.rows.filter((row) => {
+        const relation = `${row.schema_name}.${row.table_name}`;
+        const functionOnly = FUNCTION_ONLY_RELATIONS.has(relation);
+        if (functionOnly) observedFunctionOnlyRelations.add(relation);
+        return !row.relrowsecurity
+          || !row.relforcerowsecurity
+          || !row.owner_policy
+          || (
+            functionOnly
+              ? row.backend_policy
+                || row.backend_direct_crud
+                || row.worker_direct_crud
+                || row.backend_runtime_direct_crud
+                || row.worker_runtime_direct_crud
+              : !row.backend_policy
+          );
+      });
       invariant(
         uncovered.length === 0,
         `RLS/policy inventory gaps: ${uncovered.map((row) => `${row.schema_name}.${row.table_name}`).join(", ")}`
+      );
+      invariant(
+        observedFunctionOnlyRelations.size === FUNCTION_ONLY_RELATIONS.size
+          && [...FUNCTION_ONLY_RELATIONS].every((relation) =>
+            observedFunctionOnlyRelations.has(relation)
+          ),
+        `function-only relation inventory is incomplete: ${[...FUNCTION_ONLY_RELATIONS]
+          .filter((relation) => !observedFunctionOnlyRelations.has(relation))
+          .join(", ")}`
       );
       catalogRelationsVerified = inventory.rowCount;
       apiProtectedRelations = inventory.rows.map((row) => ({
         schema: row.schema_name,
         table: row.table_name,
         updateColumn: row.update_column,
+        accessClass: FUNCTION_ONLY_RELATIONS.has(`${row.schema_name}.${row.table_name}`)
+          ? "security_definer_only"
+          : "backend_policy",
       }));
       invariant(
         apiProtectedRelations.every((relation) => relation.updateColumn),
@@ -1925,7 +2033,13 @@ async function main() {
           .map(([name, applications]) => [name.slice(0, 3), applications])
       ),
       catalog_relations_verified: catalogRelationsVerified,
-      catalog_requirements_per_relation: ["row_security", "force_row_security", "backend_policy", "migration_owner_policy"],
+      catalog_requirements_per_relation: [
+        "row_security",
+        "force_row_security",
+        "migration_owner_policy",
+        "explicit_backend_policy_or_security_definer_only_classification",
+      ],
+      function_only_relations: [...FUNCTION_ONLY_RELATIONS].sort(),
       database: "disposable-local-postgres",
       roles_tested: ["anon", "authenticated", "service_role", "hacc_runtime", "hacc_worker_runtime"],
       api_application_relation_crud_denials: apiApplicationRelationCrudDenials,

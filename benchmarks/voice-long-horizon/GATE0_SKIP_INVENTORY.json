@@ -4,8 +4,8 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "e97f962cd6b9daff7d3ee22ccc87dd4a2d8c14c3971bed7ad054e45d1d2de282",
-    "source_manifest_file_count": 278,
+    "source_manifest_sha256": "7808fd68555d8521ef4fc3f07d03ec32204bb1df1183b81129551c4edae4a575",
+    "source_manifest_file_count": 279,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
       "web/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs}",
@@ -17,7 +17,10 @@
   "policy": {
     "unexpected_skip": "fail",
     "known_conditional_skip": "must_run_for_gate0",
-    "zero_failures_with_skips": "insufficient"
+    "zero_failures_with_skips": "insufficient",
+    "public_ci_required_disposition": "must_run",
+    "environment_qualified_disposition": "release_receipt_required_for_lc4_publication",
+    "environment_qualified_receipt_command": "npm run benchmark:lc4:asr-environment:receipt -- --out ABSOLUTE_PATH"
   },
   "entries": [
     {
@@ -174,21 +177,25 @@
     },
     {
       "path": "web/lib/benchmark/__tests__/lc4-development-default-runtime.integration.test.ts",
-      "content_sha256": "3947dc71f864a9c1d2e969af6a4003f5cdd822f68507e50fb8b6fbe1ea2adcc5",
+      "content_sha256": "f2dad991834ee9ce61593819f4bf5e445b5f408d20e49138af26c3de9962f1e0",
       "test_count": 1,
       "condition": "LC4_REAL_ASR_INTEGRATION is absent",
       "reason_category": "missing_local_asr_integration_environment",
-      "gate0_disposition": "must_run"
+      "gate0_disposition": "environment_qualified_release_receipt"
     },
     {
       "path": "web/lib/benchmark/__tests__/lc4-development-whisper-runtime.integration.test.ts",
-      "content_sha256": "7a2170e54776de2c451030785d9304073df0564b48527bf027d7b5886c8ea5b7",
+      "content_sha256": "a5462064c007eaa60cce18a27965efd109d7d9bcff469fe72b6af5134ac0bad7",
       "test_count": 2,
       "condition": "LC4_REAL_ASR_INTEGRATION is absent",
       "reason_category": "missing_local_asr_integration_environment",
-      "gate0_disposition": "must_run"
+      "gate0_disposition": "environment_qualified_release_receipt"
     }
   ],
   "total_skipped_suites_when_unconfigured": 21,
-  "total_skipped_tests_when_unconfigured": 59
+  "total_skipped_tests_when_unconfigured": 59,
+  "public_ci_required_suites": 19,
+  "public_ci_required_tests": 56,
+  "environment_qualified_suites": 2,
+  "environment_qualified_tests": 3
 }
