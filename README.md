@@ -4,6 +4,10 @@ An open, provider-neutral starting point designed to make long, tool-driven spee
 
 Harsha's Amazing Call Center combines a visual builder, a high-authority builder agent, realtime browser calling, durable call records, extensible tools, datasets, knowledge retrieval, a deterministic Flow v2 runtime, and an event-sourced long-conversation kernel. It is designed for support, sales, intake, scheduling, education, field operations, personal assistants, and other realtime voice experiences—not only call centers.
 
+![Harsha's Amazing Call Center builder and call operations interface](docs/assets/hacc-builder-ui-demo.webp)
+
+*Illustrative product view with sanitized, simulated demo data—not a live deployment or benchmark result.*
+
 ## Why this exists
 
 Large voice prompts and giant tool lists can make a model choose among unrelated actions, repeat work, lose state, and drift during long calls.
@@ -191,7 +195,7 @@ The builder's `validate_flow` primitive performs executable schema/topology chec
 ## Extend it
 
 - Add a self-hosted live-call tool in [`web/lib/voice-tools/extensions.ts`](web/lib/voice-tools/extensions.ts).
-- Add a builder/operator primitive in [`web/lib/agent/tools/extensions.ts`](web/lib/agent/tools/extensions.ts).
+- Add a tenant-scoped builder/operator primitive in [`web/lib/agent/tools/extensions.ts`](web/lib/agent/tools/extensions.ts), starting from the compiling [membership-summary extension](examples/operator-tools/membership-summary.ts).
 - Build an adapter against the [Realtime Provider Plugin v1 contract](web/lib/realtime/plugins/README.md), then install its server-facing runtime adapter with `registerRealtimeProvider(...)` during self-hosted server bootstrap. Registration is typed for custom string-literal IDs, rejects duplicates and capability/hook mismatches, protects the bundled OpenAI/xAI/Gemini adapters, and makes extensions visible to the provider catalog without editing a core switch. A custom browser provider still needs a matching client-side transport consumer; registration stays server-only so credentials and adapter code cannot enter the browser bundle.
 - Build an email/SMS/voice/number adapter against the [Communication Provider Adapter v1 contract](web/lib/communications/README.md). Twilio and Resend have not migrated to it and are not configuration-swappable through that contract yet.
 - Register setup metadata in [`web/lib/integrations/registry.ts`](web/lib/integrations/registry.ts).
