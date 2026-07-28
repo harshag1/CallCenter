@@ -23,6 +23,7 @@ import {
   createLc4ImmutableCas,
   createLc4PinnedListenerManifestSha256,
   createLc4PinnedListenerSink,
+  lc4DevAuthorityToolSubject,
   lc4DevLedgerGenesisSha256,
   replayLc4DevAuthorityReport,
   type Lc4PinnedListenerEvaluator,
@@ -353,6 +354,19 @@ describe("LC4-DEV concrete live dependencies", () => {
       pending_gateway_actions: 0,
       pending_gateway_obligations: [],
     }, episode)).toThrow("identity or horizon differs");
+  });
+
+  it("retains rejected argument-free worker attempts as unbound authority events", () => {
+    expect(lc4DevAuthorityToolSubject({
+      target_tool: "archive.observe_worker_result",
+      effective_arguments: null,
+    })).toBe("archive.observe_worker_result@unbound");
+    expect(lc4DevAuthorityToolSubject({
+      target_tool: "archive.launch_worker",
+      effective_arguments: {
+        launch: { ref: "worker.rights-review" },
+      },
+    })).toBe("archive.launch_worker@worker.rights-review");
   });
 
   it("accepts the operator's v2 preflight in the real dependency factory and rejects a v1 operator genesis", async () => {

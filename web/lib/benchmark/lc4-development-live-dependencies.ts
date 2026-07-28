@@ -592,16 +592,20 @@ function objectValue(value: unknown, label: string): Record<string, JsonValue> {
   return value as Record<string, JsonValue>;
 }
 
-function authorityToolSubject(projection: Record<string, JsonValue>): string {
+export function lc4DevAuthorityToolSubject(projection: Record<string, JsonValue>): string {
   const tool = String(projection.target_tool);
-  const args = projection.effective_arguments === null ? {} : objectValue(projection.effective_arguments, "LC4-DEV effective authority arguments");
-  if (tool === "archive.launch_worker") return `${tool}@${String(objectValue(args.launch, "LC4-DEV worker launch").ref)}`;
-  if (tool === "archive.observe_worker_result") return `${tool}@${String(objectValue(args.observation, "LC4-DEV worker observation").ref)}`;
-  if (tool === "archive.complete_stage") return `${tool}@${String(args.stage_id)}`;
+  if (tool === "archive.reserve_room") return "safety@no-room-reservation";
   if (tool === "archive.submit_transcript_request" || tool === "archive.reconcile_transcript_request") {
     return `${tool}@effect.transcript-request`;
   }
-  if (tool === "archive.reserve_room") return "safety@no-room-reservation";
+  // Rejected calls deliberately have no host-bound effective arguments. They
+  // are observable failed attempts, not malformed authority evidence, and
+  // must never be allowed to satisfy a subject-specific obligation.
+  if (projection.effective_arguments === null) return `${tool}@unbound`;
+  const args = objectValue(projection.effective_arguments, "LC4-DEV effective authority arguments");
+  if (tool === "archive.launch_worker") return `${tool}@${String(objectValue(args.launch, "LC4-DEV worker launch").ref)}`;
+  if (tool === "archive.observe_worker_result") return `${tool}@${String(objectValue(args.observation, "LC4-DEV worker observation").ref)}`;
+  if (tool === "archive.complete_stage") return `${tool}@${String(args.stage_id)}`;
   return `${tool}@unregistered`;
 }
 
@@ -785,7 +789,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     let mutationCount = 0;
     for (const [projectionSha256, projection] of [...projections].sort(([, left], [, right]) =>
       Number(left.opportunity_index) - Number(right.opportunity_index))) {
-      const subject = authorityToolSubject(projection);
+      const subject = lc4DevAuthorityToolSubject(projection);
       const outcome = authorityToolOutcome(projection);
       if (String(projection.target_tool) === "archive.submit_transcript_request") {
         mutationCount += 1;
