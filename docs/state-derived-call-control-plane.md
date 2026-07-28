@@ -1,6 +1,6 @@
 # State-derived call control plane
 
-Status: implementation proposal informed by the retained HACC-LC3-v6 development run. The provider-neutral benchmark path now pushes a hash-bound response plan and current capability catalog at every HACC caller turn, with exact transcript replay and provider-free canary coverage. Flow-bound invocation, the audio-bound slot extractor, bounded same-turn repair controller, and automatic worker orchestration remain proposed. None of these mechanisms has yet demonstrated a HACC efficacy advantage in a prospectively frozen provider experiment.
+Status: implementation proposal informed by the retained HACC-LC3-v6 development run. The provider-neutral benchmark path now pushes a hash-bound response plan and current capability catalog at every HACC caller turn, with exact transcript replay and provider-free canary coverage. Its common realtime gateway also projects internal actions to exact provider-facing semantic intents, rejects correlatable malformed attempts without effects, bounds correction batches, and exposes no executable tool frontier during speech-repair playback. A general production-route repair controller, the audio-bound slot extractor, and default live-route worker orchestration remain proposed. None of these mechanisms has yet demonstrated a HACC efficacy advantage in a prospectively frozen provider experiment.
 
 Related sources: [retained v6 result receipt](../benchmarks/voice-long-horizon/evidence/HACC_LC3_V6_RESULTS.md), [frozen v6 protocol](../benchmarks/voice-long-horizon/HACC_LC3_V6_PROTOCOL.md), [Flow v2](flow-v2.md), [durable conversation runtime](durable-conversation-runtime.md), [mission runtime](mission-runtime.md), and [tool extension boundary](extending-tools.md).
 
@@ -28,7 +28,7 @@ These are development observations, not a publication result. The retained compa
 | Action authority | Current capabilities and grants are host-derived; the gateway rejects undisclosed, stale, or invalid actions before effects. | The host binds a generic `flow.act` proposal to the unique eligible action, or supplies a closed `intent_id` enum when several actions are eligible. The model does not invent executable tool names. |
 | Consequential effects | Receipt reservation, dispatch-state tracking, indeterminate outcomes, and explicit read-only reconciliation exist. | A durable, idempotent reconciliation worker is enqueued automatically from an indeterminate post-dispatch receipt and feeds its authoritative result back into the next response plan. |
 | Caller audio | The benchmark retains caller PCM and includes a calibrated input-ASR gate. Model/provider transcripts remain the primary live action-argument path. | A pinned, current-schema-limited extractor produces evidence-bound slot candidates directly from caller PCM. Low-confidence values cause clarification; no hidden expected value is available to the extractor. |
-| Repair | The gateway returns structured rejections, and the model can sometimes recover on a later attempt or turn. No uniform same-turn repair contract is active. | One bounded same-turn repair is allowed for eligible rejection classes, with a machine-readable repair packet, unchanged world state, and no disclosure of expected private values. |
+| Repair | The LC4 common-provider path distinguishes correlatable semantic mistakes from fatal provenance faults, atomically rejects malformed batches with zero effect, permits at most three semantic correction batches, and forbids effect calls during its separate speech-repair playback. Ordinary live routes do not yet share one uniform controller. | One production-route same-turn repair policy is allowed for eligible rejection classes, with a machine-readable repair packet, unchanged world state, and no disclosure of expected private values. |
 | Async work | The repository has durable read-only worker and result-delivery primitives plus hash-chained conversation events. Current live provider sessions are not wired to them as the default path. | Reconciliation and declared follow-through jobs carry parent/receipt/policy lineage, survive disconnects, and can complete only preauthorized, idempotent obligations. |
 | Context packet | A durable conversation packet compiler exists, but current provider sessions do not receive its packets by default. | The response plan becomes the minimal per-turn control packet and is composed with only the relevant conversational working set. |
 
@@ -161,7 +161,12 @@ High-confidence values can populate a proposal when policy permits. Low confiden
 
 ## One bounded same-turn repair
 
-The current harness often converts a rejected attempt into a stopped or delayed episode. The proposed controller permits one repair without allowing unbounded hidden retries.
+The LC4 gateway now handles well-identified semantic mistakes in-band and bounds
+them to three rejected batches per opportunity; identity, provenance, replay,
+delivery, and post-dispatch ambiguity failures still stop the segment. That
+benchmark-specific containment path is not yet the general production-route
+controller described below, which permits one policy-selected repair without
+allowing unbounded hidden retries.
 
 Eligible rejection classes are:
 

@@ -590,3 +590,45 @@ failure record is retained in
 Neither the completed Native episode nor the nine completed HACC opportunities
 may be extracted as a partial benchmark. No Native/HACC efficacy, memory,
 guardrail, drift, or superiority claim is authorized.
+
+## 2026-07-28 — Gateway contract repair and provider-free fault injection
+
+The failed `f956647` attempt exposed a model-facing namespace collision rather
+than a transport or audio failure. The HACC control packet advertised internal
+actions such as `archive.complete_stage` and `flow.get_state`, while the sole
+provider function accepted closed semantic intents such as
+`complete_current_stage`. The well-identified but semantically invalid request
+was incorrectly escalated to a session-fatal parse error.
+
+Commits `ab3d2ef634e0947aa719610c6e4818762f75d16d` and
+`80cbdd8` now:
+
+- project internal actions to the exact callable semantic frontier and hide
+  internal-only controls;
+- reject an entire provider batch before any sibling executes when one member
+  is semantically invalid;
+- return a bounded provider-visible correction result and request exactly one
+  continuation;
+- retain separate zero-effect rejection receipts that cannot satisfy an
+  authority obligation;
+- expose no executable tool frontier during speech-repair playback;
+- keep identity, provenance, replay, batch-abuse, result-delivery, and
+  post-dispatch ambiguity failures fatal.
+
+The provider-free fault-injection benchmark in commit `580afdd` executed 33
+real `Lc4DevGatewayTurnCoordinator` scenarios across OpenAI-, Gemini-, and
+xAI-shaped events:
+
+- clean controls: **3/3**;
+- recoverable semantic, mixed-batch, and repair faults contained: **15/15**;
+- provenance, replay, abuse, and delivery faults failed closed: **15/15**;
+- unauthorized executor calls: **0**;
+- false authority projections: **0**;
+- provider API and network calls: **0**.
+
+Its artifact SHA-256 is
+`21719d58e73a54d50f9bcf547d90b4bc4d4ad1710114e808d30d83ae3370e64d`.
+This is deterministic mechanism evidence for the enumerated faults. It does not
+measure how often a provider emits them and does not authorize any provider or
+HACC efficacy claim. The paid six-cell benchmark and graph remain blocked until
+a new exact-source qualification and one-shot run complete.
