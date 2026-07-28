@@ -49,6 +49,7 @@
     "benchmark:long-call:audio": "tsx scripts/long-call-audio-postprocess.ts",
     "benchmark:lc4:statistics:generate": "tsx scripts/generate-lc4-statistical-artifacts.ts",
     "benchmark:lc4:dev": "tsx scripts/lc4-development-live.ts",
+    "benchmark:lc4:asr-environment:receipt": "tsx scripts/lc4-asr-environment-release-receipt.ts",
     "benchmark:lc4:dev:public-results": "tsx scripts/lc4-development-public-results.ts",
     "benchmark:lc4:launch": "tsx scripts/lc4-launch-benchmark.ts",
     "benchmark:lc4:qualification": "tsx scripts/lc4-qualification.ts",
@@ -59,7 +60,8 @@
     "benchmark:lc4:qualification:run": "tsx scripts/lc4-qualification.ts run",
     "benchmark:lc4:qualification:report": "tsx scripts/lc4-qualification.ts report",
     "benchmark:lc4:seal": "tsx scripts/lc4-seal-heldout.ts",
-    "flow:package": "tsx scripts/flow-package.ts"
+    "flow:package": "tsx scripts/flow-package.ts",
+    "demo:offline": "tsx scripts/offline-flow-demo.ts"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

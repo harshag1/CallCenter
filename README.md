@@ -95,7 +95,7 @@ flowchart LR
   Runtime --> DB["Postgres: checkpoints, calls, workers, evidence"]
 ```
 
-- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 35 ordered migrations (`001`–`035`). See the [runtime API guide](docs/conversation-runtime-api.md).
+- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 36 ordered migrations (`001`–`036`). See the [runtime API guide](docs/conversation-runtime-api.md).
 - `bridge/` — optional standalone Twilio Media Streams bridge. The legacy in-app `/api/bridge` compatibility route is disabled by default and cannot be enabled in production.
 - `examples/` — the tested [deep Flow v2 example pack](examples/flows/README.md) and a multi-goal mission example.
 - `docs/` — architecture, provider, flow, and extension guides.
@@ -189,6 +189,18 @@ Optional operator/generated-tool network surfaces have a separate global product
 
 Start with the tested [deep Flow v2 example pack](examples/flows/README.md). It includes service-appointment, warranty/incident, and membership/return workflows with four-level paths, receipt-bound mutations, checkpoints, progressive tool exposure, and explicit integration limitations. The smaller illustrative [membership-and-returns.json](examples/flows/membership-and-returns.json) is useful when you want the minimum schema surface.
 
+For a provider-key-free, database-free runnable tour:
+
+```bash
+cd web
+npm run demo:offline
+```
+
+It admits the complete fake tool catalog, installs the 15-step appointment flow
+in memory, executes a nine-step booking scenario, and proves receipt-backed
+restart recovery and read-after-write reconciliation. The structured output is
+deterministic and fail-closed; it is framework evidence, not an STS benchmark.
+
 > Build a Flow v2 membership and returns agent. Keep routing tools minimal, verify identity before account actions, require durable IDs from every write, checkpoint after verification, add explicit failure paths, validate the flow, and list the action fixtures needed for receipt-backed scenario tests before attaching it.
 
 The builder's `validate_flow` primitive performs executable schema/topology checks. `test_flow_scenario` can exercise receipt-backed actions, indeterminate dispatch, proof-backed reconciliation, disconnect/restart recovery, worker completion, and exact terminal assertions. Use the [Flow package CLI](docs/flow-import-export.md) to validate, dependency-check, export, and import deep examples without silently activating them. See [Flow v2](docs/flow-v2.md).
@@ -214,7 +226,12 @@ npm run build
 
 `npm run check` runs Vitest, ESLint, and TypeScript. Run it from a clean checkout before deployment; focused tests passing in one subsystem are not a substitute for this repository-wide gate.
 
-The default command intentionally skips 21 PostgreSQL integration suites (59 tests) unless their disposable-database environments are supplied: `FLOW_INTEGRATION_DATABASE_URL`, `AUTH_SECURITY_INTEGRATION_DATABASE_URL`, `CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL`, and `SECURITY_MIGRATION_INTEGRATION_DATABASE_URL`. Release verification must run those suites and the separate `npm run db:test-isolation` proof; see [database tenancy](docs/database-tenancy.md).
+The default command conditionally leaves 59 tests pending: 19 PostgreSQL
+integration suites (56 tests) and two environment-qualified real-ASR suites
+(three tests). Release verification runs the database suites against a
+disposable cluster via `npm run db:test-isolation`; see
+[database tenancy](docs/database-tenancy.md). LC4 result publication separately
+requires a clean-commit-scoped [real-ASR environment receipt](benchmarks/voice-long-horizon/ASR_ENVIRONMENT_QUALIFICATION.md).
 
 Reproduce the checked-in `$0` benchmark claims without opening a provider session:
 
