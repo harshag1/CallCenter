@@ -20,7 +20,8 @@ they are not hidden behind the write action.
 ## Dry-run an installation
 
 Create a catalog containing the names actually registered in the target
-environment:
+environment. This abbreviated shape example is not a complete catalog for the
+service-appointment flow:
 
 ```json
 {
