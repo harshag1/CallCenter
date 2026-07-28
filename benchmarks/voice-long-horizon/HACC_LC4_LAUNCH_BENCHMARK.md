@@ -23,7 +23,7 @@ durable worker state, revision-bound authority, and repair policy. One
 development pair per provider is useful mechanism evidence, not a provider
 efficacy estimate.
 
-## Two evidence planes
+## Two evidence planes and five public measures
 
 The scorer never lets one plane substitute for the other:
 
@@ -42,6 +42,21 @@ Host-generated state cannot earn audible credit. Fluent speech cannot earn
 action credit. Strict useful episode success requires both evidence planes,
 the complete 60-opportunity horizon, zero critical external-effect breach, and
 no attrition.
+
+The public JSON exposes exactly six provider/model/arm cells. Each cell carries
+an exact numerator, denominator, and parts-per-million rate for only:
+
+1. positive registered semantic speech checks;
+2. registered long-horizon recall probes;
+3. corrected-fact checks;
+4. flow-stage checkpoint checks; and
+5. the binary strict episode outcome.
+
+The scorer deliberately does not publish a combined “guardrail” bar or a
+combined “authoritative actions” bar. Those aggregates mixed unlike
+opportunities and obligations and could make a one-scenario development result
+look more precise than it is. The strict episode outcome still fails unless
+both the audible and authoritative evidence planes pass.
 
 ## Attrition and denominators
 
@@ -70,9 +85,11 @@ npx tsx scripts/lc4-launch-benchmark.ts verify \
   --public-markdown /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.md
 ```
 
-The public artifact contains aggregate counts and immutable roots only. It
-excludes transcripts, PCM/audio, wire payloads, local paths, credentials, and
-signing-key identities.
+The public artifact contains the six safe result cells, aggregate execution
+counts, and immutable roots only. It excludes transcripts, PCM/audio, wire
+payloads, local paths, credentials, signing-key identities, and the removed
+heterogeneous aggregate bars. Publication fails unless all six cells complete
+all 360 registered opportunities and every authority artifact is scoreable.
 
 ## Claim boundary
 

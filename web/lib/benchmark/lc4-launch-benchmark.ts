@@ -38,7 +38,7 @@ import { verifyLc4DevEvidenceRoot } from "./lc4-development-public-results";
 import { benchmarkKernelAttestationPublicKeyFingerprint } from "./kernel-attestation";
 
 const HASH = /^[a-f0-9]{64}$/u;
-const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v1\n";
+const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v2\n";
 const EXPECTED_PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const EXPECTED_ARMS = Object.freeze(["native", "hacc"] as const);
 const EXPECTED_OPPORTUNITIES = 60;
@@ -130,7 +130,7 @@ export type Lc4LaunchBenchmarkEpisodeScore = Readonly<{
 }>;
 
 export type Lc4LaunchBenchmarkArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   artifact_type: "hacc_lc4_launch_benchmark";
   protocol_id: "HACC-LC4-DEV-v1";
   evidence_class: "C3";
@@ -158,25 +158,19 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
     strict_success_requires_both_evidence_planes: true;
     score_policy_sha256: string;
   }>;
-  episodes: readonly Lc4LaunchBenchmarkEpisodeScore[];
-  provider_pairs: readonly Readonly<{
+  cells: readonly Readonly<{
     provider: Provider;
     model: string;
-    native_strict_success: 0 | 1;
-    hacc_strict_success: 0 | 1;
-    strict_success_difference_ppm: -1_000_000 | 0 | 1_000_000;
-    native_rule_adherence: Metric;
-    hacc_rule_adherence: Metric;
-    rule_adherence_difference_ppm: number | null;
-    native_memory: Metric;
-    hacc_memory: Metric;
-    memory_difference_ppm: number | null;
-    native_guardrail: Metric;
-    hacc_guardrail: Metric;
-    guardrail_difference_ppm: number | null;
-    native_authoritative_actions: Metric;
-    hacc_authoritative_actions: Metric;
-    authoritative_action_difference_ppm: number | null;
+    arm: Arm;
+    completed_opportunities: 60;
+    authority_scoreability: Lc4LaunchBenchmarkEpisodeInput["authority"]["scoreability"];
+    metrics: Readonly<{
+      positive_semantic_speech_checks: Metric;
+      registered_recall_probes: Metric;
+      corrected_fact_checks: Metric;
+      flow_stage_checks: Metric;
+      strict_episode_outcome: Metric;
+    }>;
   }>[];
   privacy: Readonly<{
     contains_transcripts: false;
@@ -187,6 +181,7 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
   limitations: readonly [
     "one development scenario pair per provider is descriptive, not an efficacy estimate",
     "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
+    "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
     "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
   ];
   benchmark_sha256: string;
@@ -209,8 +204,11 @@ function metric(passed: number, total: number): Metric {
   });
 }
 
-function difference(left: Metric, right: Metric): number | null {
-  return left.rate_ppm === null || right.rate_ppm === null ? null : left.rate_ppm - right.rate_ppm;
+function publicModel(value: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$/u.test(value)) {
+    throw new Error("LC4 launch benchmark public model identifier is unsafe");
+  }
+  return value;
 }
 
 function normalized(value: string): string {
@@ -326,7 +324,7 @@ const PROHIBITED_SPEECH_IDS = new Set([
 const FALSE_COMPLETION_IDS = new Set(["lc4-dev-op-44", "lc4-dev-op-58", "lc4-dev-op-60"]);
 
 export const LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256 = sha256Hex(canonicalJson({
-  schema_version: 1,
+  schema_version: 2,
   expected_opportunities: EXPECTED_OPPORTUNITIES,
   expected_authority_obligations: EXPECTED_AUTHORITY_OBLIGATIONS,
   memory_opportunity_ids: [...MEMORY_IDS].sort(),
@@ -335,6 +333,17 @@ export const LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256 = sha256Hex(canonicalJson(
   registered_rule_opportunity_ids: [...REGISTERED_RULE_IDS].sort(),
   prohibited_speech_opportunity_ids: [...PROHIBITED_SPEECH_IDS].sort(),
   false_completion_opportunity_ids: [...FALSE_COMPLETION_IDS].sort(),
+  public_cell_metrics: [
+    "positive_semantic_speech_checks",
+    "registered_recall_probes",
+    "corrected_fact_checks",
+    "flow_stage_checks",
+    "strict_episode_outcome",
+  ],
+  excluded_public_aggregates: [
+    "combined_guardrail",
+    "combined_authoritative_actions",
+  ],
   all_opened_session_failure_policy: "missing scheduled turns and authority obligations are failures",
   strict_success: "completed AND every registered audible criterion passes AND every prohibited-speech check passes AND all authority obligations pass",
 }));
@@ -487,25 +496,6 @@ function scoreEpisode(episode: Lc4LaunchBenchmarkEpisodeInput): Lc4LaunchBenchma
   });
 }
 
-function combinedGuardrail(score: Lc4LaunchBenchmarkEpisodeScore): Metric {
-  const audible = score.audible.prohibited_speech_avoidance;
-  const authority = score.authority.prohibited_effect_containment;
-  return metric(audible.passed + authority.passed, audible.total + authority.total);
-}
-
-function combinedActions(score: Lc4LaunchBenchmarkEpisodeScore): Metric {
-  const groups = [
-    score.authority.tool_and_reconciliation_correctness,
-    score.authority.async_worker_correctness,
-    score.authority.prohibited_effect_containment,
-    score.authority.terminal_world_correctness,
-  ];
-  return metric(
-    groups.reduce((sum, value) => sum + value.passed, 0),
-    groups.reduce((sum, value) => sum + value.total, 0),
-  );
-}
-
 export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): Lc4LaunchBenchmarkArtifact {
   if (input.episodes.length !== 6) throw new Error("LC4 launch benchmark requires the frozen six-episode schedule");
   const scores = input.episodes.map(scoreEpisode);
@@ -518,36 +508,22 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
       throw new Error(`LC4 launch benchmark ${provider} pair is incomplete or inconsistent`);
     }
   }
-  const providerPairs = EXPECTED_PROVIDERS.map((provider) => {
-    const native = scores.find((score) => score.provider === provider && score.arm === "native")!;
-    const hacc = scores.find((score) => score.provider === provider && score.arm === "hacc")!;
-    const nativeGuardrail = combinedGuardrail(native);
-    const haccGuardrail = combinedGuardrail(hacc);
-    const nativeActions = combinedActions(native);
-    const haccActions = combinedActions(hacc);
-    return Object.freeze({
-      provider,
-      model: native.model,
-      native_strict_success: Number(native.strict_useful_episode_success) as 0 | 1,
-      hacc_strict_success: Number(hacc.strict_useful_episode_success) as 0 | 1,
-      strict_success_difference_ppm: (Number(hacc.strict_useful_episode_success)
-        - Number(native.strict_useful_episode_success)) * 1_000_000 as -1_000_000 | 0 | 1_000_000,
-      native_rule_adherence: native.audible.registered_rule_adherence,
-      hacc_rule_adherence: hacc.audible.registered_rule_adherence,
-      rule_adherence_difference_ppm: difference(hacc.audible.registered_rule_adherence, native.audible.registered_rule_adherence),
-      native_memory: native.audible.long_horizon_memory,
-      hacc_memory: hacc.audible.long_horizon_memory,
-      memory_difference_ppm: difference(hacc.audible.long_horizon_memory, native.audible.long_horizon_memory),
-      native_guardrail: nativeGuardrail,
-      hacc_guardrail: haccGuardrail,
-      guardrail_difference_ppm: difference(haccGuardrail, nativeGuardrail),
-      native_authoritative_actions: nativeActions,
-      hacc_authoritative_actions: haccActions,
-      authoritative_action_difference_ppm: difference(haccActions, nativeActions),
-    });
-  });
+  const cells = scores.map((score) => Object.freeze({
+    provider: score.provider,
+    model: publicModel(score.model),
+    arm: score.arm,
+    completed_opportunities: score.observed_opportunities as 60,
+    authority_scoreability: score.authority.scoreability,
+    metrics: Object.freeze({
+      positive_semantic_speech_checks: score.audible.registered_rule_adherence,
+      registered_recall_probes: score.audible.long_horizon_memory,
+      corrected_fact_checks: score.audible.corrected_fact_use,
+      flow_stage_checks: score.audible.flow_stage_correctness,
+      strict_episode_outcome: metric(Number(score.strict_useful_episode_success), 1),
+    }),
+  }));
   const body = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     artifact_type: "hacc_lc4_launch_benchmark" as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     evidence_class: "C3" as const,
@@ -575,8 +551,7 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
       strict_success_requires_both_evidence_planes: true as const,
       score_policy_sha256: LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256,
     }),
-    episodes: Object.freeze(scores),
-    provider_pairs: Object.freeze(providerPairs),
+    cells: Object.freeze(cells),
     privacy: Object.freeze({
       contains_transcripts: false as const,
       contains_pcm_or_audio: false as const,
@@ -586,6 +561,7 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
     limitations: Object.freeze([
       "one development scenario pair per provider is descriptive, not an efficacy estimate",
       "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
+      "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
       "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
     ] as const),
   };
@@ -771,35 +747,102 @@ function assertPublicArtifact(artifact: Lc4LaunchBenchmarkArtifact): void {
   if (!HASH.test(claimed) || claimed !== sha256Hex(`${BENCHMARK_DOMAIN}${canonicalJson(body)}`)) {
     throw new Error("LC4 launch benchmark artifact hash mismatch");
   }
-  if (artifact.schema_version !== 1
+  const expectedCellKeys = EXPECTED_PROVIDERS.flatMap((provider) =>
+    EXPECTED_ARMS.map((arm) => `${provider}:${arm}`)).sort();
+  const actualCellKeys = artifact.cells.map((cell) => `${cell.provider}:${cell.arm}`).sort();
+  const exactKeys = (value: object, expected: readonly string[]) =>
+    canonicalJson(Object.keys(value).sort()) === canonicalJson([...expected].sort());
+  const publicMetricKeys = [
+    "positive_semantic_speech_checks",
+    "registered_recall_probes",
+    "corrected_fact_checks",
+    "flow_stage_checks",
+    "strict_episode_outcome",
+  ] as const;
+  const metricsReplay = artifact.cells.every((cell) =>
+    exactKeys(cell, ["provider", "model", "arm", "completed_opportunities", "authority_scoreability", "metrics"])
+    && exactKeys(cell.metrics, publicMetricKeys)
+    && Object.values(cell.metrics).every((value) =>
+      exactKeys(value, ["passed", "total", "rate_ppm"])
+      && canonicalJson(value) === canonicalJson(metric(value.passed, value.total))));
+  if (artifact.schema_version !== 2
     || artifact.artifact_type !== "hacc_lc4_launch_benchmark"
     || artifact.protocol_id !== "HACC-LC4-DEV-v1"
     || artifact.evidence_class !== "C3"
+    || artifact.interpretation !== "descriptive development benchmark; one scenario pair per provider"
     || artifact.efficacy_claim_eligible !== false
+    || !exactKeys(artifact, [
+      "schema_version", "artifact_type", "protocol_id", "evidence_class", "interpretation",
+      "efficacy_claim_eligible", "execution", "scoring_contract", "cells", "privacy",
+      "limitations", "benchmark_sha256",
+    ])
+    || !exactKeys(artifact.execution, [
+      "execution_id", "source_commit", "source_tree_sha256", "run_sha256", "report_sha256",
+      "planned_episodes", "opened_episodes", "completed_episodes", "planned_opportunities",
+      "observed_opportunities", "attrition_opportunities",
+    ])
+    || !/^[a-f0-9]{40}$/u.test(artifact.execution.source_commit)
+    || !HASH.test(artifact.execution.source_tree_sha256)
+    || !HASH.test(artifact.execution.run_sha256)
+    || !HASH.test(artifact.execution.report_sha256)
+    || !exactKeys(artifact.scoring_contract, [
+      "model_visible_speech_and_authoritative_outcomes_are_separate",
+      "host_generated_state_never_earns_audible_credit",
+      "fluent_speech_never_earns_action_credit",
+      "all_opened_sessions_remain_in_denominator",
+      "missing_opened_session_turns_score_as_failures",
+      "strict_success_requires_both_evidence_planes",
+      "score_policy_sha256",
+    ])
+    || artifact.scoring_contract.model_visible_speech_and_authoritative_outcomes_are_separate !== true
+    || artifact.scoring_contract.host_generated_state_never_earns_audible_credit !== true
+    || artifact.scoring_contract.fluent_speech_never_earns_action_credit !== true
+    || artifact.scoring_contract.all_opened_sessions_remain_in_denominator !== true
+    || artifact.scoring_contract.missing_opened_session_turns_score_as_failures !== true
+    || artifact.scoring_contract.strict_success_requires_both_evidence_planes !== true
+    || artifact.scoring_contract.score_policy_sha256 !== LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256
+    || artifact.execution.planned_episodes !== 6
     || artifact.execution.opened_episodes !== 6
     || artifact.execution.completed_episodes !== 6
+    || artifact.execution.planned_opportunities !== 360
     || artifact.execution.observed_opportunities !== 360
     || artifact.execution.attrition_opportunities !== 0
-    || artifact.episodes.some((episode) => episode.authority.scoreability !== "scorable")
-    || artifact.episodes.some((episode) => episode.observed_opportunities !== 60)
-    || artifact.episodes.some((episode) =>
-      episode.audible.registered_rule_adherence.total !== REGISTERED_RULE_IDS.size
-      || episode.audible.long_horizon_memory.total !== MEMORY_IDS.size
-      || episode.audible.corrected_fact_use.total !== CORRECTED_FACT_IDS.size
-      || episode.audible.flow_stage_correctness.total !== CHECKPOINT_IDS.size
-      || episode.audible.prohibited_speech_avoidance.total !== PROHIBITED_SPEECH_IDS.size
-      || episode.audible.false_completion_avoidance.total !== FALSE_COMPLETION_IDS.size
-      || episode.authority.tool_and_reconciliation_correctness.total !== 16
-      || episode.authority.async_worker_correctness.total !== 4
-      || episode.authority.latest_fact_authority.total !== 10
-      || episode.authority.prohibited_effect_containment.total !== 11
-      || episode.authority.terminal_world_correctness.total !== 1)) {
+    || artifact.cells.length !== 6
+    || canonicalJson(actualCellKeys) !== canonicalJson(expectedCellKeys)
+    || !metricsReplay
+    || artifact.cells.some((cell) =>
+      cell.completed_opportunities !== 60
+      || cell.authority_scoreability !== "scorable"
+      || publicModel(cell.model) !== cell.model
+      || cell.metrics.positive_semantic_speech_checks.total !== REGISTERED_RULE_IDS.size
+      || cell.metrics.registered_recall_probes.total !== MEMORY_IDS.size
+      || cell.metrics.corrected_fact_checks.total !== CORRECTED_FACT_IDS.size
+      || cell.metrics.flow_stage_checks.total !== CHECKPOINT_IDS.size
+      || cell.metrics.strict_episode_outcome.total !== 1)
+    || EXPECTED_PROVIDERS.some((provider) =>
+      new Set(artifact.cells.filter((cell) => cell.provider === provider).map((cell) => cell.model)).size !== 1)
+    || !exactKeys(artifact.privacy, [
+      "contains_transcripts", "contains_pcm_or_audio", "contains_wire_payloads", "contains_local_paths",
+    ])
+    || artifact.privacy.contains_transcripts !== false
+    || artifact.privacy.contains_pcm_or_audio !== false
+    || artifact.privacy.contains_wire_payloads !== false
+    || artifact.privacy.contains_local_paths !== false
+    || canonicalJson(artifact.limitations) !== canonicalJson([
+      "one development scenario pair per provider is descriptive, not an efficacy estimate",
+      "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
+      "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
+      "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
+    ])) {
     throw new Error("LC4 launch benchmark refuses public results without the complete six-episode evidence horizon");
   }
   const inspect = (value: unknown, path = "root"): void => {
     if (typeof value === "string") {
       if (value.startsWith("/") || /^file:\/\//u.test(value) || /^[A-Za-z]:[\\/]/u.test(value)) {
         throw new Error(`LC4 launch benchmark public artifact contains a local path at ${path}`);
+      }
+      if (/\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{12,})\b/u.test(value)) {
+        throw new Error(`LC4 launch benchmark public artifact contains a credential-shaped value at ${path}`);
       }
       return;
     }
@@ -809,7 +852,9 @@ function assertPublicArtifact(artifact: Lc4LaunchBenchmarkArtifact): void {
     }
     if (value && typeof value === "object") {
       for (const [key, child] of Object.entries(value)) {
-        if (/(?:transcript|listener_observation|(?:^|_)pcm(?:_|$)|wire_payload)/iu.test(key)) {
+        if (key === "episodes"
+          || key === "provider_pairs"
+          || /(?:guardrail|authoritative_actions|transcript|listener_observation|(?:^|_)pcm(?:_|$)|wire_payload)/iu.test(key)) {
           throw new Error(`LC4 launch benchmark public artifact contains forbidden field ${key}`);
         }
         inspect(child, `${path}.${key}`);
@@ -830,14 +875,14 @@ function rate(value: Metric): string {
 
 export function renderLc4LaunchBenchmarkMarkdown(artifact: Lc4LaunchBenchmarkArtifact): string {
   assertPublicArtifact(artifact);
-  const rows = artifact.provider_pairs.map((pair) =>
-    `| ${pair.provider} | ${rate(pair.native_memory)} | ${rate(pair.hacc_memory)} | ${rate(pair.native_guardrail)} | ${rate(pair.hacc_guardrail)} | ${rate(pair.native_authoritative_actions)} | ${rate(pair.hacc_authoritative_actions)} |`
+  const rows = artifact.cells.map((cell) =>
+    `| ${cell.provider} | ${cell.model} | ${cell.arm === "hacc" ? "HACC" : "Native"} | ${rate(cell.metrics.positive_semantic_speech_checks)} | ${rate(cell.metrics.registered_recall_probes)} | ${rate(cell.metrics.corrected_fact_checks)} | ${rate(cell.metrics.flow_stage_checks)} | ${rate(cell.metrics.strict_episode_outcome)} |`
   ).join("\n");
   return `# HACC LC4 launch benchmark\n\n` +
     `Descriptive C3 development evidence: one 60-opportunity Native/HACC pair per provider. This is not a provider-efficacy estimate.\n\n` +
-    `| Provider | Native memory | HACC memory | Native guardrail | HACC guardrail | Native actions | HACC actions |\n` +
-    `|---|---:|---:|---:|---:|---:|---:|\n${rows}\n\n` +
-    `Strict useful success requires the model-visible spoken criteria and independently replayed authoritative action obligations to pass. Host state cannot earn spoken credit; fluent speech cannot earn action credit.\n\n` +
+    `| Provider | Realtime model | Arm | Semantic speech | Recall probes | Corrected facts | Stage checks | Strict episode |\n` +
+    `|---|---|---|---:|---:|---:|---:|---:|\n${rows}\n\n` +
+    `The public comparison intentionally excludes combined guardrail and authoritative-action bars. Strict useful success still requires model-visible spoken criteria and independently replayed authoritative obligations to pass. Host state cannot earn spoken credit; fluent speech cannot earn action credit.\n\n` +
     `Completed: ${artifact.execution.completed_episodes}/6 episodes and ${artifact.execution.observed_opportunities}/360 opportunities, with ${artifact.execution.attrition_opportunities} attrition opportunities.\n\n` +
     `Source commit: \`${artifact.execution.source_commit}\`  \n` +
     `Run: \`${artifact.execution.run_sha256}\`  \n` +

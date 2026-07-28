@@ -115,26 +115,30 @@ describe("LC4 launch benchmark scorer", () => {
       fluent_speech_never_earns_action_credit: true,
       strict_success_requires_both_evidence_planes: true,
     });
-    expect(artifact.episodes.find((entry) => entry.episode_id === "openai-native"))
-      .toMatchObject({ strict_useful_episode_success: false, authority: { scoreability: "scorable" } });
-    expect(artifact.episodes.find((entry) => entry.episode_id === "gemini-native"))
-      .toMatchObject({ strict_useful_episode_success: false, audible: { registered_rule_adherence: { rate_ppm: 1_000_000 } } });
-    expect(artifact.episodes.find((entry) => entry.episode_id === "xai-native")?.strict_useful_episode_success).toBe(true);
+    expect(artifact.cells.find((entry) => entry.provider === "openai" && entry.arm === "native"))
+      .toMatchObject({ authority_scoreability: "scorable", metrics: { strict_episode_outcome: { passed: 0, total: 1 } } });
+    expect(artifact.cells.find((entry) => entry.provider === "gemini" && entry.arm === "native"))
+      .toMatchObject({
+        authority_scoreability: "scorable",
+        metrics: {
+          positive_semantic_speech_checks: { rate_ppm: 1_000_000 },
+          strict_episode_outcome: { passed: 0, total: 1 },
+        },
+      });
+    expect(artifact.cells.find((entry) => entry.provider === "xai" && entry.arm === "native")
+      ?.metrics.strict_episode_outcome.passed).toBe(1);
   });
 
   it("keeps every missing turn from an opened session in the registered denominators", () => {
     const artifact = scoreLc4LaunchBenchmark(scoringInput({
       "openai-native": episode("openai", "native", { observationCount: 59, completed: false }),
     }));
-    const score = artifact.episodes.find((entry) => entry.episode_id === "openai-native")!;
-    expect(score).toMatchObject({
-      opened: true,
-      completed: false,
-      observed_opportunities: 59,
-      attrition_opportunities: 1,
-      strict_useful_episode_success: false,
+    const cell = artifact.cells.find((entry) => entry.provider === "openai" && entry.arm === "native")!;
+    expect(cell).toMatchObject({
+      completed_opportunities: 59,
+      metrics: { strict_episode_outcome: { passed: 0, total: 1 } },
     });
-    expect(score.audible.registered_rule_adherence.total)
+    expect(cell.metrics.positive_semantic_speech_checks.total)
       .toBe(LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.filter((entry) => entry.applicability.status === "applicable").length);
     expect(artifact.execution.attrition_opportunities).toBe(1);
     expect(() => renderLc4LaunchBenchmarkMarkdown(artifact)).toThrow(/complete six-episode evidence horizon/u);
@@ -144,21 +148,15 @@ describe("LC4 launch benchmark scorer", () => {
     const artifact = scoreLc4LaunchBenchmark(scoringInput({
       "xai-native": episode("xai", "native", { falseCompletion: true }),
     }));
-    const score = artifact.episodes.find((entry) => entry.episode_id === "xai-native")!;
-    expect(score.audible.false_completion_avoidance.passed)
-      .toBe(score.audible.false_completion_avoidance.total - 1);
-    expect(score.audible.prohibited_speech_avoidance.passed)
-      .toBe(score.audible.prohibited_speech_avoidance.total - 1);
-    expect(score.strict_useful_episode_success).toBe(false);
+    const cell = artifact.cells.find((entry) => entry.provider === "xai" && entry.arm === "native")!;
+    expect(cell.metrics.strict_episode_outcome).toMatchObject({ passed: 0, total: 1 });
 
     const privacyLeak = structuredClone(episode("openai", "native"));
     const callback = privacyLeak.observations.find((observation) => observation.opportunity_id === "lc4-dev-op-24")!;
     (callback as { transcript: string }).transcript = "I will call you at 415 555 0184.";
     const privacyArtifact = scoreLc4LaunchBenchmark(scoringInput({ "openai-native": privacyLeak }));
-    const privacyScore = privacyArtifact.episodes.find((entry) => entry.episode_id === "openai-native")!;
-    expect(privacyScore.audible.prohibited_speech_avoidance.passed)
-      .toBe(privacyScore.audible.prohibited_speech_avoidance.total - 1);
-    expect(privacyScore.strict_useful_episode_success).toBe(false);
+    const privacyCell = privacyArtifact.cells.find((entry) => entry.provider === "openai" && entry.arm === "native")!;
+    expect(privacyCell.metrics.strict_episode_outcome).toMatchObject({ passed: 0, total: 1 });
   });
 
   it("emits deterministic provider-pair counts and a privacy-safe receipt", () => {
@@ -166,13 +164,15 @@ describe("LC4 launch benchmark scorer", () => {
     const second = scoreLc4LaunchBenchmark(scoringInput());
     expect(first).toEqual(second);
     expect(first.scoring_contract.score_policy_sha256).toBe(LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256);
-    expect(first.provider_pairs).toHaveLength(3);
-    expect(first.provider_pairs.every((pair) => pair.native_strict_success === 1 && pair.hacc_strict_success === 1)).toBe(true);
+    expect(first.schema_version).toBe(2);
+    expect(first.cells).toHaveLength(6);
+    expect(first.cells.every((cell) => cell.metrics.strict_episode_outcome.passed === 1)).toBe(true);
     const markdown = renderLc4LaunchBenchmarkMarkdown(first);
     expect(markdown).toContain("Host state cannot earn spoken credit");
     expect(markdown).toContain("360/360 opportunities");
-    expect(JSON.stringify({ episodes: first.episodes, provider_pairs: first.provider_pairs }))
-      .not.toMatch(/listener_observation|MPL-1402|Eli Park/u);
+    expect(markdown).toContain("Corrected facts");
+    expect(JSON.stringify(first))
+      .not.toMatch(/listener_observation|MPL-1402|Eli Park|provider_pairs|native_guardrail|authoritative_actions/u);
   });
 
   it("keeps the CLI provider-free and fails closed on malformed publication input", async () => {
@@ -200,5 +200,30 @@ describe("LC4 launch benchmark scorer", () => {
     (notApplicable as { semantic_applicability: string; final_required_criteria_pass: boolean | null }).final_required_criteria_pass = true;
     expect(() => scoreLc4LaunchBenchmark(scoringInput({ "openai-native": applicabilityDrift })))
       .toThrow(/frozen applicability is invalid/u);
+
+    const unscorable = structuredClone(episode("openai", "native"));
+    const mutableAuthority = unscorable.authority as unknown as {
+      scoreability: string;
+      verdict: string;
+      obligation_results: Lc4AuthorityObligationResult[];
+      replay_sha256: string | null;
+    };
+    mutableAuthority.scoreability = "unscorable_missing_authority_evidence";
+    mutableAuthority.verdict = "evidence_invalid";
+    mutableAuthority.obligation_results = [];
+    mutableAuthority.replay_sha256 = null;
+    const unscorableArtifact = scoreLc4LaunchBenchmark(scoringInput({ "openai-native": unscorable }));
+    expect(() => renderLc4LaunchBenchmarkMarkdown(unscorableArtifact))
+      .toThrow(/complete six-episode evidence horizon/u);
+
+    const unsafeNativeModel = structuredClone(episode("openai", "native"));
+    const unsafeHaccModel = structuredClone(episode("openai", "hacc"));
+    (unsafeNativeModel as { model: string }).model = "/private/tmp/model";
+    (unsafeHaccModel as { model: string }).model = "/private/tmp/model";
+    expect(() => scoreLc4LaunchBenchmark(scoringInput({
+      "openai-native": unsafeNativeModel,
+      "openai-hacc": unsafeHaccModel,
+    })))
+      .toThrow(/public model identifier is unsafe/u);
   });
 });
