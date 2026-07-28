@@ -59,6 +59,8 @@ export type Lc4PinnedListenerEvaluation = Readonly<{
   calibration_sha256: string;
   transcript_sha256: string;
   semantic_result_sha256: string;
+  /** Direct CAS address for offline replay of the canonical semantic artifact. */
+  semantic_artifact_cas_sha256?: string;
   signed_invocation_receipt_sha256: string;
   repair_projection?: Lc4DevArmBlindRepairProjection;
 }>;
@@ -230,6 +232,9 @@ function validateEvaluation(
     semantic_result_sha256: evaluation.semantic_result_sha256,
     signed_invocation_receipt_sha256: evaluation.signed_invocation_receipt_sha256,
   })) requireHash(digest, `LC4 listener evaluation ${label}`);
+  if (evaluation.semantic_artifact_cas_sha256 !== undefined) {
+    requireHash(evaluation.semantic_artifact_cas_sha256, "LC4 listener evaluation semantic artifact CAS hash");
+  }
   if (evaluation.repair_projection) assertLc4DevArmBlindRepairProjection(evaluation.repair_projection);
   if (evaluation.source_pcm_sha256 !== expectedPcmSha256
     || evaluation.source_pcm_byte_length !== expectedByteLength

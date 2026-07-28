@@ -605,6 +605,7 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         calibration_sha256: calibrationSha256,
         transcript_sha256: replay.transcript_sha256,
         semantic_result_sha256: replay.artifact_sha256,
+        semantic_artifact_cas_sha256: retained.artifact_sha256,
         signed_invocation_receipt_sha256: invocation.receipt.receipt_sha256,
         repair_projection: createLc4DevArmBlindRepairProjection({
           opportunity_id: replay.opportunity_id,
