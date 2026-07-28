@@ -9,6 +9,32 @@ npm run audit:public
 The command runs two independent, read-only checks. A zero process exit is not
 enough for automation: parse both JSON reports and verify the contracts below.
 
+## Locked dependency audit
+
+Run the dependency gate separately from `web/`:
+
+```bash
+npm run audit:dependencies:locked
+```
+
+The gate runs npm's production-only and complete lockfile audits independently.
+The production graph must contain no advisory at any severity; development
+exceptions can never authorize a runtime dependency. The complete graph must
+exactly match the short-lived reviewed exception in
+[`.security/npm-audit-exceptions.json`](../.security/npm-audit-exceptions.json).
+That manifest binds the advisory identity and metadata, every propagated
+vulnerability record, all dependency edges and node paths, exact locked node
+versions, direct development dependency constraints, package identity, lockfile
+version, Node engine, justification, and UTC expiry.
+
+A new advisory, changed severity or affected range, dependency update, graph
+movement, promotion into production dependencies, malformed manifest, or
+expired review fails closed. A clean complete audit also fails while an
+exception remains, forcing removal of stale policy instead of silently carrying
+it forward. Do not extend an expiry mechanically: first check for compatible
+upstream releases, verify the production audit remains empty, review the exact
+new graph, and document why the residual development-only exposure is bounded.
+
 ## Current publishable tree
 
 `npm run audit:public:worktree` scans the bytes that Git can publish now:

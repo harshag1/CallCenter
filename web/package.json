@@ -25,6 +25,7 @@
     "audit:public:worktree": "tsx scripts/working-tree-secret-audit.ts ..",
     "audit:public:history": "tsx scripts/public-history-audit.ts ..",
     "audit:public": "npm run audit:public:worktree && npm run audit:public:history",
+    "audit:dependencies:locked": "tsx scripts/locked-dependency-audit.ts",
     "benchmark:voice": "tsx scripts/voice-benchmark.ts",
     "benchmark:canary:operator": "tsx scripts/voice-canary-operator.ts",
     "benchmark:voice:offline": "tsx scripts/voice-benchmark-offline.ts",

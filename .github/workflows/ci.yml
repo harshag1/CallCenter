@@ -124,9 +124,7 @@ jobs:
 
       - name: Audit locked web dependencies
         working-directory: web
-        run: |
-          npm audit --package-lock-only --audit-level=high
-          npm audit --package-lock-only --omit=dev --audit-level=high
+        run: npm run audit:dependencies:locked
 
       - name: Audit locked bridge dependencies
         working-directory: bridge
