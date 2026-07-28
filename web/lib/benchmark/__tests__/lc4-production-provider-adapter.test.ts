@@ -759,6 +759,13 @@ class ProviderConnectionCloseRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class SynchronousHostCloseRealtimeClient extends FakeRealtimeClient {
+  override close() {
+    super.close();
+    this.providerClose();
+  }
+}
+
 class AudioAppendFailureRealtimeClient extends FakeRealtimeClient {
   override appendInputAudio() {
     this.events.push("append");
@@ -1072,7 +1079,7 @@ describe("LC4 production realtime adapter bridge", () => {
 
   it("retains partial output commitments when the listener handoff fails", async () => {
     const fixture = await openDevFailureFixture({
-      client: new FakeRealtimeClient("openai", []),
+      client: new SynchronousHostCloseRealtimeClient("openai", []),
       async listener() { throw new Error("listener private transcript SENTINEL"); },
     });
     const error = await caughtFailure(fixture.session.exchange({

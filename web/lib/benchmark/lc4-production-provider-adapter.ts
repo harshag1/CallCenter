@@ -721,6 +721,7 @@ export class Lc4RealtimeProviderBridge {
     let serverVadPhase: "none" | "started" | "stopped" | "committed" | "responding" = "none";
     let terminalError: Error | null = null;
     let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
+    let hostCloseInitiated = false;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
           client,
@@ -826,7 +827,7 @@ export class Lc4RealtimeProviderBridge {
         terminalFailureCode = "provider_fatal";
         waiters.get(currentOpportunity ?? "")?.();
       }
-      if (event.type === "connection.closed") {
+      if (event.type === "connection.closed" && !hostCloseInitiated) {
         // Socket close reasons are provider-controlled plaintext. Preserve only
         // the closed-vocabulary classification and let the realtime client's
         // content-free transport diagnostic retain any finer attribution.
@@ -870,7 +871,10 @@ export class Lc4RealtimeProviderBridge {
       poisoned = true;
       closed = true;
       segmentAbort.abort();
-      if (client.state !== "closed") client.close(1011, reason);
+      if (client.state !== "closed") {
+        hostCloseInitiated = true;
+        client.close(1011, reason);
+      }
       unsubscribeEvent();
       unsubscribeWire?.();
       this.#active = false;
@@ -1444,7 +1448,10 @@ export class Lc4RealtimeProviderBridge {
           segmentAbort.abort();
           terminalError = new Error("LC4 realtime segment closed during an in-flight opportunity");
           waiters.get(currentOpportunity)?.();
-          if (client.state !== "closed") client.close(1011, "LC4 segment closed during in-flight opportunity");
+          if (client.state !== "closed") {
+            hostCloseInitiated = true;
+            client.close(1011, "LC4 segment closed during in-flight opportunity");
+          }
           unsubscribeEvent();
           unsubscribeWire?.();
           this.#active = false;
@@ -1455,7 +1462,10 @@ export class Lc4RealtimeProviderBridge {
           // receipt. Release local authority and surface cleanup evidence.
           closed = true;
           segmentAbort.abort();
-          if (client.state !== "closed") client.close(1011, "LC4 provider session unavailable before rotation");
+          if (client.state !== "closed") {
+            hostCloseInitiated = true;
+            client.close(1011, "LC4 provider session unavailable before rotation");
+          }
           unsubscribeEvent();
           unsubscribeWire?.();
           this.#active = false;
@@ -1464,6 +1474,7 @@ export class Lc4RealtimeProviderBridge {
         const hadUnfinalizedDevOpportunity = pendingDevOpportunity !== null;
         closed = true;
         segmentAbort.abort();
+        hostCloseInitiated = true;
         client.close(1000, "LC4 segment rotation");
         unsubscribeEvent();
         unsubscribeWire?.();
