@@ -117,7 +117,7 @@ export type ProviderCapabilities = {
     supported: boolean;
     enabledByDefault: boolean;
   }>;
-  notes: string[];
+  notes: readonly string[];
 };
 
 export type ProviderDefinition = {
