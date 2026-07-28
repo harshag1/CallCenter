@@ -80,6 +80,13 @@ const fixtureCache = new Map<string, Readonly<{
 // atomic artifact finalization. Their assertions are correctness/security
 // gates; unlike the runner's internal deadlines, wall-clock time is not.
 const FULL_PAID_RUNNER_TEST_TIMEOUT_MS = 120_000;
+// Expiring authorization fixtures must be relative to the test process, not to
+// the date this test was authored. Keep one reference instant so every hash-
+// bound timestamp in a setup remains internally consistent.
+const TEST_NOW_MS = Date.now();
+const TEST_DAY_MS = 24 * 60 * 60 * 1_000;
+const testTime = (offsetMs = 0) => new Date(TEST_NOW_MS + offsetMs);
+const testTimeIso = (offsetMs = 0) => testTime(offsetMs).toISOString();
 const H = (character: string) => character.repeat(64);
 const ATTESTATION_KEYS = generateKeyPairSync("ed25519");
 const ATTESTATION_PUBLIC_KEY_PEM = ATTESTATION_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -104,7 +111,7 @@ function fastFakeTrialRuntime() {
     },
     clock: Object.freeze({
       monotonicNowMs: () => monotonicMs,
-      wallTimeIso: () => "2026-07-10T12:02:00.000Z",
+      wallTimeIso: () => testTimeIso(),
     }),
   });
 }
@@ -147,8 +154,8 @@ function pricingProof(
         provider,
         model: "gpt-realtime-2.1" as const,
         currency: "USD" as const,
-        verified_at: "2026-07-18T00:00:00.000Z",
-        not_after: "2026-07-24T00:00:00.000Z",
+        verified_at: testTimeIso(-60 * 60 * 1_000),
+        not_after: testTimeIso(6 * TEST_DAY_MS),
         source,
         rates: {
           input_text_micro_usd_per_million_tokens: 4_000_000 as const,
@@ -163,8 +170,8 @@ function pricingProof(
           provider,
           model: "grok-voice-think-fast-1.0" as const,
           currency: "USD" as const,
-          verified_at: "2026-07-18T00:00:00.000Z",
-          not_after: "2026-07-24T00:00:00.000Z",
+          verified_at: testTimeIso(-60 * 60 * 1_000),
+          not_after: testTimeIso(6 * TEST_DAY_MS),
           source,
           rates: {
             sent_audio_micro_usd_per_minute: 50_000 as const,
@@ -179,8 +186,8 @@ function pricingProof(
           provider,
           model: "gemini-3.1-flash-live-preview" as const,
           currency: "USD" as const,
-          verified_at: "2026-07-18T00:00:00.000Z",
-          not_after: "2026-07-24T00:00:00.000Z",
+          verified_at: testTimeIso(-60 * 60 * 1_000),
+          not_after: testTimeIso(6 * TEST_DAY_MS),
           source,
           rates: {
             input_text_micro_usd_per_million_tokens: 750_000 as const,
@@ -217,7 +224,7 @@ function pricingProof(
     caps,
     safetyMarginMicroUsd: 10_000,
     sourceCapture: capture,
-    now: new Date("2026-07-19T00:00:00.000Z"),
+    now: testTime(),
   });
 }
 
@@ -280,7 +287,7 @@ function paidGatePacket(input: Readonly<{
   return createPreCanaryProofPacket({
     schema_version: 1,
     kind: "hacc_pre_canary_no_spend_proof",
-    generated_at: "2026-07-19T00:00:00.000Z",
+    generated_at: testTimeIso(),
     source: {
       commit: input.freeze.source_commit,
       tree: input.freeze.source_tree,
@@ -528,8 +535,8 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     schema_version: 1,
     plan_id: `paid-test-plan-${id}`,
     mode: "pilot",
-    created_at: "2026-07-10T12:01:00.000Z",
-    expires_at: "2030-07-12T12:01:00.000Z",
+    created_at: testTimeIso(-60_000),
+    expires_at: testTimeIso(30 * TEST_DAY_MS),
     freeze_lock_sha256: H("a"),
     source_commit: "1".repeat(40),
     release_gate: {
@@ -580,7 +587,7 @@ async function setup(id: string, scenarioOverride?: ReturnType<typeof BenchmarkS
     audio_delivery: audioDelivery,
     cost_envelope: costEnvelope,
     maximum_micro_usd: 5_000_000,
-    reservation_expires_at: "2030-07-11T12:16:00.000Z",
+    reservation_expires_at: testTimeIso(TEST_DAY_MS),
     ledger_id: "hacc-paid-test-ledger",
     reservation_authority: {
       ledger_open_head_sha256: resumedLedger.snapshot.head_sha256,
@@ -703,7 +710,7 @@ async function expectRefusedBeforeSpend(
   prepared: Awaited<ReturnType<typeof setup>>,
   input: PaidBenchmarkRunInput,
   error: RegExp,
-  now: () => Date = () => new Date("2026-07-19T00:00:00.000Z"),
+  now: () => Date = () => testTime(),
 ): Promise<void> {
   let credentialReads = 0;
   let clientCreations = 0;
@@ -1202,7 +1209,7 @@ describe("paid benchmark execution boundary", () => {
       },
     }, {
       ...fastFakeTrialRuntime(),
-      now: () => new Date("2026-07-19T00:00:00.000Z"),
+      now: () => testTime(),
       createClient: async (_input, configuration) => new ScriptedFakeRealtimeClient({
         script: createTransportSmokeFakeScript("openai"),
         initialCapabilitySnapshot: configuration.renderedCapabilitySnapshot,
@@ -1325,7 +1332,7 @@ describe("paid benchmark execution boundary", () => {
       prepared,
       prepared.input,
       /provider_pricing_proof_stale_or_invalid|gate_1_not_ready/,
-      () => new Date("2026-07-25T00:00:00.000Z"),
+      () => testTime(6 * TEST_DAY_MS),
     );
   });
 
