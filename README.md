@@ -35,6 +35,17 @@ The result is a repeatable state machine that still leaves the realtime model fr
 - Immutable per-call runtime manifests and deterministic flow validation/scenario testing before deployment.
 - A clean Next.js workspace driven by one builder chat interface.
 
+## Integration status
+
+| Surface | Current status |
+|---|---|
+| Flow v2, scoped MCP gateway, action receipts, and browser calling | Integrated into the current application path |
+| xAI/OpenAI Twilio bridge | Implemented as a bounded development transport; not production-qualified |
+| Durable conversation log, bounded context compiler, action-policy kernel, and governed worker store | Implemented and locally tested foundation; not yet the default provider/MCP path |
+| Mission runtime and provider plugin contract | Experimental or opt-in; not release-critical runtime authority |
+
+The default live path still uses Flow v2, the static provider registry, and the legacy `launch_task` implementation. The foundation APIs are available to integrators, but their existence is not evidence that live calls already receive durable context packets, governed worker results, or unified pre/post-action policy enforcement.
+
 ## Realtime provider matrix
 
 | Provider | Default model | Browser | Experimental bridge transport | Tools |
@@ -181,7 +192,7 @@ The builder's `validate_flow` primitive performs executable schema/topology chec
 
 - Add a self-hosted live-call tool in [`web/lib/voice-tools/extensions.ts`](web/lib/voice-tools/extensions.ts).
 - Add a builder/operator primitive in [`web/lib/agent/tools/extensions.ts`](web/lib/agent/tools/extensions.ts).
-- Build an opt-in provider adapter against the [Realtime Provider Plugin v1 contract](web/lib/realtime/plugins/README.md). Its OpenAI/xAI/Gemini wrappers and conformance kit are transitional: the release-critical core registry remains static, so production wiring still requires the legacy provider ID/default/voice, browser transport, builder enum, and integration metadata changes.
+- Build an adapter against the [Realtime Provider Plugin v1 contract](web/lib/realtime/plugins/README.md), then install its server-facing runtime adapter with `registerRealtimeProvider(...)` during self-hosted server bootstrap. Registration is typed for custom string-literal IDs, rejects duplicates and capability/hook mismatches, protects the bundled OpenAI/xAI/Gemini adapters, and makes extensions visible to the provider catalog without editing a core switch. A custom browser provider still needs a matching client-side transport consumer; registration stays server-only so credentials and adapter code cannot enter the browser bundle.
 - Build an email/SMS/voice/number adapter against the [Communication Provider Adapter v1 contract](web/lib/communications/README.md). Twilio and Resend have not migrated to it and are not configuration-swappable through that contract yet.
 - Register setup metadata in [`web/lib/integrations/registry.ts`](web/lib/integrations/registry.ts).
 - Connect a remote MCP server with the builder's `add_mcp_server` tool.
@@ -198,7 +209,7 @@ npm run build
 
 `npm run check` runs Vitest, ESLint, and TypeScript. Run it from a clean checkout before deployment; focused tests passing in one subsystem are not a substitute for this repository-wide gate.
 
-The default command intentionally skips 19 PostgreSQL integration suites (56 tests) unless their disposable-database environments are supplied: `FLOW_INTEGRATION_DATABASE_URL`, `AUTH_SECURITY_INTEGRATION_DATABASE_URL`, `CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL`, and `SECURITY_MIGRATION_INTEGRATION_DATABASE_URL`. Release verification must run those suites and the separate `npm run db:test-isolation` proof; see [database tenancy](docs/database-tenancy.md).
+The default command intentionally skips 21 PostgreSQL integration suites (59 tests) unless their disposable-database environments are supplied: `FLOW_INTEGRATION_DATABASE_URL`, `AUTH_SECURITY_INTEGRATION_DATABASE_URL`, `CREDENTIAL_VAULT_INTEGRATION_DATABASE_URL`, and `SECURITY_MIGRATION_INTEGRATION_DATABASE_URL`. Release verification must run those suites and the separate `npm run db:test-isolation` proof; see [database tenancy](docs/database-tenancy.md).
 
 Reproduce the checked-in `$0` benchmark claims without opening a provider session:
 

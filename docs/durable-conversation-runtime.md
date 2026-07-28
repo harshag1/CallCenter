@@ -4,7 +4,7 @@ Status: implemented shared-state foundation, not yet the default live-call path 
 
 ## Implementation snapshot
 
-As of July 21, 2026, the repository contains these independently testable and partially integrated slices:
+At this release boundary, the repository contains these independently testable foundation slices:
 
 - `web/lib/conversation-kernel.ts` implements the pure hash-chained log, authority-stamped revisions, suspend/resume goals, commitments, worker-result admission, deterministic projection, and typed `context_overflow` behavior.
 - `web/lib/action-policy-kernel.ts` implements pure revision-bound pre/post action decisions and readback-bound confirmation evidence.

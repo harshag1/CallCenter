@@ -1,6 +1,6 @@
 # Support
 
-Use GitHub Discussions or an issue for reproducible setup questions, provider adapter problems, flow behavior, and benchmark tooling. Search existing reports first.
+Use a [GitHub issue](https://github.com/harshag1/CallCenter/issues) for reproducible setup questions, provider adapter problems, flow behavior, and benchmark tooling. Search existing reports first; GitHub Discussions is not enabled for this repository.
 
 Include:
 
