@@ -72,7 +72,7 @@ function clone<T>(value: T): T {
 
 function npmAuditFromReviewedGraph(): AuditFixture {
   const graph = manifest.exceptions[0].expected_vulnerability_graph as ReviewedGraphEntry[];
-  return {
+  const report: AuditFixture = {
     auditReportVersion: 2,
     vulnerabilities: Object.fromEntries(
       graph.map((entry) => [
@@ -105,6 +105,9 @@ function npmAuditFromReviewedGraph(): AuditFixture {
       ]),
     ),
   };
+  // One of the two reverse-effect variants observed from repeated npm audits.
+  report.vulnerabilities["eslint-plugin-react"].effects = [];
+  return report;
 }
 
 function fullReport(input: AuditGateInput): AuditFixture {
@@ -140,6 +143,19 @@ describe("locked dependency audit exception gate", () => {
       expires_on: "2026-08-15",
       advisory_id: 1124334,
       production_advisory_count: 0,
+      development_vulnerability_package_count: 9,
+      constrained_dependency_node_count: 15,
+    });
+  });
+
+  it("accepts semantically equivalent npm reverse-effect attribution", () => {
+    const input = validInput();
+    const report = fullReport(input);
+    report.vulnerabilities["eslint-plugin-import"].effects = [];
+    report.vulnerabilities["eslint-plugin-react"].effects = ["eslint-config-next"];
+
+    expect(evaluateAuditGate(input)).toMatchObject({
+      pass: true,
       development_vulnerability_package_count: 9,
       constrained_dependency_node_count: 15,
     });
@@ -204,7 +220,19 @@ describe("locked dependency audit mutation resistance", () => {
   it.each(graphMutations)("rejects a changed %s", (_label, mutate) => {
     const input = validInput();
     mutate(fullReport(input));
-    expectRejected(input, /development vulnerability graph changed/);
+    expectRejected(input, /development vulnerability graph changed|edge not proven by via/);
+  });
+
+  it("rejects a reverse effect that is not proven by the forward via graph", () => {
+    const input = validInput();
+    fullReport(input).vulnerabilities["eslint-plugin-import"].effects.push("eslint");
+    expectRejected(input, /effects contains an edge not proven by via: eslint/);
+  });
+
+  it("rejects a forward edge to an absent vulnerability package", () => {
+    const input = validInput();
+    fullReport(input).vulnerabilities["eslint-config-next"].via.push("missing-package");
+    expectRejected(input, /via references absent package missing-package/);
   });
 
   it("rejects a newly reported development vulnerability", () => {
@@ -218,7 +246,7 @@ describe("locked dependency audit mutation resistance", () => {
       effects: [],
       nodes: ["node_modules/new-dev-advisory"],
     };
-    expectRejected(input, /development vulnerability graph changed/);
+    expectRejected(input, /via references absent package some-package/);
   });
 
   it("rejects a clean full audit until the now-stale exception is removed", () => {

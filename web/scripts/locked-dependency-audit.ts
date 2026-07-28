@@ -204,7 +204,7 @@ export function normalizeVulnerabilityGraph(reportValue: unknown): NormalizedVul
     "audit report.vulnerabilities",
   );
 
-  return Object.entries(vulnerabilities)
+  const reportedGraph = Object.entries(vulnerabilities)
     .map(([key, rawValue]) => {
       const raw = assertPlainObject(rawValue, `vulnerabilities.${key}`);
       const viaRaw = raw.via;
@@ -233,6 +233,48 @@ export function normalizeVulnerabilityGraph(reportValue: unknown): NormalizedVul
       });
     })
     .sort((left, right) => left.name.localeCompare(right.name));
+
+  /*
+   * npm derives `effects` as the reverse index of the authoritative package
+   * references in `via`. Its audit service currently returns nondeterministic
+   * reverse attribution when several vulnerable packages share a physical
+   * dependency node: otherwise-identical package/advisory/via/node graphs
+   * alternate which sibling receives the reverse edge. Rebuild that redundant
+   * index from `via`, but reject every reported effect that the forward graph
+   * does not prove. Advisory identity, package entries, ranges, forward edges,
+   * and physical nodes remain exact-match inputs.
+   */
+  const graphByName = new Map(reportedGraph.map((entry) => [entry.name, entry]));
+  const derivedEffects = new Map<string, Set<string>>();
+  for (const entry of reportedGraph) {
+    for (const via of entry.via) {
+      if (via.kind !== "package") continue;
+      const dependency = graphByName.get(via.name);
+      if (!dependency) {
+        throw new Error(
+          `vulnerabilities.${entry.name}.via references absent package ${via.name}`,
+        );
+      }
+      const effects = derivedEffects.get(via.name) ?? new Set<string>();
+      effects.add(entry.name);
+      derivedEffects.set(via.name, effects);
+    }
+  }
+  for (const entry of reportedGraph) {
+    const provenEffects = derivedEffects.get(entry.name) ?? new Set<string>();
+    for (const reportedEffect of entry.effects) {
+      if (!provenEffects.has(reportedEffect)) {
+        throw new Error(
+          `vulnerabilities.${entry.name}.effects contains an edge not proven by via: ${reportedEffect}`,
+        );
+      }
+    }
+  }
+
+  return reportedGraph.map((entry) => ({
+    ...entry,
+    effects: [...(derivedEffects.get(entry.name) ?? [])].sort(),
+  }));
 }
 
 function parseExpiration(expiresOn: string): number {
