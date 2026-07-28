@@ -64,6 +64,10 @@ export function createGovernedCallActionAuthority(): ConversationCallActionAutho
           // be derivable from public turn identities.
           ownerToken: randomUUID(),
         },
+        {
+          conversationId: input.scope.conversationId,
+          organizationId: input.scope.organizationId,
+        },
       );
     },
   };

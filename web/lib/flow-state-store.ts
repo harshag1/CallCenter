@@ -169,6 +169,11 @@ export type GovernedFlowActionArgs = FlowActionReservationArgs & {
   confirmation?: ConfirmationEvidence;
 };
 
+export type GovernedFlowActionConversationScope = Readonly<{
+  conversationId: string;
+  organizationId: string;
+}>;
+
 const DISPATCH_OWNER_LEASE_MS = 60_000;
 
 async function lockActiveCall(
@@ -363,6 +368,7 @@ export async function reserveGovernedFlowActionAtomic(
   callId: string,
   flow: AgentFlow,
   args: GovernedFlowActionArgs,
+  conversationScope?: GovernedFlowActionConversationScope,
 ): Promise<GovernedFlowActionResult | RuntimeError> {
   const invalid = actionReservationInputError(args);
   if (invalid) return invalid;
@@ -403,6 +409,32 @@ export async function reserveGovernedFlowActionAtomic(
         return { value: { error: "action policy input is invalid; reservation stopped fail-closed", code: "policy_evaluation_failed" } };
       }
 
+      const factsSha256 = hashFlowValue(args.facts);
+      const receiptsSha256 = hashFlowValue(args.receipts);
+      const confirmationSha256 = args.confirmation ? hashFlowValue(args.confirmation) : null;
+      if (conversationScope) {
+        await client.query(
+          `SELECT public.reserve_conversation_call_action_intent(
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+          )`,
+          [
+            args.receiptId,
+            callId,
+            conversationScope.conversationId,
+            conversationScope.organizationId,
+            args.invocationId,
+            args.runtimeDigest,
+            args.capabilityEpoch,
+            args.tool,
+            decision.policy_digest,
+            decision.arguments_sha256,
+            factsSha256,
+            receiptsSha256,
+            confirmationSha256,
+          ],
+        );
+      }
+
       let mutation: LockedFlowMutation<AtomicActionReservation | RuntimeError> = {
         value: { error: `action policy ${decision.decision}: ${decision.reason}`, code: `policy_${decision.decision}` },
       };
@@ -415,9 +447,9 @@ export async function reserveGovernedFlowActionAtomic(
         stateRevision: decision.state_revision,
         capabilityEpoch: decision.capability_epoch,
         argumentsSha256: decision.arguments_sha256,
-        factsSha256: hashFlowValue(args.facts),
-        receiptsSha256: hashFlowValue(args.receipts),
-        confirmationSha256: args.confirmation ? hashFlowValue(args.confirmation) : null,
+        factsSha256,
+        receiptsSha256,
+        confirmationSha256,
         priorCallCount,
         evaluatedAt: evaluatedAt.toISOString(),
       });
@@ -430,8 +462,8 @@ export async function reserveGovernedFlowActionAtomic(
           decision.decision, decision.reason, decision.effect, decision.policy_digest,
           decision.state_head_sha256, decision.state_revision, decision.capability_epoch,
           decision.arguments_sha256, decision.proposal_digest, decision.challenge_digest,
-          JSON.stringify(decision.evidence_sha256), hashFlowValue(args.facts),
-          hashFlowValue(args.receipts), args.confirmation ? hashFlowValue(args.confirmation) : null,
+          JSON.stringify(decision.evidence_sha256), factsSha256,
+          receiptsSha256, confirmationSha256,
           priorCallCount, authorityBundleDigest, decision.decision_digest, evaluatedAt,
         ]
       );

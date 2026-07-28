@@ -47,7 +47,7 @@ Use `createFlowCheckpointEvent` and `flowCheckpointIdempotencyKey` from `@/lib/f
 
 ## Admit an action
 
-Use `reserveGovernedFlowActionAtomic` from `@/lib/flow-state-store`. It locks the active call and Flow state, evaluates the supplied policy against the exact state digest/revision/epoch, database time, durable prior dispatch count, arguments, facts, receipts, and readback confirmation, then persists append-only evidence. Only an `allow` decision can reserve an action receipt, and both records commit in one database transaction.
+Use `reserveGovernedFlowActionAtomic` from `@/lib/flow-state-store`. It locks the active call and Flow state, evaluates the supplied policy against the exact state digest/revision/epoch, database time, durable prior dispatch count, arguments, facts, receipts, and readback confirmation, then persists append-only evidence. The conversation coordinator also supplies the host-derived conversation and organization scope: migration `036` locks the call's unique conversation attachment and records the complete action authority under the deterministic action identity in that same transaction. A retry must match the call, conversation, organization, invocation, and canonical digests of the policy, arguments, facts, receipts, and confirmation. Only an `allow` decision can reserve an action receipt.
 
 The returned public policy object exposes decision and binding digests, not the underlying evidence hashes. Callers should still use the existing dispatch-start and settlement APIs; post-dispatch policy evaluation is currently a pure kernel and has not yet replaced the live MCP settlement path.
 
@@ -59,7 +59,7 @@ Worker executors use the lower-level claim, heartbeat, checkpoint, settle, and c
 
 ## Current release boundary
 
-These APIs and migrations `033`–`035` are implemented and tested. They are not yet the default MCP/provider call path. Before enabling them for live traffic, add a shadow adapter that:
+These APIs and migrations `033`–`036` are implemented and tested. They are not yet the default MCP/provider call path. Before enabling them for live traffic, add a shadow adapter that:
 
 1. mirrors Flow checkpoints into the conversation log;
 2. compiles and injects the bounded packet on every authority change and reconnect;

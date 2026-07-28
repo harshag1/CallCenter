@@ -117,6 +117,11 @@ describe("PostgreSQL ConversationCallCoordinator composition", () => {
     expect(first.ownerToken).toMatch(/^[a-f0-9-]{36}$/);
     expect(replay.ownerToken).toMatch(/^[a-f0-9-]{36}$/);
     expect(replay.ownerToken).not.toBe(first.ownerToken);
+    expect(mocks.reserve.mock.calls[0][3]).toEqual({
+      conversationId: base.scope.conversationId,
+      organizationId: base.scope.organizationId,
+    });
+    expect(mocks.reserve.mock.calls[1][3]).toEqual(mocks.reserve.mock.calls[0][3]);
   });
 
   it("rejects action authority that drifts from the durable Flow checkpoint", async () => {

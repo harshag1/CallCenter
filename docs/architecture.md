@@ -63,7 +63,7 @@ All secured Flow v2 live-call actions converge on the scoped MCP gateway and are
 
 ## Data and tenancy
 
-Application data routes resolve an authenticated organization or a signed call scope before tenant access. Product datasets are represented by `datasets` and `dataset_rows`; public raw-SQL management is disabled. The 35 ordered migrations (`001`–`035`) revoke public/API-role access and enable and force RLS across the public and private application relations. Production still requires a separate non-owner, non-superuser, non-`BYPASSRLS` runtime login; connecting as the migration owner defeats that boundary. Postgres stores experiment assignments, schedules, logs, flow state, call events, transcripts, and browser-call recording metadata/objects. The supplied PSTN bridges do not persist audio.
+Application data routes resolve an authenticated organization or a signed call scope before tenant access. Product datasets are represented by `datasets` and `dataset_rows`; public raw-SQL management is disabled. The 36 ordered migrations (`001`–`036`) revoke public/API-role access and enable and force RLS across the public and private application relations. Production still requires a separate non-owner, non-superuser, non-`BYPASSRLS` runtime login; connecting as the migration owner defeats that boundary. Postgres stores experiment assignments, schedules, logs, flow state, call events, transcripts, and browser-call recording metadata/objects. The supplied PSTN bridges do not persist audio.
 
 ## Deployment boundaries
 

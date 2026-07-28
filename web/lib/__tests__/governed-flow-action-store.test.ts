@@ -35,6 +35,9 @@ const client = {
         rowCount: 1,
       };
     }
+    if (sql.includes("reserve_conversation_call_action_intent")) {
+      return { rows: [{ reserve_conversation_call_action_intent: true }], rowCount: 1 };
+    }
     if (sql.includes("INSERT INTO flow_action_receipts")) return { rows: [], rowCount: 1 };
     if (sql.includes("append_flow_action_policy_decision")) return { rows: [{ append_flow_action_policy_decision: params[0] }], rowCount: 1 };
     if (sql.includes("UPDATE flow_runs SET state")) {
@@ -222,6 +225,42 @@ describe("governed Flow action admission", () => {
     expect(result.policy).toMatchObject({ decision: "deny", reason: "call_limit_reached" });
     expect(result.reservation).toBeUndefined();
   });
+
+  it("binds coordinator scope and complete replay evidence before any reservation", async () => {
+    const callId = randomUUID();
+    const conversationId = randomUUID();
+    const organizationId = randomUUID();
+    const governedArgs = args();
+    const result = await reserveGovernedFlowActionAtomic(
+      callId,
+      flow,
+      governedArgs,
+      { conversationId, organizationId },
+    );
+    if ("error" in result) throw new Error(result.error);
+
+    const intent = harness.calls.find(({ sql }) =>
+      sql.includes("reserve_conversation_call_action_intent"));
+    expect(intent?.params).toEqual([
+      governedArgs.receiptId,
+      callId,
+      conversationId,
+      organizationId,
+      governedArgs.invocationId,
+      governedArgs.runtimeDigest,
+      governedArgs.capabilityEpoch,
+      governedArgs.tool,
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+      hashFlowValue(governedArgs.facts),
+      hashFlowValue(governedArgs.receipts),
+      null,
+    ]);
+    expect(harness.calls.findIndex(({ sql }) =>
+      sql.includes("reserve_conversation_call_action_intent"))).toBeLessThan(
+      harness.calls.findIndex(({ sql }) => sql.includes("append_flow_action_policy_decision")),
+    );
+  });
 });
 
 describe("flow action policy decision database contract", () => {
@@ -243,5 +282,39 @@ describe("flow action policy decision database contract", () => {
     expect(sql).toMatch(/reservation_receipt_id IS NULL OR decision = 'allow'/);
     expect(sql).toMatch(/jsonb_array_length\(evidence_sha256\) <= 256/);
     expect(sql).toMatch(/receipt\.capability_epoch <> flow_capability_epoch/);
+  });
+});
+
+describe("036 conversation-scoped action intent contract", () => {
+  const sql = readFileSync(
+    new URL("../../migrations/036_conversation_call_action_intents.sql", import.meta.url),
+    "utf8",
+  );
+
+  it("locks the unique call attachment before admitting coordinator action authority", () => {
+    expect(sql).toMatch(/FROM public\.voice_conversation_calls\s+WHERE call_id = call_identity\s+FOR KEY SHARE/);
+    expect(sql).toMatch(/binding\.conversation_id <> conversation_identity/);
+    expect(sql).toMatch(/binding\.org_id <> organization_identity/);
+    expect(sql).toMatch(/MESSAGE = 'conversation_call_action_scope_mismatch'/);
+    expect(sql).toMatch(/FOREIGN KEY \(conversation_id, call_id\)/);
+    expect(sql).toMatch(/FOREIGN KEY \(conversation_id, org_id\)/);
+  });
+
+  it("accepts only an exact replay of policy, arguments, facts, receipts, and confirmation", () => {
+    expect(sql).toMatch(/intent\.policy_digest <> policy_sha256/);
+    expect(sql).toMatch(/intent\.arguments_sha256 <> arguments_digest/);
+    expect(sql).toMatch(/intent\.facts_sha256 <> facts_digest/);
+    expect(sql).toMatch(/intent\.receipts_sha256 <> receipts_digest/);
+    expect(sql).toMatch(/intent\.confirmation_sha256 IS DISTINCT FROM confirmation_digest/);
+    expect(sql).toMatch(/MESSAGE = 'conversation_call_action_replay_conflict'/);
+    expect(sql).toMatch(/UNIQUE \(call_id, invocation_id\)/);
+  });
+
+  it("keeps the intent ledger append-only and exposes only the admission function", () => {
+    expect(sql).toMatch(/BEFORE UPDATE OR DELETE ON public\.conversation_call_action_intents/);
+    expect(sql).toMatch(/ALTER TABLE public\.conversation_call_action_intents FORCE ROW LEVEL SECURITY/);
+    expect(sql).toMatch(/REVOKE ALL ON public\.conversation_call_action_intents FROM PUBLIC/);
+    expect(sql).toMatch(/SECURITY DEFINER SET search_path = pg_catalog, public/);
+    expect(sql).toMatch(/GRANT EXECUTE ON FUNCTION public\.reserve_conversation_call_action_intent/);
   });
 });
