@@ -76,7 +76,7 @@ function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor 
       const controlPlaneHeadSha256 = sha256Hex(`head:${inputs.length}`);
       const projectionBody = {
         schema_version: 1 as const,
-        bridge_version: "lc4-dev-gateway-bridge-v1" as const,
+        bridge_version: "lc4-dev-gateway-bridge-v2" as const,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: input.episode_id,
         opportunity_id: input.opportunity_id,
@@ -118,6 +118,10 @@ function dispatchEvent(
   provider: "openai" | "xai",
   responseId = "response-1",
   callId = "call-1",
+  semanticInput: Readonly<{ tool_name: string; arguments: Readonly<Record<string, unknown>> }> = {
+    tool_name: "complete_current_stage",
+    arguments: {},
+  },
 ): NormalizedRealtimeEvent {
   const provenance = Object.freeze({
     schemaVersion: 1 as const,
@@ -139,8 +143,8 @@ function dispatchEvent(
       request: {
         method: "tools/call",
         params: {
-          name: "complete_current_stage",
-          arguments: {},
+          name: semanticInput.tool_name,
+          arguments: semanticInput.arguments,
           _meta: {
             [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: callId,
             [PROVIDER_PROVENANCE_META_KEY]: provenance,
@@ -302,10 +306,17 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
   });
 
   it.each([
-    { tool_name: "archive.complete_stage", arguments: {} },
-    { tool_name: "complete_current_stage", arguments: { stage_id: "stage.intake" } },
-  ])("rejects open action names and hidden argument overrides before execution", async ({ tool_name, arguments: args }) => {
-    const client = new FakeClient("gemini");
+    { provider: "openai" as const, tool_name: "archive.complete_stage", arguments: {}, code: "unknown_semantic_intent" },
+    { provider: "xai" as const, tool_name: "complete_current_stage", arguments: { stage_id: "stage.intake" }, code: "model_arguments_forbidden" },
+    { provider: "gemini" as const, tool_name: "archive.complete_stage", arguments: {}, code: "unknown_semantic_intent" },
+    { provider: "gemini" as const, tool_name: "complete_current_stage", arguments: { stage_id: "stage.intake" }, code: "model_arguments_forbidden" },
+  ])("returns a bounded rejection for $provider semantic mistakes without executing", async ({
+    provider,
+    tool_name,
+    arguments: args,
+    code,
+  }) => {
+    const client = new FakeClient(provider);
     const failures: Error[] = [];
     const inputs: Lc4DevGatewayExecutionInput[] = [];
     const coordinator = new Lc4DevGatewayTurnCoordinator({
@@ -313,25 +324,186 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       executor: executor(inputs),
       onFatal: (error) => failures.push(error),
     });
+    coordinator.beginOpportunity({ episode: episode(provider, "hacc"), opportunity });
+    if (provider === "gemini") {
+      coordinator.observe({
+        type: "tool.calls",
+        provider: "gemini",
+        receivedAtMs: 1,
+        wireType: "toolCall",
+        responseId: "gemini-response-bad",
+        calls: [{
+          callId: "gemini-call-bad",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name, arguments: args }),
+          argumentsJson: { tool_name, arguments: args },
+          responseId: "gemini-response-bad",
+          terminalWireType: "toolCall",
+        }],
+      });
+    } else {
+      coordinator.observe(dispatchEvent(
+        provider,
+        `${provider}-response-bad`,
+        `${provider}-call-bad`,
+        { tool_name, arguments: args },
+      ));
+    }
+    const evidence = await coordinator.finishOpportunity();
+    expect(failures).toEqual([]);
+    expect(inputs).toEqual([]);
+    expect(client.operations).toEqual(["submit:false", "create"]);
+    expect(client.submitted).toHaveLength(1);
+    expect(client.submitted[0]?.results[0]?.output).toMatchObject({
+      ok: false,
+      code: "capability_request_rejected",
+      reason: code,
+      executed: false,
+      retriable: true,
+    });
+    expect(evidence.receipts).toEqual([]);
+    expect(evidence.authority_projections).toEqual([]);
+    expect(evidence.pre_dispatch_rejections).toHaveLength(1);
+    expect(evidence.pre_dispatch_rejections[0]).toMatchObject({
+      rejection_code: code,
+      executor_invoked: false,
+      authority_effect: "none",
+    });
+    expect(JSON.stringify(evidence.pre_dispatch_rejections)).not.toContain(tool_name);
+  });
+
+  it("rejects a mixed batch atomically before any valid sibling executes", async () => {
+    const client = new FakeClient("gemini");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: () => undefined,
+    });
     coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
     coordinator.observe({
       type: "tool.calls",
       provider: "gemini",
       receivedAtMs: 1,
       wireType: "toolCall",
-      responseId: "gemini-response-bad",
-      calls: [{
-        callId: "gemini-call-bad",
-        name: "capability_gateway",
-        argumentsText: JSON.stringify({ tool_name, arguments: args }),
-        argumentsJson: { tool_name, arguments: args },
-        responseId: "gemini-response-bad",
-        terminalWireType: "toolCall",
-      }],
+      responseId: "gemini-mixed-response",
+      calls: [
+        {
+          callId: "gemini-valid",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+          argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
+          responseId: "gemini-mixed-response",
+          terminalWireType: "toolCall",
+        },
+        {
+          callId: "gemini-invalid",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name: "archive.complete_stage", arguments: {} }),
+          argumentsJson: { tool_name: "archive.complete_stage", arguments: {} },
+          responseId: "gemini-mixed-response",
+          terminalWireType: "toolCall",
+        },
+      ],
     });
-    await expect(coordinator.finishOpportunity()).rejects.toThrow();
-    expect(failures).toHaveLength(1);
+    const evidence = await coordinator.finishOpportunity();
     expect(inputs).toEqual([]);
+    expect(client.submitted[0]?.results.map((result) => result.callId))
+      .toEqual(["gemini-valid", "gemini-invalid"]);
+    expect(evidence.pre_dispatch_rejections.map((item) => item.rejection_code))
+      .toEqual(["batch_rejected_invalid_member", "unknown_semantic_intent"]);
+  });
+
+  it("forbids executable tool authority during bounded speech repair", async () => {
+    const client = new FakeClient("openai");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: () => undefined,
+    });
+    coordinator.beginOpportunity({
+      episode: episode("openai", "hacc"),
+      opportunity,
+      phase: "repair",
+    });
+    coordinator.observe(dispatchEvent("openai"));
+    const evidence = await coordinator.finishOpportunity();
+    expect(inputs).toEqual([]);
+    expect(evidence.authority_projections).toEqual([]);
+    expect(evidence.pre_dispatch_rejections).toHaveLength(1);
+    expect(evidence.pre_dispatch_rejections[0]).toMatchObject({
+      phase: "repair",
+      rejection_code: "tool_calls_forbidden_during_repair",
+      authority_effect: "none",
+    });
+    expect(client.operations).toEqual(["submit:false", "create"]);
+  });
+
+  it("keeps normalized dispatch provenance mismatches fatal", async () => {
+    const client = new FakeClient("openai");
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor([]),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("openai", "hacc"), opportunity });
+    const original = dispatchEvent("openai") as Extract<
+      NormalizedRealtimeEvent,
+      { type: "tool.dispatch" }
+    >;
+    const forged: Extract<NormalizedRealtimeEvent, { type: "tool.dispatch" }> = {
+      ...original,
+      dispatches: [{
+        ...original.dispatches[0]!,
+        provenance: {
+          ...original.dispatches[0]!.provenance,
+          nativeCallId: "forged-call",
+        },
+      }],
+    };
+    coordinator.observe(forged);
+    await expect(coordinator.finishOpportunity()).rejects.toThrow("provenance is inconsistent");
+    expect(failures).toHaveLength(1);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 0,
+      rejection_count: 0,
+      fatal_class: "provenance",
+    });
+    expect(client.submitted).toEqual([]);
+  });
+
+  it("bounds semantic correction loops after three rejected batches", async () => {
+    const client = new FakeClient("gemini");
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor([]),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+    for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+      coordinator.observe({
+        type: "tool.calls",
+        provider: "gemini",
+        receivedAtMs: ordinal,
+        wireType: "toolCall",
+        responseId: "gemini-response-loop",
+        calls: [{
+          callId: `gemini-rejected-${ordinal}`,
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({ tool_name: "archive.complete_stage", arguments: {} }),
+          argumentsJson: { tool_name: "archive.complete_stage", arguments: {} },
+          responseId: "gemini-response-loop",
+          terminalWireType: "toolCall",
+        }],
+      });
+    }
+    await expect(coordinator.finishOpportunity()).rejects.toThrow(
+      "exceeded three rejected provider tool batches",
+    );
+    expect(failures).toHaveLength(1);
     expect(client.submitted).toEqual([]);
   });
 });

@@ -3,22 +3,31 @@ import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artif
 import type { ProviderFunctionTool } from "./capability-gateway";
 import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import type { Lc4PublicDevOpportunity } from "./lc4-public-development-corpus";
+import {
+  createHaccProviderResponsePlanView,
+  type HaccResponsePlan,
+} from "./response-plan";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
-  RealtimeToolCall,
   RealtimeToolResult,
 } from "../realtime/client/types";
-import { LOCAL_TOOL_PROXY_FUNCTION_NAME } from "../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../realtime/client/types";
 
-export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v1" as const;
+export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v2" as const;
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
+const MAX_REJECTED_TOOL_BATCHES_PER_OPPORTUNITY = 3;
 const MAX_TOOL_CALLS_PER_BATCH = 16;
 const MAX_PROVIDER_RESULT_BYTES = 64 * 1024;
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v1\n";
-const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v1\n";
+const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v1\n";
+const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v2\n";
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 
 export const LC4_DEV_SEMANTIC_INTENTS = Object.freeze([
@@ -102,6 +111,73 @@ export function lc4DevSemanticIntentForAction(action: string): Lc4DevSemanticInt
     .find(([, candidate]) => candidate === action)?.[0] as Lc4DevSemanticIntent | undefined;
   if (!match) throw new Error(`LC4-DEV action ${action} has no closed semantic intent`);
   return match;
+}
+
+function semanticIntentsForActions(actions: readonly string[]): readonly Lc4DevSemanticIntent[] {
+  const actionSet = new Set(actions);
+  return Object.freeze(
+    LC4_DEV_SEMANTIC_INTENTS.filter((intent) => actionSet.has(LC4_DEV_INTENT_ACTION_MAP[intent])),
+  );
+}
+
+function lc4DevGatewayContract(eligibleSemanticIntents: readonly Lc4DevSemanticIntent[]): Readonly<{
+  function_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
+  tool_name_policy: "one_exact_eligible_semantic_intent";
+  arguments_policy: "exact_empty_object";
+  eligible_semantic_intents: readonly Lc4DevSemanticIntent[];
+}> {
+  return freeze({
+    function_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+    tool_name_policy: "one_exact_eligible_semantic_intent",
+    arguments_policy: "exact_empty_object",
+    eligible_semantic_intents: Object.freeze([...eligibleSemanticIntents]),
+  });
+}
+
+/**
+ * LC4's internal actions deliberately differ from the stable semantic names
+ * exposed by its single provider function. This projection removes internal
+ * implementation IDs (including non-callable flow.get_state) and commits the
+ * model-visible semantic frontier back to the authoritative plan SHA.
+ */
+export function renderLc4DevHaccResponsePlan(
+  plan: HaccResponsePlan,
+  phase: "canonical" | "repair" = "canonical",
+): string {
+  const providerView = createHaccProviderResponsePlanView(plan);
+  const {
+    eligible_actions: eligibleActions,
+    designated_reconciliation_actions: designatedReconciliationActions,
+    ...common
+  } = providerView;
+  const eligibleSemanticIntents = phase === "repair"
+    ? Object.freeze([]) as readonly Lc4DevSemanticIntent[]
+    : semanticIntentsForActions(eligibleActions);
+  const designatedReconciliationIntents = phase === "repair"
+    ? Object.freeze([]) as readonly Lc4DevSemanticIntent[]
+    : semanticIntentsForActions(designatedReconciliationActions);
+  const view = freeze({
+    ...common,
+    plan_type: "hacc-lc4-provider-response-plan.v1" as const,
+    phase,
+    advances_horizon: phase === "canonical",
+    eligible_semantic_intents: eligibleSemanticIntents,
+    designated_reconciliation_intents: designatedReconciliationIntents,
+    gateway_contract: lc4DevGatewayContract(eligibleSemanticIntents),
+  });
+  return `<hacc_response_plan>\n${canonicalJson(view)}\n</hacc_response_plan>`;
+}
+
+/** Native keeps its full context but receives the exact same callable vocabulary. */
+export function appendLc4DevNativeGatewayContract(
+  instructions: string,
+  phase: "canonical" | "repair" = "canonical",
+): string {
+  if (!instructions.trim()) throw new Error("LC4-DEV Native instructions are empty");
+  const contract = lc4DevGatewayContract(
+    phase === "canonical" ? LC4_DEV_SEMANTIC_INTENTS : Object.freeze([]),
+  );
+  return `${instructions}\n<lc4_gateway_contract>\n${canonicalJson(contract)}\n</lc4_gateway_contract>`;
 }
 
 type Arm = Lc4DevLiveEpisodePlan["arm"];
@@ -198,15 +274,54 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   receipt_sha256: string;
 }>;
 
+export const LC4_DEV_PRE_DISPATCH_REJECTION_CODES = Object.freeze([
+  "unknown_semantic_intent",
+  "model_arguments_forbidden",
+  "malformed_semantic_request",
+  "batch_rejected_invalid_member",
+  "tool_calls_forbidden_during_repair",
+] as const);
+
+export type Lc4DevPreDispatchRejectionCode =
+  typeof LC4_DEV_PRE_DISPATCH_REJECTION_CODES[number];
+
+/**
+ * A correlatable model-authored request that was refused before executable
+ * authority existed. It is intentionally separate from authority projections:
+ * a malformed attempt cannot satisfy an obligation or be mistaken for a
+ * ToolWorld transition.
+ */
+export type Lc4DevSanitizedGatewayRejection = Readonly<{
+  schema_version: 1;
+  bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
+  opportunity_id: string;
+  phase: "canonical" | "repair";
+  provider: Lc4DevLiveEpisodePlan["provider"];
+  arm: Arm;
+  batch_ordinal: number;
+  call_ordinal: number;
+  rejection_code: Lc4DevPreDispatchRejectionCode;
+  provider_call_id_sha256: string;
+  provider_response_id_sha256: string;
+  request_sha256: string;
+  provider_provenance_sha256: string;
+  provider_output_sha256: string;
+  executor_invoked: false;
+  authority_effect: "none";
+  rejection_receipt_sha256: string;
+}>;
+
 export type Lc4DevGatewayReceiptSet = Readonly<{
   receipts: readonly Lc4DevSanitizedGatewayReceipt[];
   authority_projections: readonly Lc4DevGatewayAuthorityProjection[];
+  pre_dispatch_rejections: readonly Lc4DevSanitizedGatewayRejection[];
   receipt_set_sha256: string;
 }>;
 
 type OpportunityContext = Readonly<{
   episode: Lc4DevLiveEpisodePlan;
   opportunity: Lc4PublicDevOpportunity;
+  phase: "canonical" | "repair";
 }>;
 
 type ExecutableCall = Readonly<{
@@ -218,6 +333,21 @@ type ExecutableCall = Readonly<{
   request_sha256: string;
   provider_provenance_sha256: string;
 }>;
+
+type CandidateCall = Readonly<{
+  call_id: string;
+  response_id: string;
+  semantic_input: unknown;
+  request_sha256: string;
+  provider_provenance_sha256: string;
+}>;
+
+type RejectedCall = Readonly<{
+  candidate: CandidateCall;
+  rejection_code: Lc4DevPreDispatchRejectionCode;
+}>;
+
+class Lc4DevGatewayProvenanceError extends Error {}
 
 function freeze<T>(value: T): T {
   return immutableJson(value) as unknown as T;
@@ -236,55 +366,33 @@ function providerOutputSnapshot(value: JsonValue): JsonValue {
   return frozen;
 }
 
-function normalizedGeminiCall(call: RealtimeToolCall): ExecutableCall {
-  if (call.name !== "capability_gateway") {
-    throw new Error("LC4-DEV Gemini attempted a function outside capability_gateway");
-  }
-  if (call.argumentsError || call.argumentsJson === null) {
-    throw new Error("LC4-DEV Gemini capability_gateway arguments are malformed");
-  }
-  const parsed = normalizeSemanticCall(call.argumentsJson);
-  const requestBody = {
-    method: "tools/call" as const,
-    params: { name: parsed.semantic_intent, arguments: parsed.target_arguments },
-  };
-  const provenance = {
-    provider: "gemini" as const,
-    response_id: call.responseId,
-    call_id: call.callId,
-    item_id: call.itemId ?? null,
-    terminal_event_id: call.terminalEventId ?? null,
-    terminal_wire_type: call.terminalWireType,
-  };
-  return freeze({
-    call_id: call.callId,
-    response_id: call.responseId,
-    semantic_intent: parsed.semantic_intent,
-    target_tool: parsed.target_tool,
-    target_arguments: parsed.target_arguments,
-    request_sha256: sha256Hex(canonicalJson(requestBody)),
-    provider_provenance_sha256: sha256Hex(canonicalJson(provenance)),
-  });
-}
-
-function callsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
+function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
+  provider: Lc4DevLiveEpisodePlan["provider"];
   response_id: string;
-  calls: readonly ExecutableCall[];
+  calls: readonly CandidateCall[];
 }> | null {
   if (event.type === "tool.dispatch") {
     return Object.freeze({
+      provider: event.provider,
       response_id: event.responseId,
       calls: Object.freeze(event.dispatches.map((dispatch) => {
-        const parsed = normalizeSemanticCall({
-          tool_name: dispatch.request.params.name,
-          arguments: dispatch.request.params.arguments,
-        });
+        const metadata = dispatch.request.params._meta;
+        if (dispatch.provenance.provider !== event.provider
+          || dispatch.provenance.nativeCallId !== dispatch.callId
+          || dispatch.provenance.nativeResponseId !== event.responseId
+          || metadata[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY] !== dispatch.callId
+          || canonicalJson(metadata[PROVIDER_PROVENANCE_META_KEY]) !== canonicalJson(dispatch.provenance)) {
+          throw new Lc4DevGatewayProvenanceError(
+            "LC4-DEV local gateway dispatch provenance is inconsistent",
+          );
+        }
         return freeze({
           call_id: dispatch.callId,
           response_id: event.responseId,
-          semantic_intent: parsed.semantic_intent,
-          target_tool: parsed.target_tool,
-          target_arguments: parsed.target_arguments,
+          semantic_input: {
+            tool_name: dispatch.request.params.name,
+            arguments: dispatch.request.params.arguments,
+          },
           request_sha256: sha256Hex(canonicalJson(dispatch.request)),
           provider_provenance_sha256: sha256Hex(canonicalJson(dispatch.provenance)),
         });
@@ -293,11 +401,77 @@ function callsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
   }
   if (event.type === "tool.calls" && event.provider === "gemini") {
     return Object.freeze({
+      provider: event.provider,
       response_id: event.responseId,
-      calls: Object.freeze(event.calls.map(normalizedGeminiCall)),
+      calls: Object.freeze(event.calls.map((call) => {
+        if (call.name !== "capability_gateway") {
+          throw new Error("LC4-DEV Gemini attempted a function outside capability_gateway");
+        }
+        if (call.argumentsError || call.argumentsJson === null) {
+          throw new Error("LC4-DEV Gemini capability_gateway arguments are malformed");
+        }
+        const requestBody = {
+          method: "tools/call" as const,
+          params: { name: call.name, arguments: call.argumentsJson },
+        };
+        const provenance = {
+          provider: "gemini" as const,
+          response_id: call.responseId,
+          call_id: call.callId,
+          item_id: call.itemId ?? null,
+          terminal_event_id: call.terminalEventId ?? null,
+          terminal_wire_type: call.terminalWireType,
+        };
+        return freeze({
+          call_id: call.callId,
+          response_id: call.responseId,
+          semantic_input: call.argumentsJson,
+          request_sha256: sha256Hex(canonicalJson(requestBody)),
+          provider_provenance_sha256: sha256Hex(canonicalJson(provenance)),
+        });
+      })),
     });
   }
   return null;
+}
+
+function classifySemanticCall(candidate: CandidateCall):
+  | Readonly<{ ok: true; call: ExecutableCall }>
+  | Readonly<{ ok: false; rejection_code: Lc4DevPreDispatchRejectionCode }> {
+  const input = candidate.semantic_input;
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return Object.freeze({ ok: false, rejection_code: "malformed_semantic_request" });
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== 2 || keys[0] !== "arguments" || keys[1] !== "tool_name") {
+    return Object.freeze({ ok: false, rejection_code: "malformed_semantic_request" });
+  }
+  if (typeof record.tool_name !== "string"
+    || !(LC4_DEV_SEMANTIC_INTENTS as readonly string[]).includes(record.tool_name)) {
+    return Object.freeze({ ok: false, rejection_code: "unknown_semantic_intent" });
+  }
+  if (record.arguments === null
+    || typeof record.arguments !== "object"
+    || Array.isArray(record.arguments)) {
+    return Object.freeze({ ok: false, rejection_code: "malformed_semantic_request" });
+  }
+  if (Object.keys(record.arguments as Record<string, unknown>).length !== 0) {
+    return Object.freeze({ ok: false, rejection_code: "model_arguments_forbidden" });
+  }
+  const parsed = normalizeSemanticCall(input);
+  return Object.freeze({
+    ok: true,
+    call: freeze({
+      call_id: candidate.call_id,
+      response_id: candidate.response_id,
+      semantic_intent: parsed.semantic_intent,
+      target_tool: parsed.target_tool,
+      target_arguments: parsed.target_arguments,
+      request_sha256: candidate.request_sha256,
+      provider_provenance_sha256: candidate.provider_provenance_sha256,
+    }),
+  });
 }
 
 /**
@@ -315,8 +489,10 @@ export class Lc4DevGatewayTurnCoordinator {
   #fatal: Error | null = null;
   #fatalClass: "none" | "parse" | "provenance" | "execution" | "delivery" | "unknown" = "none";
   #batchOrdinal = 0;
+  #rejectedBatchCount = 0;
   #receipts: Lc4DevSanitizedGatewayReceipt[] = [];
   #authorityProjections: Lc4DevGatewayAuthorityProjection[] = [];
+  #preDispatchRejections: Lc4DevSanitizedGatewayRejection[] = [];
   #toolResponseIds = new Set<string>();
   #seenCallIds = new Set<string>();
 
@@ -331,35 +507,46 @@ export class Lc4DevGatewayTurnCoordinator {
     this.#onFatal = input.onFatal;
   }
 
-  beginOpportunity(context: OpportunityContext): void {
+  beginOpportunity(context: Omit<OpportunityContext, "phase"> & Readonly<{
+    phase?: OpportunityContext["phase"];
+  }>): void {
     if (this.#context !== null) throw new Error("LC4-DEV gateway coordinator already has an active opportunity");
     if (this.#fatal) throw this.#fatal;
-    if (this.#batchOrdinal !== 0 || this.#receipts.length !== 0 || this.#authorityProjections.length !== 0 || this.#toolResponseIds.size !== 0) {
+    if (this.#batchOrdinal !== 0
+      || this.#rejectedBatchCount !== 0
+      || this.#receipts.length !== 0
+      || this.#authorityProjections.length !== 0
+      || this.#preDispatchRejections.length !== 0
+      || this.#toolResponseIds.size !== 0) {
       throw new Error("LC4-DEV gateway coordinator state was not sealed after the prior opportunity");
     }
-    this.#context = context;
+    this.#context = Object.freeze({ ...context, phase: context.phase ?? "canonical" });
   }
 
   observe(event: NormalizedRealtimeEvent): void {
-    let batch: ReturnType<typeof callsFromEvent>;
+    let batch: ReturnType<typeof candidateCallsFromEvent>;
     try {
-      batch = callsFromEvent(event);
+      batch = candidateCallsFromEvent(event);
     } catch (error) {
-      this.#fail(error, "parse");
+      this.#fail(error, error instanceof Lc4DevGatewayProvenanceError ? "provenance" : "parse");
       return;
     }
     if (batch === null) return;
-    const { calls } = batch;
+    const { calls: candidates } = batch;
     const context = this.#context;
     if (!context) {
       this.#fail(new Error("LC4-DEV provider emitted a tool batch outside an active opportunity"), "provenance");
       return;
     }
-    if (calls.length === 0 || calls.length > MAX_TOOL_CALLS_PER_BATCH) {
+    if (batch.provider !== context.episode.provider) {
+      this.#fail(new Error("LC4-DEV provider tool batch differs from the active episode"), "provenance");
+      return;
+    }
+    if (candidates.length === 0 || candidates.length > MAX_TOOL_CALLS_PER_BATCH) {
       this.#fail(new Error("LC4-DEV provider tool batch is empty or exceeds 16 calls"), "provenance");
       return;
     }
-    const responseIds = new Set(calls.map((call) => call.response_id));
+    const responseIds = new Set(candidates.map((call) => call.response_id));
     if (responseIds.size !== 1 || !responseIds.has(batch.response_id)) {
       this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"), "provenance");
       return;
@@ -372,7 +559,7 @@ export class Lc4DevGatewayTurnCoordinator {
       this.#fail(new Error("LC4-DEV opportunity exceeded eight provider tool batches"), "provenance");
       return;
     }
-    for (const call of calls) {
+    for (const call of candidates) {
       if (this.#seenCallIds.has(call.call_id)) {
         this.#fail(new Error("LC4-DEV provider reused a tool call identity"), "provenance");
         return;
@@ -385,7 +572,35 @@ export class Lc4DevGatewayTurnCoordinator {
     // one-executable-batch-per-response invariant above.
     this.#toolResponseIds.add(batch.response_id);
     const batchOrdinal = ++this.#batchOrdinal;
-    this.#queue = this.#queue.then(() => this.#executeBatch(context, batchOrdinal, calls!)).catch((error) => {
+    const classified = context.phase === "repair"
+      ? candidates.map(() => Object.freeze({
+          ok: false as const,
+          rejection_code: "tool_calls_forbidden_during_repair" as const,
+        }))
+      : candidates.map(classifySemanticCall);
+    const rejectedMember = classified.find((entry) => !entry.ok);
+    if (rejectedMember) {
+      this.#rejectedBatchCount += 1;
+      if (this.#rejectedBatchCount > MAX_REJECTED_TOOL_BATCHES_PER_OPPORTUNITY) {
+        this.#fail(new Error("LC4-DEV opportunity exceeded three rejected provider tool batches"), "provenance");
+        return;
+      }
+      const rejectedCalls = Object.freeze(classified.map((entry, index): RejectedCall => Object.freeze({
+        candidate: candidates[index]!,
+        rejection_code: entry.ok ? "batch_rejected_invalid_member" : entry.rejection_code,
+      })));
+      this.#queue = this.#queue.then(
+        () => this.#rejectBatch(context, batchOrdinal, rejectedCalls),
+      ).catch((error) => {
+        this.#fail(error, "delivery");
+      });
+      return;
+    }
+    const executableCalls = Object.freeze(classified.map((entry) => {
+      if (!entry.ok) throw new Error("LC4-DEV semantic batch classification changed after admission");
+      return entry.call;
+    }));
+    this.#queue = this.#queue.then(() => this.#executeBatch(context, batchOrdinal, executableCalls)).catch((error) => {
       this.#fail(error, "execution");
     });
   }
@@ -398,11 +613,13 @@ export class Lc4DevGatewayTurnCoordinator {
   diagnosticSnapshot(): Readonly<{
     batch_count: number;
     receipt_count: number;
+    rejection_count: number;
     fatal_class: "none" | "parse" | "provenance" | "execution" | "delivery" | "unknown";
   }> {
     return Object.freeze({
       batch_count: this.#batchOrdinal,
       receipt_count: this.#receipts.length,
+      rejection_count: this.#preDispatchRejections.length,
       fatal_class: this.#fatalClass,
     });
   }
@@ -413,16 +630,80 @@ export class Lc4DevGatewayTurnCoordinator {
     if (this.#fatal) throw this.#fatal;
     const receipts = Object.freeze([...this.#receipts]);
     const authorityProjections = Object.freeze([...this.#authorityProjections]);
-    const receiptSetSha256 = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson({ receipts, authority_projections: authorityProjections })}`);
+    const preDispatchRejections = Object.freeze([...this.#preDispatchRejections]);
+    const receiptSetSha256 = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson({
+      receipts,
+      authority_projections: authorityProjections,
+      pre_dispatch_rejections: preDispatchRejections,
+    })}`);
     this.#context = null;
     this.#batchOrdinal = 0;
+    this.#rejectedBatchCount = 0;
     this.#receipts = [];
     this.#authorityProjections = [];
+    this.#preDispatchRejections = [];
     this.#toolResponseIds = new Set();
     this.#seenCallIds = new Set();
     this.#queue = Promise.resolve();
     this.#fatalClass = "none";
-    return Object.freeze({ receipts, authority_projections: authorityProjections, receipt_set_sha256: receiptSetSha256 });
+    return Object.freeze({
+      receipts,
+      authority_projections: authorityProjections,
+      pre_dispatch_rejections: preDispatchRejections,
+      receipt_set_sha256: receiptSetSha256,
+    });
+  }
+
+  async #rejectBatch(
+    context: OpportunityContext,
+    batchOrdinal: number,
+    calls: readonly RejectedCall[],
+  ): Promise<void> {
+    if (this.#fatal) throw this.#fatal;
+    const results: RealtimeToolResult[] = [];
+    for (const [index, call] of calls.entries()) {
+      const rejectionBody = freeze({
+        schema_version: 1 as const,
+        bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+        opportunity_id: context.opportunity.id,
+        phase: context.phase,
+        provider: context.episode.provider,
+        arm: context.episode.arm,
+        batch_ordinal: batchOrdinal,
+        call_ordinal: index + 1,
+        rejection_code: call.rejection_code,
+        provider_call_id_sha256: sha256Hex(call.candidate.call_id),
+        provider_response_id_sha256: sha256Hex(call.candidate.response_id),
+        request_sha256: call.candidate.request_sha256,
+        provider_provenance_sha256: call.candidate.provider_provenance_sha256,
+        executor_invoked: false as const,
+        authority_effect: "none" as const,
+      });
+      const rejectionReceiptSha256 = sha256Hex(
+        `${REJECTION_RECEIPT_DOMAIN}${canonicalJson(rejectionBody)}`,
+      );
+      const providerOutput = providerOutputSnapshot(freeze({
+        ok: false,
+        code: "capability_request_rejected",
+        reason: call.rejection_code,
+        retriable: true,
+        executed: false,
+        rejection_receipt_sha256: rejectionReceiptSha256,
+      }));
+      results.push({ callId: call.candidate.call_id, output: providerOutput });
+      this.#preDispatchRejections.push(freeze({
+        ...rejectionBody,
+        provider_output_sha256: sha256Hex(canonicalJson(providerOutput)),
+        rejection_receipt_sha256: rejectionReceiptSha256,
+      }));
+    }
+    try {
+      this.#client.submitToolResults(Object.freeze(results), false);
+      this.#client.createResponse();
+    } catch (error) {
+      this.#fail(error, "delivery");
+      throw error;
+    }
   }
 
   async #executeBatch(

@@ -134,7 +134,7 @@ describe("LC4-DEV municipal executable control plane", () => {
                   ? { invocation_id: "model-forged-invocation" }
                   : { model_owned_slot: "forbidden" };
               const rejected = await control.gateway_executor.execute({
-                bridge_version: "lc4-dev-gateway-bridge-v1",
+                bridge_version: "lc4-dev-gateway-bridge-v2",
                 episode_id: plan.episode_id,
                 opportunity_id: opportunity.id,
                 opportunity_index: opportunity.index,
@@ -155,7 +155,7 @@ describe("LC4-DEV municipal executable control plane", () => {
               });
             }
             const gateway = await control.gateway_executor.execute({
-              bridge_version: "lc4-dev-gateway-bridge-v1",
+              bridge_version: "lc4-dev-gateway-bridge-v2",
               episode_id: plan.episode_id,
               opportunity_id: opportunity.id,
               opportunity_index: opportunity.index,
@@ -325,7 +325,7 @@ describe("LC4-DEV municipal executable control plane", () => {
       if (opportunity.events.some((event) => event.kind === "authoritative-reconciliation")) {
         callSequence += 1;
         rejectedLateMutation = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v1",
+          bridge_version: "lc4-dev-gateway-bridge-v2",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -341,7 +341,7 @@ describe("LC4-DEV municipal executable control plane", () => {
         });
         callSequence += 1;
         rejectedReconciliation = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v1",
+          bridge_version: "lc4-dev-gateway-bridge-v2",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -362,7 +362,7 @@ describe("LC4-DEV municipal executable control plane", () => {
         if (call.target_tool === "archive.submit_transcript_request") continue;
         callSequence += 1;
         await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v1",
+          bridge_version: "lc4-dev-gateway-bridge-v2",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -418,7 +418,7 @@ describe("LC4-DEV municipal executable control plane", () => {
       await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
       if (opportunity.index === 35) {
         const rejected = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v1",
+          bridge_version: "lc4-dev-gateway-bridge-v2",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,

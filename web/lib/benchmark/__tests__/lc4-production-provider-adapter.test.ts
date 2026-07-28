@@ -701,7 +701,19 @@ class ProviderFatalRealtimeClient extends FakeRealtimeClient {
 }
 
 class GatewayParseRealtimeClient extends FakeRealtimeClient {
+  #generation = 0;
+
+  override submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean) {
+    this.events.push(`submit:${String(createResponse)}`);
+    this.submittedToolResults.push({ results, createResponse });
+  }
+
   override createResponse() {
+    this.#generation += 1;
+    if (this.#generation > 1) {
+      super.createResponse();
+      return;
+    }
     this.events.push("create");
     this.wire("response.create", {});
     queueMicrotask(() => {
@@ -1295,24 +1307,28 @@ describe("LC4 production realtime adapter bridge", () => {
     await caughtFailure(fixture.session.close());
   });
 
-  it("classifies malformed gateway input without retaining arguments or raw provider IDs", async () => {
+  it("rejects a correlatable semantic mistake and continues without retaining raw provider data", async () => {
     const fixture = await openDevFailureFixture({ client: new GatewayParseRealtimeClient("openai", []) });
-    const error = await caughtFailure(fixture.session.exchange({
+    const evidence = await fixture.session.exchange({
       opportunity_id: fixture.opportunity_id,
       caller_pcm: fixture.caller_pcm,
       response_control: { kind: "hacc_response_plan", plan: responsePlan() },
-    }));
-    expect(error.failure).toMatchObject({
-      failure_stage: "gateway_dispatch",
-      failure_code: "gateway_fatal",
-      failure_class: "gateway",
-      gateway_batch_count: 0,
-      gateway_fatal_class: "parse",
-      response_generation_requested: true,
-      response_generation_started: true,
     });
-    expect(canonicalJson(error.failure)).not.toContain("SENTINEL");
-    await caughtFailure(fixture.session.close());
+    expect(evidence.dev_gateway_receipt_set?.receipts).toEqual([]);
+    expect(evidence.dev_gateway_receipt_set?.authority_projections).toEqual([]);
+    expect(evidence.dev_gateway_receipt_set?.pre_dispatch_rejections).toHaveLength(1);
+    expect(evidence.dev_gateway_receipt_set?.pre_dispatch_rejections[0]).toMatchObject({
+      rejection_code: "unknown_semantic_intent",
+      executor_invoked: false,
+      authority_effect: "none",
+    });
+    expect(canonicalJson(evidence.dev_gateway_receipt_set)).not.toContain("SENTINEL");
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("gateway-rejection-no-repair"),
+      repair_played: false,
+    });
+    await expect(fixture.session.close()).resolves.toHaveProperty("rotation_receipt_sha256");
   });
 
   it("retains a true provider timeout after a response request", async () => {
@@ -1471,8 +1487,10 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(delivered).toContain(
       `\"capability_catalog_sha256\":\"${authoritativePlan.capability_catalog_sha256}\"`,
     );
+    expect(delivered).toContain("\"eligible_semantic_intents\"");
+    expect(delivered).not.toContain("\"eligible_actions\"");
     for (const action of authoritativePlan.eligible_actions) {
-      expect(delivered).toContain(`\"${action}\"`);
+      expect(delivered).not.toContain(`\"${action}\"`);
     }
     expect(delivered).not.toContain("\"capability_catalog\"");
     expect(delivered).not.toContain("\"input_schema\"");
@@ -1861,7 +1879,7 @@ describe("LC4 production realtime adapter bridge", () => {
         const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };
         const projectionBody = {
           schema_version: 1 as const,
-          bridge_version: "lc4-dev-gateway-bridge-v1" as const,
+          bridge_version: "lc4-dev-gateway-bridge-v2" as const,
           redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
           episode_id: input.episode_id,
           opportunity_id: input.opportunity_id,

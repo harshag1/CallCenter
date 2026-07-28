@@ -7,7 +7,11 @@ import {
   type Lc4DevReplayLedgerEvent,
 } from "./lc4-development-evidence-retention";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
-import { assertHaccResponsePlan, renderHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
+import { assertHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
+import {
+  appendLc4DevNativeGatewayContract,
+  renderLc4DevHaccResponsePlan,
+} from "./lc4-development-gateway-bridge";
 import type { RealtimeWireObservation } from "../realtime/client/types";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 
@@ -383,7 +387,7 @@ async function resolveControl(
     if (sha256Hex(control.instructions) !== control.instructions_sha256) {
       throw new Error("control-stress Native rendered instructions differ from their retained hash");
     }
-    rendered = control.instructions;
+    rendered = appendLc4DevNativeGatewayContract(control.instructions);
   } else {
     if (canonicalJson(Object.keys(control).sort()) !== canonicalJson(["kind", "plan"])) {
       throw new Error("control-stress HACC source control shape is not production-exact");
@@ -391,7 +395,7 @@ async function resolveControl(
     if (control.kind !== "hacc_response_plan") throw new Error("control-stress HACC source lacks a response plan");
     const plan = control.plan as HaccResponsePlan;
     assertHaccResponsePlan(plan);
-    rendered = renderHaccResponsePlan(plan);
+    rendered = renderLc4DevHaccResponsePlan(plan);
   }
   return Object.freeze({
     source,

@@ -2,11 +2,14 @@ import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
 import type { Lc4DevMunicipalControlPlane } from "./lc4-development-control-plane";
 import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import {
+  appendLc4DevNativeGatewayContract,
+  renderLc4DevHaccResponsePlan,
+} from "./lc4-development-gateway-bridge";
+import {
   createLc4PublicDevelopmentCorpus,
   type Lc4PublicDevelopmentCorpus,
 } from "./lc4-public-development-corpus";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
-import { renderHaccResponsePlan } from "./response-plan";
 
 const REPORT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-response-control-preflight/v1\n";
@@ -76,8 +79,8 @@ function responseControlText(
   receipt: Awaited<ReturnType<Lc4DevMunicipalControlPlane["next"]>>,
 ): string {
   return receipt.response_control.kind === "hacc_response_plan"
-    ? renderHaccResponsePlan(receipt.response_control.plan)
-    : receipt.response_control.instructions;
+    ? renderLc4DevHaccResponsePlan(receipt.response_control.plan)
+    : appendLc4DevNativeGatewayContract(receipt.response_control.instructions);
 }
 
 export function assertLc4DevResponseControlFits(input: Readonly<{
@@ -130,7 +133,7 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         sequence,
       ].join(":");
       const result = await input.control.gateway_executor.execute({
-        bridge_version: "lc4-dev-gateway-bridge-v1",
+        bridge_version: "lc4-dev-gateway-bridge-v2",
         episode_id: input.episode.episode_id,
         opportunity_id: input.opportunity_id,
         opportunity_index: input.opportunity_index,

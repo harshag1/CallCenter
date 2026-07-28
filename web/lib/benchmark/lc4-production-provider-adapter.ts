@@ -45,9 +45,11 @@ import {
   type Lc4DevCallerBranchMatrixArtifact,
 } from "./lc4-development-caller-branch";
 import {
+  appendLc4DevNativeGatewayContract,
   isLc4DevSemanticGatewayFunction,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
+  renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
 } from "./lc4-development-gateway-bridge";
@@ -59,7 +61,7 @@ import type { LiveStsProvider } from "./live-sts-development-experiment";
 import { createProductionRealtimeClient } from "./production-realtime-provider";
 import type { Lc4DevBudgetLifecycle } from "./lc4-development-budget";
 import { LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES } from "./lc4-development-response-control-preflight";
-import { assertHaccResponsePlan, renderHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
+import { assertHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
   deliverRealtimePcm16,
@@ -1204,7 +1206,7 @@ export class Lc4RealtimeProviderBridge {
             throw new Error("native LC4 arm cannot receive the HACC response-plan intervention");
           }
           responsePlan = assertHaccResponsePlan(exchangeInput.response_control.plan);
-          renderedControl = renderHaccResponsePlan(responsePlan);
+          renderedControl = renderLc4DevHaccResponsePlan(responsePlan, playbackKind);
         } else {
           if (input.manifest.episode_shape.arm !== "native") {
             throw new Error("HACC LC4 arm requires a state-derived response plan");
@@ -1213,7 +1215,10 @@ export class Lc4RealtimeProviderBridge {
             || sha256Hex(exchangeInput.response_control.instructions) !== exchangeInput.response_control.instructions_sha256) {
             throw new Error("native LC4 response context hash mismatch");
           }
-          renderedControl = exchangeInput.response_control.instructions;
+          renderedControl = appendLc4DevNativeGatewayContract(
+            exchangeInput.response_control.instructions,
+            playbackKind,
+          );
         }
         const wireStart = wire.length;
         currentOpportunity = opportunityId;
@@ -1231,7 +1236,11 @@ export class Lc4RealtimeProviderBridge {
               ? pendingDevOpportunity.effective_opportunity
               : canonicalOpportunity;
           effectiveDevOpportunity = opportunity;
-          devGateway.beginOpportunity({ episode: input.dev_gateway.episode, opportunity });
+          devGateway.beginOpportunity({
+            episode: input.dev_gateway.episode,
+            opportunity,
+            phase: playbackKind,
+          });
         }
         const exchangeSignal = linkedAbortSignal(segmentAbort.signal, exchangeInput.signal);
         let providerInputAppended = false;
