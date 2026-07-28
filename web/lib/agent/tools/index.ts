@@ -3,7 +3,7 @@
 
 import Ajv, { type ValidateFunction } from "ajv";
 import type { OperatorTool, ToolCtx } from "../types";
-import type { ToolDef } from "../../xai";
+import type { BuilderToolDefinition } from "../builder-model";
 import { queryData, searchLogs } from "./data";
 import { listCalls, getCall, getRecording } from "./calls";
 import { listAgents, updateAgent } from "./agents";
@@ -19,6 +19,7 @@ import { listFiles, parseCsv, importCsv, runJs, setHoldMusic, externalJsSandboxC
 import { sendEmailTool, sendSmsTool } from "./comms";
 import { createFlowTool, updateFlowTool, openFlowTool, listFlowsTool, previewCampaignTool, runCampaignTool, listCampaignsTool, cancelCampaignTool, getRecallPolicy } from "./flows-tools";
 import { OPERATOR_TOOL_EXTENSIONS } from "./extensions";
+import { admitOperatorToolExtensions } from "./extension-contract";
 import { listIntegrations } from "./integrations";
 import { testFlowScenario, validateFlowTool } from "./flow-testing";
 import {
@@ -37,22 +38,11 @@ const FUNDED_BY_TOOL: Readonly<Record<string, FundedOperatorCapability>> = Objec
   run_campaign: "run_campaign",
 });
 
-type AnnotatedExtension = OperatorTool & Readonly<{
-  security?: Readonly<{
-    effect: "read" | "internal_write";
-    tenant_scoped: true;
-  }>;
-}>;
-
 /** Extensions without explicit non-external, tenant-scoped effect metadata are
  * not admitted. This keeps extensibility without treating source registration
  * as authority to spend or contact third parties. */
 function admittedExtensions(): OperatorTool[] {
-  return OPERATOR_TOOL_EXTENSIONS.filter((tool) => {
-    const security = (tool as AnnotatedExtension).security;
-    return security?.tenant_scoped === true
-      && (security.effect === "read" || security.effect === "internal_write");
-  });
+  return [...admitOperatorToolExtensions(OPERATOR_TOOL_EXTENSIONS)];
 }
 
 const DECLARED_TOOLS: OperatorTool[] = [
@@ -112,7 +102,7 @@ function safeWithoutContext(tool: OperatorTool): boolean {
     && tool.name !== "web_search";
 }
 
-function asToolDef(tool: OperatorTool): ToolDef {
+function asToolDef(tool: OperatorTool): BuilderToolDefinition {
   return {
     type: "function",
     function: { name: tool.name, description: tool.description, parameters: tool.parameters },
@@ -120,7 +110,7 @@ function asToolDef(tool: OperatorTool): ToolDef {
 }
 
 export type OperatorToolCatalog = Readonly<{
-  tools: readonly ToolDef[];
+  tools: readonly BuilderToolDefinition[];
   byName: ReadonlyMap<string, OperatorTool>;
 }>;
 
@@ -177,4 +167,4 @@ export const OPERATOR_TOOLS: readonly OperatorTool[] = DEFAULT_SAFE_TOOLS;
 export const byName: ReadonlyMap<string, OperatorTool> = new ImmutableMap(
   DEFAULT_SAFE_TOOLS.map((tool) => [tool.name, tool] as const)
 );
-export const toolDefs: readonly ToolDef[] = Object.freeze(DEFAULT_SAFE_TOOLS.map(asToolDef));
+export const toolDefs: readonly BuilderToolDefinition[] = Object.freeze(DEFAULT_SAFE_TOOLS.map(asToolDef));

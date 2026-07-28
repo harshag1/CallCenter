@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  chatStream: vi.fn(),
+  streamBuilderModel: vi.fn(),
   operatorPrompt: vi.fn(() => "system prompt"),
   operatorToolCatalog: vi.fn(),
   q: vi.fn(),
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
-vi.mock("../xai", () => ({ chatStream: mocks.chatStream }));
+vi.mock("../agent/builder-model", () => ({ streamBuilderModel: mocks.streamBuilderModel }));
 vi.mock("../agent/prompt", () => ({ operatorPrompt: mocks.operatorPrompt }));
 vi.mock("../agent/tools", () => ({ operatorToolCatalog: mocks.operatorToolCatalog }));
 vi.mock("../db", () => ({ q: mocks.q }));
@@ -112,7 +112,7 @@ describe("operator loop human-confirmation boundary", () => {
       } as never)),
     } satisfies OperatorTool;
     mocks.operatorToolCatalog.mockResolvedValue(catalog([sendEmail]));
-    mocks.chatStream.mockImplementation(() => stream([
+    mocks.streamBuilderModel.mockImplementation(() => stream([
       { type: "text", delta: "Sent — your member will receive it now." },
       {
         type: "tool_calls",
@@ -137,7 +137,7 @@ describe("operator loop human-confirmation boundary", () => {
     ));
 
     expect(sendEmail.execute).toHaveBeenCalledOnce();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events).toContainEqual({ type: "operator_action_confirmation", proposal });
     expect(events.some((event) => event.type === "text")).toBe(false);
     expect(JSON.stringify(events)).not.toContain("Sent —");
@@ -190,7 +190,7 @@ describe("operator loop human-confirmation boundary", () => {
       },
     ] satisfies OperatorTool[];
     mocks.operatorToolCatalog.mockResolvedValue(catalog(tools));
-    mocks.chatStream.mockImplementation(() => stream([{
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
       type: "tool_calls",
       calls: [
         { id: "funded", name: "send_sms", arguments: "{}" },
@@ -208,7 +208,7 @@ describe("operator loop human-confirmation boundary", () => {
 
     expect(fundedExecute).not.toHaveBeenCalled();
     expect(safeExecute).not.toHaveBeenCalled();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events.filter((event) => event.type === "tool" && event.status === "error"))
       .toHaveLength(2);
     expect(events).toContainEqual({
@@ -226,7 +226,7 @@ describe("operator loop human-confirmation boundary", () => {
       parameters: { type: "object", properties: {} },
       execute: extensionExecute,
     }]));
-    mocks.chatStream
+    mocks.streamBuilderModel
       .mockImplementationOnce(() => stream([
         { type: "text", delta: "Checking the integration…" },
         {
@@ -248,7 +248,7 @@ describe("operator loop human-confirmation boundary", () => {
     expect(events).toContainEqual({ type: "text", delta: "Checking the integration…" });
     expect(events).toContainEqual({ type: "tool", name: "custom_read", status: "done" });
     expect(mocks.error).not.toHaveBeenCalled();
-    expect(mocks.chatStream).toHaveBeenCalledTimes(2);
+    expect(mocks.streamBuilderModel).toHaveBeenCalledTimes(2);
     expect(events.at(-1)).toEqual({ type: "done" });
   });
 
@@ -265,7 +265,7 @@ describe("operator loop human-confirmation boundary", () => {
       parameters: { type: "object", properties: {} },
       execute: fundedExecute,
     }]));
-    mocks.chatStream.mockImplementation(() => stream([{
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
       type: "tool_calls",
       calls: [{ id: "funded-without-card", name: "send_sms", arguments: "{}" }],
     }]));
@@ -279,7 +279,7 @@ describe("operator loop human-confirmation boundary", () => {
     ));
 
     expect(fundedExecute).toHaveBeenCalledOnce();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events).toContainEqual({ type: "tool", name: "send_sms", status: "error" });
     expect(events.at(-1)).toEqual({ type: "done" });
     expect(JSON.stringify(events)).not.toContain("must-not-enter-model-history");

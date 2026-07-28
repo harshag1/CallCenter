@@ -45,7 +45,24 @@ Input schemas must have an object root and be acyclic, bounded JSON. Inline refe
 
 ## Builder/operator tool
 
-Add an `OperatorTool` to `web/lib/agent/tools/extensions.ts`. Operator tools receive the authenticated organization, email, focused agent, and public origin. Their output may also update a surface, flow panel, notice, or navigation.
+Add an `OperatorToolExtension` to `web/lib/agent/tools/extensions.ts`; the
+compiling [membership lookup example](../examples/operator-tools/membership-summary.ts)
+shows dependency injection, JSON Schema arguments, and authenticated tenant
+scoping. Operator tools receive the authenticated organization, email, focused
+agent, and public origin. Their output may also update a surface, flow panel,
+notice, or navigation.
+
+Every extension must set `security.tenant_scoped: true` and declare
+`security.effect` as `read` or `internal_write`. The exported type requires
+both fields and runtime admission rechecks them so untyped JavaScript and unsafe
+casts still fail closed. Use `ctx.orgId` from the authenticated execution
+context; never accept an organization ID from model arguments.
+
+Registration is not authority for arbitrary egress, spending, or contact with
+third parties. Those effects are intentionally absent from the extension
+contract and must use a separately authorized capability path. Metadata is an
+admission contract, not a sandbox: self-hosted operators remain responsible for
+the extension implementation and its data-layer authorization.
 
 ## Generated edge tool
 
@@ -88,7 +105,23 @@ Operational caveats:
 
 Prefer the opt-in [Realtime Provider Plugin v1 contract](../web/lib/realtime/plugins/README.md) for a new adapter. It validates an immutable manifest, transport/media compatibility, lazy credential access, normalized events/tool calls, and provider-neutral tool-result encoding. Run its conformance kit before integration, but treat that as fixture evidence only—not a live provider, latency, quality, or model claim. The contract validates cooperative plugins and is not a sandbox.
 
-The bundled OpenAI, xAI, and Gemini plugin exports are transitional wrappers. The release-critical runtime still uses the static core registry, so a plugin is not automatically installed into the application. Production integration still requires the legacy provider ID/default/voice registry, browser transport, builder input enum, and integration metadata changes. Preserve Flow/MCP semantics, and do not advertise telephony until the declared ingress/provider media path is implemented and tested.
+The bundled OpenAI, xAI, and Gemini adapters are installed into a protected
+server-side runtime registry. A self-hosted deployment can install an
+additional adapter during server bootstrap with
+`registerRealtimeProvider(...)`; it does not need to edit a core provider
+switch or widen the built-in TypeScript union. The registry snapshots public
+metadata, rejects duplicate IDs, validates capability/hook consistency, checks
+returned browser/server connection metadata, and lets operators unregister
+only non-built-in extensions.
+
+Registration deliberately lives in `server-only` code. Provider credentials
+must remain behind an ephemeral-token or bridge factory, and an extension must
+never return a long-lived provider key in its browser connection payload. A
+custom browser transport still needs a matching client-side consumer in the
+self-hosted UI. Preserve Flow/MCP semantics, and do not advertise native
+telephony unless the adapter declares `native-pcmu`, supplies a direct WSS
+endpoint, and actually passes μ-law media end to end. A
+`requires-transcoding` adapter cannot register a direct μ-law endpoint.
 
 ## Adding a communication provider
 

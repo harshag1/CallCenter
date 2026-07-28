@@ -13,6 +13,20 @@ npm run dev
 
 Set `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` in `.env.local` only when you accept spending your own provider key and `PUBLIC_ORIGIN` is plain-HTTP loopback. It permits local builder, onboarding-AI, and browser-session provider calls. Production and non-loopback origins ignore the flag because this release does not yet ship tenant-scoped BYOK or durable provider-budget authority.
 
+The builder chat is provider-neutral. It defaults to the existing xAI model, or
+you can select any supported Chat Completions provider and pin its model:
+
+```dotenv
+HACC_BUILDER_PROVIDER=openai # xai, openai, or gemini
+HACC_BUILDER_MODEL=gpt-5.2
+OPENAI_API_KEY=...
+```
+
+For Gemini, use `GEMINI_API_KEY` and a Gemini model id; for xAI, use
+`XAI_API_KEY`. Provider choice is server-owned deployment configuration, not a
+browser/model-controlled argument. Missing credentials and unknown providers
+fail before network I/O.
+
 The example `DATABASE_SSL=disable` is valid only for the local loopback database. Production and remote databases use `verify-full`; do not put `sslmode` or other TLS parameters in the connection URL.
 
 For anonymous email OTP, self-hosted deployments must set `AUTH_TRUSTED_CLIENT_IP_HEADER` to an allowed client-IP header that their trusted proxy overwrites. Vercel selects its sanitized platform header automatically. Missing or untrusted source configuration fails closed.

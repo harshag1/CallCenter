@@ -1,7 +1,10 @@
 // Author: Harsha Gundala
-// loop.ts — operator-agent execution loop: streamed grok completions with server-side tool rounds.
+// loop.ts — operator-agent execution loop: provider-neutral streamed completions with server-side tool rounds.
 
-import { chatStream, type ChatMessage } from "../xai";
+import {
+  streamBuilderModel,
+  type BuilderChatMessage,
+} from "./builder-model";
 import { operatorToolCatalog } from "./tools";
 import { operatorPrompt } from "./prompt";
 import { q } from "../db";
@@ -89,9 +92,9 @@ export async function* runOperator(
     "SELECT role, content FROM chat_messages WHERE thread_id = $1 AND org_id = $2 ORDER BY id DESC LIMIT $3",
     [threadId, session.orgId, HISTORY_LIMIT]
   );
-  const messages: ChatMessage[] = [
+  const messages: BuilderChatMessage[] = [
     { role: "system", content: operatorPrompt(session, agentId, openFlow) },
-    ...history.reverse().map((m) => m.content as ChatMessage),
+    ...history.reverse().map((m) => m.content as BuilderChatMessage),
     { role: "user", content: userText },
   ];
   await saveMessage(session.orgId, threadId, "user", { role: "user", content: userText });
@@ -101,7 +104,7 @@ export async function* runOperator(
     const textDeltas: string[] = [];
     let calls: { id: string; name: string; arguments: string }[] = [];
 
-    for await (const ev of chatStream(messages, { tools: [...catalog.tools] })) {
+    for await (const ev of streamBuilderModel(messages, { tools: catalog.tools })) {
       if (ev.type === "text") {
         text += ev.delta;
         textDeltas.push(ev.delta);
@@ -127,7 +130,7 @@ export async function* runOperator(
       for (const delta of textDeltas) yield { type: "text", delta };
     }
 
-    const assistantMsg: ChatMessage = {
+    const assistantMsg: BuilderChatMessage = {
       role: "assistant",
       content: fundedCalls.length ? null : text || null,
       tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } })),
@@ -138,7 +141,7 @@ export async function* runOperator(
     if (fundedCalls.length && calls.length !== 1) {
       for (const call of calls) {
         yield { type: "tool", name: call.name, status: "start" };
-        const toolMsg: ChatMessage = {
+        const toolMsg: BuilderChatMessage = {
           role: "tool",
           tool_call_id: call.id,
           content: JSON.stringify({ error: "funded actions must be proposed one at a time" }),
@@ -200,7 +203,7 @@ export async function* runOperator(
         L.error("tool crashed", { tool: call.name, err: (e as Error).message, orgId: ctx.orgId });
         yield { type: "tool", name: call.name, status: "error" };
       }
-      const toolMsg: ChatMessage = {
+      const toolMsg: BuilderChatMessage = {
         role: "tool",
         tool_call_id: call.id,
         content: JSON.stringify(output).slice(0, 24_000),
