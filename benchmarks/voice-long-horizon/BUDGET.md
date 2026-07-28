@@ -111,7 +111,7 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $3.807615**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $23.00; these are pessimistic
+- **Cumulative LC4 conservative settlements: $37.00; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
@@ -163,3 +163,29 @@ spend. Each opened reservation was settled at its full $2.50 maximum:
 No reservation remains active. The incomplete roots are preserved as
 development failure evidence and cannot contribute provider efficacy scores or
 a public benchmark graph.
+
+## 2026-07-28 — Qualification accounting correction and `f956647` settlement
+
+The cumulative LC4 figure above now includes all four retained qualification-v3
+roots. Two prior passed qualification settlements had been described in the
+progress log but omitted from the aggregate:
+
+| Source | Qualification settlement | Budget evidence / final head |
+|---|---:|---|
+| `deda084a14b803b40de1ef6835a80fe389bd0e1a` | $3.00 | `3dd37f757a711323bd45a2c8cd82cb314d095fca68aee39f9f5cfd39632386ce` / `127918147d36c8e7d043f0474827bb028d4494657e9ce4493d0a13e206045b71` |
+| `79501bb50d8442b2e5c16db35fbb336061692f30` | $3.00 | `853eb948b6663007ce8d79aeff6184abb6d8b4c5a4f9dcdbf9483285eabb8577` / `2d7c0511f630b23d4a05883540babacde86b2c12ea467c709fb4f8ec42cbd443` |
+
+The next exact-source qualification and DEV attempt at
+`f95664760510016b4da5389982a11e6c8e428883` settled as follows:
+
+| Run | Conservative settlement | Active reservations after terminal | Status | Evidence |
+|---|---:|---:|---|---|
+| LC4 qualification v3 | $3.00 | $0.00 | passed; three paid sessions, six provider sessions, six generation phases, three tool round trips, zero retries | budget evidence `aa331c229f57358a1f4572ffd4b2b50325c907c94d83100fb5071d7050de3f76`; final head `0650dd20498ceee3d50381fd1f61038b5d52b953c01028280c0da244b0d97551` |
+| LC4 six-episode DEV attempt | $5.00 | $0.00 | failed after two episodes started/one completed; OpenAI HACC stopped on opportunity 10 repair; zero retries | budget evidence `eb33dcc8cd03e91416d15c2819c3f8ceb235f78913f413cd0e067674fb627c72`; terminal head `28af6280dd58d20120e0ab9717897a4cbc25b79d3e46dafbfd82339125b54684` |
+
+The DEV ledger settled the completed OpenAI Native and failed OpenAI HACC
+reservations at their full $2.50 maxima and cancelled the four unopened
+reservations. The aggregate is therefore **$12.00** for four qualifications
+and **$25.00** for four incomplete DEV attempts, or **$37.00**. These are
+conservative local-ledger settlements. Provider-reported and
+invoice-reconciled cost remain unavailable, and no reservation is active.

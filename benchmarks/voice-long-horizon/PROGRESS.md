@@ -538,3 +538,55 @@ hash/length, and sample rate.
 - Active reservations after both terminals: **$0.00**
 - Provider-reported and invoice-reconciled cost: **unavailable**
 - Public benchmark graph: **blocked**
+
+## 2026-07-28 — `f956647` qualification passed; DEV gateway repair failed closed
+
+The fresh qualification at source
+`f95664760510016b4da5389982a11e6c8e428883` passed the pinned OpenAI
+`gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` paths. It opened three paid sessions and six
+provider sessions, completed six generation phases and three tool round trips,
+and used zero retries or reconnects. Its signed terminal artifact is
+`4736fd083bfa9791f3b61479b7b5a96ece3aa3da613e4aee45fd7421268bca5d`
+and its terminal-body hash is
+`52ebc6eb0c963c95ca86c9e2d9d593fdbd8213554f30b451aee393509f8b1fca`.
+
+The immediately following DEV attempt did not complete. It finished the
+OpenAI Native episode, then stopped during the repair playback for OpenAI HACC
+opportunity 10:
+
+- episodes started/completed/finalized: **2 / 1 / 1**;
+- canonical opportunities submitted/completed: **70 / 69**;
+- response generations requested/completed: **75 / 74**;
+- provider calls: **75**;
+- bounded repair playbacks: **4**;
+- paid retries: **0**.
+
+Primary failure evidence
+`cd6758a4b60320dd8548a7e46e0988a17cea61249ba572cd95d0e83655d5a48a`
+records a `gateway_fatal` at `gateway_dispatch`, classified as `parse`, on the
+opportunity-10 repair. The provider terminal was observed and 256,800 bytes of
+assistant PCM were retained, but the response did not reach the adapter's
+completed state. Secondary cleanup evidence
+`a4847c11afb7c32cafd98128070691606da3844fb67068f26927cfbae8523104`
+links back to that primary failure. This is an evidence/gateway-path failure,
+not an OpenAI model score.
+
+The run/report/package are
+`e981290743e1120866078717f319e468efe19832e33a1651dad0c01e12c41313`,
+`7edc0be39165d06dbeacb5ce6bb28719ab557c6327e2a9550fe83becc4ecaf0a`,
+and `d1313acb4515e78093d7f4cf4b1e22f3c9961554ff1dc1f588e9fba2e5a0b947`.
+The report is incomplete, claim-ineligible, and
+`unscorable_missing_authority_evidence`, with no task results. The exact
+failure record is retained in
+[HACC_LC4_DEV_FAILED_ATTEMPTS.md](evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md).
+
+- Qualification conservative settlement: **$3.00**
+- DEV conservative settlement: **$5.00**
+- Active reservations after both terminals: **$0.00**
+- Provider-reported and invoice-reconciled cost: **unavailable**
+- Public benchmark graph: **blocked**
+
+Neither the completed Native episode nor the nine completed HACC opportunities
+may be extracted as a partial benchmark. No Native/HACC efficacy, memory,
+guardrail, drift, or superiority claim is authorized.

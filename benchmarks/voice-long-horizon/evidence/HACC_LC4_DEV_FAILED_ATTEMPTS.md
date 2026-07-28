@@ -380,3 +380,101 @@ The root is currently retained at
 The two completed OpenAI episodes cannot be extracted as a partial benchmark.
 No public graph or Native/HACC efficacy claim is authorized, and the temporary
 root must move to durable release storage before cleanup.
+
+## 2026-07-28 six-episode attempt at `f956647`
+
+**Retained failure/mechanism evidence only. No partial score is admissible.**
+
+A fresh exact-source qualification passed all three pinned provider gateways
+before this run. The qualification was rooted at
+`/private/tmp/hacc-lc4-qv3-evidence-f956647-20260728T200956Z` and records:
+
+- source commit:
+  `f95664760510016b4da5389982a11e6c8e428883`;
+- signed terminal artifact:
+  `4736fd083bfa9791f3b61479b7b5a96ece3aa3da613e4aee45fd7421268bca5d`;
+- terminal-body SHA-256:
+  `52ebc6eb0c963c95ca86c9e2d9d593fdbd8213554f30b451aee393509f8b1fca`;
+- signed package artifact:
+  `8b9a63f812e38eb34ec2f85d9ac4e9eacb41bacde690c3508458e0302398dfdd`;
+- qualification budget evidence / final head:
+  `aa331c229f57358a1f4572ffd4b2b50325c907c94d83100fb5071d7050de3f76`
+  /
+  `0650dd20498ceee3d50381fd1f61038b5d52b953c01028280c0da244b0d97551`.
+
+It opened three paid sessions and six provider sessions, completed six
+generation phases and three tool round trips, and used zero retries or
+reconnects. The OpenAI, Gemini, and xAI roundtrip evidence hashes are,
+respectively:
+
+- `2e22ac3e3434eb4ad19fb5aec0561bce2961eb4297ba3252cf2fe1af68741d57`;
+- `3ce08513cf9ff42bcbec478ab9b80f14a9edffb1c6acd6f62e975729fd18cd26`;
+- `44ea3c9eed065dfe30af4b982c1f3e01ef5b5d9e694cd82cc75a9f15ba596714`.
+
+The following six-episode DEV attempt ran from the same source commit and
+recorded:
+
+- episodes started/completed/finalized: **2 / 1 / 1**;
+- canonical opportunities submitted/completed: **70 / 69**;
+- response generations requested/completed: **75 / 74**;
+- provider calls: **75**;
+- bounded repair playbacks: **4**;
+- paid retries: **0**.
+
+OpenAI Native reached terminal completion. OpenAI HACC then selected registered
+repair `lc4-dev-repair-01` at canonical opportunity 10. The signed repair
+decision is
+`246a0677c347bb8260929e83cc9d6503266e17c9be27b96c548393bc4d962c84`;
+it binds 301,920 bytes of 24 kHz PCM with SHA-256
+`9b3e1e0dae3962c42cf6391cc12df2fd722024eeb1dd39f3d4669ef8c48d65ab`.
+
+The repair reached the pinned OpenAI `gpt-realtime-2.1` gateway. Primary
+failure evidence
+`cd6758a4b60320dd8548a7e46e0988a17cea61249ba572cd95d0e83655d5a48a`
+records:
+
+- `failure_class: gateway`;
+- `failure_code: gateway_fatal`;
+- `failure_stage: gateway_dispatch`;
+- `gateway_fatal_class: parse`;
+- `playback_kind: repair`;
+- a terminal wire response was observed;
+- 256,800 output PCM bytes were captured, but `response_completed` remained
+  false.
+
+Segment close retained secondary cleanup failure evidence
+`a4847c11afb7c32cafd98128070691606da3844fb67068f26927cfbae8523104`,
+which is hash-linked to the primary gateway failure. The outer run therefore
+records `failure_class: evidence` and failure-message SHA-256
+`0bec2e0373b578b4300f0dcfda8252559c5ee53e3665fe86b1f1b3563272f2bb`.
+
+This is a harness gateway/evidence-path failure, not an OpenAI model outcome.
+The terminal response and captured audio do not authorize treating the repair
+as completed when the adapter retained a parse-fatal state.
+
+Retained identities:
+
+- run: `e981290743e1120866078717f319e468efe19832e33a1651dad0c01e12c41313`;
+- report:
+  `7edc0be39165d06dbeacb5ce6bb28719ab557c6327e2a9550fe83becc4ecaf0a`;
+- run package:
+  `d1313acb4515e78093d7f4cf4b1e22f3c9961554ff1dc1f588e9fba2e5a0b947`;
+- run ledger head:
+  `75145f11526eea19eb9273f2652d440d7be19df38e485bfeec43c4be5a690351`;
+- budget evidence:
+  `eb33dcc8cd03e91416d15c2819c3f8ceb235f78913f413cd0e067674fb627c72`;
+- budget terminal ledger head:
+  `28af6280dd58d20120e0ab9717897a4cbc25b79d3e46dafbfd82339125b54684`.
+
+The report is incomplete, claim-ineligible, and
+`unscorable_missing_authority_evidence`; it records five invalid authority
+packets and no task results. The filesystem ledger conservatively settled
+**$5.00** across the completed OpenAI Native and failed OpenAI HACC
+reservations, cancelled the four unopened reservations, and has **$0.00**
+active. No provider-reported or invoice-reconciled cost was retained.
+
+The DEV root is currently retained at
+`/private/tmp/hacc-lc4-dev-evidence-f956647-20260728T201032Z`. Both roots live
+under `/private/tmp`, which is not durable publication storage. No completed
+episode or opportunity subset may be extracted as a score, no public graph is
+authorized, and all Native/HACC efficacy claims remain **NO-GO**.
