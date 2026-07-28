@@ -42,6 +42,7 @@ import {
   type Lc4DevReplayArtifactKind,
   type Lc4DevReplayEvidenceStore,
 } from "../lc4-development-evidence-retention";
+import type { Lc4DevCallerBranchPlaybackBinding } from "../lc4-development-realtime-contract";
 import {
   LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
   LC4_DEV_CALLER_BRANCH_SOURCES,
@@ -142,6 +143,31 @@ function repairProjection(opportunityId: string) {
     unmet_blocker_codes: [],
     final_required_criteria_pass: true,
   });
+}
+
+function providerExchangeProjection(
+  callerPcm: Uint8Array,
+  callerBranchBinding: Lc4DevCallerBranchPlaybackBinding | undefined,
+  extra: Record<string, unknown>,
+) {
+  const decision = callerBranchBinding?.decision;
+  return {
+    ...extra,
+    caller_pcm_sha256: sha256Hex(callerPcm),
+    caller_pcm_byte_length: callerPcm.byteLength,
+    caller_branch_decision_sha256: decision?.decision_sha256 ?? null,
+    caller_branch_authority: decision ? {
+      decision_sha256: decision.decision_sha256,
+      decision_evidence_sha256: callerBranchBinding!.decision_evidence.evidence_sha256,
+      matrix_artifact_sha256: decision.matrix_artifact_sha256,
+      source_id: decision.source_id,
+      source_text_sha256: decision.source_text_sha256,
+      prior_outcome: decision.prior_outcome,
+      prior_receipt_sha256: decision.prior_receipt_sha256,
+      branch_intent: decision.branch_intent,
+      reconciliation_audio_selected: decision.reconciliation_audio_selected,
+    } : null,
+  };
 }
 
 function renderedPcm(sampleRate: 16_000 | 24_000 | 48_000, seed: number): Uint8Array {
@@ -773,7 +799,7 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
     not_before: "2026-07-21T21:00:00.000Z",
     expires_at: "2026-07-22T22:00:00.000Z",
   };
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const { privateKey, publicKey } = branchKeys;
   const key = publicKey.export({ type: "spki", format: "der" });
   const withoutHash = {
     body,
@@ -1031,7 +1057,7 @@ describe("LC4-DEV live runner", () => {
         opens += 1;
         expect(previous_rotation_receipt_sha256 === null).toBe(segment_ordinal === 1);
         return {
-          async exchangeCanonical({ opportunity, caller_pcm, control_receipt }) {
+          async exchangeCanonical({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) {
             exchanges += 1;
             expect(control_receipt.response_control.kind).toBe(episode.arm === "native" ? "native_context" : "hacc_response_plan");
             expect(caller_pcm).toEqual(pcm.get(`${episode.provider}:${opportunity.id}`));
@@ -1041,7 +1067,11 @@ describe("LC4-DEV live runner", () => {
               expect(opportunity.events.some((event) => event.kind === "authoritative-reconciliation")).toBe(false);
             }
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
-            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
+            const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+            });
+            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
             const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
             return {
               playback_kind: "canonical" as const,
@@ -1051,7 +1081,7 @@ describe("LC4-DEV live runner", () => {
               listener_evidence_sha256: listenerEvidence.evidence_sha256,
               repair_projection: repairProjection(opportunity.id),
               playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
-              provider_exchange_projection: { episode_id: episode.episode_id, opportunity_id: opportunity.id },
+              provider_exchange_projection: projection,
               provider_exchange_evidence: providerEvidence,
               listener_evidence: listenerEvidence,
             };
@@ -1150,7 +1180,7 @@ describe("LC4-DEV live runner", () => {
           let expectedCanonicalOrdinal = ((segment_ordinal - 1) * 20) + 1;
           let pending: Readonly<{ opportunity_id: string; repair_played: boolean }> | null = null;
           return {
-            async exchangeCanonical({ opportunity }) {
+            async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
               expect(pending).toBeNull();
               expect(opportunity.index).toBe(expectedCanonicalOrdinal);
               if (repairedCanonicalOrdinal !== null && episode.episode_id === targetEpisodeId && opportunity.index > repairedCanonicalOrdinal && canonicalAfterRepair === null) {
@@ -1160,7 +1190,12 @@ describe("LC4-DEV live runner", () => {
               canonicalExchanges += 1;
               const shouldRepair = episode.episode_id === targetEpisodeId && opportunity.index === 10;
               const semanticResultSha256 = sha256Hex(`semantic-result:${episode.episode_id}:${opportunity.id}`);
-              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id });
+              const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+                kind: "canonical",
+                episode_id: episode.episode_id,
+                opportunity_id: opportunity.id,
+              });
+              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
               const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id });
               return {
                 playback_kind: "canonical" as const,
@@ -1177,7 +1212,7 @@ describe("LC4-DEV live runner", () => {
                   final_required_criteria_pass: !shouldRepair,
                 }),
                 playback_authority_receipt_sha256: sha256Hex(`canonical-authority:${episode.episode_id}:${opportunity.id}`),
-                provider_exchange_projection: { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id },
+                provider_exchange_projection: projection,
                 provider_exchange_evidence: providerEvidence,
                 listener_evidence: listenerEvidence,
               };
@@ -1420,11 +1455,12 @@ describe("LC4-DEV live runner", () => {
       maximum_total_micro_usd: prepare.maximum_total_micro_usd,
       async openSegment({ episode, segment_ordinal }) {
         return {
-          async exchangeCanonical({ opportunity }) {
-            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", {
+          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+            const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
             });
+            const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
             const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
@@ -1437,7 +1473,7 @@ describe("LC4-DEV live runner", () => {
               listener_evidence_sha256: listenerEvidence.evidence_sha256,
               repair_projection: repairProjection(opportunity.id),
               playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
-              provider_exchange_projection: { episode_id: episode.episode_id, opportunity_id: opportunity.id },
+              provider_exchange_projection: projection,
               provider_exchange_evidence: providerEvidence,
               listener_evidence: listenerEvidence,
             };
@@ -1497,10 +1533,11 @@ describe("LC4-DEV live runner", () => {
   });
 
   it("constructs only the preflight-bound DEV factory while confirmatory execution remains frozen", async () => {
-    const { prepare } = fixtures();
+    const { pcm, prepare } = fixtures();
     const credentials = { openai: "test-openai-secret", gemini: "test-gemini-secret", xai: "test-xai-secret" } as const;
     const preflight = authorizedPreflight(prepare, lc4DevCredentialIdentitySetSha256(credentials));
     const evidence = memoryEvidence();
+    const callerBranch = callerBranchDependencies({ evidence, pcm });
     const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { fixture: "factory-construction" });
     const gatewayExecutor: Lc4DevGatewayExecutor = {
       kind: "lc4-dev-arm-aware-gateway-v1",
@@ -1518,6 +1555,7 @@ describe("LC4-DEV live runner", () => {
       prepare,
       preflight,
       credentials,
+      caller_branch_authority: { matrix: callerBranch.matrix, trust: callerBranch.trust },
       gateway_executor: gatewayExecutor,
       evidence,
       budget_authority: budgetAuthority,
@@ -1544,6 +1582,7 @@ describe("LC4-DEV live runner", () => {
       prepare,
       preflight,
       credentials: { ...credentials, xai: "different-xai-secret" },
+      caller_branch_authority: { matrix: callerBranch.matrix, trust: callerBranch.trust },
       gateway_executor: gatewayExecutor,
       evidence,
       budget_authority: budgetAuthority,

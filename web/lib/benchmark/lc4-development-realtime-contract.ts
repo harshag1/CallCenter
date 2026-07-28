@@ -5,6 +5,18 @@ import type { Lc4DevArmBlindRepairProjection } from "./lc4-development-headless-
 import type { Lc4DevRepairDecisionReceipt, Lc4DevRepairPlayback } from "./lc4-development-repair-playback";
 import type { Lc4DevControlReceipt, Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import type { Lc4PublicDevOpportunity } from "./lc4-public-development-corpus";
+import type { Lc4DevCallerBranchDecision } from "./lc4-development-caller-branch";
+
+/**
+ * Explicit authority for replacing the frozen canonical caller PCM at the one
+ * outcome-dependent DEV branch. The signed decision remains independently
+ * replay-addressable; carrying both hashes prevents a caller from presenting
+ * an otherwise valid decision under a different retained evidence reference.
+ */
+export type Lc4DevCallerBranchPlaybackBinding = Readonly<{
+  decision: Lc4DevCallerBranchDecision;
+  decision_evidence: Lc4DevReplayArtifactReference;
+}>;
 
 export type Lc4DevExchangeEvidence = Readonly<{
   playback_kind: "canonical" | "repair";
@@ -24,6 +36,7 @@ export type Lc4DevelopmentRealtimeSession = Readonly<{
     opportunity: Lc4PublicDevOpportunity;
     caller_pcm: Uint8Array;
     control_receipt: Lc4DevControlReceipt;
+    caller_branch_binding?: Lc4DevCallerBranchPlaybackBinding;
   }>): Promise<Lc4DevExchangeEvidence>;
   exchangeRepair(input: Readonly<{
     opportunity: Lc4PublicDevOpportunity;

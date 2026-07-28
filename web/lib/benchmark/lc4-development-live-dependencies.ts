@@ -827,6 +827,71 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     }
     if (branchCandidates.length !== 1) throw new Error("LC4-DEV authority finalization requires exactly one retained caller branch decision");
     const branch = branchCandidates[0]!;
+    const branchSubmittedEvent = ledger.events().find((event) =>
+      event.event_type === "audio_submitted"
+      && event.episode_id === episode.episode_id
+      && event.opportunity_id === "lc4-dev-op-42");
+    const branchCompletedEvent = ledger.events().find((event) =>
+      event.event_type === "opportunity_completed"
+      && event.episode_id === episode.episode_id
+      && event.opportunity_id === "lc4-dev-op-42");
+    if (!branchSubmittedEvent || !branchCompletedEvent) {
+      throw new Error("LC4-DEV authority finalization is missing the op42 branch ledger lifecycle");
+    }
+    const submittedPayload = objectValue(
+      await replayEvidence.resolveJson(branchSubmittedEvent.payload_evidence),
+      "LC4-DEV op42 submitted payload",
+    );
+    const completedPayload = objectValue(
+      await replayEvidence.resolveJson(branchCompletedEvent.payload_evidence),
+      "LC4-DEV op42 completed payload",
+    );
+    const callerPcmReference = branchSubmittedEvent.evidence_references.find((reference) => reference.kind === "caller_pcm");
+    const submittedBranchReference = branchSubmittedEvent.evidence_references.find((reference) => reference.kind === "caller_branch_decision");
+    const completedBranchReference = branchCompletedEvent.evidence_references.find((reference) => reference.kind === "caller_branch_decision");
+    const providerExchangeReference = branchCompletedEvent.evidence_references.find((reference) =>
+      reference.kind === "provider_exchange"
+      && reference.evidence_sha256 === completedPayload.canonical_provider_exchange_sha256);
+    if (!callerPcmReference || !submittedBranchReference || !completedBranchReference || !providerExchangeReference
+      || submittedBranchReference.evidence_sha256 !== branch.sha256
+      || completedBranchReference.evidence_sha256 !== branch.sha256
+      || submittedPayload.caller_branch_decision_sha256 !== branch.sha256
+      || completedPayload.caller_branch_decision_sha256 !== branch.sha256
+      || submittedPayload.caller_pcm_sha256 !== callerPcmReference.evidence_sha256
+      || completedPayload.caller_pcm_sha256 !== callerPcmReference.evidence_sha256) {
+      throw new Error("LC4-DEV op42 ledger does not join the retained branch decision, caller PCM, and provider exchange");
+    }
+    const branchExchange = objectValue(
+      await replayEvidence.resolveJson(providerExchangeReference),
+      "LC4-DEV op42 provider exchange",
+    );
+    const branchExchangeAuthority = objectValue(
+      branchExchange.caller_branch_authority,
+      "LC4-DEV op42 provider exchange branch authority",
+    );
+    const callerPcmByteLength = Number(branchExchange.caller_pcm_byte_length);
+    const expectedJoinSha256 = sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-caller-branch-exchange-join/v1\n${canonicalJson({
+        opportunity_id: "lc4-dev-op-42",
+        decision_sha256: branch.sha256,
+        caller_pcm_sha256: callerPcmReference.evidence_sha256,
+        caller_pcm_byte_length: callerPcmByteLength,
+        provider_exchange_sha256: providerExchangeReference.evidence_sha256,
+      })}`,
+    );
+    if (branchExchange.opportunity_id !== "lc4-dev-op-42"
+      || branchExchange.caller_pcm_sha256 !== callerPcmReference.evidence_sha256
+      || branchExchange.caller_branch_decision_sha256 !== branch.sha256
+      || branchExchangeAuthority.decision_sha256 !== branch.sha256
+      || branchExchangeAuthority.decision_evidence_sha256 !== branch.sha256
+      || branchExchangeAuthority.matrix_artifact_sha256 !== input.caller_branch.matrix.matrix_artifact_sha256
+      || branchExchangeAuthority.source_id !== branch.body.source_id
+      || branchExchangeAuthority.source_text_sha256 !== branch.body.source_text_sha256
+      || branchExchangeAuthority.prior_outcome !== branch.body.prior_outcome
+      || branchExchangeAuthority.prior_receipt_sha256 !== branch.body.prior_receipt_sha256
+      || completedPayload.caller_branch_exchange_join_sha256 !== expectedJoinSha256) {
+      throw new Error("LC4-DEV op42 provider exchange replay does not match its signed branch authority checkpoint");
+    }
     entries.push({
       event_type: "caller_branch_decision",
       subject_id: "op42-branch",

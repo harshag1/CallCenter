@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentFlowSchema } from "../../flow";
 import { createFlowExecutionState, type FlowExecutionState } from "../../flow-runtime";
@@ -25,6 +26,20 @@ import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
 import { Lc4DevFailureEvidenceError } from "../lc4-development-failure-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import {
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+  LC4_DEV_MUTATION_OPPORTUNITY_ID,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
+  assertLc4DevCallerBranchDecision,
+  createLc4DevCallerBranchAuthority,
+  createLc4DevCallerBranchMatrixArtifact,
+  type Lc4DevCallerBranchAudioBinding,
+  type Lc4DevCallerBranchDecision,
+  type Lc4DevPriorMutationOutcome,
+} from "../lc4-development-caller-branch";
+import type { Lc4DevCallerBranchPlaybackBinding } from "../lc4-development-realtime-contract";
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
   compileLc4ProductionScheduleShape,
@@ -882,6 +897,220 @@ async function caughtFailure(promise: Promise<unknown>): Promise<Lc4DevFailureEv
     return error as Lc4DevFailureEvidenceError;
   }
   throw new Error("expected an LC4-DEV failure evidence error");
+}
+
+const callerBranchKeys = generateKeyPairSync("ed25519");
+const callerBranchIdentity = Object.freeze({
+  key_id: "lc4-dev-adapter-branch-preflight",
+  private_key_pem: callerBranchKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  public_key_pem: callerBranchKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+});
+const callerBranchTrust = Object.freeze({
+  key_id: callerBranchIdentity.key_id,
+  public_key_pem: callerBranchIdentity.public_key_pem,
+});
+
+function callerBranchPcm(
+  provider: "openai" | "gemini" | "xai",
+  outcome: Lc4DevPriorMutationOutcome,
+): Uint8Array {
+  const providerOrdinal = (["openai", "gemini", "xai"] as const).indexOf(provider) + 1;
+  const outcomeOrdinal = LC4_DEV_PRIOR_MUTATION_OUTCOMES.indexOf(outcome) + 1;
+  return new Uint8Array([providerOrdinal, outcomeOrdinal, 23, 0, 41, 0, 59, 0]);
+}
+
+function callerBranchAudioBindings(): readonly Lc4DevCallerBranchAudioBinding[] {
+  return Object.freeze((["openai", "gemini", "xai"] as const).flatMap((provider) =>
+    LC4_DEV_CALLER_BRANCH_SOURCES.map((source) => {
+      const pcm = callerBranchPcm(provider, source.prior_outcome);
+      return Object.freeze({
+        prior_outcome: source.prior_outcome,
+        provider,
+        opportunity_id: LC4_DEV_BRANCH_OPPORTUNITY_ID,
+        source_id: source.source_id,
+        source_text_sha256: source.canonical_caller_text_sha256,
+        pcm_sha256: sha256Hex(pcm),
+        pcm_byte_length: pcm.byteLength,
+        sample_rate_hz: provider === "gemini" ? 16_000 as const : 24_000 as const,
+        channels: 1 as const,
+        encoding: "pcm16le" as const,
+      });
+    }),
+  ));
+}
+
+const callerBranchMatrix = createLc4DevCallerBranchMatrixArtifact({
+  audio_manifest_sha256: sha256Hex("lc4-dev-adapter-branch-preflight-audio-manifest"),
+  audio_bindings: callerBranchAudioBindings(),
+  signing_identity: callerBranchIdentity,
+});
+const callerBranchAuthority = createLc4DevCallerBranchAuthority({
+  matrix: callerBranchMatrix,
+  signing_identity: callerBranchIdentity,
+});
+
+function callerBranchPriorReceipt(outcome: Lc4DevPriorMutationOutcome) {
+  return Object.freeze({
+    semantic_opportunity_id: LC4_DEV_MUTATION_OPPORTUNITY_ID,
+    tool: "archive.submit_transcript_request" as const,
+    outcome,
+    receipt_sha256: outcome === "no_call" ? null : sha256Hex(`lc4-dev-adapter-prior:${outcome}`),
+  });
+}
+
+async function openCallerBranchPreflight(input: Readonly<{
+  provider: "openai" | "gemini" | "xai";
+  outcome: Lc4DevPriorMutationOutcome;
+}>) {
+  const base = manifest("hacc", input.provider);
+  const corpus = createLc4PublicDevelopmentCorpus();
+  const episode: Lc4DevLiveEpisodePlan = Object.freeze({
+    episode_id: `lc4-dev-${input.provider}-${input.outcome}-branch-preflight`,
+    pair_id: `lc4-dev-${input.provider}-branch-preflight`,
+    pair_position: 2,
+    provider: input.provider,
+    arm: "hacc",
+    model: base.episode_shape.provider_profile.model,
+    voice: base.episode_shape.provider_profile.voice,
+    maximum_micro_usd: 1_000,
+    opportunity_binding_set_sha256: sha256Hex(`branch-preflight:${input.provider}:${input.outcome}`),
+  });
+  const devManifest: Lc4RealtimeEpisodeManifest = Object.freeze({
+    protocol_id: "HACC-LC4-DEV-v1",
+    run_id: episode.episode_id,
+    episode_shape: Object.freeze({
+      provider: episode.provider,
+      arm: episode.arm,
+      provider_profile: base.episode_shape.provider_profile,
+    }),
+    opportunities: Object.freeze(corpus.opportunities.map((opportunity, index) => {
+      const pcm = new Uint8Array([index + 1, 7, 11, 13]);
+      return Object.freeze({
+        ordinal: index + 1,
+        opportunity_id: opportunity.id,
+        segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+        caller_pcm_sha256: sha256Hex(pcm),
+        caller_pcm_byte_length: pcm.byteLength,
+        opportunity_contract_sha256: sha256Hex(`branch-contract-${index + 1}`),
+      });
+    })),
+  });
+  const events: string[] = [];
+  const gateway: Lc4DevGatewayExecutor = Object.freeze({
+    kind: "lc4-dev-arm-aware-gateway-v1",
+    manifest_sha256: sha256Hex("lc4-dev-adapter-branch-preflight-gateway"),
+    async execute() { throw new Error("branch preflight gateway must not execute"); },
+  });
+  const evidenceStore = replayEvidenceFixture();
+  const bridge = new Lc4RealtimeProviderBridge(() => new FakeRealtimeClient(input.provider, events));
+  const providerConfiguration = Object.freeze({
+    ...configuration(base),
+    providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
+  });
+  const devGateway = Object.freeze({
+    episode,
+    opportunities: corpus.opportunities,
+    executor: gateway,
+    caller_branch_authority: {
+      matrix: callerBranchMatrix,
+      trust: callerBranchTrust,
+    },
+  });
+  const open = (
+    ordinal: 1 | 2 | 3,
+    rotationContext: Lc4RotationContext | null,
+  ) => bridge.openSegment({
+    manifest: devManifest,
+    segment: base.episode_shape.segments[ordinal - 1]!,
+    profile: base.episode_shape.provider_profile,
+    configuration: providerConfiguration,
+    rotation_context: rotationContext,
+    listener: {
+      async accept({ capture }) {
+        const listenerEvidence = await evidenceStore.retainJson({
+          kind: "listener_evidence",
+          body: Object.freeze({
+            fixture: "branch-preflight-listener-evidence",
+            opportunity_id: capture.opportunity_id,
+          }),
+        });
+        return Object.freeze({
+          listener_evidence_sha256: listenerEvidence.evidence_sha256,
+          listener_evidence: listenerEvidence,
+          repair_projection: createLc4DevArmBlindRepairProjection({
+            opportunity_id: capture.opportunity_id,
+            listener_status: "verified",
+            semantic_result_sha256: sha256Hex(`branch-preflight-semantic:${capture.opportunity_id}`),
+            semantic_replay_sha256: sha256Hex(`branch-preflight-replay:${capture.opportunity_id}`),
+            unmet_blocker_codes: [],
+            final_required_criteria_pass: true,
+          }),
+          playback_authority_receipt_sha256: sha256Hex(`branch-preflight-playback:${capture.opportunity_id}`),
+        });
+      },
+    },
+    dev_gateway: devGateway,
+  });
+  const rotation = (
+    previousReceipt: string,
+    from: 1 | 2,
+  ): Lc4RotationContext => Object.freeze({
+    kind: "hacc_structured_state",
+    packet: createLc4HaccRotationStatePacket({
+      run_id: episode.episode_id,
+      from_segment_ordinal: from,
+      to_segment_ordinal: (from + 1) as 2 | 3,
+      available_through_opportunity: (from * 20) as 20 | 40,
+      previous_session_rotation_receipt_sha256: previousReceipt,
+      flow_state_sha256: sha256Hex(`branch-preflight-flow:${input.provider}:${input.outcome}:${from}`),
+      response_plan_chain_head_sha256: sha256Hex(`branch-preflight-plan:${input.provider}:${input.outcome}:${from}`),
+      facts: [],
+    }),
+  });
+  const firstSegment = await open(1, null);
+  const firstReceipt = await firstSegment.close();
+  const secondSegment = await open(2, rotation(firstReceipt.rotation_receipt_sha256, 1));
+  const secondReceipt = await secondSegment.close();
+  const session = await open(3, rotation(secondReceipt.rotation_receipt_sha256, 2));
+  const firstOpportunity = corpus.opportunities[40]!;
+  await session.exchange({
+    opportunity_id: firstOpportunity.id,
+    caller_pcm: new Uint8Array([41, 7, 11, 13]),
+    response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+  });
+  await session.finalizeOpportunity!({
+    opportunity_id: firstOpportunity.id,
+    decision_receipt_sha256: sha256Hex(`branch-preflight-op41:${input.provider}:${input.outcome}`),
+    repair_played: false,
+  });
+  const decision = callerBranchAuthority.decide({
+    episode_id: episode.episode_id,
+    provider: input.provider,
+    opportunity: corpus.opportunities[41]!,
+    prior_receipt: callerBranchPriorReceipt(input.outcome),
+  });
+  assertLc4DevCallerBranchDecision({
+    decision,
+    matrix: callerBranchMatrix,
+    trust: callerBranchTrust,
+  });
+  const { decision_sha256: claimedDecisionSha256, ...signedDecision } = decision;
+  const decisionEvidence = await evidenceStore.retainJson({
+    kind: "caller_branch_decision",
+    body: signedDecision as unknown as JsonValue,
+    domain_prefix: LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+    expected_evidence_sha256: claimedDecisionSha256,
+  });
+  return Object.freeze({
+    session,
+    events,
+    opportunity: corpus.opportunities[41]!,
+    pcm: callerBranchPcm(input.provider, input.outcome),
+    binding: Object.freeze({
+      decision,
+      decision_evidence: decisionEvidence,
+    }) satisfies Lc4DevCallerBranchPlaybackBinding,
+  });
 }
 
 describe("LC4 production realtime adapter bridge", () => {
@@ -1928,6 +2157,239 @@ describe("LC4 production realtime adapter bridge", () => {
     const stalePacket = nativeRotationPacket(value, "8".repeat(64), 1);
     await expect(reopen({ kind: "strong_native", packet: stalePacket })).rejects.toThrow("prior session receipt");
     await expect(reopen(haccRotationContext(value, receipt.rotation_receipt_sha256, 1))).rejects.toThrow("differs from the randomized arm");
+  });
+
+  it("accepts all 15 provider/outcome branch cells only under their exact signed playback authority", async () => {
+    for (const provider of ["openai", "gemini", "xai"] as const) {
+      for (const outcome of LC4_DEV_PRIOR_MUTATION_OUTCOMES) {
+        const fixture = await openCallerBranchPreflight({ provider, outcome });
+        let evidence: Awaited<ReturnType<typeof fixture.session.exchange>>;
+        try {
+          evidence = await fixture.session.exchange({
+            opportunity_id: fixture.opportunity.id,
+            caller_pcm: fixture.pcm,
+            response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+            caller_branch_binding: fixture.binding,
+          });
+        } catch (error) {
+          const failure = error instanceof Lc4DevFailureEvidenceError ? error.failure : null;
+          throw new Error(`branch preflight failed for ${provider}/${outcome}: ${JSON.stringify(failure)}`, { cause: error });
+        }
+        expect(evidence).toMatchObject({
+          playback_kind: "canonical",
+          caller_pcm_sha256: fixture.binding.decision.pcm_sha256,
+          caller_branch_decision_sha256: fixture.binding.decision.decision_sha256,
+        });
+        expect(evidence.replay_projection).toMatchObject({
+          caller_branch_authority: {
+            decision_sha256: fixture.binding.decision.decision_sha256,
+            decision_evidence_sha256: fixture.binding.decision.decision_sha256,
+            matrix_artifact_sha256: callerBranchMatrix.matrix_artifact_sha256,
+            prior_outcome: outcome,
+          },
+        });
+        await fixture.session.finalizeOpportunity!({
+          opportunity_id: fixture.opportunity.id,
+          decision_receipt_sha256: sha256Hex(`branch-preflight-op42:${provider}:${outcome}`),
+          repair_played: false,
+        });
+        await fixture.session.close();
+      }
+    }
+  });
+
+  it("rejects opportunity 42 without signed branch authority before appending its PCM", async () => {
+    const fixture = await openCallerBranchPreflight({ provider: "gemini", outcome: "no_call" });
+    const appendCount = fixture.events.filter((event) => event === "append").length;
+    const failure = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity.id,
+      caller_pcm: fixture.pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(failure.failure).toMatchObject({
+      failure_stage: "pre_send_contract",
+      failure_code: "invalid_contract",
+      caller_pcm_appended_byte_length: 0,
+      response_generation_requested: false,
+    });
+    expect(fixture.events.filter((event) => event === "append")).toHaveLength(appendCount);
+    await fixture.session.close();
+  });
+
+  it("rejects every mutated branch authority dimension and PCM substitution before provider send", async () => {
+    type MutationResult = Readonly<{
+      binding: Lc4DevCallerBranchPlaybackBinding;
+      pcm: Uint8Array;
+    }>;
+    type BranchMutation = Readonly<{
+      name: string;
+      mutate(binding: Lc4DevCallerBranchPlaybackBinding, pcm: Uint8Array): MutationResult;
+    }>;
+    const mutateDecision = (
+      binding: Lc4DevCallerBranchPlaybackBinding,
+      patch: Partial<Lc4DevCallerBranchDecision>,
+    ): Lc4DevCallerBranchPlaybackBinding => Object.freeze({
+      ...binding,
+      decision: Object.freeze({ ...binding.decision, ...patch }) as Lc4DevCallerBranchDecision,
+    });
+    const mutations: readonly BranchMutation[] = Object.freeze([
+      {
+        name: "retained evidence hash",
+        mutate: (binding, pcm) => ({
+          binding: {
+            ...binding,
+            decision_evidence: {
+              ...binding.decision_evidence,
+              evidence_sha256: sha256Hex("different-retained-decision"),
+            },
+          },
+          pcm,
+        }),
+      },
+      {
+        name: "retained evidence kind",
+        mutate: (binding, pcm) => ({
+          binding: {
+            ...binding,
+            decision_evidence: {
+              ...binding.decision_evidence,
+              kind: "control_authority",
+            },
+          } as Lc4DevCallerBranchPlaybackBinding,
+          pcm,
+        }),
+      },
+      {
+        name: "decision hash",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { decision_sha256: sha256Hex("different-decision") }),
+          pcm,
+        }),
+      },
+      {
+        name: "signature",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { signature_base64: Buffer.from("invalid-signature").toString("base64") }),
+          pcm,
+        }),
+      },
+      {
+        name: "episode",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { episode_id: "lc4-dev-different-episode" }),
+          pcm,
+        }),
+      },
+      {
+        name: "provider",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { provider: "gemini" }),
+          pcm,
+        }),
+      },
+      {
+        name: "opportunity",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, {
+            canonical_opportunity_id: "lc4-dev-op-41" as typeof LC4_DEV_BRANCH_OPPORTUNITY_ID,
+          }),
+          pcm,
+        }),
+      },
+      {
+        name: "ordinal",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { canonical_ordinal: 41 as 42 }),
+          pcm,
+        }),
+      },
+      {
+        name: "declared PCM hash",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { pcm_sha256: sha256Hex("different-branch-pcm") }),
+          pcm,
+        }),
+      },
+      {
+        name: "declared PCM length",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { pcm_byte_length: binding.decision.pcm_byte_length + 2 }),
+          pcm,
+        }),
+      },
+      {
+        name: "sample rate",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { sample_rate_hz: 16_000 }),
+          pcm,
+        }),
+      },
+      {
+        name: "source id",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { source_id: "lc4-dev-op-42-different-source" }),
+          pcm,
+        }),
+      },
+      {
+        name: "source text",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { source_text_sha256: sha256Hex("different-source-text") }),
+          pcm,
+        }),
+      },
+      {
+        name: "matrix",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { matrix_artifact_sha256: sha256Hex("different-matrix") }),
+          pcm,
+        }),
+      },
+      {
+        name: "prior outcome",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { prior_outcome: "settled_failure" }),
+          pcm,
+        }),
+      },
+      {
+        name: "prior receipt",
+        mutate: (binding, pcm) => ({
+          binding: mutateDecision(binding, { prior_receipt_sha256: sha256Hex("invented-prior-receipt") }),
+          pcm,
+        }),
+      },
+      {
+        name: "actual PCM bytes",
+        mutate: (binding, pcm) => ({
+          binding,
+          pcm: Uint8Array.from(pcm, (byte, index) => index === 0 ? byte ^ 0xff : byte),
+        }),
+      },
+    ]);
+
+    for (const mutation of mutations) {
+      const fixture = await openCallerBranchPreflight({ provider: "openai", outcome: "no_call" });
+      const appendCount = fixture.events.filter((event) => event === "append").length;
+      const mutated = mutation.mutate(fixture.binding, fixture.pcm);
+      const failure = await caughtFailure(fixture.session.exchange({
+        opportunity_id: fixture.opportunity.id,
+        caller_pcm: mutated.pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+        caller_branch_binding: mutated.binding,
+      }));
+      expect(failure.failure, mutation.name).toMatchObject({
+        failure_stage: "pre_send_contract",
+        failure_code: "invalid_contract",
+        caller_pcm_appended_byte_length: 0,
+        response_generation_requested: false,
+      });
+      expect(
+        fixture.events.filter((event) => event === "append"),
+        `${mutation.name} must fail before provider append`,
+      ).toHaveLength(appendCount);
+      await fixture.session.close();
+    }
   });
 
   it("keeps the exact production adapter hard-frozen before constructing a provider client", async () => {

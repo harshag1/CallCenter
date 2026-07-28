@@ -422,6 +422,10 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
           prepare,
           preflight,
           credentials,
+          caller_branch_authority: Object.freeze({
+            matrix: built.caller_branch.matrix,
+            trust: built.caller_branch.trust,
+          }),
           listener,
           gateway_executor: gatewayExecutor,
           evidence,

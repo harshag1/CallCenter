@@ -686,6 +686,45 @@ function assertControl(receipt: Lc4DevControlReceipt, arm: Arm): void {
   }
 }
 
+function assertCallerBranchExchangeAuthority(input: Readonly<{
+  projection: JsonValue;
+  decision: Lc4DevCallerBranchDecision | null;
+  decision_evidence_sha256: string | null;
+  caller_pcm_sha256: string;
+  caller_pcm_byte_length: number;
+}>): void {
+  if (input.projection === null || Array.isArray(input.projection) || typeof input.projection !== "object") {
+    throw new Error("LC4-DEV provider exchange replay projection is not an object");
+  }
+  const projection = input.projection as Record<string, JsonValue>;
+  const authority = projection.caller_branch_authority;
+  if (input.decision === null) {
+    if (authority !== null || projection.caller_branch_decision_sha256 !== null) {
+      throw new Error("LC4-DEV non-branch exchange unexpectedly claims caller branch authority");
+    }
+    return;
+  }
+  if (authority === null || Array.isArray(authority) || typeof authority !== "object") {
+    throw new Error("LC4-DEV branch exchange omitted normalized caller branch authority");
+  }
+  const normalized = authority as Record<string, JsonValue>;
+  const decision = input.decision;
+  if (projection.caller_pcm_sha256 !== input.caller_pcm_sha256
+    || projection.caller_pcm_byte_length !== input.caller_pcm_byte_length
+    || projection.caller_branch_decision_sha256 !== decision.decision_sha256
+    || normalized.decision_sha256 !== decision.decision_sha256
+    || normalized.decision_evidence_sha256 !== input.decision_evidence_sha256
+    || normalized.matrix_artifact_sha256 !== decision.matrix_artifact_sha256
+    || normalized.source_id !== decision.source_id
+    || normalized.source_text_sha256 !== decision.source_text_sha256
+    || normalized.prior_outcome !== decision.prior_outcome
+    || normalized.prior_receipt_sha256 !== decision.prior_receipt_sha256
+    || normalized.branch_intent !== decision.branch_intent
+    || normalized.reconciliation_audio_selected !== decision.reconciliation_audio_selected) {
+    throw new Error("LC4-DEV branch exchange replay authority differs from its decision and exact caller PCM");
+  }
+}
+
 export async function executeLc4DevLiveRun(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
   preflight: Lc4DevLivePreflightArtifact;
@@ -862,6 +901,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
             let expectedCallerPcmSha256 = binding.pcm_sha256;
             let expectedCallerPcmByteLength = binding.pcm_byte_length;
             let branchDecisionEvidence: Lc4DevReplayArtifactReference | null = null;
+            let branchDecision: Lc4DevCallerBranchDecision | null = null;
             failureClass = "pre-open";
             if (canonicalOpportunity.id === LC4_DEV_BRANCH_OPPORTUNITY_ID) {
               const selected = await bounded("caller-branch-selection", LC4_DEV_LIVE_TIMEOUTS.control_ms, () => input.dependencies.caller_branch.select({
@@ -888,6 +928,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               expectedCallerPcmSha256 = selected.decision.pcm_sha256;
               expectedCallerPcmByteLength = selected.decision.pcm_byte_length;
               branchDecisionEvidence = selected.evidence;
+              branchDecision = selected.decision;
               await append("caller_branch_selected", episode.episode_id, opportunity.id, {
                 decision_sha256: selected.decision.decision_sha256,
                 prior_outcome: selected.decision.prior_outcome,
@@ -945,7 +986,20 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 opportunity,
                 caller_pcm: callerPcm,
                 control_receipt: control,
+                ...(branchDecision && branchDecisionEvidence ? {
+                  caller_branch_binding: {
+                    decision: branchDecision,
+                    decision_evidence: branchDecisionEvidence,
+                  },
+                } : {}),
               }));
+              assertCallerBranchExchangeAuthority({
+                projection: exchange.provider_exchange_projection,
+                decision: branchDecision,
+                decision_evidence_sha256: branchDecisionEvidence?.evidence_sha256 ?? null,
+                caller_pcm_sha256: expectedCallerPcmSha256,
+                caller_pcm_byte_length: callerPcm.byteLength,
+              });
               providerCallsStarted += 1;
               responseGenerationsCompleted += 1;
             } catch (error) {
@@ -1146,7 +1200,17 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
               opportunity_receipt_sha256: finalized.opportunity_receipt_sha256,
               assistant_pcm_sha256: assistantReceipt.artifact_sha256,
+              caller_pcm_sha256: expectedCallerPcmSha256,
               caller_branch_decision_sha256: branchDecisionEvidence?.evidence_sha256 ?? null,
+              caller_branch_exchange_join_sha256: branchDecision ? sha256Hex(
+                `harshas-amazing-call-center/lc4-dev-caller-branch-exchange-join/v1\n${canonicalJson({
+                  opportunity_id: opportunity.id,
+                  decision_sha256: branchDecision.decision_sha256,
+                  caller_pcm_sha256: expectedCallerPcmSha256,
+                  caller_pcm_byte_length: callerPcm.byteLength,
+                  provider_exchange_sha256: exchange.provider_exchange_sha256,
+                })}`,
+              ) : null,
             }, [
               exchange.provider_exchange_evidence,
               exchange.listener_evidence,

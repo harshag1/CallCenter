@@ -33,9 +33,17 @@ import {
   type Lc4DevLivePrepareArtifact,
 } from "./lc4-development-live-runner";
 import type {
+  Lc4DevCallerBranchPlaybackBinding,
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
+import {
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  assertLc4DevCallerBranchDecision,
+  assertLc4DevCallerBranchMatrixArtifact,
+  lc4DevBranchedOpportunity,
+  type Lc4DevCallerBranchMatrixArtifact,
+} from "./lc4-development-caller-branch";
 import {
   isLc4DevSemanticGatewayFunction,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
@@ -467,6 +475,7 @@ export type Lc4RealtimeSegmentSession = Readonly<{
       | Readonly<{ kind: "hacc_response_plan"; plan: HaccResponsePlan }>
       | Readonly<{ kind: "native_context"; instructions: string; instructions_sha256: string }>;
     playback_kind?: "canonical" | "repair";
+    caller_branch_binding?: Lc4DevCallerBranchPlaybackBinding;
     repair_binding?: Readonly<{
       decision_receipt_sha256: string;
       repair_pcm_id: string;
@@ -500,6 +509,10 @@ export type Lc4OpenRealtimeSegmentInput = Readonly<{
     episode: Lc4DevLiveEpisodePlan;
     opportunities: readonly Lc4PublicDevOpportunity[];
     executor: Lc4DevGatewayExecutor;
+    caller_branch_authority?: Readonly<{
+      matrix: Lc4DevCallerBranchMatrixArtifact;
+      trust: Readonly<{ key_id: string; public_key_pem: string }>;
+    }>;
   }>;
 }>;
 
@@ -856,6 +869,7 @@ export class Lc4RealtimeProviderBridge {
       opportunity_id: string;
       canonical_evidence_sha256: string;
       repair_played: boolean;
+      effective_opportunity: Lc4PublicDevOpportunity;
     }> | null = null;
     let lastFailedExchange: Readonly<{
       error: unknown;
@@ -1109,20 +1123,73 @@ export class Lc4RealtimeProviderBridge {
         const callerPcm = Uint8Array.from(exchangeInput.caller_pcm);
         const binding = input.manifest.opportunities.find((candidate) => candidate.opportunity_id === opportunityId);
         const expectedOrdinal = input.segment.opportunity_start + opportunityOrdinal;
+        let callerBranchAuthority: Readonly<{
+          decision_sha256: string;
+          decision_evidence_sha256: string;
+          matrix_artifact_sha256: string;
+          source_id: string;
+          source_text_sha256: string;
+          prior_outcome: string;
+          prior_receipt_sha256: string | null;
+          branch_intent: string;
+          reconciliation_audio_selected: boolean;
+        }> | null = null;
         if (playbackKind === "canonical") {
+          const branchPlayback = exchangeInput.caller_branch_binding;
+          const isDevBranchOpportunity = input.manifest.protocol_id === "HACC-LC4-DEV-v1"
+            && opportunityId === LC4_DEV_BRANCH_OPPORTUNITY_ID;
           if (pendingDevOpportunity !== null
             || !binding
             || binding.segment_ordinal !== input.segment.ordinal
             || binding.ordinal !== expectedOrdinal
-            || binding.caller_pcm_byte_length !== callerPcm.byteLength
-            || binding.caller_pcm_sha256 !== sha256Hex(callerPcm)
-            || exchangeInput.repair_binding !== undefined) {
+            || exchangeInput.repair_binding !== undefined
+            || (isDevBranchOpportunity !== (branchPlayback !== undefined))) {
+            throw new Error("LC4 caller PCM or opportunity order differs from the frozen manifest");
+          }
+          if (branchPlayback) {
+            const branchAuthority = input.dev_gateway?.caller_branch_authority;
+            if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1"
+              || !branchAuthority
+              || branchPlayback.decision_evidence.kind !== "caller_branch_decision"
+              || branchPlayback.decision_evidence.evidence_sha256 !== branchPlayback.decision.decision_sha256) {
+              throw new Error("LC4-DEV caller branch playback lacks its exact retained signed authority");
+            }
+            assertLc4DevCallerBranchMatrixArtifact(branchAuthority.matrix, branchAuthority.trust);
+            assertLc4DevCallerBranchDecision({
+              decision: branchPlayback.decision,
+              matrix: branchAuthority.matrix,
+              trust: branchAuthority.trust,
+            });
+            const decision = branchPlayback.decision;
+            if (decision.episode_id !== input.manifest.run_id
+              || decision.provider !== input.profile.provider
+              || decision.canonical_opportunity_id !== opportunityId
+              || decision.canonical_ordinal !== binding.ordinal
+              || decision.pcm_sha256 !== sha256Hex(callerPcm)
+              || decision.pcm_byte_length !== callerPcm.byteLength
+              || decision.sample_rate_hz !== input.profile.input_sample_rate_hz) {
+              throw new Error("LC4-DEV caller branch playback differs from its signed episode, opportunity, provider, or PCM");
+            }
+            callerBranchAuthority = Object.freeze({
+              decision_sha256: decision.decision_sha256,
+              decision_evidence_sha256: branchPlayback.decision_evidence.evidence_sha256,
+              matrix_artifact_sha256: decision.matrix_artifact_sha256,
+              source_id: decision.source_id,
+              source_text_sha256: decision.source_text_sha256,
+              prior_outcome: decision.prior_outcome,
+              prior_receipt_sha256: decision.prior_receipt_sha256,
+              branch_intent: decision.branch_intent,
+              reconciliation_audio_selected: decision.reconciliation_audio_selected,
+            });
+          } else if (binding.caller_pcm_byte_length !== callerPcm.byteLength
+            || binding.caller_pcm_sha256 !== sha256Hex(callerPcm)) {
             throw new Error("LC4 caller PCM or opportunity order differs from the frozen manifest");
           }
         } else if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1"
           || pendingDevOpportunity?.opportunity_id !== opportunityId
           || pendingDevOpportunity.repair_played
           || !exchangeInput.repair_binding
+          || exchangeInput.caller_branch_binding !== undefined
           || !SHA256.test(exchangeInput.repair_binding.decision_receipt_sha256)
           || !SAFE_ID.test(exchangeInput.repair_binding.repair_pcm_id)
           || exchangeInput.repair_binding.pcm_sha256 !== sha256Hex(callerPcm)
@@ -1154,9 +1221,16 @@ export class Lc4RealtimeProviderBridge {
         currentOperationOrder = operationOrder;
         terminalError = null;
         terminalFailureCode = null;
+        let effectiveDevOpportunity: Lc4PublicDevOpportunity | null = null;
         if (devGateway && input.dev_gateway) {
-          const opportunity = input.dev_gateway.opportunities.find((candidate) => candidate.id === opportunityId);
-          if (!opportunity) throw new Error("LC4-DEV gateway lacks the exact public opportunity context");
+          const canonicalOpportunity = input.dev_gateway.opportunities.find((candidate) => candidate.id === opportunityId);
+          if (!canonicalOpportunity) throw new Error("LC4-DEV gateway lacks the exact public opportunity context");
+          const opportunity = exchangeInput.caller_branch_binding
+            ? lc4DevBranchedOpportunity(canonicalOpportunity, exchangeInput.caller_branch_binding.decision)
+            : playbackKind === "repair" && pendingDevOpportunity
+              ? pendingDevOpportunity.effective_opportunity
+              : canonicalOpportunity;
+          effectiveDevOpportunity = opportunity;
           devGateway.beginOpportunity({ episode: input.dev_gateway.episode, opportunity });
         }
         const exchangeSignal = linkedAbortSignal(segmentAbort.signal, exchangeInput.signal);
@@ -1369,6 +1443,8 @@ export class Lc4RealtimeProviderBridge {
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
             ...(input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? {
               playback_kind: playbackKind,
+              caller_branch_authority: callerBranchAuthority,
+              caller_branch_decision_sha256: callerBranchAuthority?.decision_sha256 ?? null,
               repair_decision_receipt_sha256: exchangeInput.repair_binding?.decision_receipt_sha256 ?? null,
               dev_listener_result: listenerResult ?? null,
             } : {}),
@@ -1387,7 +1463,12 @@ export class Lc4RealtimeProviderBridge {
           assertExchangeActive(exchangeSignal.signal);
           if (input.manifest.protocol_id === "HACC-LC4-DEV-v1") {
             pendingDevOpportunity = playbackKind === "canonical"
-              ? Object.freeze({ opportunity_id: opportunityId, canonical_evidence_sha256: evidence.evidence_sha256, repair_played: false })
+              ? Object.freeze({
+                  opportunity_id: opportunityId,
+                  canonical_evidence_sha256: evidence.evidence_sha256,
+                  repair_played: false,
+                  effective_opportunity: effectiveDevOpportunity!,
+                })
               : Object.freeze({ ...pendingDevOpportunity!, repair_played: true });
           } else opportunityOrdinal += 1;
           return evidence;
@@ -1679,6 +1760,10 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
   preflight: Lc4DevLivePreflightArtifact;
   credentials: Readonly<Record<LiveStsProvider, string>>;
+  caller_branch_authority: Readonly<{
+    matrix: Lc4DevCallerBranchMatrixArtifact;
+    trust: Readonly<{ key_id: string; public_key_pem: string }>;
+  }>;
   listener: Lc4DevelopmentListenerSink;
   gateway_executor: Lc4DevGatewayExecutor;
   evidence: Lc4DevReplayEvidenceStore;
@@ -1697,6 +1782,14 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   }
   if (lc4DevCredentialIdentitySetSha256(input.credentials) !== input.preflight.credential_identity_set_sha256) {
     throw new Error("LC4-DEV credentials differ from the hash-bound preflight identities");
+  }
+  assertLc4DevCallerBranchMatrixArtifact(
+    input.caller_branch_authority.matrix,
+    input.caller_branch_authority.trust,
+  );
+  if (input.caller_branch_authority.matrix.audio_manifest_sha256 !== input.prepare.audio_manifest_sha256
+    || input.caller_branch_authority.matrix.signer_public_key_fingerprint_sha256 !== input.preflight.authority_trust_root_sha256) {
+    throw new Error("LC4-DEV caller branch authority differs from the prepared audio or preflight trust root");
   }
   if (input.gateway_executor.kind !== "lc4-dev-arm-aware-gateway-v1"
     || input.gateway_executor.manifest_sha256 !== input.preflight.control_plane_manifest_sha256) {
@@ -1799,6 +1892,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           : Object.freeze({ kind: "hacc_structured_state" as const, packet: hacc });
       }
       const manifest = devManifest(input.prepare, episode);
+      let activeCanonicalOpportunity: Lc4PublicDevOpportunity | null = null;
       const bridgeSession = await runtime.bridge.openSegment({
         manifest,
         segment: devSegment(segment_ordinal),
@@ -1807,8 +1901,10 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         rotation_context: rotationContext,
         listener: {
           accept: async (handoff) => {
-            const opportunity = corpus.opportunities.find((candidate) => candidate.id === handoff.capture.opportunity_id);
-            if (!opportunity) throw new Error("LC4-DEV listener handoff references an unknown opportunity");
+            const opportunity = activeCanonicalOpportunity;
+            if (!opportunity || opportunity.id !== handoff.capture.opportunity_id) {
+              throw new Error("LC4-DEV listener handoff is not bound to the active projected opportunity");
+            }
             const receipt = await input.listener.accept({ episode, opportunity, ...handoff });
             if (!SHA256.test(receipt.listener_evidence_sha256)) throw new Error("LC4-DEV listener sink returned an invalid evidence hash");
             return receipt;
@@ -1818,6 +1914,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           episode,
           opportunities: corpus.opportunities,
           executor: input.gateway_executor,
+          caller_branch_authority: input.caller_branch_authority,
         },
       });
       if (segment_ordinal === 1) {
@@ -1851,11 +1948,37 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           pcm_byte_length: number;
           sample_rate_hz: 16_000 | 24_000;
         }>;
+        caller_branch_binding?: Lc4DevCallerBranchPlaybackBinding;
       }>) => {
         input.budget_authority.assertOperationWindow(50_000);
         if (closed) throw new Error("LC4-DEV adapter session is closed");
         if (exchangeInput.playback_kind === "canonical") {
           if (pendingOpportunity !== null) throw new Error("LC4-DEV prior canonical opportunity is not finalized");
+          const branchBinding = exchangeInput.caller_branch_binding;
+          const isBranchOpportunity = exchangeInput.opportunity.id === LC4_DEV_BRANCH_OPPORTUNITY_ID;
+          if (isBranchOpportunity !== (branchBinding !== undefined)) {
+            throw new Error("LC4-DEV canonical branch opportunity requires exactly one signed playback authority");
+          }
+          if (branchBinding) {
+            assertLc4DevCallerBranchDecision({
+              decision: branchBinding.decision,
+              matrix: input.caller_branch_authority.matrix,
+              trust: input.caller_branch_authority.trust,
+            });
+            if (branchBinding.decision_evidence.kind !== "caller_branch_decision"
+              || branchBinding.decision_evidence.evidence_sha256 !== branchBinding.decision.decision_sha256
+              || branchBinding.decision.episode_id !== episode.episode_id
+              || branchBinding.decision.provider !== episode.provider
+              || canonicalJson(exchangeInput.opportunity) !== canonicalJson(
+                lc4DevBranchedOpportunity(corpus.opportunities[41]!, branchBinding.decision),
+              )
+              || branchBinding.decision.pcm_sha256 !== sha256Hex(exchangeInput.caller_pcm)
+              || branchBinding.decision.pcm_byte_length !== exchangeInput.caller_pcm.byteLength
+              || branchBinding.decision.sample_rate_hz !== devProfile(episode).input_sample_rate_hz) {
+              throw new Error("LC4-DEV canonical branch playback differs from its signed retained decision");
+            }
+            await input.evidence.assertResolvable(branchBinding.decision_evidence);
+          }
           runtime!.flow_state_sha256 = exchangeInput.control_receipt.flow_state_sha256;
           runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
             previous: runtime!.response_plan_chain_head_sha256,
@@ -1872,11 +1995,13 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         }
         let evidence: Lc4ProviderExchangeEvidence;
         try {
+          activeCanonicalOpportunity = exchangeInput.opportunity;
           evidence = await bridgeSession.exchange({
             opportunity_id: exchangeInput.opportunity.id,
             caller_pcm: exchangeInput.caller_pcm,
             response_control: exchangeInput.control_receipt.response_control,
             playback_kind: exchangeInput.playback_kind,
+            ...(exchangeInput.caller_branch_binding ? { caller_branch_binding: exchangeInput.caller_branch_binding } : {}),
             ...(exchangeInput.repair_binding ? { repair_binding: exchangeInput.repair_binding } : {}),
           });
         } catch (error) {
@@ -1889,6 +2014,8 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           });
           await input.evidence.assertResolvable(failureEvidence);
           throw new Lc4DevFailureEvidenceError(error.failure, failureEvidence);
+        } finally {
+          activeCanonicalOpportunity = null;
         }
         if (exchangeInput.playback_kind === "canonical") {
           runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
@@ -1931,7 +2058,13 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         });
       };
       return Object.freeze({
-        exchangeCanonical: ({ opportunity, caller_pcm, control_receipt }) => exchangePlayback({ opportunity, caller_pcm, control_receipt, playback_kind: "canonical" }),
+        exchangeCanonical: ({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) => exchangePlayback({
+          opportunity,
+          caller_pcm,
+          control_receipt,
+          playback_kind: "canonical",
+          ...(caller_branch_binding ? { caller_branch_binding } : {}),
+        }),
         exchangeRepair: ({ opportunity, repair, decision_receipt, control_receipt }) => {
           if (repair.opportunity_id !== opportunity.id
             || repair.episode_id !== episode.episode_id
