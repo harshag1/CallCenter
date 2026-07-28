@@ -20,6 +20,7 @@ import {
   buildGeminiFunctionDeclarations,
   buildGeminiLiveSetup,
   GEMINI_CAPABILITY_GATEWAY_NAME,
+  GEMINI_HACC_CONTINUATION_CONTROL_FIELD,
   GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ,
   GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS,
   GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ,
@@ -309,7 +310,7 @@ describe("GeminiLiveClient", () => {
     }));
   });
 
-  it("puts the response plan on wire before activityEnd can trigger generation", async () => {
+  it("puts the response plan on official realtimeInput.text before activityEnd can trigger generation", async () => {
     const test = harness({ instructions: "BASE GEMINI SAFETY AND FLOW GUARDRAILS" });
     await connectReady(test);
     const setup = JSON.parse(test.socket.sent[0]);
@@ -340,15 +341,10 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([
       { realtimeInput: { activityStart: {} } },
       { realtimeInput: { audio: { data: "AQA=", mimeType: "audio/pcm;rate=16000" } } },
-      {
-        clientContent: {
-          turns: [{ role: "user", parts: [{ text: control }] }],
-          turnComplete: false,
-        },
-      },
+      { realtimeInput: { text: control } },
       { realtimeInput: { activityEnd: {} } },
     ]);
-    expect(test.socket.sent.some((message) => message.includes('"realtimeInput":{"text"'))).toBe(false);
+    expect(test.socket.sent.some((message) => message.includes('"clientContent"'))).toBe(false);
   });
 
   it("sends an official clientContent text turn without opening an audio activity", async () => {
@@ -435,21 +431,51 @@ describe("GeminiLiveClient", () => {
     expect(toolCallObservation.identities).toHaveProperty("callIdSha256");
     expect(toolCallObservation.identities).not.toHaveProperty("responseIdSha256");
     const controlObservation = observations.find((entry) => (
-      entry.direction === "outbound" && entry.wireType === "clientContent"
+      entry.direction === "outbound" && entry.wireType === "realtimeInput.text"
     ));
     expect(controlObservation?.projection).toMatchObject({
       dynamicControl: {
         sha256: createHash("sha256").update(control).digest("hex"),
         byteLength: Buffer.byteLength(control, "utf8"),
         authority: "advisory_only_gateway_and_speech_gate_enforced",
+        delivery: "realtime_input_text_before_activity_end",
       },
     });
     expect(JSON.stringify(controlObservation?.projection)).not.toContain(control);
 
+    const continuationControl =
+      "<hacc_response_plan>{\"revision\":20,\"phase\":\"canonical\"}</hacc_response_plan>";
+    const sentBeforeContinuationPreparation = test.socket.sent.length;
+    test.client.prepareToolContinuation({
+      additionalInstructions: continuationControl,
+      contextSha256: createHash("sha256").update(continuationControl).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    expect(test.socket.sent).toHaveLength(sentBeforeContinuationPreparation);
     test.client.submitToolResults([{
       callId: "provider-call-roundtrip",
       output: { ok: true, membership: "active" },
     }]);
+    const toolResponseFrame = JSON.parse(test.socket.sent.at(-1)!);
+    expect(toolResponseFrame).toEqual({
+      toolResponse: {
+        functionResponses: [{
+          id: "provider-call-roundtrip",
+          name: GEMINI_CAPABILITY_GATEWAY_NAME,
+          response: {
+            ok: true,
+            membership: "active",
+            [GEMINI_HACC_CONTINUATION_CONTROL_FIELD]: {
+              schema_version: 1,
+              delivery: "synchronous_tool_response",
+              instructions: continuationControl,
+              context_sha256: createHash("sha256").update(continuationControl).digest("hex"),
+              context_authority: "advisory_only_gateway_and_speech_gate_enforced",
+            },
+          },
+        }],
+      },
+    });
     test.socket.receive({
       serverContent: {
         modelTurn: {
@@ -510,18 +536,156 @@ describe("GeminiLiveClient", () => {
     ));
     expect(terminal?.wireObservation).toEqual(usage?.wireObservation);
     expect(terminal?.wireObservation).toMatchObject({ availability: "observed" });
+    const continuationControlObservation = observations.find((entry) => (
+      entry.direction === "outbound"
+      && entry.wireType === "toolResponse"
+      && typeof entry.projection.dynamicControl === "object"
+      && entry.projection.dynamicControl !== null
+    ));
+    expect(continuationControlObservation?.projection).toMatchObject({
+      dynamicControl: {
+        sha256: createHash("sha256").update(continuationControl).digest("hex"),
+        byteLength: Buffer.byteLength(continuationControl, "utf8"),
+        authority: "advisory_only_gateway_and_speech_gate_enforced",
+        delivery: "synchronous_tool_response",
+        integrity: "verified",
+        responseBindings: 1,
+        batchConsistency: "verified",
+      },
+    });
+    expect(JSON.stringify(continuationControlObservation?.projection))
+      .not.toContain(continuationControl);
     expect(observations.map((entry) => `${entry.direction}:${entry.wireType}`)).toEqual([
       "outbound:setup",
       "inbound:setupComplete",
       "outbound:realtimeInput.activityStart",
       "outbound:realtimeInput.audio",
-      "outbound:clientContent",
+      "outbound:realtimeInput.text",
       "outbound:realtimeInput.activityEnd",
       "inbound:toolCall",
       "outbound:toolResponse",
       "inbound:serverContent",
       "inbound:serverContent",
     ]);
+  });
+
+  it("fails closed before Gemini toolResponse when continuation control collides or exceeds its size bound", async () => {
+    for (const fault of ["reserved-field", "size"] as const) {
+      const test = harness({
+        executeCapabilityGateway: undefined,
+        ...(fault === "size" ? { maxToolResponseBytes: 256 } : {}),
+      });
+      await connectReady(test);
+      triggerProviderTurn(test);
+      test.socket.receive({
+        toolCall: {
+          functionCalls: [{
+            id: `provider-call-${fault}`,
+            name: GEMINI_CAPABILITY_GATEWAY_NAME,
+            args: { tool_name: "lookup_member", arguments: {} },
+          }],
+        },
+      });
+      await settle();
+      const control = fault === "size"
+        ? `<hacc_response_plan>${"x".repeat(220)}</hacc_response_plan>`
+        : "<hacc_response_plan>{\"revision\":21}</hacc_response_plan>";
+      const sentBeforePreparation = test.socket.sent.length;
+      test.client.prepareToolContinuation({
+        additionalInstructions: control,
+        contextSha256: createHash("sha256").update(control).digest("hex"),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+      expect(test.socket.sent).toHaveLength(sentBeforePreparation);
+
+      const output = fault === "reserved-field"
+        ? {
+            ok: false,
+            [GEMINI_HACC_CONTINUATION_CONTROL_FIELD]: { attacker: true },
+          }
+        : { ok: false };
+      expect(() => test.client.submitToolResults([{
+        callId: `provider-call-${fault}`,
+        output,
+      }])).toThrow(
+        fault === "reserved-field"
+          ? "collides with the reserved continuation-control field"
+          : "continuation control exceeds the tool response safety bound",
+      );
+      expect(test.socket.sent).toHaveLength(sentBeforePreparation);
+      expect(test.socket.sent.some((frame) => frame.includes('"toolResponse"'))).toBe(false);
+      expect(test.client.state).toBe("ready");
+    }
+  });
+
+  it("binds one identical hash-verified continuation control to every member of a Gemini tool batch", async () => {
+    const observations: RealtimeWireObservation[] = [];
+    const test = harness({ executeCapabilityGateway: undefined });
+    test.client.onWireObservation((observation) => observations.push(observation));
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      toolCall: {
+        functionCalls: [
+          {
+            id: "provider-call-batch-a",
+            name: GEMINI_CAPABILITY_GATEWAY_NAME,
+            args: { tool_name: "lookup_member", arguments: {} },
+          },
+          {
+            id: "provider-call-batch-b",
+            name: GEMINI_CAPABILITY_GATEWAY_NAME,
+            args: { tool_name: "renew_member", arguments: {} },
+          },
+        ],
+      },
+    });
+    await settle();
+    const control =
+      "<hacc_response_plan>{\"revision\":22,\"phase\":\"canonical\"}</hacc_response_plan>";
+    const contextSha256 = createHash("sha256").update(control).digest("hex");
+    test.client.prepareToolContinuation({
+      additionalInstructions: control,
+      contextSha256,
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    test.client.submitToolResults([
+      { callId: "provider-call-batch-a", output: { ok: false, reason: "bad_a" } },
+      { callId: "provider-call-batch-b", output: { ok: false, reason: "bad_b" } },
+    ]);
+
+    const frame = JSON.parse(test.socket.sent.at(-1)!);
+    const responses = frame.toolResponse.functionResponses;
+    expect(responses).toHaveLength(2);
+    expect(responses.map((response: Record<string, unknown>) => (
+      (response.response as Record<string, unknown>)[GEMINI_HACC_CONTINUATION_CONTROL_FIELD]
+    ))).toEqual([
+      {
+        schema_version: 1,
+        delivery: "synchronous_tool_response",
+        instructions: control,
+        context_sha256: contextSha256,
+        context_authority: "advisory_only_gateway_and_speech_gate_enforced",
+      },
+      {
+        schema_version: 1,
+        delivery: "synchronous_tool_response",
+        instructions: control,
+        context_sha256: contextSha256,
+        context_authority: "advisory_only_gateway_and_speech_gate_enforced",
+      },
+    ]);
+    const toolResponseObservation = observations.findLast((entry) => (
+      entry.direction === "outbound" && entry.wireType === "toolResponse"
+    ));
+    expect(toolResponseObservation?.projection.dynamicControl).toMatchObject({
+      sha256: contextSha256,
+      responseBindings: 2,
+      batchConsistency: "verified",
+      integrity: "verified",
+    });
+    expect(observations.filter((entry) => entry.direction === "outbound").at(-1)?.wireType)
+      .toBe("toolResponse");
   });
 
   it("fails closed when Gemini terminalizes before a blocking tool result", async () => {

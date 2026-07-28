@@ -478,3 +478,64 @@ The DEV root is currently retained at
 under `/private/tmp`, which is not durable publication storage. No completed
 episode or opportunity subset may be extracted as a score, no public graph is
 authorized, and all Native/HACC efficacy claims remain **NO-GO**.
+
+## 2026-07-28 six-episode attempt at `4e47774`
+
+**Quarantined custody failure. No partial score is admissible.**
+
+The exact-source qualification passed OpenAI `gpt-realtime-2.1`, Gemini
+`gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` with three paid sessions, six provider sessions,
+six generation phases, three tool round trips, and zero retries. Its trust
+root is
+`4119bace3de85da3dd55701977cabb1c0b60db1df239f5ec3e5ef3d64a0b7ae8`
+and its terminal artifact is
+`d62343dc1f90cd76266bfa05d860ff4d27b66adab0604f559473cc418034781e`.
+
+The DEV attempt then completed:
+
+- OpenAI Native: **60/60** canonical opportunities;
+- OpenAI HACC: **60/60** canonical opportunities;
+- Gemini HACC: **60/60** canonical opportunities;
+- Gemini Native: **60/60** canonical opportunities;
+- registered repairs across these episodes: **16**;
+- provider turns completed: **256**;
+- paid retries: **0**;
+- pre-dispatch semantic rejections: **0**.
+
+The four terminal event hashes are:
+
+- OpenAI Native:
+  `3fbe09ece622fa8e1a01f22ee8363ea8f91cb23a019055f8bd8b58f59716c14d`;
+- OpenAI HACC:
+  `727b64f5c67898968788cdc7b98f8b48be2362f50a7d158bdf1f61d160509bb8`;
+- Gemini HACC:
+  `71c64ca495ea6b462057c349c5f7037f1b1360d70fdeb41f6a204c1c8a3efbc4`;
+- Gemini Native:
+  `041ea4b7a0033ad7c2232ffa7e5ae0b80b6c3b8dc1a356ac93bff8ea72dd8776`.
+
+The runner next recorded xAI Native `episode_opened` event
+`9f3c562f768d21eb93fb2434f24c9ba8105fc360c283ce179898dbe8130dab90`
+and signed budget `reservation.connection_intent` event
+`7f0ede4f0c73c796c28b8ca9d86da01e3455b8d8a5c43412766f80d3da9b6564`.
+A provider network connection attempt began, but no xAI audio submission,
+response generation, or provider exchange is retained.
+
+A signed-ledger reload then rejected a transient unsafe filesystem observation.
+The file later observed as regular, mode `0600`, and `nlink=1`, but the
+aggregate failure message did not retain which predicate differed. The
+in-memory failed run was subsequently masked when budget finalization performed
+another ledger inspection. The root therefore has no immutable run, terminal
+budget evidence, run package, report, or public artifact.
+
+All six $2.50 reservations remain nonterminal in the quarantined signed ledger
+(four `opened`, one `opening`, one `reserved`), so its unreconciled local
+authorization exposure is bounded by the original **$15.00** ceiling. That is
+not a settlement, provider-reported bill, or cash-spend claim. The root must
+not be resumed or repaired in place.
+
+The next source version replaces pathname-only reads with descriptor-bound
+`O_NOFOLLOW` custody, retains the same descriptor through append, revalidates
+identity/link/mode and exact size after fsync, persists the primary terminal run
+before secondary cleanup, and atomically publishes terminal budget evidence
+with its run package. A new qualification and one-shot DEV root are mandatory.

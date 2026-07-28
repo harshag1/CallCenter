@@ -10,6 +10,7 @@ import {
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
+  RealtimeResponsePreparation,
   RealtimeToolResult,
 } from "../realtime/client/types";
 import {
@@ -208,6 +209,11 @@ export type Lc4DevGatewayExecutionInput = Readonly<{
 export type Lc4DevGatewayExecutor = Readonly<{
   kind: "lc4-dev-arm-aware-gateway-v1";
   manifest_sha256: string;
+  currentResponsePreparation(input: Readonly<{
+    episode: Lc4DevLiveEpisodePlan;
+    opportunity: Lc4PublicDevOpportunity;
+    phase: "canonical" | "repair";
+  }>): RealtimeResponsePreparation;
   execute(input: Lc4DevGatewayExecutionInput): Promise<Readonly<{
     provider_output: JsonValue;
     authoritative_receipt_sha256: string;
@@ -357,6 +363,22 @@ function freeze<T>(value: T): T {
 
 function requireHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
+}
+
+function assertResponsePreparation(
+  preparation: RealtimeResponsePreparation,
+): RealtimeResponsePreparation {
+  if (!preparation.additionalInstructions.trim()) {
+    throw new Error("LC4-DEV continuation response control is empty");
+  }
+  requireHash(preparation.contextSha256, "LC4-DEV continuation response control");
+  if (sha256Hex(preparation.additionalInstructions) !== preparation.contextSha256) {
+    throw new Error("LC4-DEV continuation response control hash mismatch");
+  }
+  if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+    throw new Error("LC4-DEV continuation response control authority boundary mismatch");
+  }
+  return Object.freeze({ ...preparation });
 }
 
 function providerOutputSnapshot(value: JsonValue): JsonValue {
@@ -615,12 +637,14 @@ export class Lc4DevGatewayTurnCoordinator {
   diagnosticSnapshot(): Readonly<{
     batch_count: number;
     receipt_count: number;
+    authority_projection_count: number;
     rejection_count: number;
     fatal_class: "none" | "parse" | "provenance" | "execution" | "delivery" | "unknown";
   }> {
     return Object.freeze({
       batch_count: this.#batchOrdinal,
       receipt_count: this.#receipts.length,
+      authority_projection_count: this.#authorityProjections.length,
       rejection_count: this.#preDispatchRejections.length,
       fatal_class: this.#fatalClass,
     });
@@ -700,6 +724,22 @@ export class Lc4DevGatewayTurnCoordinator {
       }));
     }
     try {
+      const prepareToolContinuation = this.#client.prepareToolContinuation;
+      if (typeof prepareToolContinuation !== "function") {
+        throw new Error("LC4-DEV provider client cannot bind tool-continuation response control");
+      }
+      const currentResponsePreparation = this.#executor.currentResponsePreparation;
+      if (typeof currentResponsePreparation !== "function") {
+        throw new Error("LC4-DEV gateway executor cannot resolve current continuation control");
+      }
+      const preparation = assertResponsePreparation(
+        currentResponsePreparation({
+          episode: context.episode,
+          opportunity: context.opportunity,
+          phase: context.phase,
+        }),
+      );
+      prepareToolContinuation.call(this.#client, preparation);
       this.#client.submitToolResults(Object.freeze(results), false);
       this.#client.createResponse();
     } catch (error) {

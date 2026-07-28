@@ -157,6 +157,48 @@ export type Lc4DevOperatorDependencies = Readonly<{
   create_runtime?(config: Lc4DevDefaultRuntimeConfig): Promise<Lc4DevOperatorRuntime>;
 }>;
 
+type Lc4DevTerminalRunCustodyResult = Readonly<{
+  run: Lc4DevLiveRunArtifact;
+  budget_evidence: Lc4DevBudgetEvidence;
+  run_package: Lc4DevRunPackage;
+}>;
+
+/**
+ * Closes one live execution without letting secondary ledger or budget
+ * finalization failures erase the runner's primary terminal result.
+ *
+ * The terminal run is made durable before the runtime finalizer is allowed to
+ * inspect/close its ledger and before budget evidence is finalized or replayed.
+ * Budget evidence and the publishable run package remain absent unless the
+ * entire secondary custody chain succeeds.
+ */
+export async function closeLc4DevTerminalRunCustody(input: Readonly<{
+  execute_run(): Promise<Lc4DevLiveRunArtifact>;
+  write_terminal_run(run: Lc4DevLiveRunArtifact): Promise<void>;
+  finalize_runtime(): Promise<void>;
+  finalize_budget(run: Lc4DevLiveRunArtifact): Promise<Lc4DevBudgetEvidence>;
+  replay_budget(evidence: Lc4DevBudgetEvidence): Promise<void>;
+  create_run_package(run: Lc4DevLiveRunArtifact, evidence: Lc4DevBudgetEvidence): Lc4DevRunPackage;
+  write_terminal_pair(
+    evidence: Lc4DevBudgetEvidence,
+    runPackage: Lc4DevRunPackage,
+  ): Promise<void>;
+}>): Promise<Lc4DevTerminalRunCustodyResult> {
+  let run: Lc4DevLiveRunArtifact;
+  try {
+    run = await input.execute_run();
+    await input.write_terminal_run(run);
+  } finally {
+    await input.finalize_runtime();
+  }
+
+  const budgetEvidence = await input.finalize_budget(run);
+  await input.replay_budget(budgetEvidence);
+  const runPackage = input.create_run_package(run, budgetEvidence);
+  await input.write_terminal_pair(budgetEvidence, runPackage);
+  return Object.freeze({ run, budget_evidence: budgetEvidence, run_package: runPackage });
+}
+
 const DEFAULT_DEPS: Lc4DevOperatorDependencies = Object.freeze({
   inspect_source: inspectLc4QualificationGitSource,
   replay_authority_report: replayLc4DevAuthorityReport,
@@ -235,6 +277,62 @@ async function writeImmutableJson(path: string, value: unknown): Promise<void> {
     await chmod(path, 0o400);
   } finally {
     await unlink(temporary).catch(() => undefined);
+  }
+}
+
+/**
+ * Publishes two immutable JSON artifacts as one fail-closed custody pair.
+ *
+ * A pre-existing or concurrently published destination is never removed:
+ * rollback only unlinks final paths successfully created by this invocation.
+ * The second path is the pair's commit marker.
+ */
+export async function writeImmutableJsonPair(input: Readonly<{
+  first_path: string;
+  first_value: unknown;
+  second_path: string;
+  second_value: unknown;
+}>): Promise<void> {
+  const firstPath = resolve(input.first_path);
+  const secondPath = resolve(input.second_path);
+  if (firstPath === secondPath) {
+    throw new Error("immutable JSON pair paths must be distinct");
+  }
+  await Promise.all([
+    mkdir(dirname(firstPath), { recursive: true, mode: 0o700 }),
+    mkdir(dirname(secondPath), { recursive: true, mode: 0o700 }),
+  ]);
+  const nonce = sha256Hex(randomBytes(32));
+  const firstTemporary = `${firstPath}.${nonce}.first.tmp`;
+  const secondTemporary = `${secondPath}.${nonce}.second.tmp`;
+  const linked: string[] = [];
+  try {
+    await Promise.all([
+      writeFile(firstTemporary, `${canonicalJson(input.first_value)}\n`, {
+        flag: "wx",
+        mode: 0o400,
+      }),
+      writeFile(secondTemporary, `${canonicalJson(input.second_value)}\n`, {
+        flag: "wx",
+        mode: 0o400,
+      }),
+    ]);
+    await link(firstTemporary, firstPath);
+    linked.push(firstPath);
+    await link(secondTemporary, secondPath);
+    linked.push(secondPath);
+    await Promise.all([
+      chmod(firstPath, 0o400),
+      chmod(secondPath, 0o400),
+    ]);
+  } catch (error) {
+    await Promise.all(linked.map((path) => unlink(path).catch(() => undefined)));
+    throw error;
+  } finally {
+    await Promise.all([
+      unlink(firstTemporary).catch(() => undefined),
+      unlink(secondTemporary).catch(() => undefined),
+    ]);
   }
 }
 
@@ -809,20 +907,26 @@ export async function runLc4DevelopmentOperatorCli(
       const budgetAuthority = new Lc4DevBudgetLifecycle({ lease: budgetLease, binding: { prepare, preflight }, now: io.now });
       budgetAuthority.assertProviderConstructionAuthorized();
       const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer, budget_authority: budgetAuthority });
-      let run: Lc4DevLiveRunArtifact;
-      try {
-        run = await executeLc4DevLiveRun({ prepare, preflight, dependencies: bundle.dependencies });
-      } finally {
-        await bundle.finalize();
-      }
-      const budgetEvidence = await finalizeLc4DevRunBudget({ lease: budgetLease, binding: { prepare, preflight }, run, now: io.now });
-      await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({ lease: budgetLease, binding: { prepare, preflight }, evidence: budgetEvidence, now: io.now });
-      const runPackage = createLc4DevRunPackage({ lease: budgetLease, evidence: budgetEvidence, run });
-      await Promise.all([
-        writeImmutableJson(artifactPath(evidenceRoot, "run"), run),
-        writeImmutableJson(artifactPath(evidenceRoot, "budget_evidence"), budgetEvidence),
-        writeImmutableJson(artifactPath(evidenceRoot, "run_package"), runPackage),
-      ]);
+      const closed = await closeLc4DevTerminalRunCustody({
+        execute_run: () => executeLc4DevLiveRun({ prepare, preflight, dependencies: bundle.dependencies }),
+        write_terminal_run: (run) => writeImmutableJson(artifactPath(evidenceRoot, "run"), run),
+        finalize_runtime: () => bundle.finalize(),
+        finalize_budget: (run) => finalizeLc4DevRunBudget({ lease: budgetLease, binding: { prepare, preflight }, run, now: io.now }),
+        replay_budget: (evidence) => (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({
+          lease: budgetLease,
+          binding: { prepare, preflight },
+          evidence,
+          now: io.now,
+        }),
+        create_run_package: (run, evidence) => createLc4DevRunPackage({ lease: budgetLease, evidence, run }),
+        write_terminal_pair: (evidence, runPackage) => writeImmutableJsonPair({
+          first_path: artifactPath(evidenceRoot, "budget_evidence"),
+          first_value: evidence,
+          second_path: artifactPath(evidenceRoot, "run_package"),
+          second_value: runPackage,
+        }),
+      });
+      const { run, budget_evidence: budgetEvidence, run_package: runPackage } = closed;
       io.stdout(canonicalJson({ command: "run", execution_id: run.execution_id, status: run.status, run_sha256: run.run_sha256, run_package_sha256: runPackage.package_sha256, budget_terminal_ledger_head_sha256: budgetEvidence.terminal_ledger_head_sha256, provider_calls_made: run.provider_calls_made, paid_retry_count: run.paid_retry_count }));
       return run.status === "completed" ? 0 : 2;
     }

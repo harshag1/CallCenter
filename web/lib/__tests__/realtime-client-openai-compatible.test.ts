@@ -2212,6 +2212,80 @@ describe("OpenAI-compatible realtime client", () => {
     }]);
   });
 
+  it.each(["openai", "xai"] as const)(
+    "hash-binds current control to an explicit %s tool continuation",
+    async (provider) => {
+      const socket = new FakeSocket();
+      const observations: RealtimeWireObservation[] = [];
+      const client = new OpenAICompatibleRealtimeClient({
+        provider,
+        url: `wss://${provider}.example/realtime`,
+        sessionUpdate: localProxySession,
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      client.onWireObservation((observation) => observations.push(observation));
+      await connect(client, socket);
+      socket.sent.length = 0;
+
+      const argumentsText = JSON.stringify({
+        tool_name: "complete_current_stage",
+        arguments: {},
+      });
+      socket.emit("message", JSON.stringify({
+        type: "response.function_call_arguments.done",
+        response_id: "response_control_rebind",
+        item_id: "item_control_rebind",
+        call_id: "call_control_rebind",
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: argumentsText,
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.done",
+        response: {
+          id: "response_control_rebind",
+          status: "completed",
+          output: [terminalToolOutput(
+            "call_control_rebind",
+            LOCAL_TOOL_PROXY_FUNCTION_NAME,
+            argumentsText,
+            "item_control_rebind",
+          )],
+        },
+      }));
+
+      const control =
+        "<hacc_response_plan>{\"revision\":20,\"phase\":\"canonical\"}</hacc_response_plan>";
+      const contextSha256 = createHash("sha256").update(control).digest("hex");
+      client.prepareToolContinuation({
+        additionalInstructions: control,
+        contextSha256,
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+      client.submitToolResults([{
+        callId: "call_control_rebind",
+        output: { ok: false, code: "capability_request_rejected" },
+      }], false);
+      client.createResponse();
+
+      const frames = socket.sent.map((value) => JSON.parse(value));
+      expect(frames.at(-1)).toEqual({
+        type: "response.create",
+        response: { instructions: control },
+      });
+      const continuation = observations.findLast((entry) => (
+        entry.direction === "outbound" && entry.wireType === "response.create"
+      ));
+      expect(continuation?.projection).toMatchObject({
+        dynamicControl: {
+          sha256: contextSha256,
+          byteLength: Buffer.byteLength(control, "utf8"),
+          authority: "advisory_only_gateway_and_speech_gate_enforced",
+        },
+      });
+    },
+  );
+
   for (const variant of [
     { id: "required", toolChoice: "required" as const },
     {

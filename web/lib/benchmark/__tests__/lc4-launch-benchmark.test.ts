@@ -1,10 +1,30 @@
-import { describe, expect, it } from "vitest";
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
-import { sha256Hex } from "../artifacts";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { canonicalJson, sha256Hex } from "../artifacts";
 import type { Lc4AuthorityObligationResult } from "../lc4-authoritative-obligation-evidence";
 import { runLc4LaunchBenchmarkCli } from "../lc4-launch-benchmark-cli";
 import {
+  LC4_LAUNCH_BENCHMARK_FILENAMES,
   LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256,
+  publishLc4LaunchBenchmarkPublicPair,
+  readLc4LaunchBenchmarkPublicJson,
+  readLc4LaunchBenchmarkPublicPair,
   renderLc4LaunchBenchmarkMarkdown,
   scoreLc4LaunchBenchmark,
   type Lc4LaunchBenchmarkEpisodeInput,
@@ -15,6 +35,17 @@ import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corp
 
 const H = (value: string) => sha256Hex(value);
 const corpus = createLc4PublicDevelopmentCorpus();
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function tempRoot(): Promise<string> {
+  const root = await mkdtemp(resolve(tmpdir(), "hacc-lc4-launch-public-"));
+  roots.push(root);
+  return root;
+}
 
 function result(obligation_id: string, pass = true): Lc4AuthorityObligationResult {
   return Object.freeze({ obligation_id, pass, observed_count: pass ? 1 : 0, reason: pass ? null : "fixture_failure" });
@@ -173,6 +204,126 @@ describe("LC4 launch benchmark scorer", () => {
     expect(markdown).toContain("Corrected facts");
     expect(JSON.stringify(first))
       .not.toMatch(/listener_observation|MPL-1402|Eli Park|provider_pairs|native_guardrail|authoritative_actions/u);
+  });
+
+  it("publishes and re-reads one immutable regular-file pair", async () => {
+    const root = await tempRoot();
+    const output = resolve(root, "public");
+    const artifact = scoreLc4LaunchBenchmark(scoringInput());
+    await publishLc4LaunchBenchmarkPublicPair({
+      artifact,
+      output_root: output,
+    });
+    const json = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
+    const markdown = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
+    for (const path of [json, markdown]) {
+      const metadata = await stat(path);
+      expect(metadata.isFile()).toBe(true);
+      expect(metadata.nlink).toBe(1);
+      expect(metadata.mode & 0o777).toBe(0o444);
+    }
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: json,
+      public_markdown: markdown,
+    })).resolves.toEqual(artifact);
+    expect(await readFile(json, "utf8")).toBe(`${canonicalJson(artifact)}\n`);
+    expect(await readFile(markdown, "utf8")).toBe(renderLc4LaunchBenchmarkMarkdown(artifact));
+    await expect(publishLc4LaunchBenchmarkPublicPair({
+      artifact,
+      output_root: output,
+    })).rejects.toThrow(/overwrite is forbidden/u);
+  });
+
+  it("rejects linked, symlinked, oversized, and partial public pairs", async () => {
+    const root = await tempRoot();
+    const output = resolve(root, "public");
+    const artifact = scoreLc4LaunchBenchmark(scoringInput());
+    await publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output });
+    const json = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
+    const markdown = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
+
+    const secondJsonLink = resolve(root, "second-json-link.json");
+    await link(json, secondJsonLink);
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: json,
+      public_markdown: markdown,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+    await unlink(secondJsonLink);
+
+    const markdownSymlink = resolve(root, "public-markdown-link.md");
+    await symlink(markdown, markdownSymlink);
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: json,
+      public_markdown: markdownSymlink,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+
+    const oversizedJson = resolve(root, "oversized.json");
+    await writeFile(oversizedJson, Buffer.alloc((4 * 1024 * 1024) + 1, 0x20));
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: oversizedJson,
+      public_markdown: markdown,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+
+    const oversizedMarkdown = resolve(root, "oversized.md");
+    await writeFile(oversizedMarkdown, Buffer.alloc((1024 * 1024) + 1, 0x20));
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: json,
+      public_markdown: oversizedMarkdown,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+
+    const partial = resolve(root, "partial");
+    await mkdir(partial);
+    const existingJson = resolve(partial, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
+    const missingMarkdown = resolve(partial, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
+    await writeFile(existingJson, "{}\n");
+    await expect(publishLc4LaunchBenchmarkPublicPair({
+      artifact,
+      output_root: partial,
+    })).rejects.toThrow(/overwrite is forbidden/u);
+    await expect(lstat(missingMarkdown)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed when a bounded descriptor gains an appended tail", async () => {
+    const root = await tempRoot();
+    const json = resolve(root, "growing.json");
+    const source = `${canonicalJson(scoreLc4LaunchBenchmark(scoringInput()))}\n`;
+    // A near-limit whitespace suffix keeps the starting JSON valid while
+    // making the append race long enough to exercise the descriptor probe.
+    await writeFile(json, `${source}${" ".repeat((4 * 1024 * 1024) - source.length - 4096)}`);
+    const writer = await import("node:fs/promises").then(({ open }) => open(json, "a"));
+    let writing = true;
+    const churn = (async () => {
+      const block = Buffer.alloc(4096, 0x20);
+      while (writing) {
+        await writer.write(block);
+      }
+    })();
+    try {
+      await expect(readLc4LaunchBenchmarkPublicJson({
+        public_json: json,
+      })).rejects.toThrow(/bounded regular|changed while it was being read/u);
+    } finally {
+      writing = false;
+      await churn;
+      await writer.close();
+    }
+  });
+
+  it("keeps one complete pair when concurrent publishers race", async () => {
+    const root = await tempRoot();
+    const output = resolve(root, "public");
+    const artifact = scoreLc4LaunchBenchmark(scoringInput());
+    const attempts = await Promise.allSettled([
+      publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output }),
+      publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output }),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    await expect(readLc4LaunchBenchmarkPublicPair({
+      public_json: resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.json),
+      public_markdown: resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown),
+    })).resolves.toEqual(artifact);
+    expect((await readdir(output)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
   it("keeps the CLI provider-free and fails closed on malformed publication input", async () => {

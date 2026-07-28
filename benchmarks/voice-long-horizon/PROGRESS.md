@@ -632,3 +632,57 @@ This is deterministic mechanism evidence for the enumerated faults. It does not
 measure how often a provider emits them and does not authorize any provider or
 HACC efficacy claim. The paid six-cell benchmark and graph remain blocked until
 a new exact-source qualification and one-shot run complete.
+
+## 2026-07-28 — `4e47774` one-shot run quarantined after evidence-custody failure
+
+The exact-source qualification at
+`4e477740de14c8520d5baba2337d10a0077c822f` passed all three pinned provider
+gateways with three paid sessions, six provider sessions, six generation
+phases, three tool round trips, and zero retries.
+
+The following six-cell DEV run completed both OpenAI arms and both Gemini arms:
+
+- terminal episodes: **4/6**;
+- completed canonical opportunities: **240/360**;
+- completed provider turns, including registered repairs: **256**;
+- paid retries: **0**;
+- HACC pre-dispatch semantic rejections: **0**.
+
+After Gemini Native reached its terminal event, the runner opened the internal
+xAI Native episode and recorded its signed budget connection intent. A provider
+network connection attempt began, but no xAI caller audio, response generation,
+or provider exchange was submitted. The next signed-ledger inspection rejected
+a transient unsafe pathname observation. The file later observed as a private
+regular one-link file, but the old aggregate diagnostic did not retain which
+metadata predicate differed.
+
+The in-memory failed run was then masked by a second ledger inspection during
+budget finalization. Consequently the root contains no immutable `run.json`,
+terminal budget evidence, run package, report, or public result. It is
+quarantined, must not be resumed, and contributes no partial score or graph.
+Its last run-ledger event is
+`9f3c562f768d21eb93fb2434f24c9ba8105fc360c283ce179898dbe8130dab90`;
+its last budget event is
+`7f0ede4f0c73c796c28b8ca9d86da01e3455b8d8a5c43412766f80d3da9b6564`.
+
+The launch fix keeps the ledger on one `O_NOFOLLOW` descriptor from verified
+read through append, binds pathname and descriptor by device/inode, revalidates
+after read and fsync, detects extra bytes, and keeps persistent hard links,
+symlinks, replacements, and unsafe modes fail-closed. The operator now writes
+the terminal run before secondary cleanup and publishes terminal budget
+evidence plus the run package as one rollback-safe immutable pair. Future
+release evidence is rooted on private local APFS outside Desktop metadata
+management.
+
+The same source cycle also corrected provider continuation control:
+
+- OpenAI/xAI bind the exact current response plan on `response.create`;
+- Gemini 3.1 sends normal-turn control over `realtimeInput.text`;
+- Gemini semantic-rejection control is embedded in the synchronous
+  `toolResponse`, its sole generation trigger;
+- any missing, stale, oversized, colliding, or undeliverable binding fails
+  before unsafe result delivery, with zero executor or authority projection.
+
+No Native/HACC memory, drift, guardrail, or efficacy claim is authorized from
+this incomplete run. A new source commit, qualification, evidence root, keys,
+authorization, and full one-shot run are required.

@@ -13,12 +13,17 @@ import {
   type Lc4DevAudioRenderer,
 } from "../lc4-development-audio-materializer";
 import {
+  appendLc4DevNativeGatewayContract,
+  renderLc4DevHaccResponsePlan,
+} from "../lc4-development-gateway-bridge";
+import {
   LC4_DEV_DURABLE_WORKER_PLAN_SHA256,
   LC4_DEV_MUNICIPAL_CONDITION_SUITE,
   LC4_DEV_MUNICIPAL_FLOW,
   LC4_DEV_MUNICIPAL_SCENARIO,
   createLc4DevMunicipalControlPlane,
 } from "../lc4-development-control-plane";
+import { assertHaccResponsePlan } from "../response-plan";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import {
@@ -117,6 +122,23 @@ describe("LC4-DEV municipal executable control plane", () => {
         const receipt = await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
         expect(receipt.control_receipt_sha256).toMatch(/^[a-f0-9]{64}$/u);
         expect(receipt.response_control.kind).toBe(arm === "hacc" ? "hacc_response_plan" : "native_context");
+        let currentPreparation = control.gateway_executor.currentResponsePreparation({
+          episode: plan,
+          opportunity,
+          phase: "canonical",
+        });
+        expect(currentPreparation.contextSha256).toBe(
+          sha256Hex(currentPreparation.additionalInstructions),
+        );
+        const repairPreparation = control.gateway_executor.currentResponsePreparation({
+          episode: plan,
+          opportunity,
+          phase: "repair",
+        });
+        expect(repairPreparation.contextSha256).toBe(
+          sha256Hex(repairPreparation.additionalInstructions),
+        );
+        expect(repairPreparation.contextSha256).not.toBe(currentPreparation.contextSha256);
         (arm === "hacc" ? haccContinuity : nativeContinuity).push(receipt.native_continuity_state_sha256);
         let callSequence = 0;
         for (;;) {
@@ -173,6 +195,29 @@ describe("LC4-DEV municipal executable control plane", () => {
               ? receipt.response_control.plan.eligible_actions.join(",")
               : "native-full";
             expect(gateway.disposition, `${plan.arm}:${opportunity.id}:${call.target_tool}:eligible=${eligible}:${JSON.stringify(gateway.provider_output)}`).not.toBe("rejected");
+            const reboundPreparation = control.gateway_executor.currentResponsePreparation({
+              episode: plan,
+              opportunity,
+              phase: "canonical",
+            });
+            expect(reboundPreparation.contextSha256).toBe(
+              sha256Hex(reboundPreparation.additionalInstructions),
+            );
+            if (gateway.authority_projection.post_transition_response_control_sha256 !== null) {
+              const providerOutput = gateway.provider_output as Record<string, unknown>;
+              const responseControl = providerOutput.response_control as Record<string, unknown>;
+              const expectedInstructions = responseControl.kind === "hacc_response_plan"
+                ? renderLc4DevHaccResponsePlan(
+                    assertHaccResponsePlan(responseControl.plan),
+                    "canonical",
+                  )
+                : appendLc4DevNativeGatewayContract(
+                    responseControl.instructions as string,
+                    "canonical",
+                  );
+              expect(reboundPreparation.additionalInstructions).toBe(expectedInstructions);
+            }
+            currentPreparation = reboundPreparation;
             semanticActionsByArm[arm].push(`${call.semantic_intent}:${call.target_tool}`);
             if ([30, 35, 42, 43].includes(opportunity.index)) {
               landmarkActionsByArm[arm].push(`${opportunity.index}:${call.semantic_intent}:${call.target_tool}`);

@@ -83,6 +83,16 @@ const HASH = "a".repeat(64);
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 const COMMIT = "b".repeat(40);
 const ORACLE_SECRET = "ORACLE-PLAINTEXT-MUST-NOT-LEAK";
+const FIXTURE_CONTINUATION_CONTROL =
+  "<hacc_response_plan>{\"fixture\":\"current_control\"}</hacc_response_plan>";
+
+function fixtureContinuationPreparation(): RealtimeResponsePreparation {
+  return Object.freeze({
+    additionalInstructions: FIXTURE_CONTINUATION_CONTROL,
+    contextSha256: sha256Hex(FIXTURE_CONTINUATION_CONTROL),
+    contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+  });
+}
 
 function replayEvidenceFixture() {
   const objects = new Map<string, Uint8Array>();
@@ -454,6 +464,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.events.push("prepare");
     this.preparations.push(preparation);
     this.wire("response.plan", { oracle: ORACLE_SECRET });
+  }
+  prepareToolContinuation(preparation: RealtimeResponsePreparation) {
+    this.events.push("prepare-continuation");
+    this.preparations.push(preparation);
+    this.wire("response.continuation.plan", {
+      context_sha256: preparation.contextSha256,
+      context_authority: preparation.contextAuthority,
+    });
   }
   commitInputAudio() { this.events.push("commit"); this.wire("input.commit", {}); }
   async waitForInputAudioCommit() {
@@ -859,6 +877,7 @@ async function openDevFailureFixture(input: Readonly<{
   const gateway: Lc4DevGatewayExecutor = Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1",
     manifest_sha256: "d".repeat(64),
+    currentResponsePreparation: fixtureContinuationPreparation,
     async execute() { throw new Error("failure fixture gateway must not execute"); },
   });
   const bridge = new Lc4RealtimeProviderBridge(() => input.client);
@@ -1011,6 +1030,7 @@ async function openCallerBranchPreflight(input: Readonly<{
   const gateway: Lc4DevGatewayExecutor = Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1",
     manifest_sha256: sha256Hex("lc4-dev-adapter-branch-preflight-gateway"),
+    currentResponsePreparation: fixtureContinuationPreparation,
     async execute() { throw new Error("branch preflight gateway must not execute"); },
   });
   const evidenceStore = replayEvidenceFixture();
@@ -1874,6 +1894,7 @@ describe("LC4 production realtime adapter bridge", () => {
     const gateway: Lc4DevGatewayExecutor = Object.freeze({
       kind: "lc4-dev-arm-aware-gateway-v1" as const,
       manifest_sha256: "d".repeat(64),
+      currentResponsePreparation: fixtureContinuationPreparation,
       async execute(input) {
         executed.push(`${input.arm}:${input.target_tool}`);
         const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };

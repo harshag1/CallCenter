@@ -1,7 +1,16 @@
-import { createPublicKey } from "node:crypto";
+import { createPublicKey, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import {
+  access,
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artifacts";
 import {
@@ -43,6 +52,8 @@ const EXPECTED_PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const EXPECTED_ARMS = Object.freeze(["native", "hacc"] as const);
 const EXPECTED_OPPORTUNITIES = 60;
 const EXPECTED_AUTHORITY_OBLIGATIONS = 42;
+const MAX_PUBLIC_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_PUBLIC_MARKDOWN_BYTES = 1024 * 1024;
 
 export const LC4_LAUNCH_BENCHMARK_FILENAMES = Object.freeze({
   json: "HACC_LC4_LAUNCH_BENCHMARK.json",
@@ -903,23 +914,161 @@ function absolute(path: string, label: string): string {
   return path;
 }
 
+async function readBoundedRegularFile(
+  path: string,
+  label: string,
+  maximumBytes: number,
+): Promise<string> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new Error(`${label} must be one bounded regular, non-linked file`);
+  }
+  try {
+    const [descriptorBefore, pathBefore] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    const safe = (descriptor: typeof descriptorBefore, pathMetadata: typeof pathBefore): boolean =>
+      descriptor.isFile()
+      && pathMetadata.isFile()
+      && !pathMetadata.isSymbolicLink()
+      && descriptor.dev === pathMetadata.dev
+      && descriptor.ino === pathMetadata.ino
+      && descriptor.nlink === BigInt(1)
+      && pathMetadata.nlink === BigInt(1)
+      && descriptor.size >= BigInt(2)
+      && descriptor.size <= BigInt(maximumBytes)
+      && pathMetadata.size === descriptor.size;
+    if (!safe(descriptorBefore, pathBefore)) {
+      throw new Error(`${label} must be one bounded regular, non-linked file`);
+    }
+    const expectedBytes = Number(descriptorBefore.size);
+    const bytes = Buffer.alloc(expectedBytes);
+    let offset = 0;
+    while (offset < expectedBytes) {
+      const result = await handle.read(bytes, offset, expectedBytes - offset, offset);
+      if (result.bytesRead <= 0) {
+        throw new Error(`${label} changed while it was being read`);
+      }
+      offset += result.bytesRead;
+    }
+    // Never let growth after the pre-read stat turn this into an unbounded
+    // allocation. A one-byte positional probe detects an appended tail.
+    const overflow = await handle.read(Buffer.allocUnsafe(1), 0, 1, expectedBytes);
+    const [descriptorAfter, pathAfter] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    if (overflow.bytesRead !== 0
+      || !safe(descriptorAfter, pathAfter)
+      || descriptorAfter.dev !== descriptorBefore.dev
+      || descriptorAfter.ino !== descriptorBefore.ino
+      || descriptorAfter.size !== descriptorBefore.size
+      || descriptorAfter.mtimeNs !== descriptorBefore.mtimeNs
+      || descriptorAfter.ctimeNs !== descriptorBefore.ctimeNs) {
+      throw new Error(`${label} changed while it was being read`);
+    }
+    return bytes.toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseLc4LaunchBenchmarkPublicJson(encoded: string): Lc4LaunchBenchmarkArtifact {
+  let published: Lc4LaunchBenchmarkArtifact;
+  try {
+    published = JSON.parse(encoded) as Lc4LaunchBenchmarkArtifact;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error("LC4 launch benchmark public JSON is not valid JSON");
+    }
+    throw error;
+  }
+  assertLc4LaunchBenchmarkArtifact(published);
+  return published;
+}
+
+export async function readLc4LaunchBenchmarkPublicJson(input: Readonly<{
+  public_json: string;
+}>): Promise<Lc4LaunchBenchmarkArtifact> {
+  const publicJson = absolute(input.public_json, "LC4 launch benchmark public JSON");
+  return parseLc4LaunchBenchmarkPublicJson(await readBoundedRegularFile(
+    publicJson,
+    "LC4 launch benchmark public JSON",
+    MAX_PUBLIC_JSON_BYTES,
+  ));
+}
+
+export async function readLc4LaunchBenchmarkPublicPair(input: Readonly<{
+  public_json: string;
+  public_markdown: string;
+}>): Promise<Lc4LaunchBenchmarkArtifact> {
+  const publicMarkdown = absolute(input.public_markdown, "LC4 launch benchmark public Markdown");
+  const [published, markdown] = await Promise.all([
+    readLc4LaunchBenchmarkPublicJson({ public_json: input.public_json }),
+    readBoundedRegularFile(publicMarkdown, "LC4 launch benchmark public Markdown", MAX_PUBLIC_MARKDOWN_BYTES),
+  ]);
+  if (markdown !== renderLc4LaunchBenchmarkMarkdown(published)) {
+    throw new Error("LC4 launch benchmark public Markdown does not reproduce from public JSON");
+  }
+  return published;
+}
+
+export async function publishLc4LaunchBenchmarkPublicPair(input: Readonly<{
+  artifact: Lc4LaunchBenchmarkArtifact;
+  output_root: string;
+}>): Promise<void> {
+  assertLc4LaunchBenchmarkArtifact(input.artifact);
+  const outputRoot = absolute(input.output_root, "LC4 launch benchmark output root");
+  await mkdir(outputRoot, { recursive: true, mode: 0o755 });
+  const metadata = await lstat(outputRoot);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("LC4 launch benchmark output root must be a real directory");
+  }
+  const jsonPath = resolve(outputRoot, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
+  const markdownPath = resolve(outputRoot, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
+  await Promise.all([absent(jsonPath), absent(markdownPath)]);
+
+  const json = `${canonicalJson(input.artifact)}\n`;
+  const markdown = renderLc4LaunchBenchmarkMarkdown(input.artifact);
+  const nonce = `${sha256Hex(`${input.artifact.benchmark_sha256}\n${json}\n${markdown}`)}.${randomUUID()}`;
+  const jsonTemp = resolve(dirname(jsonPath), `.${LC4_LAUNCH_BENCHMARK_FILENAMES.json}.${nonce}.tmp`);
+  const markdownTemp = resolve(dirname(markdownPath), `.${LC4_LAUNCH_BENCHMARK_FILENAMES.markdown}.${nonce}.tmp`);
+  const linked: string[] = [];
+  try {
+    await Promise.all([
+      writeFile(jsonTemp, json, { flag: "wx", mode: 0o444 }),
+      writeFile(markdownTemp, markdown, { flag: "wx", mode: 0o444 }),
+    ]);
+    // Markdown is linked first and JSON acts as the publication commit marker.
+    // A verifier requires both, and every failure removes all links created here.
+    await link(markdownTemp, markdownPath);
+    linked.push(markdownPath);
+    await link(jsonTemp, jsonPath);
+    linked.push(jsonPath);
+    await Promise.all([chmod(jsonPath, 0o444), chmod(markdownPath, 0o444)]);
+  } catch (error) {
+    await Promise.all(linked.map((path) => unlink(path).catch(() => undefined)));
+    throw error;
+  } finally {
+    await Promise.all([
+      unlink(jsonTemp).catch(() => undefined),
+      unlink(markdownTemp).catch(() => undefined),
+    ]);
+  }
+}
+
 export async function publishLc4LaunchBenchmark(input: Readonly<{
   evidence_root: string;
   output_root: string;
 }>): Promise<Lc4LaunchBenchmarkArtifact> {
-  const outputRoot = absolute(input.output_root, "LC4 launch benchmark output root");
   const artifact = await scoreLc4LaunchBenchmarkEvidenceRoot(absolute(input.evidence_root, "LC4 launch benchmark evidence root"));
-  assertLc4LaunchBenchmarkArtifact(artifact);
-  await mkdir(outputRoot, { recursive: true, mode: 0o755 });
-  const metadata = await lstat(outputRoot);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("LC4 launch benchmark output root must be a real directory");
-  const jsonPath = resolve(outputRoot, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
-  const markdownPath = resolve(outputRoot, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
-  await Promise.all([absent(jsonPath), absent(markdownPath)]);
-  await Promise.all([
-    writeFile(jsonPath, `${canonicalJson(artifact)}\n`, { flag: "wx", mode: 0o444 }),
-    writeFile(markdownPath, renderLc4LaunchBenchmarkMarkdown(artifact), { flag: "wx", mode: 0o444 }),
-  ]);
+  await publishLc4LaunchBenchmarkPublicPair({
+    artifact,
+    output_root: input.output_root,
+  });
   return artifact;
 }
 
@@ -930,10 +1079,10 @@ export async function verifyPublishedLc4LaunchBenchmark(input: Readonly<{
 }>): Promise<Lc4LaunchBenchmarkArtifact> {
   const expected = await scoreLc4LaunchBenchmarkEvidenceRoot(absolute(input.evidence_root, "LC4 launch benchmark evidence root"));
   assertLc4LaunchBenchmarkArtifact(expected);
-  const published = JSON.parse(await readFile(absolute(input.public_json, "LC4 launch benchmark public JSON"), "utf8")) as Lc4LaunchBenchmarkArtifact;
-  assertLc4LaunchBenchmarkArtifact(published);
+  const published = await readLc4LaunchBenchmarkPublicPair({
+    public_json: input.public_json,
+    public_markdown: input.public_markdown,
+  });
   if (canonicalJson(expected) !== canonicalJson(published)) throw new Error("LC4 launch benchmark public JSON does not reproduce from evidence");
-  const markdown = await readFile(absolute(input.public_markdown, "LC4 launch benchmark public Markdown"), "utf8");
-  if (markdown !== renderLc4LaunchBenchmarkMarkdown(expected)) throw new Error("LC4 launch benchmark public Markdown does not reproduce from evidence");
   return expected;
 }

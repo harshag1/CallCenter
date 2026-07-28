@@ -1,4 +1,12 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -96,10 +104,14 @@ describe("LC4 launch benchmark visual", () => {
   it("renders only exact recall counts and strict outcomes from the complete v2 artifact", () => {
     const svg = renderLc4LaunchBenchmarkSvg(artifact());
     expect(svg).toContain("Long-call recall");
-    expect(svg).toContain("Registered recall probes · exact pass rate");
+    expect(svg).toContain("Long-call recall: Native API versus HACC");
+    expect(svg).toContain("Registered recall probes · 1 call per arm");
     expect(svg).toContain("360 registered opportunities across 6 calls");
     expect(svg).toContain("One registered development scenario per provider");
+    expect(svg).toContain(">Native API</text>");
+    expect(svg).toContain("Native API 0/1");
     expect(svg).toContain("HACC 0/1");
+    expect(svg).not.toContain(">Native</text>");
     expect(svg.match(/class="value"/gu)).toHaveLength(6);
     expect(svg).not.toMatch(/Verified results|1000 (?:voice|registered|interactions)|guardrail|authoritative actions/iu);
   });
@@ -138,6 +150,45 @@ describe("LC4 launch benchmark visual", () => {
       public_json: json,
       output_root: output,
     })).rejects.toThrow(/overwrite is forbidden/u);
+  });
+
+  it("leaves one complete asset set when concurrent publishers race", async () => {
+    const root = await tempRoot();
+    const json = resolve(root, "HACC_LC4_LAUNCH_BENCHMARK.json");
+    const output = resolve(root, "visual");
+    const source = artifact();
+    await writeFile(json, `${canonicalJson(source)}\n`, { mode: 0o444 });
+    const attempts = await Promise.allSettled([
+      publishLc4LaunchBenchmarkVisual({ public_json: json, output_root: output }),
+      publishLc4LaunchBenchmarkVisual({ public_json: json, output_root: output }),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    expect((await readdir(output)).sort()).toEqual(
+      Object.values(LC4_LAUNCH_BENCHMARK_VISUAL_FILENAMES).sort(),
+    );
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("rejects symlinked and oversized public JSON before rendering", async () => {
+    const root = await tempRoot();
+    const source = resolve(root, "source.json");
+    const linked = resolve(root, "linked.json");
+    const output = resolve(root, "visual");
+    await writeFile(source, `${canonicalJson(artifact())}\n`, { mode: 0o444 });
+    await symlink(source, linked);
+    await expect(publishLc4LaunchBenchmarkVisual({
+      public_json: linked,
+      output_root: output,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+
+    const oversized = resolve(root, "oversized.json");
+    await writeFile(oversized, Buffer.alloc((4 * 1024 * 1024) + 1, 0x20));
+    await expect(publishLc4LaunchBenchmarkVisual({
+      public_json: oversized,
+      output_root: output,
+    })).rejects.toThrow(/bounded regular, non-linked file/u);
+    await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("fails closed before writing when the v2 artifact is incomplete or tampered", async () => {

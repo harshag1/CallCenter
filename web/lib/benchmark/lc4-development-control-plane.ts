@@ -35,8 +35,10 @@ import {
 } from "./lc4-development-caller-branch";
 import type { Lc4DevExecutableMechanismControl } from "./lc4-development-live-dependencies";
 import {
+  appendLc4DevNativeGatewayContract,
   LC4_DEV_INTENT_ACTION_MAP,
   lc4DevSemanticIntentForAction,
+  renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
   type Lc4DevSemanticIntent,
@@ -414,6 +416,7 @@ type EpisodeState = {
   pendingGatewayActions: LogicalAction[];
   nativeTranscriptHead: string;
   lastResponsePlanSha256: string | null;
+  currentResponseControl: Lc4DevControlReceipt["response_control"] | null;
   lastTransitionBindingSha256: string | null;
   lastPreviousExchangeSha256: string | null;
   originalMutationInvocationId: string | null;
@@ -914,6 +917,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       pendingGatewayActions: [],
       nativeTranscriptHead: hash(NATIVE_TRANSCRIPT_DOMAIN, { manifest_sha256: manifest.manifest_sha256, episode_id: episode.episode_id, genesis: true }),
       lastResponsePlanSha256: null,
+      currentResponseControl: null,
       lastTransitionBindingSha256: null,
       lastPreviousExchangeSha256: null,
       originalMutationInvocationId: null,
@@ -1036,6 +1040,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
     }
 
     const commonStateSha256 = hash(CONTINUITY_DOMAIN, commonProjection(state.common));
+    state.currentResponseControl = freeze(responseControl);
     const receiptBody = {
       schema_version: 1 as const,
       manifest_sha256: manifest.manifest_sha256,
@@ -1058,6 +1063,25 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
   const gatewayExecutor: Lc4DevGatewayExecutor = Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1" as const,
     manifest_sha256: manifest.manifest_sha256,
+    currentResponsePreparation: ({ episode, opportunity, phase }) => {
+      const state = episodes.get(episode.episode_id);
+      if (!state
+        || canonicalJson(state.episode) !== canonicalJson(episode)
+        || state.common.opportunities !== opportunity.index
+        || corpus.opportunities[opportunity.index - 1]?.id !== opportunity.id
+        || !state.currentResponseControl) {
+        throw new Error("LC4-DEV continuation control is not bound to the active opportunity");
+      }
+      const control = state.currentResponseControl;
+      const additionalInstructions = control.kind === "hacc_response_plan"
+        ? renderLc4DevHaccResponsePlan(control.plan, phase)
+        : appendLc4DevNativeGatewayContract(control.instructions, phase);
+      return Object.freeze({
+        additionalInstructions,
+        contextSha256: sha256Hex(additionalInstructions),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+      });
+    },
     execute: async (request: Lc4DevGatewayExecutionInput) => {
       const state = episodes.get(request.episode_id);
       if (!state) throw new Error("LC4-DEV gateway call arrived before its control episode was initialized");
@@ -1222,6 +1246,10 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
             plan: rebound.responsePlan,
             transition_binding_sha256: rebound.transitionBindingSha256,
           });
+          state.currentResponseControl = freeze({
+            kind: "hacc_response_plan" as const,
+            plan: rebound.responsePlan,
+          });
           postTransitionResponsePlanSha256 = rebound.responsePlan.plan_sha256;
           postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
           providerOutput = valueJson({
@@ -1238,6 +1266,11 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
             instructions,
             instructions_sha256: sha256Hex(instructions),
             transition_receipt_sha256: transitionReceiptSha256,
+          });
+          state.currentResponseControl = freeze({
+            kind: "native_context" as const,
+            instructions,
+            instructions_sha256: responseControl.instructions_sha256,
           });
           postTransitionResponsePlanSha256 = responseControl.instructions_sha256;
           postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));

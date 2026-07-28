@@ -39,6 +39,8 @@ export const GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ = 24_000;
 export const GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS = 15 * 60_000;
 export { GEMINI_PROVIDER_TRANSCRIPTION_POLICY } from "../gemini-policy";
 export const GEMINI_CAPABILITY_GATEWAY_NAME = "capability_gateway";
+export const GEMINI_HACC_CONTINUATION_CONTROL_FIELD =
+  "__hacc_continuation_control_v1";
 export const GEMINI_LIVE_DEFAULT_ENDPOINT =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
@@ -95,7 +97,7 @@ export type GeminiLiveClientOptions = {
   connectTimeoutMs?: number;
   maxIncomingMessageBytes?: number;
   maxToolResponseBytes?: number;
-  /** Compact advisory context sent through clientContent, never realtimeInput.text. */
+  /** Compact advisory context sent through the provider-supported realtime text channel. */
   maxDynamicControlBytes?: number;
   /** Defaults to the hard 10k replay ledger; tests/apps may choose a shorter fail-closed bound. */
   maximumTrackedToolCallIdentities?: number;
@@ -117,6 +119,14 @@ type FunctionResponse = {
   name: string;
   response: Record<string, JsonValue>;
 };
+
+type GeminiToolContinuationControl = Readonly<{
+  schema_version: 1;
+  delivery: "synchronous_tool_response";
+  instructions: string;
+  context_sha256: string;
+  context_authority: "advisory_only_gateway_and_speech_gate_enforced";
+}>;
 
 type PendingToolCall = {
   controller: AbortController;
@@ -348,6 +358,18 @@ function jsonRecord(value: unknown): Record<string, JsonValue> {
  */
 function functionResponseRecord(value: unknown): Record<string, JsonValue> {
   return jsonRecord(value);
+}
+
+function geminiToolContinuationControl(
+  preparation: RealtimeResponsePreparation,
+): GeminiToolContinuationControl {
+  return Object.freeze({
+    schema_version: 1,
+    delivery: "synchronous_tool_response",
+    instructions: preparation.additionalInstructions,
+    context_sha256: preparation.contextSha256,
+    context_authority: preparation.contextAuthority,
+  });
 }
 
 type SnapshottedToolResult = Readonly<{
@@ -703,6 +725,47 @@ function geminiWireType(event: Readonly<Record<string, unknown>>): string {
   return "unknown";
 }
 
+function geminiToolContinuationControlWireProjection(
+  event: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | undefined {
+  const toolResponse = isRecord(event.toolResponse) ? event.toolResponse : {};
+  const responses = Array.isArray(toolResponse.functionResponses)
+    ? toolResponse.functionResponses
+    : [];
+  const controls = responses.flatMap((candidate) => {
+    const response = isRecord(candidate) && isRecord(candidate.response)
+      ? candidate.response
+      : {};
+    const control = isRecord(response[GEMINI_HACC_CONTINUATION_CONTROL_FIELD])
+      ? response[GEMINI_HACC_CONTINUATION_CONTROL_FIELD]
+      : null;
+    if (!control
+      || control.schema_version !== 1
+      || control.delivery !== "synchronous_tool_response"
+      || typeof control.instructions !== "string"
+      || typeof control.context_sha256 !== "string"
+      || control.context_authority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      return [];
+    }
+    const actualSha256 = sha256(control.instructions);
+    return [{
+      sha256: actualSha256,
+      byteLength: textBytes(control.instructions),
+      authority: control.context_authority,
+      delivery: "synchronous_tool_response",
+      integrity: actualSha256 === control.context_sha256 ? "verified" : "mismatch",
+    }];
+  });
+  if (controls.length === 0) return undefined;
+  const canonical = canonicalJson(controls[0]);
+  const consistent = controls.every((control) => canonicalJson(control) === canonical);
+  return {
+    ...controls[0],
+    responseBindings: controls.length,
+    batchConsistency: consistent ? "verified" : "mismatch",
+  };
+}
+
 function geminiRedactedWireProjection(
   event: Readonly<Record<string, unknown>>,
   wireType: string,
@@ -716,6 +779,17 @@ function geminiRedactedWireProjection(
   if (gatewayCalls.length) projection.gatewayCalls = gatewayCalls;
   const gatewayResults = geminiGatewayResultWireProjection(event);
   if (gatewayResults.length) projection.gatewayResults = gatewayResults;
+  const toolContinuationControl = geminiToolContinuationControlWireProjection(event);
+  if (toolContinuationControl) projection.dynamicControl = toolContinuationControl;
+  const realtimeInput = isRecord(event.realtimeInput) ? event.realtimeInput : {};
+  if (typeof realtimeInput.text === "string") {
+    projection.dynamicControl = {
+      sha256: sha256(realtimeInput.text),
+      byteLength: textBytes(realtimeInput.text),
+      authority: "advisory_only_gateway_and_speech_gate_enforced",
+      delivery: "realtime_input_text_before_activity_end",
+    };
+  }
   const clientContent = isRecord(event.clientContent) ? event.clientContent : {};
   if (clientContent.turnComplete === false && Array.isArray(clientContent.turns)) {
     const texts = clientContent.turns.flatMap((turn) => (
@@ -921,6 +995,10 @@ function geminiTextWireProjection(
       }
     }
   }
+  const realtimeInput = isRecord(event.realtimeInput) ? event.realtimeInput : {};
+  if (typeof realtimeInput.text === "string") {
+    values.push({ kind: "realtime_input_context", value: realtimeInput.text });
+  }
   for (const [key, kind] of [
     ["inputTranscription", "input_transcript"],
     ["interimInputTranscription", "input_transcript"],
@@ -1065,6 +1143,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private setupReadiness: GeminiSetupReadinessEvidence | null = null;
   private submittingToolResults = false;
   private responsePrepared = false;
+  private pendingToolContinuationPreparation: RealtimeResponsePreparation | null = null;
   private clientMessageOrdinal = 0;
   private generationTrigger: GeminiGenerationTrigger | null = null;
 
@@ -1337,17 +1416,45 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         maximumBytes: this.maxDynamicControlBytes,
       });
     }
-    // Live setup is immutable. Dynamic advisory context travels through the
-    // provider's ordered clientContent channel with turnComplete:false; caller
-    // audio remains exclusively realtimeInput PCM and activityEnd is the only
-    // generation trigger for this turn.
+    // Live setup is immutable. Gemini 3.1 accepts mid-session text only through
+    // realtimeInput. This advisory context is sent before activityEnd; manual
+    // activityEnd remains the sole generation trigger for the audio turn.
     this.sendReady({
-      clientContent: {
-        turns: [{ role: "user", parts: [{ text: preparation.additionalInstructions }] }],
-        turnComplete: false,
-      },
+      realtimeInput: { text: preparation.additionalInstructions },
     });
     this.responsePrepared = true;
+  }
+
+  prepareToolContinuation(preparation: RealtimeResponsePreparation): void {
+    this.requireReady();
+    if (!this.activeToolBatch || this.activeToolBatch.callIds.size === 0) {
+      throw new Error("Gemini tool continuation requires one pending provider tool-call batch");
+    }
+    if (this.inputOpen || this.responsePrepared || this.pendingToolContinuationPreparation) {
+      throw new Error("Gemini tool continuation response is already prepared");
+    }
+    if (!preparation.additionalInstructions.trim()) {
+      throw new Error("Gemini tool continuation instructions cannot be empty");
+    }
+    if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      throw new Error("Gemini tool continuation authority boundary mismatch");
+    }
+    if (!/^[a-f0-9]{64}$/.test(preparation.contextSha256)
+        || sha256(preparation.additionalInstructions) !== preparation.contextSha256) {
+      throw new Error("Gemini tool continuation hash mismatch");
+    }
+    const controlBytes = textBytes(preparation.additionalInstructions);
+    if (controlBytes > this.maxDynamicControlBytes) {
+      throw new RealtimeDynamicControlLimitError({
+        provider: "gemini",
+        actualBytes: controlBytes,
+        maximumBytes: this.maxDynamicControlBytes,
+      });
+    }
+    // Gemini 3.1 permits clientContent only for initial history seeding. Keep
+    // this control local until it can be attached to the blocking toolResponse,
+    // which remains the sole provider continuation trigger.
+    this.pendingToolContinuationPreparation = Object.freeze({ ...preparation });
   }
 
   endActivity(): void {
@@ -1434,13 +1541,39 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
           + `unknown: ${unknown.join(", ") || "none"})`,
         );
       }
+      const continuationPreparation = this.pendingToolContinuationPreparation;
+      const continuationControl = continuationPreparation
+        ? geminiToolContinuationControl(continuationPreparation)
+        : null;
       const responses = snapshots.map((result) => {
         const call = this.outstandingToolCalls.get(result.callId);
         if (!call) throw new Error(`No outstanding Gemini tool call ${result.callId}`);
         const name = typeof call.name === "string" && call.name ? call.name : GEMINI_CAPABILITY_GATEWAY_NAME;
-        const response: FunctionResponse = { id: result.callId, name, response: result.response };
+        if (continuationControl
+          && Object.prototype.hasOwnProperty.call(
+            result.response,
+            GEMINI_HACC_CONTINUATION_CONTROL_FIELD,
+          )) {
+          throw new Error("Gemini tool result collides with the reserved continuation-control field");
+        }
+        const responseBody = continuationControl
+          ? {
+              ...result.response,
+              [GEMINI_HACC_CONTINUATION_CONTROL_FIELD]: continuationControl,
+            }
+          : result.response;
+        const response: FunctionResponse = {
+          id: result.callId,
+          name,
+          response: responseBody,
+        };
         const encoded = JSON.stringify(response);
         if (textBytes(encoded) > this.maxToolResponseBytes) {
+          if (continuationControl) {
+            throw new Error(
+              "Gemini hash-bound continuation control exceeds the tool response safety bound",
+            );
+          }
           return this.errorFunctionResponse(result.callId, name, "Capability gateway result was too large");
         }
         return response;
@@ -1467,6 +1600,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         this.completedToolResponses.set(response.id, response);
       }
       if (this.activeToolBatch?.key === activeBatch.key) this.activeToolBatch = null;
+      this.pendingToolContinuationPreparation = null;
       this.armGenerationTrigger("tool_response", sent);
       this.emit({
         type: "tool.results.submitted",
@@ -1490,6 +1624,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.clientState = "closing";
     this.inputOpen = false;
     this.responsePrepared = false;
+    this.pendingToolContinuationPreparation = null;
     this.clearConnectTimer();
     this.clearSessionTimer();
     if (wasConnecting) {
@@ -2611,6 +2746,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.socket = null;
     this.inputOpen = false;
     this.responsePrepared = false;
+    this.pendingToolContinuationPreparation = null;
     this.clearConnectTimer();
     this.clearSessionTimer();
     this.abortPendingToolCalls("Gemini Live connection closed");
@@ -2727,6 +2863,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.clientState = "closing";
     this.inputOpen = false;
     this.responsePrepared = false;
+    this.pendingToolContinuationPreparation = null;
     this.clearConnectTimer();
     this.clearSessionTimer();
     this.abortPendingToolCalls("Gemini Live session duration limit reached");

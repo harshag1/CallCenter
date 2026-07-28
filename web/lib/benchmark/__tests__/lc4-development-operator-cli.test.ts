@@ -1,5 +1,13 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,11 +16,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   assertLc4DevOperatorAuthorizationDag,
+  closeLc4DevTerminalRunCustody,
   createLc4DevOperatorAuthorizationDag,
   lc4DevOperatorAuthorizationBindingSha256,
   loadLc4DevRetainedQualification,
   loadLc4DevExplicitCredentials,
   runLc4DevelopmentOperatorCli,
+  writeImmutableJsonPair,
   type Lc4DevOperatorSigner,
 } from "../lc4-development-operator-cli";
 import type {
@@ -64,6 +74,25 @@ function reportRun(completed = true): Lc4DevLiveRunArtifact {
     ledger_head_sha256: null,
   };
   return Object.freeze({ ...body, run_sha256: sha256Hex(`${RUN_DOMAIN}${canonicalJson(body)}`) });
+}
+
+function terminalBudgetEvidence(run: Lc4DevLiveRunArtifact): Lc4DevBudgetEvidence {
+  return {
+    schema_version: 1,
+    budget_version: "HACC-LC4-DEV-BUDGET-v1",
+    execution_id: run.execution_id,
+    lease_sha256: sha256Hex("operator-test-budget-lease"),
+    ledger_id: "operator-test-ledger",
+    ledger_public_key_fingerprint_sha256: sha256Hex("operator-test-budget-key"),
+    terminal_ledger_head_sha256: sha256Hex("operator-test-budget-head"),
+    run_sha256: run.run_sha256,
+    run_status: run.status,
+    reservations: [],
+    active_reservations_micro_usd: 0,
+    conservative_settled_micro_usd: 0,
+    maximum_total_micro_usd: 15_000_000,
+    evidence_sha256: sha256Hex("operator-test-budget-evidence"),
+  } as unknown as Lc4DevBudgetEvidence;
 }
 
 type AuthorityReport = Readonly<{
@@ -185,6 +214,237 @@ afterEach(async () => {
 });
 
 describe("LC4-DEV operator custody", () => {
+  it("publishes the terminal budget evidence and run package as one private immutable pair", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-pair-"));
+    roots.push(root);
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    const budgetEvidence = { kind: "budget", digest: sha256Hex("budget") };
+    const runPackage = { kind: "package", digest: sha256Hex("package") };
+
+    await writeImmutableJsonPair({
+      first_path: budgetEvidencePath,
+      first_value: budgetEvidence,
+      second_path: runPackagePath,
+      second_value: runPackage,
+    });
+
+    expect(JSON.parse(await readFile(budgetEvidencePath, "utf8"))).toEqual(budgetEvidence);
+    expect(JSON.parse(await readFile(runPackagePath, "utf8"))).toEqual(runPackage);
+    for (const path of [budgetEvidencePath, runPackagePath]) {
+      const metadata = await stat(path);
+      expect(metadata.isFile()).toBe(true);
+      expect(metadata.nlink).toBe(1);
+      expect(metadata.mode & 0o777).toBe(0o400);
+    }
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("does not create the package or replace the first destination when first-pair publication fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-pair-first-failure-"));
+    roots.push(root);
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    await writeFile(budgetEvidencePath, "pre-existing-budget\n", { mode: 0o400 });
+
+    await expect(writeImmutableJsonPair({
+      first_path: budgetEvidencePath,
+      first_value: { kind: "new-budget" },
+      second_path: runPackagePath,
+      second_value: { kind: "new-package" },
+    })).rejects.toMatchObject({ code: "EEXIST" });
+
+    expect(await readFile(budgetEvidencePath, "utf8")).toBe("pre-existing-budget\n");
+    await expect(readFile(runPackagePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("rolls back its provisional budget link and preserves an occupied package destination", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-pair-second-failure-"));
+    roots.push(root);
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    await writeFile(runPackagePath, "pre-existing-package\n", { mode: 0o400 });
+
+    await expect(writeImmutableJsonPair({
+      first_path: budgetEvidencePath,
+      first_value: { kind: "new-budget" },
+      second_path: runPackagePath,
+      second_value: { kind: "new-package" },
+    })).rejects.toMatchObject({ code: "EEXIST" });
+
+    await expect(readFile(budgetEvidencePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(runPackagePath, "utf8")).toBe("pre-existing-package\n");
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("lets only one concurrent terminal-pair publisher commit a matching pair", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-pair-race-"));
+    roots.push(root);
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    const pairs = [
+      [{ pair: "a", kind: "budget" }, { pair: "a", kind: "package" }],
+      [{ pair: "b", kind: "budget" }, { pair: "b", kind: "package" }],
+    ] as const;
+
+    const attempts = await Promise.allSettled(pairs.map(([budget, runPackage]) =>
+      writeImmutableJsonPair({
+        first_path: budgetEvidencePath,
+        first_value: budget,
+        second_path: runPackagePath,
+        second_value: runPackage,
+      })));
+
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const budget = JSON.parse(await readFile(budgetEvidencePath, "utf8")) as { pair: string };
+    const runPackage = JSON.parse(await readFile(runPackagePath, "utf8")) as { pair: string };
+    expect(runPackage.pair).toBe(budget.pair);
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("durably retains a failed terminal run when runtime ledger inspection fails afterward", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-custody-"));
+    roots.push(root);
+    const run = reportRun(false);
+    const runPath = join(root, "run.json");
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    const calls: string[] = [];
+
+    await expect(closeLc4DevTerminalRunCustody({
+      async execute_run() {
+        calls.push("execute");
+        return run;
+      },
+      async write_terminal_run(value) {
+        calls.push("write-run");
+        await writeFile(runPath, `${canonicalJson(value)}\n`, { flag: "wx", mode: 0o400 });
+      },
+      async finalize_runtime() {
+        calls.push("inspect-runtime-ledger");
+        throw new Error("runtime ledger inspection failed");
+      },
+      async finalize_budget() {
+        calls.push("finalize-budget");
+        return terminalBudgetEvidence(run);
+      },
+      async replay_budget() {
+        calls.push("replay-budget");
+      },
+      create_run_package() {
+        calls.push("create-package");
+        throw new Error("must not create a package");
+      },
+      async write_terminal_pair(evidence, runPackage) {
+        await Promise.all([
+          writeFile(budgetEvidencePath, canonicalJson(evidence), { flag: "wx" }),
+          writeFile(runPackagePath, canonicalJson(runPackage), { flag: "wx" }),
+        ]);
+      },
+    })).rejects.toThrow("runtime ledger inspection failed");
+
+    expect(calls).toEqual(["execute", "write-run", "inspect-runtime-ledger"]);
+    expect(JSON.parse(await readFile(runPath, "utf8"))).toEqual(run);
+    await expect(readFile(budgetEvidencePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(runPackagePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains the primary failed run but no publishable package when budget finalization fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-budget-custody-"));
+    roots.push(root);
+    const run = reportRun(false);
+    const runPath = join(root, "run.json");
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    const calls: string[] = [];
+
+    await expect(closeLc4DevTerminalRunCustody({
+      async execute_run() {
+        calls.push("execute");
+        return run;
+      },
+      async write_terminal_run(value) {
+        calls.push("write-run");
+        await writeFile(runPath, `${canonicalJson(value)}\n`, { flag: "wx", mode: 0o400 });
+      },
+      async finalize_runtime() {
+        calls.push("finalize-runtime");
+      },
+      async finalize_budget() {
+        calls.push("finalize-budget");
+        throw new Error("budget ledger inspection failed");
+      },
+      async replay_budget() {
+        calls.push("replay-budget");
+      },
+      create_run_package() {
+        calls.push("create-package");
+        throw new Error("must not create a package");
+      },
+      async write_terminal_pair(evidence, runPackage) {
+        await Promise.all([
+          writeFile(budgetEvidencePath, canonicalJson(evidence), { flag: "wx" }),
+          writeFile(runPackagePath, canonicalJson(runPackage), { flag: "wx" }),
+        ]);
+      },
+    })).rejects.toThrow("budget ledger inspection failed");
+
+    expect(calls).toEqual(["execute", "write-run", "finalize-runtime", "finalize-budget"]);
+    expect(JSON.parse(await readFile(runPath, "utf8"))).toEqual(run);
+    await expect(readFile(budgetEvidencePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(runPackagePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("withholds terminal budget evidence and the run package when independent budget replay fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-budget-replay-custody-"));
+    roots.push(root);
+    const run = reportRun(false);
+    const budgetEvidence = terminalBudgetEvidence(run);
+    const runPath = join(root, "run.json");
+    const budgetEvidencePath = join(root, "budget-terminal-evidence.json");
+    const runPackagePath = join(root, "run-package.json");
+    const calls: string[] = [];
+
+    await expect(closeLc4DevTerminalRunCustody({
+      async execute_run() {
+        calls.push("execute");
+        return run;
+      },
+      async write_terminal_run(value) {
+        calls.push("write-run");
+        await writeFile(runPath, `${canonicalJson(value)}\n`, { flag: "wx", mode: 0o400 });
+      },
+      async finalize_runtime() {
+        calls.push("finalize-runtime");
+      },
+      async finalize_budget() {
+        calls.push("finalize-budget");
+        return budgetEvidence;
+      },
+      async replay_budget() {
+        calls.push("replay-budget");
+        throw new Error("budget evidence replay failed");
+      },
+      create_run_package() {
+        calls.push("create-package");
+        throw new Error("must not create a package");
+      },
+      async write_terminal_pair(evidence, runPackage) {
+        await Promise.all([
+          writeFile(budgetEvidencePath, canonicalJson(evidence), { flag: "wx" }),
+          writeFile(runPackagePath, canonicalJson(runPackage), { flag: "wx" }),
+        ]);
+      },
+    })).rejects.toThrow("budget evidence replay failed");
+
+    expect(calls).toEqual(["execute", "write-run", "finalize-runtime", "finalize-budget", "replay-budget"]);
+    expect(JSON.parse(await readFile(runPath, "utf8"))).toEqual(run);
+    await expect(readFile(budgetEvidencePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(runPackagePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("builds an acyclic authorization -> ledger genesis -> signed authorization DAG", () => {
     const { input, authority } = fixtures();
     const dag = createLc4DevOperatorAuthorizationDag(input);

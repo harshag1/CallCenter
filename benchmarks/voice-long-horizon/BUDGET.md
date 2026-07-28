@@ -7,8 +7,8 @@
 - Protected contingency reserve: **$100.00 USD**
 - Current operational ceiling: **$270.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$23.00 USD**
-- Active LC4 reservations: **$0.00 USD**
+- LC4 conservative filesystem-ledger settlements: **$40.00 USD**
+- Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$3.807615 USD**
 - Recorded total program cash spend: **unreconciled**
@@ -111,7 +111,7 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $3.807615**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $37.00; these are pessimistic
+- **Cumulative LC4 conservative settlements: $40.00; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
@@ -189,3 +189,24 @@ reservations. The aggregate is therefore **$12.00** for four qualifications
 and **$25.00** for four incomplete DEV attempts, or **$37.00**. These are
 conservative local-ledger settlements. Provider-reported and
 invoice-reconciled cost remain unavailable, and no reservation is active.
+
+## 2026-07-28 — `4e47774` quarantined nonterminal authority
+
+The next exact-source qualification conservatively settled **$3.00** and
+passed all three provider gateways. The following six-cell DEV attempt
+completed four full episodes, 240 canonical opportunities, and 16 registered
+repair turns before a transient signed-ledger filesystem observation stopped
+the run during the xAI Native connection boundary.
+
+Budget terminalization did not persist. The signed ledger therefore retains
+six nonterminal $2.50 reservations: four `opened`, one `opening`, and one
+`reserved`. Their original aggregate **$15.00** ceiling is reported above as
+quarantined nonterminal authority. It is not added to the **$37.00** settled
+total, is not reusable authority, and is not a provider invoice or cash-spend
+claim. No provider-reported cost was retained.
+
+The evidence root is frozen and must not be retried, resumed, or repaired in
+place. A new source commit requires new qualification, evidence roots, keys,
+and authorization. Its budget is independently bounded; the quarantined
+ledger remains in the accounting record until provider billing can be
+reconciled.

@@ -24,6 +24,8 @@ import {
 } from "../../realtime/client/types";
 
 const HASH = "a".repeat(64);
+const CONTINUATION_CONTROL = "<hacc_response_plan>{\"revision\":19}</hacc_response_plan>";
+const CONTINUATION_CONTROL_SHA256 = sha256Hex(CONTINUATION_CONTROL);
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
 const opportunity = createLc4PublicDevelopmentCorpus().opportunities[0]!;
 
@@ -55,6 +57,14 @@ class FakeClient implements NormalizedRealtimeClient {
   onWireEvent() { return () => undefined; }
   appendInputAudio() {}
   prepareResponse() {}
+  prepareToolContinuation(preparation: Parameters<NormalizedRealtimeClient["prepareResponse"]>[0]) {
+    expect(preparation).toEqual({
+      additionalInstructions: CONTINUATION_CONTROL,
+      contextSha256: CONTINUATION_CONTROL_SHA256,
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    this.operations.push(`prepare:${preparation.contextSha256}`);
+  }
   commitInputAudio() {}
   createResponse() {
     expect(this.operations.at(-1)).toBe("submit:false");
@@ -67,10 +77,24 @@ class FakeClient implements NormalizedRealtimeClient {
   }
 }
 
+class RebindFailureClient extends FakeClient {
+  override prepareToolContinuation(): void {
+    this.operations.push("prepare:failed");
+    throw new Error("deterministic continuation control rebind failure");
+  }
+}
+
 function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor {
   return Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1" as const,
     manifest_sha256: "b".repeat(64),
+    currentResponsePreparation() {
+      return {
+        additionalInstructions: CONTINUATION_CONTROL,
+        contextSha256: CONTINUATION_CONTROL_SHA256,
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      };
+    },
     async execute(input: Lc4DevGatewayExecutionInput) {
       inputs.push(input);
       const providerOutput = { ok: true, public_receipt: `receipt-${inputs.length}` };
@@ -363,7 +387,11 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     const evidence = await coordinator.finishOpportunity();
     expect(failures).toEqual([]);
     expect(inputs).toEqual([]);
-    expect(client.operations).toEqual(["submit:false", "create"]);
+    expect(client.operations).toEqual([
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+    ]);
     expect(client.submitted).toHaveLength(1);
     expect(client.submitted[0]?.results[0]?.output).toMatchObject({
       ok: false,
@@ -448,7 +476,44 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       rejection_code: "tool_calls_forbidden_during_repair",
       authority_effect: "none",
     });
-    expect(client.operations).toEqual(["submit:false", "create"]);
+    expect(client.operations).toEqual([
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+    ]);
+  });
+
+  it("makes continuation-control rebind failure fatal before result delivery or authority projection", async () => {
+    const client = new RebindFailureClient("openai");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("openai", "hacc"), opportunity });
+    coordinator.observe(dispatchEvent(
+      "openai",
+      "response-rebind-failure",
+      "call-rebind-failure",
+      { tool_name: "archive.complete_stage", arguments: {} },
+    ));
+
+    await expect(coordinator.finishOpportunity()).rejects.toThrow(
+      "deterministic continuation control rebind failure",
+    );
+    expect(failures).toHaveLength(1);
+    expect(inputs).toEqual([]);
+    expect(client.operations).toEqual(["prepare:failed"]);
+    expect(client.submitted).toEqual([]);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 1,
+      receipt_count: 0,
+      authority_projection_count: 0,
+      rejection_count: 1,
+      fatal_class: "delivery",
+    });
   });
 
   it("keeps normalized dispatch provenance mismatches fatal", async () => {

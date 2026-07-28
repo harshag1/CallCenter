@@ -32,6 +32,8 @@ const AUTHORITY_PROJECTION_DOMAIN =
 const FIREWALL_SOURCE_COMMIT =
   "ab3d2ef634e0947aa719610c6e4818762f75d16d";
 const HASH = "a".repeat(64);
+const CONTINUATION_CONTROL =
+  "<hacc_response_plan>{\"fault_fixture\":\"current_control\"}</hacc_response_plan>";
 
 export const LC4_GATEWAY_FAULT_INJECTION_ID =
   "HACC-LC4-GATEWAY-FAULT-INJECTION-v1" as const;
@@ -164,6 +166,11 @@ class FaultHarnessClient implements NormalizedRealtimeClient {
   }
   appendInputAudio(): void {}
   prepareResponse(): void {}
+  prepareToolContinuation(): void {
+    if (this.#throwOnDelivery) {
+      throw new Error("deterministic injected continuation control delivery failure");
+    }
+  }
   commitInputAudio(): void {}
   createResponse(): void {
     if (this.#throwOnDelivery) {
@@ -204,6 +211,13 @@ function createExecutor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExe
   return Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1" as const,
     manifest_sha256: sha256Hex("lc4-gateway-fault-injection-executor-v1"),
+    currentResponsePreparation() {
+      return Object.freeze({
+        additionalInstructions: CONTINUATION_CONTROL,
+        contextSha256: sha256Hex(CONTINUATION_CONTROL),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+      });
+    },
     async execute(input: Lc4DevGatewayExecutionInput) {
       inputs.push(input);
       const providerOutput = Object.freeze({

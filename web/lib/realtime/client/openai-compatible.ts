@@ -178,6 +178,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private readonly localToolProxyEnabled: boolean;
   private readonly baseInstructions: string;
   private pendingResponsePreparation: RealtimeResponsePreparation | null = null;
+  private pendingToolContinuationPreparation: RealtimeResponsePreparation | null = null;
   private inputPhase: "empty" | "buffered" | "committed" = "empty";
   private providerCreatedModel?: string;
   private providerSessionId?: string;
@@ -453,6 +454,27 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.pendingResponsePreparation = Object.freeze({ ...preparation });
   }
 
+  prepareToolContinuation(preparation: RealtimeResponsePreparation): void {
+    if (this.currentState !== "ready") throw new Error("Realtime client is not ready");
+    if (!this.pendingToolBatch || !this.pendingToolBatchResponseId) {
+      throw new Error("Realtime tool continuation requires one pending provider tool-call batch");
+    }
+    if (this.pendingResponsePreparation || this.pendingToolContinuationPreparation) {
+      throw new Error("Realtime tool continuation response is already prepared");
+    }
+    if (!preparation.additionalInstructions.trim()) {
+      throw new Error("Realtime tool continuation instructions cannot be empty");
+    }
+    if (preparation.contextAuthority !== "advisory_only_gateway_and_speech_gate_enforced") {
+      throw new Error("Realtime tool continuation authority boundary mismatch");
+    }
+    if (!/^[a-f0-9]{64}$/.test(preparation.contextSha256)
+        || createHash("sha256").update(preparation.additionalInstructions).digest("hex") !== preparation.contextSha256) {
+      throw new Error("Realtime tool continuation hash mismatch");
+    }
+    this.pendingToolContinuationPreparation = Object.freeze({ ...preparation });
+  }
+
   prepareServerVadTurn(
     preparation: RealtimeServerVadTurnPreparation,
     timeoutMs = this.connectTimeoutMs,
@@ -621,11 +643,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (this.turnDetectionMode === "server_vad" && !this.pendingToolContinuationResponseId) {
       throw new Error("Initial response.create is forbidden in provider-native server-VAD mode");
     }
-    if (this.pendingResponsePreparation && Object.prototype.hasOwnProperty.call(overrides, "instructions")) {
+    const preparation = this.pendingResponsePreparation ?? this.pendingToolContinuationPreparation;
+    if (preparation && Object.prototype.hasOwnProperty.call(overrides, "instructions")) {
       throw new Error("Prepared response instructions cannot be overridden");
     }
+    if (this.pendingResponsePreparation && this.pendingToolContinuationPreparation) {
+      throw new Error("Realtime response has conflicting audio-turn and tool-continuation control");
+    }
     if (this.inputPhase === "buffered") throw new Error("Commit realtime input audio before creating its response");
-    const preparation = this.pendingResponsePreparation;
     const response = preparation
       ? {
           ...overrides,
@@ -660,7 +685,10 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         this.awaitingServerVadContinuationObservationSha256 = responseCreateObservation?.observationSha256 ?? null;
       }
     }
-    if (preparation) this.pendingResponsePreparation = null;
+    if (preparation) {
+      this.pendingResponsePreparation = null;
+      this.pendingToolContinuationPreparation = null;
+    }
     if (this.inputPhase === "committed") this.inputPhase = "empty";
   }
 
@@ -767,6 +795,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       if (this.pendingToolBatch !== pending || this.currentState !== "ready") {
         throw new Error("Tool result batch authority changed during canonicalization");
       }
+      if (createResponse && this.pendingToolContinuationPreparation) {
+        throw new Error("Prepared tool continuation requires explicit createResponse delivery");
+      }
       try {
         for (const result of serialized) {
           this.sendReady({
@@ -814,6 +845,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     }
     this.currentState = "closing";
     this.pendingResponsePreparation = null;
+    this.pendingToolContinuationPreparation = null;
     this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;
@@ -1497,6 +1529,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.rejectInputCommitWaiters("Realtime socket closed before input audio commit acknowledgement");
     this.pendingInputCommits.length = 0;
     this.pendingResponsePreparation = null;
+    this.pendingToolContinuationPreparation = null;
     this.inputPhase = "empty";
     if (!wasFailed) this.currentState = "closed";
     this.clearConnectTimer();
@@ -1538,6 +1571,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (this.currentState === "failed" || this.currentState === "closed") return;
     this.currentState = "failed";
     this.pendingResponsePreparation = null;
+    this.pendingToolContinuationPreparation = null;
     this.inputPhase = "empty";
     this.pendingXaiResumption = null;
     this.pendingToolBatch = null;

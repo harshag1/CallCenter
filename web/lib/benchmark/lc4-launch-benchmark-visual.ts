@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
@@ -5,7 +6,6 @@ import {
   link,
   lstat,
   mkdir,
-  readFile,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -16,10 +16,10 @@ import sharp from "sharp";
 import { sha256Hex } from "./artifacts";
 import {
   assertLc4LaunchBenchmarkArtifact,
+  readLc4LaunchBenchmarkPublicJson,
   type Lc4LaunchBenchmarkArtifact,
 } from "./lc4-launch-benchmark";
 
-const MAX_PUBLIC_JSON_BYTES = 4 * 1024 * 1024;
 const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const WIDTH = 1600;
 const HEIGHT = 1000;
@@ -80,7 +80,7 @@ function percent(ratePpm: number | null): string {
 
 function bar(
   cellValue: PublicCell,
-  label: "Native" | "HACC",
+  label: "Native API" | "HACC",
   y: number,
   fill: string,
 ): string {
@@ -114,10 +114,10 @@ function providerGroup(
     `<g aria-label="${xml(publicLabel(provider))}, ${xml(native.model)}">`,
     `<text x="90" y="${top + 18}" class="provider">${xml(publicLabel(provider))}</text>`,
     `<text x="90" y="${top + 49}" class="model">${xml(native.model)}</text>`,
-    bar(native, "Native", top, "#B9BEC5"),
+    bar(native, "Native API", top, "#B9BEC5"),
     bar(hacc, "HACC", top + 64, "#4453E2"),
     `<text x="430" y="${top + 145}" class="strict">Strict episode</text>`,
-    `<text x="566" y="${top + 145}" class="strict-value">Native ${nativeStrict.passed}/${nativeStrict.total}</text>`,
+    `<text x="566" y="${top + 145}" class="strict-value">Native API ${nativeStrict.passed}/${nativeStrict.total}</text>`,
     `<text x="690" y="${top + 145}" class="strict-dot">·</text>`,
     `<text x="716" y="${top + 145}" class="strict-value hacc">HACC ${haccStrict.passed}/${haccStrict.total}</text>`,
     `</g>`,
@@ -131,8 +131,8 @@ export function renderLc4LaunchBenchmarkSvg(
   const groups = PROVIDERS.map((provider, index) =>
     providerGroup(artifact, provider, index)).join("\n");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" role="img" aria-labelledby="title description">
-<title id="title">Long-call recall: Native versus HACC</title>
-<desc id="description">Exact registered recall probe pass rates for OpenAI, Gemini, and xAI, comparing one Native and one HACC call per provider. Strict episode outcomes are also shown.</desc>
+<title id="title">Long-call recall: Native API versus HACC</title>
+<desc id="description">Exact registered recall probe pass rates for OpenAI, Gemini, and xAI, comparing one Native API and one HACC call per provider. Strict episode outcomes are also shown.</desc>
 <metadata>HACC LC4 benchmark ${artifact.benchmark_sha256}</metadata>
 <rect width="${WIDTH}" height="${HEIGHT}" fill="#FFFFFF"/>
 <style>
@@ -154,12 +154,12 @@ export function renderLc4LaunchBenchmarkSvg(
   .footer { font-size: 20px; font-weight: 500; fill: #2B2E33; }
 </style>
 <text id="heading" x="90" y="94" class="title">Long-call recall</text>
-<text x="90" y="137" class="subtitle">Registered recall probes · exact pass rate</text>
+<text x="90" y="137" class="subtitle">Registered recall probes · 1 call per arm</text>
 <g aria-label="Legend">
-  <rect x="1258" y="72" width="21" height="21" rx="4" fill="#B9BEC5"/>
-  <text x="1291" y="90" class="legend">Native</text>
-  <rect x="1384" y="72" width="21" height="21" rx="4" fill="#4453E2"/>
-  <text x="1417" y="90" class="legend">HACC</text>
+  <rect x="1218" y="72" width="21" height="21" rx="4" fill="#B9BEC5"/>
+  <text x="1251" y="90" class="legend">Native API</text>
+  <rect x="1392" y="72" width="21" height="21" rx="4" fill="#4453E2"/>
+  <text x="1425" y="90" class="legend">HACC</text>
 </g>
 <g aria-hidden="true">
   <line x1="430" y1="190" x2="430" y2="810" stroke="#E4E6E9" stroke-width="1"/>
@@ -198,25 +198,6 @@ async function absent(path: string): Promise<void> {
   }
 }
 
-async function readArtifact(path: string): Promise<Lc4LaunchBenchmarkArtifact> {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
-    || metadata.size < 2 || metadata.size > MAX_PUBLIC_JSON_BYTES) {
-    throw new Error("LC4 launch benchmark visual input must be one bounded regular JSON file");
-  }
-  let parsed: Lc4LaunchBenchmarkArtifact;
-  try {
-    parsed = JSON.parse(await readFile(path, "utf8")) as Lc4LaunchBenchmarkArtifact;
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      throw new Error("LC4 launch benchmark visual input is not valid JSON");
-    }
-    throw error;
-  }
-  assertLc4LaunchBenchmarkArtifact(parsed);
-  return parsed;
-}
-
 async function publishBuffers(
   outputRoot: string,
   buffers: Lc4LaunchBenchmarkVisualBuffers,
@@ -234,7 +215,7 @@ async function publishBuffers(
   ] as const;
   const finals = entries.map(([filename]) => resolve(outputRoot, filename));
   await Promise.all(finals.map(absent));
-  const nonce = sha256Hex(`${artifactSha256}\n${sha256Hex(buffers.svg)}`);
+  const nonce = `${sha256Hex(`${artifactSha256}\n${sha256Hex(buffers.svg)}`)}.${randomUUID()}`;
   const temps = entries.map(([filename]) => resolve(dirname(outputRoot), `.${filename}.${nonce}.tmp`));
   const linked: string[] = [];
   try {
@@ -262,7 +243,7 @@ export async function publishLc4LaunchBenchmarkVisual(input: Readonly<{
 }>> {
   const publicJson = absolute(input.public_json, "LC4 launch benchmark visual public JSON");
   const outputRoot = absolute(input.output_root, "LC4 launch benchmark visual output root");
-  const artifact = await readArtifact(publicJson);
+  const artifact = await readLc4LaunchBenchmarkPublicJson({ public_json: publicJson });
   const buffers = await createLc4LaunchBenchmarkVisualBuffers(artifact);
   await publishBuffers(outputRoot, buffers, artifact.benchmark_sha256);
   return Object.freeze({

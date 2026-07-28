@@ -1639,6 +1639,15 @@ describe("LC4-DEV live runner", () => {
     const gatewayExecutor: Lc4DevGatewayExecutor = {
       kind: "lc4-dev-arm-aware-gateway-v1",
       manifest_sha256: preflight.control_plane_manifest_sha256,
+      currentResponsePreparation() {
+        const additionalInstructions =
+          "<hacc_response_plan>{\"fixture\":\"current_control\"}</hacc_response_plan>";
+        return {
+          additionalInstructions,
+          contextSha256: sha256Hex(additionalInstructions),
+          contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+        };
+      },
       async execute() { throw new Error("factory construction test must not execute the gateway"); },
     };
     const budgetAuthority = {

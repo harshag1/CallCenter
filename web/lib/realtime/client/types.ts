@@ -680,6 +680,14 @@ export interface NormalizedRealtimeClient {
   /** Must precede commitInputAudio for providers where commit starts generation. */
   prepareResponse(preparation: RealtimeResponsePreparation): void;
   /**
+   * Bind hash-verified dynamic control to the continuation of the currently
+   * pending provider tool-call batch. Providers differ on the wire ordering:
+   * OpenAI-compatible transports attach it to the subsequent response.create,
+   * while Gemini embeds it in the blocking toolResponse so that message remains
+   * the sole provider continuation trigger.
+   */
+  prepareToolContinuation?(preparation: RealtimeResponsePreparation): void;
+  /**
    * Optional provider-native server-VAD barrier. It must resolve on the exact
    * `session.updated` acknowledgement before caller audio is appended.
    */

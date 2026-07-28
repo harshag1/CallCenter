@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import {
   chmod,
   lstat,
@@ -427,6 +427,14 @@ type LockOwner = Readonly<{
 }>;
 
 type HeldLock = Readonly<{ path: string; nonce: string }>;
+
+type HeldPrivateFile = Readonly<{
+  path: string;
+  label: string;
+  handle: FileHandle;
+  dev: bigint;
+  ino: bigint;
+}>;
 
 function fail(code: FilesystemBudgetLedgerError["code"], message: string): never {
   throw new FilesystemBudgetLedgerError(code, message);
@@ -1062,11 +1070,112 @@ async function withLock<T>(options: BudgetLedgerStoreOptions, action: (paths: St
   }
 }
 
-async function assertPrivateRegularFile(path: string, label: string): Promise<void> {
-  const info = await lstat(path).catch(() => null);
-  if (!info) fail("ledger_missing", `${label} is missing`);
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o077) !== 0) {
-    fail("unsafe_filesystem", `${label} must be a private regular file with one hard link`);
+const PRIVATE_FILE_BINDING_ATTEMPTS = 5;
+
+async function openHeldPrivateFile(
+  path: string,
+  label: string,
+  flags: number,
+): Promise<HeldPrivateFile> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, flags | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      fail("ledger_missing", `${label} is missing`);
+    }
+    fail("unsafe_filesystem", `${label} could not be opened as a non-symlink file`);
+  }
+  try {
+    const info = await handle.stat({ bigint: true });
+    const held = Object.freeze({
+      path,
+      label,
+      handle,
+      dev: info.dev,
+      ino: info.ino,
+    });
+    await awaitStablePrivateFileBinding(held);
+    return held;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function awaitStablePrivateFileBinding(held: HeldPrivateFile): Promise<BigIntStats> {
+  let sawLinkCountDisagreement = false;
+  let cleanSamplesAfterDisagreement = 0;
+  for (let attempt = 0; attempt < PRIVATE_FILE_BINDING_ATTEMPTS; attempt += 1) {
+    const [descriptorInfo, pathInfo] = await Promise.all([
+      held.handle.stat({ bigint: true }).catch(() => null),
+      lstat(held.path, { bigint: true }).catch(() => null),
+    ]);
+    if (
+      !descriptorInfo
+      || !pathInfo
+      || !descriptorInfo.isFile()
+      || !pathInfo.isFile()
+      || pathInfo.isSymbolicLink()
+      || descriptorInfo.dev !== held.dev
+      || descriptorInfo.ino !== held.ino
+      || pathInfo.dev !== held.dev
+      || pathInfo.ino !== held.ino
+      || (descriptorInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+      || (pathInfo.mode & BIGINT_PRIVATE_MASK) !== BIGINT_ZERO
+    ) {
+      fail("unsafe_filesystem", `${held.label} changed or is no longer safely reachable`);
+    }
+    if (descriptorInfo.nlink === BIGINT_ONE && pathInfo.nlink === BIGINT_ONE) {
+      cleanSamplesAfterDisagreement += 1;
+      // Preserve the historical single-sample fast path. If APFS exposed a
+      // transient link-count disagreement, require two subsequent agreeing
+      // samples on the same held inode before proceeding.
+      if (!sawLinkCountDisagreement || cleanSamplesAfterDisagreement >= 2) {
+        return descriptorInfo;
+      }
+    } else {
+      sawLinkCountDisagreement = true;
+      cleanSamplesAfterDisagreement = 0;
+    }
+    if (attempt + 1 < PRIVATE_FILE_BINDING_ATTEMPTS) {
+      await wait(2 ** attempt);
+    }
+  }
+  fail("unsafe_filesystem", `${held.label} did not establish a stable private single-link binding`);
+}
+
+async function readHeldPrivateFile(
+  held: HeldPrivateFile,
+  maximumBytes: number,
+  allowEmpty = false,
+): Promise<Buffer> {
+  const before = await awaitStablePrivateFileBinding(held);
+  if (
+    before.size > BigInt(maximumBytes)
+    || (!allowEmpty && before.size <= BIGINT_ZERO)
+  ) {
+    fail("integrity_failure", `${held.label} size is invalid`);
+  }
+  const bytes = await held.handle.readFile();
+  const after = await awaitStablePrivateFileBinding(held);
+  if (
+    BigInt(bytes.byteLength) !== before.size
+    || after.size !== before.size
+    || after.mtimeNs !== before.mtimeNs
+    || after.ctimeNs !== before.ctimeNs
+  ) {
+    fail("integrity_failure", `${held.label} changed while it was read`);
+  }
+  return bytes;
+}
+
+async function readPrivateFile(path: string, label: string, maximumBytes: number): Promise<Buffer> {
+  const held = await openHeldPrivateFile(path, label, constants.O_RDONLY);
+  try {
+    return await readHeldPrivateFile(held, maximumBytes);
+  } finally {
+    await held.handle.close();
   }
 }
 
@@ -1173,19 +1282,43 @@ function replayEvents(events: readonly BudgetJournalEvent[]): MutableState {
   return state;
 }
 
-async function loadEvents(paths: StorePaths): Promise<Readonly<{ events: readonly BudgetJournalEvent[]; bytes: number }>> {
-  await assertPrivateRegularFile(paths.ledger, "budget ledger");
-  const info = await stat(paths.ledger);
-  if (info.size <= 0 || info.size > MAX_LEDGER_BYTES) fail("integrity_failure", "budget ledger size is invalid");
-  const bytes = await readFile(paths.ledger);
-  if (bytes.byteLength !== info.size || bytes[bytes.byteLength - 1] !== 0x0a) {
-    fail("integrity_failure", "budget ledger has a partial or unterminated tail");
+async function loadEvents(
+  paths: StorePaths,
+  writable = false,
+): Promise<Readonly<{
+  events: readonly BudgetJournalEvent[];
+  bytes: number;
+  ledger: HeldPrivateFile;
+}>> {
+  const ledger = await openHeldPrivateFile(
+    paths.ledger,
+    "budget ledger",
+    writable ? constants.O_RDWR | constants.O_APPEND : constants.O_RDONLY,
+  );
+  let bytes: Buffer;
+  try {
+    bytes = await readHeldPrivateFile(ledger, MAX_LEDGER_BYTES);
+  } catch (error) {
+    await ledger.handle.close().catch(() => undefined);
+    throw error;
   }
-  const text = bytes.toString("utf8");
-  if (text.includes("\0") || text.includes("\r")) fail("integrity_failure", "budget ledger contains forbidden bytes");
-  const lines = text.slice(0, -1).split("\n");
-  if (lines.some((line) => line.length === 0)) fail("integrity_failure", "budget ledger contains an empty event line");
-  return Object.freeze({ events: Object.freeze(lines.map((line, index) => parseEvent(line, index + 1))), bytes: bytes.byteLength });
+  try {
+    if (bytes[bytes.byteLength - 1] !== 0x0a) {
+      fail("integrity_failure", "budget ledger has a partial or unterminated tail");
+    }
+    const text = bytes.toString("utf8");
+    if (text.includes("\0") || text.includes("\r")) fail("integrity_failure", "budget ledger contains forbidden bytes");
+    const lines = text.slice(0, -1).split("\n");
+    if (lines.some((line) => line.length === 0)) fail("integrity_failure", "budget ledger contains an empty event line");
+    return Object.freeze({
+      events: Object.freeze(lines.map((line, index) => parseEvent(line, index + 1))),
+      bytes: bytes.byteLength,
+      ledger,
+    });
+  } catch (error) {
+    await ledger.handle.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 function parseHead(text: string): BudgetJournalHead {
@@ -1205,8 +1338,11 @@ function parseHead(text: string): BudgetJournalHead {
 }
 
 async function verifyHead(paths: StorePaths, state: MutableState, byteLength: number): Promise<void> {
-  await assertPrivateRegularFile(paths.head, "budget ledger head");
-  const head = parseHead(await readFile(paths.head, "utf8"));
+  const head = parseHead((await readPrivateFile(
+    paths.head,
+    "budget ledger head",
+    MAX_EVENT_BYTES,
+  )).toString("utf8"));
   if (
     head.schema_version !== 1
     || head.ledger_id !== state.ledgerId
@@ -1235,17 +1371,33 @@ async function verifyHead(paths: StorePaths, state: MutableState, byteLength: nu
   }
 }
 
-async function loadVerified(paths: StorePaths): Promise<Readonly<{ state: MutableState; events: readonly BudgetJournalEvent[]; bytes: number }>> {
-  const loaded = await loadEvents(paths);
-  const state = replayEvents(loaded.events);
-  await verifyHead(paths, state, loaded.bytes);
-  return Object.freeze({ state, events: loaded.events, bytes: loaded.bytes });
+async function loadVerified(
+  paths: StorePaths,
+  writable = false,
+): Promise<Readonly<{
+  state: MutableState;
+  events: readonly BudgetJournalEvent[];
+  bytes: number;
+  ledger: HeldPrivateFile;
+}>> {
+  const loaded = await loadEvents(paths, writable);
+  try {
+    const state = replayEvents(loaded.events);
+    await verifyHead(paths, state, loaded.bytes);
+    return Object.freeze({
+      state,
+      events: loaded.events,
+      bytes: loaded.bytes,
+      ledger: loaded.ledger,
+    });
+  } catch (error) {
+    await loaded.ledger.handle.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function loadSigningKey(paths: StorePaths, state: MutableState) {
-  await assertPrivateRegularFile(paths.key, "budget ledger signing key");
-  const keyBytes = await readFile(paths.key);
-  if (keyBytes.byteLength > 16_384) fail("integrity_failure", "budget ledger signing key is too large");
+  const keyBytes = await readPrivateFile(paths.key, "budget ledger signing key", 16_384);
   let privateKey: ReturnType<typeof createPrivateKey>;
   try {
     privateKey = createPrivateKey(keyBytes);
@@ -1259,24 +1411,25 @@ async function loadSigningKey(paths: StorePaths, state: MutableState) {
   return privateKey;
 }
 
-async function appendFully(path: string, contents: Buffer): Promise<number> {
-  const handle = await open(path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+async function appendFully(ledger: HeldPrivateFile, contents: Buffer): Promise<number> {
+  const before = await awaitStablePrivateFileBinding(ledger);
   try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0) {
-      fail("unsafe_filesystem", "budget ledger changed into an unsafe file");
-    }
     let offset = 0;
     while (offset < contents.byteLength) {
-      const result = await handle.write(contents, offset, contents.byteLength - offset, null);
+      const result = await ledger.handle.write(contents, offset, contents.byteLength - offset, null);
       if (result.bytesWritten <= 0) fail("integrity_failure", "budget ledger append made no progress");
       offset += result.bytesWritten;
     }
-    await handle.sync();
-    const after = await handle.stat();
-    return after.size;
-  } finally {
-    await handle.close();
+    await ledger.handle.sync();
+    const after = await awaitStablePrivateFileBinding(ledger);
+    if (after.size !== before.size + BigInt(contents.byteLength)) {
+      fail("integrity_failure", "budget ledger size changed outside the exact append");
+    }
+    return Number(after.size);
+  } catch (error) {
+    // An append may already be durable. Never retry it here; recovery remains
+    // the only path for an append/head interruption.
+    throw error;
   }
 }
 
@@ -1389,10 +1542,11 @@ async function mutate(
   ) => void | LockedMutationCommitGuard | Promise<void | LockedMutationCommitGuard>,
 ): Promise<BudgetLedgerMutationResult> {
   return withLock(options, async (paths) => {
-    const loaded = await loadVerified(paths);
+    const loaded = await loadVerified(paths, true);
     const occurredAt = (options.now?.() ?? new Date()).toISOString();
-    const guard = await lockedPrecondition?.(loaded.state, loaded.events, paths, occurredAt);
+    let guard: void | LockedMutationCommitGuard = undefined;
     try {
+      guard = await lockedPrecondition?.(loaded.state, loaded.events, paths, occurredAt);
       const payload = payloadFactory(loaded.state, occurredAt);
       assertNoCredentialMaterial(payload);
       const opHash = operationHash(eventType, payload);
@@ -1424,14 +1578,17 @@ async function mutate(
       // closes the lstat/open pathname gap without pretending Node exposes
       // portable openat(2) primitives.
       await guard?.assertDurablyBound();
-      const byteLength = await appendFully(paths.ledger, line);
+      const byteLength = await appendFully(loaded.ledger, line);
       await writeHead(paths, built.nextState, byteLength, privateKey);
       // Do not report success if a concurrent same-user rename detached the
       // marker during the ledger/head commit window.
       await guard?.assertDurablyBound();
       return Object.freeze({ snapshot: snapshot(built.nextState), event: built.event, idempotent_replay: false });
     } finally {
-      await guard?.close();
+      await Promise.all([
+        guard?.close(),
+        loaded.ledger.handle.close(),
+      ]);
     }
   });
 }
@@ -1466,6 +1623,11 @@ export async function initializeFilesystemBudgetLedger(input: BudgetLedgerStoreO
     await chmod(paths.key, PRIVATE_FILE_MODE);
     const ledgerHandle = await open(paths.ledger, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, PRIVATE_FILE_MODE);
     await ledgerHandle.close();
+    const heldLedger = await openHeldPrivateFile(
+      paths.ledger,
+      "budget ledger",
+      constants.O_RDWR | constants.O_APPEND,
+    );
     const payload: InitializedPayload = Object.freeze({
       currency: "USD",
       public_key_spki_base64: Buffer.from(publicDer).toString("base64"),
@@ -1486,15 +1648,26 @@ export async function initializeFilesystemBudgetLedger(input: BudgetLedgerStoreO
       privateKey,
       eventId: (input.randomId ?? randomUUID)(),
     });
-    const line = Buffer.from(`${canonicalJson(built.event)}\n`, "utf8");
-    const byteLength = await appendFully(paths.ledger, line);
-    await writeHead(paths, built.nextState, byteLength, privateKey);
-    return Object.freeze({ snapshot: snapshot(built.nextState), event: built.event, idempotent_replay: false });
+    try {
+      const line = Buffer.from(`${canonicalJson(built.event)}\n`, "utf8");
+      const byteLength = await appendFully(heldLedger, line);
+      await writeHead(paths, built.nextState, byteLength, privateKey);
+      return Object.freeze({ snapshot: snapshot(built.nextState), event: built.event, idempotent_replay: false });
+    } finally {
+      await heldLedger.handle.close();
+    }
   });
 }
 
 export async function inspectFilesystemBudgetLedger(options: BudgetLedgerStoreOptions): Promise<BudgetJournalSnapshot> {
-  return withLock(options, async (paths) => snapshot((await loadVerified(paths)).state));
+  return withLock(options, async (paths) => {
+    const loaded = await loadVerified(paths);
+    try {
+      return snapshot(loaded.state);
+    } finally {
+      await loaded.ledger.handle.close();
+    }
+  });
 }
 
 /**
@@ -1509,9 +1682,13 @@ export async function filesystemBudgetLedgerContainsHead(
   assertHash(options.ancestorHeadSha256, "ancestorHeadSha256");
   return withLock(options, async (paths) => {
     const loaded = await loadVerified(paths);
-    return loaded.events.some(
-      (event) => event.event_sha256 === options.ancestorHeadSha256,
-    );
+    try {
+      return loaded.events.some(
+        (event) => event.event_sha256 === options.ancestorHeadSha256,
+      );
+    } finally {
+      await loaded.ledger.handle.close();
+    }
   });
 }
 
@@ -2106,20 +2283,33 @@ export async function setFilesystemBudgetPaused(input: BudgetLedgerStoreOptions 
 export async function recoverFilesystemBudgetHead(options: BudgetLedgerStoreOptions): Promise<BudgetJournalSnapshot> {
   return withLock(options, async (paths) => {
     const loaded = await loadEvents(paths);
-    const state = replayEvents(loaded.events);
-    const existingText = await readFile(paths.head, "utf8").catch(() => null);
-    if (existingText !== null) {
-      const existing = parseHead(existingText);
-      if (existing.ledger_id !== state.ledgerId || existing.sequence > state.sequence) {
-        fail("integrity_failure", "budget head is not a recoverable prefix of the event log");
+    try {
+      const state = replayEvents(loaded.events);
+      const existingBytes = await readPrivateFile(
+        paths.head,
+        "budget ledger head",
+        MAX_EVENT_BYTES,
+      ).catch((error: unknown) => {
+        if (error instanceof FilesystemBudgetLedgerError && error.code === "ledger_missing") {
+          return null;
+        }
+        throw error;
+      });
+      if (existingBytes !== null) {
+        const existing = parseHead(existingBytes.toString("utf8"));
+        if (existing.ledger_id !== state.ledgerId || existing.sequence > state.sequence) {
+          fail("integrity_failure", "budget head is not a recoverable prefix of the event log");
+        }
+        const prefix = loaded.events[existing.sequence - 1];
+        if (!prefix || prefix.event_sha256 !== existing.event_sha256) {
+          fail("integrity_failure", "budget head diverges from the event log and cannot be recovered automatically");
+        }
       }
-      const prefix = loaded.events[existing.sequence - 1];
-      if (!prefix || prefix.event_sha256 !== existing.event_sha256) {
-        fail("integrity_failure", "budget head diverges from the event log and cannot be recovered automatically");
-      }
+      const privateKey = await loadSigningKey(paths, state);
+      await writeHead(paths, state, loaded.bytes, privateKey);
+      return snapshot(state);
+    } finally {
+      await loaded.ledger.handle.close();
     }
-    const privateKey = await loadSigningKey(paths, state);
-    await writeHead(paths, state, loaded.bytes, privateKey);
-    return snapshot(state);
   });
 }
