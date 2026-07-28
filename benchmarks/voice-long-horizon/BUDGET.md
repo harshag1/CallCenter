@@ -111,3 +111,29 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 - **Cumulative total recorded program cash spend: $3.807615**
 
 Changing the operational ceiling requires a dated ledger entry linking the exact release evidence, source commit, test/artifact IDs, and any unresolved accounting uncertainty. Spending the protected reserve additionally requires a prior entry in [DEVIATIONS.md](DEVIATIONS.md).
+
+## 2026-07-28 — LC4 qualification and failed DEV-run settlement
+
+Two new local filesystem-ledger settlements were recorded at source commit
+`021c70e68e3edcf32172a3d89bf8611b5b011001`:
+
+| Run | Conservative settlement | Active reservations after terminal | Status | Evidence |
+|---|---:|---:|---|---|
+| LC4 qualification v3 | $3.00 | $0.00 | passed; three paid sessions, six provider connections, zero retries | budget evidence `5f75e13142cb6437e9e7f12ad48ac0593dedfc7dd301c0e66fca084ae7c63a2b`; final head `968b39ef2120819108d6d2bc8fbdaf6b6a815e2e696f2be2169a44b4eeea9966` |
+| LC4 six-episode DEV attempt | $7.50 | $0.00 | failed after three episodes started/two completed; zero retries | budget evidence `7f82455c4bdd24a2ea5a5d580ffe1f25bee0194e4c0f9888d6e5b02d28328372`; terminal head `0f653d854bf2c6eeda322da9eead414e50639b1e83b8a40f1b178f8fac5d2f07` |
+
+The DEV terminal settled the two completed OpenAI episodes and failed Gemini
+HACC episode at the full conservative $2.50 reservation each, then cancelled
+the three unopened reservations at $0.00. The resulting $7.50 is pessimistic
+budget accounting, not provider-reported or invoice-reconciled spend. The same
+distinction applies to the qualification's $3.00 settlement. Provider-billed
+cost for both remains unreconciled; these values must not be added to an
+invoice-spend claim.
+
+The DEV run package, run, report, and budget evidence remain bound by
+`0bd50172100019941f1ed204b5d85d47008d9623ce603db1a744b40e88b4ac73`,
+`6af4008d7a516062ae33e08efbe9ccd8f8f17494a959dab8ba53e0304e51524c`,
+`f1a6999ca108a4032c45918654e91cdc12c07becbe04904448590fa5c5628846`,
+and `7f82455c4bdd24a2ea5a5d580ffe1f25bee0194e4c0f9888d6e5b02d28328372`,
+respectively. The retained root replayed with
+`budget_replay_verified: true`, and active reservations are exactly **$0.00**.

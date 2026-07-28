@@ -165,3 +165,79 @@ attribute that failure to quota alone. Until OpenAI generation succeeds and the
 catalog/evaluator gaps above are fixed under a newly frozen protocol, the
 six-episode comparison is incomplete and no benchmark number or launch graph is
 authorized.
+
+## 2026-07-28 six-episode attempt at `021c70e`
+
+**Retained failure/mechanism evidence only. No partial score is admissible.**
+
+The attempt was preceded by a fresh qualification v3 pass for the exact pinned
+models:
+
+- source commit:
+  `021c70e68e3edcf32172a3d89bf8611b5b011001`;
+- OpenAI `gpt-realtime-2.1`, Gemini
+  `gemini-3.1-flash-live-preview`, and xAI
+  `grok-voice-think-fast-1.0` all passed their spoken gateway round trip;
+- three paid sessions, six provider connections, three tool round trips, and
+  zero retries;
+- qualification terminal:
+  `0d1d18a1aaa9df9d3322151a592e3e2c9cf3fce51bd2c3034f5870db90f28295`;
+- qualification package:
+  `980b586bcaacb460a9f77adc5d8ff67c0715c1752f5b5f2376149f74cf38e02b`;
+- retained replay artifact/head:
+  `7bd1cc0dc62f91c3822f593a986485cd5bb4354de4af9f022a0a0609fbe5162d` /
+  `562937e27efdbd295cdcab5743ccfdc1dbed068415d69cb3da3d9259002e970f`.
+
+The qualification root is currently retained at
+`/private/tmp/hacc-lc4-qv3-evidence-021c70e-20260728T180032Z`.
+
+The six-episode DEV attempt then recorded:
+
+- episodes started/completed: **3 / 2**;
+- canonical opportunities submitted/completed: **122 / 121**;
+- response generations requested/completed: **130 / 129**;
+- provider calls: **129**;
+- bounded repair playbacks: **8**;
+- paid retries: **0**.
+
+It failed on Gemini HACC opportunity 2. Primary failure evidence
+`a6271cf4bf164e9ce0945df1bd80ccf6856ce011a8d0d32ea7efab1f1e87f437`
+records `failure_class: audio_delivery`, `failure_code:
+audio_delivery_failed`, and `failure_stage: response_prepare`. It also records
+that all 170,334 caller PCM bytes had already been appended, while response
+generation had not been requested or started.
+
+Independent reconstruction from the retained control CAS object and
+`renderHaccResponsePlan` found that the canonical response plan was exactly
+4,096 UTF-8 bytes. The required
+`<hacc_response_plan>\n...\n</hacc_response_plan>` envelope adds 43 bytes, so
+the client received a 4,139-byte control against Gemini's 4,096-byte default
+dynamic-control limit. The stop was therefore caused by a harness/client bound,
+not evidence of Gemini model behavior.
+
+Retained identities:
+
+- run: `6af4008d7a516062ae33e08efbe9ccd8f8f17494a959dab8ba53e0304e51524c`;
+- report:
+  `f1a6999ca108a4032c45918654e91cdc12c07becbe04904448590fa5c5628846`;
+- run package:
+  `0bd50172100019941f1ed204b5d85d47008d9623ce603db1a744b40e88b4ac73`;
+- run ledger head:
+  `c349b669fac0989fbd3ea83dc1be26a82e3d0a95d094c40237aa8f8cb72acef4`;
+- budget evidence:
+  `7f82455c4bdd24a2ea5a5d580ffe1f25bee0194e4c0f9888d6e5b02d28328372`;
+- budget terminal ledger head:
+  `0f653d854bf2c6eeda322da9eead414e50639b1e83b8a40f1b178f8fac5d2f07`.
+
+The filesystem ledger conservatively settled **$7.50** and has **$0.00** in
+active reservations. This is pessimistic reservation settlement, not
+provider-reported or invoice-reconciled spend.
+
+The root is currently retained at
+`/private/tmp/hacc-lc4-dev-evidence-021c70e-20260728T180121Z`. The checked-in
+evidence-root verifier reopened it on 2026-07-28 and reproduced its ledger,
+budget, package, and report. It remains replayable development failure
+evidence, but `/private/tmp` is not durable publication storage. Its report is
+explicitly incomplete, claim-ineligible, and unscorable; no score from the two
+completed episodes may be extracted. C4/C5 and all HACC-superiority claims
+remain **NO-GO**.

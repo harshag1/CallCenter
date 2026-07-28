@@ -457,3 +457,51 @@ At this audit point:
 - provider spend remains $0.00 and C4/C5 eligible run count remains zero.
 
 Passing tests establish the properties those tests exercise. They do not waive any unchecked Gate 0, C4, or C5 requirement above.
+
+## 2026-07-28 addendum — qualification passed; effectiveness run remains ineligible
+
+This dated entry supersedes the audit header's historical “zero paid sessions”
+status, but it does not change the effectiveness verdict.
+
+At source commit `021c70e68e3edcf32172a3d89bf8611b5b011001`, qualification
+v3 passed the pinned OpenAI `gpt-realtime-2.1`, Gemini
+`gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` paths with three paid sessions, six provider
+connections, three spoken gateway round trips, and zero retries. The signed
+terminal artifact is
+`0d1d18a1aaa9df9d3322151a592e3e2c9cf3fce51bd2c3034f5870db90f28295`;
+the replay artifact and chain head are
+`7bd1cc0dc62f91c3822f593a986485cd5bb4354de4af9f022a0a0609fbe5162d`
+and `562937e27efdbd295cdcab5743ccfdc1dbed068415d69cb3da3d9259002e970f`.
+This supports narrowly scoped paid transport/qualification compatibility, not
+memory, task-completion, drift, guardrail, or superiority claims.
+
+The subsequent HACC-LC4-DEV comparison failed closed during Gemini HACC
+opportunity 2. It started three of six episodes, completed two, and completed
+121 of 122 submitted opportunities before a harness-side
+`audio_delivery_failed` at `response_prepare`. The retained failure artifact is
+`a6271cf4bf164e9ce0945df1bd80ccf6856ce011a8d0d32ea7efab1f1e87f437`.
+Independent recomputation showed that the frozen plan was exactly 4,096 bytes
+before the required 43-byte response-plan envelope, yielding 4,139 bytes
+against the Gemini client's 4,096-byte default bound.
+
+The root at
+`/private/tmp/hacc-lc4-dev-evidence-021c70e-20260728T180121Z` is currently
+retained and was successfully reopened by the evidence-root verifier. The
+verifier reproduced the budget, run package, ledger, and report, but the report
+correctly remains `completed: false`, `efficacy_claim_eligible: false`,
+`exact_six_episode_horizon: false`, `task_results_available: false`, and
+`authority_scoreability: unscorable_missing_authority_evidence`. It records
+four invalid/missing episode authority packets because the complete six-episode
+horizon does not exist.
+
+Therefore:
+
+- no result from the two completed episodes may be published as a partial
+  Native/HACC score;
+- no provider bar, pooled rate, confidence interval, or launch graph may use
+  this attempt;
+- the root is replayable failure/mechanism evidence only and still needs
+  durable release storage before `/private/tmp` cleanup; and
+- C4 and C5 remain **NO-GO**, as do all claims that HACC improves memory,
+  long-call alignment, guardrails, task completion, or model behavior.

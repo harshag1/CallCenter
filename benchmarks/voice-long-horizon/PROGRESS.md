@@ -431,3 +431,63 @@ wire assertions bind the new mode and invalidate stale v3/manual artifacts.
 No provider socket was opened and provider spend was **$0.00** for this change.
 The test evidence is implementation/qualification-mechanism evidence only; it
 does not produce or authorize a model-quality or HACC-superiority score.
+
+## 2026-07-28 — Exact-model qualification passed; six-episode DEV run failed closed
+
+A fresh qualification and development run were executed from source commit
+`021c70e68e3edcf32172a3d89bf8611b5b011001`. The qualification passed the
+pinned OpenAI `gpt-realtime-2.1`, Gemini
+`gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` paths. It opened three paid sessions and six
+provider connections, completed three spoken gateway round trips, and used
+zero retries. Its retained terminal records:
+
+- terminal artifact: `0d1d18a1aaa9df9d3322151a592e3e2c9cf3fce51bd2c3034f5870db90f28295`;
+- package artifact: `980b586bcaacb460a9f77adc5d8ff67c0715c1752f5b5f2376149f74cf38e02b`;
+- replay artifact/head: `7bd1cc0dc62f91c3822f593a986485cd5bb4354de4af9f022a0a0609fbe5162d` /
+  `562937e27efdbd295cdcab5743ccfdc1dbed068415d69cb3da3d9259002e970f`;
+- OpenAI, Gemini, and xAI roundtrip evidence:
+  `ac1fd8e8f941aa2bee7a56000fb1af53e306a998b07e1ea37a59d00c6a5627f3`,
+  `86ada10a2bfa73a7d21aa0499d786394040680800a567ce9866f630cb642a2fc`,
+  and `371b51b8c494f04043d5cc4a851439b59b0c14462d6291f8deaa67f80ec976eb`;
+- corresponding independent replay artifacts:
+  `e3bfbab106fb888c506d278095fc0758f55a4858a2881ae34069dd25be2435dd`,
+  `7eaf9ac3a55ffed622e96395ac18d46afe21e723959a15ab4e4bd1f2b1876e3d`,
+  and `5ac581aed4c6f5d5c2456c1f1fa294943f37c789bd611132ec738b201d6c0459`.
+
+The qualification root is currently retained locally at
+`/private/tmp/hacc-lc4-qv3-evidence-021c70e-20260728T180032Z`; like the DEV
+root below, it must move to durable release storage before temporary-file
+cleanup.
+
+The immediately following six-episode HACC-LC4-DEV run did not complete. It
+started three episodes and completed two, submitted 122 canonical
+opportunities and completed 121, requested 130 response generations and
+completed 129, crossed the provider-call boundary 129 times, performed eight
+bounded repair playbacks, and used zero retries. It stopped on Gemini HACC
+opportunity 2 with `audio_delivery_failed` at `response_prepare`.
+
+The retained primary failure evidence is
+`a6271cf4bf164e9ce0945df1bd80ccf6856ce011a8d0d32ea7efab1f1e87f437`.
+Independent recomputation from the retained control object and frozen renderer
+found a 4,096-byte canonical plan plus the 43-byte
+`<hacc_response_plan>` envelope: 4,139 UTF-8 bytes against the Gemini client's
+4,096-byte default dynamic-control bound. This is a harness transport-boundary
+failure, not a Gemini model outcome.
+
+The failed root remains present at
+`/private/tmp/hacc-lc4-dev-evidence-021c70e-20260728T180121Z`. On 2026-07-28,
+the checked-in evidence-root verifier reopened it and successfully reproduced
+the ledger, budget, run package, and stored report. Its run hash is
+`6af4008d7a516062ae33e08efbe9ccd8f8f17494a959dab8ba53e0304e51524c`,
+report hash is
+`f1a6999ca108a4032c45918654e91cdc12c07becbe04904448590fa5c5628846`,
+run ledger head is
+`c349b669fac0989fbd3ea83dc1be26a82e3d0a95d094c40237aa8f8cb72acef4`,
+and budget terminal head is
+`0f653d854bf2c6eeda322da9eead414e50639b1e83b8a40f1b178f8fac5d2f07`.
+The root is replayable development-mechanism evidence, but it is not a complete
+scoreable result and `/private/tmp` is not durable publication storage.
+
+No partial Native/HACC score is published. C4/C5 and every drift, memory,
+guardrail, or superiority claim remain **NO-GO**.
