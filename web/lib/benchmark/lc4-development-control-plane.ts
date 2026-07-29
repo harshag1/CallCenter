@@ -36,6 +36,7 @@ import {
 import type { Lc4DevExecutableMechanismControl } from "./lc4-development-live-dependencies";
 import {
   appendLc4DevNativeGatewayContract,
+  LC4_DEV_GATEWAY_BRIDGE_VERSION,
   LC4_DEV_INTENT_ACTION_MAP,
   lc4DevSemanticIntentForAction,
   renderLc4DevHaccResponsePlan,
@@ -64,7 +65,7 @@ const CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-dev-arm-common-contin
 const NATIVE_TRANSCRIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-control-transcript/v1\n";
 const NATIVE_CONTEXT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-context/v1\n";
 const WORKER_PLAN_DOMAIN = "harshas-amazing-call-center/lc4-dev-worker-plan/v1\n";
-const CONTROL_VERSION = "lc4-dev-municipal-control-plane-v1" as const;
+const CONTROL_VERSION = "lc4-dev-municipal-control-plane-v2" as const;
 
 /**
  * The natural operator brief is an arm-common, pre-conversation input. It is
@@ -1099,6 +1100,9 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       });
     },
     execute: async (request: Lc4DevGatewayExecutionInput) => {
+      if (request.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION) {
+        throw new Error("LC4-DEV gateway call uses an obsolete bridge contract");
+      }
       const state = episodes.get(request.episode_id);
       if (!state) throw new Error("LC4-DEV gateway call arrived before its control episode was initialized");
       if (state.episode.provider !== request.provider
@@ -1235,6 +1239,8 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           state.common.effectStatus = "reconciled";
         }
       }
+      let postTransitionResponsePlan: JsonValue | null = null;
+      let postTransitionResponseControl: JsonValue | null = null;
       let postTransitionResponsePlanSha256: string | null = null;
       let postTransitionResponseControlSha256: string | null = null;
       if (accepted) {
@@ -1268,12 +1274,12 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           });
           postTransitionResponsePlanSha256 = rebound.responsePlan.plan_sha256;
           postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
+          postTransitionResponsePlan = valueJson(rebound.responsePlan);
+          postTransitionResponseControl = valueJson(responseControl);
           providerOutput = valueJson({
             gateway_result: gatewayResultOnly(providerOutput),
             authoritative_outcome: authoritativeOutcome,
             speech_directive: speechDirective,
-            response_control: responseControl,
-            hacc_response_plan: rebound.responsePlan,
           });
         } else {
           const instructions = nativeContext();
@@ -1290,6 +1296,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           });
           postTransitionResponsePlanSha256 = responseControl.instructions_sha256;
           postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
+          postTransitionResponseControl = valueJson(responseControl);
           // Raw Native receives the ordinary leaf-gateway result. The
           // authoritative receipt and speech directive remain evaluator-side
           // evidence; injecting either would turn Native into a second
@@ -1331,7 +1338,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       }
       const authorityProjectionBody = {
         schema_version: 1 as const,
-        bridge_version: "lc4-dev-gateway-bridge-v2" as const,
+        bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: state.episode.episode_id,
         opportunity_id: opportunity.id,
@@ -1349,6 +1356,8 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         provider_output: valueJson(providerOutput),
         authoritative_receipt: valueJson(authoritativeReceipt),
         authoritative_tool_world_receipt: authoritativeToolWorldReceipt,
+        post_transition_response_plan: postTransitionResponsePlan,
+        post_transition_response_control: postTransitionResponseControl,
         post_transition_response_plan_sha256: postTransitionResponsePlanSha256,
         post_transition_response_control_sha256: postTransitionResponseControlSha256,
         authoritative_receipt_sha256: authoritativeReceiptSha256,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   LC4_DEV_INTENT_ACTION_MAP,
@@ -84,7 +84,13 @@ class RebindFailureClient extends FakeClient {
   }
 }
 
-function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor {
+function executor(
+  inputs: Lc4DevGatewayExecutionInput[],
+  providerOutputFor: (ordinal: number) => JsonValue = (ordinal) => ({
+    ok: true,
+    public_receipt: `receipt-${ordinal}`,
+  }),
+): Lc4DevGatewayExecutor {
   return Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1" as const,
     manifest_sha256: "b".repeat(64),
@@ -97,12 +103,12 @@ function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor 
     },
     async execute(input: Lc4DevGatewayExecutionInput) {
       inputs.push(input);
-      const providerOutput = { ok: true, public_receipt: `receipt-${inputs.length}` };
+      const providerOutput = providerOutputFor(inputs.length);
       const authoritativeReceiptSha256 = sha256Hex(`authority:${inputs.length}`);
       const controlPlaneHeadSha256 = sha256Hex(`head:${inputs.length}`);
       const projectionBody = {
         schema_version: 1 as const,
-        bridge_version: "lc4-dev-gateway-bridge-v2" as const,
+        bridge_version: "lc4-dev-gateway-bridge-v3" as const,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: input.episode_id,
         opportunity_id: input.opportunity_id,
@@ -120,6 +126,8 @@ function executor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExecutor 
         provider_output: providerOutput,
         authoritative_receipt: { ok: true },
         authoritative_tool_world_receipt: null,
+        post_transition_response_plan: null,
+        post_transition_response_control: null,
         post_transition_response_plan_sha256: null,
         post_transition_response_control_sha256: null,
         authoritative_receipt_sha256: authoritativeReceiptSha256,
@@ -181,6 +189,23 @@ function dispatchEvent(
   };
 }
 
+function providerOutputAtExactUtf8Bytes(
+  totalBytes: 4_000 | 4_001,
+  multibyte: boolean,
+): JsonValue {
+  const emptyOutput = { payload: "" };
+  const envelopeBytes = Buffer.byteLength(canonicalJson(emptyOutput), "utf8");
+  const payloadBytes = totalBytes - envelopeBytes;
+  const payload = multibyte
+    ? `${"😀".repeat(Math.floor(payloadBytes / 4))}${"a".repeat(payloadBytes % 4)}`
+    : "a".repeat(payloadBytes);
+  const output = { payload };
+  if (Buffer.byteLength(canonicalJson(output), "utf8") !== totalBytes) {
+    throw new Error("test fixture did not produce the requested UTF-8 byte length");
+  }
+  return output;
+}
+
 describe("LC4-DEV provider-neutral gateway bridge", () => {
   it("exposes one stable provider function with a closed semantic intent enum and no model slots", () => {
     expect(LC4_DEV_SEMANTIC_GATEWAY_FUNCTION).toMatchObject({
@@ -223,13 +248,71 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       target_tool: "archive.complete_stage",
       target_arguments: {},
     });
-    expect(client.operations).toEqual(["submit:false", "create"]);
+    expect(client.operations).toEqual([
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+    ]);
     expect(client.submitted[0]?.createResponse).toBe(false);
     expect(evidence.receipts).toHaveLength(1);
     expect(JSON.stringify(evidence.receipts)).not.toContain("public_receipt");
     expect(evidence.authority_projections[0]?.provider_output).toEqual({ ok: true, public_receipt: "receipt-1" });
     expect(evidence.receipt_set_sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
+
+  it.each([
+    { bytes: 4_000 as const, multibyte: false, admitted: true },
+    { bytes: 4_001 as const, multibyte: false, admitted: false },
+    { bytes: 4_000 as const, multibyte: true, admitted: true },
+    { bytes: 4_001 as const, multibyte: true, admitted: false },
+  ])(
+    "enforces the replay-safe $bytes-byte provider-output boundary (multibyte=$multibyte)",
+    async ({ bytes, multibyte, admitted }) => {
+      const providerOutput = providerOutputAtExactUtf8Bytes(bytes, multibyte);
+      const encoded = canonicalJson(providerOutput);
+      expect(Buffer.byteLength(encoded, "utf8")).toBe(bytes);
+      if (multibyte) expect(encoded.length).toBeLessThan(bytes);
+
+      const client = new FakeClient("openai");
+      const inputs: Lc4DevGatewayExecutionInput[] = [];
+      const failures: Error[] = [];
+      const coordinator = new Lc4DevGatewayTurnCoordinator({
+        client,
+        executor: executor(inputs, () => providerOutput),
+        onFatal: (error) => failures.push(error),
+      });
+      coordinator.beginOpportunity({ episode: episode("openai", "hacc"), opportunity });
+      coordinator.observe(dispatchEvent("openai"));
+
+      if (admitted) {
+        await expect(coordinator.finishOpportunity()).resolves.toMatchObject({
+          receipts: [expect.objectContaining({
+            provider_output_sha256: sha256Hex(encoded),
+          })],
+        });
+        expect(failures).toEqual([]);
+        expect(client.operations).toEqual([
+          `prepare:${CONTINUATION_CONTROL_SHA256}`,
+          "submit:false",
+          "create",
+        ]);
+        expect(client.submitted[0]?.results[0]?.output).toEqual(providerOutput);
+      } else {
+        await expect(coordinator.finishOpportunity()).rejects.toThrow(
+          `exceeds 4000 UTF-8 bytes: actual_bytes=${bytes}`,
+        );
+        expect(failures).toHaveLength(1);
+        expect(client.operations).toEqual([]);
+        expect(client.submitted).toEqual([]);
+        expect(coordinator.diagnosticSnapshot()).toMatchObject({
+          receipt_count: 0,
+          authority_projection_count: 0,
+          fatal_class: "execution",
+        });
+      }
+      expect(inputs).toHaveLength(1);
+    },
+  );
 
   it("normalizes Gemini tool.calls and preserves explicit Native routing without adding HACC authority", async () => {
     const client = new FakeClient("gemini");
@@ -254,7 +337,11 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     await coordinator.finishOpportunity();
     expect(inputs).toHaveLength(1);
     expect(inputs[0]?.arm).toBe("native");
-    expect(client.operations).toEqual(["submit:false", "create"]);
+    expect(client.operations).toEqual([
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+    ]);
   });
 
   it("accepts sequential Gemini tool batches in one model-turn response", async () => {
@@ -285,7 +372,14 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     const evidence = await coordinator.finishOpportunity();
     expect(failures).toEqual([]);
     expect(inputs.map((input) => input.provider_call_id)).toEqual(["gemini-call-1", "gemini-call-2"]);
-    expect(client.operations).toEqual(["submit:false", "create", "submit:false", "create"]);
+    expect(client.operations).toEqual([
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+      `prepare:${CONTINUATION_CONTROL_SHA256}`,
+      "submit:false",
+      "create",
+    ]);
     expect(client.submitted).toHaveLength(2);
     expect(evidence.receipts.map((receipt) => receipt.batch_ordinal)).toEqual([1, 2]);
   });
@@ -481,6 +575,38 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       "submit:false",
       "create",
     ]);
+  });
+
+  it("makes a successful post-transition control rebind failure fatal before result delivery", async () => {
+    const client = new RebindFailureClient("openai");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("openai", "hacc"), opportunity });
+    coordinator.observe(dispatchEvent(
+      "openai",
+      "response-success-rebind-failure",
+      "call-success-rebind-failure",
+    ));
+
+    await expect(coordinator.finishOpportunity()).rejects.toThrow(
+      "deterministic continuation control rebind failure",
+    );
+    expect(failures).toHaveLength(1);
+    expect(inputs).toHaveLength(1);
+    expect(client.operations).toEqual(["prepare:failed"]);
+    expect(client.submitted).toEqual([]);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 1,
+      receipt_count: 1,
+      authority_projection_count: 1,
+      rejection_count: 0,
+      fatal_class: "delivery",
+    });
   });
 
   it("makes continuation-control rebind failure fatal before result delivery or authority projection", async () => {

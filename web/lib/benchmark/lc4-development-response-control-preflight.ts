@@ -3,6 +3,7 @@ import type { Lc4DevMunicipalControlPlane } from "./lc4-development-control-plan
 import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import {
   appendLc4DevNativeGatewayContract,
+  LC4_DEV_GATEWAY_BRIDGE_VERSION,
   renderLc4DevHaccResponsePlan,
 } from "./lc4-development-gateway-bridge";
 import {
@@ -133,7 +134,7 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         sequence,
       ].join(":");
       const result = await input.control.gateway_executor.execute({
-        bridge_version: "lc4-dev-gateway-bridge-v2",
+        bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         episode_id: input.episode.episode_id,
         opportunity_id: input.opportunity_id,
         opportunity_index: input.opportunity_index,

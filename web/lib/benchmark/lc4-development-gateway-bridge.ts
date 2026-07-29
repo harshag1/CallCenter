@@ -20,13 +20,13 @@ import {
   PROVIDER_PROVENANCE_META_KEY,
 } from "../realtime/client/types";
 
-export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v2" as const;
+export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v3" as const;
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
 const MAX_REJECTED_TOOL_BATCHES_PER_OPPORTUNITY = 3;
 const MAX_TOOL_CALLS_PER_BATCH = 16;
-const MAX_PROVIDER_RESULT_BYTES = 64 * 1024;
+const MAX_PROVIDER_RESULT_BYTES = 4_000;
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v1\n";
 const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v1\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v2\n";
@@ -240,7 +240,9 @@ export type Lc4DevGatewayExecutor = Readonly<{
  * identities and credentials are excluded; model-visible public arguments,
  * the host-effective arguments, provider-visible result, and authoritative
  * ToolWorld receipt are retained so an independent process can recompute the
- * dispatch and world transition rather than trusting summary hashes.
+ * dispatch and world transition rather than trusting summary hashes. Rebound
+ * response plans and controls remain host evidence here; they are deliberately
+ * absent from the provider-visible tool result.
  */
 export type Lc4DevGatewayAuthorityProjection = Readonly<{
   schema_version: 1;
@@ -262,6 +264,8 @@ export type Lc4DevGatewayAuthorityProjection = Readonly<{
   provider_output: JsonValue;
   authoritative_receipt: JsonValue;
   authoritative_tool_world_receipt: JsonValue | null;
+  post_transition_response_plan?: JsonValue | null;
+  post_transition_response_control?: JsonValue | null;
   post_transition_response_plan_sha256: string | null;
   post_transition_response_control_sha256: string | null;
   authoritative_receipt_sha256: string;
@@ -396,8 +400,12 @@ function assertResponsePreparation(
 function providerOutputSnapshot(value: JsonValue): JsonValue {
   const frozen = freeze(value);
   const encoded = canonicalJson(frozen);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_PROVIDER_RESULT_BYTES) {
-    throw new Error("LC4-DEV gateway provider output exceeds 64 KiB");
+  const encodedBytes = Buffer.byteLength(encoded, "utf8");
+  if (encodedBytes > MAX_PROVIDER_RESULT_BYTES) {
+    throw new Error(
+      `LC4-DEV gateway provider output exceeds ${MAX_PROVIDER_RESULT_BYTES} UTF-8 bytes: `
+      + `actual_bytes=${encodedBytes}`,
+    );
   }
   return frozen;
 }
@@ -735,29 +743,7 @@ export class Lc4DevGatewayTurnCoordinator {
         rejection_receipt_sha256: rejectionReceiptSha256,
       }));
     }
-    try {
-      const prepareToolContinuation = this.#client.prepareToolContinuation;
-      if (typeof prepareToolContinuation !== "function") {
-        throw new Error("LC4-DEV provider client cannot bind tool-continuation response control");
-      }
-      const currentResponsePreparation = this.#executor.currentResponsePreparation;
-      if (typeof currentResponsePreparation !== "function") {
-        throw new Error("LC4-DEV gateway executor cannot resolve current continuation control");
-      }
-      const preparation = assertResponsePreparation(
-        currentResponsePreparation({
-          episode: context.episode,
-          opportunity: context.opportunity,
-          phase: context.phase,
-        }),
-      );
-      prepareToolContinuation.call(this.#client, preparation);
-      this.#client.submitToolResults(Object.freeze(results), false);
-      this.#client.createResponse();
-    } catch (error) {
-      this.#fail(error, "delivery");
-      throw error;
-    }
+    this.#deliverToolContinuation(context, results);
   }
 
   async #executeBatch(
@@ -793,8 +779,32 @@ export class Lc4DevGatewayTurnCoordinator {
       if (outcome.authority_projection.post_transition_response_control_sha256 !== null) {
         requireHash(outcome.authority_projection.post_transition_response_control_sha256, "LC4-DEV post-transition response control");
       }
+      const fullResponsePlan = outcome.authority_projection.post_transition_response_plan ?? null;
+      const fullResponseControl = outcome.authority_projection.post_transition_response_control ?? null;
+      const fullResponsePlanRecord = fullResponsePlan !== null
+        && typeof fullResponsePlan === "object"
+        && !Array.isArray(fullResponsePlan)
+        ? fullResponsePlan as Readonly<Record<string, JsonValue>>
+        : null;
+      if (context.episode.arm === "hacc") {
+        if ((outcome.authority_projection.post_transition_response_plan_sha256 === null) !== (fullResponsePlan === null)
+          || (outcome.authority_projection.post_transition_response_control_sha256 === null) !== (fullResponseControl === null)) {
+          throw new Error("LC4-DEV HACC authority projection does not retain its full post-transition response control");
+        }
+        if (fullResponsePlan !== null
+          && (fullResponsePlanRecord === null
+            || fullResponsePlanRecord.plan_sha256 !== outcome.authority_projection.post_transition_response_plan_sha256)) {
+          throw new Error("LC4-DEV HACC authority projection response plan does not match its committed digest");
+        }
+      }
+      if (fullResponseControl !== null
+        && sha256Hex(canonicalJson(fullResponseControl))
+          !== outcome.authority_projection.post_transition_response_control_sha256) {
+        throw new Error("LC4-DEV authority projection response control does not match its committed digest");
+      }
       const { projection_sha256: claimedProjection, ...projectionBody } = outcome.authority_projection;
       if (claimedProjection !== sha256Hex(`${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(projectionBody)}`)
+        || outcome.authority_projection.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
         || outcome.authority_projection.episode_id !== context.episode.episode_id
         || outcome.authority_projection.opportunity_id !== context.opportunity.id
         || outcome.authority_projection.provider_call_id_sha256 !== sha256Hex(call.call_id)
@@ -806,6 +816,7 @@ export class Lc4DevGatewayTurnCoordinator {
         || outcome.authority_projection.authoritative_receipt_sha256 !== outcome.authoritative_receipt_sha256
         || outcome.authority_projection.control_plane_head_sha256 !== outcome.control_plane_head_sha256
         || outcome.authority_projection.disposition !== outcome.disposition
+        || canonicalJson(outcome.authority_projection.provider_output) !== canonicalJson(outcome.provider_output)
         || canonicalJson(outcome.authority_projection.model_arguments) !== canonicalJson(call.target_arguments)) {
         throw new Error("LC4-DEV gateway authority projection does not replay the exact provider dispatch");
       }
@@ -838,11 +849,38 @@ export class Lc4DevGatewayTurnCoordinator {
       }));
       this.#authorityProjections.push(freeze(outcome.authority_projection));
     }
-    // Every adapter has a different default. Passing false removes ambiguity;
-    // the host requests exactly one continuation only after the full batch is sent.
+    // Every adapter has a different default. The shared delivery path binds
+    // the final post-transition control, submits the complete batch with
+    // implicit generation disabled, then requests exactly one continuation.
     if (this.#fatal) throw this.#fatal;
+    this.#deliverToolContinuation(context, results);
+  }
+
+  #deliverToolContinuation(
+    context: OpportunityContext,
+    results: readonly RealtimeToolResult[],
+  ): void {
     try {
-      this.#client.submitToolResults(Object.freeze(results), false);
+      const prepareToolContinuation = this.#client.prepareToolContinuation;
+      if (typeof prepareToolContinuation !== "function") {
+        throw new Error("LC4-DEV provider client cannot bind tool-continuation response control");
+      }
+      const currentResponsePreparation = this.#executor.currentResponsePreparation;
+      if (typeof currentResponsePreparation !== "function") {
+        throw new Error("LC4-DEV gateway executor cannot resolve current continuation control");
+      }
+      const preparation = assertResponsePreparation(
+        currentResponsePreparation({
+          episode: context.episode,
+          opportunity: context.opportunity,
+          phase: context.phase,
+        }),
+      );
+      // The result is the bounded authoritative outcome. The host applies the
+      // post-transition plan through the provider's continuation-control path,
+      // before result delivery, instead of duplicating it into the tool output.
+      prepareToolContinuation.call(this.#client, preparation);
+      this.#client.submitToolResults(Object.freeze([...results]), false);
       this.#client.createResponse();
     } catch (error) {
       this.#fail(error, "delivery");

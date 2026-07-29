@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import { createBenchmarkKernelAttestationSigner } from "../kernel-attestation";
 import {
   LC4_DEV_PINNED_VOICE,
@@ -95,6 +95,46 @@ describe("LC4-DEV municipal executable control plane", () => {
     expect(LC4_DEV_DURABLE_WORKER_PLAN_SHA256).toMatch(/^[a-f0-9]{64}$/u);
   });
 
+  it("versions compact continuation semantics and rejects obsolete v2 dispatches", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const control = createLc4DevMunicipalControlPlane({
+      audio_manifest: artifacts.manifest,
+      repair_manifest: artifacts.repairManifest,
+      signer: createBenchmarkKernelAttestationSigner({
+        keyId: "lc4-dev-version-boundary-test",
+        privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      }),
+    });
+    const plan = episode("hacc");
+    const firstOpportunity = createLc4PublicDevelopmentCorpus().opportunities[0]!;
+    await control.next({
+      episode: plan,
+      opportunity: firstOpportunity,
+      previous_exchange_sha256: null,
+    });
+    expect(control.manifest.version).toBe("lc4-dev-municipal-control-plane-v2");
+
+    const obsoleteRequest = {
+      bridge_version: "lc4-dev-gateway-bridge-v2",
+      episode_id: plan.episode_id,
+      opportunity_id: firstOpportunity.id,
+      opportunity_index: firstOpportunity.index,
+      provider: plan.provider,
+      arm: plan.arm,
+      provider_call_id: "obsolete-v2-call",
+      provider_response_id: "obsolete-v2-response",
+      semantic_intent: "complete_current_stage",
+      target_tool: "archive.complete_stage",
+      target_arguments: {},
+      request_sha256: sha256Hex("obsolete-v2-request"),
+      provider_provenance_sha256: sha256Hex("obsolete-v2-provenance"),
+    } as unknown as Parameters<typeof control.gateway_executor.execute>[0];
+
+    await expect(control.gateway_executor.execute(obsoleteRequest)).rejects.toThrow(
+      "obsolete bridge contract",
+    );
+  });
+
   it("runs both 60-turn arms with parity-bound public state and real gateway, ToolWorld, worker, fault, reconciliation, and CRP receipts", async () => {
     const keys = generateKeyPairSync("ed25519");
     const signer = createBenchmarkKernelAttestationSigner({
@@ -115,6 +155,7 @@ describe("LC4-DEV municipal executable control plane", () => {
     const landmarkActionsByArm = { native: [] as string[], hacc: [] as string[] };
     const semanticActionsByArm = { native: [] as string[], hacc: [] as string[] };
     let haccAmbiguousPlanSha256: string | null = null;
+    let haccOp08ProviderOutputBytes: number | null = null;
     for (const arm of ["native", "hacc"] as const) {
       const plan = episode(arm);
       let previous: string | null = null;
@@ -156,7 +197,7 @@ describe("LC4-DEV municipal executable control plane", () => {
                   ? { invocation_id: "model-forged-invocation" }
                   : { model_owned_slot: "forbidden" };
               const rejected = await control.gateway_executor.execute({
-                bridge_version: "lc4-dev-gateway-bridge-v2",
+                bridge_version: "lc4-dev-gateway-bridge-v3",
                 episode_id: plan.episode_id,
                 opportunity_id: opportunity.id,
                 opportunity_index: opportunity.index,
@@ -177,7 +218,7 @@ describe("LC4-DEV municipal executable control plane", () => {
               });
             }
             const gateway = await control.gateway_executor.execute({
-              bridge_version: "lc4-dev-gateway-bridge-v2",
+              bridge_version: "lc4-dev-gateway-bridge-v3",
               episode_id: plan.episode_id,
               opportunity_id: opportunity.id,
               opportunity_index: opportunity.index,
@@ -205,11 +246,21 @@ describe("LC4-DEV municipal executable control plane", () => {
             );
             if (gateway.authority_projection.post_transition_response_control_sha256 !== null) {
               if (plan.arm === "hacc") {
-                const providerOutput = gateway.provider_output as Record<string, unknown>;
-                const responseControl = providerOutput.response_control as Record<string, unknown>;
+                const responsePlan = assertHaccResponsePlan(
+                  gateway.authority_projection.post_transition_response_plan,
+                );
+                const responseControl = gateway.authority_projection
+                  .post_transition_response_control as Record<string, unknown>;
+                expect(responseControl).toMatchObject({
+                  kind: "hacc_response_plan",
+                  plan: responsePlan,
+                });
+                expect(sha256Hex(canonicalJson(responseControl))).toBe(
+                  gateway.authority_projection.post_transition_response_control_sha256,
+                );
                 expect(reboundPreparation.additionalInstructions).toBe(
                   renderLc4DevHaccResponsePlan(
-                    assertHaccResponsePlan(responseControl.plan),
+                    responsePlan,
                     "canonical",
                   ),
                 );
@@ -220,7 +271,28 @@ describe("LC4-DEV municipal executable control plane", () => {
               }
             }
             currentPreparation = reboundPreparation;
+            if (plan.arm === "hacc") {
+              expect(Object.keys(gateway.provider_output as Record<string, unknown>).sort()).toEqual([
+                "authoritative_outcome",
+                "gateway_result",
+                "speech_directive",
+              ]);
+              expect(gateway.provider_output).not.toHaveProperty("response_control");
+              expect(gateway.provider_output).not.toHaveProperty("hacc_response_plan");
+            }
             semanticActionsByArm[arm].push(`${call.semantic_intent}:${call.target_tool}`);
+            if (plan.arm === "hacc" && opportunity.index === 8
+              && call.target_tool === "archive.launch_worker") {
+              haccOp08ProviderOutputBytes = Buffer.byteLength(
+                canonicalJson(gateway.provider_output),
+                "utf8",
+              );
+              // The retained paid op08 result was 9,187 bytes because it
+              // embedded the rebound plan twice. The compact tool outcome is
+              // byte-stable while the full plan remains in host evidence.
+              expect(haccOp08ProviderOutputBytes).toBe(821);
+              expect(haccOp08ProviderOutputBytes).toBeLessThan(9_187);
+            }
             if ([30, 35, 42, 43].includes(opportunity.index)) {
               landmarkActionsByArm[arm].push(`${opportunity.index}:${call.semantic_intent}:${call.target_tool}`);
               expect(gateway.authority_projection.model_arguments).toEqual({});
@@ -233,14 +305,14 @@ describe("LC4-DEV municipal executable control plane", () => {
               expect(gateway.provider_output).toMatchObject({
                 authoritative_outcome: { outcome_classification: "indeterminate_reconciliation_required" },
                 speech_directive: "reconcile_before_any_terminal_claim",
-                hacc_response_plan: {
+              });
+              expect(gateway.authority_projection.post_transition_response_plan).toMatchObject({
                   recovery_state: "ambiguity_quarantine",
                   response_mode: "reconcile",
                   prohibited_claims: expect.arrayContaining([
                     "retry_ambiguous_commit",
                     "terminal_success_while_reconciliation_pending",
                   ]),
-                },
               });
               haccAmbiguousPlanSha256 = gateway.authority_projection.post_transition_response_plan_sha256;
             }
@@ -249,13 +321,13 @@ describe("LC4-DEV municipal executable control plane", () => {
               expect(gateway.provider_output).toMatchObject({
                 authoritative_outcome: { receipt_status: "succeeded" },
                 speech_directive: "confirm_only_from_authoritative_reconciliation_receipt",
-                hacc_response_plan: {
+              });
+              expect(gateway.authority_projection.post_transition_response_plan).toMatchObject({
                   recovery_state: "none",
                   eligible_actions: expect.arrayContaining([
                     "archive.observe_worker_result",
                     "archive.complete_stage",
                   ]),
-                },
               });
               expect(gateway.authority_projection.post_transition_response_plan_sha256).not.toBe(haccAmbiguousPlanSha256);
             }
@@ -281,6 +353,7 @@ describe("LC4-DEV municipal executable control plane", () => {
         previous = sha256Hex(`provider-exchange:${plan.episode_id}:${opportunity.id}`);
       }
     }
+    expect(haccOp08ProviderOutputBytes).not.toBeNull();
     expect(haccContinuity).toEqual(nativeContinuity);
 
     const native = control.snapshot("lc4-dev-openai-native");
@@ -426,7 +499,7 @@ describe("LC4-DEV municipal executable control plane", () => {
       if (opportunity.events.some((event) => event.kind === "authoritative-reconciliation")) {
         callSequence += 1;
         rejectedLateMutation = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v2",
+          bridge_version: "lc4-dev-gateway-bridge-v3",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -442,7 +515,7 @@ describe("LC4-DEV municipal executable control plane", () => {
         });
         callSequence += 1;
         rejectedReconciliation = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v2",
+          bridge_version: "lc4-dev-gateway-bridge-v3",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -463,7 +536,7 @@ describe("LC4-DEV municipal executable control plane", () => {
         if (call.target_tool === "archive.submit_transcript_request") continue;
         callSequence += 1;
         await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v2",
+          bridge_version: "lc4-dev-gateway-bridge-v3",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
@@ -519,7 +592,7 @@ describe("LC4-DEV municipal executable control plane", () => {
       await control.next({ episode: plan, opportunity, previous_exchange_sha256: previous });
       if (opportunity.index === 35) {
         const rejected = await control.gateway_executor.execute({
-          bridge_version: "lc4-dev-gateway-bridge-v2",
+          bridge_version: "lc4-dev-gateway-bridge-v3",
           episode_id: plan.episode_id,
           opportunity_id: opportunity.id,
           opportunity_index: opportunity.index,
