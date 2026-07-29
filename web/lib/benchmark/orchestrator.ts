@@ -208,6 +208,13 @@ export type TrialSessionConfiguration = Readonly<{
   model: string;
   conditionId: BenchmarkConditionId;
   instructions: string;
+  /**
+   * Content-free transport capability flag. A rotating session sets this only
+   * when it will hydrate prior turns through the provider's native history
+   * protocol after setup acknowledgement. Conversation content never belongs
+   * in the session configuration.
+   */
+  initialConversationHistoryHydrationRequired?: boolean;
   initialPrompt: string;
   renderedCapabilitySnapshot: string;
   providerTools: readonly ProviderFunctionTool[];

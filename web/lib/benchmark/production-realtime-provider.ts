@@ -96,6 +96,9 @@ export function createProductionRealtimeClient(
       voice: spec.voice,
       instructions: configuration.instructions,
       tools: configuration.providerTools,
+      ...(configuration.initialConversationHistoryHydrationRequired === true
+        ? { enableInitialHistoryHydration: true }
+        : {}),
       connectTimeoutMs: 15_000,
       maximumSessionDurationMs: 10 * 60_000,
       ...(options.geminiMaxDynamicControlBytes === undefined
