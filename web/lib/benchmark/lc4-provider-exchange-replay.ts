@@ -68,7 +68,11 @@ const WIRE_IDENTITY_KEYS = new Set([
   "itemIdSha256",
   "callIdSha256",
 ]);
-const MAX_RETAINED_WIRE_OBSERVATIONS = 512;
+// One response may legitimately combine hundreds of 20 ms caller frames with
+// provider audio, transcript deltas, and a tool-result continuation. Keep the
+// per-exchange set bounded well below the 64 MiB retained-artifact ceiling
+// without rejecting those exact long-form wire lineages.
+const MAX_RETAINED_WIRE_OBSERVATIONS = 8_192;
 
 export type Lc4ProviderExchangeReplayExpectation = Readonly<{
   run_id: string;

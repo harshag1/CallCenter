@@ -733,6 +733,45 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
     expect(() => replay(fixture("xai", true))).not.toThrow();
   });
 
+  it("replays a bounded long-form response with more than 512 wire observations", () => {
+    const valid = fixture("openai");
+    const wire = [...valid.projection.wire_observations as readonly Wire[]];
+    const responseStartIndex = wire.findIndex((entry) =>
+      entry.wire_type === "response.created");
+    const responseStart = wire[responseStartIndex]!;
+    const transcriptDeltas = Array.from({ length: 600 }, (_, index) => ({
+      ...responseStart,
+      wire_type: "response.output_audio_transcript.delta",
+      payload_sha256: sha256Hex(`long-transcript-delta-${index}`),
+      projection_sha256: realtimeWireProjectionSha256({}),
+    }));
+    wire.splice(responseStartIndex + 1, 0, ...transcriptDeltas);
+    const expanded = withWire(valid, rechain(wire));
+    const rebound = withListenerMutation(expanded, (listener) => ({
+      ...listener,
+      wire_observation_set_sha256:
+        expanded.projection.wire_observation_set_sha256,
+    }));
+
+    expect((rebound.projection.wire_observations as readonly Wire[]).length)
+      .toBeGreaterThan(512);
+    expect(() => replay(rebound)).not.toThrow();
+  });
+
+  it("rejects a wire-observation set above the retained custody bound", () => {
+    const valid = fixture("openai");
+    const first = (valid.projection.wire_observations as readonly Wire[])[0]!;
+    const oversized = Array.from({ length: 8_193 }, () => first);
+
+    expect(() => replay({
+      ...valid,
+      projection: {
+        ...valid.projection,
+        wire_observations: oversized,
+      },
+    })).toThrow(/nonempty bounded array/u);
+  });
+
   it("rejects reconnect transcript provenance that is not the exact captured-PCM listener transcript", () => {
     const valid = fixture("gemini");
     expect(() => replay({
