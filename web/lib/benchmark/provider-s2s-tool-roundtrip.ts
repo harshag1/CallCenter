@@ -1228,7 +1228,22 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         : autoResponseObservationSha256;
       operations.push("provider_auto_response_observed");
     }
-    if (event.type === "output.audio" || event.type === "output.transcript") {
+    const meaningfulOutputBeforeOrAfterTool = event.type === "output.audio"
+      ? event.audio.byteLength > 0
+      : event.type === "output.transcript"
+        ? /\S/u.test(event.text)
+        : false;
+    if (event.type === "output.transcript"
+      && !meaningfulOutputBeforeOrAfterTool
+      && !operations.includes("non_speech_transcript_artifact_ignored")) {
+      // Gemini Live can emit a whitespace-only output-transcription artifact
+      // before its native toolCall frame. With no audio and no non-whitespace
+      // text this is not speech; retain the classification without weakening
+      // the fail-closed rule for any audible bytes or meaningful transcript.
+      operations.push("non_speech_transcript_artifact_ignored");
+    }
+    if (meaningfulOutputBeforeOrAfterTool
+      && (event.type === "output.audio" || event.type === "output.transcript")) {
       if (input.provider === "xai" && event.responseId === rootResponseId) {
         if (rootResponseTerminalObservationSha256 !== null) {
           failure = "provider_error";

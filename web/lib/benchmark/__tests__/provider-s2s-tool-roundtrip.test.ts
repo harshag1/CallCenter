@@ -128,6 +128,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly #wire = new Set<RealtimeWireObservationListener>();
   readonly observations: RealtimeWireObservation[] = [];
   readonly speechBeforeTool: boolean;
+  readonly preToolTranscript: string | null;
   readonly omitDynamicControl: boolean;
   readonly omitToolResultEvent: boolean;
   readonly emitManualVadOnCommit: boolean;
@@ -160,6 +161,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
 
   constructor(provider: LiveStsProvider, options: Readonly<{
     speechBeforeTool?: boolean;
+    preToolTranscript?: string;
     omitDynamicControl?: boolean;
     omitToolResultEvent?: boolean;
     emitManualVadOnCommit?: boolean;
@@ -185,6 +187,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
+    this.preToolTranscript = options.preToolTranscript ?? null;
     this.omitDynamicControl = options.omitDynamicControl === true;
     this.omitToolResultEvent = options.omitToolResultEvent === true;
     this.emitManualVadOnCommit = options.emitManualVadOnCommit === true;
@@ -309,6 +312,40 @@ class RoundtripClient implements NormalizedRealtimeClient {
         },
       });
       if (this.provider !== "xai") return;
+    }
+    if (this.preToolTranscript !== null) {
+      const transcript = this.preToolTranscript;
+      const transcriptObservation = this.#observe(
+        "inbound",
+        "serverContent",
+        { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+        {
+          text: [{
+            kind: "output_transcript",
+            sha256: sha256Hex(transcript),
+            byteLength: Buffer.byteLength(transcript, "utf8"),
+          }],
+        },
+      );
+      this.#emit({
+        type: "output.transcript",
+        provider: this.provider,
+        receivedAtMs: 2,
+        wireType: "serverContent.outputTranscription",
+        phase: "delta",
+        text: transcript,
+        delta: transcript,
+        responseId,
+        source: "audio",
+        wireObservation: {
+          availability: "observed",
+          connectionEpoch: 1,
+          sequence: transcriptObservation.sequence,
+          observationSha256: transcriptObservation.observationSha256,
+          payloadSha256: transcriptObservation.payloadSha256,
+          projectionSha256: transcriptObservation.projectionSha256,
+        },
+      });
     }
     if (this.provider === "openai" && this.emitOpenAiMultiFrameCall) {
       this.#observe(
@@ -1849,6 +1886,56 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
     expect(execution.status).toBe("failed");
     expect(execution.failure_class).toBe("speech_before_tool");
+  });
+
+  it("does not misclassify a whitespace-only Gemini transcript artifact as speech", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini",
+      model: "gemini-model",
+      client: new RoundtripClient("gemini", { preToolTranscript: "\n" }),
+      audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(),
+      timeoutMs: 1_000,
+    });
+    expect(execution).toMatchObject({
+      status: "passed",
+      failure_class: "none",
+      tool_call_observed: true,
+      tool_result_submitted: true,
+    });
+    expect(execution.operation_order).toContain("non_speech_transcript_artifact_ignored");
+    expect(execution.operation_order.indexOf("non_speech_transcript_artifact_ignored"))
+      .toBeLessThan(execution.operation_order.indexOf("exact_tool_call_observed"));
+  });
+
+  it("still fails closed on a non-whitespace transcript with zero audio before the tool", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini",
+      model: "gemini-model",
+      client: new RoundtripClient("gemini", { preToolTranscript: "\nhello" }),
+      audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(),
+      timeoutMs: 1_000,
+    });
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "speech_before_tool",
+      tool_call_observed: false,
+      tool_result_submitted: false,
+    });
+    expect(execution.operation_order).not.toContain("non_speech_transcript_artifact_ignored");
   });
 
   it("hash-binds a content-free provider diagnostic into failed S2S evidence", async () => {

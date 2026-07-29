@@ -1083,3 +1083,55 @@ Current provider-free validation for this source candidate is green:
 - protocol/adapter/roundtrip/retained-package focus: **270/270**;
 - full repository: **3,270 passed**, **0 failed**, **85 intentionally skipped**;
 - TypeScript, ESLint, diff check, and the 44-route production build: passed.
+
+## 2026-07-29 — Exact ID-limit proof and non-speech Gemini artifact repair
+
+The next exact-source Gate D at `a9c2c66` passed, but its one-shot
+three-provider qualification failed closed. No six-cell DEV run was authorized
+and no score or benchmark graph is admissible.
+
+The retained outcomes were:
+
+- OpenAI rejected the first hydrated history item before audio.
+- Gemini emitted a one-byte output-transcription containing only `"\n"` and no
+  retained output audio; the runner immediately classified it as speech and
+  disconnected before a tool call could arrive.
+- xAI passed history hydration and the complete spoken gateway roundtrip,
+  validating the narrowly scoped empty-arguments acknowledgement handling.
+
+The OpenAI error was not guessed. A reconstruction of the exact outbound frame
+matched the retained payload hash, and the retained diagnostic hashes resolve
+to `string_above_max_length` and a maximum `item.id` length of 32. Three
+zero-generation protocol sessions then established:
+
+1. the 44-character current ID is rejected;
+2. an omitted ID is accepted and assigned a provider `item_…` identity; and
+3. a deterministic 32-character client ID is accepted and echoed exactly.
+
+The correction keeps deterministic per-item acknowledgement evidence while
+changing the generated format to exactly 32 ASCII bytes:
+`item_hacc_<four-digit ordinal>_<17 hex>`. Runtime invariants reject overlong
+or duplicate generated IDs, and tests assert exact length, shape, uniqueness,
+and zero pre-input generation.
+
+The Gemini failure was likewise a harness classification defect, not evidence
+of audible model speech or proven model nondeterminism. The failed and
+immediately prior passing runs were byte-identical through the activity-end
+trigger; the pass received `toolCall` next, while the failure received the
+newline transcription and was closed immediately. The classifier now retains
+a whitespace-only transcript as a non-speech protocol artifact and continues
+waiting within the existing bounded causal barrier. Any nonzero output audio or
+non-whitespace transcript before the exact tool call still fails permanently.
+Terminal-without-tool and timeout-without-tool remain failures.
+
+Provider-free validation is green:
+
+- exact history-ID and spoken-roundtrip mutation suites: **180/180**;
+- full repository: **3,274 passed**, **0 failed**, **85 intentionally
+  skipped**;
+- claim-boundary verifier: **96/96**;
+- TypeScript, ESLint, diff check, and the 44-route production build: passed.
+
+The failed roots remain immutable and unscored. A new paid sequence is blocked
+until these changes are committed, clean-source public audits pass, and a new
+exact-source ASR receipt is created.

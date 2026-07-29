@@ -61,10 +61,12 @@ class FakeSocket implements RealtimeWebSocket {
   sent: string[] = [];
   closed: { code?: number; reason?: string } | null = null;
   terminated = false;
+  onSend: ((data: string) => void) | null = null;
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
 
   send(data: string) {
     this.sent.push(data);
+    this.onSend?.(data);
   }
 
   close(code?: number, reason?: string) {
@@ -293,9 +295,11 @@ describe("provider-neutral conversation history hydration", () => {
       ]);
       for (const [index, frame] of historyFrames.entries()) {
         expect(frame.item.id).toMatch(
-          new RegExp(`^item_hacc_hist_${String(index + 1).padStart(4, "0")}_[a-f0-9]{24}$`),
+          new RegExp(`^item_hacc_${String(index + 1).padStart(4, "0")}_[a-f0-9]{17}$`),
         );
+        expect(Buffer.byteLength(frame.item.id, "utf8")).toBe(32);
       }
+      expect(new Set(historyFrames.map((frame) => frame.item.id)).size).toBe(historyFrames.length);
       expect(historyFrames[0].item).toMatchObject({
         type: "message",
         role: "user",
@@ -390,6 +394,80 @@ describe("provider-neutral conversation history hydration", () => {
       }
     },
   );
+
+  it("keeps all 1,024 legal provider history item IDs unique and exactly 32 bytes", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    socket.onSend = (data) => {
+      const event = JSON.parse(data) as { type?: string; item?: Record<string, unknown> };
+      if (event.type !== "conversation.item.create" || event.item === undefined) return;
+      queueMicrotask(() => {
+        socket.emit("message", JSON.stringify({
+          type: "conversation.item.added",
+          item: event.item,
+        }));
+      });
+    };
+    const turns = Array.from({ length: 512 }, (_, index) => ({
+      role: "tool" as const,
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: {
+        tool_name: "membership.lookup",
+        arguments: { ordinal: index + 1 },
+      },
+      output: `result-${index + 1}`,
+      sourceSha256: sourceSha256(`maximum-history-tool-${index + 1}`),
+    }));
+
+    const receipt = await client.hydrateConversationHistory(turns);
+    const historyFrames = socket.sent
+      .map((value) => JSON.parse(value))
+      .filter((event) => event.type === "conversation.item.create");
+    const itemIds = historyFrames.map((frame) => String(frame.item.id));
+
+    expect(receipt.providerItemCount).toBe(1_024);
+    expect(historyFrames).toHaveLength(1_024);
+    expect(new Set(itemIds).size).toBe(1_024);
+    expect(itemIds.every((itemId) => Buffer.byteLength(itemId, "utf8") === 32)).toBe(true);
+    expect(itemIds[0]).toMatch(/^item_hacc_0001_[a-f0-9]{17}$/);
+    expect(itemIds.at(-1)).toMatch(/^item_hacc_1024_[a-f0-9]{17}$/);
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("rejects 1,025 provider history items before sending any history frame", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const singleCallTurns = Array.from({ length: 510 }, (_, index) => ({
+      role: "tool" as const,
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { ordinal: index + 1 } },
+      output: `result-${index + 1}`,
+      sourceSha256: sourceSha256(`overflow-history-tool-${index + 1}`),
+    }));
+    const twoCallBatch = {
+      role: "tool_batch" as const,
+      calls: [1, 2].map((ordinal) => ({
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { ordinal } },
+        output: `batch-result-${ordinal}`,
+        sourceSha256: sourceSha256(`overflow-history-batch-${ordinal}`),
+      })),
+    };
+    const finalMessage = {
+      role: "user" as const,
+      text: "This would be provider item 1,025.",
+      sourceSha256: sourceSha256("overflow-history-message"),
+    };
+
+    await expect(client.hydrateConversationHistory([
+      ...singleCallTurns,
+      twoCallBatch,
+      finalMessage,
+    ])).rejects.toThrow("Conversation history exceeds 1024 provider items");
+    expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toHaveLength(0);
+  });
 
   it.each(["openai", "xai"] as const)(
     "hydrates a canonical two-call tool batch on %s as all calls followed by all outputs",
@@ -877,7 +955,7 @@ describe("provider-neutral conversation history hydration", () => {
     const call = JSON.parse(socket.sent.at(-1)!) as {
       item: Record<string, unknown>;
     };
-    expect(call.item.id).toMatch(/^item_hacc_hist_/);
+    expect(call.item.id).toMatch(/^item_hacc_/);
     socket.emit("message", JSON.stringify({
       type: "conversation.item.added",
       item: { ...call.item, arguments: "" },
@@ -891,7 +969,7 @@ describe("provider-neutral conversation history hydration", () => {
     const output = JSON.parse(socket.sent.at(-1)!) as {
       item: Record<string, unknown>;
     };
-    expect(output.item.id).toMatch(/^item_hacc_hist_/);
+    expect(output.item.id).toMatch(/^item_hacc_/);
     socket.emit("message", JSON.stringify({
       type: "conversation.item.added",
       item: output.item,

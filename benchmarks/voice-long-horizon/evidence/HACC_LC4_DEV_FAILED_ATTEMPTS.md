@@ -748,3 +748,72 @@ cell. OpenAI's identifier-prefix repair remains a hypothesis until a fresh
 source-bound qualification passes. xAI's next-source allowance is deliberately
 restricted to the one observed empty-string tool-call-arguments echo and does
 not permit missing arguments or omitted/empty tool output.
+
+## 2026-07-29 qualification v3 at `a9c2c66`
+
+**Failed closed. DEV was not authorized and no efficacy score is admissible.**
+
+The source-bound xAI finite-manual Gate D v4 passed first:
+
+- source:
+  `a9c2c664d0aba47e05f462a220bf514e6a43b059`;
+- provider sessions: **1**;
+- generation phases: **2**;
+- gateway roundtrips: **1**;
+- retries/reconnects/fallbacks: **0/0/0**;
+- conservative settlement/active: **$1.00 / $0.00**;
+- receipt artifact:
+  `f79e88456d00437501e2c00980e892a450a5e19ef89a45bdad23d1071a5920cc`;
+- receipt file:
+  `a8ea97e6c4c6eca3d7fc9e8dc8b8f3e43343a05c45255c14dd9d64e0f6f9f647`.
+
+The subsequent qualification opened six provider sessions, three paid, and
+attempted six generation phases and three tool roundtrips with zero retries:
+
+| Provider/model | Result | Caller PCM | Retained boundary |
+|---|---|---:|---|
+| OpenAI `gpt-realtime-2.1` | failed `history_hydration_failed` | 0 bytes | first client history item rejected before audio |
+| Gemini `gemini-3.1-flash-live-preview` | failed `speech_before_tool` | 53,506 bytes | one-byte newline transcript; no retained output-audio evidence |
+| xAI `grok-voice-think-fast-1.0` | passed | 80,260 bytes | full history hydration and spoken gateway roundtrip passed |
+
+The qualification terminal artifact/file are
+`693c296382c2e90b0a4569a0d6a1aa458007e6186703fcf61580c4b8d80477a3`
+and
+`8a3f6467595c4c838be108f7aa889237b4140efe6978f189d80e1829af9bbc99`.
+The retained payload root is
+`1fe5de56fed8dbd6ab31c274e757ed205602316609980c1803cd757ac1561c79`.
+Replay artifact/head are
+`ca5d1bd06f9dec754cfab37c6dad510d00a3356bcd5349d571eee9595c15f919`
+and
+`ebceb5374dc97d8eba5574bf51b5bf2098d74c0f317cd5eb3d1cc403c78766b3`.
+Budget evidence/head are
+`a9bf8f6bce2cc083d687f59d7cdcc9e0433b28bb2389b94d5bec5700d7c66bba`
+and
+`eb97f71e15776c3586eeef5c26f36d69da52ff89a4bb8824b4eaa348f5fb4937`.
+The qualification conservatively settled **$3.00** with **$0.00 active**.
+
+The OpenAI root retained only content-free hashes, but the failure is now
+proven exactly. Reconstructing the deterministic first frame produced the same
+223-byte payload SHA-256
+`b0a4c69f8524cdd38c6dceb0d54f9d9d1ac933145c68feb749d4f4c36c5b02b0`.
+The exact 44-character ID was
+`item_hacc_hist_0001_6010c058ae1f45f00f4668e7`. Its provider diagnostic
+commitments resolve to code `string_above_max_length` and the message that
+`item.id` permits at most 32 characters. A zero-generation probe accepted and
+echoed a deterministic 32-character client ID exactly. The repair therefore
+shortens IDs without weakening per-item identity acknowledgement.
+
+The Gemini terminal classification is preserved, but its causal interpretation
+is corrected: the only output was SHA-256
+`01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b`,
+the one-byte string `"\n"`. No output-audio evidence exists. The harness closed
+immediately, so this root cannot establish whether a tool call would have
+followed. It is not evidence that the caller heard speech. The repair retains
+whitespace-only transcription as non-speech metadata while leaving any audio,
+non-whitespace transcript, terminal-without-tool, or timeout-without-tool
+fail-closed.
+
+The failed root is immutable and cannot be retried or rescored. Package
+integrity replay passed, but the attempt is not a fully replay-verified
+three-provider qualification. It contributes no Native/HACC result cell,
+comparative score, model-superiority claim, or launch graph.

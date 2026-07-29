@@ -128,10 +128,14 @@ const CONVERSATION_HISTORY_HASH_DOMAIN =
   "harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n";
 const CONVERSATION_HISTORY_SOURCE_BINDING_DOMAIN =
   "harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n";
-// OpenAI documents client-supplied item IDs and uses the `item_` namespace in
-// its examples. Retain a HACC discriminator after that protocol-compatible
-// prefix; a fresh qualification must still prove the provider accepts it.
-const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "item_hacc_hist_";
+// OpenAI accepts client-supplied history item IDs, but rejects values longer
+// than 32 characters. Keep the provider-compatible `item_` namespace, a HACC
+// discriminator, a four-digit ordinal, and a 17-hex digest suffix: 32 ASCII
+// bytes exactly. The ordinal preserves uniqueness even if digest suffixes
+// collide. Fresh qualification still has to prove the complete wire exchange.
+const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "item_hacc_";
+const CONVERSATION_HISTORY_ITEM_ID_MAX_BYTES = 32;
+const CONVERSATION_HISTORY_ITEM_ID_SUFFIX_HEX_LENGTH = 17;
 const CONVERSATION_HISTORY_ALLOWED_INBOUND_WIRE_TYPES = new Set([
   "conversation.item.added",
   "conversation.item.created",
@@ -2523,8 +2527,13 @@ function snapshotConversationHistory(
     const providerItemOrdinal = wireItems.length + 1;
     const suffix = sha256Text(
       `${historySha256}\0${providerItemOrdinal}\0${kind}`,
-    ).slice(0, 24);
-    return `${CONVERSATION_HISTORY_ITEM_ID_PREFIX}${String(providerItemOrdinal).padStart(4, "0")}_${suffix}`;
+    ).slice(0, CONVERSATION_HISTORY_ITEM_ID_SUFFIX_HEX_LENGTH);
+    const itemId =
+      `${CONVERSATION_HISTORY_ITEM_ID_PREFIX}${String(providerItemOrdinal).padStart(4, "0")}_${suffix}`;
+    if (Buffer.byteLength(itemId, "utf8") > CONVERSATION_HISTORY_ITEM_ID_MAX_BYTES) {
+      throw new Error("Conversation history item ID exceeds the OpenAI protocol limit");
+    }
+    return itemId;
   };
   const pushWireItem = (inputItem: Omit<ConversationHistoryWireItem, "providerItemOrdinal" | "event">) => {
     const providerItemOrdinal = wireItems.length + 1;
@@ -2608,6 +2617,9 @@ function snapshotConversationHistory(
   }
   if (wireItems.length !== providerItemCount) {
     throw new Error("Conversation history provider item count changed during canonicalization");
+  }
+  if (new Set(wireItems.map((item) => item.itemId)).size !== wireItems.length) {
+    throw new Error("Conversation history provider item IDs are not unique");
   }
   return deepFreeze({
     turnCount: normalized.length,
