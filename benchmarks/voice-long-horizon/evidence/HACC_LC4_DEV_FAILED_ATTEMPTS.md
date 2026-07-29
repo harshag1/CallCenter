@@ -707,3 +707,44 @@ result cell, score, or launch graph. A new paid root is blocked until offline
 tests prove lossless, order-preserving history reconstruction across both
 rotation boundaries, including batched successful tool results and
 pre-dispatch rejection results, before any caller audio is sent.
+
+## 2026-07-29 qualification v3 at `deea288`
+
+**Failed provider-history hydration. DEV was not authorized and no efficacy
+score is admissible.**
+
+The source-bound xAI finite-manual Gate D v4 passed first, retaining:
+
+- provider sessions: **1**;
+- generation phases: **2**;
+- gateway tool roundtrips: **1**;
+- retries/reconnects/fallbacks: **0/0/0**;
+- conservative settlement: **$1.00**;
+- claim boundary: transport qualification only, not efficacy.
+
+The subsequent qualification opened all six bounded provider sessions, of
+which three were paid, attempted six logical generation phases and three
+tool-roundtrip probes, and used zero paid retries. Its provider results were:
+
+| Provider/model | Result | Caller PCM | Retained boundary |
+|---|---|---:|---|
+| OpenAI `gpt-realtime-2.1` | failed `history_hydration_failed` | 0 bytes | first `conversation.item.create` rejected immediately; hashed provider error does not prove the rejected field |
+| Gemini `gemini-3.1-flash-live-preview` | passed | 53,506 bytes | history hydration and spoken gateway roundtrip completed |
+| xAI `grok-voice-think-fast-1.0` | failed `history_hydration_failed` | 0 bytes | user item acknowledged; seeded tool-call acknowledgement retained empty arguments instead of the 53-byte outbound JSON |
+
+The qualification terminal is bound by artifact
+`eb0a8bc53fbc7e5ed36c2bf980de22fe6ba17035f49ac52b016a35a584ff884c`
+and file SHA-256
+`e0c6bce6abcaaf812a2ce9d9a6b1323bb4d52438f77aa43c767113454cc299dd`.
+Its conservative settlement is **$3.00**, budget evidence is
+`d5da03d47ad2330a8ab89dd4a2708c9046a52f644410a8ded20438c6218b7299`,
+and terminal ledger head is
+`1fd5e04266c2fc6537602b87c8b58228929402722f06e26be416d1e2ba0a0cb3`.
+Active reservation after terminalization is **$0.00**.
+
+The source root and both paid artifacts are immutable and cannot be retried.
+Gemini's passing probe is qualification evidence only; it is not a Native/HACC
+cell. OpenAI's identifier-prefix repair remains a hypothesis until a fresh
+source-bound qualification passes. xAI's next-source allowance is deliberately
+restricted to the one observed empty-string tool-call-arguments echo and does
+not permit missing arguments or omitted/empty tool output.

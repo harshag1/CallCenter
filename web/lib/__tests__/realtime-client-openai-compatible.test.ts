@@ -291,6 +291,11 @@ describe("provider-neutral conversation history hydration", () => {
         "function_call_output",
         "message",
       ]);
+      for (const [index, frame] of historyFrames.entries()) {
+        expect(frame.item.id).toMatch(
+          new RegExp(`^item_hacc_hist_${String(index + 1).padStart(4, "0")}_[a-f0-9]{24}$`),
+        );
+      }
       expect(historyFrames[0].item).toMatchObject({
         type: "message",
         role: "user",
@@ -846,6 +851,190 @@ describe("provider-neutral conversation history hydration", () => {
     expect(hydrationFirst.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
       event.type === "conversation.item.create"
     ))).toEqual([]);
+  });
+
+  it("records xAI identity-only tool acknowledgements without treating omitted content as echoed", async () => {
+    const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+    const observations: RealtimeWireObservation[] = [];
+    client.onWireObservation((observation) => observations.push(observation));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: {
+        tool_name: "membership.lookup",
+        arguments: { member_id: "m_17" },
+      },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("xai-identity-only-tool-source"),
+    }]);
+
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const call = JSON.parse(socket.sent.at(-1)!) as {
+      item: Record<string, unknown>;
+    };
+    expect(call.item.id).toMatch(/^item_hacc_hist_/);
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: { ...call.item, arguments: "" },
+    }));
+
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    const output = JSON.parse(socket.sent.at(-1)!) as {
+      item: Record<string, unknown>;
+    };
+    expect(output.item.id).toMatch(/^item_hacc_hist_/);
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: output.item,
+    }));
+
+    await expect(pending).resolves.toMatchObject({
+      status: "identity_acknowledged_content_unverifiable",
+      items: [
+        {
+          kind: "synthetic_tool_call",
+          providerContentOmission: {
+            field: "arguments",
+            observedShape: "empty_string",
+          },
+        },
+        {
+          kind: "synthetic_tool_output",
+        },
+      ],
+    });
+    const history = observations.filter((observation) => (
+      recordForTest(observation.projection).conversationHistoryItem !== undefined
+    ));
+    expect(history).toHaveLength(4);
+    expect(recordForTest(recordForTest(history[1]!.projection).conversationHistoryItem))
+      .toMatchObject({
+        kind: "synthetic_tool_call",
+        argumentsBytes: 0,
+        argumentsPresent: true,
+        argumentsJsonValid: false,
+      });
+    expect(recordForTest(recordForTest(history[3]!.projection).conversationHistoryItem))
+      .toMatchObject({
+        kind: "synthetic_tool_output",
+        outputBytes: Buffer.byteLength("{\"status\":\"active\"}", "utf8"),
+        outputPresent: true,
+      });
+  });
+
+  it.each([
+    ["openai", "conversation.item.created"],
+    ["xai", "conversation.item.added"],
+  ] as const)(
+    "rejects a nonempty changed tool payload in a %s history acknowledgement",
+    async (provider, wireType) => {
+      const { client, socket } = fakeClient(provider, { sessionUpdate: localProxySession });
+      await connect(client, socket);
+      const pending = client.hydrateConversationHistory([{
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256(`${provider}-changed-tool-source`),
+      }]);
+      const frame = JSON.parse(socket.sent.at(-1)!) as {
+        item: Record<string, unknown>;
+      };
+      socket.emit("message", JSON.stringify({
+        type: wireType,
+        item: { ...frame.item, arguments: "{\"changed\":true}" },
+      }));
+      await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+      expect(client.state).toBe("failed");
+    },
+  );
+
+  it("rejects an OpenAI empty arguments echo rather than treating it as identity-only", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("openai-empty-arguments-source"),
+    }]);
+    const frame = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: { ...frame.item, arguments: "" },
+    }));
+    await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+    expect(client.state).toBe("failed");
+  });
+
+  it.each([
+    ["name", { name: "different_tool" }],
+    ["call id", { call_id: "different_call" }],
+    ["type", { type: "function_call_output" }],
+  ] as const)(
+    "rejects an xAI identity-only acknowledgement with a changed %s",
+    async (_label, mutation) => {
+      const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+      await connect(client, socket);
+      const pending = client.hydrateConversationHistory([{
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256(`xai-changed-${String(_label)}-source`),
+      }]);
+      const frame = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+      socket.emit("message", JSON.stringify({
+        type: "conversation.item.added",
+        item: { ...frame.item, ...mutation, arguments: "" },
+      }));
+      await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+      expect(client.state).toBe("failed");
+    },
+  );
+
+  it("rejects an xAI omitted synthetic tool output without retained provider evidence", async () => {
+    const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("xai-empty-output-source"),
+    }]);
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const call = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: call.item,
+    }));
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    const output = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: { ...output.item, output: "" },
+    }));
+    await expect(pending).rejects.toThrow(/altered synthetic conversation history tool output/);
+    expect(client.state).toBe("failed");
   });
 
   it("fails the connection on mismatched or duplicate provider acknowledgements", async () => {

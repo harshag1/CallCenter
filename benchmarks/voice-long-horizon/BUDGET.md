@@ -436,3 +436,46 @@ the realtime-provider ledger. The final 48-clip development canary passed, but
 it cannot authorize paid work because it was generated before the source
 commit. The next paid authority remains exactly `$1 + $3 + $15 = $19`; there
 is still no retry reserve.
+
+## 2026-07-29 — Source `deea288` gate passed; qualification failed closed
+
+The clean-source sequence at
+`deea2889a1a364235bebfe6702e74dba2848b772` spent its Gate D and qualification
+authorities exactly once:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | failed closed; 3 paid sessions, 6 logical generation phases, 3 tool-roundtrip attempts, 0 paid retries |
+
+Gate D is transport qualification only, not efficacy evidence. The
+qualification retained one passing Gemini history/tool roundtrip, one OpenAI
+first-history-item provider rejection, and one xAI identity acknowledgement
+whose seeded tool-call arguments were omitted from the server echo. It
+therefore authorizes no DEV cell and produces no score or graph.
+
+The qualification settlement is bound by evidence
+`d5da03d47ad2330a8ab89dd4a2708c9046a52f644410a8ded20438c6218b7299`
+and terminal ledger head
+`1fd5e04266c2fc6537602b87c8b58228929402722f06e26be416d1e2ba0a0cb3`.
+All terminal ledgers retain **$0.00 active**.
+
+Current release-epoch conservative paid-provider exposure is therefore
+**$45.50** after the prior `$71.00` baseline. The failed roots are immutable,
+cannot be retried, and cannot fund a later run.
+
+One new source-bound sequence is authorized only after the provider-protocol
+repair is committed and all provider-free gates pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure would become **$64.50**.
+Including the separate frozen/non-reusable **$15.00** authority solely as an
+ultra-conservative liability view yields **$79.50**. Both remain below the
+strictly-less-than-`$250.00` remaining-work ceiling. This is a maximum, not a
+spending target, and it includes no retry reserve.

@@ -629,6 +629,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             sourceSha256: turn.sourceSha256,
             syntheticCallIdSha256: undefined,
             contentSha256: sha256Hex(turn.text),
+            contentBytes: Buffer.byteLength(turn.text, "utf8"),
+            nameSha256: undefined,
+            nameBytes: undefined,
           }]
         : [
             ...turn.calls.map((call, callIndex) => ({
@@ -638,6 +641,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
                 `fixture-history-tool:${index + 1}:${callIndex + 1}`,
               ),
               contentSha256: sha256Hex(canonicalJson(call.toolArguments)),
+              contentBytes: Buffer.byteLength(canonicalJson(call.toolArguments), "utf8"),
+              nameSha256: sha256Hex(call.toolName),
+              nameBytes: Buffer.byteLength(call.toolName, "utf8"),
             })),
             ...turn.calls.map((call, callIndex) => ({
               kind: "synthetic_tool_output" as const,
@@ -646,6 +652,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
                 `fixture-history-tool:${index + 1}:${callIndex + 1}`,
               ),
               contentSha256: sha256Hex(call.output),
+              contentBytes: Buffer.byteLength(call.output, "utf8"),
+              nameSha256: undefined,
+              nameBytes: undefined,
             })),
           ];
       return expected.map(({
@@ -653,14 +662,28 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         sourceSha256,
         syntheticCallIdSha256,
         contentSha256,
+        contentBytes,
+        nameSha256,
+        nameBytes,
       }) => {
         providerItemOrdinal += 1;
+        const itemIdSha256 = sha256Hex(`fixture-history-item:${providerItemOrdinal}`);
+        const identities = {
+          itemIdSha256,
+          ...(syntheticCallIdSha256 ? { callIdSha256: syntheticCallIdSha256 } : {}),
+        };
         const historyProjection = kind === "synthetic_tool_call"
           ? {
               kind,
+              nameSha256,
+              nameBytes,
+              namePresent: true,
               argumentsSha256: this.#corruptHistoryProjection
                 ? "0".repeat(64)
                 : contentSha256,
+              argumentsBytes: contentBytes,
+              argumentsPresent: true,
+              argumentsJsonValid: true,
             }
           : kind === "synthetic_tool_output"
             ? {
@@ -668,28 +691,54 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
                 outputSha256: this.#corruptHistoryProjection
                   ? "0".repeat(64)
                   : contentSha256,
+                outputBytes: contentBytes,
+                outputPresent: true,
               }
             : {
                 kind,
                 contentSha256: this.#corruptHistoryProjection
                   ? "0".repeat(64)
                   : contentSha256,
+                contentBytes,
               };
         const outboundObservation = geminiOutboundObservation
           ?? wireReference(this.wire("conversation.item.create", {
             conversationHistoryItem: historyProjection,
-          }));
+          }, "outbound", identities));
+        const xaiContentOmission = this.provider === "xai"
+          && kind === "synthetic_tool_call";
+        const inboundHistoryProjection = xaiContentOmission
+          ? {
+              ...historyProjection,
+              argumentsSha256: sha256Hex(""),
+              argumentsBytes: 0,
+              argumentsPresent: true,
+              argumentsJsonValid: false,
+            }
+          : historyProjection;
         const inboundObservation = this.provider === "gemini"
           ? undefined
-          : wireReference(this.wire("conversation.item.created", {
-              conversationHistoryItem: historyProjection,
-            }, "inbound"));
+          : wireReference(this.wire(
+              this.provider === "xai"
+                ? "conversation.item.added"
+                : "conversation.item.created",
+              {
+              conversationHistoryItem: inboundHistoryProjection,
+            }, "inbound", identities));
         return Object.freeze({
           historyTurnOrdinal: index + 1,
           providerItemOrdinal,
           kind,
           sourceSha256,
           ...(syntheticCallIdSha256 ? { syntheticCallIdSha256 } : {}),
+          ...(xaiContentOmission
+            ? {
+                providerContentOmission: Object.freeze({
+                  field: "arguments" as const,
+                  observedShape: "empty_string" as const,
+                }),
+              }
+            : {}),
           outboundObservation,
           ...(inboundObservation ? { inboundObservation } : {}),
         });
@@ -701,6 +750,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       connectionEpoch: 1,
       status: this.provider === "gemini"
         ? "sent_unacknowledged_by_provider_protocol" as const
+        : items.some((item) => item.providerContentOmission !== undefined)
+          ? "identity_acknowledged_content_unverifiable" as const
         : "acknowledged" as const,
       turnCount: snapshot.length,
       providerItemCount: items.length,
@@ -1214,7 +1265,12 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   #latestWireHash(wireType: string): string {
     return this.#wireHistory.findLast((item) => item.wireType === wireType)?.observationSha256 ?? "0".repeat(64);
   }
-  protected wire(wireType: string, projection: Record<string, unknown>, direction: "inbound" | "outbound" = "outbound") {
+  protected wire(
+    wireType: string,
+    projection: Record<string, unknown>,
+    direction: "inbound" | "outbound" = "outbound",
+    identities: RealtimeWireObservation["identities"] = {},
+  ) {
     this.#wireSequence += 1;
     const payloadSha256 = sha256Hex(canonicalJson({ wireType, direction, projection, sequence: this.#wireSequence }));
     const previousObservationSha256 = this.#wireHistory.at(-1)?.observationSha256 ?? null;
@@ -1236,7 +1292,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       projectionSha256: sha256Hex(canonicalJson(projection)),
       previousObservationSha256,
       observationSha256,
-      identities: typeof projection.response_id === "string"
+      identities: Object.keys(identities).length > 0
+        ? identities
+        : typeof projection.response_id === "string"
         ? { responseIdSha256: realtimeWireIdentitySha256("response", projection.response_id) }
         : {},
       projection,

@@ -188,7 +188,7 @@ const FIXTURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-spoken-fixture-artif
 const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v7\n";
 const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v7\n";
 const HISTORY_HYDRATION_EVIDENCE_DOMAIN =
-  "harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n";
+  "harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v2\n";
 const CONTROL_DIAGNOSTIC_DOMAIN = "harshas-amazing-call-center/lc4-s2s-control-size-diagnostic/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const ROUNDTRIP_USAGE_COUNTERS = new Set<RoundtripUsageCounter>([
@@ -307,7 +307,7 @@ export type Lc4S2sRoundtripDeliveryReceipt = Readonly<{
 }>;
 
 export type Lc4S2sHistoryHydrationEvidence = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   probe_sha256: typeof LC4_S2S_HISTORY_PROBE_SHA256;
   provider: LiveStsProvider;
   status: RealtimeConversationHistoryHydrationAcknowledgement["status"];
@@ -321,6 +321,12 @@ export type Lc4S2sHistoryHydrationEvidence = Readonly<{
     "synthetic_tool_call",
     "synthetic_tool_output",
     "assistant_message",
+  ];
+  item_acknowledgement_scopes: readonly [
+    "exact_content" | "unacknowledged_by_provider_protocol",
+    "exact_content" | "identity_only_content_omitted" | "unacknowledged_by_provider_protocol",
+    "exact_content" | "unacknowledged_by_provider_protocol",
+    "exact_content" | "unacknowledged_by_provider_protocol",
   ];
   outbound_observation_sha256s: readonly string[];
   inbound_observation_sha256s: readonly string[];
@@ -769,6 +775,7 @@ type ValidatedHistoryHydration = Readonly<{
   receipt: RealtimeConversationHistoryHydrationAcknowledgement;
   outboundObservationSha256s: readonly string[];
   inboundObservationSha256s: readonly string[];
+  itemAcknowledgementScopes: Lc4S2sHistoryHydrationEvidence["item_acknowledgement_scopes"];
   lastHistoryObservationSequence: number;
 }>;
 
@@ -780,7 +787,9 @@ function validateHistoryHydrationReceipt(input: Readonly<{
   const receipt = input.receipt;
   const expectedStatus = input.provider === "gemini"
     ? "sent_unacknowledged_by_provider_protocol"
-    : "acknowledged";
+    : receipt.items.some((item) => item.providerContentOmission !== undefined)
+      ? "identity_acknowledged_content_unverifiable"
+      : "acknowledged";
   const expectedKinds = [
     "user_message",
     "synthetic_tool_call",
@@ -799,6 +808,17 @@ function validateHistoryHydrationReceipt(input: Readonly<{
     sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
     sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
   ] as const;
+  const expectedToolNameSha256 = sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName);
+  const expectedContentBytes = [
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[0].text, "utf8"),
+    Buffer.byteLength(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments), "utf8"),
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].output, "utf8"),
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[2].text, "utf8"),
+  ] as const;
+  const expectedToolNameBytes = Buffer.byteLength(
+    LC4_S2S_HISTORY_PROBE[1].calls[0].toolName,
+    "utf8",
+  );
   if (receipt.schemaVersion !== 1
     || receipt.provider !== input.provider
     || receipt.status !== expectedStatus
@@ -811,6 +831,11 @@ function validateHistoryHydrationReceipt(input: Readonly<{
   }
   const outbound: string[] = [];
   const inbound: string[] = [];
+  const acknowledgementScopes: Array<
+    "exact_content"
+    | "identity_only_content_omitted"
+    | "unacknowledged_by_provider_protocol"
+  > = [];
   let priorSequence = 0;
   let syntheticCallIdSha256: string | null = null;
   for (const [index, item] of receipt.items.entries()) {
@@ -858,10 +883,12 @@ function validateHistoryHydrationReceipt(input: Readonly<{
     const outboundObservation = findObservation(item.outboundObservation, "outbound");
     outbound.push(outboundObservation.observationSha256);
     if (input.provider === "gemini") {
-      if (item.inboundObservation !== undefined
+      if (item.providerContentOmission !== undefined
+        || item.inboundObservation !== undefined
         || outboundObservation.wireType !== "clientContent") {
         throw new Error("LC4 S2S Gemini history hydration acknowledgement is dishonest");
       }
+      acknowledgementScopes.push("unacknowledged_by_provider_protocol");
       const projection = outboundObservation.projection.initialHistory;
       if (projection === null || typeof projection !== "object" || Array.isArray(projection)) {
         throw new Error("LC4 S2S Gemini history projection is unavailable");
@@ -899,7 +926,40 @@ function validateHistoryHydrationReceipt(input: Readonly<{
       }
       priorSequence = inboundObservation.sequence;
       inbound.push(inboundObservation.observationSha256);
-      for (const observation of [outboundObservation, inboundObservation]) {
+      if (!outboundObservation.identities.itemIdSha256
+        || inboundObservation.identities.itemIdSha256
+          !== outboundObservation.identities.itemIdSha256) {
+        throw new Error("LC4 S2S history item identity differs");
+      }
+      if (index === 1 || index === 2) {
+        if (outboundObservation.identities.callIdSha256 !== item.syntheticCallIdSha256
+          || inboundObservation.identities.callIdSha256 !== item.syntheticCallIdSha256) {
+          throw new Error("LC4 S2S history tool-call identity differs");
+        }
+      }
+      const omission = item.providerContentOmission;
+      const expectedOmissionField = index === 1
+        ? "arguments"
+        : index === 2
+          ? "output"
+          : null;
+      if (omission !== undefined) {
+        if (input.provider !== "xai"
+          || inboundObservation.wireType !== "conversation.item.added"
+          || expectedOmissionField !== "arguments"
+          || omission.field !== "arguments"
+          || omission.observedShape !== "empty_string"
+          || Object.keys(omission).length !== 2) {
+          throw new Error("LC4 S2S history content omission classification is invalid");
+        }
+        acknowledgementScopes.push("identity_only_content_omitted");
+      } else {
+        acknowledgementScopes.push("exact_content");
+      }
+      for (const [direction, observation] of [
+        ["outbound", outboundObservation],
+        ["inbound", inboundObservation],
+      ] as const) {
         const projection = observation.projection.conversationHistoryItem;
         if (projection === null || typeof projection !== "object" || Array.isArray(projection)) {
           throw new Error("LC4 S2S history item projection is unavailable");
@@ -910,8 +970,42 @@ function validateHistoryHydrationReceipt(input: Readonly<{
           : item.kind === "synthetic_tool_output"
             ? value.outputSha256
             : value.contentSha256;
-        if (value.kind !== item.kind || actualContentSha256 !== expectedContentSha256s[index]) {
+        if (value.kind !== item.kind) {
           throw new Error("LC4 S2S history item projection differs from the frozen probe");
+        }
+        if (item.kind === "synthetic_tool_call"
+          && (value.nameSha256 !== expectedToolNameSha256
+            || value.namePresent !== true
+            || value.nameBytes !== expectedToolNameBytes)) {
+          throw new Error("LC4 S2S history tool name projection differs from the frozen probe");
+        }
+        if (direction === "outbound" || omission === undefined) {
+          if (actualContentSha256 !== expectedContentSha256s[index]) {
+            throw new Error("LC4 S2S history item projection differs from the frozen probe");
+          }
+          if (item.kind === "synthetic_tool_call"
+            && (value.argumentsBytes !== expectedContentBytes[index]
+              || value.argumentsPresent !== true
+              || value.argumentsJsonValid !== true)) {
+            throw new Error("LC4 S2S exact history arguments projection is invalid");
+          }
+          if (item.kind === "synthetic_tool_output"
+            && (value.outputBytes !== expectedContentBytes[index]
+              || value.outputPresent !== true)) {
+            throw new Error("LC4 S2S exact history output projection is invalid");
+          }
+          if ((item.kind === "user_message" || item.kind === "assistant_message")
+            && value.contentBytes !== expectedContentBytes[index]) {
+            throw new Error("LC4 S2S exact history message projection is invalid");
+          }
+        } else if (actualContentSha256 !== sha256Hex("")) {
+          throw new Error("LC4 S2S history omitted content projection is not empty");
+        } else if (omission.field === "arguments") {
+          if (value.argumentsBytes !== 0
+            || value.argumentsPresent !== true
+            || value.argumentsJsonValid !== false) {
+            throw new Error("LC4 S2S history arguments omission projection is invalid");
+          }
         }
       }
     }
@@ -932,6 +1026,9 @@ function validateHistoryHydrationReceipt(input: Readonly<{
     receipt,
     outboundObservationSha256s: outbound,
     inboundObservationSha256s: inbound,
+    itemAcknowledgementScopes: freeze(
+      acknowledgementScopes,
+    ) as unknown as Lc4S2sHistoryHydrationEvidence["item_acknowledgement_scopes"],
     lastHistoryObservationSequence: Math.max(
       ...receipt.items.flatMap((item) => [
         item.outboundObservation?.availability === "observed"
@@ -1414,7 +1511,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       throw new Error("provider live input does not follow history hydration");
     }
     const historyEvidenceBody = freeze({
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
       provider: input.provider,
       status: validatedHistoryHydration.receipt.status,
@@ -1429,6 +1526,8 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         "synthetic_tool_output",
         "assistant_message",
       ] as const),
+      item_acknowledgement_scopes:
+        validatedHistoryHydration.itemAcknowledgementScopes,
       outbound_observation_sha256s:
         validatedHistoryHydration.outboundObservationSha256s,
       inbound_observation_sha256s:
@@ -2026,11 +2125,37 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
   if (execution.history_hydration_evidence !== null) {
     const { evidence_sha256: historyEvidenceSha256, ...historyBody } =
       execution.history_hydration_evidence;
+    const acknowledgementScopes =
+      execution.history_hydration_evidence.item_acknowledgement_scopes;
+    const scopesValid = execution.provider === "gemini"
+      ? acknowledgementScopes.length === 4
+        && acknowledgementScopes.every((scope) => (
+          scope === "unacknowledged_by_provider_protocol"
+        ))
+      : acknowledgementScopes.length === 4
+        && acknowledgementScopes[0] === "exact_content"
+        && acknowledgementScopes[2] === "exact_content"
+        && acknowledgementScopes[3] === "exact_content"
+        && [acknowledgementScopes[1]].every((scope) => (
+          scope === "exact_content"
+          || (execution.provider === "xai" && scope === "identity_only_content_omitted")
+        ))
+        && (
+          execution.history_hydration_evidence.status
+            === "identity_acknowledged_content_unverifiable"
+        ) === acknowledgementScopes.includes("identity_only_content_omitted");
+    const expectedHistoryStatus = execution.provider === "gemini"
+      ? "sent_unacknowledged_by_provider_protocol"
+      : acknowledgementScopes.includes("identity_only_content_omitted")
+        ? "identity_acknowledged_content_unverifiable"
+        : "acknowledged";
     if (historyEvidenceSha256 !== sha256Hex(
       `${HISTORY_HYDRATION_EVIDENCE_DOMAIN}${canonicalJson(historyBody)}`,
     )
+      || execution.history_hydration_evidence.schema_version !== 2
       || execution.history_hydration_evidence.probe_sha256 !== LC4_S2S_HISTORY_PROBE_SHA256
       || execution.history_hydration_evidence.provider !== execution.provider
+      || execution.history_hydration_evidence.status !== expectedHistoryStatus
       || execution.history_hydration_evidence.provider_visible_history_sha256
         !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
       || execution.history_hydration_evidence.source_binding_sha256
@@ -2040,7 +2165,8 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       || execution.history_hydration_evidence.pre_input_generation_trigger_count !== 0
       || execution.history_hydration_evidence.pre_input_output_audio_bytes !== 0
       || execution.history_hydration_evidence.pre_input_output_transcript_count !== 0
-      || execution.history_hydration_evidence.pre_input_tool_call_count !== 0) {
+      || execution.history_hydration_evidence.pre_input_tool_call_count !== 0
+      || !scopesValid) {
       throw new Error("LC4 S2S history hydration evidence contract is invalid");
     }
   }
@@ -2126,13 +2252,9 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       ?.observation_sha256s.at(-1) ?? null);
     const commit = index(execution.server_vad_auto_commit_observation_sha256);
     const rootResponse = index(execution.server_vad_auto_response_observation_sha256);
-    const toolResult = index(execution.tool_result_evidence_sha256 === null
-      ? null
-      : execution.wire_observations.find((observation) => (
-          observation.direction === "outbound"
-          && observation.wireType === "conversation.item.create"
-          && observation.identities.callIdSha256 !== undefined
-        ))?.observationSha256 ?? null);
+    const toolResult = index(
+      execution.replay_causal_binding?.result_observation_sha256 ?? null,
+    );
     const responseCreates = execution.wire_observations
       .map((observation, position) => ({ observation, position }))
       .filter(({ observation }) => observation.direction === "outbound" && observation.wireType === "response.create");

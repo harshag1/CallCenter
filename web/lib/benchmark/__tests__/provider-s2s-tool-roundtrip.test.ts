@@ -149,6 +149,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly serverVadStopAfterSuffixChunks: number | null;
   readonly serverVadPostStopAppendError: "phase_guard" | "unrelated";
   readonly emitPreInputTranscript: boolean;
+  readonly xaiHistoryContentOmission: "none" | "arguments";
   appendedBytes = 0;
   speechStartEmitted = false;
   serverVadStopped = false;
@@ -180,6 +181,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
     serverVadStopAfterSuffixChunks?: number | null;
     serverVadPostStopAppendError?: "phase_guard" | "unrelated";
     emitPreInputTranscript?: boolean;
+    xaiHistoryContentOmission?: "arguments";
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -212,6 +214,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
       : options.serverVadStopAfterSuffixChunks;
     this.serverVadPostStopAppendError = options.serverVadPostStopAppendError ?? "phase_guard";
     this.emitPreInputTranscript = options.emitPreInputTranscript === true;
+    this.xaiHistoryContentOmission = options.xaiHistoryContentOmission ?? "none";
   }
 
   get serverVadTransportParitySha256() {
@@ -669,13 +672,35 @@ class RoundtripClient implements NormalizedRealtimeClient {
       LC4_S2S_HISTORY_PROBE[2].sourceSha256,
     ] as const;
     const projections = [
-      { kind: kinds[0], contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[0].text) },
+      {
+        kind: kinds[0],
+        contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[0].text),
+        contentBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[0].text, "utf8"),
+      },
       {
         kind: kinds[1],
+        nameSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName),
+        nameBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName, "utf8"),
+        namePresent: true,
         argumentsSha256: sha256Hex(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments)),
+        argumentsBytes: Buffer.byteLength(
+          canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments),
+          "utf8",
+        ),
+        argumentsPresent: true,
+        argumentsJsonValid: true,
       },
-      { kind: kinds[2], outputSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output) },
-      { kind: kinds[3], contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[2].text) },
+      {
+        kind: kinds[2],
+        outputSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
+        outputBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].output, "utf8"),
+        outputPresent: true,
+      },
+      {
+        kind: kinds[3],
+        contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
+        contentBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[2].text, "utf8"),
+      },
     ] as const;
     const attribution = (observation: RealtimeWireObservation) => Object.freeze({
       availability: "observed" as const,
@@ -732,18 +757,47 @@ class RoundtripClient implements NormalizedRealtimeClient {
       });
     }
     const items = kinds.map((kind, index) => {
-      const outbound = this.#observe("outbound", "conversation.item.create", {}, {
+      const identities = {
+        itemIdSha256: sha256Hex(`qualification-history-item-${index + 1}`),
+        ...(index === 1 || index === 2 ? { callIdSha256: syntheticCallIdSha256 } : {}),
+      };
+      const outbound = this.#observe("outbound", "conversation.item.create", identities, {
         conversationHistoryItem: projections[index],
       });
-      const inbound = this.#observe("inbound", "conversation.item.created", {}, {
-        conversationHistoryItem: projections[index],
-      });
+      const omitArguments = this.provider === "xai"
+        && index === 1
+        && this.xaiHistoryContentOmission !== "none";
+      const inboundProjection = omitArguments
+        ? {
+            ...projections[index],
+            argumentsSha256: sha256Hex(""),
+            argumentsBytes: 0,
+            argumentsPresent: true,
+            argumentsJsonValid: false,
+          }
+        : projections[index];
+      const inbound = this.#observe(
+        "inbound",
+        this.provider === "xai" ? "conversation.item.added" : "conversation.item.created",
+        identities,
+        {
+        conversationHistoryItem: inboundProjection,
+        },
+      );
       return Object.freeze({
         historyTurnOrdinal: index === 0 ? 1 : index === 3 ? 3 : 2,
         providerItemOrdinal: index + 1,
         kind,
         sourceSha256: sources[index]!,
         ...(index === 1 || index === 2 ? { syntheticCallIdSha256 } : {}),
+        ...(omitArguments
+          ? {
+              providerContentOmission: Object.freeze({
+                field: "arguments" as const,
+                observedShape: "empty_string" as const,
+              }),
+            }
+          : {}),
         outboundObservation: attribution(outbound),
         inboundObservation: attribution(inbound),
       });
@@ -751,7 +805,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
     return Object.freeze({
       schemaVersion: 1 as const,
       provider: this.provider,
-      status: "acknowledged" as const,
+      status: this.xaiHistoryContentOmission === "none"
+        ? "acknowledged" as const
+        : "identity_acknowledged_content_unverifiable" as const,
       connectionEpoch: 1,
       turnCount: 3,
       providerItemCount: 4,
@@ -1114,6 +1170,43 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       }
     });
   }
+
+  it.each([
+    ["arguments", [
+      "exact_content",
+      "identity_only_content_omitted",
+      "exact_content",
+      "exact_content",
+    ]],
+  ] as const)(
+    "retains honest xAI %s history acknowledgement scope",
+    async (xaiHistoryContentOmission, expectedScopes) => {
+      const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+      roots.push(root);
+      const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+      const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+      const client = new RoundtripClient("xai", { xaiHistoryContentOmission });
+      const execution = await executeLc4S2sToolRoundtrip({
+        provider: "xai",
+        model: "xai-model",
+        client,
+        audio,
+        audioObject: artifact.provider_renditions.xai,
+        profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+        runtime: advancingRealtimeRuntime(),
+        timeoutMs: 1_000,
+      });
+      expect(execution).toMatchObject({
+        status: "passed",
+        failure_class: "none",
+        history_hydration_evidence: {
+          status: "identity_acknowledged_content_unverifiable",
+          item_acknowledgement_scopes: expectedScopes,
+        },
+      });
+      expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+    },
+  );
 
   it("fails closed when native history hydration is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));

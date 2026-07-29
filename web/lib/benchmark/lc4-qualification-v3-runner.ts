@@ -1104,6 +1104,32 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
     sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
     sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
   ] as const;
+  const expectedToolNameSha256 = sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName);
+  const expectedContentBytes = [
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[0].text, "utf8"),
+    Buffer.byteLength(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments), "utf8"),
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].output, "utf8"),
+    Buffer.byteLength(LC4_S2S_HISTORY_PROBE[2].text, "utf8"),
+  ] as const;
+  const acknowledgementScopes = evidence.item_acknowledgement_scopes;
+  const scopesValid = input.provider === "gemini"
+    ? acknowledgementScopes.length === 4
+      && acknowledgementScopes.every((scope) => (
+        scope === "unacknowledged_by_provider_protocol"
+      ))
+    : acknowledgementScopes.length === 4
+      && acknowledgementScopes[0] === "exact_content"
+      && acknowledgementScopes[2] === "exact_content"
+      && acknowledgementScopes[3] === "exact_content"
+      && [acknowledgementScopes[1]].every((scope) => (
+        scope === "exact_content"
+        || (input.provider === "xai" && scope === "identity_only_content_omitted")
+      ));
+  const expectedStatus = input.provider === "gemini"
+    ? "sent_unacknowledged_by_provider_protocol"
+    : acknowledgementScopes.includes("identity_only_content_omitted")
+      ? "identity_acknowledged_content_unverifiable"
+      : "acknowledged";
   const byDigest = (digest: string, direction: "inbound" | "outbound") => {
     const matches = input.wire.filter((observation) => (
       observation.observationSha256 === digest
@@ -1116,15 +1142,18 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
     return matches[0]!;
   };
   if (evidenceSha256 !== sha256Hex(
-    `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n${canonicalJson(body)}`,
+    `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v2\n${canonicalJson(body)}`,
   )
+    || evidence.schema_version !== 2
     || evidence.probe_sha256 !== LC4_S2S_HISTORY_PROBE_SHA256
     || evidence.provider !== input.provider
+    || evidence.status !== expectedStatus
     || evidence.provider_visible_history_sha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
     || evidence.source_binding_sha256 !== LC4_S2S_HISTORY_SOURCE_BINDING_SHA256
     || evidence.turn_count !== 3
     || evidence.provider_item_count !== 4
     || canonicalJson(evidence.item_kinds) !== canonicalJson(expectedKinds)
+    || !scopesValid
     || evidence.pre_input_generation_trigger_count !== 0
     || evidence.pre_input_output_audio_bytes !== 0
     || evidence.pre_input_output_transcript_count !== 0
@@ -1158,8 +1187,7 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
     throw new Error(`LC4 qualification retained ${input.provider} history triggered pre-input activity`);
   }
   if (input.provider === "gemini") {
-    if (evidence.status !== "sent_unacknowledged_by_provider_protocol"
-      || evidence.inbound_observation_sha256s.length !== 0
+    if (evidence.inbound_observation_sha256s.length !== 0
       || evidence.outbound_observation_sha256s.length !== 4
       || new Set(evidence.outbound_observation_sha256s).size !== 1) {
       throw new Error("LC4 qualification retained Gemini history acknowledgement is dishonest");
@@ -1186,8 +1214,7 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
     }
     return;
   }
-  if (evidence.status !== "acknowledged"
-    || evidence.outbound_observation_sha256s.length !== 4
+  if (evidence.outbound_observation_sha256s.length !== 4
     || evidence.inbound_observation_sha256s.length !== 4) {
     throw new Error(`LC4 qualification retained ${input.provider} history acknowledgement is incomplete`);
   }
@@ -1203,7 +1230,27 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
       throw new Error(`LC4 qualification retained ${input.provider} history order is invalid`);
     }
     priorSequence = inbound.sequence;
-    for (const observation of [outbound, inbound]) {
+    if (!outbound.identities.itemIdSha256
+      || inbound.identities.itemIdSha256 !== outbound.identities.itemIdSha256) {
+      throw new Error(`LC4 qualification retained ${input.provider} history item identity is invalid`);
+    }
+    if (kind === "synthetic_tool_call" || kind === "synthetic_tool_output") {
+      if (!outbound.identities.callIdSha256
+        || inbound.identities.callIdSha256 !== outbound.identities.callIdSha256) {
+        throw new Error(`LC4 qualification retained ${input.provider} history call identity is invalid`);
+      }
+      if (index === 2
+        && outbound.identities.callIdSha256
+          !== byDigest(evidence.outbound_observation_sha256s[1]!, "outbound")
+            .identities.callIdSha256) {
+        throw new Error(`LC4 qualification retained ${input.provider} history tool pair is unbound`);
+      }
+    }
+    const acknowledgementScope = acknowledgementScopes[index]!;
+    for (const [direction, observation] of [
+      ["outbound", outbound],
+      ["inbound", inbound],
+    ] as const) {
       const projection = observation.projection.conversationHistoryItem;
       const value = projection !== null && typeof projection === "object" && !Array.isArray(projection)
         ? projection as Record<string, unknown>
@@ -1213,8 +1260,49 @@ export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Re
         : kind === "synthetic_tool_output"
           ? value?.outputSha256
           : value?.contentSha256;
-      if (value?.kind !== kind || contentSha256 !== expectedContentSha256s[index]) {
+      if (value?.kind !== kind) {
         throw new Error(`LC4 qualification retained ${input.provider} history content is invalid`);
+      }
+      if (kind === "synthetic_tool_call"
+        && (value.nameSha256 !== expectedToolNameSha256
+          || value.namePresent !== true
+          || value.nameBytes !== Buffer.byteLength(
+            LC4_S2S_HISTORY_PROBE[1].calls[0].toolName,
+            "utf8",
+          ))) {
+        throw new Error(`LC4 qualification retained ${input.provider} history tool name is invalid`);
+      }
+      if (direction === "outbound" || acknowledgementScope === "exact_content") {
+        if (contentSha256 !== expectedContentSha256s[index]) {
+          throw new Error(`LC4 qualification retained ${input.provider} history content is invalid`);
+        }
+        if (kind === "synthetic_tool_call"
+          && (value.argumentsBytes !== expectedContentBytes[index]
+            || value.argumentsPresent !== true
+            || value.argumentsJsonValid !== true)) {
+          throw new Error(`LC4 qualification retained ${input.provider} exact history arguments are invalid`);
+        }
+        if (kind === "synthetic_tool_output"
+          && (value.outputBytes !== expectedContentBytes[index]
+            || value.outputPresent !== true)) {
+          throw new Error(`LC4 qualification retained ${input.provider} exact history output is invalid`);
+        }
+        if ((kind === "user_message" || kind === "assistant_message")
+          && value.contentBytes !== expectedContentBytes[index]) {
+          throw new Error(`LC4 qualification retained ${input.provider} exact history message is invalid`);
+        }
+      } else if (inbound.wireType !== "conversation.item.added"
+        || acknowledgementScope !== "identity_only_content_omitted"
+        || contentSha256 !== sha256Hex("")) {
+        throw new Error(`LC4 qualification retained ${input.provider} history omission is invalid`);
+      } else if (kind === "synthetic_tool_call") {
+        if (value.argumentsBytes !== 0
+          || value.argumentsPresent !== true
+          || value.argumentsJsonValid !== false) {
+          throw new Error(`LC4 qualification retained ${input.provider} history arguments omission is invalid`);
+        }
+      } else {
+        throw new Error(`LC4 qualification retained ${input.provider} message omission is invalid`);
       }
     }
   }

@@ -724,7 +724,9 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
   );
   const expectedStatus = input.provider === "gemini"
     ? "sent_unacknowledged_by_provider_protocol"
-    : "acknowledged";
+    : receipt.items.some((item) => item.providerContentOmission !== undefined)
+      ? "identity_acknowledged_content_unverifiable"
+      : "acknowledged";
   if (receipt.schemaVersion !== 1
     || receipt.provider !== input.provider
     || !Number.isSafeInteger(receipt.connectionEpoch)
@@ -775,7 +777,13 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
     expected: Readonly<{
       kind: RealtimeConversationHistoryHydratedItemAcknowledgement["kind"];
       contentSha256: string;
+      contentBytes: number;
+      nameSha256?: string;
+      nameBytes?: number;
     }>,
+    providerContentOmission?: RealtimeConversationHistoryHydratedItemAcknowledgement[
+      "providerContentOmission"
+    ],
   ) => {
     const projection = observation.history_hydration_projection;
     if (projection === null
@@ -789,8 +797,47 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
       : expected.kind === "synthetic_tool_output"
         ? value.outputSha256
         : value.contentSha256;
-    if (value.kind !== expected.kind || actualContentSha256 !== expected.contentSha256) {
+    if (value.kind !== expected.kind) {
       throw new Error("LC4 provider history item projection differs from the exact batch");
+    }
+    if (expected.kind === "synthetic_tool_call") {
+      if (value.nameSha256 !== expected.nameSha256
+        || value.namePresent !== true
+        || value.nameBytes !== expected.nameBytes) {
+        throw new Error("LC4 provider history tool name projection differs");
+      }
+    }
+    if (providerContentOmission === undefined) {
+      if (actualContentSha256 !== expected.contentSha256) {
+        throw new Error("LC4 provider history item projection differs from the exact batch");
+      }
+      if (expected.kind === "synthetic_tool_call"
+        && (value.argumentsBytes !== expected.contentBytes
+          || value.argumentsPresent !== true
+          || value.argumentsJsonValid !== true)) {
+        throw new Error("LC4 provider exact history tool arguments projection is invalid");
+      }
+      if (expected.kind === "synthetic_tool_output"
+        && (value.outputBytes !== expected.contentBytes || value.outputPresent !== true)) {
+        throw new Error("LC4 provider exact history tool output projection is invalid");
+      }
+      if ((expected.kind === "user_message" || expected.kind === "assistant_message")
+        && value.contentBytes !== expected.contentBytes) {
+        throw new Error("LC4 provider exact history message projection is invalid");
+      }
+      return;
+    }
+    const emptySha256 = sha256Hex("");
+    if (actualContentSha256 !== emptySha256) {
+      throw new Error("LC4 provider history item omission projection is not empty");
+    }
+    if (providerContentOmission.field !== "arguments"
+      || providerContentOmission.observedShape !== "empty_string"
+      || expected.kind !== "synthetic_tool_call"
+      || value.argumentsBytes !== 0
+      || value.argumentsPresent !== true
+      || value.argumentsJsonValid !== false) {
+      throw new Error("LC4 provider history tool arguments omission is invalid");
     }
   };
   const requireObservedAttribution = (
@@ -847,6 +894,7 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
           sourceSha256: turn.sourceSha256,
           toolCallOrdinal: null,
           contentSha256: sha256Hex(turn.text),
+          contentBytes: Buffer.byteLength(turn.text, "utf8"),
         }]
       : (() => {
           const calls = turn.role === "tool" ? [turn] : turn.calls;
@@ -856,12 +904,18 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
               sourceSha256: call.sourceSha256,
               toolCallOrdinal: callIndex,
               contentSha256: sha256Hex(canonicalJson(call.toolArguments)),
+              contentBytes: Buffer.byteLength(canonicalJson(call.toolArguments), "utf8"),
+              nameSha256: sha256Hex(call.toolName),
+              nameBytes: Buffer.byteLength(call.toolName, "utf8"),
             })),
             ...calls.map((call, callIndex) => ({
               kind: "synthetic_tool_output" as const,
               sourceSha256: call.sourceSha256,
               toolCallOrdinal: callIndex,
               contentSha256: sha256Hex(call.output),
+              contentBytes: Buffer.byteLength(call.output, "utf8"),
+              nameSha256: undefined,
+              nameBytes: undefined,
             })),
           ];
         })();
@@ -894,6 +948,9 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
         input.provider === "gemini",
       );
       if (input.provider === "gemini") {
+        if (item.providerContentOmission !== undefined) {
+          throw new Error("LC4 Gemini history hydration fabricated provider content acknowledgement");
+        }
         assertGeminiHistoryProjection(outboundObservation);
         if (item.inboundObservation !== undefined) {
           throw new Error("LC4 Gemini history hydration fabricated an item acknowledgement");
@@ -905,11 +962,40 @@ function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
           false,
         );
         assertItemHistoryProjection(outboundObservation, expected);
+        const omission = item.providerContentOmission;
+        if (omission !== undefined) {
+          const expectedField = expected.kind === "synthetic_tool_call"
+            ? "arguments"
+            : expected.kind === "synthetic_tool_output"
+              ? "output"
+              : null;
+          if (input.provider !== "xai"
+            || inboundObservation.wire_type !== "conversation.item.added"
+            || expectedField !== "arguments"
+            || omission.field !== "arguments"
+            || omission.observedShape !== "empty_string"
+            || Object.keys(omission).length !== 2) {
+            throw new Error("LC4 provider history content omission classification is invalid");
+          }
+        }
         if (inboundObservation.connection_epoch !== outboundObservation.connection_epoch
           || inboundObservation.sequence <= outboundObservation.sequence) {
           throw new Error("LC4 provider conversation history item acknowledgement is not causally ordered");
         }
-        assertItemHistoryProjection(inboundObservation, expected);
+        if (!outboundObservation.identity_hashes.itemIdSha256
+          || inboundObservation.identity_hashes.itemIdSha256
+            !== outboundObservation.identity_hashes.itemIdSha256) {
+          throw new Error("LC4 provider conversation history item identity differs");
+        }
+        if (expected.toolCallOrdinal !== null) {
+          if (outboundObservation.identity_hashes.callIdSha256
+              !== item.syntheticCallIdSha256
+            || inboundObservation.identity_hashes.callIdSha256
+              !== item.syntheticCallIdSha256) {
+            throw new Error("LC4 provider conversation history tool-call identity differs");
+          }
+        }
+        assertItemHistoryProjection(inboundObservation, expected, omission);
       }
     }
   }

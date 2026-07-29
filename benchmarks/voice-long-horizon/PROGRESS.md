@@ -1041,3 +1041,45 @@ canary opened **0** provider sessions and spent **$0.00**. It is development
 evidence only because it preceded the clean source commit; the release gate
 must regenerate and bind a fresh receipt to the committed source before any
 paid session is authorized.
+
+## 2026-07-29 — Qualification packet exposed provider-specific history semantics
+
+The exact-source Gate D at `deea288` passed, but the subsequent one-shot
+three-provider qualification failed closed and did not authorize DEV:
+
+- Gemini hydrated the frozen caller/tool/assistant history and completed the
+  spoken gateway roundtrip.
+- OpenAI rejected the first client-supplied history item before caller audio.
+  The retained packet hashes the provider error, so it proves the immediate
+  rejection but not which field caused it. The new `item_hacc_hist_` identifier
+  is a protocol-compatible hypothesis that must be validated by a fresh run.
+- xAI acknowledged the seeded tool-call item/call identity but returned an
+  empty-string arguments field. The old packet did not retain an independent
+  tool-name projection, so it does not prove name echo. The new source does.
+
+The repair keeps those evidence boundaries explicit:
+
+- exact outbound history content is always wire-observed and hash-bound;
+- OpenAI acknowledgements remain exact-content only;
+- xAI may report `identity_acknowledged_content_unverifiable` only for the one
+  observed shape: `conversation.item.added`, synthetic tool call, exact item
+  and call identity, exact tool-name projection, and `arguments === ""`;
+- absent arguments, omitted/empty tool output, nonempty mutations, wrong
+  provider, changed item/call/name/type, or message omissions fail closed;
+- condensed history evidence is now schema v2 and records four ordered
+  acknowledgement scopes;
+- exact-content evidence additionally proves field presence, JSON validity,
+  and UTF-8 byte length; and
+- the xAI live gateway result is selected by its replay causal hash, so seeded
+  history tool items cannot be confused with an executed live result.
+
+This is transport/evidence work, not a benchmark result. No Native/HACC score
+or launch graph exists yet. The failed qualification root is immutable and
+cannot be retried. A new clean source, fresh provider-free receipts, Gate D,
+and one-shot qualification are required before any six-cell DEV execution.
+
+Current provider-free validation for this source candidate is green:
+
+- protocol/adapter/roundtrip/retained-package focus: **270/270**;
+- full repository: **3,270 passed**, **0 failed**, **85 intentionally skipped**;
+- TypeScript, ESLint, diff check, and the 44-route production build: passed.

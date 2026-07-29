@@ -721,14 +721,31 @@ export type RealtimeConversationHistoryHydratedItemAcknowledgement = Readonly<{
   sourceSha256: string;
   /** Present for both halves of one deterministic synthetic tool-call pair. */
   syntheticCallIdSha256?: string;
+  /**
+   * Exceptional provider acknowledgement semantics. Absence means the
+   * provider echoed the exact expected content (or, for a protocol with no
+   * item acknowledgement, that no inbound acknowledgement was claimed).
+   *
+   * xAI was observed acknowledging a seeded tool call by identity while
+   * returning empty arguments in `conversation.item.added`. This marker does
+   * not claim that the provider echoed or independently verified the content;
+   * the exact outbound wire observation remains the content proof.
+   */
+  providerContentOmission?: Readonly<{
+    field: "arguments";
+    observedShape: "empty_string";
+  }>;
   outboundObservation?: RealtimeWireObservationAttribution;
   inboundObservation?: RealtimeWireObservationAttribution;
 }>;
 
 /**
  * Fail-closed proof that one exact history batch was delivered in wire order.
- * Providers with item acknowledgements report `acknowledged`; protocols without
- * such an event must state that limitation rather than fabricate acceptance.
+ * Exact provider echoes report `acknowledged`; identity acknowledgements that
+ * omit tool content report `identity_acknowledged_content_unverifiable`, with
+ * the per-item omission and exact outbound content retained separately.
+ * Protocols without an item event state that limitation rather than fabricate
+ * acceptance.
  * `historySha256` commits only to ordered provider-visible content.
  * `sourceBindingSha256` separately binds the ordered host evidence sources.
  */
@@ -736,7 +753,10 @@ export type RealtimeConversationHistoryHydrationAcknowledgement = Readonly<{
   schemaVersion: 1;
   provider: ServerRealtimeProvider;
   connectionEpoch: number;
-  status: "acknowledged" | "sent_unacknowledged_by_provider_protocol";
+  status:
+    | "acknowledged"
+    | "identity_acknowledged_content_unverifiable"
+    | "sent_unacknowledged_by_provider_protocol";
   turnCount: number;
   providerItemCount: number;
   historySha256: string;

@@ -128,7 +128,10 @@ const CONVERSATION_HISTORY_HASH_DOMAIN =
   "harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n";
 const CONVERSATION_HISTORY_SOURCE_BINDING_DOMAIN =
   "harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n";
-const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "hacc_hist_item_";
+// OpenAI documents client-supplied item IDs and uses the `item_` namespace in
+// its examples. Retain a HACC discriminator after that protocol-compatible
+// prefix; a fresh qualification must still prove the provider accepts it.
+const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "item_hacc_hist_";
 const CONVERSATION_HISTORY_ALLOWED_INBOUND_WIRE_TYPES = new Set([
   "conversation.item.added",
   "conversation.item.created",
@@ -939,7 +942,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         schemaVersion: 1 as const,
         provider: this.provider,
         connectionEpoch: this.connectionEpoch,
-        status: "acknowledged" as const,
+        status: acknowledgedItems.some((item) => item.providerContentOmission !== undefined)
+          ? "identity_acknowledged_content_unverifiable" as const
+          : "acknowledged" as const,
         turnCount: hydration.turnCount,
         providerItemCount: hydration.wireItems.length,
         historySha256: hydration.historySha256,
@@ -2022,8 +2027,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (!wireObservation) {
       return "Conversation history inbound wire evidence was not captured";
     }
-    const mismatch = conversationHistoryItemAcknowledgementError(event, pending.expected);
-    if (mismatch) return mismatch;
+    const validation = conversationHistoryItemAcknowledgementValidation(
+      this.provider,
+      event,
+      pending.expected,
+    );
+    if (validation.error) return validation.error;
     if (this.acknowledgedConversationHistoryItems.has(pending.expected.itemId)) {
       return `Provider duplicated acknowledged conversation history item ${pending.expected.itemId}`;
     }
@@ -2052,6 +2061,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
               pending.expected.syntheticCallId,
             ),
           }),
+      ...(validation.providerContentOmission === undefined
+        ? {}
+        : { providerContentOmission: Object.freeze(validation.providerContentOmission) }),
       outboundObservation: realtimeWireObservationReference(pending.outboundObservation),
       inboundObservation: realtimeWireObservationReference(wireObservation),
     }));
@@ -2070,7 +2082,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         ? "Provider completed an uncorrelated conversation item during history hydration"
         : undefined;
     }
-    return conversationHistoryItemAcknowledgementError(event, expected);
+    return conversationHistoryItemAcknowledgementValidation(
+      this.provider,
+      event,
+      expected,
+    ).error;
   }
 
   private rejectInputCommitWaiters(reason: string): void {
@@ -2717,13 +2733,24 @@ function conversationHistoryJsonError(value: unknown): string | undefined {
   return undefined;
 }
 
-function conversationHistoryItemAcknowledgementError(
+type ConversationHistoryItemAcknowledgementValidation = Readonly<{
+  error?: string;
+  providerContentOmission?: Readonly<{
+    field: "arguments";
+    observedShape: "empty_string";
+  }>;
+}>;
+
+function conversationHistoryItemAcknowledgementValidation(
+  provider: OpenAICompatibleProvider,
   event: Record<string, unknown>,
   expected: ConversationHistoryWireItem,
-): string | undefined {
+): ConversationHistoryItemAcknowledgementValidation {
   const item = record(event.item);
   if (item.id !== expected.itemId) {
-    return `Provider acknowledged conversation history item out of order; expected ${expected.itemId}`;
+    return {
+      error: `Provider acknowledged conversation history item out of order; expected ${expected.itemId}`,
+    };
   }
   const expectedItem = expected.expectedItem;
   if (expected.kind === "user_message" || expected.kind === "assistant_message") {
@@ -2733,7 +2760,7 @@ function conversationHistoryItemAcknowledgementError(
       || !Array.isArray(item.content)
       || item.content.length !== 1
     ) {
-      return `Provider altered conversation history message ${expected.itemId}`;
+      return { error: `Provider altered conversation history message ${expected.itemId}` };
     }
     const actualContent = record(item.content[0]);
     const expectedContent = record((expectedItem.content as readonly unknown[])[0]);
@@ -2741,29 +2768,43 @@ function conversationHistoryItemAcknowledgementError(
       actualContent.type !== expectedContent.type
       || actualContent.text !== expectedContent.text
     ) {
-      return `Provider altered conversation history message content ${expected.itemId}`;
+      return { error: `Provider altered conversation history message content ${expected.itemId}` };
     }
-    return undefined;
+    return {};
   }
   if (expected.kind === "synthetic_tool_call") {
     if (
       item.type !== "function_call"
       || item.call_id !== expectedItem.call_id
       || item.name !== expectedItem.name
-      || item.arguments !== expectedItem.arguments
     ) {
-      return `Provider altered synthetic conversation history tool call ${expected.itemId}`;
+      return { error: `Provider altered synthetic conversation history tool call ${expected.itemId}` };
     }
-    return undefined;
+    if (item.arguments === expectedItem.arguments) return {};
+    if (
+      provider === "xai"
+      && event.type === "conversation.item.added"
+      && typeof expectedItem.arguments === "string"
+      && expectedItem.arguments.length > 0
+      && item.arguments === ""
+    ) {
+      return {
+        providerContentOmission: {
+          field: "arguments",
+          observedShape: "empty_string",
+        },
+      };
+    }
+    return { error: `Provider altered synthetic conversation history tool call ${expected.itemId}` };
   }
   if (
     item.type !== "function_call_output"
     || item.call_id !== expectedItem.call_id
     || item.output !== expectedItem.output
   ) {
-    return `Provider altered synthetic conversation history tool output ${expected.itemId}`;
+    return { error: `Provider altered synthetic conversation history tool output ${expected.itemId}` };
   }
-  return undefined;
+  return {};
 }
 
 type WireObservationBuildInput = Readonly<{
@@ -3142,11 +3183,16 @@ function conversationHistoryItemWireProjection(
   }
   if (item.type === "function_call") {
     const argumentsText = stringValue(item.arguments);
+    const name = stringValue(item.name);
     const evidence = jsonTextEvidence(argumentsText);
     return {
       kind: "synthetic_tool_call",
+      nameSha256: sha256Text(name ?? ""),
+      nameBytes: Buffer.byteLength(name ?? "", "utf8"),
+      namePresent: name !== undefined,
       argumentsSha256: evidence.sha256,
       argumentsBytes: evidence.byteLength,
+      argumentsPresent: argumentsText !== undefined,
       argumentsJsonValid: evidence.validJson,
     };
   }

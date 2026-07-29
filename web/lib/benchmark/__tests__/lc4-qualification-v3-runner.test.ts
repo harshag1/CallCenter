@@ -54,6 +54,7 @@ import {
   LC4_S2S_TOOL_SCHEMA_SHA256,
   assertLc4S2sRoundtripExecution,
   type Lc4S2sAudioRenderer,
+  type Lc4S2sHistoryHydrationEvidence,
   type Lc4S2sRoundtripExecution,
 } from "../provider-s2s-tool-roundtrip";
 import type { LiveStsProvider } from "../live-sts-development-experiment";
@@ -383,31 +384,59 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
       {
         kind: "user_message",
         contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[0].text),
+        contentBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[0].text, "utf8"),
       },
       {
         kind: "synthetic_tool_call",
+        nameSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName),
+        nameBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].toolName, "utf8"),
+        namePresent: true,
         argumentsSha256: sha256Hex(canonicalJson(
           LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments,
         )),
+        argumentsBytes: Buffer.byteLength(canonicalJson(
+          LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments,
+        ), "utf8"),
+        argumentsPresent: true,
+        argumentsJsonValid: true,
       },
       {
         kind: "synthetic_tool_output",
         outputSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
+        outputBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[1].calls[0].output, "utf8"),
+        outputPresent: true,
       },
       {
         kind: "assistant_message",
         contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
+        contentBytes: Buffer.byteLength(LC4_S2S_HISTORY_PROBE[2].text, "utf8"),
       },
     ] as const;
     const outbound: RealtimeWireObservation[] = [];
     const inbound: RealtimeWireObservation[] = [];
-    for (const projection of projections) {
-      outbound.push(observe("outbound", "conversation.item.create", Object.freeze({}), {
+    for (const [index, projection] of projections.entries()) {
+      const itemIdentities = Object.freeze({
+        itemIdSha256: sha256Hex(`qualification-test-history-item-${index + 1}`),
+        ...(index === 1 || index === 2 ? { callIdSha256 } : {}),
+      });
+      outbound.push(observe("outbound", "conversation.item.create", itemIdentities, {
         conversationHistoryItem: projection,
       }));
-      inbound.push(observe("inbound", "conversation.item.created", Object.freeze({}), {
-        conversationHistoryItem: projection,
-      }));
+      const inboundProjection = input.provider === "xai" && index === 1
+        ? {
+            ...projection,
+            argumentsSha256: sha256Hex(""),
+            argumentsBytes: 0,
+            argumentsPresent: true,
+            argumentsJsonValid: false,
+          }
+        : projection;
+      inbound.push(observe(
+        "inbound",
+        input.provider === "xai" ? "conversation.item.added" : "conversation.item.created",
+        itemIdentities,
+        { conversationHistoryItem: inboundProjection },
+      ));
     }
     return { outbound, inbound };
   })();
@@ -631,11 +660,13 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
         || observation.wireType === "realtimeInput.activityStart")
   )) ?? wire[0]!;
   const historyEvidenceBody = Object.freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
     provider: input.provider,
     status: input.provider === "gemini"
       ? "sent_unacknowledged_by_provider_protocol" as const
+      : input.provider === "xai"
+        ? "identity_acknowledged_content_unverifiable" as const
       : "acknowledged" as const,
     connection_epoch: 1,
     turn_count: 3 as const,
@@ -648,6 +679,16 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
       "synthetic_tool_output",
       "assistant_message",
     ] as const),
+    item_acknowledgement_scopes: Object.freeze(
+      Array.from(
+        { length: 4 },
+        (_, index) => input.provider === "gemini"
+          ? "unacknowledged_by_provider_protocol" as const
+          : input.provider === "xai" && index === 1
+            ? "identity_only_content_omitted" as const
+          : "exact_content" as const,
+      ),
+    ) as Lc4S2sHistoryHydrationEvidence["item_acknowledgement_scopes"],
     outbound_observation_sha256s: Object.freeze(
       historyWire.outbound.map((observation) => observation.observationSha256),
     ),
@@ -669,7 +710,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   const historyHydrationEvidence = Object.freeze({
     ...historyEvidenceBody,
     evidence_sha256: sha256Hex(
-      `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n${canonicalJson(historyEvidenceBody)}`,
+      `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v2\n${canonicalJson(historyEvidenceBody)}`,
     ),
   });
   const body = Object.freeze({
@@ -1074,6 +1115,76 @@ describe("LC4 qualification v3 signed runner", () => {
         wire: execution.wire_observations,
       })).toThrow("history evidence is missing");
     }
+    const rehashHistoryEvidence = (
+      value: Lc4S2sHistoryHydrationEvidence,
+    ): Lc4S2sHistoryHydrationEvidence => {
+      const { evidence_sha256: _priorEvidenceSha256, ...body } = value;
+      void _priorEvidenceSha256;
+      return Object.freeze({
+        ...body,
+        evidence_sha256: sha256Hex(
+          `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v2\n${canonicalJson(body)}`,
+        ),
+      });
+    };
+    const xaiExecution = completedRoundtrips.find((execution) => execution.provider === "xai")!;
+    const xaiEvidence = xaiExecution.history_hydration_evidence!;
+    const xaiInboundToolCallSha256 = xaiEvidence.inbound_observation_sha256s[1]!;
+    const mismatchedIdentityWire = xaiExecution.wire_observations.map((observation) => (
+      observation.observationSha256 === xaiInboundToolCallSha256
+        ? Object.freeze({
+            ...observation,
+            identities: Object.freeze({
+              ...observation.identities,
+              itemIdSha256: "0".repeat(64),
+            }),
+          })
+        : observation
+    ));
+    expect(() => assertRetainedLc4QualificationHistoryHydrationEvidence({
+      provider: "xai",
+      summary: xaiExecution,
+      wire: mismatchedIdentityWire,
+    })).toThrow("history item identity is invalid");
+    const changedNameWire = xaiExecution.wire_observations.map((observation) => (
+      observation.observationSha256 === xaiInboundToolCallSha256
+        ? Object.freeze({
+            ...observation,
+            projection: Object.freeze({
+              ...observation.projection,
+              conversationHistoryItem: Object.freeze({
+                ...(observation.projection.conversationHistoryItem as Record<string, unknown>),
+                nameSha256: "0".repeat(64),
+              }),
+            }),
+          })
+        : observation
+    ));
+    expect(() => assertRetainedLc4QualificationHistoryHydrationEvidence({
+      provider: "xai",
+      summary: xaiExecution,
+      wire: changedNameWire,
+    })).toThrow("history tool name is invalid");
+    const openaiExecution = completedRoundtrips.find((execution) => execution.provider === "openai")!;
+    const openaiEvidence = openaiExecution.history_hydration_evidence!;
+    const invalidOpenAiOmission = rehashHistoryEvidence(Object.freeze({
+      ...openaiEvidence,
+      status: "identity_acknowledged_content_unverifiable",
+      item_acknowledgement_scopes: Object.freeze([
+        "exact_content",
+        "identity_only_content_omitted",
+        "exact_content",
+        "exact_content",
+      ] as const),
+    }));
+    expect(() => assertRetainedLc4QualificationHistoryHydrationEvidence({
+      provider: "openai",
+      summary: {
+        status: "passed",
+        history_hydration_evidence: invalidOpenAiOmission,
+      },
+      wire: openaiExecution.wire_observations,
+    })).toThrow("history summary is invalid");
     expect(clientConstructions.filter((entry) => entry.provider === "xai")).toEqual([
       {
         provider: "xai",
