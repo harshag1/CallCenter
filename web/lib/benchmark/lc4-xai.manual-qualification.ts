@@ -23,7 +23,7 @@ import {
 } from "./lc4-provider-profiles";
 
 export const LC4_XAI_FINITE_MANUAL_GATE_D_VERSION =
-  "HACC-LC4-PROVIDER-XAI/FINITE-MANUAL-GATE-D-v3" as const;
+  "HACC-LC4-PROVIDER-XAI/FINITE-MANUAL-GATE-D-v4" as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD = 1_000_000 as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PROVIDER_SESSIONS = 1 as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PCM_BYTES = 480_000 as const;
@@ -96,6 +96,9 @@ export const LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING = Object.freeze({
   turn_boundary: "explicit_commit_ack_then_response_create" as const,
   provider_speech_activity_events:
     "telemetry_only_never_commit_or_response_authority" as const,
+  assistant_audio_delta_wire_types:
+    LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE
+      .assistant_audio_delta_wire_types,
   tool_gateway: "capability_gateway" as const,
 });
 
@@ -1188,7 +1191,9 @@ export function assertLc4XaiFiniteManualGateDExecutionEvidence(input: Readonly<{
     {
       digest: evidence.initial_assistant_pcm_observation_sha256,
       direction: "inbound",
-      wireType: "response.audio.delta",
+      wireType:
+        LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE
+          .assistant_audio_delta_wire_types,
       label: "initial assistant PCM",
     },
     {
@@ -1218,7 +1223,9 @@ export function assertLc4XaiFiniteManualGateDExecutionEvidence(input: Readonly<{
     {
       digest: evidence.post_tool_assistant_pcm_observation_sha256,
       direction: "inbound",
-      wireType: "response.audio.delta",
+      wireType:
+        LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE
+          .assistant_audio_delta_wire_types,
       label: "post-tool assistant PCM",
     },
     {
@@ -1236,7 +1243,11 @@ export function assertLc4XaiFiniteManualGateDExecutionEvidence(input: Readonly<{
     if (matches.length !== 1
       || matches[0]!.provider !== "xai"
       || matches[0]!.direction !== role.direction
-      || matches[0]!.wire_type !== role.wireType) {
+      || !(Array.isArray(role.wireType)
+        ? role.wireType.some((wireType) => (
+            matches[0]!.wire_type === wireType
+          ))
+        : matches[0]!.wire_type === role.wireType)) {
       throw new Error(
         `Gate D ${role.label} must resolve to exactly one role-correct xAI wire observation`,
       );

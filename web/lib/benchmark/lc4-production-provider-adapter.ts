@@ -17,6 +17,7 @@ import {
 import { createLc4CapturedOutput, type Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
   assertLc4XaiTransportProfile,
   assertLc4ProviderProfileManifest,
   lc4XaiTransportProfileForPurpose,
@@ -3490,7 +3491,7 @@ function lc4GateDObservedAttribution(
   observations: readonly Lc4SanitizedWireObservation[],
   expected: Readonly<{
     direction: "inbound" | "outbound";
-    wire_type: string;
+    wire_type: string | readonly string[];
     label: string;
   }>,
 ): Lc4SanitizedWireObservation {
@@ -3501,7 +3502,11 @@ function lc4GateDObservedAttribution(
   if (matches.length !== 1
     || matches[0]!.provider !== "xai"
     || matches[0]!.direction !== expected.direction
-    || matches[0]!.wire_type !== expected.wire_type
+    || !(Array.isArray(expected.wire_type)
+      ? expected.wire_type.some((wireType) => (
+          matches[0]!.wire_type === wireType
+        ))
+      : matches[0]!.wire_type === expected.wire_type)
     || matches[0]!.connection_epoch !== reference.connectionEpoch
     || matches[0]!.sequence !== reference.sequence) {
     throw new Error(`Gate D ${expected.label} lacks one role-correct wire observation`);
@@ -3654,7 +3659,9 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
           wire,
           {
             direction: "inbound",
-            wire_type: "response.audio.delta",
+            wire_type:
+              LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE
+                .assistant_audio_delta_wire_types,
             label: "assistant PCM",
           },
         );

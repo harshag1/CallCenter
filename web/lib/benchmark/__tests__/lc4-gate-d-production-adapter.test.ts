@@ -321,7 +321,7 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
       responseIdSource: "provider",
       wireObservation: reference(started),
     });
-    const audio = this.#wire("inbound", "response.audio.delta", {
+    const audio = this.#wire("inbound", "response.output_audio.delta", {
       responseId: ROOT_RESPONSE_ID,
     });
     this.#emit({
@@ -432,7 +432,7 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
     const audioResponseId = this.#fault === "foreign_post_audio"
       ? "foreign-post-audio-response"
       : responseId;
-    const audio = this.#wire("inbound", "response.audio.delta", {
+    const audio = this.#wire("inbound", "response.output_audio.delta", {
       responseId: audioResponseId,
     });
     this.#emit({

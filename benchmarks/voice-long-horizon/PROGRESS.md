@@ -870,3 +870,36 @@ exposure is therefore `$2.00` including the failed Gate D. This is a transport
 finding and source correction, not an efficacy result, Native/HACC score, or
 launch-graph datum. A fresh clean commit, keys, evidence root, and passing Gate
 D v3 receipt remain mandatory.
+
+## 2026-07-28 — Live xAI audio-wire alias discovery and Gate D v4
+
+Gate D v3 at clean source
+`35ba9be4544e339aca2ac58db322f88fea90f495` crossed the corrected manual
+turn boundary but failed its one-shot audio-output contract. It produced no
+passing receipt, its private root is quarantined, and its `$1.00` authority is
+conservatively settled.
+
+A fresh redacted raw-wire diagnostic then executed the exact two-phase
+function lifecycle successfully with no retry or reconnect:
+
+- one explicit manual commit and acknowledgement;
+- two distinct provider response identities, both terminal `completed`;
+- 86,880 initial-response PCM bytes and 193,440 post-tool PCM bytes;
+- exactly one `capability_gateway` call whose arguments selected
+  `transport.probe` with an empty argument object; and
+- one function result followed by one explicit continuation request.
+
+The provider emitted assistant audio on the currently documented
+`response.output_audio.delta` event. HACC's shared normalizer already accepted
+both that event and the legacy-compatible `response.audio.delta`, but Gate D's
+independent role checker required only the latter. The source correction makes
+the two-name set explicit in the frozen xAI transport profile, production
+binding, live adapter, and replay validator; concrete production-adapter tests
+now exercise `response.output_audio.delta`. Gate D identity is rotated to v4,
+so neither failed root can be admitted under the corrected contract.
+
+This diagnostic is conservatively charged another `$1.00`; post-baseline
+conservative exposure is now `$4.00` across two failed one-shot gates and two
+bounded diagnostic groups. It remains transport evidence only. A new clean
+commit and a fresh passing Gate D v4 receipt are still required before
+qualification or any efficacy cell.

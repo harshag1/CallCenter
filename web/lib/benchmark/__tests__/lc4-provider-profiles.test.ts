@@ -50,6 +50,10 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
       turn_detection: { type: null },
       provider_speech_activity_events:
         "telemetry_only_never_commit_or_response_authority",
+      assistant_audio_delta_wire_types: [
+        "response.output_audio.delta",
+        "response.audio.delta",
+      ],
     });
     expect(LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE).toMatchObject({
       purpose: "interactive_transport_qualification",
@@ -99,6 +103,10 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
       turn_detection: { type: null },
       provider_speech_activity_events:
         "telemetry_only_never_commit_or_response_authority",
+      assistant_audio_delta_wire_types: [
+        "response.output_audio.delta",
+        "response.audio.delta",
+      ],
       separately_qualified_interactive_transport: {
         turn_boundary: "server_vad_speech_stop_auto_commit_auto_response",
         interpretation: "transport_reliability_only_not_finite_clip_efficacy",
