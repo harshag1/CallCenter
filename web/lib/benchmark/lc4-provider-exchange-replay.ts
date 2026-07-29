@@ -1077,6 +1077,26 @@ function assertListenerEvidence(input: Readonly<{
   capture: ReplayedOutputCapture;
   expected: Lc4ProviderExchangeReplayExpectation;
 }>): void {
+  const isHaccResponsePlan =
+    input.expected.response_control_kind === "hacc_response_plan";
+  if (isHaccResponsePlan) {
+    hash(
+      input.projection.response_plan_sha256,
+      "LC4 initial HACC response plan",
+    );
+  }
+  const expectedListenerResponsePlanSha256 = isHaccResponsePlan
+    ? hash(
+        input.projection.terminal_response_plan_sha256,
+        "LC4 terminal HACC response plan",
+      )
+    : null;
+  if (input.expected.response_control_kind === "native_context"
+    && input.projection.response_plan_sha256 !== null) {
+    throw new Error(
+      "LC4 Native exchange cannot carry a HACC response-plan commitment",
+    );
+  }
   const listenerResult = record(
     input.projection.dev_listener_result,
     "LC4 DEV listener result",
@@ -1269,7 +1289,7 @@ function assertListenerEvidence(input: Readonly<{
     || evidence.physical_playback_status !== "not_performed_headless"
     || evidence.human_audibility_status !== "not_measured_not_claimed"
     || evidence.response_plan_sha256
-      !== input.projection.response_plan_sha256
+      !== expectedListenerResponsePlanSha256
     || evidence.wire_observation_set_sha256
       !== input.projection.wire_observation_set_sha256
     || evidence.listener_manifest_sha256

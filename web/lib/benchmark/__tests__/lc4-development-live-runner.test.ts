@@ -630,6 +630,10 @@ function providerExchangeProjection(
     playback_kind: playbackKind,
     response_control_kind: extra.arm === "hacc" ? "hacc_response_plan" : "native_context",
     response_plan_sha256: responsePlanSha256,
+    terminal_response_plan_sha256: responsePlanSha256
+      ?? sha256Hex(
+        `fixture-native-response-control:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+      ),
     caller_pcm_sha256: sha256Hex(callerPcm),
     caller_pcm_byte_length: callerPcm.byteLength,
     requested_runtime_identity: {

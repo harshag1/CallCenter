@@ -714,6 +714,32 @@ function withListenerMutation(
   };
 }
 
+function haccToolContinuationFixture(provider: Provider): Fixture {
+  const initialResponsePlanSha256 = sha256Hex(
+    `${provider}-initial-response-plan`,
+  );
+  const terminalResponsePlanSha256 = sha256Hex(
+    `${provider}-post-tool-response-plan`,
+  );
+  const native = fixture(provider);
+  const hacc: Fixture = {
+    projection: {
+      ...native.projection,
+      response_control_kind: "hacc_response_plan",
+      response_plan_sha256: initialResponsePlanSha256,
+      terminal_response_plan_sha256: terminalResponsePlanSha256,
+    },
+    expectation: {
+      ...native.expectation,
+      response_control_kind: "hacc_response_plan",
+    },
+  };
+  return withListenerMutation(hacc, (listener) => ({
+    ...listener,
+    response_plan_sha256: terminalResponsePlanSha256,
+  }));
+}
+
 function replay(value: Fixture): void {
   assertLc4ProviderExchangeReplayProjection(
     value.projection as unknown as JsonValue,
@@ -731,6 +757,48 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
 
   it("replays exact xAI server-VAD caller plus delimiter and output lineage", () => {
     expect(() => replay(fixture("xai", true))).not.toThrow();
+  });
+
+  it.each(["openai", "gemini", "xai"] as const)(
+    "binds %s HACC listener evidence to the terminal post-tool response plan",
+    (provider) => {
+      const valid = haccToolContinuationFixture(provider);
+      expect(valid.projection.response_plan_sha256)
+        .not.toBe(valid.projection.terminal_response_plan_sha256);
+      expect(() => replay(valid)).not.toThrow();
+    },
+  );
+
+  it("rejects a rehashed HACC listener rebound to the initial pre-tool response plan", () => {
+    const valid = haccToolContinuationFixture("openai");
+    const mutation = withListenerMutation(valid, (listener) => ({
+      ...listener,
+      response_plan_sha256: valid.projection.response_plan_sha256,
+    }));
+    expect(() => replay(mutation)).toThrow(/listener\/CAS\/evaluator/u);
+  });
+
+  it("rejects a substituted terminal HACC response plan", () => {
+    const valid = haccToolContinuationFixture("openai");
+    expect(() => replay({
+      ...valid,
+      projection: {
+        ...valid.projection,
+        terminal_response_plan_sha256:
+          sha256Hex("substituted-terminal-response-plan"),
+      },
+    })).toThrow(/listener\/CAS\/evaluator/u);
+  });
+
+  it("rejects a Native exchange that smuggles a HACC plan commitment", () => {
+    const valid = fixture("openai");
+    expect(() => replay({
+      ...valid,
+      projection: {
+        ...valid.projection,
+        response_plan_sha256: sha256Hex("smuggled-hacc-plan"),
+      },
+    })).toThrow(/cannot carry a HACC response-plan/u);
   });
 
   it("replays a bounded long-form response with more than 512 wire observations", () => {
