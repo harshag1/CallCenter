@@ -17,6 +17,13 @@ import {
 } from "./audible-evidence";
 import { benchmarkKernelAttestationPublicKeyFingerprint } from "./kernel-attestation";
 import { LC4_DEV_LISTENER_PLAN_SHA256 } from "./lc4-development-listener-semantics";
+import { LC4_DEV_LISTENER_SEMANTIC_BUNDLE } from "./lc4-development-listener-semantics";
+import {
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS,
+} from "./lc4-development-asr-semantic-calibration-reference";
+import {
+  scoreLc4ListenerSemanticCriterion,
+} from "./lc4-listener-evidence";
 import {
   LC4_DEV_OUTPUT_ROUTE_CALIBRATION_CONFIG_SHA256,
   LC4_DEV_WHISPER_CPP_EXECUTABLE_SHA256,
@@ -36,6 +43,7 @@ type RetainedFixture = Readonly<{
   voice: string;
   opportunity_id: string;
   criterion_plan_sha256: string;
+  synthesis_prompt: string;
   reference_transcript: string;
   expected_semantic_phrases: readonly string[];
   pcm_path: string;
@@ -131,8 +139,56 @@ export async function verifyLc4DevelopmentSemanticCalibrationArtifact(input: Rea
     if (!Array.isArray(artifact.fixtures) || artifact.fixtures.length !== 48 || artifact.tts.fixture_count !== 48) {
       errors.push("calibration fixture inventory must contain exactly 48 fixtures");
     }
+    const expectedMatrix = new Set(
+      ["synthetic-samantha", "synthetic-daniel"].flatMap((routeId) =>
+        LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS.map(
+          (opportunityId) => `${routeId}\0${opportunityId}`,
+        )),
+    );
+    const observedMatrix = new Set<string>();
+    const observedFixtureIds = new Set<string>();
     const root = resolve(input.root_dir);
     for (const fixture of artifact.fixtures ?? []) {
+      if (observedFixtureIds.has(fixture.fixture_id)) {
+        errors.push(`duplicate calibration fixture ID:${fixture.fixture_id}`);
+      }
+      observedFixtureIds.add(fixture.fixture_id);
+      const matrixKey = `${fixture.route_id}\0${fixture.opportunity_id}`;
+      if (!expectedMatrix.has(matrixKey) || observedMatrix.has(matrixKey)) {
+        errors.push(`calibration route/opportunity substitution:${fixture.fixture_id}`);
+      }
+      observedMatrix.add(matrixKey);
+      const opportunity =
+        LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.find(
+          (candidate) =>
+            candidate.opportunity_id === fixture.opportunity_id,
+        );
+      if (!opportunity
+        || opportunity.criterion_plan_sha256 !==
+          fixture.criterion_plan_sha256) {
+        errors.push(`frozen semantic plan mismatch:${fixture.fixture_id}`);
+      }
+      if (typeof fixture.synthesis_prompt !== "string"
+        || fixture.synthesis_prompt.length === 0
+        || fixture.synthesis_prompt.length > 4_096) {
+        errors.push(`invalid retained TTS prompt:${fixture.fixture_id}`);
+      }
+      if (fixture.result.status !== "completed") {
+        errors.push(`ASR did not complete:${fixture.fixture_id}`);
+      } else if (opportunity) {
+        for (const criterion of opportunity.criteria.filter(
+          (candidate) => candidate.required_for_final_scorer,
+        )) {
+          if (!scoreLc4ListenerSemanticCriterion(
+            criterion,
+            fixture.result.transcript,
+          )) {
+            errors.push(
+              `frozen semantic replay failed:${fixture.fixture_id}:${criterion.criterion_id}`,
+            );
+          }
+        }
+      }
       if (!/^[A-Za-z0-9._-]+$/u.test(fixture.pcm_path)) throw new Error("calibration PCM path is unsafe");
       const pcm = new Uint8Array(await readFile(join(root, fixture.pcm_path)));
       if (sha256Hex(pcm) !== fixture.pcm_sha256 || fixture.request.played_sample_count * 2 !== pcm.byteLength) {
@@ -152,6 +208,10 @@ export async function verifyLc4DevelopmentSemanticCalibrationArtifact(input: Rea
       if (!verifySignature(null, Buffer.from(`${INVOCATION_SIGNATURE_DOMAIN}${receiptHash}`, "utf8"), publicKey, Buffer.from(receipt.signature.signature_base64, "base64"))) {
         errors.push(`signed invocation signature mismatch:${fixture.fixture_id}`);
       }
+    }
+    if (observedMatrix.size !== expectedMatrix.size
+      || [...expectedMatrix].some((key) => !observedMatrix.has(key))) {
+      errors.push("calibration route/opportunity matrix is incomplete");
     }
     if (!SHA256.test(artifact.artifact_sha256) || !SHA256.test(artifact.calibration_sha256)) errors.push("artifact contains an invalid digest");
   } catch (error) {

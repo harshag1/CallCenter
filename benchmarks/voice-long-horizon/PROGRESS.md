@@ -1007,3 +1007,37 @@ provider call or support an efficacy claim. Paid admission still requires one
 clean source commit, a fresh source-bound ASR environment receipt, and the
 already bounded `$1 + $3 + $15` one-shot sequence. No score or launch graph is
 claimed yet.
+
+## 2026-07-29 — Voice-semantic calibration now fails closed on actual speech
+
+The provider-free ASR admission gate exposed that the prior synthetic
+calibration recited target phrases without asserting them. That was sufficient
+for lexical ASR calibration but correctly failed the v3 negation-aware semantic
+scorer. The calibration generator now:
+
+- speaks explicit affirmative statements;
+- preserves a separate canonical human transcript and transparent TTS prompt;
+- preregisters spoken/ASR-equivalent forms for the collection identifier and
+  visit time;
+- omits prohibited claims from `contains_none` clips;
+- scores every actual Whisper transcript against every required frozen
+  criterion before signing; and
+- independently verifies the exact 24-opportunity × 2-voice matrix, frozen
+  criterion hashes, retained PCM, signatures, and semantic replay.
+
+A fresh 48-clip development canary using macOS Samantha and Daniel TTS plus the
+pinned local Whisper large-v3-turbo runtime completed with:
+
+| Provider-free calibration metric | Observed | Wilson upper bound |
+|---|---:|---:|
+| Fixture coverage | 100.00% | — |
+| Word error rate | 6.19% | 7.96% |
+| Semantic false-negative rate | 1.16% | 5.04% |
+| Semantic false-positive rate | 0.00% | 2.74% |
+
+All 48 actual transcripts passed their frozen opportunity criteria, and the
+offline signed-artifact verifier returned `valid: true` with no errors. This
+canary opened **0** provider sessions and spent **$0.00**. It is development
+evidence only because it preceded the clean source commit; the release gate
+must regenerate and bind a fresh receipt to the committed source before any
+paid session is authorized.

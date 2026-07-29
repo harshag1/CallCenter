@@ -18,9 +18,16 @@ import {
   LC4_DEV_LISTENER_SEMANTIC_BUNDLE,
 } from "../lib/benchmark/lc4-development-listener-semantics";
 import {
+  createLc4DevelopmentSemanticCalibrationReference,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS,
+} from "../lib/benchmark/lc4-development-asr-semantic-calibration-reference";
+import {
   createLc4DevelopmentLargeV3WhisperRuntime,
   type Lc4DevelopmentWhisperRuntimePaths,
 } from "../lib/benchmark/lc4-development-whisper-runtime";
+import {
+  scoreLc4ListenerSemanticCriterion,
+} from "../lib/benchmark/lc4-listener-evidence";
 import { verifyLc4DevelopmentSemanticCalibrationArtifact } from "../lib/benchmark/lc4-development-asr-calibration-artifact";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
@@ -30,14 +37,6 @@ import {
 const executeFile = promisify(execFile);
 const ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic-asr-calibration/v1\n";
 const SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic-asr-calibration-signature/v1\n";
-const SELECTED = Object.freeze([
-  "lc4-dev-op-05", "lc4-dev-op-10", "lc4-dev-op-11", "lc4-dev-op-15",
-  "lc4-dev-op-19", "lc4-dev-op-20", "lc4-dev-op-21", "lc4-dev-op-23",
-  "lc4-dev-op-26", "lc4-dev-op-01", "lc4-dev-op-02", "lc4-dev-op-30",
-  "lc4-dev-op-04", "lc4-dev-op-37", "lc4-dev-op-39", "lc4-dev-op-40",
-  "lc4-dev-op-41", "lc4-dev-op-45", "lc4-dev-op-46", "lc4-dev-op-48",
-  "lc4-dev-op-50", "lc4-dev-op-53", "lc4-dev-op-54", "lc4-dev-op-57",
-] as const);
 const ROUTES = Object.freeze([
   Object.freeze({ route_id: "synthetic-samantha", voice: "Samantha" }),
   Object.freeze({ route_id: "synthetic-daniel", voice: "Daniel" }),
@@ -55,14 +54,8 @@ function flag(name: string): string {
   return resolve(value);
 }
 
-function speechFriendly(phrases: readonly string[]): string | null {
-  const numericWord = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twentieth)\b/iu;
-  const candidates = phrases.filter((phrase) => !/\d/u.test(phrase) && !numericWord.test(phrase));
-  return [...candidates].sort((left, right) => right.length - left.length || left.localeCompare(right))[0] ?? null;
-}
-
 function calibrationItems() {
-  return SELECTED.map((opportunityId) => {
+  return LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS.map((opportunityId) => {
     const opportunity = LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities
       .find((candidate) => candidate.opportunity_id === opportunityId);
     if (!opportunity || opportunity.criteria.length === 0) {
@@ -71,14 +64,8 @@ function calibrationItems() {
     return Object.freeze({
       opportunity_id: opportunityId,
       criterion_plan_sha256: opportunity.criterion_plan_sha256,
-      phrases: Object.freeze(opportunity.criteria.flatMap((criterion) => {
-        const phrase = speechFriendly(criterion.phrases);
-        return phrase === null ? [] : [phrase];
-      })),
+      criteria: opportunity.criteria,
     });
-  }).map((item) => {
-    if (item.phrases.length === 0) throw new Error(`selected LC4-DEV semantic opportunity ${item.opportunity_id} has no speech-stable phrase`);
-    return item;
   });
 }
 
@@ -140,10 +127,19 @@ async function main(): Promise<void> {
   for (const route of ROUTES) {
     for (const [index, item] of items.entries()) {
       const fixtureId = `lc4-dev-${route.route_id}-${String(index + 1).padStart(2, "0")}`;
-      const reference = `Listener calibration ${SAMPLE_WORDS[index]}. ${item.phrases.join(". ")}.`;
+      const reference = createLc4DevelopmentSemanticCalibrationReference({
+        marker: SAMPLE_WORDS[index]!,
+        criteria: item.criteria,
+      });
       const aiffPath = join(root, `${fixtureId}.aiff`);
       const pcmPath = join(root, `${fixtureId}.pcm`);
-      const pcm = await synthesize({ voice: route.voice, text: reference, aiff_path: aiffPath, pcm_path: pcmPath, ffmpeg_path: paths.ffmpeg_path });
+      const pcm = await synthesize({
+        voice: route.voice,
+        text: reference.synthesis_prompt,
+        aiff_path: aiffPath,
+        pcm_path: pcmPath,
+        ffmpeg_path: paths.ffmpeg_path,
+      });
       const request = createIndependentAsrRequest({
         runId: "lc4-dev-semantic-calibration",
         unitId: fixtureId,
@@ -159,13 +155,32 @@ async function main(): Promise<void> {
         runnerSigner,
         execute: runtime.execute_asr,
       });
+      const asrResult = invocation.result;
+      if (asrResult.status !== "completed") {
+        throw new Error(
+          `Whisper did not complete semantic calibration for ${fixtureId}: ${asrResult.reason_code}`,
+        );
+      }
+      const failedCriteria = item.criteria
+        .filter((criterion) => criterion.required_for_final_scorer)
+        .filter((criterion) =>
+          !scoreLc4ListenerSemanticCriterion(
+            criterion,
+            asrResult.transcript,
+          ))
+        .map((criterion) => criterion.criterion_id);
+      if (failedCriteria.length > 0) {
+        throw new Error(
+          `Whisper transcript failed frozen semantic criteria for ${fixtureId}: ${failedCriteria.join(", ")}`,
+        );
+      }
       const fixture: AsrCalibrationSourceFixture = Object.freeze({
         fixture_id: fixtureId,
         route_id: route.route_id,
         split: "held_out",
         corpus_sample_id: `${item.opportunity_id}-${route.voice.toLowerCase()}`,
-        reference_transcript: reference,
-        expected_semantic_phrases: item.phrases,
+        reference_transcript: reference.reference_transcript,
+        expected_semantic_phrases: reference.expected_semantic_phrases,
         forbidden_semantic_phrases: Object.freeze(["counterfeit lunar permission", "zebra override accepted"]),
         reference_audio_start_sample: 0,
         reference_audio_end_sample: request.played_sample_count,
@@ -178,8 +193,9 @@ async function main(): Promise<void> {
         voice: route.voice,
         opportunity_id: item.opportunity_id,
         criterion_plan_sha256: item.criterion_plan_sha256,
-        reference_transcript: reference,
-        expected_semantic_phrases: item.phrases,
+        synthesis_prompt: reference.synthesis_prompt,
+        reference_transcript: reference.reference_transcript,
+        expected_semantic_phrases: reference.expected_semantic_phrases,
         pcm_path: `${fixtureId}.pcm`,
         pcm_sha256: request.source_played_audio_sha256,
         request: {

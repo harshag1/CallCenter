@@ -288,19 +288,25 @@ describe("LC4 public development listener semantics", () => {
     expect(verifyLc4DevelopmentListenerProtocolMigration(migration)).toEqual({ valid: true, errors: [] });
     expect(migration.timing).toBe("after_quarantined_development_attempts_before_next_paid_episode");
     expect(migration.provider_output_used).toBe(false);
-    expect(migration.migration_basis).toBe("methodology_red_team_not_provider_outcomes");
+    expect(migration.migration_basis).toBe("provider_free_asr_calibration_not_provider_outcomes");
     expect(migration.efficacy_claim_eligible).toBe(false);
-    expect(migration.changed_opportunity_ids).toEqual(
-      LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities
-        .filter((opportunity) => opportunity.applicability.status === "applicable")
-        .map((opportunity) => opportunity.opportunity_id),
-    );
-    expect(migration.changed_opportunity_ids).toContain(lc4DevCallerBranchSemanticSubjectId("no_call"));
+    expect(migration.changed_opportunity_ids).toEqual([
+      "lc4-dev-op-03",
+      "lc4-dev-op-05",
+      "lc4-dev-op-10",
+      "lc4-dev-op-19",
+      "lc4-dev-op-23",
+      "lc4-dev-op-28",
+      "lc4-dev-op-37",
+      "lc4-dev-op-59",
+    ]);
     expect(migration.current.semantic_scorer_version)
       .toContain("registered-lexical-adherence");
     expect(migration.current.semantic_scorer_build_sha256).toMatch(/^[a-f0-9]{64}$/u);
-    expect(migration.prior.semantic_scorer_version).toBe("unversioned-token-sequence-inclusion");
-    expect(migration.prior.semantic_scorer_build_sha256).toBeNull();
+    expect(migration.prior.semantic_scorer_version)
+      .toBe(migration.current.semantic_scorer_version);
+    expect(migration.prior.semantic_scorer_build_sha256)
+      .toBe(migration.current.semantic_scorer_build_sha256);
     expect(migration.current.registry_sha256).toBe(LC4_DEV_LISTENER_REGISTRY_SHA256);
     expect(migration.current.plan_sha256).toBe(LC4_DEV_LISTENER_PLAN_SHA256);
     expect(migration.current.registry_sha256).not.toBe(migration.prior.registry_sha256);

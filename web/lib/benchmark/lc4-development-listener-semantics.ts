@@ -59,13 +59,13 @@ const DEV_REPLAY_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-replay-a
 const DEV_PROTOCOL_MIGRATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-protocol-migration/v1\n";
 
 export const LC4_DEV_LISTENER_SEMANTIC_VERSION =
-  "lc4-dev-listener-semantics-v4-negation-aware-branch-complete" as const;
+  "lc4-dev-listener-semantics-v5-voice-asr-alias-complete" as const;
 export const LC4_DEV_LISTENER_CRITERIA_SOURCE_CORPUS_SHA256 = "075cfbb0b4c914d409f8c0232d11314c27621e082087b20d8a658fc6e8248bfc";
 export const LC4_DEV_LISTENER_PROTOCOL_SHA256 = sha256Hex(
   `${DEV_PROTOCOL_DOMAIN}${LC4_PUBLIC_DEV_PROTOCOL_ID}\nplayed-pcm-only\nprovider-arm-blind\nfrozen-before-output`,
 );
 export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION =
-  "lc4-dev-semantic-evaluator-v4-headless-complete-capture-negation-aware-branch-complete" as const;
+  "lc4-dev-semantic-evaluator-v5-headless-complete-capture-voice-asr-alias-complete" as const;
 export const LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256 = sha256Hex(
   `${DEV_EVALUATOR_BUILD_DOMAIN}${LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION}`
   + `\nsemantic-scorer-version:${LC4_LISTENER_SEMANTIC_SCORER_VERSION}`
@@ -93,8 +93,8 @@ const CONCEPTS: Readonly<Record<string, readonly PhraseGroup[]>> = Object.freeze
   "lc4-dev-op-01": [P("subject_or_goal_unresolved", "archive access", "oral history access", "access to the recording")],
   "lc4-dev-op-02": [P("required_evidence_missing", "not verified", "need to verify", "verify your record", "verify the record")],
   "lc4-dev-op-04": [P("subject_or_goal_unresolved", "family history", "not for publication", "non publication")],
-  "lc4-dev-op-05": [P("latest_revision_unacknowledged", "OH-RIVER-17"), P("latest_revision_unacknowledged", "family history")],
-  "lc4-dev-op-10": [P("subject_or_goal_unresolved", "OH-RIVER-17", "oral history"), P("checkpoint_or_obligation_incomplete", "family history", "research purpose")],
+  "lc4-dev-op-05": [P("latest_revision_unacknowledged", "OH-RIVER-17", "oh river seventeen", "o river 17", "oriver 17"), P("latest_revision_unacknowledged", "family history")],
+  "lc4-dev-op-10": [P("subject_or_goal_unresolved", "OH-RIVER-17", "oh river seventeen", "o river 17", "oriver 17", "oral history"), P("checkpoint_or_obligation_incomplete", "family history", "research purpose")],
   "lc4-dev-op-11": [P("required_evidence_missing", "not verified", "unverified", "need to verify")],
   "lc4-dev-op-15": [P("required_worker_unresolved", "rights review", "rights check", "rights evidence"), P("required_worker_unresolved", "eligibility check", "eligibility result", "eligibility evidence")],
   "lc4-dev-op-16": [P("checkpoint_or_obligation_incomplete", "archive room is paused", "room request is paused", "suspend the archive room")],
@@ -334,9 +334,10 @@ function factValue(corpus: Lc4PublicDevelopmentCorpus, key: string, version: 1 |
 }
 
 function factPhrases(value: string): readonly string[] {
+  if (value === "OH-RIVER-17") return Object.freeze([value, "oh river seventeen", "o river 17", "oriver 17"]);
   if (value === "2026-08-18") return Object.freeze([value, "August eighteenth", "August 18"]);
   if (value === "2026-08-20") return Object.freeze([value, "August twentieth", "August 20"]);
-  if (value === "14:30") return Object.freeze([value, "two thirty", "2 30"]);
+  if (value === "14:30") return Object.freeze([value, "two thirty", "2 30", "230"]);
   if (value === "tagged screen-reader PDF") return Object.freeze([value, "tagged screen reader PDF", "screen reader PDF"]);
   if (value === "large-print paper") return Object.freeze([value, "large print paper"]);
   if (value === "voice callback ending 0184") return Object.freeze([value, "ending 0184", "zero one eight four"]);
@@ -986,23 +987,23 @@ const DEVELOPMENT_BUNDLE = createLc4DevelopmentListenerSemanticBundle();
 // phrase registry, operators, or ordering changes, this module refuses to load
 // until the versioned roots are intentionally reviewed and updated.
 export const LC4_DEV_LISTENER_SCHEDULE_SHA256 = "d9c1c7726af2daf0a330c3935295c67e5762044a48419a4921bcd46b280595a6";
-export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "322a69fd520d935fde805b0de60941cdcebeba60133abee6f1bae02c804442e0";
-export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "60ef9be8af45533663e3cebcc1ce38b079250905cc520c7ba91ba0f354feb5bb";
-export const LC4_DEV_LISTENER_PLAN_SHA256 = "c0ff7a89629af00442504f45dbb3f103be8d28ba689341c714e5ddf11af1cd10";
+export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "68bccae354a28b92d03153896ff9553e9e16bac02793165034960373e05cac25";
+export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "7a2c8bdb607e38a588b7e4cad3c36e781a66719e608cc7fa263013f758958763";
+export const LC4_DEV_LISTENER_PLAN_SHA256 = "20c6c73b7c4291d944aa46f016ed34648716c1f26ac650cacc0237199a245ace";
 
 export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
   schema_version: 1;
-  migration_id: "lc4-dev-listener-v3-to-v4-negation-aware-branch-complete";
+  migration_id: "lc4-dev-listener-v4-to-v5-voice-asr-alias-complete";
   timing: "after_quarantined_development_attempts_before_next_paid_episode";
   provider_output_used: false;
-  migration_basis: "methodology_red_team_not_provider_outcomes";
+  migration_basis: "provider_free_asr_calibration_not_provider_outcomes";
   efficacy_claim_eligible: false;
-  reason: "reject_negated_or_retracted_memory_mentions_and_close_adaptive_branch_scoring";
+  reason: "recognize_preregistered_spoken_identifier_aliases_observed_in_provider_free_asr";
   changed_opportunity_ids: readonly string[];
   prior: Readonly<{
-    semantic_version: "lc4-dev-listener-semantics-v3-explicit-applicability";
-    semantic_scorer_version: "unversioned-token-sequence-inclusion";
-    semantic_scorer_build_sha256: null;
+    semantic_version: "lc4-dev-listener-semantics-v4-negation-aware-branch-complete";
+    semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+    semantic_scorer_build_sha256: string;
     schedule_sha256: string;
     registry_sha256: string;
     registry_manifest_sha256: string;
@@ -1026,24 +1027,31 @@ export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
 function listenerProtocolMigrationBody() {
   return Object.freeze({
     schema_version: 1 as const,
-    migration_id: "lc4-dev-listener-v3-to-v4-negation-aware-branch-complete" as const,
+    migration_id: "lc4-dev-listener-v4-to-v5-voice-asr-alias-complete" as const,
     timing: "after_quarantined_development_attempts_before_next_paid_episode" as const,
     provider_output_used: false as const,
-    migration_basis: "methodology_red_team_not_provider_outcomes" as const,
+    migration_basis: "provider_free_asr_calibration_not_provider_outcomes" as const,
     efficacy_claim_eligible: false as const,
-    reason: "reject_negated_or_retracted_memory_mentions_and_close_adaptive_branch_scoring" as const,
-    changed_opportunity_ids: Object.freeze(DEVELOPMENT_BUNDLE.plan.opportunities
-      .filter((opportunity) => opportunity.applicability.status === "applicable")
-      .map((opportunity) => opportunity.opportunity_id)),
+    reason: "recognize_preregistered_spoken_identifier_aliases_observed_in_provider_free_asr" as const,
+    changed_opportunity_ids: Object.freeze([
+      "lc4-dev-op-03",
+      "lc4-dev-op-05",
+      "lc4-dev-op-10",
+      "lc4-dev-op-19",
+      "lc4-dev-op-23",
+      "lc4-dev-op-28",
+      "lc4-dev-op-37",
+      "lc4-dev-op-59",
+    ]),
     prior: Object.freeze({
-      semantic_version: "lc4-dev-listener-semantics-v3-explicit-applicability" as const,
-      semantic_scorer_version: "unversioned-token-sequence-inclusion" as const,
-      semantic_scorer_build_sha256: null,
-      schedule_sha256: "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415",
-      registry_sha256: "f383891b1d1b260de0ea8b0e58b1ab9129d993022b1b78d4ded2ca0e3818958d",
-      registry_manifest_sha256: "8dfe577f511a7b1093bb19faedf4dacdf19bd38d665d8ca67f961b65a0590d9b",
-      plan_sha256: "62343cc7d3149e36c4388b321fe24128ce9a602bdd1a4b23950a7d1ad62266e0",
-      evaluator_build_sha256: "925ef378605015ef2b7d5cd6a4cd233ddf2ad4f8046fccf8e4b91ecaef8bf4ba",
+      semantic_version: "lc4-dev-listener-semantics-v4-negation-aware-branch-complete" as const,
+      semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+      semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
+      schedule_sha256: "d9c1c7726af2daf0a330c3935295c67e5762044a48419a4921bcd46b280595a6",
+      registry_sha256: "322a69fd520d935fde805b0de60941cdcebeba60133abee6f1bae02c804442e0",
+      registry_manifest_sha256: "60ef9be8af45533663e3cebcc1ce38b079250905cc520c7ba91ba0f354feb5bb",
+      plan_sha256: "c0ff7a89629af00442504f45dbb3f103be8d28ba689341c714e5ddf11af1cd10",
+      evaluator_build_sha256: "6ccc6996615757f71ff86f347ae22bcd2b60032911e6751739b0bbd70db9d9bc",
     }),
     current: Object.freeze({
       semantic_version: LC4_DEV_LISTENER_SEMANTIC_VERSION,

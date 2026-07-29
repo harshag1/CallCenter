@@ -16,9 +16,9 @@ const CALIBRATION_ARTIFACT_DOMAIN = "hacc/lc4/listener-semantic-calibration-arti
 export const LC4_SEMANTIC_CALIBRATION_VERSION =
   "lc4-semantic-calibration-v1-provider-free-hard-negatives" as const;
 export const LC4_SEMANTIC_CALIBRATION_FIXTURE_CORPUS_SHA256 =
-  "3be4b9468d686b5578e719b9603245f49d9c1fd940aee594596acfcfa715b0c6" as const;
+  "281ca9054dfb2ea34e9be77472ad03faa41cdde135ed8b2211722c6bf91af112" as const;
 export const LC4_SEMANTIC_CALIBRATION_ARTIFACT_SHA256 =
-  "f4b52cf7f3cb501c2bea31ea63ae003d5bda8117f29f351464338c82f10b759e" as const;
+  "f7845b4ed2d95bacd69dc8ff08061fdee92f3578d477c810353028700cee6c80" as const;
 
 export type Lc4SemanticCalibrationCategory =
   | "affirmed_phrase"

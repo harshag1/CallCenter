@@ -442,9 +442,10 @@ function prohibitedSpeechPass(opportunity: Lc4PublicDevOpportunity, transcript: 
 
 function factPhrases(value: JsonValue): readonly string[] {
   if (typeof value !== "string") return Object.freeze([canonicalJson(value)]);
+  if (value === "OH-RIVER-17") return Object.freeze([value, "oh river seventeen", "o river 17", "oriver 17"]);
   if (value === "2026-08-18") return Object.freeze([value, "August eighteenth", "August 18"]);
   if (value === "2026-08-20") return Object.freeze([value, "August twentieth", "August 20"]);
-  if (value === "14:30") return Object.freeze([value, "two thirty", "2 30"]);
+  if (value === "14:30") return Object.freeze([value, "two thirty", "2 30", "230"]);
   if (value === "tagged screen-reader PDF") return Object.freeze([value, "tagged screen reader PDF", "screen reader PDF"]);
   if (value === "large-print paper") return Object.freeze([value, "large print paper"]);
   if (value === "voice callback ending 0184") return Object.freeze([value, "ending 0184", "zero one eight four"]);

@@ -427,3 +427,12 @@ No retry reserve is added. Ordinary and ultra-conservative ceilings remain
 the implementation, tests, generated fault artifact, Gate 0 inventory, and
 this ledger are committed into one clean source tree and a fresh ASR
 environment receipt binds that exact commit.
+
+## 2026-07-29 — Provider-free voice-semantic calibration checkpoint
+
+Seven local calibration iterations used only macOS TTS, ffmpeg, and the pinned
+local Whisper model. They opened **0** provider sessions and add **$0.00** to
+the realtime-provider ledger. The final 48-clip development canary passed, but
+it cannot authorize paid work because it was generated before the source
+commit. The next paid authority remains exactly `$1 + $3 + $15 = $19`; there
+is still no retry reserve.
