@@ -852,7 +852,13 @@ export type Lc4DevLiveRunArtifact = Readonly<{
   mechanism_receipt_count: number;
   episode_finalization_count: number;
   replay_evidence_reference_count: number;
-  failure_class: "pre-open" | "transport" | "timeout" | "evidence" | null;
+  failure_class:
+    | "pre-open"
+    | "continuity_compile"
+    | "transport"
+    | "timeout"
+    | "evidence"
+    | null;
   failure_message_sha256: string | null;
   ledger: readonly Lc4DevImmutableLedgerEvent[];
   ledger_head_sha256: string | null;
@@ -905,6 +911,28 @@ async function bounded<T>(label: string, durationMs: number, operation: () => Pr
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * These errors are emitted by the authorized adapter's rotation validators
+ * before its realtime client factory is invoked. Keep this allowlist narrow:
+ * an unrecognized segment-open failure remains transport-classified rather
+ * than being optimistically described as a provider-free local failure.
+ */
+const LOCAL_CONTINUITY_COMPILE_ERROR_PREFIXES = Object.freeze([
+  "LC4 rotation ",
+  "LC4 reopened segment ",
+  "LC4 first segment ",
+  "LC4 native continuity ",
+  "LC4 HACC rotation ",
+  "LC4 provider sessions must rotate ",
+] as const);
+
+function isLocalContinuityCompileFailure(error: unknown): boolean {
+  return error instanceof Error
+    && LOCAL_CONTINUITY_COMPILE_ERROR_PREFIXES.some(
+      (prefix) => error.message.startsWith(prefix),
+    );
 }
 
 function assertControl(receipt: Lc4DevControlReceipt, arm: Arm): void {
@@ -1204,6 +1232,66 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     });
   };
 
+  const segmentOpenFailureFromUnknown = (failureInput: Readonly<{
+    error: unknown;
+    episode: Lc4DevLiveEpisodePlan;
+  }>): Readonly<{
+    failure: Lc4DevFailureEvidence;
+    run_failure_class: Exclude<Lc4DevLiveRunArtifact["failure_class"], null>;
+    provider_boundary_crossed: boolean | null;
+  }> => {
+    const timedOut = failureInput.error instanceof Error
+      && failureInput.error.message === "timeout:segment-open";
+    const continuityCompile = isLocalContinuityCompileFailure(failureInput.error);
+    const failure = createLc4DevFailureEvidence({
+      schema_version: 2,
+      evidence_version: LC4_DEV_FAILURE_EVIDENCE_VERSION,
+      redaction: "strict_allowlist_no_provider_plaintext_credentials_or_raw_ids",
+      failure_role: "primary_exchange",
+      failure_stage: timedOut ? "provider_wait" : "pre_send_contract",
+      failure_code: timedOut
+        ? "provider_response_timeout"
+        : continuityCompile ? "invalid_contract" : "adapter_failure",
+      failure_class: timedOut
+        ? "timeout"
+        : continuityCompile ? "adapter_contract" : "unknown",
+      episode_id: failureInput.episode.episode_id,
+      opportunity_id: null,
+      provider: failureInput.episode.provider,
+      model: failureInput.episode.model,
+      playback_kind: null,
+      operation_order: Object.freeze([]),
+      caller_pcm_sha256: null,
+      caller_pcm_byte_length: 0,
+      caller_pcm_chunk_count: 0,
+      caller_pcm_appended_chunk_count: 0,
+      caller_pcm_appended_byte_length: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+      output_pcm_sha256: null,
+      output_pcm_byte_length: 0,
+      output_pcm_chunk_count: 0,
+      wire_observation_count: 0,
+      terminal_wire_type: "none",
+      terminal_wire_type_sha256: null,
+      terminal_wire_observation_sha256: null,
+      gateway_batch_count: 0,
+      gateway_fatal_class: "none",
+      secondary_failure_evidence_sha256: null,
+    });
+    return Object.freeze({
+      failure,
+      run_failure_class: timedOut
+        ? "timeout"
+        : continuityCompile ? "continuity_compile" : "transport",
+      // Only the adapter's pre-factory continuity errors prove this negative.
+      // A generic or timed-out open can have crossed the provider boundary.
+      provider_boundary_crossed: continuityCompile ? false : null,
+    });
+  };
+
   try {
     for (const episode of input.prepare.episodes) {
       const providerBindings = input.prepare.audio_bindings.filter((binding) => binding.provider === episode.provider);
@@ -1219,11 +1307,36 @@ export async function executeLc4DevLiveRun(input: Readonly<{
       await append("episode_opened", episode.episode_id, null, { provider: episode.provider, arm: episode.arm, model: episode.model });
       for (const segmentOrdinal of [1, 2, 3] as const) {
         failureClass = "transport";
-        const session = await bounded("segment-open", LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, () => input.dependencies.adapter.openSegment({
-          episode,
-          segment_ordinal: segmentOrdinal,
-          previous_rotation_receipt_sha256: previousRotationReceipt,
-        }));
+        let session;
+        try {
+          session = await bounded("segment-open", LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, () => input.dependencies.adapter.openSegment({
+            episode,
+            segment_ordinal: segmentOrdinal,
+            previous_rotation_receipt_sha256: previousRotationReceipt,
+          }));
+        } catch (error) {
+          const classified = segmentOpenFailureFromUnknown({ error, episode });
+          failureClass = classified.run_failure_class;
+          const retainedFailure = await retainFailure(classified.failure);
+          if (retainedFailure.evidence_sha256 !== classified.failure.failure_evidence_sha256) {
+            throw new Error("LC4-DEV segment-open failure evidence is not retained under its failure hash");
+          }
+          await input.dependencies.evidence.assertResolvable(retainedFailure);
+          await append("segment_failed", episode.episode_id, null, {
+            segment_ordinal: segmentOrdinal,
+            failure_evidence_sha256: classified.failure.failure_evidence_sha256,
+            failure_stage: classified.failure.failure_stage,
+            failure_code: classified.failure.failure_code,
+            failure_class: classified.failure.failure_class,
+            failure_role: classified.failure.failure_role,
+            provider_boundary_crossed: classified.provider_boundary_crossed,
+            response_generation_requested: false,
+            response_generation_started: false,
+            response_completed: false,
+          }, [retainedFailure]);
+          primaryFailureEvidenceSha256 = classified.failure.failure_evidence_sha256;
+          throw error;
+        }
         let segmentBodyFailed = false;
         try {
           const start = (segmentOrdinal - 1) * 20;

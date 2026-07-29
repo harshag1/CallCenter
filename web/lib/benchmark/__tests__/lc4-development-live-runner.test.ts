@@ -2016,6 +2016,103 @@ describe("LC4-DEV live runner", () => {
     }
   });
 
+  it("records local rotation compilation failures before any provider socket or generation", async () => {
+    const { pcm, prepare, preflight } = await fixtures();
+    const evidence = memoryEvidence();
+    const retained = retainedDependencies({
+      evidence,
+      pcm,
+      repair: noRepairDependencies(),
+    });
+    const compileFailureMessage = "LC4 rotation conversation text is invalid";
+    let adapterOpenCalls = 0;
+    let providerSocketOpens = 0;
+    const compileRotationContext = (): string => {
+      throw new Error(compileFailureMessage);
+    };
+    const run = await executeLc4DevLiveRun({
+      prepare,
+      preflight,
+      dependencies: {
+        adapter: {
+          kind: "lc4-development-realtime-v1",
+          factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+          preflight_sha256: preflight.preflight_sha256,
+          maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+          async openSegment() {
+            adapterOpenCalls += 1;
+            const compiled = compileRotationContext();
+            providerSocketOpens += 1;
+            throw new Error(`unexpected provider socket after ${compiled}`);
+          },
+        },
+        ...retained,
+        ledger: { async append() {} },
+        now: () => new Date(NOW),
+      },
+    });
+
+    expect(adapterOpenCalls).toBe(1);
+    expect(providerSocketOpens).toBe(0);
+    expect(run).toMatchObject({
+      status: "failed",
+      episodes_started: 1,
+      episodes_completed: 0,
+      opportunities_submitted: 0,
+      opportunities_completed: 0,
+      response_generations_requested: 0,
+      provider_calls_started: 0,
+      response_generations_completed: 0,
+      provider_calls_made: 0,
+      total_response_generations: 0,
+      paid_retry_count: 0,
+      failure_class: "continuity_compile",
+      failure_message_sha256: sha256Hex(compileFailureMessage),
+    });
+    expect(run.ledger.map((event) => event.event_type)).toEqual([
+      "episode_opened",
+      "segment_failed",
+    ]);
+    const segmentFailed = run.ledger[1]!;
+    const segmentFailurePayload =
+      await evidence.resolveJson(segmentFailed.payload_evidence);
+    expect(segmentFailurePayload).toMatchObject({
+      segment_ordinal: 1,
+      failure_stage: "pre_send_contract",
+      failure_code: "invalid_contract",
+      failure_class: "adapter_contract",
+      failure_role: "primary_exchange",
+      provider_boundary_crossed: false,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+    });
+    const failureReference = segmentFailed.evidence_references.find(
+      (reference) => reference.kind === "failure_evidence",
+    )!;
+    const failureEvidence = await evidence.resolveJson(failureReference);
+    expect(failureEvidence).toMatchObject({
+      failure_stage: "pre_send_contract",
+      failure_code: "invalid_contract",
+      failure_class: "adapter_contract",
+      opportunity_id: null,
+      playback_kind: null,
+      operation_order: [],
+      caller_pcm_byte_length: 0,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+      wire_observation_count: 0,
+      terminal_wire_type: "none",
+    });
+    expect(canonicalJson(failureEvidence)).not.toContain(compileFailureMessage);
+    await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+      event_count: 2,
+      ledger_head_sha256: run.ledger_head_sha256,
+    });
+  });
+
   it("executes the exact closed loop and emits an immutable evidence-complete report", async () => {
     const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
