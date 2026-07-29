@@ -43,6 +43,8 @@ const LISTENER_EVIDENCE_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const CAS_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
 const LC4_DEV_LIVE_DEPENDENCY_VERSION =
   "lc4-dev-live-dependencies-v1";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -857,6 +859,93 @@ function assertOutputCapture(input: Readonly<{
   });
 }
 
+function assertSuppressedUnplayedOutput(
+  value: unknown,
+  capture: ReplayedOutputCapture,
+): void {
+  const suppression = record(
+    value,
+    "LC4 suppressed unplayed output evidence",
+  );
+  assertOnlyKeys(suppression, [
+    "schema_version",
+    "policy",
+    "tool_dispatch_count",
+    "response_count",
+    "audio_chunk_count",
+    "audio_byte_length",
+    "audio_pcm_sha256",
+    "transcript_count",
+    "transcript_hash_set_sha256",
+    "caller_heard_audio_chunk_count",
+    "caller_heard_audio_byte_length",
+    "caller_heard_audio_pcm_sha256",
+    "evidence_sha256",
+  ], "LC4 suppressed unplayed output evidence");
+  const toolDispatchCount = integer(
+    suppression.tool_dispatch_count,
+    "LC4 suppressed output tool dispatch count",
+  );
+  const responseCount = integer(
+    suppression.response_count,
+    "LC4 suppressed output response count",
+  );
+  const audioChunkCount = integer(
+    suppression.audio_chunk_count,
+    "LC4 suppressed output audio chunk count",
+  );
+  const audioByteLength = integer(
+    suppression.audio_byte_length,
+    "LC4 suppressed output audio bytes",
+  );
+  const transcriptCount = integer(
+    suppression.transcript_count,
+    "LC4 suppressed output transcript count",
+  );
+  const callerHeardChunkCount = integer(
+    suppression.caller_heard_audio_chunk_count,
+    "LC4 caller-heard output chunk count",
+    1,
+  );
+  const callerHeardByteLength = integer(
+    suppression.caller_heard_audio_byte_length,
+    "LC4 caller-heard output bytes",
+    2,
+  );
+  const audioPcmSha256 = nullableHash(
+    suppression.audio_pcm_sha256,
+    "LC4 suppressed output PCM",
+  );
+  const transcriptHashSetSha256 = nullableHash(
+    suppression.transcript_hash_set_sha256,
+    "LC4 suppressed output transcript set",
+  );
+  const {
+    evidence_sha256: claimedEvidence,
+    ...body
+  } = suppression;
+  if (suppression.schema_version !== 1
+    || suppression.policy
+      !== "exclude_everything_before_the_final_tool_batch_from_caller_heard_history"
+    || responseCount > toolDispatchCount
+    || audioByteLength % 2 !== 0
+    || (audioChunkCount === 0) !== (audioByteLength === 0)
+    || (audioChunkCount === 0) !== (audioPcmSha256 === null)
+    || (transcriptCount === 0) !== (transcriptHashSetSha256 === null)
+    || callerHeardChunkCount !== capture.chunks.length
+    || callerHeardByteLength !== capture.capture.generated_byte_length
+    || suppression.caller_heard_audio_pcm_sha256
+      !== capture.capture.generated_pcm_sha256
+    || claimedEvidence !== domainHash(
+      SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+      body,
+    )) {
+    throw new Error(
+      "LC4 suppressed output evidence differs from its policy, aggregate, or exact caller-heard capture",
+    );
+  }
+}
+
 function assertExactOpenAiCompatibleOutputWire(input: Readonly<{
   observations: readonly Lc4SanitizedWireObservation[];
   capture: ReplayedOutputCapture;
@@ -1541,9 +1630,10 @@ export function assertLc4ProviderExchangeReplayProjection(
     projection,
     "gemini_output_attribution",
   );
-  if ((schemaVersion !== 2 && schemaVersion !== 3)
+  if ((schemaVersion !== 2 && schemaVersion !== 3 && schemaVersion !== 4)
     || (schemaVersion === 2 && hasGeminiOutputAttribution)
-    || (schemaVersion === 3 && !hasGeminiOutputAttribution)
+    || ((schemaVersion === 3 || schemaVersion === 4)
+      && !hasGeminiOutputAttribution)
     || projection.adapter_version !== LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION
     || projection.run_id !== expected.run_id
     || projection.opportunity_id !== expected.opportunity_id
@@ -1558,7 +1648,7 @@ export function assertLc4ProviderExchangeReplayProjection(
     || projection.response_control_kind !== expected.response_control_kind) {
     throw new Error("LC4 provider exchange replay differs from its episode, opportunity, PCM, or arm");
   }
-  if (schemaVersion === 3) {
+  if (schemaVersion === 3 || schemaVersion === 4) {
     if (profile.provider === "gemini") {
       record(
         projection.gemini_output_attribution,
@@ -1616,6 +1706,12 @@ export function assertLc4ProviderExchangeReplayProjection(
     opportunityId: expected.opportunity_id,
     listenerPcm,
   });
+  if (schemaVersion === 4) {
+    assertSuppressedUnplayedOutput(
+      projection.suppressed_unplayed_output,
+      outputCapture,
+    );
+  }
 
   if (expectedMode === "provider_native_server_vad") {
     if (profile.provider !== "xai"
@@ -1676,7 +1772,7 @@ export function assertLc4ProviderExchangeReplayProjection(
   let outputAudioLineageScope:
     Lc4ProviderExchangeReplayResult["output_audio_lineage_scope"];
   if (profile.provider === "gemini") {
-    if (schemaVersion === 3) {
+    if (schemaVersion === 3 || schemaVersion === 4) {
       assertVersionedGeminiOutputAttribution({
         value: projection.gemini_output_attribution,
         observations,

@@ -36,6 +36,8 @@ const LISTENER_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const CAS_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
 
 type Provider = "openai" | "gemini" | "xai";
 type Wire = Readonly<{
@@ -747,6 +749,42 @@ function replay(value: Fixture): void {
   );
 }
 
+function schemaV4Fixture(provider: "openai" | "xai"): Fixture {
+  const source = fixture(provider);
+  const capture = source.projection.output_capture as Record<string, unknown>;
+  const chunks = capture.chunks as readonly unknown[];
+  const body = {
+    schema_version: 1,
+    policy:
+      "exclude_everything_before_the_final_tool_batch_from_caller_heard_history",
+    tool_dispatch_count: 0,
+    response_count: 0,
+    audio_chunk_count: 0,
+    audio_byte_length: 0,
+    audio_pcm_sha256: null,
+    transcript_count: 0,
+    transcript_hash_set_sha256: null,
+    caller_heard_audio_chunk_count: chunks.length,
+    caller_heard_audio_byte_length: capture.generated_byte_length,
+    caller_heard_audio_pcm_sha256: capture.generated_pcm_sha256,
+  };
+  return {
+    ...source,
+    projection: {
+      ...source.projection,
+      schema_version: 4,
+      gemini_output_attribution: null,
+      suppressed_unplayed_output: {
+        ...body,
+        evidence_sha256: domainHash(
+          SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+          body,
+        ),
+      },
+    },
+  };
+}
+
 describe("LC4 retained provider exchange audio-lineage replay", () => {
   it.each(["openai", "gemini", "xai"] as const)(
     "replays exact %s caller wire, output capture, CAS, and evaluator lineage",
@@ -757,6 +795,42 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
 
   it("replays exact xAI server-VAD caller plus delimiter and output lineage", () => {
     expect(() => replay(fixture("xai", true))).not.toThrow();
+  });
+
+  it.each(["openai", "xai"] as const)(
+    "replays schema-v4 %s output suppression bound to the caller-heard capture",
+    (provider) => {
+      expect(() => replay(schemaV4Fixture(provider))).not.toThrow();
+    },
+  );
+
+  it("rejects rehashed schema-v4 suppression that changes the caller-heard aggregate", () => {
+    const valid = schemaV4Fixture("openai");
+    const suppression = valid.projection
+      .suppressed_unplayed_output as Record<string, unknown>;
+    const {
+      evidence_sha256: claimedEvidence,
+      ...body
+    } = suppression;
+    expect(claimedEvidence).toMatch(/^[a-f0-9]{64}$/u);
+    const mutatedBody = {
+      ...body,
+      caller_heard_audio_pcm_sha256:
+        sha256Hex("substituted-caller-heard-output"),
+    };
+    expect(() => replay({
+      ...valid,
+      projection: {
+        ...valid.projection,
+        suppressed_unplayed_output: {
+          ...mutatedBody,
+          evidence_sha256: domainHash(
+            SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+            mutatedBody,
+          ),
+        },
+      },
+    })).toThrow(/exact caller-heard capture/u);
   });
 
   it.each(["openai", "gemini", "xai"] as const)(

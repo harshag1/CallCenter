@@ -631,3 +631,50 @@ If fully charged, ordinary post-baseline exposure becomes **$76.50**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$91.50**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.
+
+## 2026-07-29 — Source `985b3e8` qualified; DEV terminalized after one generation
+
+The exact-source Gate D and qualification at
+`985b3e838adaf19aa90c6ed2fefe66e3c5d7e416` both passed. The authorized
+six-cell DEV run then terminalized after the first OpenAI Native exchange when
+the local replay verifier rejected the adapter's current schema-v4 exchange
+artifact:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$2.50** | failed closed after 1 OpenAI Native generation; 1/360 opportunities submitted, 0 completed, 0 paid retries |
+
+The DEV budget terminal evidence/head are
+`7cc430168657d51a64e7656c426821127a3df1d55eb72c1a9a97b06672a8e619`
+and
+`6c4d60ac6f479d07e1558c77f618ee3cfcddd87aabaad07d68b438f23f06ef06`.
+The ledger settled the OpenAI Native reservation at **$2.50**, cancelled the
+other five cell reservations, and ended with **$0.00 active**. The immutable
+failed-run report is
+`5f5701cf2b4ee159d694172932f81a852aa1d1e2bb3dad22be45eb77069078c8`
+(file SHA-256
+`86e466be1fe8f36d58ebc6f7b85d5f14ff6cd1a2e176e3ae551404248793ccd6`).
+It is explicitly incomplete, unscorable, and ineligible for an efficacy
+claim or graph.
+
+Current post-baseline conservative exposure is **$64.00**, and LC4
+filesystem-ledger settlements total **$135.00**, with **$0.00 active**. The
+failed root is immutable and cannot be retried.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the schema-v4 replay repair, regression suite, public audits, and
+fresh exact-source ASR receipt all pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$83.00**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$98.00**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.

@@ -934,3 +934,72 @@ lifecycle ordering.
 This root is immutable and cannot be retried or rescored. Its Gemini/xAI passes
 are qualification evidence only. It contributes no Native/HACC result cell,
 comparative score, model-superiority claim, or launch graph.
+
+## 2026-07-29 DEV terminal at source `985b3e8`
+
+**Failed closed after one OpenAI Native generation. No efficacy score is
+admissible.**
+
+The source-bound xAI Gate D and three-provider qualification both passed:
+
+- Gate D trust/receipt:
+  `e97f95a91d073d7c6ab85b10acb8df4c3bbe5bbd2805e1add7e6b5ae78a7bac1`
+  /
+  `80c4590f34ca21ac8f2c8e6138604d27ccdc9d7d44f9caa0b0b769c61765f323`;
+- qualification trust:
+  `33a3b3d0e4cb62d441b4ee8e8fd288dfa65a7eaed00ede5a6f048e89ad150991`;
+- qualification terminal artifact/file:
+  `4b736feb7959342a14d0878b0b5099c9cf06b6ee6838b801e3138d686acc7444`
+  /
+  `1a55783580d593cb90ebc7409a60bb33bcba83f50c18f3dbad63a4688d69f91b`;
+- qualification payload root:
+  `8986ac5ce3182ae233a4655d63bf15838939231cac69df973eb4d2038113b5e8`;
+- qualification budget evidence/head:
+  `937290f1793fe08a1ae8d3e05545c27389f1fd7c8897d332e00dbbe0d588a131`
+  /
+  `a26c9adbd29dc48e4ce5fbbbe870cf1ee2e013841ebdc67e4fc1b992991cf61e`;
+- retries: **0**; settlement/active: **$3.00 / $0.00**.
+
+The strict DEV preflight authorized six episodes and 360 opportunities. The
+one-shot execution terminalized at the first OpenAI Native opportunity:
+
+- run/package:
+  `30128376f0cb1477b9b40be2e791675b368c436a81276a6328922da1d9ae20b4`
+  /
+  `ef42779d22ae9c0ae893a40650e145153e0f6475e954500d4327f3beac9bddbe`;
+- primary failure evidence:
+  `495060576c23d4549fdb908463767d27fd02e71247348dd64c1d6602910fdc2a`;
+- failure class/code/stage:
+  `evidence_retention` / `evidence_assembly_failed` / `exchange_evidence`;
+- episodes started/completed: **1/0**;
+- opportunities submitted/completed: **1/0**;
+- provider calls/completed generations: **1/1**;
+- paid retries: **0**;
+- DEV settlement/active: **$2.50 / $0.00**.
+
+The retained artifacts prove that the paid exchange itself completed:
+
+- provider-exchange evidence:
+  `f979c4b3ac3c4f8f16b41c97a9d7dea0e11ad7ee1dd969c4360ca009ac1821c3`;
+- signed listener evidence:
+  `e155be42299ef38ad4f30a5d25de9ba70cf66d791059992c814d04b3c55bebcb`;
+- exact assistant PCM: **1,464,000 bytes**, SHA-256
+  `dfda2b6b6ba8e449888af31cb506a2e3abc4a250b01eb9f3e99afa0bb986bde7`;
+- terminal cleanup view: **404** wire observations and terminal observation
+  `c230cfdccf78756bf059394a50e60bbf2bb105e32f510dd854ae48c8ee72a89d`.
+
+Offline reproduction against these exact retained bytes identified a local
+contract-version split. The adapter emitted the current schema-v4 exchange;
+the replay verifier admitted only schemas v2/v3. Mutating only the in-memory
+version to 3 made the old verifier pass the remainder of the exact exchange.
+After the repair, the original immutable schema-v4 artifact passes replay
+without mutation, including the caller-heard output capture and suppression
+receipt.
+
+The failed-run report is
+`5f5701cf2b4ee159d694172932f81a852aa1d1e2bb3dad22be45eb77069078c8`
+(file SHA-256
+`86e466be1fe8f36d58ebc6f7b85d5f14ff6cd1a2e176e3ae551404248793ccd6`).
+It reports `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and `efficacy_claim_eligible: false`.
+Nothing from this root may populate a comparative graph.

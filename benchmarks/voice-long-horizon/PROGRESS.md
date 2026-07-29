@@ -1209,3 +1209,62 @@ No DEV authorization, budget lease, ledger, provider call, score, or graph was
 created. Because the repair changes source, Gate D and qualification must be
 regenerated; the passing `6dc5a65` receipt will not be reused to authorize the
 new source.
+
+## 2026-07-29 — First DEV generation exposed a schema-v4 replay-version split
+
+Source `985b3e8` cleared the clean-source audits, exact-source ASR receipt, xAI
+Gate D, and three-provider qualification. Qualification passed all three
+current realtime models with provider-native history hydration, the spoken
+gateway roundtrip, package replay, and zero retries:
+
+| Provider/model | Qualification |
+|---|---|
+| OpenAI `gpt-realtime-2.1` | passed |
+| Gemini `gemini-3.1-flash-live-preview` | passed |
+| xAI `grok-voice-think-fast-1.0` | passed |
+
+The DEV preflight then authorized exactly six preregistered episodes and 360
+repeated opportunities. The run stopped after the first OpenAI Native
+generation:
+
+- episodes started/completed: **1/0**;
+- opportunities submitted/completed: **1/0**;
+- provider calls and completed generations: **1/1**;
+- paid retries: **0**;
+- conservative DEV settlement: **$2.50**, with all other cell reservations
+  cancelled and **$0.00 active**.
+
+This was not a transport, model, ASR, or missing-evidence failure. The retained
+root contains:
+
+- the complete provider exchange under
+  `f979c4b3ac3c4f8f16b41c97a9d7dea0e11ad7ee1dd969c4360ca009ac1821c3`;
+- **404** terminal wire observations across the exchange and cleanup view;
+- exact captured assistant PCM: **1,464,000 bytes**, SHA-256
+  `dfda2b6b6ba8e449888af31cb506a2e3abc4a250b01eb9f3e99afa0bb986bde7`;
+- signed listener evidence
+  `e155be42299ef38ad4f30a5d25de9ba70cf66d791059992c814d04b3c55bebcb`;
+  and
+- a terminal budget ledger with no active reservation.
+
+The adapter correctly emitted provider-exchange schema v4, introduced with
+provider-native rotation history and pre-tool output suppression. The
+independent replay verifier still admitted only schemas v2 and v3, so it
+rejected the otherwise complete exchange after the paid generation returned.
+Changing only the retained projection's version from 4 to 3 made the old
+verifier replay every other contract successfully, proving the exact
+version-split cause.
+
+The repair admits schema v4 and independently verifies its new suppression
+receipt: policy, counts, null/nonnull aggregate rules, receipt domain hash, and
+exact caller-heard chunk count, byte length, and PCM hash must all match the
+listener-consumed output capture. A mutation that rehashes a substituted
+caller-heard aggregate fails closed. The unmodified failed-run artifact now
+replays offline with its original schema v4 and all 1,464,000 captured bytes.
+
+The immutable failed-run report is
+`5f5701cf2b4ee159d694172932f81a852aa1d1e2bb3dad22be45eb77069078c8`.
+It remains incomplete and unscorable: this run contributes no Native/HACC
+cell, score, comparative claim, or launch graph. A fresh source-bound gate,
+qualification, and one-shot DEV root are required after the repair is
+committed and all provider-free gates pass.
