@@ -55,6 +55,7 @@ import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
   renderLc4DevHaccResponsePlan,
+  type Lc4DevGatewayConversationToolBatch,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
 } from "./lc4-development-gateway-bridge";
@@ -82,6 +83,10 @@ import {
 import {
   RealtimeDynamicControlLimitError,
   type NormalizedRealtimeClient,
+  type RealtimeConversationHistoryHydrationAcknowledgement,
+  type RealtimeConversationHistoryHydratedItemAcknowledgement,
+  type RealtimeConversationHistoryJsonValue,
+  type RealtimeConversationHistoryTurn,
   type NormalizedRealtimeEvent,
   type RealtimeWireObservation,
   type RealtimeWireObservationAttribution,
@@ -140,34 +145,38 @@ export { LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION }
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-conversation-replay/v2\n";
-const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-conversation-state-rotation/v2\n";
-const ROTATION_CONVERSATION_DOMAIN = "harshas-amazing-call-center/lc4-rotation-conversation-replay/v2\n";
-const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v4\n";
+const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-conversation-replay/v4\n";
+const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-conversation-state-rotation/v4\n";
+const ROTATION_CONVERSATION_DOMAIN = "harshas-amazing-call-center/lc4-rotation-conversation-replay/v4\n";
+const ROTATION_TOOL_BATCH_DOMAIN =
+  "harshas-amazing-call-center/lc4-rotation-tool-batch/v1\n";
+const PROVIDER_VISIBLE_HISTORY_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n";
+const PROVIDER_HISTORY_SOURCE_BINDING_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n";
+const PROVIDER_HISTORY_ACKNOWLEDGEMENT_DOMAIN =
+  "harshas-amazing-call-center/lc4-provider-history-hydration-acknowledgement/v1\n";
+const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v5\n";
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
 export const LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN =
   "harshas-amazing-call-center/lc4-gemini-server-content-output-attribution/v1\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
-const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v1\n";
+const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v2\n";
 const CONVERSATION_TURN_SOURCES = new Set([
   "caller_tts_source_bound_to_pcm",
   "listener_exact_captured_pcm_asr",
   "provider_native_output_transcript",
-  "provider_visible_tool_result",
+  "canonical_gateway_result",
 ] as const);
 
 export type Lc4AssistantConversationTranscriptSource =
   | "listener_exact_captured_pcm_asr"
   | "provider_native_output_transcript";
 
-export type Lc4NativeConversationTurnInput = Readonly<{
+type Lc4NativeConversationTurnCommon = Readonly<{
   turn_id: string;
   sequence: number;
-  speaker: "caller" | "assistant" | "tool";
-  source:
-    | "caller_tts_source_bound_to_pcm"
-    | Lc4AssistantConversationTranscriptSource
-    | "provider_visible_tool_result";
-  text: string;
   available_after_opportunity: number;
   provenance_receipt_sha256: string;
   provider_conversation_source: true;
@@ -176,19 +185,101 @@ export type Lc4NativeConversationTurnInput = Readonly<{
   semantic_evaluator_derived: false;
 }>;
 
-export type Lc4RotationConversationTurn = Readonly<{
+export type Lc4NativeConversationTurnInput =
+  | (Lc4NativeConversationTurnCommon & Readonly<{
+      speaker: "caller";
+      source: "caller_tts_source_bound_to_pcm";
+      text: string;
+    }>)
+  | (Lc4NativeConversationTurnCommon & Readonly<{
+      speaker: "assistant";
+      source: Lc4AssistantConversationTranscriptSource;
+      text: string;
+    }>)
+  | (Lc4NativeConversationTurnCommon & Readonly<{
+      speaker: "tool";
+      source: "canonical_gateway_result";
+      /** Provider function name exactly as it crossed the model boundary. */
+      tool_name: string;
+      /** Provider function arguments before host policy/effective-argument projection. */
+      tool_arguments: Readonly<Record<string, JsonValue>>;
+      /**
+       * Canonical gateway-result history. Gemini's transport-only reserved
+       * continuation field is not conversation memory and is excluded.
+       */
+      text: string;
+      tool_batch_sha256?: string;
+      tool_batch_call_ordinal?: number;
+      tool_batch_call_count?: number;
+    }>);
+
+export type Lc4RotationConversationTurn =
+  | Readonly<{
+      turn_id: string;
+      sequence: number;
+      speaker: "caller";
+      source: "caller_tts_source_bound_to_pcm";
+      text: string;
+      transcript_sha256: string;
+      available_after_opportunity: number;
+      provenance_receipt_sha256: string;
+    }>
+  | Readonly<{
+      turn_id: string;
+      sequence: number;
+      speaker: "assistant";
+      source: Lc4AssistantConversationTranscriptSource;
+      text: string;
+      transcript_sha256: string;
+      available_after_opportunity: number;
+      provenance_receipt_sha256: string;
+    }>
+  | Readonly<{
+      turn_id: string;
+      sequence: number;
+      speaker: "tool";
+      source: "canonical_gateway_result";
+      tool_name: string;
+      tool_arguments: Readonly<Record<string, JsonValue>>;
+      text: string;
+      transcript_sha256: string;
+      available_after_opportunity: number;
+      provenance_receipt_sha256: string;
+      tool_batch_sha256?: string;
+      tool_batch_call_ordinal?: number;
+      tool_batch_call_count?: number;
+    }>;
+
+export type Lc4ConversationHistoryHydrationEvidence = Readonly<{
+  schema_version: 1;
+  provider: LiveStsProvider;
+  connection_epoch: number;
+  status: RealtimeConversationHistoryHydrationAcknowledgement["status"];
+  turn_count: number;
+  provider_item_count: number;
+  provider_visible_history_sha256: string;
+  source_binding_sha256: string;
+  acknowledgement_sha256: string;
+  /** Content-free per-item call/output and wire acknowledgement lineage. */
+  items: RealtimeConversationHistoryHydrationAcknowledgement["items"];
+}>;
+
+type Lc4ConversationReplayHashTurn = Readonly<{
   turn_id: string;
   sequence: number;
-  speaker: Lc4NativeConversationTurnInput["speaker"];
+  speaker: "caller" | "assistant" | "tool";
   source: Lc4NativeConversationTurnInput["source"];
-  text: string;
   transcript_sha256: string;
   available_after_opportunity: number;
-  provenance_receipt_sha256: string;
+  tool_name?: string;
+  tool_arguments_sha256?: string;
+  tool_batch_sha256?: string;
+  tool_batch_call_ordinal?: number;
+  tool_batch_call_count?: number;
 }>;
 
 export type Lc4NativeConversationReplayPacket = Readonly<{
-  schema_version: 2;
+  schema_version: 4;
   packet_type: "native_provider_conversation_replay";
   run_id: string;
   from_segment_ordinal: 1 | 2;
@@ -201,7 +292,7 @@ export type Lc4NativeConversationReplayPacket = Readonly<{
 }>;
 
 export type Lc4HaccRotationStatePacket = Readonly<{
-  schema_version: 2;
+  schema_version: 4;
   packet_type: "hacc_provider_conversation_plus_structured_state";
   run_id: string;
   from_segment_ordinal: 1 | 2;
@@ -215,14 +306,7 @@ export type Lc4HaccRotationStatePacket = Readonly<{
   packet_sha256: string;
 }>;
 
-function hashConversationReplay(turns: readonly Readonly<{
-  turn_id: string;
-  sequence: number;
-  speaker: "caller" | "assistant" | "tool";
-  source: Lc4NativeConversationTurnInput["source"];
-  transcript_sha256: string;
-  available_after_opportunity: number;
-}>[]): string {
+function hashConversationReplay(turns: readonly Lc4RotationConversationTurn[]): string {
   return sha256Hex(`${ROTATION_CONVERSATION_DOMAIN}${canonicalJson(turns.map((turn) => ({
     turn_id: turn.turn_id,
     sequence: turn.sequence,
@@ -230,7 +314,20 @@ function hashConversationReplay(turns: readonly Readonly<{
     source: turn.source,
     transcript_sha256: turn.transcript_sha256,
     available_after_opportunity: turn.available_after_opportunity,
-  })))}`);
+    ...(turn.speaker === "tool"
+      ? {
+          tool_name: turn.tool_name,
+          tool_arguments_sha256: sha256Hex(canonicalJson(turn.tool_arguments)),
+          ...(turn.tool_batch_sha256
+            ? {
+                tool_batch_sha256: turn.tool_batch_sha256,
+                tool_batch_call_ordinal: turn.tool_batch_call_ordinal,
+                tool_batch_call_count: turn.tool_batch_call_count,
+              }
+            : {}),
+        }
+      : {}),
+  }) satisfies Lc4ConversationReplayHashTurn))}`);
 }
 
 function assertRotationBoundary(from: 1 | 2, to: 2 | 3, available: 20 | 40): void {
@@ -256,12 +353,15 @@ function validateConversationTurns(
       : turn.speaker === "assistant"
         ? turn.source === "listener_exact_captured_pcm_asr"
           || turn.source === "provider_native_output_transcript"
-        : turn.source === "provider_visible_tool_result";
+        : turn.source === "canonical_gateway_result";
     if (!sourceMatchesSpeaker) {
       throw new Error("LC4 rotation conversation speaker differs from its provider-conversation source");
     }
-    if (!turn.text.trim() || turn.text.length > 4_000) throw new Error("LC4 rotation conversation text is invalid");
-    textBytes += Buffer.byteLength(turn.text, "utf8");
+    const turnTextBytes = Buffer.byteLength(turn.text, "utf8");
+    if (!turn.text.trim() || turnTextBytes > 4_000) {
+      throw new Error("LC4 rotation conversation text is invalid");
+    }
+    textBytes += turnTextBytes;
     if (!SHA256.test(turn.provenance_receipt_sha256)) throw new Error("LC4 rotation conversation provenance receipt is invalid");
     if (!Number.isSafeInteger(turn.available_after_opportunity)
       || turn.available_after_opportunity < 1
@@ -276,7 +376,7 @@ function validateConversationTurns(
       || turn.semantic_evaluator_derived !== false) {
       throw new Error("LC4 rotation conversation forbids oracle, semantic-evaluator, future, or non-conversation state");
     }
-    return Object.freeze({
+    const common = {
       turn_id: turn.turn_id,
       sequence: turn.sequence,
       speaker: turn.speaker,
@@ -285,7 +385,51 @@ function validateConversationTurns(
       transcript_sha256: sha256Hex(turn.text),
       available_after_opportunity: turn.available_after_opportunity,
       provenance_receipt_sha256: turn.provenance_receipt_sha256,
-    });
+    };
+    if (turn.speaker === "tool") {
+      safeId(turn.tool_name, "LC4 rotation provider tool name");
+      const toolArguments = immutableJsonValue(turn.tool_arguments);
+      if (toolArguments === null
+        || typeof toolArguments !== "object"
+        || Array.isArray(toolArguments)) {
+        throw new Error("LC4 rotation provider tool arguments are invalid");
+      }
+      const toolArgumentsBytes = Buffer.byteLength(canonicalJson(toolArguments), "utf8");
+      if (toolArgumentsBytes > 64_000) {
+        throw new Error("LC4 rotation provider tool arguments exceed 64 KiB");
+      }
+      textBytes += toolArgumentsBytes;
+      return Object.freeze({
+        ...common,
+        speaker: "tool" as const,
+        source: "canonical_gateway_result" as const,
+        tool_name: turn.tool_name,
+        tool_arguments: toolArguments as Readonly<Record<string, JsonValue>>,
+        ...(turn.tool_batch_sha256 !== undefined
+          || turn.tool_batch_call_ordinal !== undefined
+          || turn.tool_batch_call_count !== undefined
+          ? (() => {
+              if (!SHA256.test(turn.tool_batch_sha256 ?? "")
+                || !Number.isSafeInteger(turn.tool_batch_call_ordinal)
+                || !Number.isSafeInteger(turn.tool_batch_call_count)
+                || turn.tool_batch_call_ordinal! < 1
+                || turn.tool_batch_call_count! < 1
+                || turn.tool_batch_call_ordinal! > turn.tool_batch_call_count!) {
+                throw new Error("LC4 rotation provider tool batch metadata is invalid");
+              }
+              return {
+                tool_batch_sha256: turn.tool_batch_sha256!,
+                tool_batch_call_ordinal: turn.tool_batch_call_ordinal!,
+                tool_batch_call_count: turn.tool_batch_call_count!,
+              };
+            })()
+          : {}),
+      });
+    }
+    if ("tool_name" in turn || "tool_arguments" in turn) {
+      throw new Error("LC4 non-tool conversation turn includes provider tool metadata");
+    }
+    return Object.freeze(common) as Lc4RotationConversationTurn;
   });
   if (textBytes > 128_000) throw new Error("LC4 rotation conversation exceeds its text budget");
   if (new Set(turns.map((turn) => turn.turn_id)).size !== turns.length) {
@@ -297,6 +441,24 @@ function validateConversationTurns(
       || !opportunityTurns.some((turn) => turn.speaker === "assistant")) {
       throw new Error(`LC4 rotation conversation omits caller/assistant evidence for opportunity ${opportunity}`);
     }
+  }
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index]!;
+    if (turn.speaker !== "tool" || turn.tool_batch_sha256 === undefined) continue;
+    if (turn.tool_batch_call_ordinal !== 1) {
+      throw new Error("LC4 rotation provider tool batch does not begin at call ordinal one");
+    }
+    const batch = turns.slice(index, index + turn.tool_batch_call_count!);
+    if (batch.length !== turn.tool_batch_call_count
+      || batch.some((candidate, callIndex) => (
+        candidate.speaker !== "tool"
+        || candidate.tool_batch_sha256 !== turn.tool_batch_sha256
+        || candidate.tool_batch_call_count !== turn.tool_batch_call_count
+        || candidate.tool_batch_call_ordinal !== callIndex + 1
+      ))) {
+      throw new Error("LC4 rotation provider tool batch is not exact and contiguous");
+    }
+    index += turn.tool_batch_call_count - 1;
   }
   return Object.freeze(turns);
 }
@@ -314,7 +476,7 @@ export function createLc4NativeConversationReplayPacket(input: Readonly<{
   if (!SHA256.test(input.previous_session_rotation_receipt_sha256)) throw new Error("LC4 native continuity rotation receipt is invalid");
   const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
   const body = Object.freeze({
-    schema_version: 2 as const,
+    schema_version: 4 as const,
     packet_type: "native_provider_conversation_replay" as const,
     run_id: input.run_id,
     from_segment_ordinal: input.from_segment_ordinal,
@@ -344,7 +506,7 @@ export function createLc4HaccRotationStatePacket(input: Readonly<{
   }
   const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
   const body = Object.freeze({
-    schema_version: 2 as const,
+    schema_version: 4 as const,
     packet_type: "hacc_provider_conversation_plus_structured_state" as const,
     run_id: input.run_id,
     from_segment_ordinal: input.from_segment_ordinal,
@@ -373,6 +535,50 @@ export function assertLc4RotationConversationParity(
   ) throw new Error("LC4 Native and HACC rotation wrappers differ in provider conversation replay");
 }
 
+function rotationTurnToInput(
+  turn: Lc4RotationConversationTurn,
+): Lc4NativeConversationTurnInput {
+  const common = {
+    turn_id: turn.turn_id,
+    sequence: turn.sequence,
+    text: turn.text,
+    available_after_opportunity: turn.available_after_opportunity,
+    provenance_receipt_sha256: turn.provenance_receipt_sha256,
+    provider_conversation_source: true as const,
+    oracle_derived: false as const,
+    future_derived: false as const,
+    semantic_evaluator_derived: false as const,
+  };
+  if (turn.speaker === "tool") {
+    return Object.freeze({
+      ...common,
+      speaker: "tool",
+      source: "canonical_gateway_result",
+      tool_name: turn.tool_name,
+      tool_arguments: turn.tool_arguments,
+      ...(turn.tool_batch_sha256
+        ? {
+            tool_batch_sha256: turn.tool_batch_sha256,
+            tool_batch_call_ordinal: turn.tool_batch_call_ordinal,
+            tool_batch_call_count: turn.tool_batch_call_count,
+          }
+        : {}),
+    });
+  }
+  if (turn.speaker === "caller") {
+    return Object.freeze({
+      ...common,
+      speaker: "caller",
+      source: "caller_tts_source_bound_to_pcm",
+    });
+  }
+  return Object.freeze({
+    ...common,
+    speaker: "assistant",
+    source: turn.source,
+  });
+}
+
 function assertNativeConversationReplayPacket(packet: Lc4NativeConversationReplayPacket): Lc4NativeConversationReplayPacket {
   const rebuilt = createLc4NativeConversationReplayPacket({
     run_id: packet.run_id,
@@ -380,19 +586,7 @@ function assertNativeConversationReplayPacket(packet: Lc4NativeConversationRepla
     to_segment_ordinal: packet.to_segment_ordinal,
     available_through_opportunity: packet.available_through_opportunity,
     previous_session_rotation_receipt_sha256: packet.previous_session_rotation_receipt_sha256,
-    conversation_turns: packet.conversation_turns.map((turn) => ({
-      turn_id: turn.turn_id,
-      sequence: turn.sequence,
-      speaker: turn.speaker,
-      source: turn.source,
-      text: turn.text,
-      available_after_opportunity: turn.available_after_opportunity,
-      provenance_receipt_sha256: turn.provenance_receipt_sha256,
-      provider_conversation_source: true,
-      oracle_derived: false,
-      future_derived: false,
-      semantic_evaluator_derived: false,
-    })),
+    conversation_turns: packet.conversation_turns.map(rotationTurnToInput),
   });
   if (canonicalJson(rebuilt) !== canonicalJson(packet)) throw new Error("LC4 Native conversation replay packet integrity failed");
   return rebuilt;
@@ -407,44 +601,341 @@ function assertHaccRotationStatePacket(packet: Lc4HaccRotationStatePacket): Lc4H
     previous_session_rotation_receipt_sha256: packet.previous_session_rotation_receipt_sha256,
     flow_state_sha256: packet.flow_state_sha256,
     response_plan_chain_head_sha256: packet.response_plan_chain_head_sha256,
-    conversation_turns: packet.conversation_turns.map((turn) => ({
-      turn_id: turn.turn_id,
-      sequence: turn.sequence,
-      speaker: turn.speaker,
-      source: turn.source,
-      text: turn.text,
-      available_after_opportunity: turn.available_after_opportunity,
-      provenance_receipt_sha256: turn.provenance_receipt_sha256,
-      provider_conversation_source: true,
-      oracle_derived: false,
-      future_derived: false,
-      semantic_evaluator_derived: false,
-    })),
+    conversation_turns: packet.conversation_turns.map(rotationTurnToInput),
   });
   if (canonicalJson(rebuilt) !== canonicalJson(packet)) throw new Error("LC4 HACC rotation state packet integrity failed");
   return rebuilt;
 }
 
-/**
- * Provider-visible reconnect history is deliberately smaller than the
- * integrity packet retained by the host. A raw Native model sees only the
- * chronological roles and content that already crossed its conversation
- * boundary—not run IDs, corpus opportunity ordinals, provenance receipts,
- * evaluator labels, or host state hashes.
- */
-function renderRotationConversationForProvider(
+function rotationConversationForProvider(
   turns: readonly Lc4RotationConversationTurn[],
+): readonly RealtimeConversationHistoryTurn[] {
+  const history: RealtimeConversationHistoryTurn[] = [];
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index]!;
+    if (turn.speaker !== "tool") {
+      history.push(Object.freeze({
+        role: turn.speaker === "caller" ? "user" as const : "assistant" as const,
+        text: turn.text,
+        sourceSha256: turn.provenance_receipt_sha256,
+      }));
+      continue;
+    }
+    const batchTurns = turn.tool_batch_sha256
+      ? turns.slice(index, index + turn.tool_batch_call_count!)
+      : [turn];
+    history.push(Object.freeze({
+      role: "tool_batch" as const,
+      calls: Object.freeze(batchTurns.map((candidate) => {
+        if (candidate.speaker !== "tool") {
+          throw new Error("LC4 provider history tool batch includes a non-tool turn");
+        }
+        return Object.freeze({
+          toolName: candidate.tool_name,
+          toolArguments: candidate.tool_arguments as Readonly<Record<
+            string,
+            RealtimeConversationHistoryJsonValue
+          >>,
+          output: candidate.text,
+          sourceSha256: candidate.provenance_receipt_sha256,
+        });
+      })),
+    }));
+    index += batchTurns.length - 1;
+  }
+  return Object.freeze(history);
+}
+
+function providerVisibleHistoryProjection(
+  turns: readonly RealtimeConversationHistoryTurn[],
+): JsonValue {
+  return turns.map((turn) => {
+    if ("text" in turn) {
+      return { role: turn.role, text: turn.text };
+    }
+    const calls = turn.role === "tool" ? [turn] : turn.calls;
+    return {
+      role: "tool_batch",
+      calls: calls.map((call) => ({
+        toolName: call.toolName,
+        toolArguments: call.toolArguments as JsonValue,
+        output: call.output,
+      })),
+    };
+  }) as unknown as JsonValue;
+}
+
+function providerVisibleHistorySha256(
+  turns: readonly RealtimeConversationHistoryTurn[],
 ): string {
-  const conversation = turns.map((turn) => Object.freeze({
-    role: turn.speaker,
-    content: turn.text,
-  }));
-  return [
-    "Continue from this chronological provider conversation replay.",
-    "<lc4_provider_conversation>",
-    canonicalJson(conversation),
-    "</lc4_provider_conversation>",
-  ].join("\n");
+  return sha256Hex(
+    `${PROVIDER_VISIBLE_HISTORY_DOMAIN}${canonicalJson(providerVisibleHistoryProjection(turns))}`,
+  );
+}
+
+function providerHistorySourceBindingSha256(
+  turns: readonly RealtimeConversationHistoryTurn[],
+  historySha256: string,
+): string {
+  return sha256Hex(`${PROVIDER_HISTORY_SOURCE_BINDING_DOMAIN}${canonicalJson({
+    historySha256,
+    sources: turns.map((turn, index) => {
+      if ("text" in turn) {
+        return {
+          ordinal: index + 1,
+          sourceSha256: turn.sourceSha256,
+        };
+      }
+      const calls = turn.role === "tool" ? [turn] : turn.calls;
+      return {
+        ordinal: index + 1,
+        role: "tool_batch",
+        calls: calls.map((call, callIndex) => ({
+          callOrdinal: callIndex + 1,
+          sourceSha256: call.sourceSha256,
+        })),
+      };
+    }),
+  })}`);
+}
+
+function validateConversationHistoryHydrationAcknowledgement(input: Readonly<{
+  receipt: RealtimeConversationHistoryHydrationAcknowledgement;
+  provider: LiveStsProvider;
+  turns: readonly RealtimeConversationHistoryTurn[];
+  expected_history_sha256: string;
+  wire_observations: readonly Lc4SanitizedWireObservation[];
+}>): Lc4ConversationHistoryHydrationEvidence {
+  // Snapshot once so a hostile/mutable client cannot change nested item or
+  // attribution fields between validation, hashing, and retained evidence.
+  const receipt = JSON.parse(
+    canonicalJson(input.receipt as unknown as JsonValue),
+  ) as RealtimeConversationHistoryHydrationAcknowledgement;
+  const expectedProviderItemCount = input.turns.reduce(
+    (count, turn) => {
+      if ("text" in turn) return count + 1;
+      return count + (turn.role === "tool" ? 2 : turn.calls.length * 2);
+    },
+    0,
+  );
+  const expectedSourceBinding = providerHistorySourceBindingSha256(
+    input.turns,
+    input.expected_history_sha256,
+  );
+  const expectedStatus = input.provider === "gemini"
+    ? "sent_unacknowledged_by_provider_protocol"
+    : "acknowledged";
+  if (receipt.schemaVersion !== 1
+    || receipt.provider !== input.provider
+    || !Number.isSafeInteger(receipt.connectionEpoch)
+    || receipt.connectionEpoch < 1
+    || receipt.status !== expectedStatus
+    || receipt.turnCount !== input.turns.length
+    || receipt.providerItemCount !== expectedProviderItemCount
+    || receipt.historySha256 !== input.expected_history_sha256
+    || receipt.sourceBindingSha256 !== expectedSourceBinding
+    || receipt.items.length !== expectedProviderItemCount) {
+    throw new Error("LC4 provider conversation history hydration acknowledgement is invalid");
+  }
+  let providerItemOrdinal = 0;
+  let priorObservedSequence = 0;
+  let geminiSharedOutboundObservationSha256: string | null = null;
+  const expectedToolCallCount = input.turns.reduce((count, turn) => {
+    if ("text" in turn) return count;
+    return count + (turn.role === "tool" ? 1 : turn.calls.length);
+  }, 0);
+  const expectedGeminiContentTurnCount = input.turns.reduce(
+    (count, turn) => count + ("text" in turn ? 1 : 2),
+    0,
+  );
+  const assertGeminiHistoryProjection = (observation: Lc4SanitizedWireObservation) => {
+    const projection = observation.history_hydration_projection;
+    if (projection === null
+      || typeof projection !== "object"
+      || Array.isArray(projection)) {
+      throw new Error("LC4 Gemini history hydration projection is unavailable");
+    }
+    const value = projection as Readonly<Record<string, JsonValue>>;
+    if (value.protocol !== "initial_history_in_client_content"
+      || value.entryCount !== input.turns.length
+      || value.providerContentTurnCount !== expectedGeminiContentTurnCount
+      || value.functionCallCount !== expectedToolCallCount
+      || value.functionResponseCount !== expectedToolCallCount
+      || value.turnComplete !== true
+      || value.generationTriggered !== false
+      || value.providerAcknowledgement !== "not_defined_by_protocol"
+      || value.providerVisibleHistorySha256 !== input.expected_history_sha256
+      || typeof value.geminiContentSha256 !== "string"
+      || !SHA256.test(value.geminiContentSha256)) {
+      throw new Error("LC4 Gemini history hydration projection differs from the exact batch");
+    }
+  };
+  const assertItemHistoryProjection = (
+    observation: Lc4SanitizedWireObservation,
+    expected: Readonly<{
+      kind: RealtimeConversationHistoryHydratedItemAcknowledgement["kind"];
+      contentSha256: string;
+    }>,
+  ) => {
+    const projection = observation.history_hydration_projection;
+    if (projection === null
+      || typeof projection !== "object"
+      || Array.isArray(projection)) {
+      throw new Error("LC4 provider history item projection is unavailable");
+    }
+    const value = projection as Readonly<Record<string, JsonValue>>;
+    const actualContentSha256 = expected.kind === "synthetic_tool_call"
+      ? value.argumentsSha256
+      : expected.kind === "synthetic_tool_output"
+        ? value.outputSha256
+        : value.contentSha256;
+    if (value.kind !== expected.kind || actualContentSha256 !== expected.contentSha256) {
+      throw new Error("LC4 provider history item projection differs from the exact batch");
+    }
+  };
+  const requireObservedAttribution = (
+    attribution: RealtimeWireObservationAttribution | undefined,
+    direction: "inbound" | "outbound",
+    allowSharedGeminiOutbound: boolean,
+  ): Lc4SanitizedWireObservation => {
+    if (attribution?.availability !== "observed") {
+      throw new Error("LC4 provider conversation history hydration lacks observed wire lineage");
+    }
+    const matches = input.wire_observations.filter((observation) => (
+      observation.observation_sha256 === attribution.observationSha256
+    ));
+    if (matches.length !== 1) {
+      throw new Error("LC4 provider conversation history hydration wire lineage is not unique");
+    }
+    const observation = matches[0]!;
+    if (observation.provider !== input.provider
+      || observation.direction !== direction
+      || attribution.connectionEpoch !== receipt.connectionEpoch
+      || observation.connection_epoch !== attribution.connectionEpoch
+      || observation.sequence !== attribution.sequence
+      || observation.payload_sha256 !== attribution.payloadSha256
+      || observation.projection_sha256 !== attribution.projectionSha256) {
+      throw new Error("LC4 provider conversation history hydration wire lineage differs");
+    }
+    const expectedWireType = input.provider === "gemini"
+      ? direction === "outbound" && observation.wire_type === "clientContent"
+      : direction === "outbound"
+        ? observation.wire_type === "conversation.item.create"
+        : observation.wire_type === "conversation.item.created"
+          || observation.wire_type === "conversation.item.added";
+    if (!expectedWireType) {
+      throw new Error("LC4 provider conversation history hydration wire type is invalid");
+    }
+    if (allowSharedGeminiOutbound) {
+      geminiSharedOutboundObservationSha256 ??= observation.observation_sha256;
+      if (observation.observation_sha256 !== geminiSharedOutboundObservationSha256) {
+        throw new Error("LC4 Gemini history hydration spans more than one outbound history frame");
+      }
+      if (priorObservedSequence === 0) priorObservedSequence = observation.sequence;
+    } else {
+      if (observation.sequence <= priorObservedSequence) {
+        throw new Error("LC4 provider conversation history hydration wire order is not monotonic");
+      }
+      priorObservedSequence = observation.sequence;
+    }
+    return observation;
+  };
+  for (const [turnIndex, turn] of input.turns.entries()) {
+    const expectedItems = "text" in turn
+      ? [{
+          kind: turn.role === "user" ? "user_message" as const : "assistant_message" as const,
+          sourceSha256: turn.sourceSha256,
+          toolCallOrdinal: null,
+          contentSha256: sha256Hex(turn.text),
+        }]
+      : (() => {
+          const calls = turn.role === "tool" ? [turn] : turn.calls;
+          return [
+            ...calls.map((call, callIndex) => ({
+              kind: "synthetic_tool_call" as const,
+              sourceSha256: call.sourceSha256,
+              toolCallOrdinal: callIndex,
+              contentSha256: sha256Hex(canonicalJson(call.toolArguments)),
+            })),
+            ...calls.map((call, callIndex) => ({
+              kind: "synthetic_tool_output" as const,
+              sourceSha256: call.sourceSha256,
+              toolCallOrdinal: callIndex,
+              contentSha256: sha256Hex(call.output),
+            })),
+          ];
+        })();
+    const syntheticCallIds = new Map<number, string>();
+    for (const expected of expectedItems) {
+      providerItemOrdinal += 1;
+      const item = receipt.items[providerItemOrdinal - 1];
+      if (!item
+        || item.historyTurnOrdinal !== turnIndex + 1
+        || item.providerItemOrdinal !== providerItemOrdinal
+        || item.kind !== expected.kind
+        || item.sourceSha256 !== expected.sourceSha256) {
+        throw new Error("LC4 provider conversation history hydration item order is invalid");
+      }
+      if (expected.toolCallOrdinal !== null) {
+        if (!item.syntheticCallIdSha256 || !SHA256.test(item.syntheticCallIdSha256)) {
+          throw new Error("LC4 provider conversation history tool pair lacks a synthetic call binding");
+        }
+        const prior = syntheticCallIds.get(expected.toolCallOrdinal);
+        if (prior !== undefined && item.syntheticCallIdSha256 !== prior) {
+          throw new Error("LC4 provider conversation history tool pair binding differs");
+        }
+        syntheticCallIds.set(expected.toolCallOrdinal, item.syntheticCallIdSha256);
+      } else if (item.syntheticCallIdSha256 !== undefined) {
+        throw new Error("LC4 provider conversation message has a synthetic tool-call binding");
+      }
+      const outboundObservation = requireObservedAttribution(
+        item.outboundObservation,
+        "outbound",
+        input.provider === "gemini",
+      );
+      if (input.provider === "gemini") {
+        assertGeminiHistoryProjection(outboundObservation);
+        if (item.inboundObservation !== undefined) {
+          throw new Error("LC4 Gemini history hydration fabricated an item acknowledgement");
+        }
+      } else {
+        const inboundObservation = requireObservedAttribution(
+          item.inboundObservation,
+          "inbound",
+          false,
+        );
+        assertItemHistoryProjection(outboundObservation, expected);
+        if (inboundObservation.connection_epoch !== outboundObservation.connection_epoch
+          || inboundObservation.sequence <= outboundObservation.sequence) {
+          throw new Error("LC4 provider conversation history item acknowledgement is not causally ordered");
+        }
+        assertItemHistoryProjection(inboundObservation, expected);
+      }
+    }
+  }
+  const acknowledgementSha256 = sha256Hex(
+    `${PROVIDER_HISTORY_ACKNOWLEDGEMENT_DOMAIN}${canonicalJson(receipt as unknown as JsonValue)}`,
+  );
+  return Object.freeze({
+    schema_version: 1,
+    provider: input.provider,
+    connection_epoch: receipt.connectionEpoch,
+    status: receipt.status,
+    turn_count: receipt.turnCount,
+    provider_item_count: receipt.providerItemCount,
+    provider_visible_history_sha256: receipt.historySha256,
+    source_binding_sha256: receipt.sourceBindingSha256,
+    acknowledgement_sha256: acknowledgementSha256,
+    items: Object.freeze(receipt.items.map((item) => Object.freeze({
+      ...item,
+      ...(item.outboundObservation
+        ? { outboundObservation: Object.freeze({ ...item.outboundObservation }) }
+        : {}),
+      ...(item.inboundObservation
+        ? { inboundObservation: Object.freeze({ ...item.inboundObservation }) }
+        : {}),
+    }))),
+  });
 }
 
 export type Lc4RotationContext =
@@ -455,7 +946,9 @@ type ValidatedRotationContext = Readonly<{
   kind: "none" | Lc4RotationContext["kind"];
   packet_sha256: string | null;
   conversation_replay_sha256: string | null;
-  rendered: string | null;
+  provider_visible_history_sha256: string | null;
+  conversation_history: readonly RealtimeConversationHistoryTurn[];
+  control_state_suffix: string | null;
 }>;
 
 export type Lc4SanitizedWireObservation = Readonly<{
@@ -470,6 +963,8 @@ export type Lc4SanitizedWireObservation = Readonly<{
   observation_sha256: string;
   previous_observation_sha256: string | null;
   identity_hashes: RealtimeWireObservation["identities"];
+  /** Content-free provider-history projection preimage, when applicable. */
+  history_hydration_projection?: JsonValue;
 }>;
 
 export type Lc4GeminiOutputAudioChunkAttribution = Readonly<{
@@ -544,8 +1039,24 @@ export type Lc4GeminiOutputAttribution = Readonly<{
   attribution_sha256: string;
 }>;
 
+export type Lc4SuppressedUnplayedOutputEvidence = Readonly<{
+  schema_version: 1;
+  policy: "exclude_everything_before_the_final_tool_batch_from_caller_heard_history";
+  tool_dispatch_count: number;
+  response_count: number;
+  audio_chunk_count: number;
+  audio_byte_length: number;
+  audio_pcm_sha256: string | null;
+  transcript_count: number;
+  transcript_hash_set_sha256: string | null;
+  caller_heard_audio_chunk_count: number;
+  caller_heard_audio_byte_length: number;
+  caller_heard_audio_pcm_sha256: string;
+  evidence_sha256: string;
+}>;
+
 export type Lc4ProviderExchangeEvidence = Readonly<{
-  schema_version: 3;
+  schema_version: 4;
   adapter_version: typeof LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION;
   run_id: string;
   opportunity_id: string;
@@ -571,6 +1082,11 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   effective_runtime_identity: Readonly<{ provider: LiveStsProvider; model: string; voice: string }>;
   output_capture: Lc4CapturedOutput;
   /**
+   * Content-free proof that intermediate model output was generated but never
+   * delivered to the caller, evaluated, or admitted into reconnect history.
+   */
+  suppressed_unplayed_output: Lc4SuppressedUnplayedOutputEvidence;
+  /**
    * `null` on non-Gemini exchanges. Historical Gemini evidence may omit this
    * field entirely; only this versioned contract can upgrade output-wire
    * completeness from unverified to verified.
@@ -585,6 +1101,11 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
    * retains raw provider call/response IDs or credentials.
    */
   dev_gateway_receipt_set: Lc4DevGatewayReceiptSet | null;
+  /**
+   * DEV-only in-memory canonical gateway replay. This preserves provider batch
+   * boundaries but is intentionally omitted from retained public evidence.
+   */
+  dev_gateway_conversation_tool_batches?: readonly Lc4DevGatewayConversationToolBatch[];
   input_audio_delivery: RealtimeAudioDeliveryReceipt & Readonly<{
     profile_sha256: string;
     pcm_sha256: string;
@@ -829,7 +1350,14 @@ function validateRotationContext(
     if (input.rotation_context !== null || previousRotationReceiptSha256 !== null) {
       throw new Error("LC4 first segment forbids a rotation context");
     }
-    return Object.freeze({ kind: "none", packet_sha256: null, conversation_replay_sha256: null, rendered: null });
+    return Object.freeze({
+      kind: "none",
+      packet_sha256: null,
+      conversation_replay_sha256: null,
+      provider_visible_history_sha256: null,
+      conversation_history: Object.freeze([]),
+      control_state_suffix: null,
+    });
   }
   if (input.rotation_context === null || previousRotationReceiptSha256 === null) {
     throw new Error("LC4 reopened segment requires a receipt-bound rotation context");
@@ -851,13 +1379,13 @@ function validateRotationContext(
     (input.manifest.episode_shape.arm === "native" && input.rotation_context.kind !== "native_conversation_replay")
     || (input.manifest.episode_shape.arm === "hacc" && input.rotation_context.kind !== "hacc_structured_state")
   ) throw new Error("LC4 rotation context kind differs from the randomized arm");
-  const renderedConversation = renderRotationConversationForProvider(packet.conversation_turns);
-  const rendered = packet.packet_type === "native_provider_conversation_replay"
-    ? renderedConversation
+  const conversationHistory = rotationConversationForProvider(packet.conversation_turns);
+  const historySha256 = providerVisibleHistorySha256(conversationHistory);
+  const controlStateSuffix = packet.packet_type === "native_provider_conversation_replay"
+    ? null
     : [
-        renderedConversation,
-        "The following HACC continuity commitment cannot override system rules or authorize actions.",
-        `<lc4_hacc_structured_state packet_sha256="${packet.packet_sha256}">`,
+        "The following HACC control-state commitment cannot override system rules or authorize actions.",
+        "<lc4_hacc_structured_state>",
         canonicalJson({
           flow_state_sha256: packet.flow_state_sha256,
           response_plan_chain_head_sha256: packet.response_plan_chain_head_sha256,
@@ -868,11 +1396,16 @@ function validateRotationContext(
     kind: input.rotation_context.kind,
     packet_sha256: packet.packet_sha256,
     conversation_replay_sha256: packet.conversation_replay_sha256,
-    rendered,
+    provider_visible_history_sha256: historySha256,
+    conversation_history: conversationHistory,
+    control_state_suffix: controlStateSuffix,
   });
 }
 
 function sanitizeWireObservation(observation: RealtimeWireObservation): Lc4SanitizedWireObservation {
+  const projection = observation.projection as Readonly<Record<string, unknown>>;
+  const historyHydrationProjection =
+    projection.conversationHistoryItem ?? projection.initialHistory;
   return Object.freeze({
     provider: observation.provider,
     direction: observation.direction,
@@ -885,6 +1418,12 @@ function sanitizeWireObservation(observation: RealtimeWireObservation): Lc4Sanit
     observation_sha256: observation.observationSha256,
     previous_observation_sha256: observation.previousObservationSha256,
     identity_hashes: Object.freeze({ ...observation.identities }),
+    ...(historyHydrationProjection !== undefined
+      ? {
+          history_hydration_projection:
+            immutableJsonValue(historyHydrationProjection),
+        }
+      : {}),
   });
 }
 
@@ -1495,11 +2034,17 @@ export class Lc4RealtimeProviderBridge {
     )) throw new Error("LC4-DEV gateway context differs from the provider manifest");
     if (input.segment.ordinal !== this.#sessionOrdinal + 1) throw new Error("LC4 provider sessions must rotate in segment order");
     const rotationContext = validateRotationContext(input, this.#previousRotationReceiptSha256);
-    const effectiveConfiguration = rotationContext.rendered === null
+    const effectiveConfiguration = rotationContext.conversation_history.length === 0
+      && rotationContext.control_state_suffix === null
       ? input.configuration
       : Object.freeze({
           ...input.configuration,
-          instructions: `${input.configuration.instructions}\n${rotationContext.rendered}`,
+          instructions: rotationContext.control_state_suffix === null
+            ? input.configuration.instructions
+            : `${input.configuration.instructions}\n${rotationContext.control_state_suffix}`,
+          ...(rotationContext.conversation_history.length > 0
+            ? { initialConversationHistoryHydrationRequired: true as const }
+            : {}),
         });
     const runtimeTransportProfile = input.profile.provider === "xai"
       ? lc4XaiTransportProfileForPurpose(input.profile.transport_purpose!)
@@ -1524,6 +2069,8 @@ export class Lc4RealtimeProviderBridge {
     const wire: Lc4SanitizedWireObservation[] = [];
     const outputByResponse = new Map<string, Uint8Array[]>();
     const outputTranscriptByResponse = new Map<string, string>();
+    const finalToolAudioBoundaryByResponse = new Map<string, number>();
+    const suppressedTranscriptHashes: string[] = [];
     const responseIdsByOpportunity = new Map<string, string[]>();
     const outputFormatByResponse = new Map<string, Readonly<{ encoding: "pcm16"; sampleRateHz: number; channels: 1 }>>();
     const geminiWireProjections = new Map<string, JsonValue>();
@@ -1531,6 +2078,7 @@ export class Lc4RealtimeProviderBridge {
     const completedByResponse = new Set<string>();
     const waiters = new Map<string, () => void>();
     let currentOpportunity: string | null = null;
+    let toolDispatchCount = 0;
     let activeResponseId: string | null = null;
     let rootResponseId: string | null = null;
     let currentOperationOrder: Lc4ProviderExchangeOperation[] | null = null;
@@ -1622,6 +2170,18 @@ export class Lc4RealtimeProviderBridge {
     };
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
       devGateway?.observe(event);
+      if (devGateway && (event.type === "tool.dispatch" || event.type === "tool.calls")) {
+        toolDispatchCount += 1;
+        finalToolAudioBoundaryByResponse.set(
+          event.responseId,
+          outputByResponse.get(event.responseId)?.length ?? 0,
+        );
+        const transcript = outputTranscriptByResponse.get(event.responseId)?.trim();
+        if (transcript) {
+          suppressedTranscriptHashes.push(sha256Hex(transcript));
+          outputTranscriptByResponse.delete(event.responseId);
+        }
+      }
       // xAI may report speech_started/speech_stopped while manual mode is
       // active. Those events are telemetry only: the manual causal proof below
       // still requires the host commit, its acknowledgement, and the host
@@ -1823,9 +2383,28 @@ export class Lc4RealtimeProviderBridge {
         waiters.get(currentOpportunity ?? "")?.();
       }
     });
+    let historyHydrationEvidence: Lc4ConversationHistoryHydrationEvidence | null = null;
     try {
       await client.connect();
       if (client.state !== "ready") throw new Error("LC4 realtime provider session did not remain ready");
+      if (rotationContext.conversation_history.length > 0) {
+        if (!client.hydrateConversationHistory) {
+          throw new Error("LC4 reopened provider session lacks conversation history hydration");
+        }
+        const acknowledgement = await client.hydrateConversationHistory(
+          rotationContext.conversation_history,
+        );
+        historyHydrationEvidence = validateConversationHistoryHydrationAcknowledgement({
+          receipt: acknowledgement,
+          provider: input.profile.provider,
+          turns: rotationContext.conversation_history,
+          expected_history_sha256: rotationContext.provider_visible_history_sha256!,
+          wire_observations: wire,
+        });
+        if (client.state !== "ready") {
+          throw new Error("LC4 provider session lost readiness during conversation history hydration");
+        }
+      }
     } catch (error) {
       unsubscribeEvent();
       unsubscribeWire?.();
@@ -2087,6 +2666,9 @@ export class Lc4RealtimeProviderBridge {
         rootResponseId = null;
         outputByResponse.clear();
         outputFormatByResponse.clear();
+        finalToolAudioBoundaryByResponse.clear();
+        suppressedTranscriptHashes.length = 0;
+        toolDispatchCount = 0;
         terminalByResponse.clear();
         completedByResponse.clear();
         try {
@@ -2440,9 +3022,10 @@ export class Lc4RealtimeProviderBridge {
           diagnosticStage = "response_validate";
           if (!activeResponseId || !terminalByResponse.has(activeResponseId)) throw new Error("LC4 provider response lacks a terminal identity");
           diagnosticStage = "gateway_dispatch";
-          const devGatewayReceiptSet = devGateway
-            ? await devGateway.finishOpportunity()
+          const devGatewayFinished = devGateway
+            ? await devGateway.finishOpportunityWithConversationReplay()
             : null;
+          const devGatewayReceiptSet = devGatewayFinished?.receipt_set ?? null;
           assertExchangeActive(exchangeSignal.signal);
           const terminalGatewayReceipt = devGatewayReceiptSet?.receipts.at(-1) ?? null;
           const initialResponseControlSha256 = exchangeInput.response_control.kind === "hacc_response_plan"
@@ -2452,10 +3035,69 @@ export class Lc4RealtimeProviderBridge {
             ?? initialResponseControlSha256;
           const terminalResponseControlSha256 = terminalGatewayReceipt?.post_transition_response_control_sha256
             ?? initialResponseControlSha256;
-          const chunks = outputByResponse.get(activeResponseId) ?? [];
+          const allActiveResponseChunks = outputByResponse.get(activeResponseId) ?? [];
+          const finalToolBoundary = finalToolAudioBoundaryByResponse.get(activeResponseId) ?? 0;
+          if (finalToolBoundary < 0 || finalToolBoundary > allActiveResponseChunks.length) {
+            throw new Error("LC4 final tool/audio boundary is invalid");
+          }
+          const chunks = allActiveResponseChunks.slice(finalToolBoundary);
           const pcm = concatenate(chunks);
           diagnosticStage = "response_validate";
           if (pcm.byteLength === 0) throw new Error("LC4 provider response produced no PCM output");
+          const responseIds = responseIdsByOpportunity.get(opportunityId) ?? [activeResponseId];
+          const orderedResponseIds = [...new Set([
+            ...responseIds,
+            ...outputByResponse.keys(),
+          ])];
+          const suppressedChunks = orderedResponseIds.flatMap((responseId) => {
+            const responseChunks = outputByResponse.get(responseId) ?? [];
+            const admittedCount = responseId === activeResponseId
+              ? finalToolBoundary
+              : responseChunks.length;
+            return responseChunks.slice(0, admittedCount);
+          });
+          const suppressedPcm = concatenate(suppressedChunks);
+          const nonTerminalTranscriptHashes = orderedResponseIds
+            .filter((responseId) => responseId !== activeResponseId)
+            .map((responseId) => outputTranscriptByResponse.get(responseId)?.trim() ?? "")
+            .filter(Boolean)
+            .map((transcript) => sha256Hex(transcript));
+          const allSuppressedTranscriptHashes = [
+            ...suppressedTranscriptHashes,
+            ...nonTerminalTranscriptHashes,
+          ];
+          const suppressedResponseCount = orderedResponseIds.filter((responseId) => {
+            if (responseId !== activeResponseId) {
+              return (outputByResponse.get(responseId)?.length ?? 0) > 0
+                || Boolean(outputTranscriptByResponse.get(responseId)?.trim());
+            }
+            return finalToolBoundary > 0;
+          }).length;
+          const suppressionBody = Object.freeze({
+            schema_version: 1 as const,
+            policy:
+              "exclude_everything_before_the_final_tool_batch_from_caller_heard_history" as const,
+            tool_dispatch_count: toolDispatchCount,
+            response_count: suppressedResponseCount,
+            audio_chunk_count: suppressedChunks.length,
+            audio_byte_length: suppressedPcm.byteLength,
+            audio_pcm_sha256: suppressedPcm.byteLength > 0
+              ? sha256Hex(suppressedPcm)
+              : null,
+            transcript_count: allSuppressedTranscriptHashes.length,
+            transcript_hash_set_sha256: allSuppressedTranscriptHashes.length > 0
+              ? sha256Hex(canonicalJson(allSuppressedTranscriptHashes))
+              : null,
+            caller_heard_audio_chunk_count: chunks.length,
+            caller_heard_audio_byte_length: pcm.byteLength,
+            caller_heard_audio_pcm_sha256: sha256Hex(pcm),
+          });
+          const suppressedUnplayedOutput = Object.freeze({
+            ...suppressionBody,
+            evidence_sha256: sha256Hex(
+              `${SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN}${canonicalJson(suppressionBody)}`,
+            ),
+          });
           operationOrder.push("assistant_pcm_captured");
           const capture = createLc4CapturedOutput({
             runId: input.manifest.run_id,
@@ -2466,11 +3108,8 @@ export class Lc4RealtimeProviderBridge {
             sampleRateHz: input.profile.output_sample_rate_hz,
             chunks: chunks.map((chunk, index) => ({ chunkId: `${opportunityId}-chunk-${index + 1}`, pcm: chunk })),
           });
-          const providerOutputTranscript = (responseIdsByOpportunity.get(opportunityId) ?? [activeResponseId])
-            .map((responseId) => outputTranscriptByResponse.get(responseId)?.trim() ?? "")
-            .filter(Boolean)
-            .join("\n")
-            .trim();
+          const providerOutputTranscript =
+            outputTranscriptByResponse.get(activeResponseId)?.trim() ?? "";
           const opportunityWire = Object.freeze(wire.slice(wireStart));
           const wireObservationSetSha256 = sha256Hex(
             `harshas-amazing-call-center/lc4-wire-observation-set/v1\n${canonicalJson(opportunityWire)}`,
@@ -2502,7 +3141,22 @@ export class Lc4RealtimeProviderBridge {
                       redacted_projection: redactedProjection,
                     });
                   }),
-                capture,
+                capture: suppressedChunks.length === 0
+                  ? capture
+                  : createLc4CapturedOutput({
+                      runId: input.manifest.run_id,
+                      opportunityId,
+                      responseId: `response-${sha256Hex(activeResponseId).slice(0, 32)}-generated`,
+                      provider: input.profile.provider,
+                      surface: "server_realtime_pcm",
+                      sampleRateHz: input.profile.output_sample_rate_hz,
+                      chunks: orderedResponseIds
+                        .flatMap((responseId) => outputByResponse.get(responseId) ?? [])
+                        .map((chunk, index) => ({
+                        chunkId: `${opportunityId}-generated-chunk-${index + 1}`,
+                        pcm: chunk,
+                        })),
+                    }),
               })
             : null;
           const xaiManualTurnCausality = usesXaiManualTurn
@@ -2592,7 +3246,7 @@ export class Lc4RealtimeProviderBridge {
             : null;
           diagnosticStage = "exchange_evidence";
           const body = Object.freeze({
-            schema_version: 3 as const,
+            schema_version: 4 as const,
             adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
             run_id: input.manifest.run_id,
             opportunity_id: opportunityId,
@@ -2629,6 +3283,7 @@ export class Lc4RealtimeProviderBridge {
               voice: input.profile.voice,
             }),
             output_capture: capture,
+            suppressed_unplayed_output: suppressedUnplayedOutput,
             gemini_output_attribution: geminiOutputAttribution,
             wire_observations: opportunityWire,
             wire_observation_set_sha256: wireObservationSetSha256,
@@ -2674,6 +3329,8 @@ export class Lc4RealtimeProviderBridge {
               ? {
                   dev_assistant_conversation_transcript: assistantConversationTranscript!,
                   dev_assistant_conversation_transcript_source: assistantConversationTranscriptSource!,
+                  dev_gateway_conversation_tool_batches:
+                    devGatewayFinished?.conversation_tool_batches ?? Object.freeze([]),
                 }
               : {}),
             replay_projection: replayProjection,
@@ -2818,8 +3475,9 @@ export class Lc4RealtimeProviderBridge {
           rotation_context_kind: rotationContext.kind,
           rotation_context_sha256: rotationContext.packet_sha256,
           rotation_conversation_replay_sha256: rotationContext.conversation_replay_sha256,
+          conversation_history_hydration: historyHydrationEvidence,
         });
-        const receipt = sha256Hex(`harshas-amazing-call-center/lc4-provider-session-rotation/v1\n${canonicalJson(body)}`);
+        const receipt = sha256Hex(`${SEGMENT_FINALIZATION_DOMAIN}${canonicalJson(body)}`);
         this.#previousRotationReceiptSha256 = receipt;
         return Object.freeze({
           session_ordinal: sessionOrdinal,
@@ -3283,46 +3941,74 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             )?.canonical_caller_text;
         if (!callerText) throw new Error("LC4-DEV raw conversation replay lacks its exact spoken caller source text");
         const appendConversationTurn = (
-          speaker: Lc4NativeConversationTurnInput["speaker"],
-          source: Lc4NativeConversationTurnInput["source"],
-          text: string,
-          provenanceReceiptSha256: string,
+          turn: Readonly<
+            | {
+                speaker: "caller";
+                source: "caller_tts_source_bound_to_pcm";
+                text: string;
+                provenance_receipt_sha256: string;
+              }
+            | {
+                speaker: "assistant";
+                source: Lc4AssistantConversationTranscriptSource;
+                text: string;
+                provenance_receipt_sha256: string;
+              }
+              | {
+                speaker: "tool";
+                source: "canonical_gateway_result";
+                tool_name: string;
+                tool_arguments: Readonly<Record<string, JsonValue>>;
+                text: string;
+                provenance_receipt_sha256: string;
+                tool_batch_sha256?: string;
+                tool_batch_call_ordinal?: number;
+                tool_batch_call_count?: number;
+              }
+          >,
         ) => {
           const sequence = runtime!.conversation_turns.length + 1;
           runtime!.conversation_turns.push(Object.freeze({
-            turn_id: `conversation.${String(sequence).padStart(3, "0")}.${speaker}`,
+            turn_id: `conversation.${String(sequence).padStart(3, "0")}.${turn.speaker}`,
             sequence,
-            speaker,
-            source,
-            text,
+            ...turn,
             available_after_opportunity: exchangeInput.opportunity.index,
-            provenance_receipt_sha256: provenanceReceiptSha256,
             provider_conversation_source: true as const,
             oracle_derived: false as const,
             future_derived: false as const,
             semantic_evaluator_derived: false as const,
-          }));
+          }) as Lc4NativeConversationTurnInput);
         };
-        appendConversationTurn(
-          "caller",
-          "caller_tts_source_bound_to_pcm",
-          callerText,
-          sha256Hex(exchangeInput.caller_pcm),
-        );
-        for (const projection of evidence.dev_gateway_receipt_set?.authority_projections ?? []) {
-          appendConversationTurn(
-            "tool",
-            "provider_visible_tool_result",
-            canonicalJson(projection.provider_output),
-            projection.projection_sha256,
+        appendConversationTurn({
+          speaker: "caller",
+          source: "caller_tts_source_bound_to_pcm",
+          text: callerText,
+          provenance_receipt_sha256: sha256Hex(exchangeInput.caller_pcm),
+        });
+        for (const batch of evidence.dev_gateway_conversation_tool_batches ?? []) {
+          const batchSha256 = sha256Hex(
+            `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch as unknown as JsonValue)}`,
           );
+          for (const call of batch.calls) {
+            appendConversationTurn({
+              speaker: "tool",
+              source: "canonical_gateway_result",
+              tool_name: call.gateway_tool_name,
+              tool_arguments: call.model_arguments,
+              text: call.provider_output_canonical_json,
+              provenance_receipt_sha256: call.source_sha256,
+              tool_batch_sha256: batchSha256,
+              tool_batch_call_ordinal: call.call_ordinal,
+              tool_batch_call_count: batch.calls.length,
+            });
+          }
         }
-        appendConversationTurn(
-          "assistant",
-          assistantTranscriptSource,
-          assistantTranscript,
-          evidence.output_capture.generated_pcm_sha256,
-        );
+        appendConversationTurn({
+          speaker: "assistant",
+          source: assistantTranscriptSource,
+          text: assistantTranscript,
+          provenance_receipt_sha256: evidence.output_capture.generated_pcm_sha256,
+        });
         if (exchangeInput.playback_kind === "canonical") {
           pendingOpportunity = Object.freeze({
             opportunity: exchangeInput.opportunity,

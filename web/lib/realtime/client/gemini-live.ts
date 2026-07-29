@@ -16,6 +16,11 @@ import {
   type RealtimeEventListener,
   type RealtimeResponseTerminalStatus,
   type RealtimeResponsePreparation,
+  type RealtimeConversationHistoryHydrationAcknowledgement,
+  type RealtimeConversationHistoryHydratedItemAcknowledgement,
+  type RealtimeConversationHistoryJsonValue,
+  type RealtimeConversationHistoryToolCall,
+  type RealtimeConversationHistoryTurn,
   type RealtimeWireObservation,
   type RealtimeWireObservationAttribution,
   type RealtimeWireObservationListener,
@@ -49,6 +54,11 @@ const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_TOOL_RESPONSE_BYTES = 1024 * 1024;
 export const GEMINI_LIVE_DEFAULT_MAX_DYNAMIC_CONTROL_BYTES = 4 * 1024;
 export const GEMINI_LIVE_HARD_MAX_DYNAMIC_CONTROL_BYTES = 64 * 1024;
+/** Provider-history limits are framework safety walls, not Google-published maxima. */
+export const GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES = 512;
+export const GEMINI_LIVE_MAX_INITIAL_HISTORY_PROVIDER_ITEMS = 1_024;
+export const GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES = 64 * 1024;
+export const GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES = 512 * 1024;
 const MAX_FUNCTION_CALLS_PER_BATCH = 64;
 const MAX_TRACKED_FUNCTION_CALL_IDS = 10_000;
 const CLIENT_GENERATED_WIRE_ATTRIBUTION = Object.freeze({
@@ -87,6 +97,11 @@ export type GeminiLiveClientOptions = {
    * setup frame is derived from this value without maintaining a second schema.
    */
   tools: readonly ProviderFunctionTool[];
+  /**
+   * Opt in before connect so setup can declare Google's non-generating initial
+   * history protocol. The actual history is supplied once, after setupComplete.
+   */
+  enableInitialHistoryHydration?: boolean;
   resumeHandle?: string;
   executeCapabilityGateway?: GeminiGatewayExecutor;
   onEvent?: (event: GeminiLiveEvent) => void;
@@ -144,7 +159,7 @@ type GeminiGenerationTrigger = Readonly<{
   localResponseId: string;
   connectionEpoch: number;
   inputTurn: number;
-  trigger: "audio_activity_end" | "client_content" | "tool_response";
+  trigger: "audio_activity_end" | "tool_response";
   clientMessageOrdinal: number;
   triggerObservationSha256?: string;
   phase: "awaiting_provider" | "awaiting_tool_result" | "awaiting_post_tool" | "terminal";
@@ -179,6 +194,8 @@ export type GeminiSetupReadinessEvidence = Readonly<{
   clientSentToolNames: readonly string[];
   clientSentModel: string;
   clientSentVoice: string;
+  /** Whether setup asked the server to treat the first clientContent as non-generating history. */
+  clientSentInitialHistoryInClientContent: boolean;
   providerTranscriptionPolicy: typeof GEMINI_PROVIDER_TRANSCRIPTION_POLICY;
   /** Every requested field is unverifiable because setupComplete has no fields. */
   configuration: SessionConfigurationAcknowledgement;
@@ -487,6 +504,15 @@ const MAX_PROVIDER_TOOLS_BYTES = 1024 * 1024;
 const MAX_FUNCTION_CALL_ID_LENGTH = 256;
 const PROVIDER_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 const GEMINI_FUNCTION_CALL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const INITIAL_HISTORY_PROVIDER_VISIBLE_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n";
+const INITIAL_HISTORY_SOURCE_BINDING_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n";
+const GEMINI_INITIAL_HISTORY_CALL_ID_DOMAIN =
+  "harshas-amazing-call-center/gemini-initial-history-function-call/v2\n";
+const GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_CALLS_PER_BATCH = 128;
+const GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_BATCH_BYTES = 256 * 1_024;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -517,6 +543,412 @@ function assertStrictJson(value: unknown, path: string, ancestors = new WeakSet<
     }
   }
   ancestors.delete(value);
+}
+
+function snapshotHistoryJson(
+  value: unknown,
+  path: string,
+  ancestors = new WeakSet<object>(),
+  depth = 0,
+): RealtimeConversationHistoryJsonValue {
+  if (depth > 40) throw new Error(`${path} exceeds the maximum JSON depth`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${path} contains a non-finite number`);
+    return value;
+  }
+  if (typeof value !== "object") throw new Error(`${path} contains a non-JSON value`);
+  if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new Error(`${path} contains symbol properties`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    throw new Error(`${path} contains a non-JSON object`);
+  }
+  ancestors.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Array.isArray(value)) {
+    const length = descriptors.length?.value;
+    if (!Number.isSafeInteger(length) || length < 0) throw new Error(`${path} has an invalid length`);
+    const result: RealtimeConversationHistoryJsonValue[] = [];
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (key === "length") continue;
+      if (!/^(0|[1-9]\d*)$/.test(key)
+        || Number(key) >= length
+        || !descriptor.enumerable
+        || !("value" in descriptor)) {
+        throw new Error(`${path} must use concrete array elements only`);
+      }
+    }
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !("value" in descriptor)) throw new Error(`${path} cannot be sparse`);
+      result.push(snapshotHistoryJson(descriptor.value, `${path}[${index}]`, ancestors, depth + 1));
+    }
+    ancestors.delete(value);
+    return Object.freeze(result);
+  }
+  const result: Record<string, RealtimeConversationHistoryJsonValue> = {};
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new Error(`${path} contains an unsafe object key`);
+    }
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      throw new Error(`${path}.${key} must be a concrete enumerable value`);
+    }
+    result[key] = snapshotHistoryJson(descriptor.value, `${path}.${key}`, ancestors, depth + 1);
+  }
+  ancestors.delete(value);
+  return Object.freeze(result);
+}
+
+type SnapshottedHistoryTurn =
+  | Extract<RealtimeConversationHistoryTurn, Readonly<{ role: "user" | "assistant" }>>
+  | Readonly<{
+      role: "tool_batch";
+      calls: readonly RealtimeConversationHistoryToolCall[];
+    }>;
+type ToolHistoryTurn = Extract<SnapshottedHistoryTurn, Readonly<{ role: "tool_batch" }>>;
+
+function isToolHistoryTurn(turn: SnapshottedHistoryTurn): turn is ToolHistoryTurn {
+  return turn.role === "tool_batch";
+}
+
+type CompiledGeminiInitialHistory = Readonly<{
+  frame: Readonly<Record<string, unknown>>;
+  encoded: string;
+  historySha256: string;
+  sourceBindingSha256: string;
+  turnCount: number;
+  providerItemCount: number;
+  items: readonly Omit<
+    RealtimeConversationHistoryHydratedItemAcknowledgement,
+    "outboundObservation" | "inboundObservation"
+  >[];
+}>;
+
+function concreteHistoryField(
+  descriptors: Record<string, PropertyDescriptor>,
+  key: string,
+  path: string,
+): unknown {
+  const descriptor = descriptors[key];
+  if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+    throw new Error(`${path}.${key} must be a concrete enumerable value`);
+  }
+  return descriptor.value;
+}
+
+function snapshotHistoryTurns(
+  turns: readonly RealtimeConversationHistoryTurn[],
+): readonly SnapshottedHistoryTurn[] {
+  if (!Array.isArray(turns)) throw new Error("Gemini initial history must be an array");
+  const listDescriptors = Object.getOwnPropertyDescriptors(turns) as Record<string, PropertyDescriptor>;
+  const length = listDescriptors.length?.value;
+  if (!Number.isSafeInteger(length)
+    || length < 1
+    || length > GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES) {
+    throw new Error(
+      `Gemini initial history must contain 1 to ${GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES} turns`,
+    );
+  }
+  if (Object.getOwnPropertySymbols(turns).length > 0) {
+    throw new Error("Gemini initial history cannot have symbol properties");
+  }
+  for (const [key, descriptor] of Object.entries(listDescriptors)) {
+    if (key === "length") continue;
+    if (!/^(0|[1-9]\d*)$/.test(key)
+      || Number(key) >= length
+      || !descriptor.enumerable
+      || !("value" in descriptor)) {
+      throw new Error("Gemini initial history must use concrete array elements only");
+    }
+  }
+
+  const snapshots: SnapshottedHistoryTurn[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = listDescriptors[String(index)];
+    const path = `Gemini initial history turn ${index + 1}`;
+    if (!descriptor || !("value" in descriptor) || !isRecord(descriptor.value)) {
+      throw new Error(`${path} must be a concrete object`);
+    }
+    const turn = descriptor.value;
+    if (Object.getPrototypeOf(turn) !== Object.prototype
+      || Object.getOwnPropertySymbols(turn).length > 0) {
+      throw new Error(`${path} must be a plain object without symbols`);
+    }
+    const fields = Object.getOwnPropertyDescriptors(turn);
+    const role = concreteHistoryField(fields, "role", path);
+    if (role === "user" || role === "assistant") {
+      const sourceSha256 = concreteHistoryField(fields, "sourceSha256", path);
+      if (typeof sourceSha256 !== "string" || !SHA256_HEX.test(sourceSha256)) {
+        throw new Error(`${path}.sourceSha256 must be a lowercase SHA-256`);
+      }
+      const text = concreteHistoryField(fields, "text", path);
+      if (typeof text !== "string" || !text.trim()) throw new Error(`${path}.text must be non-empty`);
+      if (textBytes(text) > GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES) {
+        throw new Error(
+          `${path} exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES} UTF-8 bytes`,
+        );
+      }
+      snapshots.push(Object.freeze({ role, text, sourceSha256 }));
+      continue;
+    }
+    if (role !== "tool" && role !== "tool_batch") throw new Error(`${path}.role is invalid`);
+    const rawCalls = role === "tool"
+      ? [turn]
+      : concreteHistoryField(fields, "calls", path);
+    if (!Array.isArray(rawCalls) || rawCalls.length < 1) {
+      throw new Error(`${path}.calls must be a non-empty array`);
+    }
+    if (rawCalls.length > GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_CALLS_PER_BATCH) {
+      throw new Error(
+        `${path} exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_CALLS_PER_BATCH} tool calls`,
+      );
+    }
+    const calls = rawCalls.map((rawCall, callIndex) => {
+      const callPath = `${path}.calls[${callIndex}]`;
+      if (!isRecord(rawCall)
+        || Object.getPrototypeOf(rawCall) !== Object.prototype
+        || Object.getOwnPropertySymbols(rawCall).length > 0) {
+        throw new Error(`${callPath} must be a plain object without symbols`);
+      }
+      const callFields = Object.getOwnPropertyDescriptors(rawCall);
+      const toolName = concreteHistoryField(callFields, "toolName", callPath);
+      const toolArguments = concreteHistoryField(callFields, "toolArguments", callPath);
+      const output = concreteHistoryField(callFields, "output", callPath);
+      const sourceSha256 = concreteHistoryField(callFields, "sourceSha256", callPath);
+      if (typeof toolName !== "string" || !PROVIDER_TOOL_NAME.test(toolName)) {
+        throw new Error(`${callPath}.toolName is invalid`);
+      }
+      if (!isRecord(toolArguments)) {
+        throw new Error(`${callPath}.toolArguments must be a JSON object`);
+      }
+      if (typeof output !== "string") throw new Error(`${callPath}.output must be a string`);
+      if (typeof sourceSha256 !== "string" || !SHA256_HEX.test(sourceSha256)) {
+        throw new Error(`${callPath}.sourceSha256 must be a lowercase SHA-256`);
+      }
+      const snapshottedArguments = snapshotHistoryJson(
+        toolArguments,
+        `${callPath}.toolArguments`,
+      );
+      if (!isRecord(snapshottedArguments)) {
+        throw new Error(`${callPath}.toolArguments must remain an object`);
+      }
+      const providerVisibleBytes = textBytes(canonicalJson({
+        toolName,
+        toolArguments: snapshottedArguments as Record<string, JsonValue>,
+        output,
+      }));
+      if (providerVisibleBytes > GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES) {
+        throw new Error(
+          `${callPath} exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES} UTF-8 bytes`,
+        );
+      }
+      return Object.freeze({
+        toolName,
+        toolArguments: snapshottedArguments as Readonly<Record<
+          string,
+          RealtimeConversationHistoryJsonValue
+        >>,
+        output,
+        sourceSha256,
+      });
+    });
+    const visibleCalls = calls.map((call) => ({
+      toolName: call.toolName,
+      toolArguments: call.toolArguments,
+      output: call.output,
+    }));
+    const batchBytes = textBytes(canonicalJson(jsonValue(visibleCalls)));
+    if (batchBytes > GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_BATCH_BYTES) {
+      throw new Error(
+        `${path} tool batch exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_TOOL_BATCH_BYTES} UTF-8 bytes`,
+      );
+    }
+    snapshots.push(Object.freeze({ role: "tool_batch" as const, calls: Object.freeze(calls) }));
+  }
+  return Object.freeze(snapshots);
+}
+
+function compileGeminiInitialHistory(
+  turns: readonly RealtimeConversationHistoryTurn[],
+  declaredToolNames: ReadonlySet<string>,
+): CompiledGeminiInitialHistory {
+  const snapshots = snapshotHistoryTurns(turns);
+  const providerVisible = snapshots.map((turn) => isToolHistoryTurn(turn)
+    ? Object.freeze({
+        role: "tool_batch" as const,
+        calls: Object.freeze(turn.calls.map((call) => Object.freeze({
+          toolName: call.toolName,
+          toolArguments: call.toolArguments,
+          output: call.output,
+        }))),
+      })
+    : Object.freeze({ role: turn.role, text: turn.text }));
+  const historySha256 = sha256(
+    `${INITIAL_HISTORY_PROVIDER_VISIBLE_DOMAIN}${canonicalJson(jsonValue(providerVisible))}`,
+  );
+  const sourceBindingSha256 = sha256(
+    `${INITIAL_HISTORY_SOURCE_BINDING_DOMAIN}${canonicalJson(jsonValue({
+      historySha256,
+      sources: snapshots.map((turn, index) => isToolHistoryTurn(turn)
+        ? {
+            ordinal: index + 1,
+            role: "tool_batch",
+            calls: turn.calls.map((call, callIndex) => ({
+              callOrdinal: callIndex + 1,
+              sourceSha256: call.sourceSha256,
+            })),
+          }
+        : {
+            ordinal: index + 1,
+            sourceSha256: turn.sourceSha256,
+          }),
+    }))}`,
+  );
+  const providerTurns: Record<string, unknown>[] = [];
+  const items: Array<Omit<
+    RealtimeConversationHistoryHydratedItemAcknowledgement,
+    "outboundObservation" | "inboundObservation"
+  >> = [];
+  let providerItemOrdinal = 0;
+
+  for (const [index, turn] of snapshots.entries()) {
+    const historyTurnOrdinal = index + 1;
+    if (!isToolHistoryTurn(turn)) {
+      providerTurns.push({
+        role: turn.role === "user" ? "user" : "model",
+        parts: [{ text: turn.text }],
+      });
+      providerItemOrdinal += 1;
+      items.push(Object.freeze({
+        historyTurnOrdinal,
+        providerItemOrdinal,
+        kind: turn.role === "user" ? "user_message" : "assistant_message",
+        sourceSha256: turn.sourceSha256,
+      }));
+      continue;
+    }
+    const compiledCalls = turn.calls.map((call, callIndex) => {
+      if (!declaredToolNames.has(call.toolName)) {
+        throw new Error(`Gemini initial history tool ${call.toolName} is not declared in this session`);
+      }
+      let parsedResponse: unknown;
+      try {
+        parsedResponse = JSON.parse(call.output);
+      } catch {
+        throw new Error(
+          `Gemini initial history tool output at turn ${historyTurnOrdinal} call ${callIndex + 1} `
+          + "must be a canonical JSON object",
+        );
+      }
+      if (!isRecord(parsedResponse)) {
+        throw new Error(
+          `Gemini initial history tool output at turn ${historyTurnOrdinal} call ${callIndex + 1} `
+          + "must be a canonical JSON object",
+        );
+      }
+      const response = snapshotHistoryJson(
+        parsedResponse,
+        `Gemini initial history turn ${historyTurnOrdinal}.calls[${callIndex}].output`,
+      );
+      if (!isRecord(response)
+        || canonicalJson(response as Record<string, JsonValue>) !== call.output) {
+        throw new Error(
+          `Gemini initial history tool output at turn ${historyTurnOrdinal} call ${callIndex + 1} `
+          + "must be a canonical JSON object",
+        );
+      }
+      const callId = `hacc-history-${sha256(
+        `${GEMINI_INITIAL_HISTORY_CALL_ID_DOMAIN}${historyTurnOrdinal}\n${callIndex + 1}\n`
+        + canonicalJson(jsonValue(providerVisible[index])),
+      ).slice(0, 48)}`;
+      return Object.freeze({
+        call,
+        response,
+        callId,
+        syntheticCallIdSha256: sha256(callId),
+      });
+    });
+    providerTurns.push({
+      role: "model",
+      parts: compiledCalls.map(({ call, callId }) => ({
+        functionCall: {
+          id: callId,
+          name: call.toolName,
+          args: call.toolArguments,
+        },
+      })),
+    });
+    for (const { call, syntheticCallIdSha256 } of compiledCalls) {
+      providerItemOrdinal += 1;
+      items.push(Object.freeze({
+        historyTurnOrdinal,
+        providerItemOrdinal,
+        kind: "synthetic_tool_call" as const,
+        sourceSha256: call.sourceSha256,
+        syntheticCallIdSha256,
+      }));
+    }
+    providerTurns.push({
+      role: "user",
+      parts: compiledCalls.map(({ call, response, callId }) => ({
+        functionResponse: {
+          id: callId,
+          name: call.toolName,
+          response,
+        },
+      })),
+    });
+    for (const { call, syntheticCallIdSha256 } of compiledCalls) {
+      providerItemOrdinal += 1;
+      items.push(Object.freeze({
+        historyTurnOrdinal,
+        providerItemOrdinal,
+        kind: "synthetic_tool_output" as const,
+        sourceSha256: call.sourceSha256,
+        syntheticCallIdSha256,
+      }));
+    }
+  }
+  if (providerTurns[0]?.role !== "user") {
+    throw new Error("Gemini initial history must begin with a user turn");
+  }
+  if (items.length > GEMINI_LIVE_MAX_INITIAL_HISTORY_PROVIDER_ITEMS) {
+    throw new Error(
+      `Gemini initial history exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_PROVIDER_ITEMS} provider content items`,
+    );
+  }
+  for (let index = 1; index < providerTurns.length; index += 1) {
+    if (providerTurns[index]?.role === providerTurns[index - 1]?.role) {
+      throw new Error(
+        `Gemini initial history cannot encode adjacent ${String(providerTurns[index]?.role)} provider turns`,
+      );
+    }
+  }
+  const frame = {
+    clientContent: {
+      turns: providerTurns,
+      turnComplete: true,
+    },
+  };
+  const encoded = JSON.stringify(frame);
+  if (textBytes(encoded) > GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES) {
+    throw new Error(
+      `Gemini initial history frame exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES} UTF-8 bytes`,
+    );
+  }
+  return Object.freeze({
+    frame: deepFreezeJson(frame),
+    encoded,
+    historySha256,
+    sourceBindingSha256,
+    turnCount: snapshots.length,
+    providerItemCount: items.length,
+    items: Object.freeze(items),
+  });
 }
 
 function validatedProviderTools(tools: readonly ProviderFunctionTool[]): readonly ProviderFunctionTool[] {
@@ -580,7 +1012,7 @@ export function buildGeminiFunctionDeclarations(
 
 export function buildGeminiLiveSetup(options: Pick<
   GeminiLiveClientOptions,
-  "model" | "voice" | "instructions" | "resumeHandle" | "tools"
+  "model" | "voice" | "instructions" | "resumeHandle" | "tools" | "enableInitialHistoryHydration"
 >): Record<string, unknown> {
   const model = options.model.startsWith("models/") ? options.model : `models/${options.model}`;
   const functionDeclarations = buildGeminiFunctionDeclarations(options.tools);
@@ -601,6 +1033,9 @@ export function buildGeminiLiveSetup(options: Pick<
       },
       ...(options.resumeHandle
         ? { sessionResumption: { handle: options.resumeHandle } }
+        : {}),
+      ...(options.enableInitialHistoryHydration === true
+        ? { historyConfig: { initialHistoryInClientContent: true } }
         : {}),
       contextWindowCompression: { slidingWindow: {} },
     },
@@ -664,6 +1099,11 @@ type GeminiWireObservationBuildInput = Readonly<{
   event: Readonly<Record<string, unknown>>;
   exactSerialized: string;
   previousObservationSha256: string | null;
+  semanticContext?: Readonly<{
+    kind: "initial_conversation_history";
+    entryCount: number;
+    providerVisibleHistorySha256: string;
+  }>;
 }>;
 
 const GEMINI_CONFIGURATION_HASH_DOMAIN = "harshas-amazing-call-center/gemini-configuration/v1";
@@ -682,7 +1122,11 @@ const GEMINI_USAGE_COUNTERS = [
 
 function buildGeminiWireObservation(input: GeminiWireObservationBuildInput): RealtimeWireObservation {
   const wireType = geminiWireType(input.event);
-  const projection = deepFreezeJson(geminiRedactedWireProjection(input.event, wireType));
+  const projection = deepFreezeJson(geminiRedactedWireProjection(
+    input.event,
+    wireType,
+    input.semanticContext,
+  ));
   const identities = deepFreezeJson(geminiWireIdentityProjection(input.event));
   const projectionSha256 = realtimeWireProjectionSha256(projection);
   const core = {
@@ -769,6 +1213,7 @@ function geminiToolContinuationControlWireProjection(
 function geminiRedactedWireProjection(
   event: Readonly<Record<string, unknown>>,
   wireType: string,
+  semanticContext?: GeminiWireObservationBuildInput["semanticContext"],
 ): Record<string, unknown> {
   const projection: Record<string, unknown> = {};
   const session = geminiSessionWireProjection(event, wireType);
@@ -791,6 +1236,25 @@ function geminiRedactedWireProjection(
     };
   }
   const clientContent = isRecord(event.clientContent) ? event.clientContent : {};
+  if (semanticContext?.kind === "initial_conversation_history") {
+    const turns = Array.isArray(clientContent.turns) ? clientContent.turns : [];
+    const parts = turns.flatMap((turn) => (
+      isRecord(turn) && Array.isArray(turn.parts) ? turn.parts : []
+    ));
+    projection.initialHistory = {
+      protocol: "initial_history_in_client_content",
+      entryCount: semanticContext.entryCount,
+      providerContentTurnCount: turns.length,
+      textPartCount: parts.filter((part) => isRecord(part) && typeof part.text === "string").length,
+      functionCallCount: parts.filter((part) => isRecord(part) && isRecord(part.functionCall)).length,
+      functionResponseCount: parts.filter((part) => isRecord(part) && isRecord(part.functionResponse)).length,
+      turnComplete: clientContent.turnComplete === true,
+      generationTriggered: false,
+      providerAcknowledgement: "not_defined_by_protocol",
+      providerVisibleHistorySha256: semanticContext.providerVisibleHistorySha256,
+      geminiContentSha256: geminiJsonWireEvidence(turns).sha256,
+    };
+  }
   if (clientContent.turnComplete === false && Array.isArray(clientContent.turns)) {
     const texts = clientContent.turns.flatMap((turn) => (
       isRecord(turn) && Array.isArray(turn.parts)
@@ -805,7 +1269,7 @@ function geminiRedactedWireProjection(
       };
     }
   }
-  const text = geminiTextWireProjection(event);
+  const text = geminiTextWireProjection(event, semanticContext);
   if (text.length) projection.text = text;
   const usage = geminiUsageWireProjection(event);
   if (usage) projection.usage = usage;
@@ -832,6 +1296,7 @@ function geminiSessionWireProjection(
   const generation = isRecord(setup.generationConfig) ? setup.generationConfig : {};
   const speech = isRecord(generation.speechConfig) ? generation.speechConfig : {};
   const realtimeInput = isRecord(setup.realtimeInputConfig) ? setup.realtimeInputConfig : {};
+  const historyConfig = isRecord(setup.historyConfig) ? setup.historyConfig : {};
   const automaticActivity = isRecord(realtimeInput.automaticActivityDetection)
     ? realtimeInput.automaticActivityDetection
     : {};
@@ -863,6 +1328,7 @@ function geminiSessionWireProjection(
     inputFormat: { encoding: "pcm16", sampleRateHz: GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ, channels: 1 },
     outputFormat: { encoding: "pcm16", sampleRateHz: GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ, channels: 1 },
     manualActivityDetection: automaticActivity.disabled === true,
+    initialHistoryInClientContent: historyConfig.initialHistoryInClientContent === true,
     providerTranscriptionPolicy: GEMINI_PROVIDER_TRANSCRIPTION_POLICY,
   };
 }
@@ -978,6 +1444,7 @@ function geminiJsonWireEvidence(value: unknown): Readonly<{ sha256: string; byte
 
 function geminiTextWireProjection(
   event: Readonly<Record<string, unknown>>,
+  semanticContext?: GeminiWireObservationBuildInput["semanticContext"],
 ): Record<string, unknown>[] {
   const content = isRecord(event.serverContent) ? event.serverContent : {};
   const values: Array<{ kind: string; value: string }> = [];
@@ -988,7 +1455,11 @@ function geminiTextWireProjection(
       for (const part of turn.parts) {
         if (isRecord(part) && typeof part.text === "string") {
           values.push({
-            kind: clientContent.turnComplete === true ? "client_text_turn" : "client_context",
+            kind: semanticContext?.kind === "initial_conversation_history"
+              ? "initial_history_text"
+              : clientContent.turnComplete === true
+                ? "client_text_turn"
+                : "client_context",
             value: part.text,
           });
         }
@@ -1097,6 +1568,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private readonly providerToolsSha256: string;
   private readonly declaredToolNames: ReadonlySet<string>;
   private readonly resumptionEnabled: boolean;
+  private readonly initialHistoryHydrationEnabled: boolean;
   private readonly eventListeners = new Set<RealtimeEventListener>();
   private readonly wireEventListeners = new Set<RealtimeWireEventListener>();
   private readonly wireObservationListeners = new Set<RealtimeWireObservationListener>();
@@ -1146,6 +1618,8 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private pendingToolContinuationPreparation: RealtimeResponsePreparation | null = null;
   private clientMessageOrdinal = 0;
   private generationTrigger: GeminiGenerationTrigger | null = null;
+  private initialHistoryHydrationPending = false;
+  private initialHistoryHydrated = false;
 
   constructor(options: GeminiLiveClientOptions) {
     if (!options.model.trim()) throw new Error("Gemini Live model is required");
@@ -1161,6 +1635,12 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.providerToolsSha256 = sha256(canonicalJson(jsonValue(this.providerTools)));
     this.declaredToolNames = new Set(this.providerTools.map((tool) => tool.name));
     this.resumptionEnabled = options.resumeHandle !== undefined;
+    this.initialHistoryHydrationEnabled = options.enableInitialHistoryHydration === true;
+    if (this.resumptionEnabled && this.initialHistoryHydrationEnabled) {
+      throw new Error(
+        "Gemini Live session resumption and explicit initial history hydration cannot be combined",
+      );
+    }
     if (options.executeCapabilityGateway && (
       this.providerTools.length !== 1
       || this.providerTools[0]?.name !== GEMINI_CAPABILITY_GATEWAY_NAME
@@ -1214,7 +1694,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   }
 
   get isReady(): boolean {
-    return this.clientState === "ready";
+    return this.clientState === "ready" && !this.initialHistoryHydrationPending;
   }
 
   get state(): RealtimeClientState {
@@ -1284,6 +1764,8 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.conflictedToolCallIds.clear();
     this.clientMessageOrdinal = 0;
     this.generationTrigger = null;
+    this.initialHistoryHydrationPending = this.initialHistoryHydrationEnabled;
+    this.initialHistoryHydrated = !this.initialHistoryHydrationEnabled;
     this.currentResponseId = null;
     this.responseStarted = false;
     this.responseFinished = false;
@@ -1498,20 +1980,91 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     if (!text.trim() || Buffer.byteLength(text, "utf8") > 16 * 1024) {
       throw new Error("Gemini text turn must be non-empty and at most 16384 UTF-8 bytes");
     }
-    this.inputTranscriptAttributionAmbiguous = this.inputTurn > 0 && !this.inputProviderTranscriptFinished;
-    this.inputProviderTranscriptFinished = false;
-    this.inputTurn += 1;
-    this.inputTranscript.reset();
-    // Official Live API text-turn shape. Unlike realtimeInput.text inside an
-    // activityStart/activityEnd pair, turnComplete reliably triggers model
-    // generation without sending any caller-audio bytes.
-    const sent = this.sendReady({
-      clientContent: {
-        turns: [{ role: "user", parts: [{ text }] }],
-        turnComplete: true,
-      },
+    // Gemini 3.1 reserves clientContent for setup-declared initial history.
+    // A live text update therefore uses realtimeInput inside the same manual
+    // activity boundary as audio; activityEnd remains the generation trigger.
+    this.startActivity();
+    this.sendReady({ realtimeInput: { text } });
+    this.endActivity();
+  }
+
+  async hydrateConversationHistory(
+    turns: readonly RealtimeConversationHistoryTurn[],
+    timeoutMs?: number,
+  ): Promise<RealtimeConversationHistoryHydrationAcknowledgement> {
+    this.requireTransportReady();
+    if (!this.initialHistoryHydrationEnabled) {
+      throw new Error("Gemini Live initial history hydration was not enabled before connect");
+    }
+    if (this.initialHistoryHydrated || !this.initialHistoryHydrationPending) {
+      throw new Error("Gemini Live initial conversation history has already been hydrated");
+    }
+    if (timeoutMs !== undefined && (
+      !Number.isFinite(timeoutMs)
+      || !Number.isInteger(timeoutMs)
+      || timeoutMs <= 0
+    )) {
+      throw new Error("Gemini initial history timeoutMs must be a positive integer");
+    }
+    // The common interface carries a timeout for transports with per-item
+    // acknowledgements. Gemini defines no history-acceptance event to await;
+    // this method returns immediately with an explicitly unacknowledged status.
+    if (this.inputOpen
+      || this.responsePrepared
+      || this.clientMessageOrdinal !== 0
+      || this.generationTrigger !== null) {
+      throw new Error("Gemini initial history must be the first post-setup client message");
+    }
+
+    const compiled = compileGeminiInitialHistory(turns, this.declaredToolNames);
+    let observation: RealtimeWireObservation | undefined;
+    try {
+      this.socket!.send(compiled.encoded);
+      observation = this.notifyWireObservation(
+        "outbound",
+        compiled.frame,
+        compiled.encoded,
+        undefined,
+        {
+          kind: "initial_conversation_history",
+          entryCount: compiled.turnCount,
+          providerVisibleHistorySha256: compiled.historySha256,
+        },
+      );
+    } catch {
+      const binding = {
+        socket: this.socket!,
+        epoch: this.connectionEpoch,
+      } satisfies ConnectionBinding;
+      const error = new Error("Gemini Live initial conversation history could not be sent");
+      this.failActiveConnection(
+        binding,
+        error,
+        "initial_history_send_failed",
+      );
+      try { binding.socket.close(1000, "initial history failed"); } catch { /* already failed */ }
+      throw error;
+    }
+    this.clientMessageOrdinal += 1;
+    this.initialHistoryHydrationPending = false;
+    this.initialHistoryHydrated = true;
+    const outboundObservation = observation
+      ? realtimeWireObservationReference(observation)
+      : CLIENT_GENERATED_WIRE_ATTRIBUTION;
+    return Object.freeze({
+      schemaVersion: 1,
+      provider: "gemini",
+      connectionEpoch: this.connectionEpoch,
+      status: "sent_unacknowledged_by_provider_protocol",
+      turnCount: compiled.turnCount,
+      providerItemCount: compiled.providerItemCount,
+      historySha256: compiled.historySha256,
+      sourceBindingSha256: compiled.sourceBindingSha256,
+      items: Object.freeze(compiled.items.map((item) => Object.freeze({
+        ...item,
+        outboundObservation,
+      }))),
     });
-    this.armGenerationTrigger("client_content", sent);
   }
 
   submitToolResults(results: readonly RealtimeToolResult[], createResponse = false): void {
@@ -1652,6 +2205,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         instructions: this.options.instructions,
         tools: this.providerTools,
         resumeHandle: this.resumption.handle,
+        enableInitialHistoryHydration: this.initialHistoryHydrationEnabled,
       });
       const setupFrame = JSON.stringify(setup);
       const setupRecord = isRecord(setup.setup) ? setup.setup : {};
@@ -1663,6 +2217,9 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         clientSentToolNames: Object.freeze(this.providerTools.map((tool) => tool.name)),
         clientSentModel: typeof setupRecord.model === "string" ? setupRecord.model : this.options.model,
         clientSentVoice: this.options.voice,
+        clientSentInitialHistoryInClientContent:
+          isRecord(setupRecord.historyConfig)
+          && setupRecord.historyConfig.initialHistoryInClientContent === true,
         providerTranscriptionPolicy: GEMINI_PROVIDER_TRANSCRIPTION_POLICY,
         configuration: geminiSetupConfigurationEvidence(setupRecord),
       });
@@ -1827,8 +2384,12 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     event: Readonly<Record<string, unknown>>,
     exactSerialized: string,
     arrival?: WireArrival,
+    semanticContext?: GeminiWireObservationBuildInput["semanticContext"],
   ): RealtimeWireObservation | undefined {
-    if (!this.wireObservationListeners.size) return undefined;
+    // Initial-history receipts must bind a real outbound observation even when
+    // the application has no external evidence subscriber. Opted-in sessions
+    // therefore maintain the complete setup-to-history chain internally.
+    if (!this.wireObservationListeners.size && !this.initialHistoryHydrationEnabled) return undefined;
     const observedAtMs = arrival?.wallMs ?? this.now();
     const rawMonotonicMs = arrival?.monotonicMs ?? this.monotonicNow();
     if (!Number.isFinite(observedAtMs) || !Number.isFinite(rawMonotonicMs)) {
@@ -1848,6 +2409,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       event,
       exactSerialized,
       previousObservationSha256: this.wireObservationChainHead,
+      ...(semanticContext ? { semanticContext } : {}),
     });
     this.wireSequence = sequence;
     this.wireObservationChainHead = observation.observationSha256;
@@ -1902,6 +2464,8 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         client_sent_tool_names: [...acknowledged.clientSentToolNames],
         client_sent_model: acknowledged.clientSentModel,
         client_sent_voice: acknowledged.clientSentVoice,
+        client_sent_initial_history_in_client_content:
+          acknowledged.clientSentInitialHistoryInClientContent,
         provider_transcription_policy: acknowledged.providerTranscriptionPolicy,
         connection_epoch: acknowledged.connectionEpoch,
         configuration_strict_parity_verified: acknowledged.configuration.strictParityVerified,
@@ -2726,9 +3290,16 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     });
   }
 
-  private requireReady() {
+  private requireTransportReady() {
     if (this.clientState !== "ready" || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
       throw new Error("Gemini Live setup is not complete");
+    }
+  }
+
+  private requireReady() {
+    this.requireTransportReady();
+    if (this.initialHistoryHydrationPending) {
+      throw new Error("Gemini Live initial conversation history has not been hydrated");
     }
   }
 

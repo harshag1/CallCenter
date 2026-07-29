@@ -964,3 +964,46 @@ is preserved as
 [unverified advisory input](../../docs/research/external/2026-07-29-lc4-rotation-fable.md).
 It is auxiliary research spend, not realtime-provider spend or benchmark
 evidence.
+
+## 2026-07-29 — Provider-native continuity and qualification proof complete offline
+
+The release branch now separates long-call continuity into three planes:
+
+1. immutable audit evidence;
+2. caller-heard provider conversation history;
+3. bounded HACC control state and application-owned authority.
+
+OpenAI and xAI hydrate ordered native conversation items with real per-item
+acknowledgements. Gemini hydrates one ordered initial-history `clientContent`
+frame and explicitly records that its protocol does not acknowledge individual
+history items. The neutral contract preserves parallel `tool_batch` boundaries,
+exact normalized arguments, canonical gateway results, source hashes, and
+caller-heard assistant output. Generated-but-unplayed pre-tool speech is
+suppressed from playback and future conversation history while remaining
+content-free, hash-bound audit evidence.
+
+The fresh qualification plan is now v7/schema 3. It signs the exact history
+probe, provider-visible history hash, source-binding hash, and a distinct paid
+configuration matrix requiring history hydration. Gate A setup sessions remain
+non-generating setup checks; all three paid sessions must hydrate history before
+caller audio. The retained-package verifier independently reconstructs the
+history frames, item order, content hashes, acknowledgement boundary, zero
+pre-input generation/tool/output activity, and first live-input observation.
+
+Provider-free validation currently passes:
+
+- OpenAI/xAI/Gemini hydration, batch, suppression, gateway, adapter,
+  qualification, and live-runner focused suites;
+- strict rejection of missing hydration, changed history hashes, fabricated
+  Gemini acknowledgements, and pre-input model output;
+- 33/33 deterministic gateway fault-injection scenarios, artifact
+  `ab00c555a442345f1b7a1395c25d840e6b2bbc9d80f4a35beb4ff803da84ff77`;
+- 96/96 offline claim-verification tests;
+- full repository suite: 3,257 passed, 0 failed, 85 intentionally skipped;
+- production build, full TypeScript, and ESLint checks.
+
+This clears the history-hydration design gate but does not itself authorize a
+provider call or support an efficacy claim. Paid admission still requires one
+clean source commit, a fresh source-bound ASR environment receipt, and the
+already bounded `$1 + $3 + $15` one-shot sequence. No score or launch graph is
+claimed yet.

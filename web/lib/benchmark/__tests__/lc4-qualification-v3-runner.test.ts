@@ -15,6 +15,7 @@ import {
   LC4_XAI_SERVER_VAD_SETTING_SHA256,
   assertLc4QualificationV3Authorization,
   assertLc4QualificationV3PlanArtifact,
+  assertRetainedLc4QualificationHistoryHydrationEvidence,
   createLc4QualificationV3AuthorizationArtifact,
   createLc4QualificationV3Targets,
   loadLc4QualificationV3AuthorizationFile,
@@ -43,6 +44,10 @@ import {
 import {
   LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_COMPACT_CONTROL_SHA256,
+  LC4_S2S_HISTORY_PROBE,
+  LC4_S2S_HISTORY_PROBE_SHA256,
+  LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+  LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_SOURCE_TEXT,
   LC4_S2S_TOOL,
@@ -357,6 +362,55 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
       format: Object.freeze({ encoding: "pcm16" as const, sampleRateHz: input.provider === "gemini" ? 24_000 : input.audio.sampleRateHz, channels: 1 as const }),
     }),
   });
+  const historyWire = input.provider === "gemini" ? (() => {
+    const outbound = observe("outbound", "clientContent", Object.freeze({}), {
+      initialHistory: {
+        protocol: "initial_history_in_client_content",
+        entryCount: 3,
+        providerContentTurnCount: 4,
+        functionCallCount: 1,
+        functionResponseCount: 1,
+        turnComplete: true,
+        generationTriggered: false,
+        providerAcknowledgement: "not_defined_by_protocol",
+        providerVisibleHistorySha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+        geminiContentSha256: sha256Hex("qualification-test-gemini-history"),
+      },
+    });
+    return { outbound: [outbound, outbound, outbound, outbound], inbound: [] };
+  })() : (() => {
+    const projections = [
+      {
+        kind: "user_message",
+        contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[0].text),
+      },
+      {
+        kind: "synthetic_tool_call",
+        argumentsSha256: sha256Hex(canonicalJson(
+          LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments,
+        )),
+      },
+      {
+        kind: "synthetic_tool_output",
+        outputSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
+      },
+      {
+        kind: "assistant_message",
+        contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
+      },
+    ] as const;
+    const outbound: RealtimeWireObservation[] = [];
+    const inbound: RealtimeWireObservation[] = [];
+    for (const projection of projections) {
+      outbound.push(observe("outbound", "conversation.item.create", Object.freeze({}), {
+        conversationHistoryItem: projection,
+      }));
+      inbound.push(observe("inbound", "conversation.item.created", Object.freeze({}), {
+        conversationHistoryItem: projection,
+      }));
+    }
+    return { outbound, inbound };
+  })();
   const xaiTarget = createLc4QualificationV3Targets().find((target) => target.provider === "xai")!;
   const xaiTransportParitySha256 = xaiServerVadTransportParitySha256(
     withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate(
@@ -424,6 +478,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     return { control, ack, inputAudio, speechStart, silenceTail, speechStop, commit, rootResponse, call, result, continuation, continuationStarted, outputAudio, terminal };
   })() : null;
   const commonWire = input.provider !== "xai" ? (() => {
+    if (input.provider === "gemini") observe("outbound", "realtimeInput.activityStart");
     const inputAudio = observe(
       "outbound",
       input.provider === "gemini" ? "realtimeInput.audio" : "input_audio_buffer.append",
@@ -570,9 +625,56 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     summary: replaySummary, wire_observations: wire, sanitized_usage: [sanitizedUsage], causal_binding: causalBinding,
   });
   expect(replay.valid, replay.errors.join(", ")).toBe(true);
+  const firstLiveInput = wire.find((observation) => (
+    observation.direction === "outbound"
+      && (observation.wireType === "input_audio_buffer.append"
+        || observation.wireType === "realtimeInput.activityStart")
+  )) ?? wire[0]!;
+  const historyEvidenceBody = Object.freeze({
+    schema_version: 1 as const,
+    probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
+    provider: input.provider,
+    status: input.provider === "gemini"
+      ? "sent_unacknowledged_by_provider_protocol" as const
+      : "acknowledged" as const,
+    connection_epoch: 1,
+    turn_count: 3 as const,
+    provider_item_count: 4 as const,
+    provider_visible_history_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+    source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+    item_kinds: Object.freeze([
+      "user_message",
+      "synthetic_tool_call",
+      "synthetic_tool_output",
+      "assistant_message",
+    ] as const),
+    outbound_observation_sha256s: Object.freeze(
+      historyWire.outbound.map((observation) => observation.observationSha256),
+    ),
+    inbound_observation_sha256s: Object.freeze(
+      historyWire.inbound.map((observation) => observation.observationSha256),
+    ),
+    last_history_observation_sequence: Math.max(
+      ...historyWire.outbound.map((observation) => observation.sequence),
+      ...historyWire.inbound.map((observation) => observation.sequence),
+    ),
+    first_live_input_observation_sha256: firstLiveInput.observationSha256,
+    first_live_input_sequence: firstLiveInput.sequence,
+    pre_input_generation_trigger_count: 0 as const,
+    pre_input_output_audio_bytes: 0 as const,
+    pre_input_output_transcript_count: 0 as const,
+    pre_input_tool_call_count: 0 as const,
+    receipt_sha256: "7".repeat(64),
+  });
+  const historyHydrationEvidence = Object.freeze({
+    ...historyEvidenceBody,
+    evidence_sha256: sha256Hex(
+      `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n${canonicalJson(historyEvidenceBody)}`,
+    ),
+  });
   const body = Object.freeze({
-    schema_version: 3 as const,
-    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v6" as const,
+    schema_version: 4 as const,
+    roundtrip_version: "HACC-LC4-S2S-TOOL-ROUNDTRIP-v7" as const,
     provider: input.provider,
     model: input.model,
     attempted_at: NOW.toISOString(),
@@ -625,6 +727,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     input_audio_evidence: inputAudioEvidence,
     output_audio_evidence: outputAudioEvidence,
     pre_tool_output_quarantine: preToolOutputQuarantine,
+    history_hydration_evidence: historyHydrationEvidence,
     wire_observations: Object.freeze(wire),
     usage: Object.freeze([{ totalTokens: 8, raw: { total: 8 } }]),
     replay_summary: replaySummary,
@@ -639,7 +742,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   const execution = Object.freeze({
     ...body,
-    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(body)}`),
+    evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v7\n${canonicalJson(body)}`),
   });
   assertLc4S2sRoundtripExecution(execution);
   return execution;
@@ -663,7 +766,7 @@ function failedRetainedExecution(
   const failed = Object.freeze({
     ...body,
     evidence_sha256: sha256Hex(
-      `harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(body)}`,
+      `harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v7\n${canonicalJson(body)}`,
     ),
   });
   assertLc4S2sRoundtripExecution(failed);
@@ -892,7 +995,9 @@ describe("LC4 qualification v3 signed runner", () => {
     const clientConstructions: Array<{
       provider: string;
       xaiTurnBoundary: string | null;
+      historyHydrationRequired: boolean;
     }> = [];
+    const completedRoundtrips: Lc4S2sRoundtripExecution[] = [];
     const terminal = await runLc4QualificationV3({
       root,
       repositoryRoot,
@@ -904,14 +1009,20 @@ describe("LC4 qualification v3 signed runner", () => {
         inspectGitSource: async () => SOURCE,
         loadCredentials: async () => CREDENTIALS,
         materializeAudio: audioModule.materializeLc4S2sAudioFixture,
-        createClient: (provider, _configuration, _apiKey, options) => {
+        createClient: (provider, configuration, _apiKey, options) => {
           clientConstructions.push({
             provider,
             xaiTurnBoundary: options.xaiTurnBoundary ?? null,
+            historyHydrationRequired:
+              configuration.initialConversationHistoryHydrationRequired === true,
           });
           return new SetupClient(provider, true);
         },
-        executeRoundtrip: async (input) => passedExecution(input),
+        executeRoundtrip: async (input) => {
+          const execution = passedExecution(input);
+          completedRoundtrips.push(execution);
+          return execution;
+        },
       },
     });
     expect(terminal.body).toMatchObject({
@@ -934,10 +1045,46 @@ describe("LC4 qualification v3 signed runner", () => {
     });
     expect(plan.body.targets.find((target) => target.provider === "xai")).toMatchObject({
       qualification_turn_boundary: "provider_native_server_vad",
+      history_hydration_required: true,
     });
+    expect(plan.body).toMatchObject({
+      schema_version: 3,
+      history_probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
+      history_provider_visible_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+      history_source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+    });
+    expect(plan.body.paid_configuration_matrix_sha256)
+      .not.toBe(plan.body.setup_configuration_matrix_sha256);
+    for (const provider of ["openai", "gemini", "xai"] as const) {
+      expect(clientConstructions.filter((entry) => entry.provider === provider)
+        .map((entry) => entry.historyHydrationRequired)).toEqual([false, true]);
+    }
+    for (const execution of completedRoundtrips) {
+      expect(() => assertRetainedLc4QualificationHistoryHydrationEvidence({
+        provider: execution.provider,
+        summary: execution,
+        wire: execution.wire_observations,
+      })).not.toThrow();
+      expect(() => assertRetainedLc4QualificationHistoryHydrationEvidence({
+        provider: execution.provider,
+        summary: {
+          status: execution.status,
+          history_hydration_evidence: null,
+        },
+        wire: execution.wire_observations,
+      })).toThrow("history evidence is missing");
+    }
     expect(clientConstructions.filter((entry) => entry.provider === "xai")).toEqual([
-      { provider: "xai", xaiTurnBoundary: "provider_native_server_vad" },
-      { provider: "xai", xaiTurnBoundary: "provider_native_server_vad" },
+      {
+        provider: "xai",
+        xaiTurnBoundary: "provider_native_server_vad",
+        historyHydrationRequired: false,
+      },
+      {
+        provider: "xai",
+        xaiTurnBoundary: "provider_native_server_vad",
+        historyHydrationRequired: true,
+      },
     ]);
     const gateB = JSON.parse(await readFile(
       join(root, "attempts", `${authBody.authorization_id}.complete`, "xai-server-vad-gate-b-binding.json"),

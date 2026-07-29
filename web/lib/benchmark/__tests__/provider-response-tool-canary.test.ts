@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { executeProviderResponseToolCanary } from "../provider-response-tool-canary";
+import {
+  executeProviderResponseToolCanary,
+  RESPONSE_TOOL_CANARY_PROMPT,
+} from "../provider-response-tool-canary";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -25,6 +28,7 @@ class FakeCanaryClient implements NormalizedRealtimeClient {
   prepareCalls = 0;
   commitCalls = 0;
   textTurnCalls = 0;
+  readonly textTurns: string[] = [];
 
   constructor(provider: "openai" | "gemini" | "xai", controlled = true, emitDispatch = provider !== "gemini") {
     this.provider = provider;
@@ -44,7 +48,11 @@ class FakeCanaryClient implements NormalizedRealtimeClient {
   prepareResponse(): void { this.prepareCalls += 1; }
   commitInputAudio(): void { this.commitCalls += 1; this.emitCall(); }
   createResponse(): void { this.createCalls += 1; this.emitCall(); }
-  sendTextTurn(): void { this.textTurnCalls += 1; this.emitCall(); }
+  sendTextTurn(text: string): void {
+    this.textTurnCalls += 1;
+    this.textTurns.push(text);
+    this.emitCall();
+  }
 
   private emitCall(): void {
     queueMicrotask(() => {
@@ -157,7 +165,7 @@ describe("paid response/tool-call canary executor", () => {
     expect(JSON.stringify(result)).not.toContain("provider-response-secret");
   });
 
-  it("uses Gemini provider-native clientContent text turn and never opens an audio activity", async () => {
+  it("uses the Gemini realtime text-turn path without caller audio", async () => {
     const client = new FakeCanaryClient("gemini");
     const result = await executeProviderResponseToolCanary({
       provider: "gemini",
@@ -166,6 +174,7 @@ describe("paid response/tool-call canary executor", () => {
       timeoutMs: 1_000,
     });
     expect(result.status).toBe("passed");
+    expect(client.textTurns).toEqual([RESPONSE_TOOL_CANARY_PROMPT]);
     expect(client).toMatchObject({
       textTurnCalls: 1,
       startCalls: 0,

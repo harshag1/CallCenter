@@ -5,7 +5,7 @@
  * signed qualification bindings cannot create an import cycle between them.
  */
 export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION =
-  "lc4-production-provider-adapter-v4" as const;
+  "lc4-production-provider-adapter-v6" as const;
 
 /**
  * Runtime-nominal capability carried only by the concrete production adapter

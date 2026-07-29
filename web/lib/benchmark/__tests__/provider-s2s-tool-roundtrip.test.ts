@@ -8,6 +8,9 @@ import { DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE } from "../orchestrator";
 import { replayProviderToolRoundtrip } from "../provider-roundtrip-replay";
 import {
   LC4_S2S_COMPACT_CONTROL,
+  LC4_S2S_HISTORY_PROBE,
+  LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+  LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
   LC4_S2S_SOURCE_TEXT,
   LC4_S2S_TOOL_SCHEMA_SHA256,
   assertLc4S2sRoundtripExecution,
@@ -145,6 +148,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly geminiProviderNativeWireShape: boolean;
   readonly serverVadStopAfterSuffixChunks: number | null;
   readonly serverVadPostStopAppendError: "phase_guard" | "unrelated";
+  readonly emitPreInputTranscript: boolean;
   appendedBytes = 0;
   speechStartEmitted = false;
   serverVadStopped = false;
@@ -175,6 +179,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
     geminiProviderNativeWireShape?: boolean;
     serverVadStopAfterSuffixChunks?: number | null;
     serverVadPostStopAppendError?: "phase_guard" | "unrelated";
+    emitPreInputTranscript?: boolean;
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
@@ -206,6 +211,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
       ? LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
       : options.serverVadStopAfterSuffixChunks;
     this.serverVadPostStopAppendError = options.serverVadPostStopAppendError ?? "phase_guard";
+    this.emitPreInputTranscript = options.emitPreInputTranscript === true;
   }
 
   get serverVadTransportParitySha256() {
@@ -647,6 +653,113 @@ class RoundtripClient implements NormalizedRealtimeClient {
     this.state = "ready";
     this.#emit({ type: "session.ready", provider: this.provider, receivedAtMs: 1, wireType: this.provider === "gemini" ? "setupComplete" : "session.updated" });
   }
+  async hydrateConversationHistory(turns: Parameters<NonNullable<NormalizedRealtimeClient["hydrateConversationHistory"]>>[0]) {
+    expect(turns).toEqual(LC4_S2S_HISTORY_PROBE);
+    const syntheticCallIdSha256 = sha256Hex("qualification-history-call");
+    const kinds = [
+      "user_message",
+      "synthetic_tool_call",
+      "synthetic_tool_output",
+      "assistant_message",
+    ] as const;
+    const sources = [
+      LC4_S2S_HISTORY_PROBE[0].sourceSha256,
+      LC4_S2S_HISTORY_PROBE[1].calls[0]!.sourceSha256,
+      LC4_S2S_HISTORY_PROBE[1].calls[0]!.sourceSha256,
+      LC4_S2S_HISTORY_PROBE[2].sourceSha256,
+    ] as const;
+    const projections = [
+      { kind: kinds[0], contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[0].text) },
+      {
+        kind: kinds[1],
+        argumentsSha256: sha256Hex(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments)),
+      },
+      { kind: kinds[2], outputSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output) },
+      { kind: kinds[3], contentSha256: sha256Hex(LC4_S2S_HISTORY_PROBE[2].text) },
+    ] as const;
+    const attribution = (observation: RealtimeWireObservation) => Object.freeze({
+      availability: "observed" as const,
+      connectionEpoch: observation.connectionEpoch,
+      sequence: observation.sequence,
+      observationSha256: observation.observationSha256,
+      payloadSha256: observation.payloadSha256,
+      projectionSha256: observation.projectionSha256,
+    });
+    if (this.emitPreInputTranscript) {
+      this.#emit({
+        type: "output.transcript",
+        provider: this.provider,
+        receivedAtMs: 1,
+        wireType: "test.pre_input_transcript",
+        phase: "final",
+        text: "forbidden",
+        responseId: `${this.provider}-pre-input`,
+        source: "audio",
+      });
+    }
+    if (this.provider === "gemini") {
+      const observation = this.#observe("outbound", "clientContent", {}, {
+        initialHistory: {
+          protocol: "initial_history_in_client_content",
+          entryCount: 3,
+          providerContentTurnCount: 4,
+          functionCallCount: 1,
+          functionResponseCount: 1,
+          turnComplete: true,
+          generationTriggered: false,
+          providerAcknowledgement: "not_defined_by_protocol",
+          providerVisibleHistorySha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+          geminiContentSha256: sha256Hex("qualification-gemini-history-content"),
+        },
+      });
+      return Object.freeze({
+        schemaVersion: 1 as const,
+        provider: this.provider,
+        status: "sent_unacknowledged_by_provider_protocol" as const,
+        connectionEpoch: 1,
+        turnCount: 3,
+        providerItemCount: 4,
+        historySha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+        sourceBindingSha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+        items: Object.freeze(kinds.map((kind, index) => Object.freeze({
+          historyTurnOrdinal: index === 0 ? 1 : index === 3 ? 3 : 2,
+          providerItemOrdinal: index + 1,
+          kind,
+          sourceSha256: sources[index]!,
+          ...(index === 1 || index === 2 ? { syntheticCallIdSha256 } : {}),
+          outboundObservation: attribution(observation),
+        }))),
+      });
+    }
+    const items = kinds.map((kind, index) => {
+      const outbound = this.#observe("outbound", "conversation.item.create", {}, {
+        conversationHistoryItem: projections[index],
+      });
+      const inbound = this.#observe("inbound", "conversation.item.created", {}, {
+        conversationHistoryItem: projections[index],
+      });
+      return Object.freeze({
+        historyTurnOrdinal: index === 0 ? 1 : index === 3 ? 3 : 2,
+        providerItemOrdinal: index + 1,
+        kind,
+        sourceSha256: sources[index]!,
+        ...(index === 1 || index === 2 ? { syntheticCallIdSha256 } : {}),
+        outboundObservation: attribution(outbound),
+        inboundObservation: attribution(inbound),
+      });
+    });
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      provider: this.provider,
+      status: "acknowledged" as const,
+      connectionEpoch: 1,
+      turnCount: 3,
+      providerItemCount: 4,
+      historySha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+      sourceBindingSha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+      items: Object.freeze(items),
+    });
+  }
   close() { this.state = "closed"; }
   onEvent(listener: RealtimeEventListener) { this.#events.add(listener); return () => this.#events.delete(listener); }
   onWireEvent() { return () => undefined; }
@@ -656,6 +769,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
       throw new Error(this.serverVadPostStopAppendError === "phase_guard"
         ? XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR
         : "unrelated websocket append failure");
+    }
+    if (this.provider === "gemini" && this.appendedBytes === 0) {
+      this.#observe("outbound", "realtimeInput.activityStart");
     }
     this.appendedBytes += audio.data.byteLength;
     this.#observe(
@@ -958,6 +1074,18 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
             : "manual_commit",
       });
       expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+      expect(execution.history_hydration_evidence).toMatchObject({
+        probe_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        provider,
+        provider_visible_history_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+        source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+        pre_input_generation_trigger_count: 0,
+        pre_input_output_audio_bytes: 0,
+        pre_input_output_transcript_count: 0,
+        pre_input_tool_call_count: 0,
+      });
+      expect(execution.history_hydration_evidence!.last_history_observation_sequence)
+        .toBeLessThan(execution.history_hydration_evidence!.first_live_input_sequence);
       expect(client.appendedBytes).toBe(
         artifact.provider_renditions[provider].byte_length
           + (provider === "xai" ? LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length : 0),
@@ -986,6 +1114,97 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       }
     });
   }
+
+  it("fails closed when native history hydration is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const client = new RoundtripClient("openai");
+    Object.defineProperty(client, "hydrateConversationHistory", { value: undefined });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai", model: "openai-model", client, audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
+    });
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "history_hydration_unsupported",
+      history_hydration_evidence: null,
+      response_generation_requested: false,
+    });
+    expect(client.appendedBytes).toBe(0);
+  });
+
+  it("rejects a hash-mutated native history receipt before caller audio", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const client = new RoundtripClient("openai");
+    const hydrate = client.hydrateConversationHistory.bind(client);
+    Object.defineProperty(client, "hydrateConversationHistory", {
+      value: async (...args: Parameters<typeof hydrate>) => Object.freeze({
+        ...await hydrate(...args),
+        historySha256: "0".repeat(64),
+      }),
+    });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai", model: "openai-model", client, audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("history_hydration_evidence_invalid");
+    expect(client.appendedBytes).toBe(0);
+    expect(execution.response_generation_requested).toBe(false);
+  });
+
+  it("rejects a fabricated Gemini history acknowledgement before caller audio", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const client = new RoundtripClient("gemini");
+    const hydrate = client.hydrateConversationHistory.bind(client);
+    Object.defineProperty(client, "hydrateConversationHistory", {
+      value: async (...args: Parameters<typeof hydrate>) => {
+        const receipt = await hydrate(...args);
+        return Object.freeze({
+          ...receipt,
+          items: Object.freeze(receipt.items.map((item) => Object.freeze({
+            ...item,
+            inboundObservation: item.outboundObservation,
+          }))),
+        });
+      },
+    });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini", model: "gemini-model", client, audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("history_hydration_evidence_invalid");
+    expect(client.appendedBytes).toBe(0);
+  });
+
+  it("rejects model activity emitted during non-generating hydration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "openai" });
+    const client = new RoundtripClient("openai", { emitPreInputTranscript: true });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "openai", model: "openai-model", client, audio,
+      audioObject: artifact.provider_renditions.openai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
+    });
+    expect(execution.failure_class).toBe("history_pre_input_activity");
+    expect(client.appendedBytes).toBe(0);
+  });
 
   it("quarantines xAI root speech through terminal tool admission and releases only the distinct continuation", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
@@ -1654,7 +1873,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
     const fabricated = Object.freeze({
       ...fabricatedBody,
-      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n${canonicalJson(fabricatedBody)}`),
+      evidence_sha256: sha256Hex(`harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v7\n${canonicalJson(fabricatedBody)}`),
     });
     expect(() => assertLc4S2sRoundtripExecution(fabricated)).toThrow(
       "lacks the frozen server-VAD silence tail",

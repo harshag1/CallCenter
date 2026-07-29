@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import {
+  LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES,
+  LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   LC4_DEV_INTENT_ACTION_MAP,
   LC4_DEV_SEMANTIC_INTENTS,
@@ -206,6 +208,26 @@ function providerOutputAtExactUtf8Bytes(
   return output;
 }
 
+function semanticInputAtExactUtf8Bytes(
+  totalBytes: number,
+): Readonly<{ tool_name: string; arguments: Readonly<Record<string, unknown>> }> {
+  const emptyInput = {
+    tool_name: "complete_current_stage",
+    arguments: { oversized_model_slot: "" },
+  };
+  const envelopeBytes = Buffer.byteLength(canonicalJson(emptyInput), "utf8");
+  const semanticInput = {
+    tool_name: "complete_current_stage",
+    arguments: {
+      oversized_model_slot: "a".repeat(totalBytes - envelopeBytes),
+    },
+  };
+  if (Buffer.byteLength(canonicalJson(semanticInput), "utf8") !== totalBytes) {
+    throw new Error("test fixture did not produce the requested semantic-input byte length");
+  }
+  return semanticInput;
+}
+
 describe("LC4-DEV provider-neutral gateway bridge", () => {
   it("exposes one stable provider function with a closed semantic intent enum and no model slots", () => {
     expect(LC4_DEV_SEMANTIC_GATEWAY_FUNCTION).toMatchObject({
@@ -382,6 +404,311 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     ]);
     expect(client.submitted).toHaveLength(2);
     expect(evidence.receipts.map((receipt) => receipt.batch_ordinal)).toEqual([1, 2]);
+  });
+
+  it("returns an ephemeral, lossless replay snapshot with exact delivered batch boundaries", async () => {
+    const client = new FakeClient("gemini");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: () => undefined,
+    });
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+
+    coordinator.observe({
+      type: "tool.calls",
+      provider: "gemini",
+      receivedAtMs: 1,
+      wireType: "toolCall",
+      responseId: "gemini-replay-response",
+      calls: [
+        {
+          callId: "accepted-call-1",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({
+            tool_name: "complete_current_stage",
+            arguments: {},
+          }),
+          argumentsJson: {
+            tool_name: "complete_current_stage",
+            arguments: {},
+          },
+          responseId: "gemini-replay-response",
+          terminalWireType: "toolCall",
+        },
+        {
+          callId: "accepted-call-2",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({
+            tool_name: "reserve_archive_room",
+            arguments: {},
+          }),
+          argumentsJson: {
+            tool_name: "reserve_archive_room",
+            arguments: {},
+          },
+          responseId: "gemini-replay-response",
+          terminalWireType: "toolCall",
+        },
+      ],
+    });
+    coordinator.observe({
+      type: "tool.calls",
+      provider: "gemini",
+      receivedAtMs: 2,
+      wireType: "toolCall",
+      responseId: "gemini-replay-response",
+      calls: [
+        {
+          callId: "atomically-rejected-valid-call",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({
+            tool_name: "complete_current_stage",
+            arguments: {},
+          }),
+          argumentsJson: {
+            tool_name: "complete_current_stage",
+            arguments: {},
+          },
+          responseId: "gemini-replay-response",
+          terminalWireType: "toolCall",
+        },
+        {
+          callId: "rejected-unknown-call",
+          name: "capability_gateway",
+          argumentsText: JSON.stringify({
+            tool_name: "archive.complete_stage",
+            arguments: {},
+          }),
+          argumentsJson: {
+            tool_name: "archive.complete_stage",
+            arguments: {},
+          },
+          responseId: "gemini-replay-response",
+          terminalWireType: "toolCall",
+        },
+      ],
+    });
+
+    const finished = await coordinator.finishOpportunityWithConversationReplay();
+
+    expect(inputs.map((input) => input.semantic_intent)).toEqual([
+      "complete_current_stage",
+      "reserve_archive_room",
+    ]);
+    expect(finished.conversation_tool_batches.map((batch) => ({
+      batch_ordinal: batch.batch_ordinal,
+      provider_response_id_sha256: batch.provider_response_id_sha256,
+      call_ordinals: batch.calls.map((call) => call.call_ordinal),
+    }))).toEqual([
+      {
+        batch_ordinal: 1,
+        provider_response_id_sha256: sha256Hex("gemini-replay-response"),
+        call_ordinals: [1, 2],
+      },
+      {
+        batch_ordinal: 2,
+        provider_response_id_sha256: sha256Hex("gemini-replay-response"),
+        call_ordinals: [1, 2],
+      },
+    ]);
+    expect(finished.conversation_tool_batches.map((batch) =>
+      batch.calls.map((call) => call.gateway_tool_name)))
+      .toEqual([
+        ["capability_gateway", "capability_gateway"],
+        ["capability_gateway", "capability_gateway"],
+      ]);
+    expect(finished.conversation_tool_batches.map((batch) =>
+      batch.calls.map((call) => call.model_arguments)))
+      .toEqual([
+        [
+          { arguments: {}, tool_name: "complete_current_stage" },
+          { arguments: {}, tool_name: "reserve_archive_room" },
+        ],
+        [
+          { arguments: {}, tool_name: "complete_current_stage" },
+          { arguments: {}, tool_name: "archive.complete_stage" },
+        ],
+      ]);
+    expect(finished.conversation_tool_batches.map((batch) =>
+      batch.calls.map((call) => ({
+        source_kind: call.source_kind,
+        source_sha256: call.source_sha256,
+        disposition: call.disposition,
+        rejection_code: call.pre_dispatch_rejection_code,
+      }))))
+      .toEqual([
+        [
+          {
+            source_kind: "authority_projection",
+            source_sha256: finished.receipt_set.authority_projections[0]?.projection_sha256,
+            disposition: "executed",
+            rejection_code: null,
+          },
+          {
+            source_kind: "authority_projection",
+            source_sha256: finished.receipt_set.authority_projections[1]?.projection_sha256,
+            disposition: "executed",
+            rejection_code: null,
+          },
+        ],
+        [
+          {
+            source_kind: "pre_dispatch_rejection",
+            source_sha256: finished.receipt_set.pre_dispatch_rejections[0]?.rejection_receipt_sha256,
+            disposition: "pre_dispatch_rejected",
+            rejection_code: "batch_rejected_invalid_member",
+          },
+          {
+            source_kind: "pre_dispatch_rejection",
+            source_sha256: finished.receipt_set.pre_dispatch_rejections[1]?.rejection_receipt_sha256,
+            disposition: "pre_dispatch_rejected",
+            rejection_code: "unknown_semantic_intent",
+          },
+        ],
+      ]);
+    expect(finished.conversation_tool_batches.flatMap((batch) =>
+      batch.calls.map((call) => call.provider_output_canonical_json)))
+      .toEqual(client.submitted.flatMap((submission) =>
+        submission.results.map((result) => canonicalJson(result.output))));
+
+    // The opt-in replay snapshot is ephemeral continuity input. It cannot
+    // silently change the public receipt-set schema or its committed digest.
+    expect(Object.keys(finished.receipt_set).sort()).toEqual([
+      "authority_projections",
+      "pre_dispatch_rejections",
+      "receipt_set_sha256",
+      "receipts",
+    ]);
+    expect(canonicalJson(finished.receipt_set)).not.toContain("conversation_tool_batches");
+  });
+
+  it("rejects a 64 KiB + 1 model-argument record before execution or provider delivery", async () => {
+    const client = new FakeClient("openai");
+    const failures: Error[] = [];
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: (error) => failures.push(error),
+    });
+    const oversized = semanticInputAtExactUtf8Bytes(
+      LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES + 1,
+    );
+    expect(Buffer.byteLength(canonicalJson(oversized), "utf8"))
+      .toBe(LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES + 1);
+    coordinator.beginOpportunity({ episode: episode("openai", "hacc"), opportunity });
+    coordinator.observe(dispatchEvent(
+      "openai",
+      "oversized-arguments-response",
+      "oversized-arguments-call",
+      oversized,
+    ));
+
+    await expect(coordinator.finishOpportunityWithConversationReplay()).rejects.toThrow(
+      `exceed ${LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES} UTF-8 bytes`,
+    );
+    expect(failures).toHaveLength(1);
+    expect(inputs).toEqual([]);
+    expect(client.operations).toEqual([]);
+    expect(client.submitted).toEqual([]);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 0,
+      receipt_count: 0,
+      authority_projection_count: 0,
+      rejection_count: 0,
+      fatal_class: "parse",
+    });
+  });
+
+  it("rejects an individually valid but oversized model-argument batch before delivery", async () => {
+    const client = new FakeClient("gemini");
+    const failures: Error[] = [];
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: (error) => failures.push(error),
+    });
+    const perCallBytes = 53_000;
+    const argumentsJson = semanticInputAtExactUtf8Bytes(perCallBytes);
+    const callCount = 5;
+    expect(perCallBytes).toBeLessThan(LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES);
+    expect(Buffer.byteLength(
+      canonicalJson(Array.from({ length: callCount }, () => argumentsJson)),
+      "utf8",
+    )).toBeGreaterThan(LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES);
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+    coordinator.observe({
+      type: "tool.calls",
+      provider: "gemini",
+      receivedAtMs: 1,
+      wireType: "toolCall",
+      responseId: "gemini-oversized-argument-batch",
+      calls: Array.from({ length: callCount }, (_, index) => ({
+        callId: `gemini-oversized-call-${index + 1}`,
+        name: "capability_gateway",
+        argumentsText: canonicalJson(argumentsJson),
+        argumentsJson,
+        responseId: "gemini-oversized-argument-batch",
+        terminalWireType: "toolCall",
+      })),
+    });
+
+    await expect(coordinator.finishOpportunityWithConversationReplay()).rejects.toThrow(
+      `batch exceeds ${LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES} UTF-8 bytes`,
+    );
+    expect(failures).toHaveLength(1);
+    expect(inputs).toEqual([]);
+    expect(client.operations).toEqual([]);
+    expect(client.submitted).toEqual([]);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 0,
+      receipt_count: 0,
+      authority_projection_count: 0,
+      rejection_count: 0,
+      fatal_class: "parse",
+    });
+  });
+
+  it("fails closed instead of replaying a rejected non-object semantic input", async () => {
+    const client = new FakeClient("gemini");
+    const failures: Error[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor([]),
+      onFatal: (error) => failures.push(error),
+    });
+    coordinator.beginOpportunity({ episode: episode("gemini", "hacc"), opportunity });
+    coordinator.observe({
+      type: "tool.calls",
+      provider: "gemini",
+      receivedAtMs: 1,
+      wireType: "toolCall",
+      responseId: "gemini-non-object-response",
+      calls: [{
+        callId: "gemini-non-object-call",
+        name: "capability_gateway",
+        argumentsText: JSON.stringify("not-an-object"),
+        argumentsJson: "not-an-object",
+        responseId: "gemini-non-object-response",
+        terminalWireType: "toolCall",
+      }],
+    });
+
+    await expect(coordinator.finishOpportunityWithConversationReplay()).rejects.toThrow(
+      "gateway model arguments must be a JSON object",
+    );
+    expect(failures).toHaveLength(1);
+    expect(client.submitted).toEqual([]);
+    expect(coordinator.diagnosticSnapshot()).toMatchObject({
+      batch_count: 0,
+      receipt_count: 0,
+      authority_projection_count: 0,
+      rejection_count: 0,
+      fatal_class: "parse",
+    });
   });
 
   it("fails closed on a replayed provider call identity and never submits a result", async () => {

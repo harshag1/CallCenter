@@ -27,6 +27,8 @@ const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
 const MAX_REJECTED_TOOL_BATCHES_PER_OPPORTUNITY = 3;
 const MAX_TOOL_CALLS_PER_BATCH = 16;
 const MAX_PROVIDER_RESULT_BYTES = 4_000;
+export const LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES = 64 * 1_024;
+export const LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES = 256 * 1_024;
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v1\n";
 const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v1\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v2\n";
@@ -264,8 +266,8 @@ export type Lc4DevGatewayAuthorityProjection = Readonly<{
   provider_output: JsonValue;
   authoritative_receipt: JsonValue;
   authoritative_tool_world_receipt: JsonValue | null;
-  post_transition_response_plan?: JsonValue | null;
-  post_transition_response_control?: JsonValue | null;
+  post_transition_response_plan: JsonValue | null;
+  post_transition_response_control: JsonValue | null;
   post_transition_response_plan_sha256: string | null;
   post_transition_response_control_sha256: string | null;
   authoritative_receipt_sha256: string;
@@ -342,6 +344,40 @@ export type Lc4DevGatewayReceiptSet = Readonly<{
   receipt_set_sha256: string;
 }>;
 
+/**
+ * Ephemeral, provider-visible tool history captured at the delivery boundary.
+ *
+ * This deliberately preserves provider batch boundaries: history hydration
+ * must recreate every function call in a batch before recreating any result
+ * from that batch. It is returned only by the opt-in coordinator API and is
+ * never incorporated into the public receipt set or its committed hash.
+ */
+export type Lc4DevGatewayConversationToolCall = Readonly<{
+  call_ordinal: number;
+  gateway_tool_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
+  model_arguments: Readonly<Record<string, JsonValue>>;
+  provider_output_canonical_json: string;
+  source_kind: "authority_projection" | "pre_dispatch_rejection";
+  source_sha256: string;
+  disposition:
+    | Lc4DevGatewayAuthorityProjection["disposition"]
+    | "pre_dispatch_rejected";
+  pre_dispatch_rejection_code: Lc4DevPreDispatchRejectionCode | null;
+}>;
+
+export type Lc4DevGatewayConversationToolBatch = Readonly<{
+  schema_version: 1;
+  bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
+  batch_ordinal: number;
+  provider_response_id_sha256: string;
+  calls: readonly Lc4DevGatewayConversationToolCall[];
+}>;
+
+export type Lc4DevGatewayOpportunityWithConversationReplay = Readonly<{
+  receipt_set: Lc4DevGatewayReceiptSet;
+  conversation_tool_batches: readonly Lc4DevGatewayConversationToolBatch[];
+}>;
+
 type OpportunityContext = Readonly<{
   episode: Lc4DevLiveEpisodePlan;
   opportunity: Lc4PublicDevOpportunity;
@@ -354,6 +390,8 @@ type ExecutableCall = Readonly<{
   semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   target_arguments: Readonly<Record<string, JsonValue>>;
+  gateway_tool_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
+  model_arguments: Readonly<Record<string, JsonValue>>;
   request_sha256: string;
   provider_provenance_sha256: string;
 }>;
@@ -361,7 +399,8 @@ type ExecutableCall = Readonly<{
 type CandidateCall = Readonly<{
   call_id: string;
   response_id: string;
-  semantic_input: unknown;
+  gateway_tool_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
+  semantic_input: Readonly<Record<string, JsonValue>>;
   request_sha256: string;
   provider_provenance_sha256: string;
 }>;
@@ -410,6 +449,38 @@ function providerOutputSnapshot(value: JsonValue): JsonValue {
   return frozen;
 }
 
+function normalizedModelArguments(
+  value: unknown,
+): Readonly<Record<string, JsonValue>> {
+  const normalized = immutableJson(value);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
+    throw new Error("LC4-DEV gateway model arguments must be a JSON object");
+  }
+  return normalized as Readonly<Record<string, JsonValue>>;
+}
+
+function assertReplayableModelArgumentBatch(calls: readonly CandidateCall[]): void {
+  const canonicalArguments = calls.map((call, index) => {
+    const encoded = canonicalJson(call.semantic_input);
+    const encodedBytes = Buffer.byteLength(encoded, "utf8");
+    if (encodedBytes > LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES) {
+      throw new Error(
+        `LC4-DEV gateway model arguments at call ${index + 1} exceed `
+        + `${LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES} UTF-8 bytes: actual_bytes=${encodedBytes}`,
+      );
+    }
+    return call.semantic_input;
+  });
+  const aggregateBytes = Buffer.byteLength(canonicalJson(canonicalArguments), "utf8");
+  if (aggregateBytes > LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES) {
+    throw new Error(
+      `LC4-DEV gateway model argument batch exceeds `
+      + `${LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES} UTF-8 bytes: `
+      + `actual_bytes=${aggregateBytes}`,
+    );
+  }
+}
+
 function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
   provider: Lc4DevLiveEpisodePlan["provider"];
   response_id: string;
@@ -433,10 +504,11 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
         return freeze({
           call_id: dispatch.callId,
           response_id: event.responseId,
-          semantic_input: {
+          gateway_tool_name: event.gateway,
+          semantic_input: normalizedModelArguments({
             tool_name: dispatch.request.params.name,
             arguments: dispatch.request.params.arguments,
-          },
+          }),
           request_sha256: sha256Hex(canonicalJson(dispatch.request)),
           provider_provenance_sha256: sha256Hex(canonicalJson(dispatch.provenance)),
         });
@@ -469,7 +541,8 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
         return freeze({
           call_id: call.callId,
           response_id: call.responseId,
-          semantic_input: call.argumentsJson,
+          gateway_tool_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          semantic_input: normalizedModelArguments(call.argumentsJson),
           request_sha256: sha256Hex(canonicalJson(requestBody)),
           provider_provenance_sha256: sha256Hex(canonicalJson(provenance)),
         });
@@ -512,6 +585,8 @@ function classifySemanticCall(candidate: CandidateCall):
       semantic_intent: parsed.semantic_intent,
       target_tool: parsed.target_tool,
       target_arguments: parsed.target_arguments,
+      gateway_tool_name: candidate.gateway_tool_name,
+      model_arguments: candidate.semantic_input,
       request_sha256: candidate.request_sha256,
       provider_provenance_sha256: candidate.provider_provenance_sha256,
     }),
@@ -537,6 +612,7 @@ export class Lc4DevGatewayTurnCoordinator {
   #receipts: Lc4DevSanitizedGatewayReceipt[] = [];
   #authorityProjections: Lc4DevGatewayAuthorityProjection[] = [];
   #preDispatchRejections: Lc4DevSanitizedGatewayRejection[] = [];
+  #conversationToolBatches: Lc4DevGatewayConversationToolBatch[] = [];
   #toolResponseIds = new Set<string>();
   #seenCallIds = new Set<string>();
 
@@ -561,6 +637,7 @@ export class Lc4DevGatewayTurnCoordinator {
       || this.#receipts.length !== 0
       || this.#authorityProjections.length !== 0
       || this.#preDispatchRejections.length !== 0
+      || this.#conversationToolBatches.length !== 0
       || this.#toolResponseIds.size !== 0) {
       throw new Error("LC4-DEV gateway coordinator state was not sealed after the prior opportunity");
     }
@@ -593,6 +670,12 @@ export class Lc4DevGatewayTurnCoordinator {
     const responseIds = new Set(candidates.map((call) => call.response_id));
     if (responseIds.size !== 1 || !responseIds.has(batch.response_id)) {
       this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"), "provenance");
+      return;
+    }
+    try {
+      assertReplayableModelArgumentBatch(candidates);
+    } catch (error) {
+      this.#fail(error, "parse");
       return;
     }
     if (context.episode.provider !== "gemini" && this.#toolResponseIds.has(batch.response_id)) {
@@ -671,32 +754,44 @@ export class Lc4DevGatewayTurnCoordinator {
   }
 
   async finishOpportunity(): Promise<Lc4DevGatewayReceiptSet> {
+    const finished = await this.finishOpportunityWithConversationReplay();
+    return finished.receipt_set;
+  }
+
+  async finishOpportunityWithConversationReplay():
+  Promise<Lc4DevGatewayOpportunityWithConversationReplay> {
     if (!this.#context) throw new Error("LC4-DEV gateway coordinator has no active opportunity");
     await this.#queue;
     if (this.#fatal) throw this.#fatal;
     const receipts = Object.freeze([...this.#receipts]);
     const authorityProjections = Object.freeze([...this.#authorityProjections]);
     const preDispatchRejections = Object.freeze([...this.#preDispatchRejections]);
+    const conversationToolBatches = Object.freeze([...this.#conversationToolBatches]);
     const receiptSetSha256 = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson({
       receipts,
       authority_projections: authorityProjections,
       pre_dispatch_rejections: preDispatchRejections,
     })}`);
+    const receiptSet = Object.freeze({
+      receipts,
+      authority_projections: authorityProjections,
+      pre_dispatch_rejections: preDispatchRejections,
+      receipt_set_sha256: receiptSetSha256,
+    });
     this.#context = null;
     this.#batchOrdinal = 0;
     this.#rejectedBatchCount = 0;
     this.#receipts = [];
     this.#authorityProjections = [];
     this.#preDispatchRejections = [];
+    this.#conversationToolBatches = [];
     this.#toolResponseIds = new Set();
     this.#seenCallIds = new Set();
     this.#queue = Promise.resolve();
     this.#fatalClass = "none";
     return Object.freeze({
-      receipts,
-      authority_projections: authorityProjections,
-      pre_dispatch_rejections: preDispatchRejections,
-      receipt_set_sha256: receiptSetSha256,
+      receipt_set: receiptSet,
+      conversation_tool_batches: conversationToolBatches,
     });
   }
 
@@ -707,6 +802,7 @@ export class Lc4DevGatewayTurnCoordinator {
   ): Promise<void> {
     if (this.#fatal) throw this.#fatal;
     const results: RealtimeToolResult[] = [];
+    const conversationCalls: Lc4DevGatewayConversationToolCall[] = [];
     for (const [index, call] of calls.entries()) {
       const rejectionBody = freeze({
         schema_version: 1 as const,
@@ -737,13 +833,29 @@ export class Lc4DevGatewayTurnCoordinator {
         rejection_receipt_sha256: rejectionReceiptSha256,
       }));
       results.push({ callId: call.candidate.call_id, output: providerOutput });
+      conversationCalls.push(freeze({
+        call_ordinal: index + 1,
+        gateway_tool_name: call.candidate.gateway_tool_name,
+        model_arguments: call.candidate.semantic_input,
+        provider_output_canonical_json: canonicalJson(providerOutput),
+        source_kind: "pre_dispatch_rejection" as const,
+        source_sha256: rejectionReceiptSha256,
+        disposition: "pre_dispatch_rejected" as const,
+        pre_dispatch_rejection_code: call.rejection_code,
+      }));
       this.#preDispatchRejections.push(freeze({
         ...rejectionBody,
         provider_output_sha256: sha256Hex(canonicalJson(providerOutput)),
         rejection_receipt_sha256: rejectionReceiptSha256,
       }));
     }
-    this.#deliverToolContinuation(context, results);
+    this.#deliverToolContinuation(context, results, freeze({
+      schema_version: 1 as const,
+      bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+      batch_ordinal: batchOrdinal,
+      provider_response_id_sha256: sha256Hex(calls[0]!.candidate.response_id),
+      calls: conversationCalls,
+    }));
   }
 
   async #executeBatch(
@@ -753,6 +865,7 @@ export class Lc4DevGatewayTurnCoordinator {
   ): Promise<void> {
     if (this.#fatal) throw this.#fatal;
     const results: RealtimeToolResult[] = [];
+    const conversationCalls: Lc4DevGatewayConversationToolCall[] = [];
     for (const [index, call] of calls.entries()) {
       if (this.#fatal) throw this.#fatal;
       const outcome = await this.#executor.execute(freeze({
@@ -779,14 +892,24 @@ export class Lc4DevGatewayTurnCoordinator {
       if (outcome.authority_projection.post_transition_response_control_sha256 !== null) {
         requireHash(outcome.authority_projection.post_transition_response_control_sha256, "LC4-DEV post-transition response control");
       }
-      const fullResponsePlan = outcome.authority_projection.post_transition_response_plan ?? null;
-      const fullResponseControl = outcome.authority_projection.post_transition_response_control ?? null;
+      const fullResponsePlan = outcome.authority_projection.post_transition_response_plan;
+      const fullResponseControl = outcome.authority_projection.post_transition_response_control;
       const fullResponsePlanRecord = fullResponsePlan !== null
         && typeof fullResponsePlan === "object"
         && !Array.isArray(fullResponsePlan)
         ? fullResponsePlan as Readonly<Record<string, JsonValue>>
         : null;
       if (context.episode.arm === "hacc") {
+        const authoritativeTransition =
+          outcome.authority_projection.authoritative_tool_world_receipt !== null
+          && outcome.disposition !== "rejected";
+        if (authoritativeTransition
+          && (fullResponsePlan === null
+            || fullResponseControl === null
+            || outcome.authority_projection.post_transition_response_plan_sha256 === null
+            || outcome.authority_projection.post_transition_response_control_sha256 === null)) {
+          throw new Error("LC4-DEV HACC authoritative transition omits its full post-transition response control");
+        }
         if ((outcome.authority_projection.post_transition_response_plan_sha256 === null) !== (fullResponsePlan === null)
           || (outcome.authority_projection.post_transition_response_control_sha256 === null) !== (fullResponseControl === null)) {
           throw new Error("LC4-DEV HACC authority projection does not retain its full post-transition response control");
@@ -848,17 +971,34 @@ export class Lc4DevGatewayTurnCoordinator {
         receipt_sha256: sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`),
       }));
       this.#authorityProjections.push(freeze(outcome.authority_projection));
+      conversationCalls.push(freeze({
+        call_ordinal: index + 1,
+        gateway_tool_name: call.gateway_tool_name,
+        model_arguments: call.model_arguments,
+        provider_output_canonical_json: canonicalJson(providerOutput),
+        source_kind: "authority_projection" as const,
+        source_sha256: outcome.authority_projection.projection_sha256,
+        disposition: outcome.disposition,
+        pre_dispatch_rejection_code: null,
+      }));
     }
     // Every adapter has a different default. The shared delivery path binds
     // the final post-transition control, submits the complete batch with
     // implicit generation disabled, then requests exactly one continuation.
     if (this.#fatal) throw this.#fatal;
-    this.#deliverToolContinuation(context, results);
+    this.#deliverToolContinuation(context, results, freeze({
+      schema_version: 1 as const,
+      bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+      batch_ordinal: batchOrdinal,
+      provider_response_id_sha256: sha256Hex(calls[0]!.response_id),
+      calls: conversationCalls,
+    }));
   }
 
   #deliverToolContinuation(
     context: OpportunityContext,
     results: readonly RealtimeToolResult[],
+    conversationToolBatch: Lc4DevGatewayConversationToolBatch,
   ): void {
     try {
       const prepareToolContinuation = this.#client.prepareToolContinuation;
@@ -881,6 +1021,9 @@ export class Lc4DevGatewayTurnCoordinator {
       // before result delivery, instead of duplicating it into the tool output.
       prepareToolContinuation.call(this.#client, preparation);
       this.#client.submitToolResults(Object.freeze([...results]), false);
+      // Snapshot only after synchronous provider delivery accepts the exact
+      // batch. Failed preflight/rebind/submission attempts cannot enter replay.
+      this.#conversationToolBatches.push(conversationToolBatch);
       this.#client.createResponse();
     } catch (error) {
       this.#fail(error, "delivery");

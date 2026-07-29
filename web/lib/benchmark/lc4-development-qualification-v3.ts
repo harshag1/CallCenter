@@ -48,8 +48,8 @@ import {
   type SignedLc4QualificationPackageEnvelopeV5,
 } from "./lc4-qualification-package-envelope";
 
-const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v5\n";
-const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n";
+const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v6\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v6\n";
 const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
 const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v7\n";
 const AUTHORIZATION_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v5\n";

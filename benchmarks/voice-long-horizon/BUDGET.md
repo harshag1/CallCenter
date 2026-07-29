@@ -407,3 +407,23 @@ provider-visible history reconstruction at both rotation boundaries,
 including batched successful tool results and pre-dispatch rejection results,
 with exact role, order, content, and hash preservation. No v5 partial result or
 score may be published.
+
+## 2026-07-29 — Offline admission gate satisfied; clean-source gate remains
+
+The provider-neutral history, batched tool replay, caller-heard output, and
+non-generating qualification changes now pass their provider-free regression
+and evidence checks. This work opened **0** provider sessions and spent
+**$0.00** in realtime-provider budget.
+
+The authorized maximum remains unchanged and non-additive:
+
+- Gate D: `$1.00`;
+- three-provider qualification: `$3.00`;
+- one six-cell DEV run: `$15.00`;
+- total next authority: `$19.00`.
+
+No retry reserve is added. Ordinary and ultra-conservative ceilings remain
+`$60.50` and `$75.50`, respectively. Provider admission is still closed until
+the implementation, tests, generated fault artifact, Gate 0 inventory, and
+this ledger are committed into one clean source tree and a fresh ASR
+environment receipt binds that exact commit.

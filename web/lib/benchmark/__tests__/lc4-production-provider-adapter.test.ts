@@ -74,6 +74,8 @@ import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   Pcm16Audio,
+  RealtimeConversationHistoryHydrationAcknowledgement,
+  RealtimeConversationHistoryTurn,
   RealtimeEventListener,
   RealtimeResponsePreparation,
   RealtimeToolResult,
@@ -332,6 +334,109 @@ function publicConversationTurns(
   ).flat());
 }
 
+function publicConversationTurnsWithTool(
+  output: string,
+): readonly Lc4NativeConversationTurnInput[] {
+  const turns = [...publicConversationTurns(20)];
+  turns.splice(1, 0, Object.freeze({
+    turn_id: "placeholder.tool",
+    sequence: 0,
+    speaker: "tool" as const,
+    source: "canonical_gateway_result" as const,
+    tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+    tool_arguments: Object.freeze({
+      tool_name: "membership.lookup",
+      arguments: Object.freeze({ member_id: "PUBLIC-17" }),
+    }),
+    text: output,
+    available_after_opportunity: 1,
+    provenance_receipt_sha256: sha256Hex(`provider-visible-tool:${output}`),
+    provider_conversation_source: true as const,
+    oracle_derived: false as const,
+    future_derived: false as const,
+    semantic_evaluator_derived: false as const,
+  }));
+  return Object.freeze(turns.map((turn, index) => Object.freeze({
+    ...turn,
+    turn_id: `conversation.${String(index + 1).padStart(3, "0")}.${turn.speaker}`,
+    sequence: index + 1,
+  }) as Lc4NativeConversationTurnInput));
+}
+
+function publicConversationTurnsWithToolBatch(
+  outputs: readonly [string, string],
+): readonly Lc4NativeConversationTurnInput[] {
+  const turns = [...publicConversationTurns(20)];
+  const batchSha256 = sha256Hex(`provider-tool-batch:${outputs.join("\n")}`);
+  const toolTurns = outputs.map((output, index) => Object.freeze({
+    turn_id: "placeholder.tool",
+    sequence: 0,
+    speaker: "tool" as const,
+    source: "canonical_gateway_result" as const,
+    tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+    tool_arguments: Object.freeze({
+      tool_name: index === 0 ? "membership.lookup" : "membership.quote",
+      arguments: Object.freeze(index === 0
+        ? { member_id: "PUBLIC-17" }
+        : { member_id: "PUBLIC-17", term: "annual" }) as Readonly<Record<string, JsonValue>>,
+    }),
+    text: output,
+    available_after_opportunity: 1,
+    provenance_receipt_sha256: sha256Hex(`provider-visible-tool:${index}:${output}`),
+    tool_batch_sha256: batchSha256,
+    tool_batch_call_ordinal: index + 1,
+    tool_batch_call_count: outputs.length,
+    provider_conversation_source: true as const,
+    oracle_derived: false as const,
+    future_derived: false as const,
+    semantic_evaluator_derived: false as const,
+  }));
+  turns.splice(1, 0, ...toolTurns);
+  return Object.freeze(turns.map((turn, index) => Object.freeze({
+    ...turn,
+    turn_id: `conversation.${String(index + 1).padStart(3, "0")}.${turn.speaker}`,
+    sequence: index + 1,
+  }) as Lc4NativeConversationTurnInput));
+}
+
+function publicDeepConversationTurns(): readonly Lc4NativeConversationTurnInput[] {
+  const base = publicConversationTurns(40);
+  const turns: Lc4NativeConversationTurnInput[] = [];
+  for (let offset = 0; offset < 40; offset += 1) {
+    turns.push(base[offset * 2]!);
+    const opportunity = offset + 1;
+    const output = canonicalJson({
+      gateway_result: { ok: true, opportunity },
+      authoritative_outcome: { disposition: "verified" },
+      speech_directive: `Confirm verified outcome ${opportunity}.`,
+    });
+    turns.push(Object.freeze({
+      turn_id: "placeholder.tool",
+      sequence: 0,
+      speaker: "tool",
+      source: "canonical_gateway_result",
+      tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+      tool_arguments: Object.freeze({
+        tool_name: "membership.lookup",
+        arguments: Object.freeze({ opportunity }),
+      }),
+      text: output,
+      available_after_opportunity: opportunity,
+      provenance_receipt_sha256: sha256Hex(`deep-tool:${opportunity}:${output}`),
+      provider_conversation_source: true,
+      oracle_derived: false,
+      future_derived: false,
+      semantic_evaluator_derived: false,
+    }));
+    turns.push(base[offset * 2 + 1]!);
+  }
+  return Object.freeze(turns.map((turn, index) => Object.freeze({
+    ...turn,
+    turn_id: `conversation.${String(index + 1).padStart(3, "0")}.${turn.speaker}`,
+    sequence: index + 1,
+  }) as Lc4NativeConversationTurnInput));
+}
+
 function devEpisodeForComparator(
   arm: "native" | "hacc",
   provider: "openai" | "gemini" | "xai" = "openai",
@@ -405,9 +510,11 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly #serverVadStopAfterSilenceChunks: number | null;
   readonly #xaiServerVad: boolean;
   readonly #serverVadEmitsSpeechStarted: boolean;
+  readonly #corruptHistoryProjection: boolean;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
+  readonly hydratedHistories: Array<readonly RealtimeConversationHistoryTurn[]> = [];
 
   constructor(
     provider: "openai" | "gemini" | "xai",
@@ -418,6 +525,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
     xaiServerVad = false,
     serverVadEmitsSpeechStarted = true,
+    corruptHistoryProjection = false,
   ) {
     this.provider = provider;
     this.events = events;
@@ -426,6 +534,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.#serverVadStopAfterSilenceChunks = serverVadStopAfterSilenceChunks;
     this.#xaiServerVad = xaiServerVad;
     this.#serverVadEmitsSpeechStarted = serverVadEmitsSpeechStarted;
+    this.#corruptHistoryProjection = corruptHistoryProjection;
   }
 
   get serverVadTransportParitySha256() {
@@ -435,6 +544,171 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   }
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
+  async hydrateConversationHistory(
+    turns: readonly RealtimeConversationHistoryTurn[],
+  ): Promise<RealtimeConversationHistoryHydrationAcknowledgement> {
+    this.events.push("hydrate");
+    const snapshot = Object.freeze(turns.map((turn) => {
+      if ("text" in turn) return Object.freeze({ ...turn });
+      const calls = turn.role === "tool" ? [turn] : turn.calls;
+      return Object.freeze({
+        role: "tool_batch" as const,
+        calls: Object.freeze(calls.map((call) => Object.freeze({
+          toolName: call.toolName,
+          toolArguments: JSON.parse(canonicalJson(call.toolArguments)),
+          output: call.output,
+          sourceSha256: call.sourceSha256,
+        }))),
+      });
+    }));
+    this.hydratedHistories.push(snapshot);
+    const historySha256 = sha256Hex(
+      `harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n${canonicalJson(
+        snapshot.map((turn) => "text" in turn
+          ? { role: turn.role, text: turn.text }
+          : {
+              role: "tool_batch",
+              calls: turn.calls.map((call) => ({
+                toolName: call.toolName,
+                toolArguments: call.toolArguments,
+                output: call.output,
+              })),
+            }),
+      )}`,
+    );
+    const sourceBindingSha256 = sha256Hex(
+      `harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n${canonicalJson({
+        historySha256,
+        sources: snapshot.map((turn, index) => "text" in turn
+          ? {
+              ordinal: index + 1,
+              sourceSha256: turn.sourceSha256,
+            }
+          : {
+              ordinal: index + 1,
+              role: "tool_batch",
+              calls: turn.calls.map((call, callIndex) => ({
+                callOrdinal: callIndex + 1,
+                sourceSha256: call.sourceSha256,
+              })),
+            }),
+      })}`,
+    );
+    let providerItemOrdinal = 0;
+    const toolCallCount = snapshot.reduce(
+      (count, turn) => count + ("calls" in turn ? turn.calls.length : 0),
+      0,
+    );
+    const geminiContentTurnCount = snapshot.reduce(
+      (count, turn) => count + ("calls" in turn ? 2 : 1),
+      0,
+    );
+    const geminiOutboundObservation = this.provider === "gemini"
+      ? wireReference(this.wire("clientContent", {
+          initialHistory: {
+            protocol: "initial_history_in_client_content",
+            entryCount: snapshot.length,
+            providerContentTurnCount: geminiContentTurnCount,
+            textPartCount: snapshot.filter((turn) => "text" in turn).length,
+            functionCallCount: toolCallCount,
+            functionResponseCount: toolCallCount,
+            turnComplete: true,
+            generationTriggered: false,
+            providerAcknowledgement: "not_defined_by_protocol",
+            providerVisibleHistorySha256: this.#corruptHistoryProjection
+              ? "0".repeat(64)
+              : historySha256,
+            geminiContentSha256: sha256Hex("fixture-gemini-history-content"),
+          },
+        }))
+      : null;
+    const items = snapshot.flatMap((turn, index) => {
+      const expected = "text" in turn
+        ? [{
+            kind: turn.role === "user" ? "user_message" as const : "assistant_message" as const,
+            sourceSha256: turn.sourceSha256,
+            syntheticCallIdSha256: undefined,
+            contentSha256: sha256Hex(turn.text),
+          }]
+        : [
+            ...turn.calls.map((call, callIndex) => ({
+              kind: "synthetic_tool_call" as const,
+              sourceSha256: call.sourceSha256,
+              syntheticCallIdSha256: sha256Hex(
+                `fixture-history-tool:${index + 1}:${callIndex + 1}`,
+              ),
+              contentSha256: sha256Hex(canonicalJson(call.toolArguments)),
+            })),
+            ...turn.calls.map((call, callIndex) => ({
+              kind: "synthetic_tool_output" as const,
+              sourceSha256: call.sourceSha256,
+              syntheticCallIdSha256: sha256Hex(
+                `fixture-history-tool:${index + 1}:${callIndex + 1}`,
+              ),
+              contentSha256: sha256Hex(call.output),
+            })),
+          ];
+      return expected.map(({
+        kind,
+        sourceSha256,
+        syntheticCallIdSha256,
+        contentSha256,
+      }) => {
+        providerItemOrdinal += 1;
+        const historyProjection = kind === "synthetic_tool_call"
+          ? {
+              kind,
+              argumentsSha256: this.#corruptHistoryProjection
+                ? "0".repeat(64)
+                : contentSha256,
+            }
+          : kind === "synthetic_tool_output"
+            ? {
+                kind,
+                outputSha256: this.#corruptHistoryProjection
+                  ? "0".repeat(64)
+                  : contentSha256,
+              }
+            : {
+                kind,
+                contentSha256: this.#corruptHistoryProjection
+                  ? "0".repeat(64)
+                  : contentSha256,
+              };
+        const outboundObservation = geminiOutboundObservation
+          ?? wireReference(this.wire("conversation.item.create", {
+            conversationHistoryItem: historyProjection,
+          }));
+        const inboundObservation = this.provider === "gemini"
+          ? undefined
+          : wireReference(this.wire("conversation.item.created", {
+              conversationHistoryItem: historyProjection,
+            }, "inbound"));
+        return Object.freeze({
+          historyTurnOrdinal: index + 1,
+          providerItemOrdinal,
+          kind,
+          sourceSha256,
+          ...(syntheticCallIdSha256 ? { syntheticCallIdSha256 } : {}),
+          outboundObservation,
+          ...(inboundObservation ? { inboundObservation } : {}),
+        });
+      });
+    });
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      provider: this.provider,
+      connectionEpoch: 1,
+      status: this.provider === "gemini"
+        ? "sent_unacknowledged_by_provider_protocol" as const
+        : "acknowledged" as const,
+      turnCount: snapshot.length,
+      providerItemCount: items.length,
+      historySha256,
+      sourceBindingSha256,
+      items: Object.freeze(items),
+    });
+  }
   close() {
     this.events.push("close");
     this.state = "closed";
@@ -613,6 +887,46 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       queueMicrotask(() => {
         const responseId = `provider-tool-response-plaintext-${this.#responseOrdinal}`;
         if (this.submittedToolResults.length === 1) {
+          const preToolAudio = new Uint8Array([8, 0]);
+          const encoded = Buffer.from(preToolAudio).toString("base64");
+          const preToolObservation = this.wire("serverContent", {
+            audio: {
+              direction: "output",
+              chunks: [{
+                validCanonicalBase64: true,
+                byteLength: preToolAudio.byteLength,
+                sha256: sha256Hex(preToolAudio),
+                encodedBytes: Buffer.byteLength(encoded, "utf8"),
+                mimeTypeRecognized: true,
+                format: {
+                  encoding: "pcm16",
+                  sampleRateHz: 24_000,
+                  channels: 1,
+                },
+              }],
+            },
+          }, "inbound");
+          this.emit({
+            type: "output.transcript",
+            provider: "gemini",
+            receivedAtMs: 3,
+            wireType: "serverContent",
+            responseId,
+            phase: "final",
+            text: "Second generated prefix before the final tool batch.",
+            source: "audio",
+            wireObservation: wireReference(preToolObservation),
+          });
+          this.emit({
+            type: "output.audio",
+            provider: "gemini",
+            receivedAtMs: 3,
+            wireType: "serverContent",
+            responseId,
+            audio: preToolAudio,
+            format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+            wireObservation: wireReference(preToolObservation),
+          });
           const toolCallObservation = this.wire("toolCall", {}, "inbound");
           this.emit({
             type: "tool.calls",
@@ -710,6 +1024,68 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
                 },
               },
             }],
+          });
+        }
+        const preToolAudio = new Uint8Array([9, 0]);
+        if (this.provider === "gemini") {
+          const encoded = Buffer.from(preToolAudio).toString("base64");
+          const preToolObservation = this.wire("serverContent", {
+            audio: {
+              direction: "output",
+              chunks: [{
+                validCanonicalBase64: true,
+                byteLength: preToolAudio.byteLength,
+                sha256: sha256Hex(preToolAudio),
+                encodedBytes: Buffer.byteLength(encoded, "utf8"),
+                mimeTypeRecognized: true,
+                format: {
+                  encoding: "pcm16",
+                  sampleRateHz: 24_000,
+                  channels: 1,
+                },
+              }],
+            },
+          }, "inbound");
+          this.emit({
+            type: "output.transcript",
+            provider: "gemini",
+            receivedAtMs: 2,
+            wireType: "serverContent",
+            responseId,
+            phase: "final",
+            text: "Generated before tool dispatch and never played.",
+            source: "audio",
+            wireObservation: wireReference(preToolObservation),
+          });
+          this.emit({
+            type: "output.audio",
+            provider: "gemini",
+            receivedAtMs: 2,
+            wireType: "serverContent",
+            responseId,
+            audio: preToolAudio,
+            format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+            wireObservation: wireReference(preToolObservation),
+          });
+        } else {
+          this.emit({
+            type: "output.transcript",
+            provider: this.provider,
+            receivedAtMs: 2,
+            wireType: "response.output_audio_transcript.done",
+            responseId,
+            phase: "final",
+            text: "Generated before tool dispatch and never played.",
+            source: "audio",
+          });
+          this.emit({
+            type: "output.audio",
+            provider: this.provider,
+            receivedAtMs: 2,
+            wireType: "response.audio.delta",
+            responseId,
+            audio: preToolAudio,
+            format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
           });
         }
         if (this.provider !== "gemini") {
@@ -1762,7 +2138,7 @@ describe("LC4 production realtime adapter bridge", () => {
     await expect(replayEvidenceFixture().retainJson({
       kind: "provider_exchange",
       body: mutatedProjection as JsonValue,
-      domain_prefix: "harshas-amazing-call-center/lc4-provider-exchange-evidence/v4\n",
+      domain_prefix: "harshas-amazing-call-center/lc4-provider-exchange-evidence/v5\n",
       expected_evidence_sha256: evidence.evidence_sha256,
     })).rejects.toThrow();
 
@@ -2934,7 +3310,7 @@ describe("LC4 production realtime adapter bridge", () => {
         const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };
         const projectionBody = {
           schema_version: 1 as const,
-          bridge_version: "lc4-dev-gateway-bridge-v2" as const,
+          bridge_version: "lc4-dev-gateway-bridge-v3" as const,
           redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
           episode_id: input.episode_id,
           opportunity_id: input.opportunity_id,
@@ -2952,6 +3328,8 @@ describe("LC4 production realtime adapter bridge", () => {
           provider_output: providerOutput,
           authoritative_receipt: { ok: true },
           authoritative_tool_world_receipt: null,
+          post_transition_response_plan: null,
+          post_transition_response_control: null,
           post_transition_response_plan_sha256: null,
           post_transition_response_control_sha256: null,
           authoritative_receipt_sha256: "e".repeat(64),
@@ -3026,13 +3404,40 @@ describe("LC4 production realtime adapter bridge", () => {
       ? ["hacc:archive.complete_stage", "hacc:archive.complete_stage"]
       : ["hacc:archive.complete_stage"]);
     expect(events).toEqual(provider === "gemini"
-      ? ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "submit:false", "create", "listener"]
+      ? ["connect", "append", "prepare", "commit", "create", "prepare-continuation", "submit:false", "create", "prepare-continuation", "submit:false", "create", "listener"]
       : provider === "xai"
-        ? ["connect", "append", "prepare", "commit", "commit-ack", "create", "submit:false", "create", "listener"]
-        : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
+        ? ["connect", "append", "prepare", "commit", "commit-ack", "create", "prepare-continuation", "submit:false", "create", "listener"]
+        : ["connect", "append", "prepare", "commit", "create", "prepare-continuation", "submit:false", "create", "listener"]);
     expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
+    expect(evidence.output_capture).toMatchObject({
+      generated_byte_length: 4,
+      generated_pcm_sha256: sha256Hex(new Uint8Array([1, 0, 2, 0])),
+    });
+    expect(evidence.suppressed_unplayed_output).toMatchObject({
+      policy: "exclude_everything_before_the_final_tool_batch_from_caller_heard_history",
+      tool_dispatch_count: provider === "gemini" ? 2 : 1,
+      response_count: provider === "gemini" ? 2 : 1,
+      audio_chunk_count: provider === "gemini" ? 2 : 1,
+      audio_byte_length: provider === "gemini" ? 4 : 2,
+      audio_pcm_sha256: sha256Hex(
+        provider === "gemini" ? new Uint8Array([9, 0, 8, 0]) : new Uint8Array([9, 0]),
+      ),
+      transcript_count: provider === "gemini" ? 2 : 1,
+      caller_heard_audio_byte_length: 4,
+      caller_heard_audio_pcm_sha256: sha256Hex(new Uint8Array([1, 0, 2, 0])),
+    });
+    expect(evidence.dev_gateway_conversation_tool_batches)
+      .toHaveLength(provider === "gemini" ? 2 : 1);
+    expect(canonicalJson(evidence.replay_projection))
+      .not.toContain("dev_gateway_conversation_tool_batches");
+    if (provider === "gemini") {
+      expect(evidence.gemini_output_attribution).toMatchObject({
+        output_audio_byte_length: 8,
+        output_audio_pcm_sha256: sha256Hex(new Uint8Array([9, 0, 8, 0, 1, 0, 2, 0])),
+      });
+    }
     if (provider === "xai") {
       expect(evidence.transport_mode).toBe("manual_commit");
       expect(evidence.transport_purpose).toBe("finite_prerecorded_efficacy");
@@ -3084,7 +3489,22 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(configurations[1]?.instructions).toContain("<lc4_hacc_structured_state");
     expect(configurations[1]?.instructions).toContain('"flow_state_sha256"');
     expect(configurations[2]?.instructions).toContain("<lc4_hacc_structured_state");
-    expect(events).toEqual(["connect", "close", "connect", "close", "connect", "close"]);
+    for (const providerConfiguration of configurations.slice(1)) {
+      expect(providerConfiguration.initialConversationHistoryHydrationRequired).toBe(true);
+      for (const turn of publicConversationTurns(20)) {
+        expect(providerConfiguration.instructions).not.toContain(turn.text);
+      }
+    }
+    expect(events).toEqual([
+      "connect",
+      "close",
+      "connect",
+      "hydrate",
+      "close",
+      "connect",
+      "hydrate",
+      "close",
+    ]);
   });
 
   it("keeps native context and the HACC response-plan intervention mutually exclusive", async () => {
@@ -3171,21 +3591,28 @@ describe("LC4 production realtime adapter bridge", () => {
       opportunity: number,
     ) => {
       const sequence = turns.length + 1;
-      turns.push(Object.freeze({
+      const common = {
         turn_id: `conversation.${String(sequence).padStart(3, "0")}.${speaker}`,
         sequence,
-        speaker,
-        source: speaker === "caller"
-          ? "caller_tts_source_bound_to_pcm"
-          : "listener_exact_captured_pcm_asr",
         text,
         available_after_opportunity: opportunity,
         provenance_receipt_sha256: sha256Hex(`${speaker}-pcm:${opportunity}`),
-        provider_conversation_source: true,
-        oracle_derived: false,
-        future_derived: false,
-        semantic_evaluator_derived: false,
-      }));
+        provider_conversation_source: true as const,
+        oracle_derived: false as const,
+        future_derived: false as const,
+        semantic_evaluator_derived: false as const,
+      };
+      turns.push(speaker === "caller"
+        ? Object.freeze({
+            ...common,
+            speaker: "caller",
+            source: "caller_tts_source_bound_to_pcm",
+          })
+        : Object.freeze({
+            ...common,
+            speaker: "assistant",
+            source: "listener_exact_captured_pcm_asr",
+          }));
     };
     for (const opportunity of corpus.opportunities.slice(0, 20)) {
       append("caller", opportunity.canonical_caller_text, opportunity.index);
@@ -3282,6 +3709,294 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(() => assertLc4RotationConversationParity(native, changedHacc)).toThrow("differ in provider conversation replay");
   });
 
+  it("keeps Native and HACC provider-native hydration byte-identical while HACC alone receives control state", async () => {
+    const openReconnected = async (arm: "native" | "hacc") => {
+      const value = manifest(arm);
+      const clients: FakeRealtimeClient[] = [];
+      const configurations: TrialSessionConfiguration[] = [];
+      const bridge = new Lc4RealtimeProviderBridge((provider, providerConfiguration) => {
+        configurations.push(providerConfiguration);
+        const client = new FakeRealtimeClient(provider, []);
+        clients.push(client);
+        return client;
+      });
+      const first = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[0]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() {} },
+      });
+      const firstReceipt = await first.close();
+      const packet = arm === "native"
+        ? {
+            kind: "native_conversation_replay" as const,
+            packet: nativeRotationPacket(value, firstReceipt.rotation_receipt_sha256, 1),
+          }
+        : haccRotationContext(value, firstReceipt.rotation_receipt_sha256, 1);
+      const second = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[1]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: packet,
+        listener: { accept() {} },
+      });
+      const hydration = clients[1]?.hydratedHistories[0];
+      const reopenedInstructions = configurations[1]!.instructions;
+      await second.close();
+      return { hydration, reopenedInstructions };
+    };
+    const native = await openReconnected("native");
+    const hacc = await openReconnected("hacc");
+    expect(native.hydration).toEqual(hacc.hydration);
+    expect(native.reopenedInstructions).not.toContain("lc4_hacc_structured_state");
+    expect(hacc.reopenedInstructions).toContain("lc4_hacc_structured_state");
+    for (const turn of publicConversationTurns(20)) {
+      expect(native.reopenedInstructions).not.toContain(turn.text);
+      expect(hacc.reopenedInstructions).not.toContain(turn.text);
+    }
+  });
+
+  it("retains exact provider tool metadata and rejects the old 9,187-byte duplicated-plan output", () => {
+    const value = manifest("native");
+    const compactOutput = canonicalJson({
+      gateway_result: { ok: true, membership_status: "active" },
+      authoritative_outcome: { disposition: "verified" },
+      speech_directive: "Confirm only that the membership is active.",
+    });
+    const compact = createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: "7".repeat(64),
+      conversation_turns: publicConversationTurnsWithTool(compactOutput),
+    });
+    const tool = compact.conversation_turns.find((turn) => turn.speaker === "tool");
+    expect(tool).toMatchObject({
+      speaker: "tool",
+      source: "canonical_gateway_result",
+      tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+      tool_arguments: {
+        tool_name: "membership.lookup",
+        arguments: { member_id: "PUBLIC-17" },
+      },
+      text: compactOutput,
+    });
+
+    expect(() => createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: "7".repeat(64),
+      conversation_turns: publicConversationTurnsWithTool("x".repeat(9_187)),
+    })).toThrow("conversation text is invalid");
+    expect(() => createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: "7".repeat(64),
+      // 2,001 Unicode code points but 4,002 UTF-8 bytes: the guard is bytes,
+      // not JavaScript string length.
+      conversation_turns: publicConversationTurnsWithTool("é".repeat(2_001)),
+    })).toThrow("conversation text is invalid");
+  });
+
+  it("hydrates typed tool call/output pairs and binds their expanded provider item count", async () => {
+    const value = manifest("native");
+    const clients: FakeRealtimeClient[] = [];
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      const client = new FakeRealtimeClient(provider, []);
+      clients.push(client);
+      return client;
+    });
+    const first = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() {} },
+    });
+    const firstReceipt = await first.close();
+    const compactOutput = canonicalJson({
+      gateway_result: { ok: true },
+      authoritative_outcome: { disposition: "verified" },
+      speech_directive: "Confirm the verified result.",
+    });
+    const packet = createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: firstReceipt.rotation_receipt_sha256,
+      conversation_turns: publicConversationTurnsWithTool(compactOutput),
+    });
+    const second = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[1]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: { kind: "native_conversation_replay", packet },
+      listener: { accept() {} },
+    });
+    expect(clients[1]?.hydratedHistories[0]?.find((turn) => turn.role === "tool_batch"))
+      .toEqual({
+        role: "tool_batch",
+        calls: [{
+          toolName: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+          toolArguments: {
+            tool_name: "membership.lookup",
+            arguments: { member_id: "PUBLIC-17" },
+          },
+          output: compactOutput,
+          sourceSha256: sha256Hex(`provider-visible-tool:${compactOutput}`),
+        }],
+      });
+    const receipt = await second.close();
+    expect(receipt.finalization_body).toMatchObject({
+      conversation_history_hydration: {
+        turn_count: packet.conversation_turns.length,
+        provider_item_count: packet.conversation_turns.length + 1,
+      },
+    });
+  });
+
+  it("preserves a real two-call provider batch as call-call-output-output hydration", async () => {
+    const value = manifest("native");
+    const clients: FakeRealtimeClient[] = [];
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      const client = new FakeRealtimeClient(provider, []);
+      clients.push(client);
+      return client;
+    });
+    const first = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() {} },
+    });
+    const firstReceipt = await first.close();
+    const outputs = [
+      canonicalJson({ ok: true, active: true }),
+      canonicalJson({ ok: true, annual_total: 420 }),
+    ] as const;
+    const packet = createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: firstReceipt.rotation_receipt_sha256,
+      conversation_turns: publicConversationTurnsWithToolBatch(outputs),
+    });
+    const second = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[1]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: { kind: "native_conversation_replay", packet },
+      listener: { accept() {} },
+    });
+    const hydrated = clients[1]!.hydratedHistories[0]!;
+    expect(hydrated).toHaveLength(packet.conversation_turns.length - 1);
+    expect(hydrated.find((turn) => turn.role === "tool_batch")).toEqual({
+      role: "tool_batch",
+      calls: [
+        {
+          toolName: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+          toolArguments: {
+            tool_name: "membership.lookup",
+            arguments: { member_id: "PUBLIC-17" },
+          },
+          output: outputs[0],
+          sourceSha256: sha256Hex(`provider-visible-tool:0:${outputs[0]}`),
+        },
+        {
+          toolName: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+          toolArguments: {
+            tool_name: "membership.quote",
+            arguments: { member_id: "PUBLIC-17", term: "annual" },
+          },
+          output: outputs[1],
+          sourceSha256: sha256Hex(`provider-visible-tool:1:${outputs[1]}`),
+        },
+      ],
+    });
+    const receipt = await second.close();
+    expect(receipt.finalization_body).toMatchObject({
+      conversation_history_hydration: {
+        turn_count: packet.conversation_turns.length - 1,
+        provider_item_count: 44,
+      },
+    });
+  });
+
+  it("hydrates a 120-turn opportunity-40 history without moving any replay text into instructions", async () => {
+    const value = manifest("native");
+    const clients: FakeRealtimeClient[] = [];
+    const configurations: TrialSessionConfiguration[] = [];
+    const bridge = new Lc4RealtimeProviderBridge((provider, providerConfiguration) => {
+      configurations.push(providerConfiguration);
+      const client = new FakeRealtimeClient(provider, []);
+      clients.push(client);
+      return client;
+    });
+    const open = (ordinal: 1 | 2 | 3, rotationContext: Lc4RotationContext | null) => (
+      bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[ordinal - 1]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: rotationContext,
+        listener: { accept() {} },
+      })
+    );
+    const first = await open(1, null);
+    const firstReceipt = await first.close();
+    const segmentTwoPacket = nativeRotationPacket(
+      value,
+      firstReceipt.rotation_receipt_sha256,
+      1,
+    );
+    const second = await open(2, {
+      kind: "native_conversation_replay",
+      packet: segmentTwoPacket,
+    });
+    const secondReceipt = await second.close();
+    const deepTurns = publicDeepConversationTurns();
+    expect(deepTurns).toHaveLength(120);
+    const segmentThreePacket = createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 2,
+      to_segment_ordinal: 3,
+      available_through_opportunity: 40,
+      previous_session_rotation_receipt_sha256: secondReceipt.rotation_receipt_sha256,
+      conversation_turns: deepTurns,
+    });
+    const third = await open(3, {
+      kind: "native_conversation_replay",
+      packet: segmentThreePacket,
+    });
+    expect(clients[2]?.hydratedHistories[0]).toHaveLength(120);
+    for (const turn of deepTurns) {
+      expect(configurations[2]?.instructions).not.toContain(turn.text);
+    }
+    const receipt = await third.close();
+    expect(receipt.finalization_body).toMatchObject({
+      conversation_history_hydration: {
+        turn_count: 120,
+        provider_item_count: 160,
+        status: "acknowledged",
+      },
+    });
+  });
+
   it("rejects future, oracle-derived, evaluator-derived, and non-conversation Native replay turns", () => {
     const value = manifest("native");
     const turns = publicConversationTurns(20);
@@ -3304,7 +4019,12 @@ describe("LC4 production realtime adapter bridge", () => {
           ...turn,
           turn_id: "conversation.002.tool",
           speaker: "tool" as const,
-          source: "provider_visible_tool_result" as const,
+          source: "canonical_gateway_result" as const,
+          tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+          tool_arguments: {
+            tool_name: "membership.lookup",
+            arguments: {},
+          },
         }
       : turn);
     expect(() => createLc4NativeConversationReplayPacket({
@@ -3317,12 +4037,16 @@ describe("LC4 production realtime adapter bridge", () => {
     })).toThrow("omits caller/assistant evidence for opportunity 1");
   });
 
-  it("injects only receipt-bound raw conversation at Native reopen and exposes only its hashes in evidence", async () => {
+  it("hydrates receipt-bound Native history after connect without serializing it into instructions", async () => {
     const value = manifest("native");
     const configurations: TrialSessionConfiguration[] = [];
+    const clients: FakeRealtimeClient[] = [];
+    const events: string[] = [];
     const bridge = new Lc4RealtimeProviderBridge((provider, providerConfiguration) => {
       configurations.push(providerConfiguration);
-      return new FakeRealtimeClient(provider, []);
+      const client = new FakeRealtimeClient(provider, events);
+      clients.push(client);
+      return client;
     });
     const first = await bridge.openSegment({
       manifest: value,
@@ -3342,8 +4066,28 @@ describe("LC4 production realtime adapter bridge", () => {
       rotation_context: { kind: "native_conversation_replay", packet },
       listener: { accept() {} },
     });
-    expect(configurations[1]?.instructions).toContain("<lc4_provider_conversation>");
-    for (const turn of packet.conversation_turns) expect(configurations[1]?.instructions).toContain(turn.text);
+    expect(events).toEqual(["connect", "close", "connect", "hydrate"]);
+    expect(configurations[1]?.initialConversationHistoryHydrationRequired).toBe(true);
+    expect(configurations[1]?.instructions).toBe(configuration(value).instructions);
+    for (const turn of packet.conversation_turns) {
+      expect(configurations[1]?.instructions).not.toContain(turn.text);
+    }
+    expect(clients[1]?.hydratedHistories).toHaveLength(1);
+    expect(clients[1]?.hydratedHistories[0]).toEqual(packet.conversation_turns.map((turn) => (
+      turn.speaker === "tool"
+        ? {
+            role: "tool",
+            toolName: turn.tool_name,
+            toolArguments: turn.tool_arguments,
+            output: turn.text,
+            sourceSha256: turn.provenance_receipt_sha256,
+          }
+        : {
+            role: turn.speaker === "caller" ? "user" : "assistant",
+            text: turn.text,
+            sourceSha256: turn.provenance_receipt_sha256,
+          }
+    )));
     for (const forbiddenMetadata of [
       "available_after_opportunity",
       "conversation_replay_sha256",
@@ -3371,10 +4115,176 @@ describe("LC4 production realtime adapter bridge", () => {
       rotation_context_sha256: packet.packet_sha256,
       rotation_conversation_replay_sha256: packet.conversation_replay_sha256,
     });
+    expect(events.indexOf("hydrate")).toBeGreaterThan(events.lastIndexOf("connect"));
+    expect(events.indexOf("append")).toBeGreaterThan(events.indexOf("hydrate"));
+    expect(events.indexOf("create")).toBeGreaterThan(events.indexOf("hydrate"));
     const encodedEvidence = JSON.stringify(evidence);
     for (const turn of packet.conversation_turns) expect(encodedEvidence).not.toContain(turn.text);
-    await second.close();
+    const secondReceipt = await second.close();
+    expect(secondReceipt.finalization_body).toMatchObject({
+      conversation_history_hydration: {
+        schema_version: 1,
+        provider: "openai",
+        status: "acknowledged",
+        turn_count: packet.conversation_turns.length,
+        provider_item_count: packet.conversation_turns.length,
+      },
+    });
+    const hydrationEvidence = (
+      secondReceipt.finalization_body as Record<string, unknown>
+    ).conversation_history_hydration as {
+      items: Array<{
+        outboundObservation?: { availability: string };
+        inboundObservation?: { availability: string };
+      }>;
+    };
+    expect(hydrationEvidence.items).toHaveLength(packet.conversation_turns.length);
+    expect(hydrationEvidence.items.every((item) =>
+      item.outboundObservation?.availability === "observed"
+      && item.inboundObservation?.availability === "observed")).toBe(true);
+    const encodedFinalization = JSON.stringify(secondReceipt.finalization_body);
+    for (const turn of packet.conversation_turns) {
+      expect(encodedFinalization).not.toContain(turn.text);
+    }
   });
+
+  it("fails closed before audio when a reopened provider lacks history hydration", async () => {
+    const value = manifest("native");
+    let factoryOrdinal = 0;
+    const events: string[] = [];
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      factoryOrdinal += 1;
+      const client = new FakeRealtimeClient(provider, events);
+      if (factoryOrdinal === 2) {
+        Object.defineProperty(client, "hydrateConversationHistory", {
+          configurable: true,
+          value: undefined,
+        });
+      }
+      return client;
+    });
+    const first = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() {} },
+    });
+    const firstReceipt = await first.close();
+    await expect(bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[1]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: {
+        kind: "native_conversation_replay",
+        packet: nativeRotationPacket(value, firstReceipt.rotation_receipt_sha256, 1),
+      },
+      listener: { accept() {} },
+    })).rejects.toThrow("lacks conversation history hydration");
+    expect(events).toEqual(["connect", "close", "connect", "close"]);
+    expect(events).not.toContain("append");
+    expect(events).not.toContain("create");
+  });
+
+  it.each(["openai", "gemini", "xai"] as const)(
+    "retains honest, observed %s hydration lineage before the reopened segment",
+    async (provider) => {
+      const value = manifest("native", provider);
+      const bridge = new Lc4RealtimeProviderBridge(
+        (clientProvider) => new FakeRealtimeClient(clientProvider, []),
+      );
+      const first = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[0]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() {} },
+      });
+      const firstReceipt = await first.close();
+      const packet = nativeRotationPacket(
+        value,
+        firstReceipt.rotation_receipt_sha256,
+        1,
+      );
+      const second = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[1]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: { kind: "native_conversation_replay", packet },
+        listener: { accept() {} },
+      });
+      const receipt = await second.close();
+      const hydration = (
+        receipt.finalization_body as Record<string, unknown>
+      ).conversation_history_hydration as {
+        status: string;
+        items: Array<{
+          outboundObservation?: { availability: string };
+          inboundObservation?: { availability: string };
+        }>;
+      };
+      expect(hydration.status).toBe(provider === "gemini"
+        ? "sent_unacknowledged_by_provider_protocol"
+        : "acknowledged");
+      expect(hydration.items.every((item) =>
+        item.outboundObservation?.availability === "observed")).toBe(true);
+      expect(hydration.items.every((item) => provider === "gemini"
+        ? item.inboundObservation === undefined
+        : item.inboundObservation?.availability === "observed")).toBe(true);
+    },
+  );
+
+  it.each(["openai", "gemini", "xai"] as const)(
+    "fails closed before audio when %s history wire projection content is altered",
+    async (provider) => {
+      const value = manifest("native", provider);
+      const events: string[] = [];
+      let factoryOrdinal = 0;
+      const bridge = new Lc4RealtimeProviderBridge((clientProvider) => {
+        factoryOrdinal += 1;
+        return new FakeRealtimeClient(
+          clientProvider,
+          events,
+          false,
+          "completed",
+          null,
+          false,
+          true,
+          factoryOrdinal === 2,
+        );
+      });
+      const first = await bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[0]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() {} },
+      });
+      const firstReceipt = await first.close();
+      await expect(bridge.openSegment({
+        manifest: value,
+        segment: value.episode_shape.segments[1]!,
+        profile: value.episode_shape.provider_profile,
+        configuration: configuration(value),
+        rotation_context: {
+          kind: "native_conversation_replay",
+          packet: nativeRotationPacket(value, firstReceipt.rotation_receipt_sha256, 1),
+        },
+        listener: { accept() {} },
+      })).rejects.toThrow(
+        provider === "gemini"
+          ? "Gemini history hydration projection differs"
+          : "provider history item projection differs",
+      );
+      expect(events).not.toContain("append");
+      expect(events).not.toContain("create");
+    },
+  );
 
   it("requires a valid arm-specific packet on every reopen", async () => {
     const value = manifest("native");

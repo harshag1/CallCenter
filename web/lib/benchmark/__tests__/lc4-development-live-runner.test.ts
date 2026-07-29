@@ -116,6 +116,9 @@ import {
 import {
   LC4_S2S_AUDIO_FIXTURE_VERSION,
   LC4_S2S_COMPACT_CONTROL_SHA256,
+  LC4_S2S_HISTORY_PROBE_SHA256,
+  LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+  LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_SOURCE_TEXT_SHA256,
   LC4_S2S_TOOL_SCHEMA_SHA256,
@@ -824,6 +827,13 @@ function qualificationFixture() {
   };
 
   const setupTargets = createLc4QualificationV3Targets();
+  const paidTargets = setupTargets.map((target) => ({
+    ...target,
+    configuration: {
+      ...target.configuration,
+      initialConversationHistoryHydrationRequired: true as const,
+    },
+  }));
   const source = {
     source_commit: "b".repeat(40),
     source_tree_oid: "c".repeat(40),
@@ -871,7 +881,7 @@ function qualificationFixture() {
     credential_sha256: String(index + 1).repeat(64),
   }));
   const credentialSetSha256 = sha256Hex(`harshas-amazing-call-center/provider-credential-set/v1\n${canonicalJson(credentialIdentities)}`);
-  const plannedTargets = setupTargets.map((target) => {
+  const plannedTargets = paidTargets.map((target) => {
     const audio = renditions[target.provider];
     return {
       provider: target.provider,
@@ -910,6 +920,7 @@ function qualificationFixture() {
             target.model,
           )
         : null,
+      history_hydration_required: true as const,
       setup_sessions: 1 as const,
       paid_sessions: 1 as const,
       generation_phases: 2 as const,
@@ -917,7 +928,7 @@ function qualificationFixture() {
     };
   });
   const unsignedPlanBody = {
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     protocol_id: "HACC-LC4-v1" as const,
     plan_id: "lc4-dev-test-qualification-v3",
@@ -925,12 +936,16 @@ function qualificationFixture() {
     source,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     setup_configuration_matrix_sha256: providerQualificationMatrixSha256(setupTargets),
+    paid_configuration_matrix_sha256: providerQualificationMatrixSha256(paidTargets),
+    history_probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
+    history_provider_visible_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+    history_source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
     credential_set_sha256: credentialSetSha256,
     credential_identities: credentialIdentities,
     audio_fixture: audioFixture,
     control_size_diagnostic: lc4S2sControlSizeDiagnostic(),
     targets: plannedTargets,
-    execution_scope: "gate_a_setup_acceptance_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only" as const,
+    execution_scope: "gate_a_setup_acceptance_then_non_generating_history_hydration_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only" as const,
     maximum_total_micro_usd: 3_000_000 as const,
     maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
     maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
@@ -941,14 +956,14 @@ function qualificationFixture() {
   };
   const planBody = {
     ...unsignedPlanBody,
-    plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v5\n${canonicalJson(unsignedPlanBody)}`),
+    plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v6\n${canonicalJson(unsignedPlanBody)}`),
   };
   const plan = signArtifact({
     body: planBody,
     privateKey: planAuthority.privateKey,
     publicKey: planAuthority.publicKey,
-    signingDomain: "harshas-amazing-call-center/lc4-qualification-plan/v5\n",
-    artifactDomain: "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n",
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-plan/v6\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-plan-artifact/v6\n",
   }) as Lc4QualificationV3PlanArtifact;
   const terminalPublicKey = terminalAuthority.publicKey.export({ type: "spki", format: "der" });
   const authorizationBody = {

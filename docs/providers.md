@@ -18,6 +18,33 @@ This deployment setting is independent of an agent's realtime voice provider.
 
 Builder, onboarding-AI, and Gemini browser routes fail closed in production and at non-loopback origins even if `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` is copied there. xAI/OpenAI browser calls use the stock organization-scoped BYOK path: the authenticated same-origin setup route encrypts the root under an org/provider/generation-bound vault context, and the token route uses it only to mint a provider ephemeral credential. Every built-in browser adapter requires one explicit funding authority: either that exact provider's tenant root, or a process-local, identity-checked marker minted only after the loopback development checks pass. The origin is bound to the authority kind: local deployment authority requires non-production plain-HTTP loopback, while tenant BYOK requires a canonical non-loopback HTTPS origin or tunnel. Exact loopback mode selects the local authority even when a tenant root is stored, so the tenant root is never used over plaintext HTTP; an issued local marker cannot be moved to a tunnel. Omission, provider substitution, and reconstructed marker objects fail before provider network I/O; no adapter treats `undefined` as permission to read a deployment key. The generic credential-ingest API remains for external tool/MCP credentials, not provider BYOK. Generic `HACC_ENABLE_*_EGRESS` switches do not relax either spend boundary.
 
+## Provider-neutral history hydration
+
+Long calls can rotate onto a fresh provider connection without flattening prior
+caller content into system instructions. The normalized client accepts exact
+chronological user, assistant, and `tool_batch` turns. A singleton tool is only
+backward-compatible sugar for a one-call batch; every call is emitted before
+its matching result, and parallel batch order is preserved.
+
+- OpenAI and xAI receive ordered `conversation.item.create` message,
+  function-call, and function-result items and must acknowledge every item.
+- Gemini receives one `clientContent` initial-history frame containing ordered
+  text, `functionCall`, and `functionResponse` turns. Gemini's protocol has no
+  per-item acknowledgement, so the receipt says
+  `sent_unacknowledged_by_provider_protocol` instead of inventing one.
+- History hydration never sends caller audio or requests a response. The
+  qualification verifier proves the exact redacted wire projections, zero
+  generation/tool/output activity before live input, and the first subsequent
+  caller-audio boundary.
+- Only caller-heard assistant output enters portable conversation history.
+  Generated but unplayed pre-tool audio is separately hash-bound as suppressed
+  evidence and cannot silently become remembered speech.
+
+This is the conversation plane, not the authority plane. Durable facts,
+corrections, goals, confirmations, worker state, and capability epochs remain
+application-owned and hash-bound. Provider resumption stays disabled by
+default; exact history hydration is an explicit fresh-session transport.
+
 ## xAI
 
 - Default: `grok-voice-think-fast-1.0`. The `grok-voice-latest` alias currently points to it but is not reproducible evidence.

@@ -28,6 +28,12 @@ import type {
   Pcm16Audio,
   Pcm16Format,
   RealtimeClientState,
+  RealtimeConversationHistoryHydratedItemAcknowledgement,
+  RealtimeConversationHistoryHydratedItemKind,
+  RealtimeConversationHistoryHydrationAcknowledgement,
+  RealtimeConversationHistoryJsonValue,
+  RealtimeConversationHistoryToolCall,
+  RealtimeConversationHistoryTurn,
   RealtimeEventListener,
   RealtimeOutputAudioTruncation,
   RealtimeInputAudioCommitAcknowledgement,
@@ -112,6 +118,47 @@ const TRANSPORT_GENERATED_WIRE_ATTRIBUTION = Object.freeze({
   reason: "transport_generated" as const,
 });
 const MAX_PENDING_INPUT_COMMITS = 128;
+const MAX_CONVERSATION_HISTORY_TURNS = 512;
+const MAX_CONVERSATION_HISTORY_PROVIDER_ITEMS = 1_024;
+const MAX_CONVERSATION_HISTORY_FIELD_BYTES = 64 * 1_024;
+const MAX_CONVERSATION_HISTORY_TOTAL_BYTES = 512 * 1_024;
+const MAX_CONVERSATION_HISTORY_JSON_DEPTH = 64;
+const MAX_CONVERSATION_HISTORY_JSON_NODES = 100_000;
+const CONVERSATION_HISTORY_HASH_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n";
+const CONVERSATION_HISTORY_SOURCE_BINDING_DOMAIN =
+  "harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n";
+const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "hacc_hist_item_";
+const CONVERSATION_HISTORY_ALLOWED_INBOUND_WIRE_TYPES = new Set([
+  "conversation.item.added",
+  "conversation.item.created",
+  "conversation.item.done",
+  "conversation.created",
+  "error",
+  "ping",
+  "rate_limits.updated",
+  "session.created",
+  "session.updated",
+]);
+
+type ConversationHistoryWireItem = Readonly<{
+  historyTurnOrdinal: number;
+  providerItemOrdinal: number;
+  kind: RealtimeConversationHistoryHydratedItemKind;
+  sourceSha256: string;
+  itemId: string;
+  syntheticCallId?: string;
+  event: Readonly<Record<string, unknown>>;
+  expectedItem: Readonly<Record<string, unknown>>;
+}>;
+
+type PendingConversationHistoryItem = {
+  expected: ConversationHistoryWireItem;
+  outboundObservation?: RealtimeWireObservation;
+  resolve: (value: RealtimeConversationHistoryHydratedItemAcknowledgement) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 type PendingInputCommit = {
   connectionEpoch: number;
@@ -170,12 +217,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private readonly connectTimeoutMs: number;
   private readonly maximumWireEventBytes?: number;
   private readonly xaiResumptionEnabled: boolean;
+  private readonly xaiConversationReplayRequested: boolean;
   private readonly maximumTrackedIdentities: number;
   private readonly requireStrictSessionConfigurationParity: boolean;
   private readonly unexpectedManualTurnDetectionPolicy: "diagnose" | "fail";
   private readonly turnDetectionMode: "manual" | "server_vad";
   private readonly requestedModel?: string;
   private readonly localToolProxyEnabled: boolean;
+  private readonly declaredFunctionToolNames: ReadonlySet<string>;
   private readonly baseInstructions: string;
   private pendingResponsePreparation: RealtimeResponsePreparation | null = null;
   private pendingToolContinuationPreparation: RealtimeResponsePreparation | null = null;
@@ -209,6 +258,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   private responseGenerationStarted = false;
   private responseTerminalObserved = false;
   private initialSessionUpdateSent = false;
+  private conversationActivityStarted = false;
+  private conversationHistoryHydrationStarted = false;
+  private conversationHistoryHydrationInProgress = false;
+  private conversationHistoryAuthorizedWireEvent: Record<string, unknown> | null = null;
+  private pendingConversationHistoryItem: PendingConversationHistoryItem | null = null;
+  private readonly acknowledgedConversationHistoryItems =
+    new Map<string, ConversationHistoryWireItem>();
+  private readonly hydratedConversationHistoryCallIds = new Set<string>();
 
   constructor(options: OpenAICompatibleRealtimeClientOptions) {
     if (options.provider !== "openai" && options.provider !== "xai") {
@@ -278,6 +335,8 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       throw new Error("maximumTrackedIdentities must be a positive integer");
     }
     this.provider = options.provider;
+    this.xaiConversationReplayRequested = options.provider === "xai"
+      && parsedUrl.searchParams.has("conversation_id");
     this.connectionUrl = parsedUrl.toString();
     this.connectionHeaders = { ...options.headers };
     this.connectTimeoutMs = options.connectTimeoutMs ?? 15_000;
@@ -297,6 +356,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       && tool.type === "function"
       && tool.name === LOCAL_TOOL_PROXY_FUNCTION_NAME
     ));
+    this.declaredFunctionToolNames = new Set(configuredTools.flatMap((tool) => {
+      const value = record(tool);
+      if (value.type !== "function") return [];
+      const name = stringValue(value.name) ?? stringValue(record(value.function).name);
+      return name === undefined ? [] : [name];
+    }));
     if (namedLocalProxyTools.length > 1) {
       throw new Error("Realtime session cannot declare the local capability gateway more than once");
     }
@@ -432,6 +497,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   }
 
   prepareResponse(preparation: RealtimeResponsePreparation): void {
+    this.assertConversationHistoryNotHydrating();
     if (this.turnDetectionMode === "server_vad") {
       throw new Error("Use prepareServerVadTurn before audio in provider-native server-VAD mode");
     }
@@ -455,6 +521,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
   }
 
   prepareToolContinuation(preparation: RealtimeResponsePreparation): void {
+    this.assertConversationHistoryNotHydrating();
     if (this.currentState !== "ready") throw new Error("Realtime client is not ready");
     if (!this.pendingToolBatch || !this.pendingToolBatchResponseId) {
       throw new Error("Realtime tool continuation requires one pending provider tool-call batch");
@@ -479,6 +546,11 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     preparation: RealtimeServerVadTurnPreparation,
     timeoutMs = this.connectTimeoutMs,
   ): Promise<RealtimeServerVadTurnAcknowledgement> {
+    try {
+      this.assertConversationHistoryNotHydrating();
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     if (this.provider !== "xai" || this.turnDetectionMode !== "server_vad") {
       return Promise.reject(new Error("Provider-native server-VAD turn preparation is available only for xAI server_vad sessions"));
     }
@@ -763,6 +835,128 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (createResponse) this.createResponse();
   }
 
+  async hydrateConversationHistory(
+    turns: readonly RealtimeConversationHistoryTurn[],
+    timeoutMs = this.connectTimeoutMs,
+  ): Promise<RealtimeConversationHistoryHydrationAcknowledgement> {
+    if (this.currentState !== "ready") {
+      throw new Error(`Conversation history hydration requires a ready realtime session (state: ${this.currentState})`);
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error("Conversation history item acknowledgement timeout must be positive");
+    }
+    if (this.conversationHistoryHydrationStarted || this.conversationHistoryHydrationInProgress) {
+      throw new Error("Conversation history can be hydrated exactly once per realtime connection");
+    }
+    if (this.xaiConversationReplayRequested) {
+      throw new Error(
+        "Manual conversation history hydration cannot be combined with xAI conversation resumption",
+      );
+    }
+    if (
+      this.conversationActivityStarted
+      || this.inputPhase !== "empty"
+      || this.pendingResponsePreparation !== null
+      || this.pendingToolContinuationPreparation !== null
+      || this.pendingToolBatch !== null
+      || this.pendingToolContinuationResponseId !== null
+      || this.pendingServerVadTurn !== null
+      || this.responseGenerationRequested
+      || this.responseGenerationStarted
+    ) {
+      throw new Error("Conversation history must be hydrated before the first live realtime turn");
+    }
+
+    const hydration = snapshotConversationHistory(turns);
+    for (const item of hydration.wireItems) {
+      if (item.kind !== "synthetic_tool_call") continue;
+      const toolName = stringValue(record(item.expectedItem).name);
+      if (toolName === undefined || !this.declaredFunctionToolNames.has(toolName)) {
+        throw new Error(
+          `Conversation history tool ${String(toolName)} is not declared in the realtime session`,
+        );
+      }
+    }
+    const syntheticToolCalls = hydration.wireItems.filter(
+      (item) => item.kind === "synthetic_tool_call",
+    ).length;
+    if (
+      this.providerWireToolCalls.size + syntheticToolCalls
+      > this.maximumTrackedIdentities
+    ) {
+      throw new Error(
+        `Conversation history tool identities exceed the realtime identity ledger limit `
+        + `of ${this.maximumTrackedIdentities}`,
+      );
+    }
+    this.conversationHistoryHydrationStarted = true;
+    this.conversationHistoryHydrationInProgress = true;
+    const acknowledgedItems: RealtimeConversationHistoryHydratedItemAcknowledgement[] = [];
+    try {
+      for (const expected of hydration.wireItems) {
+        const acknowledgement = await new Promise<RealtimeConversationHistoryHydratedItemAcknowledgement>(
+          (resolve, reject) => {
+            const pending: PendingConversationHistoryItem = {
+              expected,
+              resolve,
+              reject,
+              timer: setTimeout(() => {
+                if (this.pendingConversationHistoryItem !== pending) return;
+                this.pendingConversationHistoryItem = null;
+                reject(new Error(
+                  `Conversation history item ${expected.providerItemOrdinal} acknowledgement `
+                  + `timed out after ${timeoutMs} ms`,
+                ));
+              }, timeoutMs),
+            };
+            this.pendingConversationHistoryItem = pending;
+            try {
+              this.conversationHistoryAuthorizedWireEvent = expected.event;
+              pending.outboundObservation = this.sendReady(expected.event);
+              if (!pending.outboundObservation) {
+                throw new Error("Conversation history outbound wire evidence was not captured");
+              }
+              if (this.provider === "xai" && expected.kind !== "synthetic_tool_output") {
+                this.meteredBillableTextInputEvents += 1;
+              }
+            } catch (error) {
+              clearTimeout(pending.timer);
+              if (this.pendingConversationHistoryItem === pending) {
+                this.pendingConversationHistoryItem = null;
+              }
+              reject(error instanceof Error ? error : new Error(String(error)));
+            } finally {
+              this.conversationHistoryAuthorizedWireEvent = null;
+            }
+          },
+        );
+        acknowledgedItems.push(acknowledgement);
+      }
+      if (acknowledgedItems.length !== hydration.wireItems.length) {
+        throw new Error("Conversation history acknowledgement count changed during hydration");
+      }
+      return observerSnapshot({
+        schemaVersion: 1 as const,
+        provider: this.provider,
+        connectionEpoch: this.connectionEpoch,
+        status: "acknowledged" as const,
+        turnCount: hydration.turnCount,
+        providerItemCount: hydration.wireItems.length,
+        historySha256: hydration.historySha256,
+        sourceBindingSha256: hydration.sourceBindingSha256,
+        items: acknowledgedItems,
+      });
+    } catch (error) {
+      const message = `Conversation history hydration became indeterminate: ${errorMessage(error)}`;
+      this.failConnection(message, "conversation_history_hydration_failed");
+      throw new Error(message);
+    } finally {
+      this.conversationHistoryAuthorizedWireEvent = null;
+      this.conversationHistoryHydrationInProgress = false;
+      this.rejectPendingConversationHistoryItem("Conversation history hydration ended before item acknowledgement");
+    }
+  }
+
   /**
    * Submits a complete function-call batch before requesting the next model
    * response. This matters for xAI, which can issue multiple calls in one turn.
@@ -854,6 +1048,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.awaitingServerVadContinuationOriginId = null;
     this.awaitingServerVadContinuationObservationSha256 = null;
     this.rejectPendingServerVadTurn("Realtime socket closed before the server-VAD turn completed");
+    this.rejectPendingConversationHistoryItem(
+      "Realtime socket closed before conversation history item acknowledgement",
+    );
     this.rejectInputCommitWaiters("Realtime client closed before input audio commit acknowledgement");
     this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
@@ -890,6 +1087,30 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
         fatal: false,
         wireObservation: CLIENT_GENERATED_WIRE_ATTRIBUTION,
       });
+      return;
+    }
+
+    if (
+      this.conversationHistoryHydrationInProgress
+      && !CONVERSATION_HISTORY_ALLOWED_INBOUND_WIRE_TYPES.has(String(parsed.event.type))
+    ) {
+      const wireType = String(parsed.event.type);
+      const message = `Provider emitted ${wireType} while conversation history hydration was awaiting item acknowledgement`;
+      const wireObservation = this.notifyWireListeners(parsed.event, exactSerialized);
+      this.emit({
+        type: "error",
+        provider: this.provider,
+        receivedAtMs: this.now(),
+        wireType,
+        code: "conversation_history_hydration_interleaved",
+        message,
+        fatal: true,
+        ...optional(
+          "wireObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      this.failConnection(message, "conversation_history_hydration_interleaved", false);
       return;
     }
 
@@ -1101,6 +1322,78 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       exactSerialized,
       configurationAcknowledgement,
     );
+
+    if (parsed.event.type === "error" && this.conversationHistoryHydrationInProgress) {
+      const providerError = record(parsed.event.error);
+      const diagnostic = createRealtimeTransportFailureDiagnostic({
+        origin: "provider_wire",
+        rawCode: stringValue(providerError.code) ?? stringValue(providerError.type),
+        message: stringValue(providerError.message) ?? "Provider rejected conversation history hydration",
+        responseGenerationRequested: false,
+        responseGenerationStarted: false,
+        responseTerminalObserved: false,
+      });
+      const message = `Provider rejected conversation history item ${
+        this.pendingConversationHistoryItem?.expected.providerItemOrdinal ?? "unknown"
+      }`;
+      this.emit({
+        type: "error",
+        provider: this.provider,
+        receivedAtMs: this.now(),
+        wireType: "error",
+        code: "conversation_history_provider_rejected",
+        message,
+        fatal: true,
+        details: {
+          category: diagnostic.category,
+          ...optional("safeRawCode", diagnostic.safeRawCode),
+          ...optional("messageSha256", diagnostic.messageSha256),
+        },
+        transportDiagnostic: diagnostic,
+        ...optional(
+          "wireObservation",
+          wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+        ),
+      });
+      this.failConnection(
+        message,
+        "conversation_history_provider_rejected",
+        false,
+        diagnostic,
+      );
+      return;
+    }
+
+    if (
+      parsed.event.type === "conversation.item.added"
+      || parsed.event.type === "conversation.item.created"
+      || parsed.event.type === "conversation.item.done"
+    ) {
+      const acknowledgementError = parsed.event.type === "conversation.item.done"
+        ? this.validateConversationHistoryItemDone(parsed.event)
+        : this.acknowledgeConversationHistoryItem(parsed.event, wireObservation);
+      if (acknowledgementError) {
+        this.emit({
+          type: "error",
+          provider: this.provider,
+          receivedAtMs: this.now(),
+          wireType: String(parsed.event.type),
+          code: "conversation_history_acknowledgement_invalid",
+          message: acknowledgementError,
+          fatal: true,
+          ...optional(
+            "wireObservation",
+            wireObservation === undefined ? undefined : realtimeWireObservationReference(wireObservation),
+          ),
+        });
+        this.failConnection(
+          acknowledgementError,
+          "conversation_history_acknowledgement_invalid",
+          false,
+        );
+        return;
+      }
+    }
 
     if (parsed.event.type === "session.updated"
       && this.pendingServerVadTurn?.phase === "awaiting_session_ack"
@@ -1526,6 +1819,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.awaitingServerVadContinuationOriginId = null;
     this.awaitingServerVadContinuationObservationSha256 = null;
     this.rejectPendingServerVadTurn("Realtime socket closed before the server-VAD turn completed");
+    this.rejectPendingConversationHistoryItem(
+      "Realtime socket closed before conversation history item acknowledgement",
+    );
     this.rejectInputCommitWaiters("Realtime socket closed before input audio commit acknowledgement");
     this.pendingInputCommits.length = 0;
     this.pendingResponsePreparation = null;
@@ -1580,6 +1876,7 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.awaitingServerVadContinuationOriginId = null;
     this.awaitingServerVadContinuationObservationSha256 = null;
     this.rejectPendingServerVadTurn(message);
+    this.rejectPendingConversationHistoryItem(message);
     this.rejectInputCommitWaiters(message);
     this.pendingInputCommits.length = 0;
     this.clearConnectTimer();
@@ -1616,6 +1913,14 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pendingServerVadTurn = null;
+    pending.reject(new Error(reason));
+  }
+
+  private rejectPendingConversationHistoryItem(reason: string): void {
+    const pending = this.pendingConversationHistoryItem;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingConversationHistoryItem = null;
     pending.reject(new Error(reason));
   }
 
@@ -1699,6 +2004,75 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     });
   }
 
+  private acknowledgeConversationHistoryItem(
+    event: Record<string, unknown>,
+    wireObservation?: RealtimeWireObservation,
+  ): string | undefined {
+    const itemId = stringValue(record(event.item).id);
+    const pending = this.pendingConversationHistoryItem;
+    if (!pending) {
+      if (itemId !== undefined && this.acknowledgedConversationHistoryItems.has(itemId)) {
+        return `Provider duplicated acknowledged conversation history item ${itemId}`;
+      }
+      if (this.conversationHistoryHydrationInProgress) {
+        return "Provider emitted an uncorrelated conversation item acknowledgement during history hydration";
+      }
+      return undefined;
+    }
+    if (!wireObservation) {
+      return "Conversation history inbound wire evidence was not captured";
+    }
+    const mismatch = conversationHistoryItemAcknowledgementError(event, pending.expected);
+    if (mismatch) return mismatch;
+    if (this.acknowledgedConversationHistoryItems.has(pending.expected.itemId)) {
+      return `Provider duplicated acknowledged conversation history item ${pending.expected.itemId}`;
+    }
+    if (!pending.outboundObservation) {
+      return "Conversation history acknowledgement lacks its outbound wire evidence";
+    }
+    clearTimeout(pending.timer);
+    this.pendingConversationHistoryItem = null;
+    this.acknowledgedConversationHistoryItems.set(
+      pending.expected.itemId,
+      pending.expected,
+    );
+    if (pending.expected.syntheticCallId !== undefined) {
+      this.hydratedConversationHistoryCallIds.add(pending.expected.syntheticCallId);
+    }
+    pending.resolve(observerSnapshot({
+      historyTurnOrdinal: pending.expected.historyTurnOrdinal,
+      providerItemOrdinal: pending.expected.providerItemOrdinal,
+      kind: pending.expected.kind,
+      sourceSha256: pending.expected.sourceSha256,
+      ...(pending.expected.syntheticCallId === undefined
+        ? {}
+        : {
+            syntheticCallIdSha256: realtimeWireIdentitySha256(
+              "call",
+              pending.expected.syntheticCallId,
+            ),
+          }),
+      outboundObservation: realtimeWireObservationReference(pending.outboundObservation),
+      inboundObservation: realtimeWireObservationReference(wireObservation),
+    }));
+    return undefined;
+  }
+
+  private validateConversationHistoryItemDone(
+    event: Record<string, unknown>,
+  ): string | undefined {
+    const itemId = stringValue(record(event.item).id);
+    const expected = itemId === undefined
+      ? undefined
+      : this.acknowledgedConversationHistoryItems.get(itemId);
+    if (!expected) {
+      return this.conversationHistoryHydrationInProgress
+        ? "Provider completed an uncorrelated conversation item during history hydration"
+        : undefined;
+    }
+    return conversationHistoryItemAcknowledgementError(event, expected);
+  }
+
   private rejectInputCommitWaiters(reason: string): void {
     for (const pending of this.pendingInputCommits) {
       if (pending.acknowledgement) continue;
@@ -1717,6 +2091,13 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     if (this.currentState !== "ready") {
       throw new Error(`Realtime session is not ready (state: ${this.currentState})`);
     }
+    const hydrationSendAuthorized = event === this.conversationHistoryAuthorizedWireEvent;
+    if (this.conversationHistoryHydrationInProgress && !hydrationSendAuthorized) {
+      throw new Error("A live realtime operation cannot interleave conversation history hydration");
+    }
+    if (!hydrationSendAuthorized && event.type !== "session.update") {
+      this.conversationActivityStarted = true;
+    }
     return this.sendRaw(event, dynamicControl);
   }
 
@@ -1725,6 +2106,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
       throw new Error(
         `Resolve the complete tool-call batch before continuing: ${[...this.pendingToolBatch].join(", ")}`,
       );
+    }
+  }
+
+  private assertConversationHistoryNotHydrating(): void {
+    if (this.conversationHistoryHydrationInProgress) {
+      throw new Error("A live realtime operation cannot interleave conversation history hydration");
     }
   }
 
@@ -1742,6 +2129,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     for (const call of calls) {
       const invalid = providerCallIdError(call.callId);
       if (invalid) return `Malformed provider tool call id: ${invalid}`;
+      if (this.hydratedConversationHistoryCallIds.has(call.callId)) {
+        return `Provider reused hydrated conversation history tool call id ${call.callId} for executable work`;
+      }
       if (batchIds.has(call.callId)) return `Provider repeated tool call id ${call.callId} inside one batch`;
       if (this.providerToolCallIds.has(call.callId)) {
         return `Provider reused tool call id ${call.callId} after it was already admitted`;
@@ -1867,7 +2257,9 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     dynamicControl?: WireDynamicControlEvidence,
     configurationEvidence?: SessionConfigurationAcknowledgement,
   ): RealtimeWireObservation | undefined {
-    if (!this.wireObservationListeners.size) return undefined;
+    if (!this.wireObservationListeners.size && !this.conversationHistoryHydrationInProgress) {
+      return undefined;
+    }
     const sequence = this.wireSequence + 1;
     const observation = buildWireObservation({
       provider: this.provider,
@@ -1940,6 +2332,438 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
     this.meteredBillableTextInputEvents = 0;
     return usage;
   }
+}
+
+type ConversationHistorySnapshot = Readonly<{
+  turnCount: number;
+  historySha256: string;
+  sourceBindingSha256: string;
+  wireItems: readonly ConversationHistoryWireItem[];
+}>;
+
+type NormalizedConversationHistoryTurn =
+  | Readonly<{
+      role: "user" | "assistant";
+      text: string;
+      sourceSha256: string;
+    }>
+  | Readonly<{
+      role: "tool_batch";
+      calls: readonly RealtimeConversationHistoryToolCall[];
+    }>;
+
+const MAX_CONVERSATION_HISTORY_TOOL_CALLS_PER_BATCH = 128;
+const MAX_CONVERSATION_HISTORY_TOOL_BATCH_BYTES = 256 * 1_024;
+
+function snapshotConversationHistory(
+  input: readonly RealtimeConversationHistoryTurn[],
+): ConversationHistorySnapshot {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new Error("Conversation history hydration requires at least one turn");
+  }
+  if (input.length > MAX_CONVERSATION_HISTORY_TURNS) {
+    throw new Error(
+      `Conversation history exceeds ${MAX_CONVERSATION_HISTORY_TURNS} turns`,
+    );
+  }
+  let detached: unknown;
+  try {
+    detached = structuredClone(input);
+  } catch {
+    throw new Error("Conversation history must be structured-cloneable");
+  }
+  if (!Array.isArray(detached) || detached.length !== input.length) {
+    throw new Error("Conversation history changed during canonicalization");
+  }
+
+  const normalized: NormalizedConversationHistoryTurn[] = [];
+  let providerItemCount = 0;
+  const providerVisible: Array<
+    | Readonly<{ role: "user" | "assistant"; text: string }>
+    | Readonly<{
+        role: "tool_batch";
+        calls: readonly Readonly<{
+          toolName: string;
+          toolArguments: Readonly<Record<string, RealtimeConversationHistoryJsonValue>>;
+          output: string;
+        }>[];
+      }>
+  > = [];
+  for (const [index, candidate] of detached.entries()) {
+    if (!isRecord(candidate)) {
+      throw new Error(`Conversation history turn ${index + 1} must be an object`);
+    }
+    if (candidate.role === "user" || candidate.role === "assistant") {
+      const role: "user" | "assistant" = candidate.role;
+      const sourceSha256 = assertConversationHistorySourceSha256(
+        candidate.sourceSha256,
+        index + 1,
+      );
+      if (typeof candidate.text !== "string" || !candidate.text.trim()) {
+        throw new Error(`Conversation history turn ${index + 1} text is empty`);
+      }
+      assertConversationHistoryFieldBytes(candidate.text, index + 1, "text");
+      const turn = deepFreeze({
+        role,
+        text: candidate.text,
+        sourceSha256,
+      });
+      providerItemCount += 1;
+      if (providerItemCount > MAX_CONVERSATION_HISTORY_PROVIDER_ITEMS) {
+        throw new Error(
+          `Conversation history exceeds ${MAX_CONVERSATION_HISTORY_PROVIDER_ITEMS} provider items`,
+        );
+      }
+      normalized.push(turn);
+      providerVisible.push(deepFreeze({ role: turn.role, text: turn.text }));
+      continue;
+    }
+    if (candidate.role !== "tool" && candidate.role !== "tool_batch") {
+      throw new Error(`Conversation history turn ${index + 1} role is invalid`);
+    }
+    const rawCalls = candidate.role === "tool"
+      ? [candidate]
+      : candidate.calls;
+    if (!Array.isArray(rawCalls) || rawCalls.length === 0) {
+      throw new Error(`Conversation history turn ${index + 1} tool batch must be non-empty`);
+    }
+    if (rawCalls.length > MAX_CONVERSATION_HISTORY_TOOL_CALLS_PER_BATCH) {
+      throw new Error(
+        `Conversation history turn ${index + 1} tool batch exceeds `
+        + `${MAX_CONVERSATION_HISTORY_TOOL_CALLS_PER_BATCH} calls`,
+      );
+    }
+    providerItemCount += rawCalls.length * 2;
+    if (providerItemCount > MAX_CONVERSATION_HISTORY_PROVIDER_ITEMS) {
+      throw new Error(
+        `Conversation history exceeds ${MAX_CONVERSATION_HISTORY_PROVIDER_ITEMS} provider items`,
+      );
+    }
+    const calls = rawCalls.map((rawCall, callIndex) => (
+      snapshotConversationHistoryToolCall(rawCall, index + 1, callIndex + 1)
+    ));
+    const visibleCalls = calls.map((call) => deepFreeze({
+      toolName: call.toolName,
+      toolArguments: call.toolArguments,
+      output: call.output,
+    }));
+    const batchBytes = Buffer.byteLength(canonicalJson(visibleCalls), "utf8");
+    if (batchBytes > MAX_CONVERSATION_HISTORY_TOOL_BATCH_BYTES) {
+      throw new Error(
+        `Conversation history turn ${index + 1} tool batch is ${batchBytes} UTF-8 bytes; `
+        + `limit is ${MAX_CONVERSATION_HISTORY_TOOL_BATCH_BYTES}`,
+      );
+    }
+    const turn = deepFreeze({
+      role: "tool_batch" as const,
+      calls,
+    });
+    normalized.push(turn);
+    providerVisible.push(deepFreeze({
+      role: "tool_batch" as const,
+      calls: visibleCalls,
+    }));
+  }
+
+  const providerVisibleJson = canonicalJson(providerVisible);
+  const providerVisibleBytes = Buffer.byteLength(providerVisibleJson, "utf8");
+  if (providerVisibleBytes > MAX_CONVERSATION_HISTORY_TOTAL_BYTES) {
+    throw new Error(
+      `Conversation history provider-visible content is ${providerVisibleBytes} UTF-8 bytes; `
+      + `limit is ${MAX_CONVERSATION_HISTORY_TOTAL_BYTES}`,
+    );
+  }
+  const historySha256 = sha256Text(
+    `${CONVERSATION_HISTORY_HASH_DOMAIN}${providerVisibleJson}`,
+  );
+  const sourceBindingSha256 = sha256Text(
+    `${CONVERSATION_HISTORY_SOURCE_BINDING_DOMAIN}${canonicalJson({
+      historySha256,
+      sources: normalized.map((turn, index) => {
+        if (turn.role === "user" || turn.role === "assistant") {
+          return {
+            ordinal: index + 1,
+            sourceSha256: turn.sourceSha256,
+          };
+        }
+        const batch = turn as Extract<
+          NormalizedConversationHistoryTurn,
+          { role: "tool_batch" }
+        >;
+        return {
+          ordinal: index + 1,
+          role: "tool_batch",
+          calls: batch.calls.map((call, callIndex) => ({
+            callOrdinal: callIndex + 1,
+            sourceSha256: call.sourceSha256,
+          })),
+        };
+      }),
+    })}`,
+  );
+
+  const wireItems: ConversationHistoryWireItem[] = [];
+  const nextItemId = (kind: RealtimeConversationHistoryHydratedItemKind): string => {
+    const providerItemOrdinal = wireItems.length + 1;
+    const suffix = sha256Text(
+      `${historySha256}\0${providerItemOrdinal}\0${kind}`,
+    ).slice(0, 24);
+    return `${CONVERSATION_HISTORY_ITEM_ID_PREFIX}${String(providerItemOrdinal).padStart(4, "0")}_${suffix}`;
+  };
+  const pushWireItem = (inputItem: Omit<ConversationHistoryWireItem, "providerItemOrdinal" | "event">) => {
+    const providerItemOrdinal = wireItems.length + 1;
+    const expectedItem = deepFreeze(inputItem.expectedItem);
+    wireItems.push(deepFreeze({
+      ...inputItem,
+      providerItemOrdinal,
+      expectedItem,
+      event: {
+        type: "conversation.item.create",
+        item: expectedItem,
+      },
+    }));
+  };
+
+  for (const [index, turn] of normalized.entries()) {
+    const historyTurnOrdinal = index + 1;
+    if (turn.role === "user" || turn.role === "assistant") {
+      const kind = turn.role === "user" ? "user_message" : "assistant_message";
+      const itemId = nextItemId(kind);
+      pushWireItem({
+        historyTurnOrdinal,
+        kind,
+        sourceSha256: turn.sourceSha256,
+        itemId,
+        expectedItem: {
+          id: itemId,
+          type: "message",
+          role: turn.role,
+          content: [{
+            type: turn.role === "user" ? "input_text" : "output_text",
+            text: turn.text,
+          }],
+        },
+      });
+      continue;
+    }
+    const toolBatch = turn as Extract<NormalizedConversationHistoryTurn, { role: "tool_batch" }>;
+    const syntheticCalls = toolBatch.calls.map((call, callIndex) => ({
+      call,
+      syntheticCallId:
+        `hacc_hist_call_${String(historyTurnOrdinal).padStart(4, "0")}_${
+          String(callIndex + 1).padStart(3, "0")
+        }_${sha256Text(
+          `${historySha256}\0${historyTurnOrdinal}\0${callIndex + 1}\0tool`,
+        ).slice(0, 24)}`,
+    }));
+    for (const { call, syntheticCallId } of syntheticCalls) {
+      const callItemId = nextItemId("synthetic_tool_call");
+      pushWireItem({
+        historyTurnOrdinal,
+        kind: "synthetic_tool_call",
+        sourceSha256: call.sourceSha256,
+        itemId: callItemId,
+        syntheticCallId,
+        expectedItem: {
+          id: callItemId,
+          type: "function_call",
+          call_id: syntheticCallId,
+          name: call.toolName,
+          arguments: canonicalJson(call.toolArguments),
+        },
+      });
+    }
+    for (const { call, syntheticCallId } of syntheticCalls) {
+      const outputItemId = nextItemId("synthetic_tool_output");
+      pushWireItem({
+        historyTurnOrdinal,
+        kind: "synthetic_tool_output",
+        sourceSha256: call.sourceSha256,
+        itemId: outputItemId,
+        syntheticCallId,
+        expectedItem: {
+          id: outputItemId,
+          type: "function_call_output",
+          call_id: syntheticCallId,
+          output: call.output,
+        },
+      });
+    }
+  }
+  if (wireItems.length !== providerItemCount) {
+    throw new Error("Conversation history provider item count changed during canonicalization");
+  }
+  return deepFreeze({
+    turnCount: normalized.length,
+    historySha256,
+    sourceBindingSha256,
+    wireItems,
+  });
+}
+
+function snapshotConversationHistoryToolCall(
+  candidate: unknown,
+  turnOrdinal: number,
+  callOrdinal: number,
+): RealtimeConversationHistoryToolCall {
+  const label = `Conversation history turn ${turnOrdinal} tool call ${callOrdinal}`;
+  if (!isRecord(candidate)) throw new Error(`${label} must be an object`);
+  if (
+    typeof candidate.toolName !== "string"
+    || !/^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u.test(candidate.toolName)
+  ) {
+    throw new Error(`${label} toolName is invalid`);
+  }
+  if (!isRecord(candidate.toolArguments)) {
+    throw new Error(`${label} toolArguments must be a JSON object`);
+  }
+  const jsonError = conversationHistoryJsonError(candidate.toolArguments);
+  if (jsonError) throw new Error(`${label} toolArguments ${jsonError}`);
+  const toolArguments = candidate.toolArguments as Readonly<
+    Record<string, RealtimeConversationHistoryJsonValue>
+  >;
+  assertConversationHistoryFieldBytes(
+    canonicalJson(toolArguments),
+    turnOrdinal,
+    `tool call ${callOrdinal} toolArguments`,
+  );
+  if (typeof candidate.output !== "string") {
+    throw new Error(`${label} output must be a string`);
+  }
+  assertConversationHistoryFieldBytes(
+    candidate.output,
+    turnOrdinal,
+    `tool call ${callOrdinal} output`,
+  );
+  return deepFreeze({
+    toolName: candidate.toolName,
+    toolArguments,
+    output: candidate.output,
+    sourceSha256: assertConversationHistorySourceSha256(
+      candidate.sourceSha256,
+      turnOrdinal,
+      callOrdinal,
+    ),
+  });
+}
+
+function assertConversationHistorySourceSha256(
+  value: unknown,
+  turnOrdinal: number,
+  callOrdinal?: number,
+): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new Error(
+      `Conversation history turn ${turnOrdinal}${
+        callOrdinal === undefined ? "" : ` tool call ${callOrdinal}`
+      } sourceSha256 is invalid`,
+    );
+  }
+  return value;
+}
+
+function assertConversationHistoryFieldBytes(
+  value: string,
+  turnOrdinal: number,
+  field: string,
+): void {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes > MAX_CONVERSATION_HISTORY_FIELD_BYTES) {
+    throw new Error(
+      `Conversation history turn ${turnOrdinal} ${field} is ${bytes} UTF-8 bytes; `
+      + `limit is ${MAX_CONVERSATION_HISTORY_FIELD_BYTES}`,
+    );
+  }
+}
+
+function conversationHistoryJsonError(value: unknown): string | undefined {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const current = pending.pop()!;
+    nodes += 1;
+    if (nodes > MAX_CONVERSATION_HISTORY_JSON_NODES) {
+      return `exceeds ${MAX_CONVERSATION_HISTORY_JSON_NODES} JSON nodes`;
+    }
+    if (current.depth > MAX_CONVERSATION_HISTORY_JSON_DEPTH) {
+      return `exceeds JSON depth ${MAX_CONVERSATION_HISTORY_JSON_DEPTH}`;
+    }
+    if (
+      current.value === null
+      || typeof current.value === "string"
+      || typeof current.value === "boolean"
+    ) {
+      continue;
+    }
+    if (typeof current.value === "number") {
+      if (!Number.isFinite(current.value)) return "contains a non-finite number";
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      for (const child of current.value) {
+        pending.push({ value: child, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!isRecord(current.value)) return "contains a non-JSON value";
+    const prototype = Object.getPrototypeOf(current.value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return "contains a non-JSON object";
+    }
+    for (const child of Object.values(current.value)) {
+      pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+function conversationHistoryItemAcknowledgementError(
+  event: Record<string, unknown>,
+  expected: ConversationHistoryWireItem,
+): string | undefined {
+  const item = record(event.item);
+  if (item.id !== expected.itemId) {
+    return `Provider acknowledged conversation history item out of order; expected ${expected.itemId}`;
+  }
+  const expectedItem = expected.expectedItem;
+  if (expected.kind === "user_message" || expected.kind === "assistant_message") {
+    if (
+      item.type !== "message"
+      || item.role !== expectedItem.role
+      || !Array.isArray(item.content)
+      || item.content.length !== 1
+    ) {
+      return `Provider altered conversation history message ${expected.itemId}`;
+    }
+    const actualContent = record(item.content[0]);
+    const expectedContent = record((expectedItem.content as readonly unknown[])[0]);
+    if (
+      actualContent.type !== expectedContent.type
+      || actualContent.text !== expectedContent.text
+    ) {
+      return `Provider altered conversation history message content ${expected.itemId}`;
+    }
+    return undefined;
+  }
+  if (expected.kind === "synthetic_tool_call") {
+    if (
+      item.type !== "function_call"
+      || item.call_id !== expectedItem.call_id
+      || item.name !== expectedItem.name
+      || item.arguments !== expectedItem.arguments
+    ) {
+      return `Provider altered synthetic conversation history tool call ${expected.itemId}`;
+    }
+    return undefined;
+  }
+  if (
+    item.type !== "function_call_output"
+    || item.call_id !== expectedItem.call_id
+    || item.output !== expectedItem.output
+  ) {
+    return `Provider altered synthetic conversation history tool output ${expected.itemId}`;
+  }
+  return undefined;
 }
 
 type WireObservationBuildInput = Readonly<{
@@ -2064,6 +2888,11 @@ function buildRedactedWireProjection(
   const text = textWireProjection(input.event, wireType);
   if (text.length) projection.text = text;
 
+  const conversationHistoryItem = conversationHistoryItemWireProjection(input.event, wireType);
+  if (conversationHistoryItem !== undefined) {
+    projection.conversationHistoryItem = conversationHistoryItem;
+  }
+
   const usage = usageWireProjection(input.event);
   if (usage !== undefined) projection.usage = usage;
 
@@ -2165,7 +2994,10 @@ type GatewayCallCandidate = Readonly<{
 
 function gatewayCallWireProjection(event: Record<string, unknown>): Record<string, unknown>[] {
   return gatewayCallCandidates(event)
-    .filter((call) => call.name === LOCAL_TOOL_PROXY_FUNCTION_NAME)
+    .filter((call) => (
+      call.name === LOCAL_TOOL_PROXY_FUNCTION_NAME
+      && !call.itemId?.startsWith(CONVERSATION_HISTORY_ITEM_ID_PREFIX)
+    ))
     .map((call) => {
       const argumentEvidence = jsonTextEvidence(call.argumentsText);
       const parsed = argumentEvidence.parsed;
@@ -2231,6 +3063,8 @@ function gatewayResultWireProjection(
   const item = record(event.item);
   if (item.type !== "function_call_output") return [];
   const callId = stringValue(item.call_id);
+  const itemId = stringValue(item.id);
+  if (itemId?.startsWith(CONVERSATION_HISTORY_ITEM_ID_PREFIX)) return [];
   const resultEvidence = jsonTextEvidence(stringValue(item.output));
   return [{
     gateway: LOCAL_TOOL_PROXY_FUNCTION_NAME,
@@ -2242,14 +3076,21 @@ function gatewayResultWireProjection(
 }
 
 function textWireProjection(event: Record<string, unknown>, wireType: string): Record<string, unknown>[] {
-  const values: Array<{ kind: "input_text" | "transcript"; value: string }> = [];
-  if (wireType === "conversation.item.create") {
+  const values: Array<{ kind: "input_text" | "output_text" | "transcript"; value: string }> = [];
+  if (
+    wireType === "conversation.item.create"
+    || wireType === "conversation.item.added"
+    || wireType === "conversation.item.created"
+    || wireType === "conversation.item.done"
+  ) {
     const item = record(event.item);
     if (item.type === "message" && Array.isArray(item.content)) {
       for (const part of item.content) {
         const content = record(part);
         if (content.type === "input_text" && typeof content.text === "string") {
           values.push({ kind: "input_text", value: content.text });
+        } else if (content.type === "output_text" && typeof content.text === "string") {
+          values.push({ kind: "output_text", value: content.text });
         }
       }
     }
@@ -2264,6 +3105,61 @@ function textWireProjection(event: Record<string, unknown>, wireType: string): R
     sha256: sha256Text(value),
     byteLength: Buffer.byteLength(value, "utf8"),
   }));
+}
+
+function conversationHistoryItemWireProjection(
+  event: Record<string, unknown>,
+  wireType: string,
+): Record<string, unknown> | undefined {
+  if (
+    wireType !== "conversation.item.create"
+    && wireType !== "conversation.item.added"
+    && wireType !== "conversation.item.created"
+    && wireType !== "conversation.item.done"
+  ) {
+    return undefined;
+  }
+  const item = record(event.item);
+  const itemId = stringValue(item.id);
+  if (!itemId?.startsWith(CONVERSATION_HISTORY_ITEM_ID_PREFIX)) return undefined;
+  if (item.type === "message" && Array.isArray(item.content) && item.content.length === 1) {
+    const content = record(item.content[0]);
+    const text = stringValue(content.text);
+    if (
+      (item.role !== "user" && item.role !== "assistant")
+      || (content.type !== "input_text" && content.type !== "output_text")
+      || text === undefined
+    ) {
+      return { kind: "invalid_history_message" };
+    }
+    return {
+      kind: item.role === "user" ? "user_message" : "assistant_message",
+      role: item.role,
+      contentType: content.type,
+      contentSha256: sha256Text(text),
+      contentBytes: Buffer.byteLength(text, "utf8"),
+    };
+  }
+  if (item.type === "function_call") {
+    const argumentsText = stringValue(item.arguments);
+    const evidence = jsonTextEvidence(argumentsText);
+    return {
+      kind: "synthetic_tool_call",
+      argumentsSha256: evidence.sha256,
+      argumentsBytes: evidence.byteLength,
+      argumentsJsonValid: evidence.validJson,
+    };
+  }
+  if (item.type === "function_call_output") {
+    const output = stringValue(item.output);
+    return {
+      kind: "synthetic_tool_output",
+      outputSha256: sha256Text(output ?? ""),
+      outputBytes: Buffer.byteLength(output ?? "", "utf8"),
+      outputPresent: output !== undefined,
+    };
+  }
+  return { kind: "invalid_history_item" };
 }
 
 function usageWireProjection(event: Record<string, unknown>): Record<string, number> | undefined {

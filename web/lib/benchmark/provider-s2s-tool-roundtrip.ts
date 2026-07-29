@@ -21,6 +21,8 @@ import type {
   NormalizedRealtimeUsage,
   Pcm16Audio,
   RealtimeToolCall,
+  RealtimeConversationHistoryHydrationAcknowledgement,
+  RealtimeConversationHistoryTurn,
   RealtimeTransportFailureDiagnostic,
   RealtimeWireObservation,
 } from "../realtime/client/types";
@@ -69,7 +71,7 @@ import {
   type RealtimeAudioDeliveryRuntime,
 } from "../realtime/audio-delivery";
 
-export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v6" as const;
+export const LC4_S2S_ROUNDTRIP_VERSION = "HACC-LC4-S2S-TOOL-ROUNDTRIP-v7" as const;
 export const LC4_S2S_AUDIO_FIXTURE_VERSION = "HACC-LC4-S2S-SPOKEN-FIXTURE-v1" as const;
 export const LC4_S2S_SOURCE_TEXT = "Please complete the current stage." as const;
 export const LC4_S2S_SOURCE_TEXT_SHA256 = sha256Hex(
@@ -87,6 +89,80 @@ export const LC4_S2S_VOICE_SHA256 = sha256Hex(
 export const LC4_S2S_TOOL = LC4_DEV_SEMANTIC_GATEWAY_FUNCTION;
 export const LC4_S2S_TOOL_SCHEMA_SHA256 = sha256Hex(
   `harshas-amazing-call-center/lc4-s2s-tool-schema/v1\n${canonicalJson(LC4_S2S_TOOL)}`,
+);
+const LC4_S2S_HISTORY_USER_SOURCE_SHA256 = sha256Hex(
+  "harshas-amazing-call-center/lc4-s2s-history-probe/user/v1",
+);
+const LC4_S2S_HISTORY_TOOL_SOURCE_SHA256 = sha256Hex(
+  "harshas-amazing-call-center/lc4-s2s-history-probe/tool/v1",
+);
+const LC4_S2S_HISTORY_ASSISTANT_SOURCE_SHA256 = sha256Hex(
+  "harshas-amazing-call-center/lc4-s2s-history-probe/assistant/v1",
+);
+export const LC4_S2S_HISTORY_PROBE: readonly [
+  Readonly<{ role: "user"; text: string; sourceSha256: string }>,
+  Extract<RealtimeConversationHistoryTurn, { role: "tool_batch" }>,
+  Readonly<{ role: "assistant"; text: string; sourceSha256: string }>,
+] = Object.freeze([
+  Object.freeze({
+    role: "user" as const,
+    text: "Earlier, I asked you to complete the previous stage.",
+    sourceSha256: LC4_S2S_HISTORY_USER_SOURCE_SHA256,
+  }),
+  Object.freeze({
+    role: "tool_batch" as const,
+    calls: Object.freeze([Object.freeze({
+      toolName: "capability_gateway",
+      toolArguments: Object.freeze({
+        tool_name: "complete_current_stage",
+        arguments: Object.freeze({}),
+      }),
+      output: canonicalJson({ ok: true, qualification_stage: "previous_completed" }),
+      sourceSha256: LC4_S2S_HISTORY_TOOL_SOURCE_SHA256,
+    })]),
+  }),
+  Object.freeze({
+    role: "assistant" as const,
+    text: "The previous stage was completed.",
+    sourceSha256: LC4_S2S_HISTORY_ASSISTANT_SOURCE_SHA256,
+  }),
+]);
+export const LC4_S2S_HISTORY_PROBE_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/lc4-s2s-history-probe/v1\n${
+    canonicalJson(LC4_S2S_HISTORY_PROBE)
+  }`,
+);
+export const LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n${
+    canonicalJson([
+      { role: "user", text: LC4_S2S_HISTORY_PROBE[0].text },
+      {
+        role: "tool_batch",
+        calls: LC4_S2S_HISTORY_PROBE[1].calls.map((call) => ({
+          toolName: call.toolName,
+          toolArguments: call.toolArguments,
+          output: call.output,
+        })),
+      },
+      { role: "assistant", text: LC4_S2S_HISTORY_PROBE[2].text },
+    ])
+  }`,
+);
+export const LC4_S2S_HISTORY_SOURCE_BINDING_SHA256 = sha256Hex(
+  `harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n${
+    canonicalJson({
+      historySha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+      sources: [
+        { ordinal: 1, sourceSha256: LC4_S2S_HISTORY_USER_SOURCE_SHA256 },
+        {
+          ordinal: 2,
+          role: "tool_batch",
+          calls: [{ callOrdinal: 1, sourceSha256: LC4_S2S_HISTORY_TOOL_SOURCE_SHA256 }],
+        },
+        { ordinal: 3, sourceSha256: LC4_S2S_HISTORY_ASSISTANT_SOURCE_SHA256 },
+      ],
+    })
+  }`,
 );
 export const LC4_S2S_COMPACT_CONTROL = [
   "Listen to the caller's spoken request.",
@@ -109,8 +185,10 @@ export const LC4_S2S_PACKETIZER_SHA256 = sha256Hex(
 const execFileAsync = promisify(execFile);
 const CAS_DOMAIN = "harshas-amazing-call-center/lc4-s2s-pcm-object/v1\n";
 const FIXTURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-spoken-fixture-artifact/v1\n";
-const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v6\n";
-const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v6\n";
+const ROUNDTRIP_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-evidence/v7\n";
+const ROUNDTRIP_FAILURE_DOMAIN = "harshas-amazing-call-center/lc4-s2s-roundtrip-failure/v7\n";
+const HISTORY_HYDRATION_EVIDENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n";
 const CONTROL_DIAGNOSTIC_DOMAIN = "harshas-amazing-call-center/lc4-s2s-control-size-diagnostic/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const ROUNDTRIP_USAGE_COUNTERS = new Set<RoundtripUsageCounter>([
@@ -178,6 +256,10 @@ export type Lc4S2sControlSizeDiagnostic = Readonly<{
 export type Lc4S2sRoundtripFailureClass =
   | "none"
   | "session_setup_failed"
+  | "history_hydration_unsupported"
+  | "history_hydration_failed"
+  | "history_hydration_evidence_invalid"
+  | "history_pre_input_activity"
   | "audio_delivery_failed"
   | "audio_delivery_contract_failed"
   | "input_audio_replay_invalid"
@@ -224,8 +306,37 @@ export type Lc4S2sRoundtripDeliveryReceipt = Readonly<{
   scheduled_offsets_ms: readonly number[];
 }>;
 
+export type Lc4S2sHistoryHydrationEvidence = Readonly<{
+  schema_version: 1;
+  probe_sha256: typeof LC4_S2S_HISTORY_PROBE_SHA256;
+  provider: LiveStsProvider;
+  status: RealtimeConversationHistoryHydrationAcknowledgement["status"];
+  connection_epoch: number;
+  turn_count: 3;
+  provider_item_count: 4;
+  provider_visible_history_sha256: typeof LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256;
+  source_binding_sha256: typeof LC4_S2S_HISTORY_SOURCE_BINDING_SHA256;
+  item_kinds: readonly [
+    "user_message",
+    "synthetic_tool_call",
+    "synthetic_tool_output",
+    "assistant_message",
+  ];
+  outbound_observation_sha256s: readonly string[];
+  inbound_observation_sha256s: readonly string[];
+  last_history_observation_sequence: number;
+  first_live_input_observation_sha256: string;
+  first_live_input_sequence: number;
+  pre_input_generation_trigger_count: 0;
+  pre_input_output_audio_bytes: 0;
+  pre_input_output_transcript_count: 0;
+  pre_input_tool_call_count: 0;
+  receipt_sha256: string;
+  evidence_sha256: string;
+}>;
+
 export type Lc4S2sRoundtripExecution = Readonly<{
-  schema_version: 3;
+  schema_version: 4;
   roundtrip_version: typeof LC4_S2S_ROUNDTRIP_VERSION;
   provider: LiveStsProvider;
   model: string;
@@ -238,6 +349,7 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   input_audio_evidence: RoundtripInputAudioEvidence | null;
   output_audio_evidence: RoundtripOutputAudioEvidence | null;
   pre_tool_output_quarantine: RoundtripPreToolOutputQuarantineEvidence | null;
+  history_hydration_evidence: Lc4S2sHistoryHydrationEvidence | null;
   compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
   tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
   response_generation_requested: boolean;
@@ -653,6 +765,186 @@ function providerWireUsage(
   return Object.keys(counters).length === 0 ? null : freeze(counters);
 }
 
+type ValidatedHistoryHydration = Readonly<{
+  receipt: RealtimeConversationHistoryHydrationAcknowledgement;
+  outboundObservationSha256s: readonly string[];
+  inboundObservationSha256s: readonly string[];
+  lastHistoryObservationSequence: number;
+}>;
+
+function validateHistoryHydrationReceipt(input: Readonly<{
+  provider: LiveStsProvider;
+  receipt: RealtimeConversationHistoryHydrationAcknowledgement;
+  wire: readonly RealtimeWireObservation[];
+}>): ValidatedHistoryHydration {
+  const receipt = input.receipt;
+  const expectedStatus = input.provider === "gemini"
+    ? "sent_unacknowledged_by_provider_protocol"
+    : "acknowledged";
+  const expectedKinds = [
+    "user_message",
+    "synthetic_tool_call",
+    "synthetic_tool_output",
+    "assistant_message",
+  ] as const;
+  const expectedSources = [
+    LC4_S2S_HISTORY_USER_SOURCE_SHA256,
+    LC4_S2S_HISTORY_TOOL_SOURCE_SHA256,
+    LC4_S2S_HISTORY_TOOL_SOURCE_SHA256,
+    LC4_S2S_HISTORY_ASSISTANT_SOURCE_SHA256,
+  ] as const;
+  const expectedContentSha256s = [
+    sha256Hex(LC4_S2S_HISTORY_PROBE[0].text),
+    sha256Hex(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments)),
+    sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
+    sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
+  ] as const;
+  if (receipt.schemaVersion !== 1
+    || receipt.provider !== input.provider
+    || receipt.status !== expectedStatus
+    || receipt.turnCount !== 3
+    || receipt.providerItemCount !== 4
+    || receipt.historySha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+    || receipt.sourceBindingSha256 !== LC4_S2S_HISTORY_SOURCE_BINDING_SHA256
+    || receipt.items.length !== 4) {
+    throw new Error("LC4 S2S history hydration receipt differs from the frozen probe");
+  }
+  const outbound: string[] = [];
+  const inbound: string[] = [];
+  let priorSequence = 0;
+  let syntheticCallIdSha256: string | null = null;
+  for (const [index, item] of receipt.items.entries()) {
+    if (item.providerItemOrdinal !== index + 1
+      || item.historyTurnOrdinal !== (index === 0 ? 1 : index === 3 ? 3 : 2)
+      || item.kind !== expectedKinds[index]
+      || item.sourceSha256 !== expectedSources[index]) {
+      throw new Error("LC4 S2S history hydration item order differs from the frozen probe");
+    }
+    if (index === 1 || index === 2) {
+      if (!item.syntheticCallIdSha256 || !SHA256.test(item.syntheticCallIdSha256)) {
+        throw new Error("LC4 S2S history hydration tool pair lacks a synthetic call binding");
+      }
+      syntheticCallIdSha256 ??= item.syntheticCallIdSha256;
+      if (item.syntheticCallIdSha256 !== syntheticCallIdSha256) {
+        throw new Error("LC4 S2S history hydration tool pair binding differs");
+      }
+    } else if (item.syntheticCallIdSha256 !== undefined) {
+      throw new Error("LC4 S2S history hydration message has a tool-call binding");
+    }
+    const findObservation = (
+      attribution: typeof item.outboundObservation,
+      direction: "inbound" | "outbound",
+    ) => {
+      if (attribution?.availability !== "observed") {
+        throw new Error("LC4 S2S history hydration lacks observed wire lineage");
+      }
+      const matches = input.wire.filter((observation) => (
+        observation.observationSha256 === attribution.observationSha256
+      ));
+      if (matches.length !== 1) {
+        throw new Error("LC4 S2S history hydration wire lineage is not unique");
+      }
+      const observation = matches[0]!;
+      if (observation.provider !== input.provider
+        || observation.direction !== direction
+        || observation.connectionEpoch !== receipt.connectionEpoch
+        || observation.sequence !== attribution.sequence
+        || observation.payloadSha256 !== attribution.payloadSha256
+        || observation.projectionSha256 !== attribution.projectionSha256) {
+        throw new Error("LC4 S2S history hydration wire lineage differs");
+      }
+      return observation;
+    };
+    const outboundObservation = findObservation(item.outboundObservation, "outbound");
+    outbound.push(outboundObservation.observationSha256);
+    if (input.provider === "gemini") {
+      if (item.inboundObservation !== undefined
+        || outboundObservation.wireType !== "clientContent") {
+        throw new Error("LC4 S2S Gemini history hydration acknowledgement is dishonest");
+      }
+      const projection = outboundObservation.projection.initialHistory;
+      if (projection === null || typeof projection !== "object" || Array.isArray(projection)) {
+        throw new Error("LC4 S2S Gemini history projection is unavailable");
+      }
+      const value = projection as Readonly<Record<string, unknown>>;
+      if (value.protocol !== "initial_history_in_client_content"
+        || value.entryCount !== 3
+        || value.providerContentTurnCount !== 4
+        || value.functionCallCount !== 1
+        || value.functionResponseCount !== 1
+        || value.turnComplete !== true
+        || value.generationTriggered !== false
+        || value.providerAcknowledgement !== "not_defined_by_protocol"
+        || value.providerVisibleHistorySha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+        || typeof value.geminiContentSha256 !== "string"
+        || !SHA256.test(value.geminiContentSha256)) {
+        throw new Error("LC4 S2S Gemini history projection differs from the frozen probe");
+      }
+      if (priorSequence === 0) priorSequence = outboundObservation.sequence;
+      if (outboundObservation.sequence !== priorSequence) {
+        throw new Error("LC4 S2S Gemini history hydration spans multiple frames");
+      }
+    } else {
+      if (outboundObservation.wireType !== "conversation.item.create") {
+        throw new Error("LC4 S2S history outbound wire type is invalid");
+      }
+      const inboundObservation = findObservation(item.inboundObservation, "inbound");
+      if (inboundObservation.wireType !== "conversation.item.created"
+        && inboundObservation.wireType !== "conversation.item.added") {
+        throw new Error("LC4 S2S history inbound wire type is invalid");
+      }
+      if (outboundObservation.sequence <= priorSequence
+        || inboundObservation.sequence <= outboundObservation.sequence) {
+        throw new Error("LC4 S2S history hydration wire order is invalid");
+      }
+      priorSequence = inboundObservation.sequence;
+      inbound.push(inboundObservation.observationSha256);
+      for (const observation of [outboundObservation, inboundObservation]) {
+        const projection = observation.projection.conversationHistoryItem;
+        if (projection === null || typeof projection !== "object" || Array.isArray(projection)) {
+          throw new Error("LC4 S2S history item projection is unavailable");
+        }
+        const value = projection as Readonly<Record<string, unknown>>;
+        const actualContentSha256 = item.kind === "synthetic_tool_call"
+          ? value.argumentsSha256
+          : item.kind === "synthetic_tool_output"
+            ? value.outputSha256
+            : value.contentSha256;
+        if (value.kind !== item.kind || actualContentSha256 !== expectedContentSha256s[index]) {
+          throw new Error("LC4 S2S history item projection differs from the frozen probe");
+        }
+      }
+    }
+  }
+  const forbiddenPreInputWire = input.wire.some((observation) => (
+    observation.wireType === "response.create"
+    || observation.wireType === "input_audio_buffer.append"
+    || observation.wireType === "input_audio_buffer.commit"
+    || observation.wireType.startsWith("realtimeInput.")
+    || observation.wireType === "toolResponse"
+    || observation.wireType === "toolCall"
+    || observation.wireType === "serverContent"
+  ));
+  if (forbiddenPreInputWire) {
+    throw new Error("LC4 S2S history hydration triggered activity before live input");
+  }
+  return freeze({
+    receipt,
+    outboundObservationSha256s: outbound,
+    inboundObservationSha256s: inbound,
+    lastHistoryObservationSequence: Math.max(
+      ...receipt.items.flatMap((item) => [
+        item.outboundObservation?.availability === "observed"
+          ? item.outboundObservation.sequence
+          : 0,
+        item.inboundObservation?.availability === "observed"
+          ? item.inboundObservation.sequence
+          : 0,
+      ]),
+    ),
+  });
+}
+
 export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   provider: LiveStsProvider;
   model: string;
@@ -681,6 +973,13 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let inputAudioEvidence: RoundtripInputAudioEvidence | null = null;
   let outputAudioEvidence: RoundtripOutputAudioEvidence | null = null;
   let preToolOutputQuarantine: RoundtripPreToolOutputQuarantineEvidence | null = null;
+  let historyHydrationEvidence: Lc4S2sHistoryHydrationEvidence | null = null;
+  let validatedHistoryHydration: ValidatedHistoryHydration | null = null;
+  let historyPreInputPhase = true;
+  let preInputGenerationTriggerCount = 0;
+  let preInputOutputAudioBytes = 0;
+  let preInputOutputTranscriptCount = 0;
+  let preInputToolCallCount = 0;
   let responseRequested = false;
   let providerAutoResponseObserved = false;
   let transportFailureDiagnostic: RealtimeTransportFailureDiagnostic | null = null;
@@ -801,6 +1100,14 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     });
   };
   const unsubscribeEvent = input.client.onEvent((event) => {
+    if (historyPreInputPhase) {
+      if (event.type === "response.started") preInputGenerationTriggerCount += 1;
+      if (event.type === "output.audio") preInputOutputAudioBytes += event.audio.byteLength;
+      if (event.type === "output.transcript") preInputOutputTranscriptCount += 1;
+      if (event.type === "tool.calls" || event.type === "tool.dispatch") {
+        preInputToolCallCount += 1;
+      }
+    }
     if ((event.type === "error" || event.type === "connection.closed")
       && event.transportDiagnostic !== undefined
       && transportFailureDiagnostic === null) {
@@ -1023,6 +1330,39 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     await input.client.connect();
     if (input.client.state !== "ready") throw new Error("client not ready");
     operations.push("session_ready");
+    if (typeof input.client.hydrateConversationHistory !== "function") {
+      failure = "history_hydration_unsupported";
+      throw new Error("provider client lacks conversation history hydration");
+    }
+    let historyReceipt: RealtimeConversationHistoryHydrationAcknowledgement;
+    try {
+      historyReceipt = await input.client.hydrateConversationHistory(
+        LC4_S2S_HISTORY_PROBE,
+        5_000,
+      );
+    } catch {
+      failure = "history_hydration_failed";
+      throw new Error("provider conversation history hydration failed");
+    }
+    try {
+      validatedHistoryHydration = validateHistoryHydrationReceipt({
+        provider: input.provider,
+        receipt: historyReceipt,
+        wire,
+      });
+    } catch {
+      failure = "history_hydration_evidence_invalid";
+      throw new Error("provider conversation history hydration evidence is invalid");
+    }
+    if (preInputGenerationTriggerCount !== 0
+      || preInputOutputAudioBytes !== 0
+      || preInputOutputTranscriptCount !== 0
+      || preInputToolCallCount !== 0) {
+      failure = "history_pre_input_activity";
+      throw new Error("provider history hydration triggered pre-input activity");
+    }
+    historyPreInputPhase = false;
+    operations.push("history_hydration_verified_without_generation");
     if (input.provider === "xai") {
       if (typeof input.client.prepareServerVadTurn !== "function" || !transportParitySha256) {
         failure = "server_vad_control_ack_missing";
@@ -1060,6 +1400,58 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       runtime: input.runtime ?? SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
       signal: input.signal ?? new AbortController().signal,
     });
+    const firstLiveInput = wire.find((observation) => (
+      observation.direction === "outbound"
+      && observation.sequence > validatedHistoryHydration!.lastHistoryObservationSequence
+      && observation.wireType === (
+        input.provider === "gemini"
+          ? "realtimeInput.activityStart"
+          : "input_audio_buffer.append"
+      )
+    ));
+    if (!firstLiveInput) {
+      failure = "history_hydration_evidence_invalid";
+      throw new Error("provider live input does not follow history hydration");
+    }
+    const historyEvidenceBody = freeze({
+      schema_version: 1 as const,
+      probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
+      provider: input.provider,
+      status: validatedHistoryHydration.receipt.status,
+      connection_epoch: validatedHistoryHydration.receipt.connectionEpoch,
+      turn_count: 3 as const,
+      provider_item_count: 4 as const,
+      provider_visible_history_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+      source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
+      item_kinds: freeze([
+        "user_message",
+        "synthetic_tool_call",
+        "synthetic_tool_output",
+        "assistant_message",
+      ] as const),
+      outbound_observation_sha256s:
+        validatedHistoryHydration.outboundObservationSha256s,
+      inbound_observation_sha256s:
+        validatedHistoryHydration.inboundObservationSha256s,
+      last_history_observation_sequence:
+        validatedHistoryHydration.lastHistoryObservationSequence,
+      first_live_input_observation_sha256: firstLiveInput.observationSha256,
+      first_live_input_sequence: firstLiveInput.sequence,
+      pre_input_generation_trigger_count: 0 as const,
+      pre_input_output_audio_bytes: 0 as const,
+      pre_input_output_transcript_count: 0 as const,
+      pre_input_tool_call_count: 0 as const,
+      receipt_sha256: sha256Hex(
+        canonicalJson(validatedHistoryHydration.receipt),
+      ),
+    });
+    historyHydrationEvidence = freeze({
+      ...historyEvidenceBody,
+      evidence_sha256: sha256Hex(
+        `${HISTORY_HYDRATION_EVIDENCE_DOMAIN}${canonicalJson(historyEvidenceBody)}`,
+      ),
+    });
+    operations.push("live_input_after_history_hydration");
     const plan = packetizeRealtimePcm16(input.audio, input.profile);
     if (receipt.total_byte_length !== input.audioObject.byte_length
       || receipt.chunk_count !== plan.frames.length
@@ -1295,6 +1687,9 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   if (failure === "none" && inputAudioEvidence === null) {
     failure = "input_audio_replay_invalid";
   }
+  if (failure === "none" && historyHydrationEvidence === null) {
+    failure = "history_hydration_evidence_invalid";
+  }
   if (failure === "none" && outputAudioEvidence === null) {
     failure = "post_tool_output_audio_missing_or_invalid";
   }
@@ -1304,6 +1699,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   }
 
   const protocolPassed = failure === "none"
+    && historyHydrationEvidence !== null
     && inputAudioEvidence !== null
     && outputAudioEvidence !== null
     && (input.provider !== "xai" || preToolOutputQuarantine !== null)
@@ -1477,6 +1873,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     && replay.public_execution_sha256 !== null
     && replay.replay_sha256 !== null;
   const closedLoopEvidenceReady = delivery !== null
+    && historyHydrationEvidence !== null
     && inputAudioEvidence !== null
     && outputAudioEvidence !== null
     && (input.provider === "xai"
@@ -1512,7 +1909,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     transport_failure_diagnostic: transportFailureDiagnostic,
   });
   const body = freeze({
-    schema_version: 3 as const,
+    schema_version: 4 as const,
     roundtrip_version: LC4_S2S_ROUNDTRIP_VERSION,
     provider: input.provider,
     model: input.model,
@@ -1525,6 +1922,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     input_audio_evidence: inputAudioEvidence,
     output_audio_evidence: outputAudioEvidence,
     pre_tool_output_quarantine: preToolOutputQuarantine,
+    history_hydration_evidence: historyHydrationEvidence,
     compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: responseRequested,
@@ -1600,6 +1998,7 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
   if (execution.status === "passed" && (
     execution.failure_class !== "none"
     || execution.delivery === null
+    || execution.history_hydration_evidence === null
     || execution.input_audio_evidence === null
     || execution.output_audio_evidence === null
     || (execution.provider === "xai"
@@ -1624,6 +2023,27 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.public_execution_sha256 === null
     || execution.replay_sha256 === null
   )) throw new Error("passing LC4 S2S roundtrip lacks closed-loop evidence");
+  if (execution.history_hydration_evidence !== null) {
+    const { evidence_sha256: historyEvidenceSha256, ...historyBody } =
+      execution.history_hydration_evidence;
+    if (historyEvidenceSha256 !== sha256Hex(
+      `${HISTORY_HYDRATION_EVIDENCE_DOMAIN}${canonicalJson(historyBody)}`,
+    )
+      || execution.history_hydration_evidence.probe_sha256 !== LC4_S2S_HISTORY_PROBE_SHA256
+      || execution.history_hydration_evidence.provider !== execution.provider
+      || execution.history_hydration_evidence.provider_visible_history_sha256
+        !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+      || execution.history_hydration_evidence.source_binding_sha256
+        !== LC4_S2S_HISTORY_SOURCE_BINDING_SHA256
+      || execution.history_hydration_evidence.first_live_input_sequence
+        <= execution.history_hydration_evidence.last_history_observation_sequence
+      || execution.history_hydration_evidence.pre_input_generation_trigger_count !== 0
+      || execution.history_hydration_evidence.pre_input_output_audio_bytes !== 0
+      || execution.history_hydration_evidence.pre_input_output_transcript_count !== 0
+      || execution.history_hydration_evidence.pre_input_tool_call_count !== 0) {
+      throw new Error("LC4 S2S history hydration evidence contract is invalid");
+    }
+  }
   if (execution.status === "passed") {
     const delivery = execution.delivery!;
     const inputAudio = execution.input_audio_evidence!;

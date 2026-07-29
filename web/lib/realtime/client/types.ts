@@ -663,6 +663,87 @@ export type RealtimeServerVadTurnAcknowledgement = Readonly<{
   inboundObservation?: RealtimeWireObservationAttribution;
 }>;
 
+export type RealtimeConversationHistoryJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly RealtimeConversationHistoryJsonValue[]
+  | Readonly<{ [key: string]: RealtimeConversationHistoryJsonValue }>;
+
+export type RealtimeConversationHistoryToolCall = Readonly<{
+  toolName: string;
+  toolArguments: Readonly<Record<string, RealtimeConversationHistoryJsonValue>>;
+  /**
+   * Canonical gateway-result history. Provider-specific transport control
+   * envelopes are deliberately excluded and remain in the HACC control plane.
+   * The string itself is never JSON-normalized by the neutral contract.
+   */
+  output: string;
+  sourceSha256: string;
+}>;
+
+export type RealtimeConversationHistoryToolBatchTurn = Readonly<{
+  role: "tool_batch";
+  /** One provider response's ordered, non-empty parallel function-call batch. */
+  calls: readonly RealtimeConversationHistoryToolCall[];
+}>;
+
+/**
+ * Exact, chronological conversation content admitted for provider history
+ * hydration. Source hashes bind turns/calls to host evidence, but are never
+ * copied into provider-visible content or its content hash. Singleton `tool`
+ * remains backward-compatible sugar for a one-call `tool_batch`.
+ */
+export type RealtimeConversationHistoryTurn =
+  | Readonly<{
+      role: "user" | "assistant";
+      text: string;
+      sourceSha256: string;
+    }>
+  | (RealtimeConversationHistoryToolCall & Readonly<{
+      role: "tool";
+    }>)
+  | RealtimeConversationHistoryToolBatchTurn;
+
+export type RealtimeConversationHistoryHydratedItemKind =
+  | "user_message"
+  | "assistant_message"
+  | "synthetic_tool_call"
+  | "synthetic_tool_output";
+
+export type RealtimeConversationHistoryHydratedItemAcknowledgement = Readonly<{
+  /** One-based index in the provider-neutral turn list. */
+  historyTurnOrdinal: number;
+  /** One-based index in the provider wire-item list; tool batches occupy 2N items. */
+  providerItemOrdinal: number;
+  kind: RealtimeConversationHistoryHydratedItemKind;
+  sourceSha256: string;
+  /** Present for both halves of one deterministic synthetic tool-call pair. */
+  syntheticCallIdSha256?: string;
+  outboundObservation?: RealtimeWireObservationAttribution;
+  inboundObservation?: RealtimeWireObservationAttribution;
+}>;
+
+/**
+ * Fail-closed proof that one exact history batch was delivered in wire order.
+ * Providers with item acknowledgements report `acknowledged`; protocols without
+ * such an event must state that limitation rather than fabricate acceptance.
+ * `historySha256` commits only to ordered provider-visible content.
+ * `sourceBindingSha256` separately binds the ordered host evidence sources.
+ */
+export type RealtimeConversationHistoryHydrationAcknowledgement = Readonly<{
+  schemaVersion: 1;
+  provider: ServerRealtimeProvider;
+  connectionEpoch: number;
+  status: "acknowledged" | "sent_unacknowledged_by_provider_protocol";
+  turnCount: number;
+  providerItemCount: number;
+  historySha256: string;
+  sourceBindingSha256: string;
+  items: readonly RealtimeConversationHistoryHydratedItemAcknowledgement[];
+}>;
+
 export interface NormalizedRealtimeClient {
   readonly provider: ServerRealtimeProvider;
   readonly state: RealtimeClientState;
@@ -711,6 +792,14 @@ export interface NormalizedRealtimeClient {
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void;
   /** Optional provider-native text turn used by explicitly zero-audio probes. */
   sendTextTurn?(text: string): void;
+  /**
+   * Seed exact chronological history before the first live turn. The receipt
+   * distinguishes acknowledged delivery from protocols that expose no item ack.
+   */
+  hydrateConversationHistory?(
+    turns: readonly RealtimeConversationHistoryTurn[],
+    timeoutMs?: number,
+  ): Promise<RealtimeConversationHistoryHydrationAcknowledgement>;
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean): void;
 }
 

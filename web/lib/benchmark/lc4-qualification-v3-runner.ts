@@ -36,6 +36,10 @@ import {
 import {
   LC4_S2S_COMPACT_CONTROL,
   LC4_S2S_COMPACT_CONTROL_SHA256,
+  LC4_S2S_HISTORY_PROBE,
+  LC4_S2S_HISTORY_PROBE_SHA256,
+  LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+  LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
   LC4_S2S_PACKETIZER_SHA256,
   LC4_S2S_TOOL,
   LC4_S2S_TOOL_SCHEMA_SHA256,
@@ -100,7 +104,7 @@ import {
   type Lc4QualificationBudgetEvidence,
 } from "./lc4-qualification-budget";
 
-export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v6" as const;
+export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v7" as const;
 export const LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-AUTHORIZATION-v5" as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD = 3_000_000 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS = 6 as const;
@@ -112,8 +116,8 @@ export const LC4_QUALIFICATION_V3_PROVIDER_ORDER = Object.freeze(["openai", "gem
 export const LC4_XAI_SERVER_VAD_SETTING_SHA256 = XAI_SERVER_VAD_SETTING_SHA256;
 export const LC4_QUALIFICATION_XAI_TURN_BOUNDARY = "provider_native_server_vad" as const;
 
-const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v5\n";
-const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n";
+const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v6\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v6\n";
 const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v5\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v5\n";
 const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
@@ -188,7 +192,7 @@ export class Lc4QualificationV3BoundaryError extends Error {
 }
 
 export type Lc4QualificationV3PlanBody = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
   protocol_id: "HACC-LC4-v1";
   plan_id: string;
@@ -196,6 +200,10 @@ export type Lc4QualificationV3PlanBody = Readonly<{
   source: Lc4QualificationV3GitSource;
   provider_profile_manifest_sha256: string;
   setup_configuration_matrix_sha256: string;
+  paid_configuration_matrix_sha256: string;
+  history_probe_sha256: typeof LC4_S2S_HISTORY_PROBE_SHA256;
+  history_provider_visible_sha256: typeof LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256;
+  history_source_binding_sha256: typeof LC4_S2S_HISTORY_SOURCE_BINDING_SHA256;
   credential_set_sha256: string;
   credential_identities: readonly Readonly<{ provider: LiveStsProvider; credential_sha256: string }>[];
   audio_fixture: Lc4S2sAudioFixtureArtifact;
@@ -216,12 +224,13 @@ export type Lc4QualificationV3PlanBody = Readonly<{
     qualification_turn_boundary: "manual_commit" | "provider_activity_markers" | typeof LC4_QUALIFICATION_XAI_TURN_BOUNDARY;
     production_session_payload_sha256: string | null;
     xai_transport_parity_sha256: string | null;
+    history_hydration_required: true;
     setup_sessions: 1;
     paid_sessions: 1;
     generation_phases: 2;
     tool_roundtrips: 1;
   }>[];
-  execution_scope: "gate_a_setup_acceptance_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only";
+  execution_scope: "gate_a_setup_acceptance_then_non_generating_history_hydration_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only";
   maximum_total_micro_usd: typeof LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD;
   maximum_provider_sessions: typeof LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS;
   maximum_paid_sessions: typeof LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS;
@@ -1070,6 +1079,150 @@ function assertRetainedXaiServerVadEvidence(input: Readonly<{
   }
 }
 
+export function assertRetainedLc4QualificationHistoryHydrationEvidence(input: Readonly<{
+  provider: LiveStsProvider;
+  summary: Pick<Lc4S2sRoundtripExecution, "status" | "history_hydration_evidence">;
+  wire: readonly RealtimeWireObservation[];
+}>): void {
+  const evidence = input.summary.history_hydration_evidence;
+  if (evidence === null) {
+    if (input.summary.status === "passed") {
+      throw new Error(`LC4 qualification retained ${input.provider} history evidence is missing`);
+    }
+    return;
+  }
+  const { evidence_sha256: evidenceSha256, ...body } = evidence;
+  const expectedKinds = [
+    "user_message",
+    "synthetic_tool_call",
+    "synthetic_tool_output",
+    "assistant_message",
+  ] as const;
+  const expectedContentSha256s = [
+    sha256Hex(LC4_S2S_HISTORY_PROBE[0].text),
+    sha256Hex(canonicalJson(LC4_S2S_HISTORY_PROBE[1].calls[0].toolArguments)),
+    sha256Hex(LC4_S2S_HISTORY_PROBE[1].calls[0].output),
+    sha256Hex(LC4_S2S_HISTORY_PROBE[2].text),
+  ] as const;
+  const byDigest = (digest: string, direction: "inbound" | "outbound") => {
+    const matches = input.wire.filter((observation) => (
+      observation.observationSha256 === digest
+    ));
+    if (matches.length !== 1 || matches[0]!.direction !== direction
+      || matches[0]!.provider !== input.provider
+      || matches[0]!.connectionEpoch !== evidence.connection_epoch) {
+      throw new Error(`LC4 qualification retained ${input.provider} history lineage is invalid`);
+    }
+    return matches[0]!;
+  };
+  if (evidenceSha256 !== sha256Hex(
+    `harshas-amazing-call-center/lc4-s2s-history-hydration-evidence/v1\n${canonicalJson(body)}`,
+  )
+    || evidence.probe_sha256 !== LC4_S2S_HISTORY_PROBE_SHA256
+    || evidence.provider !== input.provider
+    || evidence.provider_visible_history_sha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+    || evidence.source_binding_sha256 !== LC4_S2S_HISTORY_SOURCE_BINDING_SHA256
+    || evidence.turn_count !== 3
+    || evidence.provider_item_count !== 4
+    || canonicalJson(evidence.item_kinds) !== canonicalJson(expectedKinds)
+    || evidence.pre_input_generation_trigger_count !== 0
+    || evidence.pre_input_output_audio_bytes !== 0
+    || evidence.pre_input_output_transcript_count !== 0
+    || evidence.pre_input_tool_call_count !== 0
+    || !SHA256.test(evidence.receipt_sha256)) {
+    throw new Error(`LC4 qualification retained ${input.provider} history summary is invalid`);
+  }
+  const firstLiveInput = byDigest(evidence.first_live_input_observation_sha256, "outbound");
+  const expectedLiveWireType = input.provider === "gemini"
+    ? "realtimeInput.activityStart"
+    : "input_audio_buffer.append";
+  if (firstLiveInput.wireType !== expectedLiveWireType
+    || firstLiveInput.sequence !== evidence.first_live_input_sequence
+    || evidence.first_live_input_sequence <= evidence.last_history_observation_sequence) {
+    throw new Error(`LC4 qualification retained ${input.provider} live-input boundary is invalid`);
+  }
+  const forbiddenBeforeLiveInput = input.wire.some((observation) => (
+    observation.connectionEpoch === evidence.connection_epoch
+    && observation.sequence < firstLiveInput.sequence
+    && (
+      observation.wireType === "response.create"
+      || observation.wireType === "input_audio_buffer.append"
+      || observation.wireType === "input_audio_buffer.commit"
+      || observation.wireType.startsWith("realtimeInput.")
+      || observation.wireType === "toolResponse"
+      || observation.wireType === "toolCall"
+      || observation.wireType === "serverContent"
+    )
+  ));
+  if (forbiddenBeforeLiveInput) {
+    throw new Error(`LC4 qualification retained ${input.provider} history triggered pre-input activity`);
+  }
+  if (input.provider === "gemini") {
+    if (evidence.status !== "sent_unacknowledged_by_provider_protocol"
+      || evidence.inbound_observation_sha256s.length !== 0
+      || evidence.outbound_observation_sha256s.length !== 4
+      || new Set(evidence.outbound_observation_sha256s).size !== 1) {
+      throw new Error("LC4 qualification retained Gemini history acknowledgement is dishonest");
+    }
+    const observation = byDigest(evidence.outbound_observation_sha256s[0]!, "outbound");
+    const projection = observation.projection.initialHistory;
+    const value = projection !== null && typeof projection === "object" && !Array.isArray(projection)
+      ? projection as Record<string, unknown>
+      : null;
+    if (observation.wireType !== "clientContent"
+      || observation.sequence !== evidence.last_history_observation_sequence
+      || value?.protocol !== "initial_history_in_client_content"
+      || value.entryCount !== 3
+      || value.providerContentTurnCount !== 4
+      || value.functionCallCount !== 1
+      || value.functionResponseCount !== 1
+      || value.turnComplete !== true
+      || value.generationTriggered !== false
+      || value.providerAcknowledgement !== "not_defined_by_protocol"
+      || value.providerVisibleHistorySha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+      || typeof value.geminiContentSha256 !== "string"
+      || !SHA256.test(value.geminiContentSha256)) {
+      throw new Error("LC4 qualification retained Gemini history projection is invalid");
+    }
+    return;
+  }
+  if (evidence.status !== "acknowledged"
+    || evidence.outbound_observation_sha256s.length !== 4
+    || evidence.inbound_observation_sha256s.length !== 4) {
+    throw new Error(`LC4 qualification retained ${input.provider} history acknowledgement is incomplete`);
+  }
+  let priorSequence = 0;
+  for (const [index, kind] of expectedKinds.entries()) {
+    const outbound = byDigest(evidence.outbound_observation_sha256s[index]!, "outbound");
+    const inbound = byDigest(evidence.inbound_observation_sha256s[index]!, "inbound");
+    if (outbound.wireType !== "conversation.item.create"
+      || (inbound.wireType !== "conversation.item.created"
+        && inbound.wireType !== "conversation.item.added")
+      || outbound.sequence <= priorSequence
+      || inbound.sequence <= outbound.sequence) {
+      throw new Error(`LC4 qualification retained ${input.provider} history order is invalid`);
+    }
+    priorSequence = inbound.sequence;
+    for (const observation of [outbound, inbound]) {
+      const projection = observation.projection.conversationHistoryItem;
+      const value = projection !== null && typeof projection === "object" && !Array.isArray(projection)
+        ? projection as Record<string, unknown>
+        : null;
+      const contentSha256 = kind === "synthetic_tool_call"
+        ? value?.argumentsSha256
+        : kind === "synthetic_tool_output"
+          ? value?.outputSha256
+          : value?.contentSha256;
+      if (value?.kind !== kind || contentSha256 !== expectedContentSha256s[index]) {
+        throw new Error(`LC4 qualification retained ${input.provider} history content is invalid`);
+      }
+    }
+  }
+  if (priorSequence !== evidence.last_history_observation_sequence) {
+    throw new Error(`LC4 qualification retained ${input.provider} history boundary is invalid`);
+  }
+}
+
 function assertRetainedProviderExecutionEvidence(input: Readonly<{
   provider: LiveStsProvider;
   summary: RetainedRoundtripSummary;
@@ -1096,6 +1249,11 @@ function assertRetainedProviderExecutionEvidence(input: Readonly<{
     || (summary.public_execution_sha256 === null) !== (summary.replay_sha256 === null)) {
     throw new Error(`LC4 qualification retained ${input.provider} execution differs from terminal`);
   }
+  assertRetainedLc4QualificationHistoryHydrationEvidence({
+    provider: input.provider,
+    summary,
+    wire,
+  });
   if (summary.public_execution_sha256 === null) {
     if (summary.status === "passed") {
       throw new Error(`LC4 qualification retained ${input.provider} passing execution lacks replay evidence`);
@@ -1342,6 +1500,20 @@ function setupConfiguration(provider: LiveStsProvider): TrialSessionConfiguratio
   });
 }
 
+function paidRoundtripConfiguration(provider: LiveStsProvider): TrialSessionConfiguration {
+  return freeze({
+    ...setupConfiguration(provider),
+    initialConversationHistoryHydrationRequired: true as const,
+  });
+}
+
+function paidRoundtripTargets(): readonly ProviderQualificationTarget[] {
+  return freeze(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => {
+    const configuration = paidRoundtripConfiguration(provider);
+    return freeze({ provider, model: configuration.model, configuration });
+  }));
+}
+
 function qualificationTurnBoundary(
   provider: LiveStsProvider,
 ): "manual_commit" | "provider_activity_markers" | typeof LC4_QUALIFICATION_XAI_TURN_BOUNDARY {
@@ -1420,7 +1592,7 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
   assertSignedArtifact({ artifact, expectedFingerprint: trustRootFingerprint, signingDomain: PLAN_DOMAIN, artifactDomain: PLAN_ARTIFACT_DOMAIN });
   const { plan_sha256, ...body } = artifact.body;
   if (planBodySha256(body) !== plan_sha256) throw new Error("LC4 qualification v3 plan body hash mismatch");
-  if (artifact.body.schema_version !== 2
+  if (artifact.body.schema_version !== 3
     || artifact.body.runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION
     || artifact.body.maximum_total_micro_usd !== LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD
     || artifact.body.maximum_provider_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
@@ -1429,22 +1601,32 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
     || artifact.body.maximum_tool_roundtrips !== LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS
     || artifact.body.paid_retry_allowed !== false
     || artifact.body.provider_calls_authorized !== false
+    || artifact.body.history_probe_sha256 !== LC4_S2S_HISTORY_PROBE_SHA256
+    || artifact.body.history_provider_visible_sha256 !== LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256
+    || artifact.body.history_source_binding_sha256 !== LC4_S2S_HISTORY_SOURCE_BINDING_SHA256
     || artifact.body.control_size_diagnostic.qualification_gate !== false
     || artifact.body.targets.length !== 3
     || artifact.body.targets.some((target) => target.gateway_schema_sha256 !== LC4_S2S_TOOL_SCHEMA_SHA256)) {
     throw new Error("LC4 qualification v3 plan weakened a frozen boundary");
   }
   const expectedTargets = createLc4QualificationV3Targets();
+  const expectedPaidTargets = paidRoundtripTargets();
+  if (artifact.body.setup_configuration_matrix_sha256 !== providerQualificationMatrixSha256(expectedTargets)
+    || artifact.body.paid_configuration_matrix_sha256 !== providerQualificationMatrixSha256(expectedPaidTargets)) {
+    throw new Error("LC4 qualification v3 configuration matrix differs from production");
+  }
   for (const [index, target] of artifact.body.targets.entries()) {
     const expected = expectedTargets[index]!;
+    const expectedPaid = expectedPaidTargets[index]!;
     const expectedPayloadSha256 = target.provider === "gemini"
       ? null
-      : qualificationProductionSessionPayloadSha256(target.provider, expected.configuration);
+      : qualificationProductionSessionPayloadSha256(target.provider, expectedPaid.configuration);
     const expectedTransportParitySha256 = target.provider === "xai"
-      ? expectedXaiTransportParitySha256(expected.configuration)
+      ? expectedXaiTransportParitySha256(expectedPaid.configuration)
       : null;
     if (target.provider !== expected.provider
       || target.model !== expected.model
+      || target.history_hydration_required !== true
       || target.qualification_turn_boundary !== qualificationTurnBoundary(target.provider)
       || target.production_session_payload_sha256 !== expectedPayloadSha256
       || target.xai_transport_parity_sha256 !== expectedTransportParitySha256) {
@@ -1475,10 +1657,11 @@ export async function prepareLc4QualificationV3(input: Readonly<{
   ]);
   const fixture = await dependencies.materializeAudio({ root, renderer: input.audioRenderer });
   const targets = createLc4QualificationV3Targets();
+  const paidTargets = paidRoundtripTargets();
   const planId = input.planId ?? randomUUID();
   requireId(planId, "LC4 qualification v3 plan ID");
   const unsignedBody = freeze({
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     protocol_id: "HACC-LC4-v1" as const,
     plan_id: planId,
@@ -1486,13 +1669,17 @@ export async function prepareLc4QualificationV3(input: Readonly<{
     source,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     setup_configuration_matrix_sha256: providerQualificationMatrixSha256(targets),
+    paid_configuration_matrix_sha256: providerQualificationMatrixSha256(paidTargets),
+    history_probe_sha256: LC4_S2S_HISTORY_PROBE_SHA256,
+    history_provider_visible_sha256: LC4_S2S_HISTORY_PROVIDER_VISIBLE_SHA256,
+    history_source_binding_sha256: LC4_S2S_HISTORY_SOURCE_BINDING_SHA256,
     credential_set_sha256: credentialSetSha256(credentials),
     credential_identities: freeze(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => credentialIdentity(provider, credentials[provider]))),
     audio_fixture: fixture,
     control_size_diagnostic: lc4S2sControlSizeDiagnostic(),
     targets: freeze(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => {
       const object = fixture.provider_renditions[provider];
-      const configuration = targets.find((target) => target.provider === provider)!.configuration;
+      const configuration = paidTargets.find((target) => target.provider === provider)!.configuration;
       return freeze({
         provider,
         model: LIVE_STS_PROVIDER_SPECS[provider].model,
@@ -1513,13 +1700,14 @@ export async function prepareLc4QualificationV3(input: Readonly<{
         xai_transport_parity_sha256: provider === "xai"
           ? expectedXaiTransportParitySha256(configuration)
           : null,
+        history_hydration_required: true as const,
         setup_sessions: 1 as const,
         paid_sessions: 1 as const,
         generation_phases: 2 as const,
         tool_roundtrips: 1 as const,
       });
     })),
-    execution_scope: "gate_a_setup_acceptance_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only" as const,
+    execution_scope: "gate_a_setup_acceptance_then_non_generating_history_hydration_then_gate_b_spoken_tool_roundtrip_gate_c_diagnostic_only" as const,
     maximum_total_micro_usd: LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD,
     maximum_provider_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS,
     maximum_paid_sessions: LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS,
@@ -1992,6 +2180,7 @@ export async function runLc4QualificationV3(input: Readonly<{
   await mkdir(partial, { mode: 0o700 });
   const attemptedAt = now().toISOString();
   const targets = createLc4QualificationV3Targets();
+  const paidTargets = paidRoundtripTargets();
   const budgetBinding: Lc4QualificationBudgetBinding = freeze({
     attemptId,
     authorizationId: attemptId,
@@ -2002,7 +2191,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     credentialSetSha256: plan.body.credential_set_sha256,
     providerProfileManifestSha256: plan.body.provider_profile_manifest_sha256,
     configurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
-    devConfigurationMatrixSha256: plan.body.setup_configuration_matrix_sha256,
+    devConfigurationMatrixSha256: plan.body.paid_configuration_matrix_sha256,
     providersModels: freeze(Object.fromEntries(plan.body.targets.map((target) => [target.provider, target.model])) as Record<LiveStsProvider, string>),
     expiresAt: input.authorization.body.expires_at,
   });
@@ -2070,6 +2259,7 @@ export async function runLc4QualificationV3(input: Readonly<{
     if (primaryFailure === null) {
       for (const provider of LC4_QUALIFICATION_V3_PROVIDER_ORDER) {
         const target = targets.find((entry) => entry.provider === provider)!;
+        const paidTarget = paidTargets.find((entry) => entry.provider === provider)!;
         const planned = plan.body.targets.find((entry) => entry.provider === provider)!;
         const audio = await loadLc4S2sPcm({ root, artifact: plan.body.audio_fixture, provider });
         await reassertLc4QualificationV3ExistingRoot(rootIdentity);
@@ -2083,7 +2273,7 @@ export async function runLc4QualificationV3(input: Readonly<{
           model: target.model,
           client: dependencies.createClient(
             provider,
-            target.configuration,
+            paidTarget.configuration,
             credentials[provider],
             qualificationClientOptions(provider),
           ),

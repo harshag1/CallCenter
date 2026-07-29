@@ -256,6 +256,16 @@ The caller-facing agent can continue while work runs. The active packet contains
 
 This avoids dual history: a provider replay could contain a fact or confirmation that the application has since superseded. It also gives all providers one portable recovery contract. The new session records its predecessor, packet digest, event-log prefix, and runtime manifest.
 
+Advanced long-call adapters may also hydrate exact caller-heard conversation
+turns into that fresh session through the provider-neutral history contract.
+That transport preserves user/assistant roles and ordered tool batches without
+promoting them to system instructions or durable authority. It is separate
+from provider-cached resumption: each admitted item is source-bound, hydration
+must not trigger generation, and new caller audio cannot begin until the
+provider-specific wire proof is complete. Corrections, confirmations, goals,
+workers, and capability state still come only from the newly compiled durable
+packet.
+
 Provider-native resumption may be enabled later only as a declared optimization with a tested `delta_only` contract:
 
 - the adapter proves which provider history prefix will be replayed;

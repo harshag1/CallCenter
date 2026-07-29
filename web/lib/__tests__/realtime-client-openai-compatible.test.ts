@@ -185,6 +185,27 @@ function deliverToolBatch(
   }));
 }
 
+async function acknowledgeHistoryItems(
+  socket: FakeSocket,
+  expectedCount: number,
+  wireType: "conversation.item.added" | "conversation.item.created" = "conversation.item.added",
+) {
+  for (let index = 0; index < expectedCount; index += 1) {
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(index + 1);
+    });
+    const created = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))[index] as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: wireType,
+      item: created.item,
+    }));
+  }
+}
+
 describe("PCM realtime audio", () => {
   it("round-trips exact signed PCM16 bytes and computes duration", () => {
     const audio = { ...PCM, data: Uint8Array.from([0, 128, 255, 127]) };
@@ -204,6 +225,752 @@ describe("PCM realtime audio", () => {
     const chunks = chunkPcm16(audio, 10);
     expect(chunks).toHaveLength(5);
     expect(chunks.map((chunk) => chunk.data.byteLength)).toEqual([480, 480, 480, 480, 480]);
+  });
+});
+
+describe("provider-neutral conversation history hydration", () => {
+  const sourceSha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+  const canonicalJsonForHistory = (value: unknown): string => {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(canonicalJsonForHistory).join(",")}]`;
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalJsonForHistory(object[key])}`
+    )).join(",")}}`;
+  };
+
+  it.each(["openai", "xai"] as const)(
+    "hydrates exact ordered user, assistant, and synthetic tool history on %s without generation",
+    async (provider) => {
+      const { client, socket } = fakeClient(provider, { sessionUpdate: localProxySession });
+      const observations: RealtimeWireObservation[] = [];
+      const normalizedEvents: NormalizedRealtimeEvent[] = [];
+      client.onWireObservation((observation) => observations.push(observation));
+      client.onEvent((event) => normalizedEvents.push(event));
+      await connect(client, socket);
+      const largeToolOutput = `result:${"z".repeat(9_180)}`;
+      expect(Buffer.byteLength(largeToolOutput, "utf8")).toBe(9_187);
+      const turns = [
+        {
+          role: "user" as const,
+          text: "Please check the exact membership record.",
+          sourceSha256: sourceSha256("caller-audio-1"),
+        },
+        {
+          role: "assistant" as const,
+          text: "I will inspect the membership record now.",
+          sourceSha256: sourceSha256("assistant-audio-1"),
+        },
+        {
+          role: "tool" as const,
+          toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          toolArguments: {
+            tool_name: "membership.lookup",
+            arguments: { memberId: "m_17", includeExpiry: true },
+          },
+          output: largeToolOutput,
+          sourceSha256: sourceSha256("tool-receipt-1"),
+        },
+        {
+          role: "assistant" as const,
+          text: "The verified record is available.",
+          sourceSha256: sourceSha256("assistant-audio-2"),
+        },
+      ];
+      const pending = client.hydrateConversationHistory(turns);
+      await acknowledgeHistoryItems(socket, 5);
+      const receipt = await pending;
+
+      const sent = socket.sent.map((value) => JSON.parse(value));
+      const historyFrames = sent.filter((event) => event.type === "conversation.item.create");
+      expect(historyFrames).toHaveLength(5);
+      expect(historyFrames.map((event) => event.item.type)).toEqual([
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+      ]);
+      expect(historyFrames[0].item).toMatchObject({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: turns[0].text }],
+      });
+      expect(historyFrames[1].item).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: turns[1].text }],
+      });
+      expect(historyFrames[2].item).toMatchObject({
+        type: "function_call",
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: "{\"arguments\":{\"includeExpiry\":true,\"memberId\":\"m_17\"},\"tool_name\":\"membership.lookup\"}",
+      });
+      expect(historyFrames[2].item.call_id).toMatch(/^hacc_hist_call_0003_001_[a-f0-9]{24}$/);
+      expect(historyFrames[3].item).toEqual(expect.objectContaining({
+        type: "function_call_output",
+        call_id: historyFrames[2].item.call_id,
+        output: largeToolOutput,
+      }));
+      expect(sent.some((event) => event.type === "response.create")).toBe(false);
+      expect(receipt).toMatchObject({
+        schemaVersion: 1,
+        provider,
+        connectionEpoch: 1,
+        status: "acknowledged",
+        turnCount: 4,
+        providerItemCount: 5,
+        historySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        sourceBindingSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        items: [
+          { providerItemOrdinal: 1, historyTurnOrdinal: 1, kind: "user_message" },
+          { providerItemOrdinal: 2, historyTurnOrdinal: 2, kind: "assistant_message" },
+          {
+            providerItemOrdinal: 3,
+            historyTurnOrdinal: 3,
+            kind: "synthetic_tool_call",
+            syntheticCallIdSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          {
+            providerItemOrdinal: 4,
+            historyTurnOrdinal: 3,
+            kind: "synthetic_tool_output",
+            syntheticCallIdSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          { providerItemOrdinal: 5, historyTurnOrdinal: 4, kind: "assistant_message" },
+        ],
+      });
+      for (const item of receipt.items) {
+        expect(item.outboundObservation).toMatchObject({
+          availability: "observed",
+          observationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+        expect(item.inboundObservation).toMatchObject({
+          availability: "observed",
+          observationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+      }
+      const historyObservations = observations.filter((observation) => (
+        recordForTest(observation.projection).conversationHistoryItem !== undefined
+      ));
+      expect(historyObservations).toHaveLength(10);
+      expect(historyObservations.every((observation) => (
+        recordForTest(observation.projection).gatewayCalls === undefined
+        && recordForTest(observation.projection).gatewayResults === undefined
+      ))).toBe(true);
+      expect(historyObservations.map((observation) => (
+        recordForTest(recordForTest(observation.projection).conversationHistoryItem).kind
+      ))).toEqual([
+        "user_message", "user_message",
+        "assistant_message", "assistant_message",
+        "synthetic_tool_call", "synthetic_tool_call",
+        "synthetic_tool_output", "synthetic_tool_output",
+        "assistant_message", "assistant_message",
+      ]);
+      expect(verifyRealtimeWireObservationChain(observations)).toMatchObject({ valid: true });
+      const serializedEvidence = JSON.stringify(observations);
+      expect(serializedEvidence).not.toContain(turns[0].text);
+      expect(serializedEvidence).not.toContain(largeToolOutput);
+      for (const turn of turns) {
+        expect(JSON.stringify(historyFrames)).not.toContain(turn.sourceSha256);
+      }
+      if (provider === "xai") {
+        client.close();
+        expect(normalizedEvents.findLast((event) => (
+          event.type === "usage" && event.scope === "session"
+        ))).toMatchObject({
+          type: "usage",
+          usage: { billableTextInputEvents: 4 },
+        });
+      }
+    },
+  );
+
+  it.each(["openai", "xai"] as const)(
+    "hydrates a canonical two-call tool batch on %s as all calls followed by all outputs",
+    async (provider) => {
+      const multiToolSession = {
+        ...baseSession,
+        session: {
+          ...baseSession.session,
+          tools: [
+            { type: "function", name: "records.lookup", parameters: { type: "object" } },
+            { type: "function", name: "rates.quote", parameters: { type: "object" } },
+          ],
+        },
+      };
+      const { client, socket } = fakeClient(provider, { sessionUpdate: multiToolSession });
+      const events: NormalizedRealtimeEvent[] = [];
+      client.onEvent((event) => events.push(event));
+      await connect(client, socket);
+      const firstSource = sourceSha256("batch-call-one");
+      const secondSource = sourceSha256("batch-call-two");
+      const calls = [
+        {
+          toolName: "records.lookup",
+          toolArguments: { include_history: true, member_id: "m_17" },
+          output: "{\"member\":\"active\"}",
+          sourceSha256: firstSource,
+        },
+        {
+          toolName: "rates.quote",
+          toolArguments: { plan: "annual", seats: 3 },
+          output: "{\"currency\":\"USD\",\"total\":420}",
+          sourceSha256: secondSource,
+        },
+      ] as const;
+      const pending = client.hydrateConversationHistory([{
+        role: "tool_batch",
+        calls,
+      }]);
+      await acknowledgeHistoryItems(
+        socket,
+        4,
+        provider === "openai" ? "conversation.item.created" : "conversation.item.added",
+      );
+      const receipt = await pending;
+      const frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ));
+      expect(frames.map((frame) => frame.item.type)).toEqual([
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+      ]);
+      expect(frames[0].item).toMatchObject({
+        name: "records.lookup",
+        arguments: "{\"include_history\":true,\"member_id\":\"m_17\"}",
+      });
+      expect(frames[1].item).toMatchObject({
+        name: "rates.quote",
+        arguments: "{\"plan\":\"annual\",\"seats\":3}",
+      });
+      expect(frames[0].item.call_id).toMatch(/^hacc_hist_call_0001_001_[a-f0-9]{24}$/);
+      expect(frames[1].item.call_id).toMatch(/^hacc_hist_call_0001_002_[a-f0-9]{24}$/);
+      expect(frames[2].item).toMatchObject({
+        call_id: frames[0].item.call_id,
+        output: calls[0].output,
+      });
+      expect(frames[3].item).toMatchObject({
+        call_id: frames[1].item.call_id,
+        output: calls[1].output,
+      });
+      const visible = [{
+        role: "tool_batch",
+        calls: calls.map((call) => ({
+          toolName: call.toolName,
+          toolArguments: call.toolArguments,
+          output: call.output,
+        })),
+      }];
+      const expectedHistorySha256 = createHash("sha256")
+        .update("harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n")
+        .update(canonicalJsonForHistory(visible))
+        .digest("hex");
+      const expectedSourceBindingSha256 = createHash("sha256")
+        .update("harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n")
+        .update(canonicalJsonForHistory({
+          historySha256: expectedHistorySha256,
+          sources: [{
+            ordinal: 1,
+            role: "tool_batch",
+            calls: [
+              { callOrdinal: 1, sourceSha256: firstSource },
+              { callOrdinal: 2, sourceSha256: secondSource },
+            ],
+          }],
+        }))
+        .digest("hex");
+      expect(receipt).toMatchObject({
+        status: "acknowledged",
+        turnCount: 1,
+        providerItemCount: 4,
+        historySha256: expectedHistorySha256,
+        sourceBindingSha256: expectedSourceBindingSha256,
+        items: [
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 1,
+            kind: "synthetic_tool_call",
+            sourceSha256: firstSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 2,
+            kind: "synthetic_tool_call",
+            sourceSha256: secondSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 3,
+            kind: "synthetic_tool_output",
+            sourceSha256: firstSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 4,
+            kind: "synthetic_tool_output",
+            sourceSha256: secondSource,
+          },
+        ],
+      });
+      expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+      if (provider === "xai") {
+        client.close();
+        expect(events.findLast((event) => (
+          event.type === "usage" && event.scope === "session"
+        ))).toMatchObject({ type: "usage", usage: { billableTextInputEvents: 2 } });
+      }
+    },
+  );
+
+  it("normalizes singleton tool sugar to the identical canonical one-call batch", async () => {
+    const singleton = fakeClient("openai", { sessionUpdate: localProxySession });
+    const canonical = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(singleton.client, singleton.socket);
+    await connect(canonical.client, canonical.socket);
+    const call = {
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("singleton-normalization-source"),
+    } as const;
+    const singletonPending = singleton.client.hydrateConversationHistory([{
+      role: "tool",
+      ...call,
+    }]);
+    const canonicalPending = canonical.client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [call],
+    }]);
+    await Promise.all([
+      acknowledgeHistoryItems(singleton.socket, 2),
+      acknowledgeHistoryItems(canonical.socket, 2),
+    ]);
+    const [singletonReceipt, canonicalReceipt] = await Promise.all([
+      singletonPending,
+      canonicalPending,
+    ]);
+    expect(singletonReceipt.historySha256).toBe(canonicalReceipt.historySha256);
+    expect(singletonReceipt.sourceBindingSha256).toBe(canonicalReceipt.sourceBindingSha256);
+    expect(singletonReceipt.providerItemCount).toBe(2);
+    expect(singleton.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toEqual(canonical.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )));
+  });
+
+  it("hydrates more than 48 chronological turns with one acknowledgement barrier per item", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const turns = Array.from({ length: 60 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      text: `${index % 2 === 0 ? "caller" : "assistant"} history turn ${index + 1}`,
+      sourceSha256: sourceSha256(`history-source-${index + 1}`),
+    }));
+    const pending = client.hydrateConversationHistory(turns);
+    await acknowledgeHistoryItems(socket, 60);
+    await expect(pending).resolves.toMatchObject({
+      status: "acknowledged",
+      turnCount: 60,
+      providerItemCount: 60,
+    });
+    expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toHaveLength(60);
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("keeps provider-visible history identity independent from host source bindings", async () => {
+    const openai = fakeClient("openai");
+    const xai = fakeClient("xai");
+    await connect(openai.client, openai.socket);
+    await connect(xai.client, xai.socket);
+    const visible = {
+      role: "assistant" as const,
+      text: "The same exact audible assistant history.",
+    };
+    const openaiPending = openai.client.hydrateConversationHistory([{
+      ...visible,
+      sourceSha256: sourceSha256("openai-capture-receipt"),
+    }]);
+    const xaiPending = xai.client.hydrateConversationHistory([{
+      ...visible,
+      sourceSha256: sourceSha256("xai-capture-receipt"),
+    }]);
+    await Promise.all([
+      acknowledgeHistoryItems(openai.socket, 1, "conversation.item.created"),
+      acknowledgeHistoryItems(xai.socket, 1, "conversation.item.added"),
+    ]);
+    const [openaiReceipt, xaiReceipt] = await Promise.all([openaiPending, xaiPending]);
+    expect(openaiReceipt.historySha256).toBe(xaiReceipt.historySha256);
+    expect(openaiReceipt.sourceBindingSha256).not.toBe(xaiReceipt.sourceBindingSha256);
+    const openaiItem = JSON.parse(openai.socket.sent.at(-1)!).item;
+    const xaiItem = JSON.parse(xai.socket.sent.at(-1)!).item;
+    expect(openaiItem).toEqual(xaiItem);
+  });
+
+  it("accepts a matching GA item.done lifecycle event without treating it as generation", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "assistant",
+      text: "completed historical assistant item",
+      sourceSha256: sourceSha256("done-history-source"),
+    }]);
+    await acknowledgeHistoryItems(socket, 1, "conversation.item.added");
+    const created = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.done",
+      item: created.item,
+    }));
+    await expect(pending).resolves.toMatchObject({ status: "acknowledged" });
+    expect(client.state).toBe("ready");
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("validates an entire history batch before sending and rejects oversized content", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    socket.sent.length = 0;
+    await expect(client.hydrateConversationHistory([
+      {
+        role: "user",
+        text: "valid first turn",
+        sourceSha256: sourceSha256("valid-source"),
+      },
+      {
+        role: "tool",
+        toolName: "records.lookup",
+        toolArguments: {},
+        output: "x".repeat(64 * 1_024 + 1),
+        sourceSha256: sourceSha256("oversized-source"),
+      },
+    ])).rejects.toThrow(/output is .* UTF-8 bytes/);
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("ready");
+    await expect(client.hydrateConversationHistory([{
+      role: "user",
+      text: "boxed hashes are not primitive evidence",
+      sourceSha256: new String(sourceSha256("boxed-source")) as unknown as string,
+    }])).rejects.toThrow(/sourceSha256 is invalid/);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("rejects empty, oversized, and undeclared tool batches before any wire item", async () => {
+    const declaredSession = {
+      ...baseSession,
+      session: {
+        ...baseSession.session,
+        tools: [{ type: "function", name: "records.lookup", parameters: { type: "object" } }],
+      },
+    };
+    const { client, socket } = fakeClient("openai", { sessionUpdate: declaredSession });
+    await connect(client, socket);
+    socket.sent.length = 0;
+
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [],
+    }])).rejects.toThrow(/tool batch must be non-empty/);
+    expect(socket.sent).toEqual([]);
+
+    const oversizedCalls = Array.from({ length: 5 }, (_, index) => ({
+      toolName: "records.lookup",
+      toolArguments: { ordinal: index + 1 },
+      output: "x".repeat(60 * 1_024),
+      sourceSha256: sourceSha256(`oversized-batch-source-${index + 1}`),
+    }));
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: oversizedCalls,
+    }])).rejects.toThrow(/tool batch is .* UTF-8 bytes/);
+    expect(socket.sent).toEqual([]);
+
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [
+        {
+          toolName: "records.lookup",
+          toolArguments: { member_id: "m_17" },
+          output: "{\"status\":\"active\"}",
+          sourceSha256: sourceSha256("declared-batch-source"),
+        },
+        {
+          toolName: "billing.charge",
+          toolArguments: { amount: 420 },
+          output: "{\"charged\":true}",
+          sourceSha256: sourceSha256("undeclared-batch-source"),
+        },
+      ],
+    }])).rejects.toThrow(/tool billing\.charge is not declared/);
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("ready");
+  });
+
+  it("rejects wrong-state, mid-turn, concurrent, and repeated hydration", async () => {
+    const turn = [{
+      role: "user" as const,
+      text: "one historical caller turn",
+      sourceSha256: sourceSha256("one-history-source"),
+    }];
+    const idle = fakeClient("openai");
+    await expect(idle.client.hydrateConversationHistory(turn)).rejects.toThrow(/requires a ready/);
+    expect(idle.socket.sent).toEqual([]);
+
+    const active = fakeClient("openai");
+    await connect(active.client, active.socket);
+    active.client.sendTextTurn("live caller turn", false);
+    await expect(active.client.hydrateConversationHistory(turn)).rejects.toThrow(/before the first live/);
+
+    const once = fakeClient("xai");
+    await connect(once.client, once.socket);
+    const reentrantErrors: string[] = [];
+    once.client.onWireObservation((observation) => {
+      if (
+        observation.direction !== "outbound"
+        || observation.wireType !== "conversation.item.create"
+      ) return;
+      try {
+        once.client.sendTextTurn("observer must not interleave", false);
+      } catch (error) {
+        reentrantErrors.push(error instanceof Error ? error.message : String(error));
+      }
+    });
+    const pending = once.client.hydrateConversationHistory(turn);
+    expect(reentrantErrors).toEqual([
+      expect.stringMatching(/cannot interleave conversation history hydration/),
+    ]);
+    const sentDuringHydration = once.socket.sent.length;
+    expect(() => once.client.sendTextTurn("must not interleave", false))
+      .toThrow(/cannot interleave conversation history hydration/);
+    expect(once.socket.sent).toHaveLength(sentDuringHydration);
+    await expect(once.client.hydrateConversationHistory(turn)).rejects.toThrow(/exactly once/);
+    await acknowledgeHistoryItems(once.socket, 1);
+    await expect(pending).resolves.toMatchObject({ status: "acknowledged" });
+    await expect(once.client.hydrateConversationHistory(turn)).rejects.toThrow(/exactly once/);
+  });
+
+  it("fails closed if a provider starts generation while history acknowledgement is pending", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "historical caller content",
+      sourceSha256: sourceSha256("interleaved-provider-source"),
+    }]);
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "unrequested-response", status: "in_progress" },
+    }));
+    await expect(pending).rejects.toThrow(/Provider emitted response.created/);
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
+  it("retains a sanitized provider rejection instead of misclassifying it as interleaving", async () => {
+    const { client, socket } = fakeClient("openai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "history the provider will reject",
+      sourceSha256: sourceSha256("provider-rejection-source"),
+    }]);
+    socket.emit("message", JSON.stringify({
+      type: "error",
+      error: {
+        code: "invalid_request_error",
+        message: "private provider rejection account@example.test secret-marker",
+      },
+    }));
+    await expect(pending).rejects.toThrow(/Provider rejected conversation history item 1/);
+    expect(client.state).toBe("failed");
+    const failure = events.findLast((event) => event.type === "error");
+    expect(failure).toMatchObject({
+      type: "error",
+      code: "conversation_history_provider_rejected",
+      fatal: true,
+      transportDiagnostic: {
+        origin: "provider_wire",
+        category: "provider_request",
+        safeRawCode: "invalid_request_error",
+        messageSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("account@example.test");
+    expect(JSON.stringify(failure)).not.toContain("secret-marker");
+  });
+
+  it("keeps xAI provider resumption mutually exclusive with manual history hydration", async () => {
+    const historicalTurn = [{
+      role: "user" as const,
+      text: "must not be appended over resumed provider history",
+      sourceSha256: sourceSha256("resumed-history-source"),
+    }];
+    const resumedFirst = fakeClient("xai", {
+      url: "wss://xai.example/realtime?conversation_id=conv_prior",
+    });
+    await connect(resumedFirst.client, resumedFirst.socket);
+    resumedFirst.socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: {
+        id: "provider_replayed_item",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "provider replay" }],
+      },
+    }));
+    await expect(resumedFirst.client.hydrateConversationHistory(historicalTurn))
+      .rejects.toThrow(/cannot be combined with xAI conversation resumption/);
+
+    const hydrationFirst = fakeClient("xai", {
+      url: "wss://xai.example/realtime?conversation_id=conv_prior",
+    });
+    await connect(hydrationFirst.client, hydrationFirst.socket);
+    await expect(hydrationFirst.client.hydrateConversationHistory(historicalTurn))
+      .rejects.toThrow(/cannot be combined with xAI conversation resumption/);
+    hydrationFirst.socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: {
+        id: "provider_replayed_item",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "provider replay" }],
+      },
+    }));
+    expect(hydrationFirst.client.state).toBe("ready");
+    expect(hydrationFirst.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toEqual([]);
+  });
+
+  it("fails the connection on mismatched or duplicate provider acknowledgements", async () => {
+    const mismatched = fakeClient("openai");
+    await connect(mismatched.client, mismatched.socket);
+    const mismatchPending = mismatched.client.hydrateConversationHistory([{
+      role: "assistant",
+      text: "exact assistant history",
+      sourceSha256: sourceSha256("assistant-history-source"),
+    }]);
+    const frame = JSON.parse(mismatched.socket.sent.at(-1)!) as {
+      item: { content: Array<{ text: string }> };
+    };
+    frame.item.content[0]!.text = "provider-altered history";
+    mismatched.socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: frame.item,
+    }));
+    await expect(mismatchPending).rejects.toThrow(/altered conversation history message content/);
+    expect(mismatched.client.state).toBe("failed");
+
+    const duplicated = fakeClient("xai");
+    await connect(duplicated.client, duplicated.socket);
+    const duplicatePending = duplicated.client.hydrateConversationHistory([{
+      role: "user",
+      text: "exact caller history",
+      sourceSha256: sourceSha256("caller-history-source"),
+    }]);
+    await acknowledgeHistoryItems(duplicated.socket, 1);
+    await duplicatePending;
+    const created = JSON.parse(duplicated.socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    duplicated.socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: created.item,
+    }));
+    expect(duplicated.client.state).toBe("failed");
+  });
+
+  it("seals hydrated synthetic call IDs against later executable reuse", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("sealed-history-tool-source"),
+    }]);
+    await acknowledgeHistoryItems(socket, 2);
+    await pending;
+    const historyCall = socket.sent.map((value) => JSON.parse(value)).find((event) => (
+      event.type === "conversation.item.create" && event.item.type === "function_call"
+    )).item as {
+      id: string;
+      call_id: string;
+      name: string;
+      arguments: string;
+    };
+    socket.emit("message", JSON.stringify({
+      type: "response.function_call_arguments.done",
+      response_id: "response_reusing_history",
+      call_id: historyCall.call_id,
+      name: historyCall.name,
+      arguments: historyCall.arguments,
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      response: {
+        id: "response_reusing_history",
+        status: "completed",
+        output: [{
+          type: "function_call",
+          id: historyCall.id,
+          call_id: historyCall.call_id,
+          name: historyCall.name,
+          arguments: historyCall.arguments,
+          status: "completed",
+        }],
+      },
+    }));
+    expect(client.state).toBe("failed");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "invalid_provider_tool_call_identity",
+      message: expect.stringContaining("reused hydrated conversation history tool call id"),
+      fatal: true,
+    }));
+    expect(events.some((event) => event.type === "tool.dispatch")).toBe(false);
+  });
+
+  it("rejects a pending hydration immediately when the connection closes", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "pending history item",
+      sourceSha256: sourceSha256("close-history-source"),
+    }], 10_000);
+    client.close();
+    await expect(pending).rejects.toThrow(/closed before conversation history item acknowledgement/);
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
+  it("times out waiting for an exact item acknowledgement and leaves no usable partial session", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    vi.useFakeTimers();
+    try {
+      const pending = client.hydrateConversationHistory([{
+        role: "user",
+        text: "history requiring acknowledgement",
+        sourceSha256: sourceSha256("timeout-history-source"),
+      }], 10);
+      const rejected = expect(pending).rejects.toThrow(/timed out after 10 ms/);
+      await vi.advanceTimersByTimeAsync(11);
+      await rejected;
+      expect(client.state).toBe("failed");
+      expect(socket.terminated).toBe(true);
+      expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

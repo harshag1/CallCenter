@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { canonicalJson } from "../../benchmark/artifacts";
 import {
   CAPABILITY_GATEWAY_TOOL,
   type ProviderFunctionTool,
@@ -7,6 +8,7 @@ import {
 import {
   RealtimeDynamicControlLimitError,
   type NormalizedRealtimeEvent,
+  type RealtimeConversationHistoryTurn,
   type RealtimeWebSocket,
   type RealtimeWebSocketFactory,
   type RealtimeWireObservation,
@@ -22,6 +24,10 @@ import {
   GEMINI_CAPABILITY_GATEWAY_NAME,
   GEMINI_HACC_CONTINUATION_CONTROL_FIELD,
   GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ,
+  GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES,
+  GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES,
+  GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES,
+  GEMINI_LIVE_MAX_INITIAL_HISTORY_PROVIDER_ITEMS,
   GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS,
   GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ,
   GEMINI_PROVIDER_TRANSCRIPTION_POLICY,
@@ -159,6 +165,46 @@ function inputAudio(...bytes: number[]) {
   };
 }
 
+function historySourceSha256(label: string): string {
+  return createHash("sha256").update(`test-history-source:${label}`).digest("hex");
+}
+
+function fortyEightTurnHistory(): readonly RealtimeConversationHistoryTurn[] {
+  const nineKibibyteObject = JSON.stringify({
+    payload: "T".repeat((9 * 1024) - Buffer.byteLength('{"payload":""}', "utf8")),
+  });
+  if (Buffer.byteLength(nineKibibyteObject, "utf8") !== 9 * 1024) {
+    throw new Error("9 KiB history fixture drifted");
+  }
+  return Object.freeze(Array.from({ length: 16 }, (_, index) => {
+    const ordinal = index + 1;
+    return [
+      Object.freeze({
+        role: "user" as const,
+        text: `Caller turn ${ordinal}`,
+        sourceSha256: historySourceSha256(`user-${ordinal}`),
+      }),
+      Object.freeze({
+        role: "tool" as const,
+        toolName: GEMINI_CAPABILITY_GATEWAY_NAME,
+        toolArguments: Object.freeze({
+          tool_name: "lookup_member",
+          arguments: Object.freeze({ opportunity: ordinal }),
+        }),
+        output: index === 7
+          ? nineKibibyteObject
+          : JSON.stringify({ ok: true, opportunity: ordinal }),
+        sourceSha256: historySourceSha256(`tool-${ordinal}`),
+      }),
+      Object.freeze({
+        role: "assistant" as const,
+        text: `Assistant turn ${ordinal}`,
+        sourceSha256: historySourceSha256(`assistant-${ordinal}`),
+      }),
+    ];
+  }).flat());
+}
+
 afterEach(() => vi.useRealTimers());
 
 describe("GeminiLiveClient", () => {
@@ -235,6 +281,7 @@ describe("GeminiLiveClient", () => {
     expect(setup.setup.tools[0].functionDeclarations[0].parametersJsonSchema.properties)
       .not.toHaveProperty("capability_grant");
     expect(setup.setup.sessionResumption).not.toHaveProperty("transparent");
+    expect(setup.setup).not.toHaveProperty("historyConfig");
     expect(setup.setup).not.toHaveProperty("inputAudioTranscription");
     expect(setup.setup).not.toHaveProperty("outputAudioTranscription");
     expect(GEMINI_PROVIDER_TRANSCRIPTION_POLICY).toEqual({
@@ -347,22 +394,420 @@ describe("GeminiLiveClient", () => {
     expect(test.socket.sent.some((message) => message.includes('"clientContent"'))).toBe(false);
   });
 
-  it("sends an official clientContent text turn without opening an audio activity", async () => {
+  it("sends a Gemini 3.1 live text turn through realtimeInput and a manual activity boundary", async () => {
     const test = harness();
     await connectReady(test);
     test.socket.sent.length = 0;
 
     test.client.sendTextTurn("Call capability_gateway exactly once.");
 
-    expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([{
-      clientContent: {
-        turns: [{ role: "user", parts: [{ text: "Call capability_gateway exactly once." }] }],
-        turnComplete: true,
+    expect(test.socket.sent.map((message) => JSON.parse(message))).toEqual([
+      { realtimeInput: { activityStart: {} } },
+      { realtimeInput: { text: "Call capability_gateway exactly once." } },
+      { realtimeInput: { activityEnd: {} } },
+    ]);
+    expect(test.socket.sent.some((message) => message.includes("clientContent"))).toBe(false);
+  });
+
+  it("hydrates 48 ordered turns with a 9 KiB tool result through Gemini initial history without generation", async () => {
+    const observations: RealtimeWireObservation[] = [];
+    const test = harness({ enableInitialHistoryHydration: true });
+    test.client.onWireObservation((observation) => observations.push(observation));
+    const connected = test.client.connect();
+    test.socket.open();
+
+    expect(test.socket.sent).toHaveLength(1);
+    expect(JSON.parse(test.socket.sent[0])).toMatchObject({
+      setup: {
+        historyConfig: { initialHistoryInClientContent: true },
       },
-    }]);
-    expect(test.socket.sent.some((message) => message.includes("activityStart"))).toBe(false);
-    expect(test.socket.sent.some((message) => message.includes("activityEnd"))).toBe(false);
-    expect(test.socket.sent.some((message) => message.includes("realtimeInput"))).toBe(false);
+    });
+    expect(test.client.isReady).toBe(false);
+    expect(() => test.client.startActivity())
+      .toThrow("setup is not complete");
+
+    test.socket.receive({ setupComplete: {} });
+    await settle();
+    await connected;
+    expect(test.client.state).toBe("ready");
+    expect(test.client.isReady).toBe(false);
+    expect(test.client.setupReadinessEvidence).toMatchObject({
+      clientSentInitialHistoryInClientContent: true,
+    });
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "provider.event",
+      data: expect.objectContaining({
+        name: "session.setup_completed",
+        client_sent_initial_history_in_client_content: true,
+      }),
+    }));
+    expect(() => test.client.startActivity())
+      .toThrow("initial conversation history has not been hydrated");
+
+    const turns = fortyEightTurnHistory();
+    expect(turns).toHaveLength(48);
+    const receipt = await test.client.hydrateConversationHistory(turns, 2_000);
+    expect(test.socket.sent).toHaveLength(2);
+    const encodedHistory = test.socket.sent[1]!;
+    const historyFrame = JSON.parse(encodedHistory);
+    expect(historyFrame.clientContent.turnComplete).toBe(true);
+    expect(historyFrame.clientContent.turns).toHaveLength(64);
+    expect(historyFrame.clientContent.turns.map((turn: { role: string }) => turn.role))
+      .toEqual(Array.from({ length: 16 }, () => ["user", "model", "user", "model"]).flat());
+
+    const ninthToolCall = historyFrame.clientContent.turns[29].parts[0].functionCall;
+    const ninthToolResponse = historyFrame.clientContent.turns[30].parts[0].functionResponse;
+    expect(ninthToolCall).toMatchObject({
+      id: expect.stringMatching(/^hacc-history-[a-f0-9]{48}$/),
+      name: GEMINI_CAPABILITY_GATEWAY_NAME,
+      args: { tool_name: "lookup_member", arguments: { opportunity: 8 } },
+    });
+    expect(ninthToolResponse).toEqual({
+      id: ninthToolCall.id,
+      name: GEMINI_CAPABILITY_GATEWAY_NAME,
+      response: {
+        payload: "T".repeat((9 * 1024) - Buffer.byteLength('{"payload":""}', "utf8")),
+      },
+    });
+    expect(encodedHistory).not.toContain(
+      "sourceSha256" in turns[0]! ? turns[0]!.sourceSha256 : turns[0]!.calls[0]!.sourceSha256,
+    );
+    expect(Buffer.byteLength(encodedHistory, "utf8"))
+      .toBeLessThanOrEqual(GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES);
+
+    expect(receipt).toMatchObject({
+      schemaVersion: 1,
+      provider: "gemini",
+      connectionEpoch: 1,
+      status: "sent_unacknowledged_by_provider_protocol",
+      turnCount: 48,
+      providerItemCount: 64,
+      historySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      sourceBindingSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(receipt.items).toHaveLength(64);
+    expect(receipt.items.filter((item) => item.kind === "synthetic_tool_call")).toHaveLength(16);
+    expect(receipt.items.filter((item) => item.kind === "synthetic_tool_output")).toHaveLength(16);
+    for (let index = 0; index < receipt.items.length; index += 1) {
+      expect(receipt.items[index]?.providerItemOrdinal).toBe(index + 1);
+      expect(receipt.items[index]?.inboundObservation).toBeUndefined();
+      expect(receipt.items[index]?.outboundObservation).toMatchObject({
+        availability: "observed",
+        connectionEpoch: 1,
+        sequence: 3,
+      });
+    }
+    const calls = receipt.items.filter((item) => item.kind === "synthetic_tool_call");
+    const outputs = receipt.items.filter((item) => item.kind === "synthetic_tool_output");
+    expect(calls.map((item) => item.syntheticCallIdSha256))
+      .toEqual(outputs.map((item) => item.syntheticCallIdSha256));
+
+    expect(test.events.some((event) => event.type === "response.started")).toBe(false);
+    expect(test.events.some((event) => event.type === "response.completed")).toBe(false);
+    expect(test.client.isReady).toBe(true);
+    expect(() => test.client.startActivity()).not.toThrow();
+
+    expect(observations.map(({ direction, wireType }) => `${direction}:${wireType}`)).toEqual([
+      "outbound:setup",
+      "inbound:setupComplete",
+      "outbound:clientContent",
+      "outbound:realtimeInput.activityStart",
+    ]);
+    expect(verifyRealtimeWireObservationChain(observations)).toMatchObject({
+      valid: true,
+      eventCount: 4,
+      errors: [],
+    });
+    const historyObservation = observations[2]!;
+    expect(historyObservation.payloadBytes).toBe(Buffer.byteLength(encodedHistory, "utf8"));
+    expect(historyObservation.projection.initialHistory).toEqual({
+      protocol: "initial_history_in_client_content",
+      entryCount: 48,
+      providerContentTurnCount: 64,
+      textPartCount: 32,
+      functionCallCount: 16,
+      functionResponseCount: 16,
+      turnComplete: true,
+      generationTriggered: false,
+      providerAcknowledgement: "not_defined_by_protocol",
+      providerVisibleHistorySha256: receipt.historySha256,
+      geminiContentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(historyObservation.projection.text).toHaveLength(32);
+    expect((historyObservation.projection.text as Array<{ kind: string }>)
+      .every((entry) => entry.kind === "initial_history_text")).toBe(true);
+    expect(observations[0]?.projection.session).toMatchObject({
+      initialHistoryInClientContent: true,
+    });
+
+    const rebound = harness({ enableInitialHistoryHydration: true });
+    await connectReady(rebound);
+    const reboundTurns = turns.map((turn, index) => index === 0
+      ? Object.freeze({ ...turn, sourceSha256: historySourceSha256("rebound-user-1") })
+      : turn);
+    const reboundReceipt = await rebound.client.hydrateConversationHistory(reboundTurns);
+    expect(reboundReceipt.historySha256).toBe(receipt.historySha256);
+    expect(reboundReceipt.sourceBindingSha256).not.toBe(receipt.sourceBindingSha256);
+    expect(reboundReceipt.items.every((item) => (
+      item.outboundObservation?.availability === "observed"
+      && item.outboundObservation.sequence === 3
+    ))).toBe(true);
+  });
+
+  it("hydrates a two-call tool batch as one model call content followed by one user result content", async () => {
+    const tools: ProviderFunctionTool[] = [
+      {
+        type: "function",
+        name: "records.lookup",
+        description: "Look up a record.",
+        parameters: { type: "object", additionalProperties: false, properties: {} },
+      },
+      {
+        type: "function",
+        name: "rates.quote",
+        description: "Quote a rate.",
+        parameters: { type: "object", additionalProperties: false, properties: {} },
+      },
+    ];
+    const test = harness({
+      enableInitialHistoryHydration: true,
+      tools,
+      executeCapabilityGateway: undefined,
+    });
+    const connected = test.client.connect();
+    test.socket.open();
+    test.socket.receive({ setupComplete: {} });
+    await settle();
+    await connected;
+
+    const firstSource = historySourceSha256("gemini-batch-one");
+    const secondSource = historySourceSha256("gemini-batch-two");
+    const calls = [
+      {
+        toolName: "records.lookup",
+        toolArguments: { member_id: "m_17" },
+        output: "{\"active\":true}",
+        sourceSha256: firstSource,
+      },
+      {
+        toolName: "rates.quote",
+        toolArguments: { seats: 3 },
+        output: "{\"total\":420}",
+        sourceSha256: secondSource,
+      },
+    ] as const;
+    const turns: readonly RealtimeConversationHistoryTurn[] = [
+      {
+        role: "user",
+        text: "Please look up the account and quote it.",
+        sourceSha256: historySourceSha256("gemini-batch-user"),
+      },
+      { role: "tool_batch", calls },
+      {
+        role: "assistant",
+        text: "The account is active and the total is 420.",
+        sourceSha256: historySourceSha256("gemini-batch-assistant"),
+      },
+    ];
+    const receipt = await test.client.hydrateConversationHistory(turns);
+    const frame = JSON.parse(test.socket.sent[1]!);
+    expect(frame.clientContent.turns.map((turn: { role: string }) => turn.role))
+      .toEqual(["user", "model", "user", "model"]);
+    const functionCalls = frame.clientContent.turns[1].parts.map(
+      (part: { functionCall: Record<string, unknown> }) => part.functionCall,
+    );
+    const functionResponses = frame.clientContent.turns[2].parts.map(
+      (part: { functionResponse: Record<string, unknown> }) => part.functionResponse,
+    );
+    expect(functionCalls.map((call: { name: string }) => call.name))
+      .toEqual(["records.lookup", "rates.quote"]);
+    expect(functionResponses.map((response: { name: string }) => response.name))
+      .toEqual(["records.lookup", "rates.quote"]);
+    expect(functionResponses.map((response: { id: string }) => response.id))
+      .toEqual(functionCalls.map((call: { id: string }) => call.id));
+    expect(functionResponses.map((response: { response: unknown }) => response.response))
+      .toEqual([{ active: true }, { total: 420 }]);
+    const visible = [
+      { role: "user", text: "Please look up the account and quote it." },
+      {
+        role: "tool_batch",
+        calls: calls.map((call) => ({
+          toolName: call.toolName,
+          toolArguments: call.toolArguments,
+          output: call.output,
+        })),
+      },
+      { role: "assistant", text: "The account is active and the total is 420." },
+    ];
+    const expectedHistorySha256 = createHash("sha256")
+      .update("harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n")
+      .update(canonicalJson(visible))
+      .digest("hex");
+    expect(receipt).toMatchObject({
+      status: "sent_unacknowledged_by_provider_protocol",
+      turnCount: 3,
+      providerItemCount: 6,
+      historySha256: expectedHistorySha256,
+      items: [
+        { historyTurnOrdinal: 1, providerItemOrdinal: 1, kind: "user_message" },
+        {
+          historyTurnOrdinal: 2,
+          providerItemOrdinal: 2,
+          kind: "synthetic_tool_call",
+          sourceSha256: firstSource,
+        },
+        {
+          historyTurnOrdinal: 2,
+          providerItemOrdinal: 3,
+          kind: "synthetic_tool_call",
+          sourceSha256: secondSource,
+        },
+        {
+          historyTurnOrdinal: 2,
+          providerItemOrdinal: 4,
+          kind: "synthetic_tool_output",
+          sourceSha256: firstSource,
+        },
+        {
+          historyTurnOrdinal: 2,
+          providerItemOrdinal: 5,
+          kind: "synthetic_tool_output",
+          sourceSha256: secondSource,
+        },
+        { historyTurnOrdinal: 3, providerItemOrdinal: 6, kind: "assistant_message" },
+      ],
+    });
+    expect(test.socket.sent.some((message) => message.includes("response.create"))).toBe(false);
+  });
+
+  it("fails closed on undeclared, out-of-order, repeated, or oversized initial history", async () => {
+    expect(() => harness({
+      resumeHandle: "existing-session",
+      enableInitialHistoryHydration: true,
+    })).toThrow("cannot be combined");
+
+    const noOptIn = harness();
+    await connectReady(noOptIn);
+    await expect(noOptIn.client.hydrateConversationHistory(fortyEightTurnHistory()))
+      .rejects.toThrow("was not enabled before connect");
+    expect(noOptIn.socket.sent).toHaveLength(1);
+
+    const test = harness({ enableInitialHistoryHydration: true });
+    await connectReady(test);
+    const sentBefore = test.socket.sent.length;
+    const assistantFirst: readonly RealtimeConversationHistoryTurn[] = [{
+      role: "assistant",
+      text: "This cannot begin provider history.",
+      sourceSha256: historySourceSha256("assistant-first"),
+    }];
+    await expect(test.client.hydrateConversationHistory(assistantFirst))
+      .rejects.toThrow("must begin with a user turn");
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    let sourceCoercions = 0;
+    const coercibleSource = {
+      toString() {
+        sourceCoercions += 1;
+        return historySourceSha256("coercible");
+      },
+    };
+    await expect(test.client.hydrateConversationHistory([{
+      role: "user",
+      text: "A hostile source binding must not be coerced.",
+      sourceSha256: coercibleSource as unknown as string,
+    }])).rejects.toThrow("sourceSha256 must be a lowercase SHA-256");
+    expect(sourceCoercions).toBe(0);
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    const undeclared: readonly RealtimeConversationHistoryTurn[] = [
+      {
+        role: "user",
+        text: "Use a missing tool.",
+        sourceSha256: historySourceSha256("missing-user"),
+      },
+      {
+        role: "tool",
+        toolName: "undeclared_tool",
+        toolArguments: {},
+        output: "{}",
+        sourceSha256: historySourceSha256("missing-tool"),
+      },
+    ];
+    await expect(test.client.hydrateConversationHistory(undeclared))
+      .rejects.toThrow("is not declared in this session");
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    const nonCanonicalOutput: readonly RealtimeConversationHistoryTurn[] = [
+      {
+        role: "user",
+        text: "Use the declared tool.",
+        sourceSha256: historySourceSha256("noncanonical-user"),
+      },
+      {
+        role: "tool",
+        toolName: GEMINI_CAPABILITY_GATEWAY_NAME,
+        toolArguments: {},
+        output: '{"z":1,"a":2}',
+        sourceSha256: historySourceSha256("noncanonical-tool"),
+      },
+    ];
+    await expect(test.client.hydrateConversationHistory(nonCanonicalOutput))
+      .rejects.toThrow("must be a canonical JSON object");
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    const tooMany = Array.from(
+      { length: GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES + 1 },
+      (_, index): RealtimeConversationHistoryTurn => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: `turn-${index}`,
+        sourceSha256: historySourceSha256(`too-many-${index}`),
+      }),
+    );
+    await expect(test.client.hydrateConversationHistory(tooMany))
+      .rejects.toThrow(`1 to ${GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES} turns`);
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    const frameOverflow = Array.from(
+      { length: 8 },
+      (_, index): RealtimeConversationHistoryTurn => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: "x".repeat(GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRY_BYTES),
+        sourceSha256: historySourceSha256(`frame-overflow-${index}`),
+      }),
+    );
+    await expect(test.client.hydrateConversationHistory(frameOverflow))
+      .rejects.toThrow(`frame exceeds ${GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES}`);
+    expect(test.socket.sent).toHaveLength(sentBefore);
+
+    const receipt = await test.client.hydrateConversationHistory(fortyEightTurnHistory());
+    expect(receipt.status).toBe("sent_unacknowledged_by_provider_protocol");
+    await expect(test.client.hydrateConversationHistory(fortyEightTurnHistory()))
+      .rejects.toThrow("already been hydrated");
+
+    const maximumExpansion = harness({ enableInitialHistoryHydration: true });
+    await connectReady(maximumExpansion);
+    const maximumExpansionTurns: RealtimeConversationHistoryTurn[] = [{
+      role: "user",
+      text: "Begin maximum provider-item expansion.",
+      sourceSha256: historySourceSha256("maximum-expansion-user"),
+    }];
+    for (let index = 1; index < GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES; index += 1) {
+      maximumExpansionTurns.push({
+        role: "tool",
+        toolName: GEMINI_CAPABILITY_GATEWAY_NAME,
+        toolArguments: { index },
+        output: "{}",
+        sourceSha256: historySourceSha256(`maximum-expansion-tool-${index}`),
+      });
+    }
+    const maximumExpansionReceipt = await maximumExpansion.client
+      .hydrateConversationHistory(maximumExpansionTurns);
+    expect(maximumExpansionReceipt.turnCount).toBe(GEMINI_LIVE_MAX_INITIAL_HISTORY_ENTRIES);
+    expect(maximumExpansionReceipt.providerItemCount).toBe(1_023);
+    expect(maximumExpansionReceipt.providerItemCount)
+      .toBeLessThanOrEqual(GEMINI_LIVE_MAX_INITIAL_HISTORY_PROVIDER_ITEMS);
+    expect(Buffer.byteLength(maximumExpansion.socket.sent[1]!, "utf8"))
+      .toBeLessThanOrEqual(GEMINI_LIVE_MAX_INITIAL_HISTORY_FRAME_BYTES);
   });
 
   it("rejects oversized dynamic control before wire delivery", async () => {
