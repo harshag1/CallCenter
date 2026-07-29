@@ -124,12 +124,12 @@ export function createProductionRealtimeClient(
         connectTimeoutMs: 15_000,
         enableResumption: false,
         requireStrictSessionConfigurationParity: false,
-        // Finite prerecorded benchmark clips fail closed if the provider
-        // contradicts manual turn mode. Interactive/server-VAD paths retain
-        // their separately qualified provider-native lifecycle.
-        unexpectedManualTurnDetectionPolicy: xaiTurnBoundary === "manual_commit"
-          ? "fail"
-          : "diagnose",
+        // xAI can emit speech_started/speech_stopped as non-authoritative
+        // telemetry even when turn_detection.type is null. Manual authority is
+        // proven separately by commit -> committed -> response.create ->
+        // response.created wire causality; telemetry must never trigger either
+        // the commit or the response.
+        unexpectedManualTurnDetectionPolicy: "diagnose",
       });
 }
 

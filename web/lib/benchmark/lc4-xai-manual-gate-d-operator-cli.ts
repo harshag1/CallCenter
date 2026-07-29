@@ -415,6 +415,36 @@ function credentialIdentity(apiKey: string): string {
   return sha256Hex(`${CREDENTIAL_IDENTITY_DOMAIN}${apiKey}`);
 }
 
+function gateDExecutionFailureClass(error: unknown):
+  | "preflight_contract"
+  | "provider_transport"
+  | "manual_turn_causality"
+  | "tool_roundtrip_causality"
+  | "audio_output_contract"
+  | "provider_protocol"
+  | "unknown" {
+  const message = error instanceof Error ? error.message : "";
+  if (/credential|authorization|source|caller PCM|terminal signer/iu.test(message)) {
+    return "preflight_contract";
+  }
+  if (/connect|connection|socket|timed out|timeout/iu.test(message)) {
+    return "provider_transport";
+  }
+  if (/commit|manual turn|speech telemetry/iu.test(message)) {
+    return "manual_turn_causality";
+  }
+  if (/tool|gateway|continuation/iu.test(message)) {
+    return "tool_roundtrip_causality";
+  }
+  if (/PCM|audio/iu.test(message)) {
+    return "audio_output_contract";
+  }
+  if (/wire|response|identity|terminal|provider/iu.test(message)) {
+    return "provider_protocol";
+  }
+  return "unknown";
+}
+
 async function loadXaiCredentialFromEnvironment(): Promise<string> {
   const direct = process.env.XAI_API_KEY;
   const envFilePath = process.env.BENCHMARK_PROVIDER_ENV_FILE;
@@ -691,7 +721,8 @@ async function commandRun(
     if (await exists(output.invocation)) {
       throw new Error(
         "Gate D one-shot execution did not pass after invocation was claimed; "
-        + "the $1 authority is conservatively settled and this evidence root cannot be retried",
+        + "the $1 authority is conservatively settled and this evidence root cannot be retried; "
+        + `failure_class=${gateDExecutionFailureClass(error)}`,
         { cause: error },
       );
     }

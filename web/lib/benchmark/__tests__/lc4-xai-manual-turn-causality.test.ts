@@ -14,7 +14,9 @@ import {
 const RESPONSE_ID = "response-turn-1";
 const OTHER_RESPONSE_ID = "response-turn-2";
 
-function observations(): readonly Lc4XaiManualTurnCausalityWireObservation[] {
+function observations(
+  speechTelemetry: "none" | "complete" | "started_only" = "none",
+): readonly Lc4XaiManualTurnCausalityWireObservation[] {
   let previous: string | null = sha256Hex("prior-opportunity-wire");
   const specs: readonly Readonly<{
     direction: "inbound" | "outbound";
@@ -23,6 +25,16 @@ function observations(): readonly Lc4XaiManualTurnCausalityWireObservation[] {
   }>[] = [
     { direction: "outbound", wire_type: "input_audio_buffer.append", identity_hashes: {} },
     { direction: "outbound", wire_type: "input_audio_buffer.commit", identity_hashes: {} },
+    ...(speechTelemetry === "none" ? [] : [{
+      direction: "inbound" as const,
+      wire_type: "input_audio_buffer.speech_started",
+      identity_hashes: {},
+    }]),
+    ...(speechTelemetry === "complete" ? [{
+      direction: "inbound" as const,
+      wire_type: "input_audio_buffer.speech_stopped",
+      identity_hashes: {},
+    }] : []),
     { direction: "inbound", wire_type: "input_audio_buffer.committed", identity_hashes: {} },
     { direction: "outbound", wire_type: "response.create", identity_hashes: {} },
     { direction: "inbound", wire_type: "response.created", identity_hashes: {
@@ -50,17 +62,28 @@ function body(
   wire: readonly Lc4XaiManualTurnCausalityWireObservation[],
   responseIdentity = lc4XaiManualResponseWireIdentitySha256(RESPONSE_ID),
 ) {
+  const exact = (wireType: string) => {
+    const matches = wire.filter((observation) => (
+      observation.wire_type === wireType
+    ));
+    if (matches.length !== 1) throw new Error(`test wire lacks ${wireType}`);
+    return matches[0]!;
+  };
+  const commit = exact("input_audio_buffer.commit");
+  const acknowledgement = exact("input_audio_buffer.committed");
+  const create = exact("response.create");
+  const start = exact("response.created");
   return Object.freeze({
     schema_version: 1 as const,
     connection_epoch: 1,
-    commit_observation_sha256: wire[1]!.observation_sha256,
-    commit_sequence: wire[1]!.sequence,
-    commit_ack_observation_sha256: wire[2]!.observation_sha256,
-    commit_ack_sequence: wire[2]!.sequence,
-    response_create_observation_sha256: wire[3]!.observation_sha256,
-    response_create_sequence: wire[3]!.sequence,
-    response_start_observation_sha256: wire[4]!.observation_sha256,
-    response_start_sequence: wire[4]!.sequence,
+    commit_observation_sha256: commit.observation_sha256,
+    commit_sequence: commit.sequence,
+    commit_ack_observation_sha256: acknowledgement.observation_sha256,
+    commit_ack_sequence: acknowledgement.sequence,
+    response_create_observation_sha256: create.observation_sha256,
+    response_create_sequence: create.sequence,
+    response_start_observation_sha256: start.observation_sha256,
+    response_start_sequence: start.sequence,
     response_id_sha256: responseIdentity,
   });
 }
@@ -85,6 +108,21 @@ describe("LC4 xAI finite manual-turn causality", () => {
       lc4XaiManualResponseWireIdentitySha256(RESPONSE_ID),
     );
     expect(evidence.response_id_sha256).not.toBe(sha256Hex(RESPONSE_ID));
+  });
+
+  it("admits xAI speech activity only as a complete pre-ack telemetry pair", () => {
+    const complete = observations("complete");
+    const evidence = createLc4XaiManualTurnCausality(
+      body(complete),
+      complete,
+    );
+    expect(assertLc4XaiManualTurnCausality(evidence, complete)).toBe(evidence);
+
+    const incomplete = observations("started_only");
+    expect(() => createLc4XaiManualTurnCausality(
+      body(incomplete),
+      incomplete,
+    )).toThrow(/manual speech telemetry/u);
   });
 
   it("rejects wrong schemas, plain hashes, and cross-turn response identities", () => {

@@ -81,7 +81,12 @@ profiles satisfy that requirement differently:
   claim that Gemini issued the ID.
 - xAI finite-clip evidence binds the exact caller PCM, one explicit commit and
   its acknowledgement, one initial response request, the tool result, and the
-  distinct post-tool continuation. The separately qualified server-VAD path
+  distinct post-tool continuation. xAI may still emit one
+  `speech_started`/`speech_stopped` pair while `turn_detection.type` is null;
+  finite-manual replay treats that pair only as bounded telemetry and rejects
+  it if incomplete, duplicated, response-bound, call-bound, or later than the
+  explicit commit acknowledgement. It never substitutes for commit or response
+  authority. The separately qualified server-VAD path
   additionally binds its disclosed delimiter prefix, native speech stop,
   automatic commit, and automatic initial response. Any root-response audio
   before the terminal function call is retained in response-scoped quarantine
@@ -163,7 +168,7 @@ npm run benchmark:lc4:xai-gate-d:report -- \
 ```
 
 `run` consumes its authorization marker before constructing the production
-client. Gate D v2 retains that marker's canonical preimage and physical file
+client. Gate D v3 retains that marker's canonical preimage and physical file
 identity, a bounded content-free execution replay, and a terminal-signed
 package manifest binding the plan, authorization, claim, production adapter,
 execution, source/tree, transport profiles, and budget. Plan-authority and
@@ -172,6 +177,12 @@ exactly two generation phases and one gateway roundtrip, and conservatively
 settles the separate $1.00 authority. Failure after the marker exists is
 terminal for that evidence root: there is no retry, reconnect, resume, or
 fallback path.
+
+Gate D v3 reflects a live xAI compatibility finding: manual mode can emit
+speech-activity telemetry even though the host still owns commit and response
+creation. Replay admits only a complete, ordered, identity-free telemetry pair
+before the explicit commit acknowledgement. It still fails if the provider
+commits or starts a response without the corresponding host wire event.
 
 Gate D is client-observed evidence signed by the operator's terminal key; xAI
 does not attest the package. Its PCM hashes and non-empty byte counts prove

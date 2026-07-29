@@ -23,7 +23,7 @@ import {
 } from "./lc4-provider-profiles";
 
 export const LC4_XAI_FINITE_MANUAL_GATE_D_VERSION =
-  "HACC-LC4-PROVIDER-XAI/FINITE-MANUAL-GATE-D-v2" as const;
+  "HACC-LC4-PROVIDER-XAI/FINITE-MANUAL-GATE-D-v3" as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD = 1_000_000 as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PROVIDER_SESSIONS = 1 as const;
 export const LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PCM_BYTES = 480_000 as const;
@@ -94,6 +94,8 @@ export const LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING = Object.freeze({
   transport_profile_sha256:
     LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256,
   turn_boundary: "explicit_commit_ack_then_response_create" as const,
+  provider_speech_activity_events:
+    "telemetry_only_never_commit_or_response_authority" as const,
   tool_gateway: "capability_gateway" as const,
 });
 
@@ -1314,12 +1316,6 @@ export function assertLc4XaiFiniteManualGateDExecutionEvidence(input: Readonly<{
         "Gate D wire evidence contains a missing, duplicate, or reordered lifecycle role",
       );
     }
-  }
-  if (evidence.wire_observations.some((observation) => (
-    observation.wire_type === "input_audio_buffer.speech_started"
-    || observation.wire_type === "input_audio_buffer.speech_stopped"
-  ))) {
-    throw new Error("Gate D manual replay contains unsolicited server-VAD evidence");
   }
   if (!Number.isSafeInteger(evidence.initial_assistant_pcm_byte_length)
     || evidence.initial_assistant_pcm_byte_length < 2

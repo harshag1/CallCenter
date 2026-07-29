@@ -213,6 +213,32 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
 
   async waitForInputAudioCommit() {
     this.operations.push("wait_for_commit_ack");
+    if (this.#fault !== "unsolicited_vad") {
+      const started = this.#wire(
+        "inbound",
+        "input_audio_buffer.speech_started",
+      );
+      this.#emit({
+        type: "input.speech_activity",
+        provider: "xai",
+        receivedAtMs: started.sequence,
+        wireType: started.wireType,
+        phase: "started",
+        wireObservation: reference(started),
+      });
+      const stopped = this.#wire(
+        "inbound",
+        "input_audio_buffer.speech_stopped",
+      );
+      this.#emit({
+        type: "input.speech_activity",
+        provider: "xai",
+        receivedAtMs: stopped.sequence,
+        wireType: stopped.wireType,
+        phase: "stopped",
+        wireObservation: reference(stopped),
+      });
+    }
     const acknowledgement = this.#wire(
       "inbound",
       "input_audio_buffer.committed",
@@ -618,7 +644,7 @@ describe("LC4 Gate D concrete xAI production adapter", () => {
   });
 
   it.each([
-    ["unsolicited_vad", /unsolicited server-VAD/u],
+    ["unsolicited_vad", /manual speech telemetry/u],
     ["tool_on_foreign_response", /requires one tool call/u],
     ["foreign_tool_call_wire_identity", /foreign wire identities/u],
     ["foreign_continuation_origin", /foreign root response identity/u],

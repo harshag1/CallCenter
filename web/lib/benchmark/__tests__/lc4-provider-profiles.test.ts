@@ -48,6 +48,8 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
       purpose: "finite_prerecorded_efficacy",
       transport_mode: "manual_commit",
       turn_detection: { type: null },
+      provider_speech_activity_events:
+        "telemetry_only_never_commit_or_response_authority",
     });
     expect(LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE).toMatchObject({
       purpose: "interactive_transport_qualification",
@@ -95,6 +97,8 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
       output_sample_rate_hz: 24_000,
       turn_boundary: "finite_clip_input_audio_buffer.commit_then_response.create",
       turn_detection: { type: null },
+      provider_speech_activity_events:
+        "telemetry_only_never_commit_or_response_authority",
       separately_qualified_interactive_transport: {
         turn_boundary: "server_vad_speech_stop_auto_commit_auto_response",
         interpretation: "transport_reliability_only_not_finite_clip_efficacy",

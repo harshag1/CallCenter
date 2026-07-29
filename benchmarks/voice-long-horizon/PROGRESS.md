@@ -824,3 +824,49 @@ are unchanged.
 This remains C1 serialization and containment evidence. It does not establish
 provider token usage, billed savings, invocation success, model quality,
 reduced drift, or superiority over a native realtime agent.
+
+## 2026-07-28 — Live xAI manual telemetry discovery and Gate D v3
+
+The first finite-manual Gate D from clean source
+`3d91c85103c6eab03302f714fbd59f5ac51906f3` claimed its one-shot invocation
+and failed before producing a passing receipt. The private root is immutable,
+cannot be retried, and contributes no qualification or efficacy evidence. Its
+full `$1.00` authority is conservatively settled.
+
+Two bounded production diagnostics then isolated the mechanism without
+reusing that root:
+
+- a setup-only WebSocket accepted the pinned
+  `grok-voice-think-fast-1.0` model, `ara` voice, 24 kHz PCM formats,
+  `turn_detection.type: null`, and the static function schema; the observed
+  lifecycle was `socket.open`, `session.created`, `conversation.created`,
+  `ping`, `session.updated`;
+- a separate single-generation manual-audio probe appended 126,156 bytes of
+  PCM, explicitly committed, received `input_audio_buffer.committed`,
+  explicitly requested one response, observed 96,480 assistant PCM bytes, and
+  completed. It also emitted exactly one
+  `input_audio_buffer.speech_started` / `speech_stopped` pair before the commit
+  acknowledgement despite manual mode.
+
+That pair was telemetry, not turn authority: no response started until the
+host's explicit commit acknowledgement and `response.create`. The failed Gate
+D had incorrectly treated any speech-activity report as proof of provider
+server-VAD control. The source correction now:
+
+- treats the pair as optional non-authoritative telemetry;
+- admits only zero events or exactly one ordered started/stopped pair before
+  the explicit commit acknowledgement;
+- rejects incomplete, duplicate, response-bound, or call-bound telemetry;
+- still requires exact `commit -> committed -> response.create ->
+  response.created` causality and a distinct post-tool continuation;
+- rotates the finite-manual transport profile, production binding, and Gate D
+  identity to v3; and
+- emits only a closed-vocabulary failure class after a one-shot claim, never
+  provider plaintext.
+
+The two diagnostic sessions are grouped under a separate conservative `$1.00`
+charge; provider billing remains unreconciled. Post-baseline conservative
+exposure is therefore `$2.00` including the failed Gate D. This is a transport
+finding and source correction, not an efficacy result, Native/HACC score, or
+launch-graph datum. A fresh clean commit, keys, evidence root, and passing Gate
+D v3 receipt remain mandatory.

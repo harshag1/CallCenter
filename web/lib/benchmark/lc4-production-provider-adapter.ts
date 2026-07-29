@@ -112,6 +112,7 @@ import {
   LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY,
 } from "./lc4-production-provider-contract";
 import {
+  assertLc4XaiManualSpeechActivityTelemetry,
   createLc4XaiManualTurnCausality,
   lc4XaiManualResponseWireIdentitySha256,
   type Lc4XaiManualTurnCausalityEvidence,
@@ -1620,9 +1621,10 @@ export class Lc4RealtimeProviderBridge {
     };
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
       devGateway?.observe(event);
-      if (usesXaiManualTurn && event.type === "input.speech_activity") {
-        failManualTransport("xAI manual turn received an unsolicited server-VAD speech event");
-      }
+      // xAI may report speech_started/speech_stopped while manual mode is
+      // active. Those events are telemetry only: the manual causal proof below
+      // still requires the host commit, its acknowledgement, and the host
+      // response.create before any response can start.
       if (usesXaiManualTurn && event.type === "input.audio_committed") {
         if (manualTurnPhase !== "commit_sent"
           || currentOpportunity === null
@@ -2387,6 +2389,10 @@ export class Lc4RealtimeProviderBridge {
                 || acknowledgementReference.sequence !== observedCommitAck.sequence) {
                 throw new Error("xAI manual turn commit acknowledgement barrier is missing, foreign, or duplicated");
               }
+              assertLc4XaiManualSpeechActivityTelemetry(wire, {
+                connection_epoch: observedCommitAck.connection_epoch,
+                commit_ack_sequence: observedCommitAck.sequence,
+              });
               operationOrder.push("caller_pcm_commit_acknowledged");
             }
             diagnosticStage = "response_request";
@@ -3603,10 +3609,9 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
   });
   const unsubscribeEvent = client.onEvent((event) => {
     try {
-      if (event.type === "input.speech_activity") {
-        fail("Gate D manual transport received an unsolicited server-VAD event");
-        return;
-      }
+      // Manual-mode xAI speech activity is non-authoritative telemetry. The
+      // signed replay validates it as an optional complete pair and still
+      // requires explicit commit/ack/create/start causality.
       if (event.type === "response.started") {
         const observation = lc4GateDObservedAttribution(
           event.wireObservation,
@@ -3908,6 +3913,10 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
       || commitAck.sequence <= commit.sequence) {
       throw new Error("Gate D manual commit acknowledgement is foreign or duplicated");
     }
+    assertLc4XaiManualSpeechActivityTelemetry(wire, {
+      connection_epoch: commitAck.connection_epoch,
+      commit_ack_sequence: commitAck.sequence,
+    });
     const responseCreateFloor = wire.length;
     client.createResponse();
     responseCreate = lc4GateDExactlyOneWire(

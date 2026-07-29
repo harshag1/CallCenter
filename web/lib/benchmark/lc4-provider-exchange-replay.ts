@@ -28,11 +28,12 @@ import {
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 import type { Lc4CapturedOutput } from "./lc4-listener-evidence";
+import {
+  assertLc4XaiManualTurnCausality,
+} from "./lc4-xai-manual-turn-causality";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const WIRE_SET_DOMAIN = "harshas-amazing-call-center/lc4-wire-observation-set/v1\n";
-const XAI_MANUAL_CAUSALITY_DOMAIN =
-  "harshas-amazing-call-center/lc4-xai-manual-turn-causality/v1\n";
 const CAPTURE_CHUNK_DOMAIN =
   "hacc/lc4/listener-output-chunk-receipt/v1\n";
 const CAPTURE_DOMAIN = "hacc/lc4/listener-output-capture/v1\n";
@@ -1418,76 +1419,7 @@ function assertManualCausality(
   value: unknown,
   observations: readonly Lc4SanitizedWireObservation[],
 ): void {
-  const evidence = record(value, "LC4 xAI manual causality");
-  if (evidence.schema_version !== 1) throw new Error("LC4 xAI manual causality schema is unsupported");
-  const commit = oneWire(observations, {
-    observation_sha256: hash(evidence.commit_observation_sha256, "LC4 xAI manual commit observation"),
-    direction: "outbound",
-    wire_type: "input_audio_buffer.commit",
-    label: "manual commit",
-  });
-  const acknowledgement = oneWire(observations, {
-    observation_sha256: hash(evidence.commit_ack_observation_sha256, "LC4 xAI manual commit acknowledgement"),
-    direction: "inbound",
-    wire_type: "input_audio_buffer.committed",
-    label: "manual commit acknowledgement",
-  });
-  const create = oneWire(observations, {
-    observation_sha256: hash(evidence.response_create_observation_sha256, "LC4 xAI manual response create"),
-    direction: "outbound",
-    wire_type: "response.create",
-    label: "manual response create",
-  });
-  const start = oneWire(observations, {
-    observation_sha256: hash(evidence.response_start_observation_sha256, "LC4 xAI manual response start"),
-    direction: "inbound",
-    wire_type: "response.created",
-    label: "manual response start",
-  });
-  const connectionEpoch = integer(evidence.connection_epoch, "LC4 xAI manual connection epoch", 1);
-  const responseIdentity = hash(evidence.response_id_sha256, "LC4 xAI manual response identity");
-  if ([commit, acknowledgement, create, start].some((observation) =>
-    observation.connection_epoch !== connectionEpoch)
-    || evidence.commit_sequence !== commit.sequence
-    || evidence.commit_ack_sequence !== acknowledgement.sequence
-    || evidence.response_create_sequence !== create.sequence
-    || evidence.response_start_sequence !== start.sequence
-    || !(commit.sequence < acknowledgement.sequence
-      && acknowledgement.sequence < create.sequence
-      && create.sequence < start.sequence)
-    || start.identity_hashes.responseIdSha256 !== responseIdentity) {
-    throw new Error("LC4 xAI manual commit/ack/create/start causality is invalid");
-  }
-  const interval = observations.filter((observation) =>
-    observation.connection_epoch === connectionEpoch
-    && observation.sequence >= commit.sequence
-    && observation.sequence <= start.sequence);
-  for (const wireType of [
-    "input_audio_buffer.commit",
-    "input_audio_buffer.committed",
-    "response.create",
-    "response.created",
-  ]) {
-    if (interval.filter((observation) => observation.wire_type === wireType).length !== 1) {
-      throw new Error("LC4 xAI manual causal interval crosses another input turn or response");
-    }
-  }
-  const body = {
-    schema_version: 1,
-    connection_epoch: evidence.connection_epoch,
-    commit_observation_sha256: evidence.commit_observation_sha256,
-    commit_sequence: evidence.commit_sequence,
-    commit_ack_observation_sha256: evidence.commit_ack_observation_sha256,
-    commit_ack_sequence: evidence.commit_ack_sequence,
-    response_create_observation_sha256: evidence.response_create_observation_sha256,
-    response_create_sequence: evidence.response_create_sequence,
-    response_start_observation_sha256: evidence.response_start_observation_sha256,
-    response_start_sequence: evidence.response_start_sequence,
-    response_id_sha256: evidence.response_id_sha256,
-  };
-  if (evidence.causality_sha256 !== sha256Hex(
-    `${XAI_MANUAL_CAUSALITY_DOMAIN}${canonicalJson(body)}`,
-  )) throw new Error("LC4 xAI manual causality commitment is invalid");
+  assertLc4XaiManualTurnCausality(value, observations);
 }
 
 function assertServerVadSuffix(

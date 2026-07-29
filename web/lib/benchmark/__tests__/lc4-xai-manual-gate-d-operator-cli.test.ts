@@ -400,6 +400,7 @@ describe("LC4 xAI Gate D operator", () => {
     ], output.value, dependencies)).toBe(1);
     expect(firstPaid).toHaveBeenCalledTimes(1);
     expect(output.stderr.at(-1)).toContain("$1 authority is conservatively settled");
+    expect(output.stderr.at(-1)).toContain("failure_class=provider_protocol");
     expect(output.stderr.join("\n")).not.toContain("provider plaintext");
 
     const secondPaid = vi.fn();

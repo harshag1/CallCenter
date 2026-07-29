@@ -4,9 +4,11 @@
 
 - Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
   $250.00 USD**
-- Current declared release sequence: **$19.00 USD maximum** (`$1` Gate D +
+- Remaining declared release sequence: **$19.00 USD maximum** (`$1` Gate D +
   `$3` qualification + `$15` six-cell DEV)
-- Post-baseline paid-provider exposure: **$0.00 USD**
+- Post-baseline conservative paid-provider exposure: **$2.00 USD** (`$1`
+  terminal failed Gate D + `$1` grouped xAI transport diagnostics)
+- Post-baseline declared aggregate maximum: **$21.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
 - LC4 conservative filesystem-ledger settlements: **$71.00 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
@@ -21,9 +23,10 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-The current release plan imposes the much smaller **$19.00** group cap. No
-provider session may be scheduled outside the declared Gate D, qualification,
-and one-shot six-cell roots without a new dated authorization entry. The prior
+The current release plan imposes the much smaller **$21.00** epoch cap:
+**$2.00** conservatively charged diagnosis plus at most **$19.00** for the
+remaining Gate D, qualification, and one-shot six-cell roots. No other provider
+session may be scheduled without a new dated authorization entry. The prior
 `$1,000 / $900 / $100 / $270` program ceilings are historical, superseded
 planning authority; they do not authorize current work. Auxiliary spend remains
 separate from provider/model evidence, while provider-billed cash spend remains
@@ -108,13 +111,17 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 | 2026-07-10 | Research setup and documentation | none | offline | $0.00 | $0.00 | complete | Protocol, provider, and prior-art audit |
 | 2026-07-21 | Prior usefulness canaries v1-v14 | mixed | mixed | unavailable | $6.878733 | retained runner estimates; billing unreconciled | [Historical estimate audit](HISTORICAL_ESTIMATED_SPEND_AUDIT.json) |
 | 2026-07-21 | HACC-LC3-v1 frozen schedule | OpenAI, Gemini, xAI | paired native-memory / HACC | $270.00 maximum | superseded without opening a socket | Historical planning authority; replaced by the 2026-07-28 epoch | [Protocol](HACC_LC3_PROTOCOL.md) |
-| 2026-07-28 | Remaining release work | OpenAI, Gemini, xAI | Gate D, qualification, one six-cell DEV root | $19.00 declared; `< $250.00` hard epoch ceiling | $0.00 post-baseline at entry | current; no new provider call at entry | This ledger |
+| 2026-07-28 | Remaining release work | OpenAI, Gemini, xAI | Gate D, qualification, one six-cell DEV root | $19.00 declared; `< $250.00` hard epoch ceiling | $0.00 post-baseline at entry | current epoch opened | This ledger |
+| 2026-07-28 | xAI finite-manual Gate D v2 | xAI | transport qualification only | $1.00 | $1.00 conservative settlement; invoice unreconciled | terminal failure after one-shot invocation claim; no receipt; root quarantined | External private evidence root; source `3d91c85103c6eab03302f714fbd59f5ac51906f3` |
+| 2026-07-28 | xAI manual-transport diagnosis | xAI | one setup-only session plus one single-generation session | $1.00 grouped diagnostic reserve | $1.00 conservative charge; invoice unreconciled | setup accepted; manual generation completed; no retry/reconnect | Sanitized event summary in [PROGRESS.md](PROGRESS.md) |
 
 - **Retained estimated provider cost before HACC-LC3: $6.878733**
 - **Provider-billed cost: unreconciled**
 - **Active reservations in terminal ledgers: $0.00; separately quarantined
   nonterminal reservation authority: $15.00 maximum**
-- **Current declared release sequence: $19.00 maximum**
+- **Remaining declared release sequence: $19.00 maximum**
+- **Post-baseline conservative paid-provider exposure: $2.00**
+- **Post-baseline declared aggregate maximum: $21.00**
 - **Current remaining-work hard ceiling: strictly less than $250.00**
 - **Post-baseline paid-provider exposure at epoch entry: $0.00**
 

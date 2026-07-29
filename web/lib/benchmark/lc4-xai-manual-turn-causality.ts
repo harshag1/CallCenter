@@ -228,6 +228,57 @@ function exactlyOneWireObservation(
   return observation;
 }
 
+function assertManualSpeechActivityTelemetry(
+  observations: readonly Lc4XaiManualTurnCausalityWireObservation[],
+  input: Readonly<{
+    connection_epoch: number;
+    commit_ack_sequence: number;
+  }>,
+): void {
+  const started = observations.filter((observation) => (
+    observation.provider === "xai"
+    && observation.direction === "inbound"
+    && observation.wire_type === "input_audio_buffer.speech_started"
+  ));
+  const stopped = observations.filter((observation) => (
+    observation.provider === "xai"
+    && observation.direction === "inbound"
+    && observation.wire_type === "input_audio_buffer.speech_stopped"
+  ));
+  if (started.length === 0 && stopped.length === 0) return;
+  if (started.length !== 1 || stopped.length !== 1) {
+    throw new Error(
+      "xAI manual speech telemetry must be absent or one complete started/stopped pair",
+    );
+  }
+  const start = started[0]!;
+  const stop = stopped[0]!;
+  if (start.connection_epoch !== input.connection_epoch
+    || stop.connection_epoch !== input.connection_epoch
+    || !(start.sequence < stop.sequence
+      && stop.sequence < input.commit_ack_sequence)
+    || start.identity_hashes.responseIdSha256 !== undefined
+    || stop.identity_hashes.responseIdSha256 !== undefined
+    || start.identity_hashes.callIdSha256 !== undefined
+    || stop.identity_hashes.callIdSha256 !== undefined) {
+    throw new Error(
+      "xAI manual speech telemetry acquired turn, response, or tool authority",
+    );
+  }
+}
+
+export function assertLc4XaiManualSpeechActivityTelemetry(
+  observationInput: readonly unknown[],
+  input: Readonly<{
+    connection_epoch: number;
+    commit_ack_sequence: number;
+  }>,
+): void {
+  const observations = Object.freeze(observationInput.map(parseObservation));
+  assertRetainedWireSlice(observations);
+  assertManualSpeechActivityTelemetry(observations, input);
+}
+
 export function assertLc4XaiManualTurnCausality(
   evidenceInput: unknown,
   observationInput: readonly unknown[],
@@ -276,6 +327,10 @@ export function assertLc4XaiManualTurnCausality(
       "xAI manual turn wire observations violate commit/ack/create/start causality",
     );
   }
+  assertManualSpeechActivityTelemetry(observations, {
+    connection_epoch: evidence.connection_epoch,
+    commit_ack_sequence: acknowledgement.sequence,
+  });
   const causalInterval = observations.filter((observation) => (
     observation.connection_epoch === evidence.connection_epoch
     && observation.sequence >= commit.sequence

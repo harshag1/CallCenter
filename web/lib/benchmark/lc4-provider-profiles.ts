@@ -87,11 +87,15 @@ function createXaiTransportProfile(
         transport_mode: "manual_commit" as const,
         turn_boundary: "finite_clip_input_audio_buffer.commit_then_response.create" as const,
         turn_detection: Object.freeze({ type: null }),
+        provider_speech_activity_events:
+          "telemetry_only_never_commit_or_response_authority" as const,
       })
     : Object.freeze({
         purpose,
         transport_mode: "provider_native_server_vad" as const,
         turn_boundary: "server_vad_speech_stop_auto_commit_auto_response" as const,
+        provider_speech_activity_events:
+          "authoritative_server_vad_turn_boundary" as const,
         turn_detection: LC4_XAI_SERVER_VAD,
         turn_detection_sha256: LC4_XAI_SERVER_VAD_SHA256,
         transport_disclosure_sha256: LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
@@ -196,6 +200,9 @@ const profiles = Object.freeze({
       LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256,
     turn_boundary: LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.turn_boundary,
     turn_detection: LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.turn_detection,
+    provider_speech_activity_events:
+      LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE
+        .provider_speech_activity_events,
     context_delivery: Object.freeze({
       wire_field: "response.create.response.instructions" as const,
       authority: "per_response_instructions_override_session_instructions" as const,
@@ -311,6 +318,7 @@ export function assertLc4ProviderProfileManifest(
     transport_profile_sha256: xai.transport_profile_sha256,
     turn_boundary: xai.turn_boundary,
     turn_detection: xai.turn_detection,
+    provider_speech_activity_events: xai.provider_speech_activity_events,
   }, "finite_prerecorded_efficacy");
   if (!isRecord(xai.separately_qualified_interactive_transport)) {
     throw new Error("LC4 xAI interactive qualification transport profile is missing");
