@@ -6,11 +6,19 @@ No result is claimed in this document.
 ## Question
 
 For the same 60-opportunity long-horizon spoken schedule, how does each
-provider's realtime model behave Native versus behind HACC?
+provider's realtime model behave as the **Registered Native comparator** versus
+behind HACC?
+
+Throughout this benchmark, **Registered Native comparator** means **Native
+realtime API + common benchmark continuity**: the provider's realtime API
+receives the same benchmark-managed chronological caller, assistant, and
+provider-visible tool-result history used to preserve the call across planned
+connection refreshes. It is not a bare or context-free model/API baseline, and
+it is not consumer ChatGPT Voice.
 
 The six frozen cells are:
 
-| Provider | Native | HACC |
+| Provider | Registered Native comparator | HACC |
 |---|---:|---:|
 | OpenAI realtime | 1 episode | 1 episode |
 | Gemini Live | 1 episode | 1 episode |
@@ -18,18 +26,21 @@ The six frozen cells are:
 
 Both arms receive the same natural initial task, model, voice, caller PCM,
 static gateway function, leaf world, audio delivery, limits, and repair
-selection policy. Native then relies on the provider's ordinary conversation memory;
+selection policy. The Registered Native comparator then relies on the
+provider's ordinary chronological conversation context;
 it never receives Flow structure, the evaluator rubric, the current corpus
 state, or a host-selected “correct” fact revision. At a planned connection
-refresh, Native receives only a receipt-bound chronological replay of the
+refresh, the Registered Native comparator receives only a receipt-bound
+chronological replay of the
 caller source text that produced the PCM, the assistant transcript already
 derived by the signed evaluator from the exact captured output PCM, and
 provider-visible tool results. This reuses the scored audio path and keeps
 transcript provenance identical even where provider-native transcription is
 disabled; it makes no additional API call. Corrections therefore remain
 old and new statements in conversation order—the host does not resolve them
-for Native. Packet hashes, run IDs, opportunity ordinals, source labels, and
-provenance receipts remain host-side integrity evidence; Native's
+for the Registered Native comparator. Packet hashes, run IDs, opportunity
+ordinals, source labels, and provenance receipts remain host-side integrity
+evidence; the Registered Native comparator's
 provider-visible reconnect projection contains only chronological roles and
 content. HACC receives the same chronological conversation plus
 flow-conditioned plans, bounded active authority, durable worker state,
@@ -68,7 +79,11 @@ is explicitly development regression evidence—not ASR, provider, or
 natural-language-generalization evidence. See
 [HACC_LC4_SEMANTIC_SCORER_CALIBRATION_V1.md](evidence/HACC_LC4_SEMANTIC_SCORER_CALIBRATION_V1.md).
 
-The public JSON exposes exactly six provider/model/arm cells. Each cell also
+The public JSON exposes exactly six provider/model/arm cells. Its frozen
+`comparison_design` block independently encodes the Registered Native
+comparator label and definition, the three one-pair provider strata, and that
+the 360 opportunity observations are repeated within six calls rather than 360
+independent trials. Each cell also
 binds its finite-call transport mode, purpose, profile hash, model-identity
 verification status, qualification scope, and non-secret qualification receipt
 hash. `provider_verified` means the retained setup evidence contains provider
@@ -129,6 +144,11 @@ listener observation replay, every authority artifact is
 scorable, the budget ledger is terminal, and the complete evidence root
 reproduces.
 
+The 360 opportunities are repeated measurements nested within six calls, not
+360 independent trials. The development call—one arm in one provider pair—is
+the episode unit; with only one pair per provider, the artifact remains
+descriptive C3 mechanism evidence.
+
 ## Exact commands after the live run
 
 The existing qualification, xAI finite-manual Gate D, and six-episode operator
@@ -141,21 +161,39 @@ exact run source:
 
 ```bash
 cd web
+
+REPOSITORY_ROOT=/absolute/path/to/X_Project
+PUBLIC_OUTPUT_ROOT="$REPOSITORY_ROOT/benchmarks/voice-long-horizon/evidence/lc4-launch"
+LAUNCH_VISUAL_OUTPUT_ROOT="$PUBLIC_OUTPUT_ROOT/visual"
+
+# Replace both placeholders with the independently retained 64-hex roots.
+# These are different authorities and are not interchangeable.
+export AUTHORITY_TRUST_ROOT_SHA256="REPLACE_WITH_LISTENER_AUTHORITY_TRUST_ROOT"
+export GATE_D_PLAN_TRUST_ROOT_SHA256="REPLACE_WITH_GATE_D_PLAN_TRUST_ROOT"
+
 npx tsx scripts/lc4-launch-benchmark.ts publish \
   --evidence-root /absolute/path/to/completed-evidence-root \
-  --output-root /absolute/path/to/new-public-output-directory \
+  --output-root "$PUBLIC_OUTPUT_ROOT" \
+  --authority-trust-root-sha256 "$AUTHORITY_TRUST_ROOT_SHA256" \
   --gate-d-receipt /absolute/path/to/gate-d-receipt.json \
   --gate-d-invocation-marker /absolute/path/to/gate-d-invocation.json \
   --gate-d-trust-root-sha256 "$GATE_D_PLAN_TRUST_ROOT_SHA256"
 
 npx tsx scripts/lc4-launch-benchmark.ts verify \
   --evidence-root /absolute/path/to/completed-evidence-root \
-  --public-json /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.json \
-  --public-markdown /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.md \
+  --public-json "$PUBLIC_OUTPUT_ROOT/HACC_LC4_LAUNCH_BENCHMARK.json" \
+  --public-markdown "$PUBLIC_OUTPUT_ROOT/HACC_LC4_LAUNCH_BENCHMARK.md" \
+  --authority-trust-root-sha256 "$AUTHORITY_TRUST_ROOT_SHA256" \
   --gate-d-receipt /absolute/path/to/gate-d-receipt.json \
   --gate-d-invocation-marker /absolute/path/to/gate-d-invocation.json \
   --gate-d-trust-root-sha256 "$GATE_D_PLAN_TRUST_ROOT_SHA256"
 ```
+
+`PUBLIC_OUTPUT_ROOT` is the single curated, Git-trackable launch-evidence
+location. Do not substitute the ignored
+`benchmarks/voice-long-horizon/results/` tree. The publisher is no-clobber, so
+the curated directory must not already exist; a replacement publication needs
+review and a new destination rather than an in-place overwrite.
 
 The public artifact contains the six safe result cells, aggregate execution
 counts, public transport commitments, bounded model-identity status, the
@@ -179,15 +217,17 @@ conservative local authorization liability rather than invoice reconciliation.
 
 After the evidence-bound public JSON/Markdown pair exists, a separate
 provider-free command replays the same evidence root and renders the minimal
-launch comparison:
+launch comparison. Run it in the same shell with the three output variables
+and two trust-root variables defined above:
 
 ```bash
 cd web
 npm run benchmark:lc4:launch:visual -- publish \
   --evidence-root /absolute/path/to/completed-evidence-root \
-  --public-json /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.json \
-  --public-markdown /absolute/path/to/HACC_LC4_LAUNCH_BENCHMARK.md \
-  --output-root /absolute/path/to/new-launch-visual-directory \
+  --public-json "$PUBLIC_OUTPUT_ROOT/HACC_LC4_LAUNCH_BENCHMARK.json" \
+  --public-markdown "$PUBLIC_OUTPUT_ROOT/HACC_LC4_LAUNCH_BENCHMARK.md" \
+  --output-root "$LAUNCH_VISUAL_OUTPUT_ROOT" \
+  --authority-trust-root-sha256 "$AUTHORITY_TRUST_ROOT_SHA256" \
   --gate-d-receipt /absolute/path/to/gate-d-receipt.json \
   --gate-d-invocation-marker /absolute/path/to/gate-d-invocation.json \
   --gate-d-trust-root-sha256 "$GATE_D_PLAN_TRUST_ROOT_SHA256"
@@ -196,8 +236,8 @@ npm run benchmark:lc4:launch:visual -- publish \
 It writes one immutable asset in SVG, PNG, and WebP form. The graph uses the
 registered recall-probe counts as its bars, prints every exact numerator and
 denominator, and includes the binary strict episode outcome without turning it
-into a pooled rate. Its footer is fixed to `360 registered opportunities across
-6 calls`.
+into a pooled rate. Its footer is fixed to `360 repeated opportunities within 6
+calls · not 360 independent trials`.
 
 The renderer independently reproduces the public pair from the retained
 evidence root and Gate D authority before it creates its output directory. A
@@ -211,7 +251,8 @@ launch asset is produced before a completed evidence root exists.
 
 The six-episode artifact is C3 descriptive development evidence. It may support
 a precise statement such as “on this registered 60-opportunity development
-scenario, HACC changed X/Y scored opportunities versus Native for model Z.”
+scenario, HACC changed X/Y scored opportunities versus the Registered Native
+comparator for model Z.”
 It cannot support a broad “HACC improves voice agents” claim or a statistically
 reliable provider comparison. That requires independent held-out templates and
 the confirmatory LC4 protocol.

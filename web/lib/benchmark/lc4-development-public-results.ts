@@ -128,7 +128,7 @@ export type Lc4DevPublicResultArtifact = Readonly<{
   limitations: readonly [
     "six development episodes are mechanism evidence, not an efficacy estimate",
     "authority scores are published only when the complete evidence DAG replays",
-    "no Native-versus-HACC superiority claim is authorized by this artifact",
+    "the Registered Native comparator is Native realtime API + common benchmark continuity; no HACC superiority claim is authorized",
     "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
   ];
   public_result_sha256: string;
@@ -599,7 +599,7 @@ export function createLc4DevPublicResultArtifact(
     limitations: Object.freeze([
       "six development episodes are mechanism evidence, not an efficacy estimate",
       "authority scores are published only when the complete evidence DAG replays",
-      "no Native-versus-HACC superiority claim is authorized by this artifact",
+      "the Registered Native comparator is Native realtime API + common benchmark continuity; no HACC superiority claim is authorized",
       "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
     ] as const),
   };
@@ -612,12 +612,12 @@ function value(value: number | null): string {
 
 export function renderLc4DevPublicResultMarkdown(result: Lc4DevPublicResultArtifact): string {
   assertLc4DevPublicResultArtifact(result);
-  const providers = result.design.providers.map((entry) => `| ${entry.provider} | ${entry.model} | Native + HACC | 60 each |`).join("\n");
+  const providers = result.design.providers.map((entry) => `| ${entry.provider} | ${entry.model} | Registered Native comparator + HACC | 60 each |`).join("\n");
   const transports = result.design.cells.map((entry) =>
-    `| ${entry.provider} | ${entry.model} | ${entry.arm === "hacc" ? "HACC" : "Native"} | ${entry.transport_purpose ?? "not_applicable"} | ${entry.turn_boundary_control} | ${entry.wire_turn_boundary} | ${entry.output_audio_lineage_scope} | ${entry.model_identity_verification} | ${entry.qualification_scope} | \`${entry.transport_profile_sha256}\` |`
+    `| ${entry.provider} | ${entry.model} | ${entry.arm === "hacc" ? "HACC" : "Registered Native comparator"} | ${entry.transport_purpose ?? "not_applicable"} | ${entry.turn_boundary_control} | ${entry.wire_turn_boundary} | ${entry.output_audio_lineage_scope} | ${entry.model_identity_verification} | ${entry.qualification_scope} | \`${entry.transport_profile_sha256}\` |`
   ).join("\n");
   return `# HACC LC4-DEV public result\n\n` +
-    `C3 mechanism evidence only. This artifact is not confirmatory provider-efficacy evidence and does not authorize a Native-versus-HACC superiority claim.\n\n` +
+    `C3 mechanism evidence only. Registered Native comparator means Native realtime API + common benchmark continuity; it is not a bare model/API baseline or consumer ChatGPT Voice. This artifact is not confirmatory provider-efficacy evidence and does not authorize a HACC superiority claim. Its 360 opportunities are repeated within six calls, not 360 independent trials.\n\n` +
     `## Result\n\n` +
     `| Measure | Value |\n|---|---:|\n` +
     `| Run status | ${result.execution.status} |\n` +
@@ -830,7 +830,7 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
     || canonicalJson(result.limitations) !== canonicalJson([
       "six development episodes are mechanism evidence, not an efficacy estimate",
       "authority scores are published only when the complete evidence DAG replays",
-      "no Native-versus-HACC superiority claim is authorized by this artifact",
+      "the Registered Native comparator is Native realtime API + common benchmark continuity; no HACC superiority claim is authorized",
       "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
     ])) {
     throw new Error("LC4-DEV public result claim boundary or frozen design drifted");

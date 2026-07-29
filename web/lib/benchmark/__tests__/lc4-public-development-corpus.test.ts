@@ -59,7 +59,7 @@ describe("LC4 public mechanism-development corpus", () => {
     });
   });
 
-  it("defines exactly one paired Native/HACC episode for every provider", () => {
+  it("defines exactly one paired Registered Native comparator/HACC episode for every provider", () => {
     const corpus = createLc4PublicDevelopmentCorpus();
     expect(corpus.six_episode_canary_schedule).toHaveLength(6);
     expect(new Set(corpus.six_episode_canary_schedule.map((row) => row.template_id))).toEqual(new Set([corpus.template_id]));

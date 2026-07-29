@@ -286,7 +286,7 @@ function rehashBenchmarkOnly(
   const { benchmark_sha256: _claimed, ...body } = artifact;
   void _claimed;
   (artifact as { benchmark_sha256: string }).benchmark_sha256 = sha256Hex(
-    `harshas-amazing-call-center/lc4-launch-benchmark/v6\n${canonicalJson(body)}`,
+    `harshas-amazing-call-center/lc4-launch-benchmark/v7\n${canonicalJson(body)}`,
   );
 }
 
@@ -480,7 +480,29 @@ describe("LC4 launch benchmark scorer", () => {
     const second = scoreLc4LaunchBenchmark(scoringInput());
     expect(first).toEqual(second);
     expect(first.scoring_contract.score_policy_sha256).toBe(LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256);
-    expect(first.schema_version).toBe(6);
+    expect(first.schema_version).toBe(7);
+    expect(first.comparison_design).toEqual({
+      registered_native_comparator: {
+        public_label: "Registered Native comparator",
+        definition: "Native realtime API + common benchmark continuity",
+        receives_common_benchmark_continuity: true,
+        receives_hacc_state_projection: false,
+        is_bare_or_context_free_model_or_api_baseline: false,
+        is_consumer_chatgpt_voice: false,
+      },
+      hacc_public_label: "HACC",
+      provider_pair_count: 3,
+      pairs_per_provider: 1,
+      episodes_per_pair: 2,
+      opportunity_accounting: {
+        calls: 6,
+        opportunities_per_call: 60,
+        repeated_opportunity_observations: 360,
+        opportunities_are_independent_trials: false,
+        inferential_status:
+          "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only",
+      },
+    });
     expect(first.budget).toEqual({
       maximum_total_micro_usd: 15_000_000,
       conservative_settled_micro_usd: 12_000_000,
@@ -515,12 +537,38 @@ describe("LC4 launch benchmark scorer", () => {
     const markdown = renderLc4LaunchBenchmarkMarkdown(first);
     expect(markdown).toContain("Host state cannot earn spoken credit");
     expect(markdown).toContain("360/360 opportunities");
+    expect(markdown).toContain("Registered Native comparator means Native realtime API + common benchmark continuity");
+    expect(markdown).toContain("360 opportunities are repeated within 6 calls, not 360 independent trials");
+    expect(markdown).not.toContain("Native API versus HACC");
     expect(markdown).toContain("Corrected facts");
     expect(markdown).toContain("Budget replay: verified, 0 active reservation liability");
     expect(markdown).toContain("Completed evidence root:");
+    expect(markdown).toContain("| xai | Registered Native comparator | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | provider_verified | xai_finite_manual_gate_d_exact_transport |");
     expect(markdown).toContain("| xai | HACC | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | provider_verified | xai_finite_manual_gate_d_exact_transport |");
     expect(JSON.stringify(first))
       .not.toMatch(/listener_observation|MPL-1402|Eli Park|provider_pairs|native_guardrail|authoritative_actions/u);
+  });
+
+  it("fails closed when comparator or repeated-opportunity semantics drift", () => {
+    const comparatorDrift = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (comparatorDrift.comparison_design.registered_native_comparator as {
+      definition: string;
+    }).definition = "bare native API";
+    rehashBenchmarkOnly(comparatorDrift);
+    expect(() => assertLc4LaunchBenchmarkArtifact(comparatorDrift))
+      .toThrow(/complete six-episode evidence horizon/u);
+
+    const independenceDrift = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (independenceDrift.comparison_design.opportunity_accounting as {
+      opportunities_are_independent_trials: boolean;
+    }).opportunities_are_independent_trials = true;
+    rehashBenchmarkOnly(independenceDrift);
+    expect(() => assertLc4LaunchBenchmarkArtifact(independenceDrift))
+      .toThrow(/complete six-episode evidence horizon/u);
   });
 
   it("binds terminal budget replay and rejects tampered budget authority", () => {

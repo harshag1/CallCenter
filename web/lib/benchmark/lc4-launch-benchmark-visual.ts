@@ -81,7 +81,7 @@ function percent(ratePpm: number | null): string {
 
 function bar(
   cellValue: PublicCell,
-  label: "Native API" | "HACC",
+  label: "Registered Native" | "HACC",
   y: number,
   fill: string,
 ): string {
@@ -115,12 +115,12 @@ function providerGroup(
     `<g aria-label="${xml(publicLabel(provider))}, ${xml(native.model)}">`,
     `<text x="90" y="${top + 18}" class="provider">${xml(publicLabel(provider))}</text>`,
     `<text x="90" y="${top + 49}" class="model">${xml(native.model)}</text>`,
-    bar(native, "Native API", top, "#B9BEC5"),
+    bar(native, "Registered Native", top, "#B9BEC5"),
     bar(hacc, "HACC", top + 64, "#4453E2"),
     `<text x="430" y="${top + 145}" class="strict">Strict episode</text>`,
-    `<text x="566" y="${top + 145}" class="strict-value">Native API ${nativeStrict.passed}/${nativeStrict.total}</text>`,
-    `<text x="690" y="${top + 145}" class="strict-dot">·</text>`,
-    `<text x="716" y="${top + 145}" class="strict-value hacc">HACC ${haccStrict.passed}/${haccStrict.total}</text>`,
+    `<text x="566" y="${top + 145}" class="strict-value">Registered Native ${nativeStrict.passed}/${nativeStrict.total}</text>`,
+    `<text x="730" y="${top + 145}" class="strict-dot">·</text>`,
+    `<text x="756" y="${top + 145}" class="strict-value hacc">HACC ${haccStrict.passed}/${haccStrict.total}</text>`,
     `</g>`,
   ].join("\n");
 }
@@ -132,8 +132,8 @@ export function renderLc4LaunchBenchmarkSvg(
   const groups = PROVIDERS.map((provider, index) =>
     providerGroup(artifact, provider, index)).join("\n");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" role="img" aria-labelledby="title description">
-<title id="title">Long-call recall: Native API versus HACC</title>
-<desc id="description">Exact registered recall probe pass rates for OpenAI, Gemini, and xAI, comparing one Native API and one HACC call per provider. Strict episode outcomes are also shown.</desc>
+<title id="title">Long-call recall: Registered Native comparator versus HACC</title>
+<desc id="description">Exact registered recall probe pass rates for OpenAI, Gemini, and xAI, comparing one Registered Native comparator call and one HACC call per provider. Registered Native means Native realtime API + common benchmark continuity. Strict episode outcomes are also shown.</desc>
 <metadata>HACC LC4 benchmark ${artifact.benchmark_sha256}</metadata>
 <rect width="${WIDTH}" height="${HEIGHT}" fill="#FFFFFF"/>
 <style>
@@ -157,10 +157,10 @@ export function renderLc4LaunchBenchmarkSvg(
 <text id="heading" x="90" y="94" class="title">Long-call recall</text>
 <text x="90" y="137" class="subtitle">Registered recall probes · 1 call per arm</text>
 <g aria-label="Legend">
-  <rect x="1218" y="72" width="21" height="21" rx="4" fill="#B9BEC5"/>
-  <text x="1251" y="90" class="legend">Native API</text>
-  <rect x="1392" y="72" width="21" height="21" rx="4" fill="#4453E2"/>
-  <text x="1425" y="90" class="legend">HACC</text>
+  <rect x="1138" y="72" width="21" height="21" rx="4" fill="#B9BEC5"/>
+  <text x="1171" y="90" class="legend">Registered Native</text>
+  <rect x="1400" y="72" width="21" height="21" rx="4" fill="#4453E2"/>
+  <text x="1433" y="90" class="legend">HACC</text>
 </g>
 <g aria-hidden="true">
   <line x1="430" y1="190" x2="430" y2="810" stroke="#E4E6E9" stroke-width="1"/>
@@ -172,8 +172,8 @@ export function renderLc4LaunchBenchmarkSvg(
 </g>
 ${groups}
 <line x1="90" y1="866" x2="1510" y2="866" stroke="#E4E6E9" stroke-width="1"/>
-<text x="800" y="912" text-anchor="middle" class="caveat">One registered development scenario per provider · descriptive, not an efficacy estimate</text>
-<text x="800" y="955" text-anchor="middle" class="footer">360 registered opportunities across 6 calls</text>
+<text x="800" y="912" text-anchor="middle" class="caveat">Native realtime API + common benchmark continuity · one development pair per provider · C3 descriptive only</text>
+<text x="800" y="955" text-anchor="middle" class="footer">360 repeated opportunities within 6 calls · not 360 independent trials</text>
 </svg>
 `;
 }

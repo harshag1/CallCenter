@@ -215,17 +215,19 @@ async function tempRoot(): Promise<string> {
 }
 
 describe("LC4 launch benchmark visual", () => {
-  it("renders only exact recall counts and strict outcomes from the complete v2 artifact", () => {
+  it("renders only exact recall counts and strict outcomes from the complete launch artifact", () => {
     const svg = renderLc4LaunchBenchmarkSvg(artifact());
     expect(svg).toContain("Long-call recall");
-    expect(svg).toContain("Long-call recall: Native API versus HACC");
+    expect(svg).toContain("Long-call recall: Registered Native comparator versus HACC");
     expect(svg).toContain("Registered recall probes · 1 call per arm");
-    expect(svg).toContain("360 registered opportunities across 6 calls");
-    expect(svg).toContain("One registered development scenario per provider");
-    expect(svg).toContain(">Native API</text>");
-    expect(svg).toContain("Native API 0/1");
+    expect(svg).toContain("360 repeated opportunities within 6 calls · not 360 independent trials");
+    expect(svg).toContain("Native realtime API + common benchmark continuity");
+    expect(svg).toContain("one development pair per provider");
+    expect(svg).toContain(">Registered Native</text>");
+    expect(svg).toContain("Registered Native 0/1");
     expect(svg).toContain("HACC 0/1");
-    expect(svg).not.toContain(">Native</text>");
+    expect(svg).not.toMatch(/>Native(?: API)?<\/text>/u);
+    expect(svg).not.toContain("ChatGPT Voice");
     expect(svg.match(/class="value"/gu)).toHaveLength(6);
     expect(svg).not.toMatch(/Verified results|1000 (?:voice|registered|interactions)|guardrail|authoritative actions/iu);
   });

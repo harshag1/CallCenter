@@ -4,9 +4,9 @@
 >
 > Passing this canary may show that the runner, audio boundary, memory path,
 > repair policy, receipt binding, reconciliation, and worker machinery operate
-> end to end. It cannot estimate or support a Native-versus-HACC treatment
-> effect, provider ranking, production-readiness claim, or LC4 confirmatory
-> result.
+> end to end. It cannot estimate or support a treatment effect between HACC and
+> the Registered Native comparator, provider ranking, production-readiness
+> claim, or LC4 confirmatory result.
 
 ## Purpose and separation
 
@@ -53,10 +53,20 @@ connection rotations, and two interruption repairs.
 
 ## Pairing and provider compatibility
 
-The artifact schedules exactly one Native/HACC pair for each of `openai`,
-`gemini`, and `xai`. Both arms of a provider pair bind the same template ID,
-source-corpus root, caller voice slot, and canonical prompts before an
-outcome-dependent branch. Arm order alternates by provider.
+The artifact schedules exactly one Registered Native comparator/HACC pair for
+each of `openai`, `gemini`, and `xai`. **Registered Native comparator** means
+**Native realtime API + common benchmark continuity**: the provider realtime
+API receives the benchmark-managed chronological caller, assistant, and
+provider-visible tool-result history needed across planned connection
+refreshes, but no HACC state projection. It is neither a bare/context-free
+model baseline nor consumer ChatGPT Voice. Both arms of a provider pair bind
+the same template ID, source-corpus root, caller voice slot, and canonical
+prompts before an outcome-dependent branch. Arm order alternates by provider.
+
+The 360 scheduled opportunities are repeated measurements nested within six
+calls, not 360 independent trials. With one development pair per provider, this
+canary remains C3 descriptive mechanism evidence even when all opportunities
+complete.
 
 This is not a claim of identical audible speech after an arm-specific system
 outcome. If the earlier mutation reaches a different authoritative outcome in

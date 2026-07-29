@@ -4,14 +4,17 @@ Status: documentation-verified on 2026-07-28; hash-bound in
 `web/lib/benchmark/lc4-provider-profiles.ts`; **provider execution remains
 unauthorized** by this artifact.
 
-These profiles freeze the non-treatment settings for each Native-versus-HACC
-matched pair. They do not assert that three different provider APIs have the
-same semantics. The estimand remains within-provider: model, voice, audio,
-provider-frozen turn boundaries, static gateway function schema, omitted
-temperature/reasoning configuration, session-resumption policy, timeout, and
-retry policy must be identical between that provider's two arms. The raw prompt
-and logical catalog versus HACC's managed context/catalog/guardrail treatment
-are the intended differences.
+These profiles freeze the non-treatment settings for each Registered Native
+comparator/HACC matched pair. **Registered Native comparator** means **Native
+realtime API + common benchmark continuity**, not a bare model/API or consumer
+voice product. The profiles do not assert that three different provider APIs
+have the same semantics. The estimand remains within-provider: model, voice,
+audio, provider-frozen turn boundaries, static gateway function schema,
+omitted temperature/reasoning configuration, session-resumption policy,
+timeout, and retry policy must be identical between that provider's two arms.
+The Registered Native comparator's static prompt and logical catalog versus
+HACC's managed context/catalog/guardrail treatment are the intended
+differences.
 
 | Provider | Frozen model / voice | PCM input -> output | Turn boundary | Per-turn HACC context authority |
 |---|---|---:|---|---|
@@ -38,15 +41,16 @@ are the intended differences.
   barrier; an exact empty `turn_detection` echo remains conditional until the
   paid spoken Gate B.
 - LC4 efficacy cells use xAI's documented manual turn mode for finite
-  prerecorded caller clips. Native and HACC receive the same byte-exact PCM,
-  one `input_audio_buffer.commit`, the matching commit acknowledgement, and one
-  initial `response.create`; neither arm receives a VAD delimiter. This removes
-  endpoint timing from the within-provider treatment comparison.
+  prerecorded caller clips. The Registered Native comparator and HACC receive
+  the same byte-exact PCM, one `input_audio_buffer.commit`, the matching commit
+  acknowledgement, and one initial `response.create`; neither arm receives a
+  VAD delimiter. This removes endpoint timing from the within-provider
+  treatment comparison.
 - xAI server VAD remains a separate interactive-transport qualification at
   threshold `0.85`, silence `500 ms`, and prefix padding `333 ms`.
   That qualification uses the disclosed bounded zero-PCM delimiter and proves
   lifecycle compatibility only. It does not authorize or score the finite-clip
-  Native-versus-HACC efficacy cells.
+  Registered Native comparator/HACC efficacy cells.
 - Temperature and reasoning controls are omitted for all matched arms. That is
   arm parity, not cross-provider equivalence: provider defaults may differ.
 - Planned connection refreshes use the same conversation-replay compiler in
@@ -55,11 +59,12 @@ are the intended differences.
   the signed listener evaluator, and provider-visible tool results. This reuses
   the scored audio path and does not enable an extra provider transcription
   stream or make an additional API call. The compiler rejects oracle-,
-  semantic-evaluator-, future-, or non-conversation inputs. HACC
-  adds its structured state commitment to that replay; Native does not receive
-  it. Receipt hashes, corpus opportunity ordinals, source labels, and other
-  replay-integrity metadata remain host-side. Rebuilding a Native prompt from
-  corpus fact annotations is prohibited.
+  semantic-evaluator-, future-, or non-conversation inputs. HACC adds its
+  structured state commitment to that replay; the Registered Native comparator
+  does not receive it. Receipt hashes, corpus opportunity ordinals, source
+  labels, and other replay-integrity metadata remain host-side. Rebuilding a
+  Registered Native comparator prompt from corpus fact annotations is
+  prohibited.
 
 ## Frozen lifecycle evidence policies
 
@@ -98,8 +103,8 @@ profiles satisfy that requirement differently:
 
 Missing, conflicting, reordered, or provenance-free lifecycle evidence makes
 the roundtrip fail closed. These rules test evidence integrity and provider
-mechanism compatibility for the frozen profile; they do not test Native versus
-HACC efficacy.
+mechanism compatibility for the frozen profile; they do not test Registered
+Native comparator versus HACC efficacy.
 
 ## Primary sources
 
@@ -124,9 +129,10 @@ Gate D is the only admission bridge between those scopes. It must be a fresh,
 source/profile-bound, one-shot xAI manual clip that proves commit
 acknowledgement, the initial tool response, one authoritative result, and the
 distinct post-tool continuation. Gate D is transport-compatibility evidence,
-not Native-versus-HACC efficacy evidence. Until its signed receipt and trust
-root replay successfully, no xAI efficacy cell may be admitted, published, or
-used in a launch claim. The older server-VAD receipt cannot substitute for it.
+not Registered Native comparator/HACC efficacy evidence. Until its signed
+receipt and trust root replay successfully, no xAI efficacy cell may be
+admitted, published, or used in a launch claim. The older server-VAD receipt
+cannot substitute for it.
 
 ### Gate D operator
 

@@ -13,8 +13,9 @@ Executable inference artifact: [`HACC_LC4_CONSTRAINED_INFERENCE_V1.json`](./HACC
 ## Design
 
 The proposed schedule has 24 independent held-out templates, three provider
-strata, 72 matched Native/HACC pairs, 144 episodes, and 8,640 scheduled caller
-opportunities. Each provider contributes exactly 24 pairs.
+strata, 72 matched Registered Native comparator/HACC pairs, 144 episodes, and
+8,640 scheduled caller opportunities. Each provider contributes exactly 24
+pairs.
 
 The allocation uses the prospective seed
 `hacc-lc4-power-plan-20260721-v1`. For each provider, the implementation
@@ -22,7 +23,7 @@ enumerates the complete support satisfying every frozen balance margin, then
 uses SHA-256 rejection sampling to select one support member without modulo
 bias. Provider selections use distinct domain-separated digests. This produces:
 
-- 12 Native-first and 12 HACC-first pairs;
+- 12 Registered-Native-first and 12 HACC-first pairs;
 - two of each order in every four-template family;
 - three of each order for every six-template structural variant;
 - four of each order in every eight-template TTS slot; and
@@ -40,7 +41,7 @@ The executable calculation is the two-sided exact conditional McNemar power
 calculation at alpha 0.05 over 72 provider-template pairs. The two prospective
 alternatives come from the LC4 draft, not LC3 treatment-effect estimates.
 
-| HACC-only | Native-only | Paired difference | Discordance | Exact power |
+| HACC-only | Registered-Native-only | Paired difference | Discordance | Exact power |
 |---:|---:|---:|---:|---:|
 | 0.30 | 0.05 | 0.25 | 0.35 | 0.9601001250 |
 | 0.35 | 0.10 | 0.25 | 0.45 | 0.8772507901 |

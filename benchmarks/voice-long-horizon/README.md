@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. The current LC4 development comparator holds the provider/model, natural task, caller audio, chronological conversation and tool-result history, transport, and limits constant. Native receives that ordinary provider-session history without HACC's host state projection; HACC receives the same caller turns plus scoped Flow packets and tools backed by durable, runtime-enforced state.
+This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. The current LC4 development comparison holds the provider/model, natural task, caller audio, chronological conversation and tool-result history, transport, and limits constant. Its **Registered Native comparator** is **Native realtime API + common benchmark continuity**: it receives that ordinary provider-session history without HACC's host state projection. HACC receives the same caller turns plus scoped Flow packets and tools backed by durable, runtime-enforced state. This comparator is not a bare/context-free model API and is not consumer ChatGPT Voice.
 
 **Current status: the latest completed paid comparative dataset is HACC-LC3-v6: 18 production-API episodes and nine matched pairs. Native and HACC both scored 0/9 for mission completion and strict alignment, so no superiority result exists.** Only 8/18 episodes reached all 20 turns (Native 5/9, HACC 3/9). Independent red-teaming found evaluator, output-voice calibration, playback, and provenance defects; the immutable scores remain retained, but the batch is not publication-quality efficacy evidence. Later paid LC4 qualification and development attempts produced transport/mechanism evidence but failed or were quarantined before a complete publishable comparison. See [RESULTS.md](RESULTS.md) and the [LC4 failed-attempt record](evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md).
 
@@ -29,12 +29,16 @@ The conjunctive `strict_success` product endpoint remains useful, but some of it
 
 The current release benchmark is the six-cell LC4 development comparison:
 
-- `native`: the provider-equivalent realtime transport receives the frozen natural task, caller turns, and chronological prior assistant/tool-result history. It receives no Flow graph, evaluator rubric, host-selected current fact, or HACC state projection.
+- `native` (**Registered Native comparator**): the provider-equivalent realtime API receives the frozen natural task plus common benchmark continuity—the caller turns and chronological prior assistant/tool-result history. It receives no Flow graph, evaluator rubric, host-selected current fact, or HACC state projection.
 - `hacc`: the same provider/model and caller turns receive scoped Flow packets and tools backed by HACC's durable state, capability, receipt, and repair boundaries.
 
 This small development comparison is frozen in [HACC_LC4_LAUNCH_BENCHMARK.md](HACC_LC4_LAUNCH_BENCHMARK.md). It is descriptive mechanism evidence, not a provider-efficacy estimate.
 
-A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That candidate matrix must not be used to describe the current LC4 Native comparator.
+Its 360 scheduled opportunities are repeated measurements within six calls,
+not 360 independent trials. There is only one Registered Native comparator/HACC
+pair per provider.
+
+A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That candidate matrix must not be used to describe the current LC4 Registered Native comparator.
 
 All paired conditions use the same provider model, voice, frozen caller PCM fixture library, condition-blind caller policy and seed, hidden world, business facts, leaf tool implementations and responses, limits, and failure schedule. When both arms select the same caller utterance, they receive identical bytes; a closed-loop caller may select a different next utterance after observable outcomes diverge. The intervention is the orchestration method, not extra information.
 
@@ -44,7 +48,7 @@ Progressive tool disclosure, graph-based voice flows, external state, checkpoint
 
 The research contribution under test is narrower:
 
-- a provider-controlled raw-versus-harness causal evaluation over the same realtime STS models and caller audio;
+- a provider-controlled Registered Native comparator-versus-harness causal evaluation over the same realtime STS models and caller audio;
 - revision-bound capability leases plus transactional voice actions (`propose -> validate -> authorize -> execute once -> verify -> commit`);
 - separate measurement of model attempts, runtime blocks, executed effects, and verified commits;
 - a Conversation Integrity Curve and Reliable Horizon for locating where reliability decays;
@@ -94,7 +98,7 @@ recorded in `GATE0_SKIP_INVENTORY.json`. See the root
 - [PROGRESS.md](PROGRESS.md): dated implementation and experiment log
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
 - [RESULTS.md](RESULTS.md): exploratory live outcome and exact claim boundary
-- [HACC-LC4 output-voice calibration](evidence/HACC_LC4_OUTPUT_VOICE_CALIBRATION.md): 54 retained production calibration utterances across three development batches; the final independently pinned ASR gate passed 18/18 fixtures with 0/144 word errors, but this is evaluator evidence rather than Native-versus-HACC efficacy evidence
+- [HACC-LC4 output-voice calibration](evidence/HACC_LC4_OUTPUT_VOICE_CALIBRATION.md): 54 retained production calibration utterances across three development batches; the final independently pinned ASR gate passed 18/18 fixtures with 0/144 word errors, but this is evaluator evidence rather than Registered Native comparator/HACC efficacy evidence
 - [LIVE_STS_DEVELOPMENT_RESULT.json](LIVE_STS_DEVELOPMENT_RESULT.json): public machine-readable summary of the 32-session development batch
 - [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
 - [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result

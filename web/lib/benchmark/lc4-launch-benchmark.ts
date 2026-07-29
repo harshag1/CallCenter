@@ -61,7 +61,7 @@ import {
 } from "./lc4-publication-transport-provenance";
 
 const HASH = /^[a-f0-9]{64}$/u;
-const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v6\n";
+const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v7\n";
 const COMPLETED_EVIDENCE_ROOT_DOMAIN =
   "harshas-amazing-call-center/lc4-launch-completed-evidence-root/v2\n";
 const RESPONSE_LINEAGE_ROOT_DOMAIN =
@@ -202,12 +202,34 @@ export type Lc4LaunchBenchmarkEpisodeScore = Readonly<{
 }>;
 
 export type Lc4LaunchBenchmarkArtifact = Readonly<{
-  schema_version: 6;
+  schema_version: 7;
   artifact_type: "hacc_lc4_launch_benchmark";
   protocol_id: "HACC-LC4-DEV-v1";
   evidence_class: "C3";
   interpretation: "descriptive development benchmark; one scenario pair per provider";
   efficacy_claim_eligible: false;
+  comparison_design: Readonly<{
+    registered_native_comparator: Readonly<{
+      public_label: "Registered Native comparator";
+      definition: "Native realtime API + common benchmark continuity";
+      receives_common_benchmark_continuity: true;
+      receives_hacc_state_projection: false;
+      is_bare_or_context_free_model_or_api_baseline: false;
+      is_consumer_chatgpt_voice: false;
+    }>;
+    hacc_public_label: "HACC";
+    provider_pair_count: 3;
+    pairs_per_provider: 1;
+    episodes_per_pair: 2;
+    opportunity_accounting: Readonly<{
+      calls: 6;
+      opportunities_per_call: 60;
+      repeated_opportunity_observations: 360;
+      opportunities_are_independent_trials: false;
+      inferential_status:
+        "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only";
+    }>;
+  }>;
   execution: Readonly<{
     execution_id: string;
     source_commit: string;
@@ -322,6 +344,7 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
   }>;
   limitations: readonly [
     "one development scenario pair per provider is descriptive, not an efficacy estimate",
+    "360 opportunity observations are repeated within six calls, not 360 independent trials",
     "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
     "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
     "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
@@ -957,12 +980,34 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
     });
   });
   const body = {
-    schema_version: 6 as const,
+    schema_version: 7 as const,
     artifact_type: "hacc_lc4_launch_benchmark" as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     evidence_class: "C3" as const,
     interpretation: "descriptive development benchmark; one scenario pair per provider" as const,
     efficacy_claim_eligible: false as const,
+    comparison_design: Object.freeze({
+      registered_native_comparator: Object.freeze({
+        public_label: "Registered Native comparator" as const,
+        definition: "Native realtime API + common benchmark continuity" as const,
+        receives_common_benchmark_continuity: true as const,
+        receives_hacc_state_projection: false as const,
+        is_bare_or_context_free_model_or_api_baseline: false as const,
+        is_consumer_chatgpt_voice: false as const,
+      }),
+      hacc_public_label: "HACC" as const,
+      provider_pair_count: 3 as const,
+      pairs_per_provider: 1 as const,
+      episodes_per_pair: 2 as const,
+      opportunity_accounting: Object.freeze({
+        calls: 6 as const,
+        opportunities_per_call: 60 as const,
+        repeated_opportunity_observations: 360 as const,
+        opportunities_are_independent_trials: false as const,
+        inferential_status:
+          "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only" as const,
+      }),
+    }),
     execution: Object.freeze({
       execution_id: input.execution_id,
       source_commit: input.source_commit,
@@ -1047,6 +1092,7 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
     }),
     limitations: Object.freeze([
       "one development scenario pair per provider is descriptive, not an efficacy estimate",
+      "360 opportunity observations are repeated within six calls, not 360 independent trials",
       "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
       "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
       "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
@@ -1614,7 +1660,7 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
         cell.adaptive_repair.repair_assisted_semantic_score.passed,
         cell.adaptive_repair.repair_assisted_semantic_score.total,
       )));
-  if (artifact.schema_version !== 6
+  if (artifact.schema_version !== 7
     || artifact.artifact_type !== "hacc_lc4_launch_benchmark"
     || artifact.protocol_id !== "HACC-LC4-DEV-v1"
     || artifact.evidence_class !== "C3"
@@ -1622,9 +1668,32 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
     || artifact.efficacy_claim_eligible !== false
     || !exactKeys(artifact, [
       "schema_version", "artifact_type", "protocol_id", "evidence_class", "interpretation",
-      "efficacy_claim_eligible", "execution", "evidence", "budget", "scoring_contract", "qualification", "cells", "privacy",
+      "efficacy_claim_eligible", "comparison_design", "execution", "evidence",
+      "budget", "scoring_contract", "qualification", "cells", "privacy",
       "limitations", "benchmark_sha256",
     ])
+    || canonicalJson(artifact.comparison_design) !== canonicalJson({
+      registered_native_comparator: {
+        public_label: "Registered Native comparator",
+        definition: "Native realtime API + common benchmark continuity",
+        receives_common_benchmark_continuity: true,
+        receives_hacc_state_projection: false,
+        is_bare_or_context_free_model_or_api_baseline: false,
+        is_consumer_chatgpt_voice: false,
+      },
+      hacc_public_label: "HACC",
+      provider_pair_count: 3,
+      pairs_per_provider: 1,
+      episodes_per_pair: 2,
+      opportunity_accounting: {
+        calls: 6,
+        opportunities_per_call: 60,
+        repeated_opportunity_observations: 360,
+        opportunities_are_independent_trials: false,
+        inferential_status:
+          "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only",
+      },
+    })
     || !exactKeys(artifact.execution, [
       "execution_id", "source_commit", "source_tree_sha256", "run_sha256", "report_sha256",
       "planned_episodes", "opened_episodes", "completed_episodes", "planned_opportunities",
@@ -1771,6 +1840,7 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
     || artifact.privacy.contains_gate_d_receipt_path_or_trust_root !== false
     || canonicalJson(artifact.limitations) !== canonicalJson([
       "one development scenario pair per provider is descriptive, not an efficacy estimate",
+      "360 opportunity observations are repeated within six calls, not 360 independent trials",
       "rates are exact registered opportunity or obligation counts, not subjective quality ratings",
       "published bars exclude heterogeneous guardrail and authoritative-action aggregates",
       "headless evidence proves complete captured PCM reached the pinned evaluator; it does not claim human audibility",
@@ -1816,17 +1886,24 @@ function rate(value: Metric): string {
 
 export function renderLc4LaunchBenchmarkMarkdown(artifact: Lc4LaunchBenchmarkArtifact): string {
   assertLc4LaunchBenchmarkArtifact(artifact);
+  const comparator = artifact.comparison_design.registered_native_comparator;
+  const opportunityAccounting =
+    artifact.comparison_design.opportunity_accounting;
+  const armLabel = (arm: "native" | "hacc"): string =>
+    arm === "hacc"
+      ? artifact.comparison_design.hacc_public_label
+      : comparator.public_label;
   const rows = artifact.cells.map((cell) =>
-    `| ${cell.provider} | ${cell.model} | ${cell.arm === "hacc" ? "HACC" : "Native"} | ${cell.wire_turn_boundary} | ${cell.model_identity_verification} | ${rate(cell.metrics.positive_semantic_speech_checks)} | ${rate(cell.metrics.registered_recall_probes)} | ${rate(cell.metrics.corrected_fact_checks)} | ${rate(cell.metrics.flow_stage_checks)} | ${rate(cell.metrics.strict_episode_outcome)} |`
+    `| ${cell.provider} | ${cell.model} | ${armLabel(cell.arm)} | ${cell.wire_turn_boundary} | ${cell.model_identity_verification} | ${rate(cell.metrics.positive_semantic_speech_checks)} | ${rate(cell.metrics.registered_recall_probes)} | ${rate(cell.metrics.corrected_fact_checks)} | ${rate(cell.metrics.flow_stage_checks)} | ${rate(cell.metrics.strict_episode_outcome)} |`
   ).join("\n");
   const transportRows = artifact.cells.map((cell) =>
-    `| ${cell.provider} | ${cell.arm === "hacc" ? "HACC" : "Native"} | ${cell.transport_purpose ?? "not_applicable"} | ${cell.turn_boundary_control} | ${cell.wire_turn_boundary} | ${cell.model_identity_verification} | ${cell.qualification_scope} | \`${cell.transport_profile_sha256}\` |`
+    `| ${cell.provider} | ${armLabel(cell.arm)} | ${cell.transport_purpose ?? "not_applicable"} | ${cell.turn_boundary_control} | ${cell.wire_turn_boundary} | ${cell.model_identity_verification} | ${cell.qualification_scope} | \`${cell.transport_profile_sha256}\` |`
   ).join("\n");
   const adaptiveRows = artifact.cells.map((cell) =>
-    `| ${cell.provider} | ${cell.arm === "hacc" ? "HACC" : "Native"} | ${cell.adaptive_repair.branch_outcome} | ${cell.adaptive_repair.repair_playback_count} | ${cell.adaptive_repair.total_response_generations} | ${rate(cell.adaptive_repair.first_response_semantic_score)} | ${rate(cell.adaptive_repair.repair_assisted_semantic_score)} |`
+    `| ${cell.provider} | ${armLabel(cell.arm)} | ${cell.adaptive_repair.branch_outcome} | ${cell.adaptive_repair.repair_playback_count} | ${cell.adaptive_repair.total_response_generations} | ${rate(cell.adaptive_repair.first_response_semantic_score)} | ${rate(cell.adaptive_repair.repair_assisted_semantic_score)} |`
   ).join("\n");
   return `# HACC LC4 launch benchmark\n\n` +
-    `Descriptive C3 development evidence: one 60-opportunity Native/HACC pair per provider. This is not a provider-efficacy estimate.\n\n` +
+    `Descriptive C3 development evidence: one 60-opportunity ${comparator.public_label}/HACC pair per provider. ${comparator.public_label} means ${comparator.definition}; it is not a bare model/API baseline or consumer ChatGPT Voice. The ${opportunityAccounting.repeated_opportunity_observations} opportunities are repeated within ${opportunityAccounting.calls} calls, not ${opportunityAccounting.repeated_opportunity_observations} independent trials. This is not a provider-efficacy estimate.\n\n` +
     `| Provider | Realtime model | Arm | Wire turn boundary | Model identity | Semantic speech | Recall probes | Corrected facts | Stage checks | Strict episode |\n` +
     `|---|---|---|---|---|---:|---:|---:|---:|---:|\n${rows}\n\n` +
     `## Adaptive repair accounting\n\n` +

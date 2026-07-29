@@ -220,9 +220,11 @@ describe("LC4-DEV public results", () => {
     expect(markdown).toContain("| Authority passed | 5 |");
     expect(markdown).toContain("| Conservative ledger liability | $12.345678 |");
     expect(markdown).not.toContain("settled cost");
-    expect(markdown).toContain(`| openai | ${LC4_PROVIDER_PROFILE_MANIFEST.providers.openai.model} | Native + HACC | 60 each |`);
-    expect(markdown).toContain("does not authorize a Native-versus-HACC superiority claim");
-    expect(markdown).toContain("| xai | grok-voice-think-fast-1.0 | Native | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact | provider_verified | xai_finite_manual_gate_d_exact_transport |");
+    expect(markdown).toContain(`| openai | ${LC4_PROVIDER_PROFILE_MANIFEST.providers.openai.model} | Registered Native comparator + HACC | 60 each |`);
+    expect(markdown).toContain("Registered Native comparator means Native realtime API + common benchmark continuity");
+    expect(markdown).toContain("does not authorize a HACC superiority claim");
+    expect(markdown).toContain("360 opportunities are repeated within six calls, not 360 independent trials");
+    expect(markdown).toContain("| xai | grok-voice-think-fast-1.0 | Registered Native comparator | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact | provider_verified | xai_finite_manual_gate_d_exact_transport |");
     expect(markdown).toContain("transport qualification only");
     expect(markdown).toContain(
       `Listener authority trust root: \`${H("listener-authority-root")}\``,

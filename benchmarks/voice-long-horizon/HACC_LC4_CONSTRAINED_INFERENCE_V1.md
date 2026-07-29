@@ -12,12 +12,13 @@ Bound allocation SHA-256: `c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743db
 
 ## Exact primary null test
 
-For each provider, the code enumerates every 24-template Native-first/HACC-first
-allocation that has:
+For each provider, the code enumerates every 24-template
+Registered-Native-first/HACC-first allocation that has:
 
-- two Native-first assignments in every four-template family;
-- three Native-first assignments in every six-template structural variant; and
-- four Native-first assignments in every eight-template TTS slot.
+- two Registered-Native-first assignments in every four-template family;
+- three Registered-Native-first assignments in every six-template structural
+  variant; and
+- four Registered-Native-first assignments in every eight-template TTS slot.
 
 This yields exactly 504 allocations per provider. Providers are independently
 randomized from that support, so the joint support is exactly
