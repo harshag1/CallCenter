@@ -903,3 +903,64 @@ conservative exposure is now `$4.00` across two failed one-shot gates and two
 bounded diagnostic groups. It remains transport evidence only. A new clean
 commit and a fresh passing Gate D v4 receipt are still required before
 qualification or any efficacy cell.
+
+## 2026-07-29 — DEV v5 stopped locally; fresh paid sequence remains gated
+
+The latest immutable LC4 DEV v5 root at source
+`12650977209760e244b7df8d551788bd3b33cddd` completed OpenAI Native's 60
+canonical opportunities and OpenAI HACC's first 20 before the HACC episode
+reached its first connection-rotation boundary. Across those two partial cells,
+the retained run records 80/80 submitted/completed canonical opportunities, 86
+completed generations including six registered repairs, and zero paid retries.
+These are execution-custody counts, not result cells or efficacy evidence.
+
+The retained run then failed before segment 2 opened:
+
+- machine-recorded failure class: `transport`;
+- failure message SHA-256:
+  `5e7b140348c37e798dbdc66d3ecad0f1f66e573b992bc3c67cee4fcf83bfe7fa`;
+- exact hash preimage proved offline:
+  `LC4 rotation conversation text is invalid`;
+- segment-2 provider sockets, generations, and calls: **0**;
+- run:
+  `32625a9fc35f26c75e27218554e7026ae1d23f1231e8e0788c4b2bc909cf1c56`;
+- package:
+  `a1c33fe35b832cc365b751375f84b35290a0390894fd16b71bce1ec06aadbea2`.
+
+The stored `transport` label is immutable historical output but an inaccurate
+diagnosis. Provider-free reconstruction found that one HACC tool-result turn
+was 9,187 UTF-8 bytes because the provider-visible success payload duplicated
+the full response plan. The local rotation validator rejected it against the
+then-current per-turn bound before making a segment-2 provider call. This is a
+local continuity/rotation compilation defect, not evidence of a provider
+transport failure, model failure, HACC win, or Native/HACC comparison.
+
+The v5 budget terminal conservatively settled **$5.00**, cancelled the four
+unopened reservations, and retained **$0.00** active. Immutable conservative
+paid-provider exposure for the current release epoch is now **$41.50**.
+The earlier **$15.00 maximum** authority remains separately frozen and
+non-reusable; it is neither settlement nor invoice evidence.
+
+Only one next fresh-source paid sequence is authorized:
+
+- `$1.00` maximum for xAI finite-manual Gate D;
+- `$3.00` maximum for exact-source three-provider qualification;
+- `$15.00` maximum for one one-shot six-cell DEV root.
+
+That sequence would cap ordinary post-baseline exposure at **$60.50**. Adding
+the frozen `$15.00` solely as an ultra-conservative liability view yields
+**$75.50**. Both remain under the user's strictly-less-than-`$250.00`
+remaining-work ceiling; neither is a spending target.
+
+Paid rerun admission is currently **blocked**. Provider-free tests must first
+prove lossless, ordered reconstruction of every provider-visible conversation
+turn at both segment boundaries, including batched successful tool results and
+pre-dispatch rejection results, and prove that history hydration completes
+before caller audio begins. No paid rerun, completed benchmark, result score, or
+launch graph is claimed by this entry.
+
+A separate Fable/Claude Code rotation-architecture review cost **$0.57204** and
+is preserved as
+[unverified advisory input](../../docs/research/external/2026-07-29-lc4-rotation-fable.md).
+It is auxiliary research spend, not realtime-provider spend or benchmark
+evidence.

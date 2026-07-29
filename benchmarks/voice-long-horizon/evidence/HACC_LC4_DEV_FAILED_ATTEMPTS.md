@@ -654,3 +654,56 @@ resumed, and contributes no result cell or launch graph. No xAI efficacy cell
 may be admitted from this receipt; a fresh source/profile-bound Gate D manual
 clip must first produce a signed replay-verifiable receipt, and that receipt is
 transport compatibility evidence rather than a Native-versus-HACC result.
+
+## 2026-07-29 six-episode attempt v5 at `1265097`
+
+**Failed local rotation compilation. No partial score is admissible.**
+
+The immutable source was
+`12650977209760e244b7df8d551788bd3b33cddd`. The attempt completed one full
+OpenAI Native episode and the first 20 canonical opportunities of OpenAI HACC:
+
+- episodes started/completed: **2/1**;
+- canonical opportunities submitted/completed: **80/80**;
+- response generations requested/completed: **86/86**;
+- registered repairs: **6**;
+- paid retries: **0**;
+- unopened Gemini/xAI reservations: **4**, all cancelled.
+
+The failure occurred while compiling the OpenAI HACC history for segment 2.
+No segment-2 provider socket opened, no segment-2 generation was requested, and
+no segment-2 provider call was made. The retained terminal artifacts are:
+
+- machine-recorded failure class: `transport`;
+- failure message SHA-256:
+  `5e7b140348c37e798dbdc66d3ecad0f1f66e573b992bc3c67cee4fcf83bfe7fa`;
+- run:
+  `32625a9fc35f26c75e27218554e7026ae1d23f1231e8e0788c4b2bc909cf1c56`;
+- package:
+  `a1c33fe35b832cc365b751375f84b35290a0390894fd16b71bce1ec06aadbea2`;
+- budget evidence/head:
+  `563e90511f93a85b4665bb96f0c62e596630a34020e0a6971f887c3b67a6f6a5` /
+  `e5ee1a0969647aa1f594a50a3f264fc3505d1f48ce7135ab4a26742d8b0afd83`.
+
+The recorded `transport` class is preserved but was disproved as the causal
+classification. SHA-256 of the exact local error text
+`LC4 rotation conversation text is invalid` equals the retained failure hash.
+Provider-free reconstruction found a 9,187-byte provider-visible HACC
+tool-result turn: the successful gateway output repeated the full response plan
+under two fields. The local validator rejected that turn before any segment-2
+provider interaction. This root is therefore evidence of a local
+continuity/rotation defect, not provider transport behavior or comparative
+model performance.
+
+The DEV budget conservatively settled **$5.00** for the completed OpenAI Native
+reservation and failed OpenAI HACC reservation, with **$0.00** active after
+terminalization. Current release-epoch conservative exposure is **$41.50**.
+The separate **$15.00 maximum** custody-failure authority remains frozen and
+non-reusable. See the [budget ledger](../BUDGET.md) and
+[progress checkpoint](../PROGRESS.md) for the bounded next sequence.
+
+The failed root is immutable, cannot be resumed or repaired, and contributes no
+result cell, score, or launch graph. A new paid root is blocked until offline
+tests prove lossless, order-preserving history reconstruction across both
+rotation boundaries, including batched successful tool results and
+pre-dispatch rejection results, before any caller audio is sent.

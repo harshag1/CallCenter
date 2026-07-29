@@ -4,16 +4,18 @@
 
 - Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
   $250.00 USD**
-- Remaining declared release sequence: **$19.00 USD maximum** (`$1` Gate D +
-  `$3` qualification + `$15` six-cell DEV)
-- Post-baseline conservative paid-provider exposure: **$4.00 USD** (two `$1`
-  terminal failed Gate D roots + two `$1` grouped xAI transport diagnostics)
-- Post-baseline declared aggregate maximum: **$23.00 USD**
+- Next declared release sequence: **$19.00 USD maximum** (`$1` fresh-source
+  Gate D + `$3` fresh-source qualification + `$15` one-shot six-cell DEV)
+- Post-baseline conservative paid-provider exposure: **$41.50 USD**
+- Post-baseline maximum after the next declared sequence: **$60.50 USD**
+- Ultra-conservative post-baseline maximum including frozen authority:
+  **$75.50 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$71.00 USD**
+- LC4 conservative filesystem-ledger settlements: **$112.50 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
-- Recorded auxiliary review spend: **$3.807615 USD**
+- Recorded auxiliary review spend: **$4.379655 USD**, including the separate
+  **$0.57204** 2026-07-29 rotation review
 - Recorded total program cash spend: **unreconciled**
 
 The 2026-07-28 authorization is a new remaining-work epoch, not a reset of the
@@ -23,14 +25,22 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-The current release plan imposes the much smaller **$23.00** epoch cap:
-**$4.00** conservatively charged diagnosis plus at most **$19.00** for the
-remaining Gate D, qualification, and one-shot six-cell roots. No other provider
-session may be scheduled without a new dated authorization entry. The prior
-`$1,000 / $900 / $100 / $270` program ceilings are historical, superseded
-planning authority; they do not authorize current work. Auxiliary spend remains
-separate from provider/model evidence, while provider-billed cash spend remains
-unreconciled.
+Immutable roots have now conservatively charged **$41.50** after that baseline,
+with **$0.00** active. Only one new **$19.00** sequence is authorized:
+fresh-source Gate D, qualification, and one-shot six-cell DEV. That would bound
+the ordinary post-baseline total at **$60.50**. Even adding the separate,
+frozen, non-reusable **$15.00** authority produces an ultra-conservative
+**$75.50**, still below the user's remaining-work ceiling. The frozen authority
+cannot fund a run and is not a settlement or invoice.
+
+No paid session in the next sequence may open until provider-free tests prove
+lossless, order-preserving provider-history reconstruction across both rotation
+boundaries, including batched tool results and pre-dispatch rejection turns.
+No other provider session may be scheduled without a new dated authorization
+entry. The prior `$1,000 / $900 / $100 / $270` program ceilings are historical,
+superseded planning authority; they do not authorize current work. Auxiliary
+spend remains separate from provider/model evidence, while provider-billed cash
+spend remains unreconciled.
 
 ## Historical spend gates
 
@@ -69,7 +79,7 @@ For budget admission, `budget_charged_spend` is the sum, per settled run, of the
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-`declared_release_charged_spend + active_release_reservations + pessimistic_max_cost(proposed_run) <= $19.00`
+`next_sequence_charged_spend + active_next_sequence_reservations + pessimistic_max_cost(proposed_run) <= $19.00`
 
 Required controls:
 
@@ -80,8 +90,8 @@ Required controls:
 - reservation expiry for sessions that never open;
 - immediate reconciliation after completion, failure, cancellation, or timeout;
 - preservation of the raw provider usage payload and pricing source/version;
-- a kill switch that prevents new sessions at either the declared `$19.00`
-  release cap or the strict remaining-work ceiling; and
+- a kill switch that prevents new sessions at either the next-sequence
+  `$19.00` cap or the strict remaining-work ceiling; and
 - no automatic contingency or reserve beyond the declared release sequence.
 
 Reservation lifecycle statuses are `reserved`, `opened`, `completed`, `failed`, `cancelled`, `expired`, and `reconciled`. The signed append-only machine ledger is the source of truth; this Markdown table is a human-readable summary. Identity creation, atomic paused initialization, lineage-bound inspection, explicit resume, and explicit pause are documented in [CANARY_OPERATOR_RUNBOOK.md](CANARY_OPERATOR_RUNBOOK.md). A paid plan binds the exact signed post-resume head, and a separate exclusive one-shot anchor is consumed before reservation or the production CLI's lazy provider-credential resolution; this prevents an otherwise valid rollback of only the ledger/head/key triplet from rearming that head. The local anchor is deliberately fail-closed and may strand authority after a crash. Its parent directory, anchor directory, and anchor file remain open through commit and are revalidated by device/inode and canonical pathname before and after descriptor fsync and ledger/head publication, so observed concurrent path replacement is refused. Node does not expose portable `openat(2)`/`renameat(2)` primitives, however, and a process with the same local-user authority can still delete or rename local state after the final check. This is not a security boundary against the ledger owner or same-UID malware; defending that threat requires external monotonic or WORM-backed authority.
@@ -111,19 +121,23 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 | 2026-07-10 | Research setup and documentation | none | offline | $0.00 | $0.00 | complete | Protocol, provider, and prior-art audit |
 | 2026-07-21 | Prior usefulness canaries v1-v14 | mixed | mixed | unavailable | $6.878733 | retained runner estimates; billing unreconciled | [Historical estimate audit](HISTORICAL_ESTIMATED_SPEND_AUDIT.json) |
 | 2026-07-21 | HACC-LC3-v1 frozen schedule | OpenAI, Gemini, xAI | paired native-memory / HACC | $270.00 maximum | superseded without opening a socket | Historical planning authority; replaced by the 2026-07-28 epoch | [Protocol](HACC_LC3_PROTOCOL.md) |
-| 2026-07-28 | Remaining release work | OpenAI, Gemini, xAI | Gate D, qualification, one six-cell DEV root | $19.00 declared; `< $250.00` hard epoch ceiling | $0.00 post-baseline at entry | current epoch opened | This ledger |
+| 2026-07-28 | Remaining release work | OpenAI, Gemini, xAI | Historical Gate D, qualification, and DEV authority | $19.00 declared at epoch entry | $0.00 post-baseline at entry | historical opening authority; consumed/superseded and not reusable | This ledger |
 | 2026-07-28 | xAI finite-manual Gate D v2 | xAI | transport qualification only | $1.00 | $1.00 conservative settlement; invoice unreconciled | terminal failure after one-shot invocation claim; no receipt; root quarantined | External private evidence root; source `3d91c85103c6eab03302f714fbd59f5ac51906f3` |
 | 2026-07-28 | xAI manual-transport diagnosis | xAI | one setup-only session plus one single-generation session | $1.00 grouped diagnostic reserve | $1.00 conservative charge; invoice unreconciled | setup accepted; manual generation completed; no retry/reconnect | Sanitized event summary in [PROGRESS.md](PROGRESS.md) |
 | 2026-07-28 | xAI finite-manual Gate D v3 | xAI | transport qualification only | $1.00 | $1.00 conservative settlement; invoice unreconciled | terminal failure after one-shot invocation claim; no receipt; root quarantined | External private evidence root; source `35ba9be4544e339aca2ac58db322f88fea90f495` |
 | 2026-07-28 | xAI two-phase tool diagnosis | xAI | exact manual audio/tool/result/continuation lifecycle | $1.00 grouped diagnostic reserve | $1.00 conservative charge; invoice unreconciled | two distinct responses completed; one tool roundtrip; no retry/reconnect | Sanitized event summary in [PROGRESS.md](PROGRESS.md) |
+| 2026-07-29 | Release epoch through failed LC4 DEV v5 | OpenAI, Gemini, xAI | Cumulative Gate D, qualification, diagnostics, and immutable failed DEV roots since the `$71.00` baseline | $41.50 cumulatively charged; $0.00 active | $41.50 conservative local-ledger exposure; invoice unreconciled | v5 stopped at a local segment-rotation validation boundary; no completed comparison | [Progress checkpoint](PROGRESS.md) and [failed-attempt record](evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md) |
+| 2026-07-29 | Next fresh-source release sequence | OpenAI, Gemini, xAI | Gate D, qualification, one one-shot six-cell DEV root | $19.00 maximum; `< $250.00` hard epoch ceiling | not started; $0.00 active | blocked on offline lossless batch/rejection history gates | This ledger |
 
 - **Retained estimated provider cost before HACC-LC3: $6.878733**
 - **Provider-billed cost: unreconciled**
 - **Active reservations in terminal ledgers: $0.00; separately quarantined
   nonterminal reservation authority: $15.00 maximum**
-- **Remaining declared release sequence: $19.00 maximum**
-- **Post-baseline conservative paid-provider exposure: $4.00**
-- **Post-baseline declared aggregate maximum: $23.00**
+- **Next declared release sequence: $19.00 maximum**
+- **Post-baseline conservative paid-provider exposure: $41.50**
+- **Post-baseline maximum after the next sequence: $60.50**
+- **Ultra-conservative post-baseline maximum including frozen authority:
+  $75.50**
 - **Current remaining-work hard ceiling: strictly less than $250.00**
 - **Post-baseline paid-provider exposure at epoch entry: $0.00**
 
@@ -139,10 +153,11 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 | 2026-07-16 | Fable / Claude Code | Authentication and credential-boundary review | $0.458499 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-auth-credential-boundary-fable.md) |
 | 2026-07-16 | Fable / Claude Code | Pre-canary release-gate and paid-runner falsification review | $0.687619 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-16-precanary-release-gate-fable.md) |
 | 2026-07-21 | Fable / Claude Code | Durable long-conversation runtime architecture review | $0.495064 | Unverified peer-review input; not C1–C5 evidence | [Advisory record](../../docs/research/external/2026-07-21-durable-voice-runtime-fable.md) |
+| 2026-07-29 | Fable / Claude Code | Provider-native long-call rotation and history-hydration review | $0.57204 | Unverified advisory input; not provider spend, C1–C5 evidence, or a benchmark result | [Advisory record](../../docs/research/external/2026-07-29-lc4-rotation-fable.md) |
 
-- **Cumulative auxiliary review spend: $3.807615**
+- **Cumulative auxiliary review spend: $4.379655**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $71.00; these are pessimistic
+- **Cumulative LC4 conservative settlements: $112.50; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
@@ -338,3 +353,57 @@ cannot be retried or resumed. Its server-VAD qualification cannot authorize a
 finite-manual xAI efficacy cell; that path requires a separately budgeted,
 source/profile-bound one-shot Gate D receipt, which is transport evidence and
 not a comparative result.
+
+## 2026-07-29 — Release-epoch checkpoint and failed DEV v5 settlement
+
+The release epoch now carries **$41.50** of immutable conservative
+paid-provider exposure after the `$71.00` baseline. All terminal ledgers
+currently report **$0.00** active. This is pessimistic filesystem-reservation
+accounting; provider billing remains unreconciled.
+
+The latest retained root was the LC4 DEV v5 one-shot at source
+`12650977209760e244b7df8d551788bd3b33cddd`. Its budget terminal settled
+OpenAI Native and OpenAI HACC at their full `$2.50` maxima, cancelled the four
+unopened cells, and retained:
+
+- DEV conservative settlement: **$5.00**;
+- active reservations after terminalization: **$0.00**;
+- run:
+  `32625a9fc35f26c75e27218554e7026ae1d23f1231e8e0788c4b2bc909cf1c56`;
+- package:
+  `a1c33fe35b832cc365b751375f84b35290a0390894fd16b71bce1ec06aadbea2`;
+- budget evidence:
+  `563e90511f93a85b4665bb96f0c62e596630a34020e0a6971f887c3b67a6f6a5`;
+- budget terminal head:
+  `e5ee1a0969647aa1f594a50a3f264fc3505d1f48ce7135ab4a26742d8b0afd83`.
+
+The immutable run stored `failure_class: transport` and
+`failure_message_sha256:
+5e7b140348c37e798dbdc66d3ecad0f1f66e573b992bc3c67cee4fcf83bfe7fa`.
+That classification is retained as historical machine output but is not a
+correct diagnosis. The hash is exactly the SHA-256 of the local error
+`LC4 rotation conversation text is invalid`. The validator rejected a retained
+provider-visible tool-result turn before opening segment 2, so segment 2 made
+no provider socket, generation, or billable call. This root is a failed local
+continuity/rotation attempt, not transport or efficacy evidence.
+
+The next and only authorized paid sequence is capped at **$19.00**:
+
+| Fresh-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, post-baseline exposure would be **$60.50**. Including the
+separate frozen/non-reusable **$15.00** authority only as an
+ultra-conservative liability view yields **$75.50**. Both are below the
+strictly-less-than-`$250.00` remaining-work ceiling. The `$15.00` frozen
+authority cannot be reused to fund the fresh-source sequence.
+
+Paid rerun admission remains closed until offline gates demonstrate lossless
+provider-visible history reconstruction at both rotation boundaries,
+including batched successful tool results and pre-dispatch rejection results,
+with exact role, order, content, and hash preservation. No v5 partial result or
+score may be published.
