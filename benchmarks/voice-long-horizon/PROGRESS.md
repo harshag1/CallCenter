@@ -1268,3 +1268,63 @@ It remains incomplete and unscorable: this run contributes no Native/HACC
 cell, score, comparative claim, or launch graph. A fresh source-bound gate,
 qualification, and one-shot DEV root are required after the repair is
 committed and all provider-free gates pass.
+
+## 2026-07-29 — Two OpenAI cells completed; outer timeout obscured Gemini evidence
+
+Source `09fad06` cleared the full repository suite, claim verifier, TypeScript,
+ESLint, production build, public worktree/history audits, fresh exact-source
+ASR receipt, xAI Gate D, and three-provider qualification. Qualification
+passed the current OpenAI, Gemini, and xAI models with zero retries:
+
+| Provider/model | Qualification evidence |
+|---|---|
+| OpenAI `gpt-realtime-2.1` | passed; 150 retained wire observations |
+| Gemini `gemini-3.1-flash-live-preview` | passed; 115 retained wire observations |
+| xAI `grok-voice-think-fast-1.0` | passed; 189 retained wire observations |
+
+The strict DEV preflight authorized exactly six calls and 360 repeated
+opportunities. The one-shot run then completed OpenAI Native 60/60 and OpenAI
+HACC 60/60. Gemini HACC completed nine canonical opportunities before its
+selected repair at opportunity 10 reached the runner's outer timeout:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **130/129**;
+- generations requested/provider calls completed: **139/138**;
+- completed repair playbacks: **8**;
+- paid retries: **0**;
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+Primary failure evidence
+`4d71580defe95e7c660bda2cb19b8aff728ea8a08c366bca7e6e8caebe829a2a`
+records `timeout / provider_response_timeout / provider_wait`, Gemini HACC
+opportunity 10, repair playback, and the exact submitted repair PCM:
+**201,280 bytes**, SHA-256
+`0fc7bc34a4a79bfdb17607e66b08e55080aecc7a01bb6fd713aed613f667c676`.
+Because the runner's generic 50-second fuse won, the primary artifact has no
+adapter wire prefix or generation flags. Cleanup evidence
+`0db7a4edbf3e122c148a58500076d2d6cdeae225f7c637dd389bcd9cd997bcec`
+retains the failed segment close and the terminal wire view.
+
+The failure is a local timeout-ownership race, not admissible model evidence.
+The frozen corpus's longest paced input is **7,776.25 ms**. xAI can add a
+**5,000 ms** control/commit acknowledgement barrier, and the adapter starts
+its **45,000 ms** provider-response timer only after those earlier phases.
+The old **50,000 ms** runner fuse and budget-operation window could therefore
+preempt the adapter before it retained its sanitized diagnostic.
+
+The repair centralizes every inner deadline in one shared timeout contract.
+It preserves the 45-second provider policy and the pinned listener's
+600-second Whisper subprocess limit. The outer runner watchdog and
+budget-admission window are now 700 seconds: 8-second frozen input bound +
+5-second provider barrier + 45-second provider wait + 600-second listener ASR
++ 30-second evidence margin = a 688-second inner bound, with 12 seconds of
+emergency-fuse separation. Admission now rejects canonical, branch, or repair
+PCM exceeding the 8-second premise.
+
+The immutable partial run/report
+`15b182d759ba6977e9e6cc1682330e822486af43bef6796c708c1b43c1a07048`
+/
+`4ae66633df0d5cc5a7dc4a2bd451480696771210c8d8905de04eabe917c25b3d`
+remain incomplete and unscorable. The two completed OpenAI cells may not be
+reused across a source change and may not populate a launch graph. All six
+cells must be rerun from the repaired clean source.

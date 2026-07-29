@@ -6,6 +6,7 @@ import {
   type IndependentAsrAdapterInput,
   type IndependentAsrContract,
 } from "./audible-evidence";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
 import {
   runWhisperCppAsr,
   type WhisperCppAsrConfig,
@@ -164,7 +165,7 @@ export function createLc4DevelopmentLargeV3WhisperRuntime(
     threads: 8,
     beamSize: 5,
     bestOf: 5,
-    timeoutMs: 600_000,
+    timeoutMs: LC4_DEV_TIMEOUT_CONTRACT.listener_asr_ms,
   });
   const whisperConfigSha256 = configSha256(whisperConfig);
   const contract = createLc4DevelopmentLargeV3WhisperContract(whisperConfig);
@@ -212,4 +213,3 @@ export function createLc4DevelopmentLargeV3WhisperRuntime(
     },
   });
 }
-

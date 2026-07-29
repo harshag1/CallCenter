@@ -33,6 +33,7 @@ import {
   LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
   LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
 } from "./lc4-development-audio-contract";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 
 export const LC4_DEV_AUDIO_MATERIALIZER_ID = "HACC-LC4-DEV-AUDIO-v2" as const;
@@ -53,6 +54,27 @@ const MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-manifest/v2\n
 const REPAIR_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-audio-manifest/v2\n";
 const TOOLCHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-toolchain/v1\n";
 const RENDITION_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-rendition/v1\n";
+
+export function assertLc4DevPacedInputWithinTimeoutContract(
+  bindings: readonly Readonly<{
+    pcm_byte_length: number;
+    sample_rate_hz: 16_000 | 24_000;
+  }>[],
+): void {
+  for (const binding of bindings) {
+    const durationMs =
+      (binding.pcm_byte_length / (binding.sample_rate_hz * 2)) * 1_000;
+    if (
+      !Number.isFinite(durationMs)
+      || durationMs <= 0
+      || durationMs > LC4_DEV_TIMEOUT_CONTRACT.maximum_frozen_paced_input_ms
+    ) {
+      throw new Error(
+        "LC4-DEV paced input exceeds the emergency-watchdog audio bound",
+      );
+    }
+  }
+}
 const PREPARE_FRAGMENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-audio-prepare-fragment/v2\n";
 const BRANCH_BINDING_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-caller-branch-audio-binding-set/v1\n";
 
@@ -633,6 +655,11 @@ export function assertLc4DevAudioArtifacts(input: Readonly<{
   if (input.repairManifest.repair_sources.length !== 24 || input.repairManifest.repair_audio_bindings.length !== 72) {
     throw new Error("LC4-DEV repair audio coverage is incomplete");
   }
+  assertLc4DevPacedInputWithinTimeoutContract([
+    ...input.manifest.caller_audio_bindings,
+    ...input.manifest.caller_branch_audio_bindings,
+    ...input.repairManifest.repair_audio_bindings,
+  ]);
   for (const [providerIndex, provider] of (["openai", "gemini", "xai"] as const).entries()) {
     const offset = providerIndex * 60;
     corpus.opportunities.forEach((opportunity, index) => {

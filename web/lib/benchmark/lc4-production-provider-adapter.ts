@@ -31,6 +31,7 @@ import type {
 } from "./lc4-production-runner-foundation";
 import { createLc4ProviderExecutionProfile } from "./lc4-production-runner-foundation";
 import {
+  LC4_DEV_LIVE_TIMEOUTS,
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   type Lc4DevControlReceipt,
@@ -38,6 +39,7 @@ import {
   type Lc4DevLivePreflightArtifact,
   type Lc4DevLivePrepareArtifact,
 } from "./lc4-development-live-runner";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
 import type {
   Lc4DevCallerBranchPlaybackBinding,
   Lc4DevelopmentListenerSink,
@@ -3096,7 +3098,10 @@ export class Lc4RealtimeProviderBridge {
               completed,
               aborted.promise,
               new Promise<never>((_, reject) => {
-                responseTimer = setTimeout(() => reject(new Error("LC4 provider response timed out")), 45_000);
+                responseTimer = setTimeout(
+                  () => reject(new Error("LC4 provider response timed out")),
+                  LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms,
+                );
               }),
             ]);
           } finally {
@@ -3926,7 +3931,9 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         }>;
         caller_branch_binding?: Lc4DevCallerBranchPlaybackBinding;
       }>) => {
-        input.budget_authority.assertOperationWindow(50_000);
+        input.budget_authority.assertOperationWindow(
+          LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms,
+        );
         if (closed) throw new Error("LC4-DEV adapter session is closed");
         if (exchangeInput.playback_kind === "canonical") {
           if (pendingOpportunity !== null) throw new Error("LC4-DEV prior canonical opportunity is not finalized");

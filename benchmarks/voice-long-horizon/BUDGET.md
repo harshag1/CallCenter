@@ -632,6 +632,51 @@ Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$91.50**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.
 
+## 2026-07-29 — Source `09fad06` qualified; DEV terminalized at 129/360
+
+The exact-source Gate D and qualification at
+`09fad06eefcb7f9cba0aa8b91fd4a8cd10791511` passed. The one-shot DEV run
+completed both OpenAI cells, then terminalized during the ninth Gemini HACC
+repair request:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 129/360 opportunities completed, 0 paid retries |
+
+The DEV budget evidence/head are
+`5d070a676f6eaacb6ce9415746dae8a083229c53a16a7dab96a7190eeb7e3698`
+and
+`d2e111543ec76f29767a61c3bbb895114ef2506bfde7707d65eb1b8debbc88ec`.
+The ledger settled OpenAI Native, OpenAI HACC, and Gemini HACC at **$2.50**
+each, cancelled the remaining three reservations, and ended with **$0.00
+active**. The immutable report is
+`4ae66633df0d5cc5a7dc4a2bd451480696771210c8d8905de04eabe917c25b3d`
+(file SHA-256
+`ce3cfc004713ab754ef10ac8316e3da9c5c638d66a7118af4da2e0c4015c8dfd`).
+It is incomplete, unscorable, and ineligible for a comparative claim or graph.
+
+Current post-baseline conservative exposure is **$75.50**, and LC4
+filesystem-ledger settlements total **$146.50**, with **$0.00 active**. The
+failed root is immutable and cannot be retried.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the timeout-ownership repair, regression suite, public audits,
+and fresh exact-source ASR receipt all pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$94.50**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$109.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.
+
 ## 2026-07-29 — Source `985b3e8` qualified; DEV terminalized after one generation
 
 The exact-source Gate D and qualification at

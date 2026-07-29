@@ -12,6 +12,7 @@ import {
 } from "../audible-evidence";
 import {
   LC4_DEV_ADAPTER_BOUNDARY,
+  LC4_DEV_LIVE_TIMEOUTS,
   assertLc4DevLivePrepareArtifact,
   assertLc4DevRepairPlaybackReceiptBinding,
   createLc4DevLivePreflightArtifact,
@@ -26,6 +27,10 @@ import {
   type Lc4DevLiveRunnerDependencies,
   type Lc4DevelopmentRealtimeAdapter,
 } from "../lc4-development-live-runner";
+import {
+  LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS,
+  LC4_DEV_TIMEOUT_CONTRACT,
+} from "../lc4-development-timeout-contract";
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import {
@@ -152,6 +157,18 @@ import {
   Lc4DevFailureEvidenceError,
   createLc4DevFailureEvidence,
 } from "../lc4-development-failure-evidence";
+
+describe("LC4-DEV timeout ownership", () => {
+  it("keeps the runner fuse beyond every inner timeout owner", () => {
+    expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBeGreaterThanOrEqual(
+      LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS,
+    );
+    expect(LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS).toBe(688_000);
+    expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBe(700_000);
+    expect(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms).toBe(45_000);
+    expect(LC4_DEV_TIMEOUT_CONTRACT.listener_asr_ms).toBe(600_000);
+  });
+});
 
 const HASH = "a".repeat(64);
 const NOW = "2026-07-21T22:00:00.000Z";

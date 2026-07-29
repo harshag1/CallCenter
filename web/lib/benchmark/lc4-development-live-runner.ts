@@ -63,6 +63,7 @@ import {
   independentAsrContractSha256,
   type IndependentAsrContract,
 } from "./audible-evidence";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -77,10 +78,10 @@ export const LC4_DEV_LIVE_TOTAL_OPPORTUNITIES = 360 as const;
 export const LC4_DEV_LIVE_HARD_CEILING_MICRO_USD = 15_000_000 as const;
 export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
   segment_open_ms: 20_000,
-  // The provider adapter owns the 45 s response timer and must first retain a
-  // sanitized failure envelope. This outer fuse is deliberately later so it
-  // cannot win the race and discard the diagnostic.
-  opportunity_exchange_ms: 50_000,
+  // Emergency watchdog only. Inner components own their timeouts and retain
+  // the replayable failure evidence; see lc4-development-timeout-contract.
+  opportunity_exchange_ms:
+    LC4_DEV_TIMEOUT_CONTRACT.opportunity_emergency_watchdog_ms,
   retention_ms: 10_000,
   control_ms: 10_000,
   segment_close_ms: 10_000,

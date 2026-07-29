@@ -9,6 +9,7 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_DEV_PINNED_VOICE,
   assertLc4DevAudioArtifacts,
+  assertLc4DevPacedInputWithinTimeoutContract,
   createLc4DevCallerBranchAudioAccessor,
   createLc4DevCallerAudioLoader,
   createPinnedMacOsLc4DevAudioRenderer,
@@ -72,6 +73,16 @@ afterEach(async () => {
 });
 
 describe("LC4-DEV audio materializer", () => {
+  it("rejects audio that can invalidate the shared exchange watchdog", () => {
+    expect(() => assertLc4DevPacedInputWithinTimeoutContract([
+      { pcm_byte_length: 256_000, sample_rate_hz: 16_000 },
+      { pcm_byte_length: 384_000, sample_rate_hz: 24_000 },
+    ])).not.toThrow();
+    expect(() => assertLc4DevPacedInputWithinTimeoutContract([
+      { pcm_byte_length: 256_002, sample_rate_hz: 16_000 },
+    ])).toThrow("paced input exceeds");
+  });
+
   it("publishes exact immutable masters plus canonical, closed-loop branch, and repair bindings", async () => {
     const parent = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-audio-"));
     roots.push(parent);

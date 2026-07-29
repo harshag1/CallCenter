@@ -1003,3 +1003,76 @@ The failed-run report is
 It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and `efficacy_claim_eligible: false`.
 Nothing from this root may populate a comparative graph.
+
+## 2026-07-29 DEV terminal at source `09fad06`
+
+**Failed closed after 129/360 completed opportunities. No efficacy score is
+admissible.**
+
+The source-bound xAI Gate D and three-provider qualification both passed:
+
+- Gate D receipt/file:
+  `b3e0195daeea3177106db8ed64367feda14c503d01ad67c5da2680030cfd8298`
+  /
+  `e53d9aaaed04ba6bfdeef8ba7bf8b7137cbe3a7c2e1279f543feb3c705dfcadfe`;
+- qualification terminal artifact/body/file:
+  `0bc9eb17a7c44ff4102d8580f371d7f390def526d22292857c4622f23c3415a7`
+  /
+  `7ff9ff8be343f4157e872757c9af01afd29de122e65751675a43991002239c06`
+  /
+  `3f72db3f3e3341d646cebebd4c4a73caffcad066c68c6b8ba3c07a643acb4179`;
+- qualification budget evidence/head:
+  `5c7b29953f3c9f22fd300abfa83d1e05545b338c95b46ebcd9f0ba0eadfcbbe1`
+  /
+  `cfcf868bb500b31b43eb1d633cdfbeee3ef42e0adb0e3f042fe1acbeb4ffa74b`;
+- provider sessions/paid sessions/generation phases/tool roundtrips:
+  **6/3/6/3**;
+- retries: **0**; settlement/active: **$3.00 / $0.00**.
+
+The one-shot DEV root terminalized while executing Gemini HACC opportunity 10:
+
+- run/package:
+  `15b182d759ba6977e9e6cc1682330e822486af43bef6796c708c1b43c1a07048`
+  /
+  `fbdf2e7b66911db29af9d83f3e5ca62c38105c02641f5330d0344ed8a5d88e1a`;
+- primary failure evidence:
+  `4d71580defe95e7c660bda2cb19b8aff728ea8a08c366bca7e6e8caebe829a2a`;
+- failure class/code/stage:
+  `timeout` / `provider_response_timeout` / `provider_wait`;
+- playback:
+  Gemini HACC opportunity 10 repair, **201,280 PCM bytes**, SHA-256
+  `0fc7bc34a4a79bfdb17607e66b08e55080aecc7a01bb6fd713aed613f667c676`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **130/129**;
+- generations requested/provider calls completed: **139/138**;
+- completed repair playbacks: **8**;
+- paid retries: **0**;
+- DEV settlement/active: **$7.50 / $0.00**.
+
+OpenAI Native and OpenAI HACC each completed 60/60 opportunities. Those cells
+remain trapped inside an incomplete source-bound run and cannot be mixed with
+a later rerun.
+
+The outer error commitment
+`771cde19f703fc5d227cb5e843f6853e2d8d2702234cd20041ffdfc8cc1e32c7`
+resolves to `LC4-DEV exchange failed: provider_response_timeout`. The primary
+failure has zero wire observations and false generation flags because the
+runner's 50-second `Promise.race` rejected first. The adapter's own 45-second
+timer begins only after real-time audio delivery; the submitted Gemini repair
+alone takes **6,290 ms** to pace. The adapter could not own that timeout before
+approximately 51.29 seconds, even before its listener/evidence handoff.
+
+The full frozen audio set confirms a **7,776.25 ms** maximum paced input. The
+repaired source centralizes the timeout contract, preserves the 45-second
+provider response policy and 600-second listener ASR timeout, and moves the
+outer runner/budget watchdog to **700 seconds**. Its explicit inner bound is
+8 + 5 + 45 + 600 + 30 = **688 seconds**. Audio admission rejects any future
+canonical, branch, or repair binding above the 8-second premise.
+
+The failed-run report is
+`4ae66633df0d5cc5a7dc4a2bd451480696771210c8d8905de04eabe917c25b3d`
+(file SHA-256
+`ce3cfc004713ab754ef10ac8316e3da9c5c638d66a7118af4da2e0c4015c8dfd`).
+It is incomplete, evidence-incomplete, task-result unavailable, and
+efficacy-claim ineligible. Nothing from this root may populate a comparative
+graph.

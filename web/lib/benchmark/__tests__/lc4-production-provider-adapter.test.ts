@@ -27,7 +27,10 @@ import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   type Lc4DevGatewayExecutor,
 } from "../lc4-development-gateway-bridge";
-import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import {
+  type Lc4DevLiveEpisodePlan,
+} from "../lc4-development-live-runner";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "../lc4-development-timeout-contract";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
 import {
   Lc4DevFailureEvidenceError,
@@ -2122,7 +2125,7 @@ describe("LC4 production realtime adapter bridge", () => {
         caller_pcm: fixture.caller_pcm,
         response_control: { kind: "hacc_response_plan", plan: responsePlan() },
       }));
-      await vi.advanceTimersByTimeAsync(45_000);
+      await vi.advanceTimersByTimeAsync(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms);
       const error = await pending;
       expect(error.failure).toMatchObject({
         failure_stage: "provider_wait",
