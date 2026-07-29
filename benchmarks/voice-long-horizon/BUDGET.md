@@ -594,3 +594,40 @@ Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$87.50**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve, and every provider session remains subject
 to signed authority and pessimistic reservation.
+
+## 2026-07-29 — Source `6dc5a65` qualified; DEV preflight refused locally
+
+The exact-source Gate D and qualification at
+`6dc5a6568237e2f429e18008dd52d39df867b7c9` both passed:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$0.00** | not authorized; provider-free preflight refused the retained qualification before writing authorization, budget lease, or ledger |
+
+The refusal exposed a local verifier disagreement: the DEV loader counted an
+exact provider-native historical assistant-item acknowledgement as live
+pre-tool output. No DEV provider boundary was crossed. The prepared-only DEV
+root has no `authorization.json`, `preflight.json`, `budget-run-lease.json`,
+`ledger.jsonl`, or `run.json`.
+
+Current post-baseline conservative exposure is **$57.50**, and LC4
+filesystem-ledger settlements total **$128.50**, with **$0.00 active**. The
+qualification remains valid evidence for its immutable source but cannot be
+reused after a source change.
+
+One further **$19.00 maximum** sequence is preregistered only for the new clean
+source after full provider-free validation:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$76.50**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$91.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.

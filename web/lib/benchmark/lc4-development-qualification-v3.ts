@@ -146,6 +146,13 @@ export function lc4DevProjectionContainsAssistantOutput(
   const projected = projection as Readonly<Record<string, unknown>>;
   if (projected.audio !== undefined) return true;
   if (projected.text === undefined) return false;
+  // Provider-native history hydration deliberately replays caller-heard user
+  // and assistant messages before the first live turn. Those acknowledgements
+  // carry both a typed `conversationHistoryItem` commitment and the ordinary
+  // redacted text projection. Exclude only the exact, hash/byte-matched history
+  // shape; malformed, mixed, or altered projections remain possible live
+  // assistant output and therefore fail closed below.
+  if (lc4DevProjectionIsExactConversationHistoryMessage(projected)) return false;
   // Gemini and OpenAI-compatible transports encode caller transcription with
   // different redacted kinds. Exempt only their exact caller-side shapes;
   // mixed, malformed, and unknown text remains possible assistant output.
@@ -159,6 +166,39 @@ export function lc4DevProjectionContainsAssistantOutput(
         || (wireType.startsWith("conversation.item.input_audio_transcription.")
           && (entry as Readonly<Record<string, unknown>>).kind === "transcript"))
     ));
+}
+
+function lc4DevProjectionIsExactConversationHistoryMessage(
+  projected: Readonly<Record<string, unknown>>,
+): boolean {
+  const history = projected.conversationHistoryItem;
+  if (!history || typeof history !== "object" || Array.isArray(history)) return false;
+  const item = history as Readonly<Record<string, unknown>>;
+  const expected = item.kind === "user_message"
+    && item.role === "user"
+    && item.contentType === "input_text"
+    ? "input_text"
+    : item.kind === "assistant_message"
+      && item.role === "assistant"
+      && item.contentType === "output_text"
+      ? "output_text"
+      : null;
+  if (expected === null
+    || typeof item.contentSha256 !== "string"
+    || !HASH.test(item.contentSha256)
+    || !Number.isSafeInteger(item.contentBytes)
+    || (item.contentBytes as number) < 0
+    || !Array.isArray(projected.text)
+    || projected.text.length !== 1) {
+    return false;
+  }
+  const text = projected.text[0];
+  return text !== null
+    && typeof text === "object"
+    && !Array.isArray(text)
+    && (text as Readonly<Record<string, unknown>>).kind === expected
+    && (text as Readonly<Record<string, unknown>>).sha256 === item.contentSha256
+    && (text as Readonly<Record<string, unknown>>).byteLength === item.contentBytes;
 }
 
 export function lc4DevPreToolOutputIsExactlyQuarantined(input: Readonly<{

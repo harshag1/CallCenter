@@ -1170,3 +1170,42 @@ Focused provider-free validation is **141/141**. The failed qualification root
 is immutable and unscored. The next paid sequence remains blocked until this
 repair, updated ledgers, full validation, public audits, and a fresh
 exact-source ASR receipt are committed together.
+
+## 2026-07-29 — Three-provider qualification passed; strict DEV loader caught history replay
+
+Source `6dc5a65` cleared all offline gates, public audits, the fresh ASR receipt,
+xAI Gate D, and three-provider qualification. The qualification retained:
+
+| Provider/model | Result | History and spoken roundtrip |
+|---|---|---|
+| OpenAI `gpt-realtime-2.1` | passed | exact four-item provider-native history plus spoken gateway roundtrip |
+| Gemini `gemini-3.1-flash-live-preview` | passed | ordered initial history plus spoken gateway roundtrip |
+| xAI `grok-voice-think-fast-1.0` | passed | acknowledged history plus spoken gateway roundtrip |
+
+All three executions replay-verified with zero retries. The qualification
+terminal artifact is
+`ddd1e92caef9fbe51039f068c2640ae3a2230a675f824f564e4bddde0eac25d9`.
+
+DEV preparation then succeeded, but provider-free preflight refused before
+authorization because the retained loader treated OpenAI's exact seeded
+historical assistant-message acknowledgement as unquarantined live pre-tool
+output. Retained wire proves the projection was an `item_hacc_…`
+`conversationHistoryItem` with exact output-text hash and byte length. The
+first live response contained a function call; caller-playable output began
+only in the post-tool continuation.
+
+The repair excludes only an exact message-history projection when:
+
+- the typed history kind, role, and content type agree;
+- the redacted text kind agrees; and
+- SHA-256 plus UTF-8 byte length match exactly.
+
+Audio, changed hashes or lengths, extra text entries, malformed history kinds,
+and all unknown shapes remain fail-closed. The original retained qualification
+now passes the strict DEV loader offline, and the focused verifier/operator
+suite is **38/38**.
+
+No DEV authorization, budget lease, ledger, provider call, score, or graph was
+created. Because the repair changes source, Gate D and qualification must be
+regenerated; the passing `6dc5a65` receipt will not be reused to authorize the
+new source.

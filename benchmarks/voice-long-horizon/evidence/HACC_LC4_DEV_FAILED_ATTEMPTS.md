@@ -818,6 +818,56 @@ integrity replay passed, but the attempt is not a fully replay-verified
 three-provider qualification. It contributes no Native/HACC result cell,
 comparative score, model-superiority claim, or launch graph.
 
+## 2026-07-29 DEV preflight refusal after qualification at `6dc5a65`
+
+**Three-provider qualification passed, but DEV was never authorized or run. No
+efficacy score is admissible.**
+
+The source-bound xAI Gate D passed with receipt
+`f41a7cce16efbb1376e66eed710fae961bac3520339c957f2eeec9aa03b419af`.
+The subsequent qualification passed OpenAI, Gemini, and xAI with:
+
+- terminal artifact:
+  `ddd1e92caef9fbe51039f068c2640ae3a2230a675f824f564e4bddde0eac25d9`;
+- terminal file SHA-256:
+  `0f058ef30fb5b6229a549cd949856c425190e55d7eaf1357d79f6c8a8bd4ab6f`;
+- budget evidence/head:
+  `88fecf03562c431940a12bcf7f1d524fa6567e6d77f47cfb0a59c7f6c7cdda18`
+  /
+  `04498cac292c12d78d918a688d5178a294d43009d0a555ce1dfafebd5eff052f`;
+- payload root:
+  `8d8b3c9787e53d664ffaf8d696d787d0bd2d65761eaab9f069508d0925e5d40b`;
+- replay artifact/head:
+  `452fd2f7b8e352bcce20b9297e7109b1b07000940b78c1661b3e6c8177d9a995`
+  /
+  `92df4e7b5e9e3dd264efa1962b35dd0f25088d2239b30a588152437c923a2c02`;
+- provider sessions/paid sessions/generation phases/tool roundtrips:
+  **6/3/6/3**;
+- paid retries: **0**;
+- conservative qualification settlement/active: **$3.00 / $0.00**.
+
+DEV wrote only `operator-intent.json` and `prepare.json` under the fresh
+evidence root. Preflight then failed locally with
+`LC4-DEV qualification v3 openai emitted unquarantined output before its
+required tool call`. It wrote no authorization, preflight, budget lease,
+ledger, terminal run, or package and opened no DEV provider session.
+
+The refusal was a verifier bug, not live pre-tool speech. Before the live tool
+call, the OpenAI wire included the frozen provider-native history probe's
+assistant message. Its redacted projection carried both:
+
+- an exact `conversationHistoryItem` typed as `assistant_message`; and
+- the matching `output_text` SHA-256 and UTF-8 byte length.
+
+The loader counted that historical acknowledgement as possible model output.
+The repair recognizes only exact hash/byte-matched hydrated user/assistant
+message shapes. It still treats audio, mismatches, extra text, malformed
+history, and unknown shapes as possible assistant output.
+
+This prepared-only root is not a failed efficacy episode and contributes no
+Native/HACC cell, score, comparison, or launch graph. The passing qualification
+is immutable source evidence but cannot authorize a changed source.
+
 ## 2026-07-29 qualification v3 at `f44aeb9`
 
 **Failed closed. DEV was not authorized and no efficacy score is admissible.**

@@ -138,6 +138,25 @@ describe("LC4-DEV retained roundtrip log cardinality", () => {
 });
 
 describe("LC4-DEV pre-tool assistant-output detection", () => {
+  const historyMessage = (
+    role: "user" | "assistant",
+    sha256: string,
+    byteLength: number,
+  ) => ({
+    conversationHistoryItem: {
+      kind: role === "user" ? "user_message" : "assistant_message",
+      role,
+      contentType: role === "user" ? "input_text" : "output_text",
+      contentSha256: sha256,
+      contentBytes: byteLength,
+    },
+    text: [{
+      kind: role === "user" ? "input_text" : "output_text",
+      sha256,
+      byteLength,
+    }],
+  });
+
   it("does not confuse Gemini caller input transcription with assistant speech", () => {
     expect(lc4DevProjectionContainsAssistantOutput({
       text: [{
@@ -154,6 +173,55 @@ describe("LC4-DEV pre-tool assistant-output detection", () => {
         sha256: "5".repeat(64),
       }],
     }, "conversation.item.input_audio_transcription.completed")).toBe(false);
+  });
+
+  it("does not confuse exact provider-native history acknowledgements with live assistant output", () => {
+    expect(lc4DevProjectionContainsAssistantOutput(
+      historyMessage("user", "6".repeat(64), 52),
+      "conversation.item.added",
+    )).toBe(false);
+    expect(lc4DevProjectionContainsAssistantOutput(
+      historyMessage("assistant", "7".repeat(64), 33),
+      "conversation.item.done",
+    )).toBe(false);
+  });
+
+  it("fails closed on altered, mixed, malformed, or audible history projections", () => {
+    const exact = historyMessage("assistant", "8".repeat(64), 33);
+    for (const projection of [
+      {
+        ...exact,
+        text: [{ kind: "output_text", sha256: "9".repeat(64), byteLength: 33 }],
+      },
+      {
+        ...exact,
+        text: [
+          ...exact.text,
+          { kind: "output_text", sha256: "a".repeat(64), byteLength: 1 },
+        ],
+      },
+      {
+        ...exact,
+        conversationHistoryItem: {
+          ...exact.conversationHistoryItem,
+          kind: "invalid_history_message",
+        },
+      },
+      {
+        ...exact,
+        conversationHistoryItem: {
+          ...exact.conversationHistoryItem,
+          contentSha256: "not-a-sha256",
+        },
+        text: [{ kind: "output_text", sha256: "not-a-sha256", byteLength: 33 }],
+      },
+      {
+        ...exact,
+        audio: { direction: "output" },
+      },
+    ]) {
+      expect(lc4DevProjectionContainsAssistantOutput(projection)).toBe(true);
+    }
   });
 
   it("fails closed on output, mixed, unknown, malformed, or audio projections", () => {
