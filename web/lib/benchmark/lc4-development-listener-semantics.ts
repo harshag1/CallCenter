@@ -624,6 +624,33 @@ function plannedSemanticSubject(input: Readonly<{
 }
 
 /**
+ * Returns the chronological call turn for one criterion-bound semantic
+ * subject. Opportunity 42 has five branch-qualified registry subjects, but
+ * each remains conversation turn 42. Looking up the canonical ID directly in
+ * the branch-expanded semantic plan would produce index -1 (and therefore
+ * turn 0), while using the registry index would incorrectly shift every later
+ * call turn by the four additional branch subjects.
+ */
+export function lc4DevelopmentListenerCanonicalTurn(input: Readonly<{
+  bundle?: Lc4DevelopmentListenerSemanticBundle;
+  canonical_opportunity_id: string;
+  criterion_plan_sha256: string;
+}>): number {
+  const bundle = input.bundle ?? LC4_DEV_LISTENER_SEMANTIC_BUNDLE;
+  plannedSemanticSubject({
+    bundle,
+    canonical_opportunity_id: input.canonical_opportunity_id,
+    criterion_plan_sha256: input.criterion_plan_sha256,
+  });
+  const match = /^lc4-dev-op-(\d{2})$/u.exec(input.canonical_opportunity_id);
+  const turn = match === null ? 0 : Number(match[1]);
+  if (!Number.isSafeInteger(turn) || turn < 1 || turn > 60) {
+    throw new Error("LC4-DEV semantic evaluator canonical opportunity has no chronological turn");
+  }
+  return turn;
+}
+
+/**
  * Pure, deterministic replay boundary. It accepts no provider, arm, flow, or
  * episode label. False semantic results remain evidence; missing, detached, or
  * ambiguous evidence throws and therefore cannot be counted as a pass.
@@ -895,7 +922,11 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         unitId: `listener-${evaluationInput.opportunity_id}`,
         responseId: `listener-${evaluationInput.opportunity_id}`,
         blindObservationId: observationNonce,
-        turn: bundle.plan.opportunities.findIndex((opportunity) => opportunity.opportunity_id === evaluationInput.opportunity_id) + 1,
+        turn: lc4DevelopmentListenerCanonicalTurn({
+          bundle,
+          canonical_opportunity_id: evaluationInput.opportunity_id,
+          criterion_plan_sha256: planned.criterion_plan_sha256,
+        }),
         audioArtifactPath: `listener/${sourcePcmSha256}.pcm`,
         asrInvocation: invocation,
         contract: input.asr_contract,

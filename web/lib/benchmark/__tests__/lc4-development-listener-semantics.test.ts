@@ -17,6 +17,7 @@ import {
   assertLc4DevelopmentListenerSemanticBundle,
   createLc4DevelopmentListenerSemanticBundle,
   lc4DevelopmentAsrBlindNonceSha256,
+  lc4DevelopmentListenerCanonicalTurn,
   lc4DevelopmentListenerCriterionBindings,
   replayLc4DevelopmentListenerObservation,
   type Lc4DevelopmentListenerSemanticBundle,
@@ -196,6 +197,30 @@ describe("LC4 public development listener semantics", () => {
       lc4DevCallerBranchSemanticSubjectId("settled_success"),
     );
     expect(reportedOutcomeOnly.final_required_criteria_pass).toBe(false);
+  });
+
+  it("binds all five opportunity-42 semantic subjects to chronological turn 42", () => {
+    const bindings = lc4DevelopmentListenerCriterionBindings().filter(
+      (binding) => binding.canonical_opportunity_id === "lc4-dev-op-42",
+    );
+    expect(bindings).toHaveLength(5);
+    expect(bindings.map((binding) =>
+      lc4DevelopmentListenerCanonicalTurn({
+        canonical_opportunity_id: binding.canonical_opportunity_id,
+        criterion_plan_sha256: binding.criterion_plan_sha256,
+      }))).toEqual([42, 42, 42, 42, 42]);
+
+    const opportunity50 = lc4DevelopmentListenerCriterionBindings().find(
+      (binding) => binding.canonical_opportunity_id === "lc4-dev-op-50",
+    )!;
+    expect(lc4DevelopmentListenerCanonicalTurn({
+      canonical_opportunity_id: opportunity50.canonical_opportunity_id,
+      criterion_plan_sha256: opportunity50.criterion_plan_sha256,
+    })).toBe(50);
+    expect(() => lc4DevelopmentListenerCanonicalTurn({
+      canonical_opportunity_id: "lc4-dev-op-41",
+      criterion_plan_sha256: bindings[0]!.criterion_plan_sha256,
+    })).toThrow(/canonical opportunity and branch subject mismatch/u);
   });
 
   it("rejects opportunity-42 branch and semantic-subject mutation offline", () => {
