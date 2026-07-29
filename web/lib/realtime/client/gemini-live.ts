@@ -1592,6 +1592,13 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   private currentResponseId: string | null = null;
   private responseStarted = false;
   private responseFinished = false;
+  private completedResponseTerminal: Readonly<{
+    responseId: string;
+    connectionEpoch: number;
+    inputTurn: number;
+    status: RealtimeResponseTerminalStatus;
+    reason?: string;
+  }> | null = null;
   private currentResponseInterrupted = false;
   private inputTranscript = new TranscriptAssembler();
   private outputTranscript = new TranscriptAssembler();
@@ -1769,6 +1776,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.currentResponseId = null;
     this.responseStarted = false;
     this.responseFinished = false;
+    this.completedResponseTerminal = null;
     const epoch = ++this.connectionEpoch;
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
@@ -2482,6 +2490,84 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     const modelTurn = isRecord(content.modelTurn) ? content.modelTurn : undefined;
     const parts = modelTurn && Array.isArray(modelTurn.parts) ? modelTurn.parts : [];
 
+    if (this.responseFinished
+      && this.currentResponseId !== null
+      && this.generationTrigger?.phase === "terminal") {
+      // Gemini documents transcription as independently delivered from the
+      // model turn. The service can also deliver terminal bookkeeping after
+      // turnComplete. Neither is a new response, and attempting to start one
+      // would manufacture an invalid_provider_message failure without a new
+      // client-side generation trigger.
+      if (isRecord(content.inputTranscription)) {
+        this.handleTranscript("input", content.inputTranscription);
+      }
+      if (isRecord(content.interimInputTranscription)) {
+        this.handleTranscript("input", content.interimInputTranscription);
+      }
+      if (isRecord(content.outputTranscription)) {
+        this.handleTranscript("output", content.outputTranscription);
+      }
+
+      const containsLateAudio = parts.some((part) => (
+        isRecord(part) && isRecord(part.inlineData)
+      ));
+      if (parts.length > 0) {
+        this.failActiveConnection(
+          binding,
+          new Error(
+            containsLateAudio
+              ? "Gemini returned output audio after the response terminal"
+              : "Gemini returned model content after the response terminal",
+          ),
+          containsLateAudio ? "output_audio_after_terminal" : "model_content_after_terminal",
+        );
+        return;
+      }
+
+      const terminal = this.completedResponseTerminal;
+      const lateReason =
+        typeof content.turnCompleteReason === "string" ? content.turnCompleteReason : undefined;
+      const lateRejected = lateReason === "RESPONSE_REJECTED"
+        || lateReason === "MALFORMED_FUNCTION_CALL"
+        || Boolean(lateReason?.includes("PROHIBITED"));
+      const terminalConflict = terminal === null
+        || terminal.responseId !== this.currentResponseId
+        || terminal.connectionEpoch !== this.connectionEpoch
+        || terminal.inputTurn !== this.inputTurn
+        || (content.interrupted === true && terminal.status !== "interrupted")
+        || (content.generationComplete === true && terminal.status === "interrupted")
+        || (lateRejected && terminal.status !== "failed")
+        || (terminal.reason !== undefined
+          && lateReason !== undefined
+          && terminal.reason !== lateReason);
+      if (terminalConflict) {
+        this.failActiveConnection(
+          binding,
+          new Error("Gemini returned conflicting metadata after the response terminal"),
+          "conflicting_post_terminal_metadata",
+        );
+        return;
+      }
+
+      if (content.generationComplete === true
+        || content.turnComplete === true
+        || content.interrupted === true
+        || content.waitingForInput === true) {
+        this.emit({
+          type: "provider.event",
+          data: {
+            name: "response.post_terminal_metadata",
+            responseId: this.currentResponseId,
+            generationComplete: content.generationComplete === true,
+            turnComplete: content.turnComplete === true,
+            interrupted: content.interrupted === true,
+            waitingForInput: content.waitingForInput === true,
+          },
+        }, "serverContent");
+      }
+      return;
+    }
+
     const hasTerminalSignal = content.generationComplete === true
       || content.turnComplete === true
       || content.interrupted === true;
@@ -2671,6 +2757,14 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
 
   private handleToolCalls(binding: ConnectionBinding, toolCall: Record<string, unknown>) {
     if (!this.isCurrentConnection(binding) || this.clientState !== "ready") return;
+    if (this.responseFinished && this.generationTrigger?.phase === "terminal") {
+      this.failActiveConnection(
+        binding,
+        new Error("Gemini returned a function call after the response terminal"),
+        "tool_call_after_terminal",
+      );
+      return;
+    }
     if (!Array.isArray(toolCall.functionCalls) || toolCall.functionCalls.length === 0) return;
     if (toolCall.functionCalls.length > MAX_FUNCTION_CALLS_PER_BATCH) {
       this.failActiveConnection(
@@ -3045,6 +3139,14 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   }
 
   private handleToolCancellation(binding: ConnectionBinding, cancellation: Record<string, unknown>) {
+    if (this.responseFinished && this.generationTrigger?.phase === "terminal") {
+      this.failActiveConnection(
+        binding,
+        new Error("Gemini returned a tool cancellation after the response terminal"),
+        "tool_cancellation_after_terminal",
+      );
+      return;
+    }
     if (!Array.isArray(cancellation.ids)
       || cancellation.ids.length === 0
       || cancellation.ids.length > MAX_FUNCTION_CALLS_PER_BATCH) {
@@ -3199,6 +3301,13 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
   ) {
     if (!this.currentResponseId || this.responseFinished) return;
     this.responseFinished = true;
+    this.completedResponseTerminal = Object.freeze({
+      responseId: this.currentResponseId,
+      connectionEpoch: this.connectionEpoch,
+      inputTurn: this.inputTurn,
+      status,
+      ...(reason ? { reason } : {}),
+    });
     if (this.generationTrigger) {
       this.generationTrigger = Object.freeze({ ...this.generationTrigger, phase: "terminal" });
     }
@@ -3244,6 +3353,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       this.currentResponseId = localResponseId;
       this.responseStarted = false;
       this.responseFinished = false;
+      this.completedResponseTerminal = null;
       this.currentResponseInterrupted = false;
       this.generationTrigger = Object.freeze({
         ...active,
@@ -3262,6 +3372,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     this.currentResponseId = localResponseId;
     this.responseStarted = false;
     this.responseFinished = false;
+    this.completedResponseTerminal = null;
     this.currentResponseInterrupted = false;
     this.generationTrigger = Object.freeze({
       localResponseId,

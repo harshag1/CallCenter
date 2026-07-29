@@ -1076,3 +1076,93 @@ The failed-run report is
 It is incomplete, evidence-incomplete, task-result unavailable, and
 efficacy-claim ineligible. Nothing from this root may populate a comparative
 graph.
+
+## 2026-07-29 DEV terminal at source `35adfec`
+
+**Failed closed after 139/360 completed opportunities. No efficacy score is
+admissible.**
+
+The source-bound release gates passed first:
+
+- xAI Gate D receipt/trust:
+  `d1c01125d052e19565aadb93c30223fadd9cb9c003438a68b995faadecdc4922`
+  /
+  `9fc01779a4209ed1744ff2e91af2f4e37cc1991617e97da83380763421617ec7`;
+- qualification terminal artifact/body:
+  `359e023c736985ceff9f6fda0eafc847c8de6a79f2b2937ee3fb9da8a84b1b7b`
+  /
+  `caa7bbe5d30e952a71532e2644e05e2cf5a362190e1d4a92e77354a2d8b73e03`;
+- qualification trust:
+  `762611659a1893a77799acb04fae6bea955a31e67a6f4e8a0fb6c1ef023be842`;
+- qualification provider sessions/paid sessions/generation phases/tool
+  roundtrips: **6/3/6/3**;
+- qualification retries/settlement/active: **0 / $3.00 / $0.00**.
+
+The DEV execution root
+`/private/tmp/hacc-lc4-dev-release-20260729T221746Z` retained:
+
+- run/package:
+  `d136124af3cd31254f554bb906293c11c619667706a9e3bbf53a6833114c31ed`
+  /
+  `0e03c600c27c1e9bf407311f84b5096fc0319c258c495b009b697685763c1cbc`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **140/139**;
+- generations requested/completed: **149/148**;
+- provider calls/completed repairs: **149/9**;
+- paid retries: **0**;
+- DEV settlement/active: **$7.50 / $0.00**.
+
+Both OpenAI cells completed 60/60. Gemini HACC completed opportunity 19 and
+then failed during opportunity 20's canonical playback. Those partial cells
+remain trapped in this source-bound failed root and cannot be mixed with a
+later run.
+
+Primary failure evidence
+`b9de06a49860494a418b696ca64cac27561a1e02cf615e531c3383a5770c64c6`
+records:
+
+- `provider_external / provider_fatal / provider_wait`;
+- caller PCM: **85,828 bytes**, SHA-256
+  `9709f3e0a52c062d8e3e1b87c2ebeb155703efefe6a7591895c0ca832d438231`,
+  all **135/135** chunks delivered;
+- response generation requested and started;
+- a normalized response terminal observed;
+- assistant PCM: **2,274,242 bytes** across **160** chunks, SHA-256
+  `651d88c398b718f305c316a1c0c346c6394804d203382851c7d04f786f045c34`;
+- final wire observation
+  `41d350abc37bf96debff0344cb094e8452663acb32c9891308e8340c5119b0d5`;
+  and
+- final wire type commitment
+  `2ef871697891e67d2f02f30ee665f9a0670a06eebe922df0bf65678f108c4a2d`,
+  which resolves to `serverContent`, not a provider error union.
+
+Cleanup evidence
+`aedbc51fbd89b0b541b97884b69e5f2299a88f16abebdb16a64dfdb41355f43d`
+is secondary to that primary failure. The terminal budget evidence/head are
+`19ecc9a6bc005c78064bc93a53ffdae91e55174d6a6d4978e8984d10e134b15a`
+/
+`bbe75024a8fe7761e6291a98174e63299a2484ad902499c5ff2e481ac7bba0a0`.
+
+The raw provider frame is intentionally not retained, so its precise fields
+cannot be reconstructed. The proven client lifecycle explains the failure
+class: after `completeResponse()` moved the generation trigger to `terminal`,
+a later terminal-bearing `serverContent` attempted
+`ensureResponseStarted()`, which rejected the absence of a new local trigger
+and surfaced as `invalid_provider_message`. This is strongly consistent with
+post-terminal provider bookkeeping and is not evidence of missing model
+output or a provider error frame.
+
+The repair accepts only consistent post-terminal metadata and independently
+ordered transcription on the existing response identity. It rejects
+post-terminal model content, PCM, tool calls, tool cancellation, and
+contradictory status before any side effect. Focused Gemini/publication tests
+pass **61/61**; the complete suite passes **3,290** tests across **301** files,
+with the remaining environment-qualified skips source-inventoried.
+
+The failed-run report is
+`75e215a26be1eb139d098dbd81847bfb92629a883a0097aaccf2f761fec19c1b`
+(file SHA-256
+`5ba47c9f3df0bb8a8ecb2674655e20a55a2918f6512bef56243c567cd4019e62`).
+It reports `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and `efficacy_claim_eligible: false`.
+Nothing from this root may populate a comparative score or graph.

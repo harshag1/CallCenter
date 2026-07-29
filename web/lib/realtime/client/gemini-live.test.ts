@@ -1619,6 +1619,147 @@ describe("GeminiLiveClient", () => {
     expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
   });
 
+  it("retains late terminal bookkeeping without inventing a second Gemini response", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      serverContent: {
+        modelTurn: { parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=24000" } }] },
+        turnComplete: true,
+      },
+    });
+    test.socket.receive({
+      serverContent: {
+        outputTranscription: { text: "late final transcript", finished: true },
+        generationComplete: true,
+        turnComplete: true,
+        waitingForInput: true,
+      },
+      usageMetadata: { promptTokenCount: 10, responseTokenCount: 4, totalTokenCount: 14 },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("ready");
+    expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
+    expect(test.events.filter((event) => event.type === "response.completed")).toHaveLength(1);
+    const responseId = test.events.find(
+      (event) => event.type === "response.completed",
+    )?.responseId;
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "output.transcript",
+      text: "late final transcript",
+      phase: "final",
+      responseId,
+    }));
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "usage",
+      scope: "response",
+      responseId,
+      usage: expect.objectContaining({ totalTokens: 14 }),
+    }));
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "provider.event",
+      data: {
+        name: "response.post_terminal_metadata",
+        responseId,
+        generationComplete: true,
+        turnComplete: true,
+        interrupted: false,
+        waitingForInput: true,
+      },
+    }));
+    expect(test.events.some(
+      (event) => event.type === "error" && event.code === "invalid_provider_message",
+    )).toBe(false);
+  });
+
+  it("fails closed on Gemini PCM delivered after the response terminal", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    test.socket.receive({
+      serverContent: {
+        modelTurn: { parts: [{ inlineData: { data: "AQA=", mimeType: "audio/pcm;rate=24000" } }] },
+      },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("failed");
+    expect(test.events.filter((event) => event.type === "response.completed")).toHaveLength(1);
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "output_audio_after_terminal",
+      fatal: true,
+    }));
+  });
+
+  it("rejects post-terminal Gemini tool activity before replay or execution", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    const sentBeforeLateCall = test.socket.sent.length;
+    test.socket.receive({
+      toolCall: {
+        functionCalls: [{
+          id: "late-call",
+          name: GEMINI_CAPABILITY_GATEWAY_NAME,
+          args: {},
+        }],
+      },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("failed");
+    expect(test.socket.sent).toHaveLength(sentBeforeLateCall);
+    expect(test.events.some(
+      (event) => event.type === "tool.calls" || event.type === "tool.dispatch",
+    )).toBe(false);
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "tool_call_after_terminal",
+      fatal: true,
+    }));
+  });
+
+  it("fails closed on Gemini model content delivered after the response terminal", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    test.socket.receive({
+      serverContent: {
+        modelTurn: { parts: [{ text: "late provider content" }] },
+      },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("failed");
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "model_content_after_terminal",
+      fatal: true,
+    }));
+  });
+
+  it("fails closed on conflicting Gemini metadata after the response terminal", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    test.socket.receive({ serverContent: { interrupted: true, turnComplete: true } });
+    await settle();
+
+    expect(test.client.state).toBe("failed");
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "conflicting_post_terminal_metadata",
+      fatal: true,
+    }));
+  });
+
   it("reports cumulative transcript corrections without concatenating the rejected hypothesis", async () => {
     const test = harness();
     await connectReady(test);

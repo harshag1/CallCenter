@@ -1328,3 +1328,65 @@ The immutable partial run/report
 remain incomplete and unscorable. The two completed OpenAI cells may not be
 reused across a source change and may not populate a launch graph. All six
 cells must be rerun from the repaired clean source.
+
+## 2026-07-29 — Gemini post-terminal bookkeeping isolated from audible output
+
+Source `35adfec77659501340dfe9b603b045a9981ee50b` cleared the full repository
+suite, claim verifier, build, public audits, fresh ASR receipt, xAI Gate D, and
+three-provider qualification. Its DEV root passed the previous Gemini repair
+timeout boundary, completed both OpenAI arms, and completed 19 Gemini HACC
+opportunities before opportunity 20 terminalized:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **140/139**;
+- generations requested/completed: **149/148**;
+- completed repairs: **9**;
+- paid retries: **0**;
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+Primary evidence
+`b9de06a49860494a418b696ca64cac27561a1e02cf615e531c3383a5770c64c6`
+retains Gemini HACC opportunity 20's complete caller delivery, normalized
+response terminal, and **2,274,242** captured assistant PCM bytes across
+**160** chunks, SHA-256
+`651d88c398b718f305c316a1c0c346c6394804d203382851c7d04f786f045c34`.
+The final observed wire union was `serverContent`, not a provider error frame.
+The normalized client then emitted a fatal error, so the adapter correctly
+refused to call the exchange complete.
+
+The retained redaction boundary does not preserve the provider's raw late
+frame, so its exact fields are not claimed. The lifecycle is strongly
+consistent with a repeated post-terminal Gemini bookkeeping frame: after
+`completeResponse()` marked the local generation trigger terminal, any later
+`generationComplete`, `turnComplete`, or `interrupted` signal previously
+called `ensureResponseStarted()` and became the generic fatal
+`invalid_provider_message`.
+
+The repair adds an explicit, identity-bound post-terminal metadata path:
+
+- independently ordered input/output transcription and consistent duplicate
+  terminal bookkeeping stay bound to the completed response;
+- no second response lifecycle event is emitted;
+- contradictory terminal state fails closed;
+- any late model content, PCM, tool call, or tool cancellation fails before
+  normalized output, execution, or cached replay; and
+- a new local generation trigger closes the late-metadata window.
+
+It also repairs the three public publication entrypoints that Node 24/tsx
+could not transform because of top-level await, with a CommonJS-transform
+regression test.
+
+Provider-free validation on the final repair is **301 test files / 3,290
+tests passed**, with **27 suites / 85 tests** explicitly inventoried as
+environment-qualified skips. ESLint and TypeScript pass. The Gate 0 source
+manifest now binds **330** source/configuration files under SHA-256
+`e0c7c242541e9b0150dc73ce4e0ecc4a435beda05f3c2112ffe9779b26c67629`.
+
+The immutable failed run/report
+`d136124af3cd31254f554bb906293c11c619667706a9e3bbf53a6833114c31ed`
+/
+`75e215a26be1eb139d098dbd81847bfb92629a883a0097aaccf2f761fec19c1b`
+remain incomplete and unscorable. No completed cell, comparison, or launch
+graph may be reused from that root. A new clean commit, public audits,
+exact-source ASR receipt, Gate D, qualification, and all six DEV cells are
+required.
