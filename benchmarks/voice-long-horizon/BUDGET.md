@@ -2,20 +2,37 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-- Authorized absolute ceiling: **$1,000.00 USD**
-- Maximum automatically schedulable spend: **$900.00 USD**
-- Protected contingency reserve: **$100.00 USD**
-- Current operational ceiling: **$270.00 USD**
+- Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
+  $250.00 USD**
+- Current declared release sequence: **$19.00 USD maximum** (`$1` Gate D +
+  `$3` qualification + `$15` six-cell DEV)
+- Post-baseline paid-provider exposure: **$0.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$55.50 USD**
+- LC4 conservative filesystem-ledger settlements: **$71.00 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$3.807615 USD**
 - Recorded total program cash spend: **unreconciled**
 
-The authorization is a ceiling, not a target. No new provider session may be scheduled once cumulative provider spend plus active reservations reaches $900. The final $100 is protected against metering lag, in-flight overrun, reconciliation, or an explicitly approved and documented contingency; the runner must never consume it automatically. Auxiliary spend is excluded from provider/model evidence accounting but still counts toward the user's $1,000 total cash authorization when reserve use is considered.
+The 2026-07-28 authorization is a new remaining-work epoch, not a reset of the
+historical ledger and not a spending target. The epoch baseline is the
+**$71.00** conservative settlement plus the separate, non-reusable **$15.00
+maximum** quarantined authority recorded below. Admission requires
 
-## Spend gates
+`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
+
+The current release plan imposes the much smaller **$19.00** group cap. No
+provider session may be scheduled outside the declared Gate D, qualification,
+and one-shot six-cell roots without a new dated authorization entry. The prior
+`$1,000 / $900 / $100 / $270` program ceilings are historical, superseded
+planning authority; they do not authorize current work. Auxiliary spend remains
+separate from provider/model evidence, while provider-billed cash spend remains
+unreconciled.
+
+## Historical spend gates
+
+The table below records the earlier program design. It is retained for audit
+history and is superseded by the current remaining-work epoch above.
 
 | Gate | Purpose | Maximum automatically schedulable cumulative spend | Release condition |
 |---|---|---:|---|
@@ -45,9 +62,11 @@ The $15 ceiling is aggregate. Smokes run sequentially with a $5 pessimistic rese
 
 ## Fail-closed reservation rule
 
-For budget admission, `budget_charged_spend` is the sum, per settled run, of the largest currently known post-run estimate, provider-reported amount, or reconciled amount. Before opening any paid session, an atomic reservation must satisfy:
+For budget admission, `budget_charged_spend` is the sum, per settled run, of the largest currently known post-run estimate, provider-reported amount, or reconciled amount. Before opening any paid session in the current epoch, an atomic reservation must satisfy both:
 
-`budget_charged_spend + active_atomic_reservations + pessimistic_max_cost(proposed_run) <= min(current_operational_ceiling, $900)`
+`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
+
+`declared_release_charged_spend + active_release_reservations + pessimistic_max_cost(proposed_run) <= $19.00`
 
 Required controls:
 
@@ -58,8 +77,9 @@ Required controls:
 - reservation expiry for sessions that never open;
 - immediate reconciliation after completion, failure, cancellation, or timeout;
 - preservation of the raw provider usage payload and pricing source/version;
-- a kill switch that prevents new sessions at either the operational or $900 scheduling ceiling;
-- an absolute hard stop at $1,000, including active reservations.
+- a kill switch that prevents new sessions at either the declared `$19.00`
+  release cap or the strict remaining-work ceiling; and
+- no automatic contingency or reserve beyond the declared release sequence.
 
 Reservation lifecycle statuses are `reserved`, `opened`, `completed`, `failed`, `cancelled`, `expired`, and `reconciled`. The signed append-only machine ledger is the source of truth; this Markdown table is a human-readable summary. Identity creation, atomic paused initialization, lineage-bound inspection, explicit resume, and explicit pause are documented in [CANARY_OPERATOR_RUNBOOK.md](CANARY_OPERATOR_RUNBOOK.md). A paid plan binds the exact signed post-resume head, and a separate exclusive one-shot anchor is consumed before reservation or the production CLI's lazy provider-credential resolution; this prevents an otherwise valid rollback of only the ledger/head/key triplet from rearming that head. The local anchor is deliberately fail-closed and may strand authority after a crash. Its parent directory, anchor directory, and anchor file remain open through commit and are revalidated by device/inode and canonical pathname before and after descriptor fsync and ledger/head publication, so observed concurrent path replacement is refused. Node does not expose portable `openat(2)`/`renameat(2)` primitives, however, and a process with the same local-user authority can still delete or rename local state after the final check. This is not a security boundary against the ledger owner or same-UID malware; defending that threat requires external monotonic or WORM-backed authority.
 
@@ -87,15 +107,16 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 |---|---|---|---|---:|---:|---|---|
 | 2026-07-10 | Research setup and documentation | none | offline | $0.00 | $0.00 | complete | Protocol, provider, and prior-art audit |
 | 2026-07-21 | Prior usefulness canaries v1-v14 | mixed | mixed | unavailable | $6.878733 | retained runner estimates; billing unreconciled | [Historical estimate audit](HISTORICAL_ESTIMATED_SPEND_AUDIT.json) |
-| 2026-07-21 | HACC-LC3-v1 frozen schedule | OpenAI, Gemini, xAI | paired native-memory / HACC | $270.00 maximum | pending | operational ceiling released; no HACC-LC3 socket opened at entry time | [Protocol](HACC_LC3_PROTOCOL.md) |
+| 2026-07-21 | HACC-LC3-v1 frozen schedule | OpenAI, Gemini, xAI | paired native-memory / HACC | $270.00 maximum | superseded without opening a socket | Historical planning authority; replaced by the 2026-07-28 epoch | [Protocol](HACC_LC3_PROTOCOL.md) |
+| 2026-07-28 | Remaining release work | OpenAI, Gemini, xAI | Gate D, qualification, one six-cell DEV root | $19.00 declared; `< $250.00` hard epoch ceiling | $0.00 post-baseline at entry | current; no new provider call at entry | This ledger |
 
 - **Retained estimated provider cost before HACC-LC3: $6.878733**
 - **Provider-billed cost: unreconciled**
 - **Active reservations in terminal ledgers: $0.00; separately quarantined
   nonterminal reservation authority: $15.00 maximum**
-- **Remaining HACC-LC3 reservation authority under current operational ceiling: $270.00 before sockets**
-- **Remaining automatically schedulable: $900.00**
-- **Protected reserve: $100.00**
+- **Current declared release sequence: $19.00 maximum**
+- **Current remaining-work hard ceiling: strictly less than $250.00**
+- **Post-baseline paid-provider exposure at epoch entry: $0.00**
 
 ### Auxiliary research ledger
 
@@ -112,11 +133,14 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $3.807615**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $55.50; these are pessimistic
+- **Cumulative LC4 conservative settlements: $71.00; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
-Changing the operational ceiling requires a dated ledger entry linking the exact release evidence, source commit, test/artifact IDs, and any unresolved accounting uncertainty. Spending the protected reserve additionally requires a prior entry in [DEVIATIONS.md](DEVIATIONS.md).
+Changing the current epoch or declared `$19.00` release sequence requires a
+dated ledger entry linking the exact release evidence, source commit,
+test/artifact IDs, and any unresolved accounting uncertainty. There is no
+automatic reserve in the current epoch.
 
 ## 2026-07-28 — LC4 qualification and failed DEV-run settlement
 
@@ -261,3 +285,47 @@ validate the current uncommitted remediation or authorize a retry. The failed
 root is immutable and nonpublishable; the next paid attempt requires a new
 source commit, qualification, evidence root, keys, authorization, and complete
 one-shot run.
+
+## 2026-07-28 — `f75d1d2` qualification and xAI VAD-liveness settlement
+
+The exact-source qualification at
+`f75d1d2eeb36c3f1ddf9cafa7819a78f4fce370e` passed OpenAI
+`gpt-realtime-2.1`, Gemini `gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0`. It used three paid calls, six provider sessions,
+six generation phases, three tool round trips, zero retries, and
+conservatively settled **$3.00**. The xAI call covered the retained server-VAD
+transport, not the later finite-manual efficacy transport or Gate D. Its
+terminal artifact, budget evidence, and terminal budget head are
+`6850c02e10938ccf3a99ff29a08dd4813870ca09f2d9f66c1dc7e6c6045c7587`,
+`10364ff4c0903d3658d2afc467baa07810edb6138dc379d6362f1004677194d5`,
+and
+`2e50d6a13de0c293d1de48c3b324e34b5b7b9e7eabee31d816b4436a97481b00`.
+
+The following one-shot DEV run completed both OpenAI arms and both Gemini arms,
+then completed eight xAI Native turns before xAI Native opportunity 9 failed
+closed. It submitted 249 canonical opportunities, completed 248, completed
+16/16 registered repairs, made 264 completed provider calls, used zero paid
+retries, and never opened xAI HACC. The ledger conservatively settled
+**$12.50**, cancelled the unopened xAI HACC reservation, and has **$0.00**
+active.
+
+| Run | Conservative settlement | Active reservations after terminal | Status | Evidence |
+|---|---:|---:|---|---|
+| LC4 qualification v3 | $3.00 | $0.00 | passed; exact source/tree; three providers; zero retries | budget evidence `10364ff4c0903d3658d2afc467baa07810edb6138dc379d6362f1004677194d5`; terminal head `2e50d6a13de0c293d1de48c3b324e34b5b7b9e7eabee31d816b4436a97481b00` |
+| LC4 six-episode DEV attempt | $12.50 | $0.00 | failed after five episodes started/four completed; xAI Native opportunity 9 server-VAD liveness stall; zero retries | budget evidence `9ccf17639c355402fbbd19cc2b9ebd1bafe7231ab193c1712ea0dbac7d9589b4`; terminal head `d7f48980a0a2e25ea668ce33ea40347de89e7686fbce30b654af958e45906122` |
+
+The DEV run and package are bound by
+`d98b0d6e1b009dde600f37986904f082b9e52dab098a935420c191d537aa880a`
+and
+`5d2ecd3f17f8474db4ec400ca5b9f3101bed290059a4f3a0ecefcb3df4570de3`.
+These two roots add **$15.50** to the previous **$55.50**, producing the
+**$71.00** cumulative conservative settlement above. The separate `4e47774`
+**$15.00 maximum** quarantined nonterminal authority remains outside that
+total and is not reusable. These are pessimistic local reservations, not
+provider invoices.
+
+No partial score or graph is admissible. The failed root is immutable and
+cannot be retried or resumed. Its server-VAD qualification cannot authorize a
+finite-manual xAI efficacy cell; that path requires a separately budgeted,
+source/profile-bound one-shot Gate D receipt, which is transport evidence and
+not a comparative result.

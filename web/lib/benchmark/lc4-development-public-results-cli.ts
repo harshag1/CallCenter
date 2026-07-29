@@ -3,7 +3,6 @@ import {
   LC4_DEV_PUBLIC_RESULT_FILENAMES,
   publishLc4DevPublicResult,
   verifyLc4DevPublicResult,
-  type Lc4DevPublicResultDependencies,
 } from "./lc4-development-public-results";
 
 type Io = Readonly<{
@@ -37,17 +36,31 @@ export async function runLc4DevPublicResultCli(
     stdout: (value) => process.stdout.write(`${value}\n`),
     stderr: (value) => process.stderr.write(`${value}\n`),
   },
-  dependencies: Lc4DevPublicResultDependencies = {},
 ): Promise<number> {
   try {
     const command = args[0];
     const parsed = flags(args.slice(1));
     if (command === "publish") {
-      exact(parsed, ["--evidence-root", "--output-root"]);
+      exact(parsed, [
+        "--evidence-root",
+        "--output-root",
+        "--authority-trust-root-sha256",
+        "--gate-d-receipt",
+        "--gate-d-invocation-marker",
+        "--gate-d-trust-root-sha256",
+      ]);
       const result = await publishLc4DevPublicResult({
         evidence_root: parsed["--evidence-root"]!,
         output_root: parsed["--output-root"]!,
-        dependencies,
+        authority_trust_root_sha256:
+          parsed["--authority-trust-root-sha256"]!,
+        xai_finite_manual_gate_d: {
+          receipt_path: parsed["--gate-d-receipt"]!,
+          invocation_marker_path:
+            parsed["--gate-d-invocation-marker"]!,
+          plan_trust_root_sha256:
+            parsed["--gate-d-trust-root-sha256"]!,
+        },
       });
       io.stdout(canonicalJson({
         valid: true,
@@ -55,18 +68,36 @@ export async function runLc4DevPublicResultCli(
         evidence_class: result.evidence_class,
         efficacy_claim_eligible: result.efficacy_claim_eligible,
         public_result_sha256: result.public_result_sha256,
+        authority_trust_root_sha256:
+          result.qualification.listener_authority_trust_root_sha256,
         files: LC4_DEV_PUBLIC_RESULT_FILENAMES,
         provider_calls_made: false,
       }));
       return 0;
     }
     if (command === "verify") {
-      exact(parsed, ["--evidence-root", "--public-json", "--public-markdown"]);
+      exact(parsed, [
+        "--evidence-root",
+        "--public-json",
+        "--public-markdown",
+        "--authority-trust-root-sha256",
+        "--gate-d-receipt",
+        "--gate-d-invocation-marker",
+        "--gate-d-trust-root-sha256",
+      ]);
       const result = await verifyLc4DevPublicResult({
         evidence_root: parsed["--evidence-root"]!,
         public_json: parsed["--public-json"]!,
         public_markdown: parsed["--public-markdown"]!,
-        dependencies,
+        authority_trust_root_sha256:
+          parsed["--authority-trust-root-sha256"]!,
+        xai_finite_manual_gate_d: {
+          receipt_path: parsed["--gate-d-receipt"]!,
+          invocation_marker_path:
+            parsed["--gate-d-invocation-marker"]!,
+          plan_trust_root_sha256:
+            parsed["--gate-d-trust-root-sha256"]!,
+        },
       });
       io.stdout(canonicalJson({
         valid: true,
@@ -74,6 +105,8 @@ export async function runLc4DevPublicResultCli(
         evidence_class: result.evidence_class,
         efficacy_claim_eligible: result.efficacy_claim_eligible,
         public_result_sha256: result.public_result_sha256,
+        authority_trust_root_sha256:
+          result.qualification.listener_authority_trust_root_sha256,
         provider_calls_made: false,
       }));
       return 0;
@@ -84,4 +117,3 @@ export async function runLc4DevPublicResultCli(
     return 1;
   }
 }
-

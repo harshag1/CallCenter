@@ -217,7 +217,7 @@ CREATE OR REPLACE FUNCTION public.append_voice_worker_event(
   event_payload_text text,
   event_payload_sha256 text
 ) RETURNS public.voice_worker_events
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $append_voice_worker_event$
 DECLARE
   job public.voice_worker_jobs%ROWTYPE;
@@ -308,7 +308,7 @@ CREATE OR REPLACE FUNCTION public.spawn_voice_worker_job(
   source_call_identity uuid DEFAULT NULL,
   parent_worker_identity uuid DEFAULT NULL
 ) RETURNS public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $spawn_voice_worker_job$
 DECLARE
   conversation public.voice_conversations%ROWTYPE;
@@ -453,7 +453,7 @@ $spawn_voice_worker_job$;
 
 CREATE OR REPLACE FUNCTION public.claim_voice_worker_job(owner_identity uuid, lease_milliseconds integer)
 RETURNS SETOF public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $claim_voice_worker_job$
 DECLARE
   candidate public.voice_worker_jobs%ROWTYPE;
@@ -522,7 +522,7 @@ $heartbeat_voice_worker_job$;
 CREATE OR REPLACE FUNCTION public.mark_voice_worker_dispatch_started(
   worker_identity uuid, owner_identity uuid
 ) RETURNS public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $mark_voice_worker_dispatch_started$
 DECLARE job public.voice_worker_jobs%ROWTYPE; payload text;
 BEGIN
@@ -543,7 +543,7 @@ $mark_voice_worker_dispatch_started$;
 CREATE OR REPLACE FUNCTION public.checkpoint_voice_worker_job(
   worker_identity uuid, owner_identity uuid, checkpoint_text text, checkpoint_digest text
 ) RETURNS public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $checkpoint_voice_worker_job$
 DECLARE job public.voice_worker_jobs%ROWTYPE; payload text;
 BEGIN
@@ -578,7 +578,7 @@ CREATE OR REPLACE FUNCTION public.request_voice_worker_cancellation(
   worker_identity uuid, organization_identity uuid
 )
 RETURNS public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $cancel_voice_worker_job$
 DECLARE job public.voice_worker_jobs%ROWTYPE; payload text;
 BEGIN
@@ -599,7 +599,7 @@ CREATE OR REPLACE FUNCTION public.settle_voice_worker_job(
   worker_identity uuid, owner_identity uuid, terminal_status text,
   result_text text DEFAULT NULL, result_digest text DEFAULT NULL, error_text text DEFAULT NULL
 ) RETURNS public.voice_worker_jobs
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $settle_voice_worker_job$
 DECLARE job public.voice_worker_jobs%ROWTYPE; payload text; terminal_event public.voice_worker_events%ROWTYPE;
 BEGIN
@@ -792,6 +792,32 @@ REVOKE ALL ON FUNCTION public.request_voice_worker_cancellation(uuid,uuid) FROM 
 REVOKE ALL ON FUNCTION public.settle_voice_worker_job(uuid,uuid,text,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_voice_conversation_inbox(uuid,uuid,uuid,integer,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.apply_voice_conversation_inbox(uuid,uuid,uuid,uuid) FROM PUBLIC;
+
+-- Migration 013 grants future public-schema functions to hacc_backend by
+-- default. Remove that broad inherited ACL before adding the exact worker /
+-- coordinator capability split below.
+DO $voice_worker_function_revokes$
+DECLARE runtime_role text;
+BEGIN
+  FOREACH runtime_role IN ARRAY ARRAY[
+    'anon','authenticated','service_role','hacc_backend','hacc_worker'
+  ] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname=runtime_role) THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION public.append_voice_worker_event(uuid,text,text,text) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.ensure_voice_conversation(uuid,uuid,uuid,integer,uuid) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.spawn_voice_worker_job(uuid,uuid,text,text,text,text,text,text,text,text,uuid,uuid) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.claim_voice_worker_job(uuid,integer) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.heartbeat_voice_worker_job(uuid,uuid,integer) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.mark_voice_worker_dispatch_started(uuid,uuid) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.checkpoint_voice_worker_job(uuid,uuid,text,text) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.request_voice_worker_cancellation(uuid,uuid) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.settle_voice_worker_job(uuid,uuid,text,text,text,text) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.claim_voice_conversation_inbox(uuid,uuid,uuid,integer,integer) FROM %I',runtime_role);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.apply_voice_conversation_inbox(uuid,uuid,uuid,uuid) FROM %I',runtime_role);
+    END IF;
+  END LOOP;
+END
+$voice_worker_function_revokes$;
 
 -- Migration 013 normally provisions these NOLOGIN capability roles. Conditional
 -- grants keep a schema-only/bootstrap installation reapplicable; operators must

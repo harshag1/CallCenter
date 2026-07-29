@@ -7,7 +7,10 @@ import {
   type Lc4PublicDevelopmentCorpus,
   type Lc4PublicDevOpportunity,
 } from "./lc4-public-development-corpus";
-import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
+import {
+  LC4_PROVIDER_PROFILE_MANIFEST,
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+} from "./lc4-provider-profiles";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import type { HaccResponsePlan } from "./response-plan";
 import type {
@@ -24,14 +27,23 @@ import {
   type Lc4DevFailureEvidence,
 } from "./lc4-development-failure-evidence";
 import {
+  LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
   assertLc4DevRetainedQualificationReceipt,
   type Lc4DevRetainedQualificationReceipt,
 } from "./lc4-development-qualification-v3";
+import {
+  assertLc4XaiFiniteManualGateDReceipt,
+  type Lc4XaiFiniteManualGateDReceipt,
+} from "./lc4-xai.manual-qualification";
 import type {
   Lc4DevExchangeEvidence,
   Lc4DevelopmentRealtimeAdapter,
 } from "./lc4-development-realtime-contract";
-import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-playback";
+import type {
+  Lc4DevRepairPlayback,
+  Lc4DevRepairPlaybackController,
+  Lc4DevRepairPlaybackReceipt,
+} from "./lc4-development-repair-playback";
 import {
   LC4_DEV_BRANCH_OPPORTUNITY_ID,
   assertLc4DevCallerBranchDecision,
@@ -45,6 +57,12 @@ import {
   LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
   LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
 } from "./lc4-development-audio-contract";
+import { createLc4ProviderExecutionProfile } from "./lc4-production-runner-foundation";
+import { assertLc4ProviderExchangeReplayProjection } from "./lc4-provider-exchange-replay";
+import {
+  independentAsrContractSha256,
+  type IndependentAsrContract,
+} from "./audible-evidence";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -52,7 +70,7 @@ export type {
   Lc4DevelopmentRealtimeSession,
 } from "./lc4-development-realtime-contract";
 
-export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v2" as const;
+export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v3" as const;
 export const LC4_DEV_LIVE_EPISODES = 6 as const;
 export const LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE = 60 as const;
 export const LC4_DEV_LIVE_TOTAL_OPPORTUNITIES = 360 as const;
@@ -71,10 +89,10 @@ export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
 const HASH = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
-const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v2\n";
-const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v2\n";
-const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v2\n";
-const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v2\n";
+const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v3\n";
+const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v4\n";
+const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v4\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v4\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
@@ -97,6 +115,81 @@ function requireHash(value: string, label: string): void {
 
 function requireId(value: string, label: string): void {
   if (!SAFE_ID.test(value)) throw new Error(`${label} must be a safe opaque identifier`);
+}
+
+const ASR_RUNNER_TRUST_KEYS = Object.freeze([
+  "key_id",
+  "public_key_fingerprint_sha256",
+  "public_key_spki_base64",
+  "signature_algorithm",
+] as const);
+
+export type Lc4DevAsrRunnerTrust = Readonly<{
+  key_id: string;
+  public_key_spki_base64: string;
+  public_key_fingerprint_sha256: string;
+  signature_algorithm: "Ed25519";
+}>;
+
+/**
+ * Validates the external ASR runner trust root without relying on any key
+ * identity carried by an invocation receipt. The canonical DER SPKI is the
+ * fingerprint preimage and is sufficient for independent Ed25519 replay.
+ */
+export function assertLc4DevAsrRunnerTrust(
+  value: unknown,
+): asserts value is Lc4DevAsrRunnerTrust {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("LC4-DEV ASR runner trust must be one object");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (canonicalJson(Object.keys(candidate).sort())
+    !== canonicalJson([...ASR_RUNNER_TRUST_KEYS].sort())) {
+    throw new Error("LC4-DEV ASR runner trust has missing or unknown fields");
+  }
+  if (typeof candidate.key_id !== "string"
+    || !SAFE_ID.test(candidate.key_id)) {
+    throw new Error("LC4-DEV ASR runner key ID must be one safe identifier");
+  }
+  if (candidate.signature_algorithm !== "Ed25519") {
+    throw new Error("LC4-DEV ASR runner trust must use Ed25519");
+  }
+  if (typeof candidate.public_key_fingerprint_sha256 !== "string"
+    || !HASH.test(candidate.public_key_fingerprint_sha256)) {
+    throw new Error(
+      "LC4-DEV ASR runner public-key fingerprint must be one lowercase SHA-256",
+    );
+  }
+  if (typeof candidate.public_key_spki_base64 !== "string"
+    || candidate.public_key_spki_base64.length < 40
+    || candidate.public_key_spki_base64.length > 1_024) {
+    throw new Error("LC4-DEV ASR runner SPKI must be one bounded base64 value");
+  }
+  const der = Buffer.from(candidate.public_key_spki_base64, "base64");
+  if (der.byteLength < 32
+    || der.byteLength > 512
+    || der.toString("base64") !== candidate.public_key_spki_base64) {
+    throw new Error("LC4-DEV ASR runner SPKI must be canonical bounded base64");
+  }
+  let publicKey;
+  try {
+    publicKey = createPublicKey({ key: der, format: "der", type: "spki" });
+  } catch {
+    throw new Error("LC4-DEV ASR runner SPKI is invalid");
+  }
+  if (publicKey.asymmetricKeyType !== "ed25519"
+    || sha256Hex(der) !== candidate.public_key_fingerprint_sha256) {
+    throw new Error(
+      "LC4-DEV ASR runner SPKI is not the pinned Ed25519 trust root",
+    );
+  }
+}
+
+export function createLc4DevAsrRunnerTrust(
+  value: Lc4DevAsrRunnerTrust,
+): Lc4DevAsrRunnerTrust {
+  assertLc4DevAsrRunnerTrust(value);
+  return freeze({ ...value });
 }
 
 function assertIso(value: string, label: string): void {
@@ -126,8 +219,14 @@ export type Lc4DevLiveEpisodePlan = Readonly<{
   opportunity_binding_set_sha256: string;
 }>;
 
+export type Lc4DevXaiFiniteManualQualificationBinding = Readonly<{
+  receipt_sha256: string;
+  plan_authority_trust_root_sha256: string;
+  transport_profile_sha256: string;
+}>;
+
 export type Lc4DevLivePrepareArtifact = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   runner_version: typeof LC4_DEV_LIVE_RUNNER_VERSION;
   protocol_id: "HACC-LC4-DEV-v1";
   execution_id: string;
@@ -136,6 +235,11 @@ export type Lc4DevLivePrepareArtifact = Readonly<{
   source_tree_sha256: string;
   corpus_sha256: string;
   provider_profile_manifest_sha256: string;
+  qualification_transport_scope_sha256: string;
+  qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified";
+  xai_finite_manual_transport_qualification:
+    "receipt_bound_pending_preflight_replay";
+  xai_finite_manual_gate_d: Lc4DevXaiFiniteManualQualificationBinding;
   audio_delivery_profile_sha256: string;
   audio_packetizer_contract_sha256: string;
   audio_execution_contract_sha256: string;
@@ -163,12 +267,25 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
   audio_bindings: readonly Lc4DevCallerAudioBinding[];
   maximum_total_micro_usd?: number;
   corpus?: Lc4PublicDevelopmentCorpus;
+  xai_finite_manual_gate_d: Lc4DevXaiFiniteManualQualificationBinding;
 }>): Lc4DevLivePrepareArtifact {
   requireId(input.execution_id, "LC4-DEV execution ID");
   assertIso(input.created_at, "LC4-DEV prepare time");
   if (!COMMIT.test(input.source_commit)) throw new Error("LC4-DEV source commit must be a full Git SHA-1");
   requireHash(input.source_tree_sha256, "LC4-DEV source tree");
   requireHash(input.audio_manifest_sha256, "LC4-DEV audio manifest");
+  requireHash(
+    input.xai_finite_manual_gate_d.receipt_sha256,
+    "LC4-DEV xAI finite-manual Gate D receipt",
+  );
+  requireHash(
+    input.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
+    "LC4-DEV xAI finite-manual Gate D plan authority",
+  );
+  if (input.xai_finite_manual_gate_d.transport_profile_sha256
+    !== LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256) {
+    throw new Error("LC4-DEV xAI finite-manual Gate D uses a stale transport profile");
+  }
   const corpus = input.corpus ?? createLc4PublicDevelopmentCorpus();
   assertLc4PublicDevelopmentCorpus(corpus);
   const maximum = input.maximum_total_micro_usd ?? LC4_DEV_LIVE_HARD_CEILING_MICRO_USD;
@@ -226,7 +343,7 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     throw new Error("LC4-DEV episode reservations exceed the execution ceiling");
   }
   const body = {
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     runner_version: LC4_DEV_LIVE_RUNNER_VERSION,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     execution_id: input.execution_id,
@@ -235,6 +352,13 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     source_tree_sha256: input.source_tree_sha256,
     corpus_sha256: corpus.artifact_sha256,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    qualification_transport_scope_sha256: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
+    qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified" as const,
+    xai_finite_manual_transport_qualification:
+      "receipt_bound_pending_preflight_replay" as const,
+    xai_finite_manual_gate_d: Object.freeze({
+      ...input.xai_finite_manual_gate_d,
+    }),
     audio_delivery_profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
     audio_packetizer_contract_sha256: LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
     audio_execution_contract_sha256: LC4_DEV_AUDIO_EXECUTION_CONTRACT_SHA256,
@@ -255,7 +379,7 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
 }
 
 export type Lc4DevLivePreflightArtifact = Readonly<{
-  schema_version: 2;
+  schema_version: 4;
   execution_id: string;
   checked_at: string;
   prepare_sha256: string;
@@ -268,14 +392,25 @@ export type Lc4DevLivePreflightArtifact = Readonly<{
   runtime_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
+  asr_contract: IndependentAsrContract;
+  asr_contract_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
   provider_profile_manifest_sha256: string;
+  qualification_transport_scope_sha256: string;
+  qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified";
   audio_delivery_profile_sha256: string;
   audio_packetizer_contract_sha256: string;
   audio_execution_contract_sha256: string;
   immutable_ledger_genesis_sha256: string;
   adapter_contract: "lc4-development-realtime-v1";
   adapter_boundary: "dev_factory_unlocked_confirmatory_factory_still_frozen";
-  all_six_episodes_qualified: true;
+  qualification_scope_verified: true;
+  all_episode_transports_qualified: true;
+  xai_finite_manual_transport_qualification: "verified";
+  xai_finite_manual_gate_d_receipt_sha256: string;
+  xai_finite_manual_gate_d_transport_profile_sha256: string;
+  xai_finite_manual_gate_d_claim_boundary:
+    "transport_qualification_only_not_efficacy_evidence";
   budget_verified: true;
   audio_verified: true;
   provider_calls_authorized: true;
@@ -285,12 +420,13 @@ export type Lc4DevLivePreflightArtifact = Readonly<{
   authority_trust_root_sha256: string;
   authorization: Lc4DevLiveAuthorizationArtifact;
   qualification: Lc4DevRetainedQualificationReceipt;
+  xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   authorization_verified: true;
   preflight_sha256: string;
 }>;
 
 export type Lc4DevLiveAuthorizationBody = Readonly<{
-  schema_version: 2;
+  schema_version: 4;
   protocol_id: "HACC-LC4-DEV-v1";
   purpose: "six_public_development_episodes_only";
   execution_id: string;
@@ -305,7 +441,15 @@ export type Lc4DevLiveAuthorizationBody = Readonly<{
   runtime_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
+  asr_contract: IndependentAsrContract;
+  asr_contract_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
   provider_profile_manifest_sha256: string;
+  qualification_transport_scope_sha256: string;
+  qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified";
+  xai_finite_manual_gate_d_receipt_sha256: string;
+  xai_finite_manual_gate_d_plan_authority_trust_root_sha256: string;
+  xai_finite_manual_gate_d_transport_profile_sha256: string;
   audio_delivery_profile_sha256: string;
   audio_packetizer_contract_sha256: string;
   audio_execution_contract_sha256: string;
@@ -345,6 +489,7 @@ function verifyDevAuthorization(input: Readonly<{
   expected_authority_public_key_fingerprint_sha256: string;
   prepare: Lc4DevLivePrepareArtifact;
   qualification: Lc4DevRetainedQualificationReceipt;
+  xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   checked_at: string;
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
@@ -352,10 +497,21 @@ function verifyDevAuthorization(input: Readonly<{
   runtime_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
+  asr_contract: IndependentAsrContract;
+  asr_contract_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
   immutable_ledger_genesis_sha256: string;
 }>): void {
-  const { artifact, prepare, qualification } = input;
+  const { artifact, prepare, qualification, xai_finite_manual_gate_d: gateD } = input;
   assertLc4DevRetainedQualificationReceipt(qualification);
+  assertLc4XaiFiniteManualGateDReceipt(gateD, {
+    expected_plan_trust_root_sha256:
+      prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
+    expected_source_commit: prepare.source_commit,
+    expected_source_tree_sha256: prepare.source_tree_sha256,
+    expected_provider_profile_manifest_sha256:
+      prepare.provider_profile_manifest_sha256,
+  });
   const body = artifact.body;
   for (const [label, digest] of Object.entries({
     expected_authority_public_key_fingerprint_sha256: input.expected_authority_public_key_fingerprint_sha256,
@@ -363,19 +519,31 @@ function verifyDevAuthorization(input: Readonly<{
     qualification_terminal_root_sha256: qualification.terminal_root_sha256,
     qualification_retained_artifact_sha256: qualification.retained_artifact_sha256,
   })) requireHash(digest, label);
-  if (body.schema_version !== 2 || body.protocol_id !== "HACC-LC4-DEV-v1" || body.purpose !== "six_public_development_episodes_only") {
+  assertLc4DevAsrRunnerTrust(input.asr_runner_trust);
+  assertLc4DevAsrRunnerTrust(body.asr_runner_trust);
+  if (independentAsrContractSha256(input.asr_contract)
+      !== input.asr_contract_sha256
+    || independentAsrContractSha256(body.asr_contract)
+      !== body.asr_contract_sha256) {
+    throw new Error("LC4-DEV ASR contract differs from its canonical digest");
+  }
+  if (body.schema_version !== 4 || body.protocol_id !== "HACC-LC4-DEV-v1" || body.purpose !== "six_public_development_episodes_only") {
     throw new Error("LC4-DEV authorization has the wrong protocol or purpose");
   }
   assertIso(body.not_before, "LC4-DEV authorization start");
   assertIso(body.expires_at, "LC4-DEV authorization expiry");
   const checked = Date.parse(input.checked_at);
   if (checked < Date.parse(body.not_before) || checked >= Date.parse(body.expires_at)) throw new Error("LC4-DEV authorization is not active");
-  if (qualification.schema_version !== 3
+  if (qualification.schema_version !== 4
     || qualification.protocol_id !== "HACC-LC4-DEV-v1"
     || qualification.qualification_protocol_id !== "HACC-LC4-v1"
     || qualification.status !== "passed"
     || canonicalJson(qualification.providers) !== canonicalJson(["openai", "gemini", "xai"])) {
     throw new Error("LC4-DEV retained qualification is not a three-provider passing terminal receipt");
+  }
+  if (qualification.transport_qualification_scope_sha256
+    !== LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256) {
+    throw new Error("LC4-DEV retained qualification transport scope is unsupported");
   }
   if (body.execution_id !== prepare.execution_id
     || body.prepare_sha256 !== prepare.prepare_sha256
@@ -390,7 +558,23 @@ function verifyDevAuthorization(input: Readonly<{
     || body.runtime_config_sha256 !== input.runtime_config_sha256
     || body.asr_evaluator_build_sha256 !== input.asr_evaluator_build_sha256
     || body.asr_evaluator_toolchain_sha256 !== input.asr_evaluator_toolchain_sha256
+    || body.asr_contract_sha256 !== input.asr_contract_sha256
+    || canonicalJson(body.asr_contract) !== canonicalJson(input.asr_contract)
+    || canonicalJson(body.asr_runner_trust)
+      !== canonicalJson(input.asr_runner_trust)
     || body.provider_profile_manifest_sha256 !== prepare.provider_profile_manifest_sha256
+    || body.qualification_transport_scope_sha256 !== prepare.qualification_transport_scope_sha256
+    || body.qualification_transport_scope_sha256 !== qualification.transport_qualification_scope_sha256
+    || body.qualification_claim_boundary !== prepare.qualification_claim_boundary
+    || body.xai_finite_manual_gate_d_receipt_sha256
+      !== prepare.xai_finite_manual_gate_d.receipt_sha256
+    || body.xai_finite_manual_gate_d_receipt_sha256 !== gateD.receipt_sha256
+    || body.xai_finite_manual_gate_d_plan_authority_trust_root_sha256
+      !== prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256
+    || body.xai_finite_manual_gate_d_transport_profile_sha256
+      !== prepare.xai_finite_manual_gate_d.transport_profile_sha256
+    || body.xai_finite_manual_gate_d_transport_profile_sha256
+      !== gateD.transport_profile_sha256
     || body.audio_delivery_profile_sha256 !== prepare.audio_delivery_profile_sha256
     || body.audio_packetizer_contract_sha256 !== prepare.audio_packetizer_contract_sha256
     || body.audio_execution_contract_sha256 !== prepare.audio_execution_contract_sha256
@@ -431,12 +615,16 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
   checked_at: string;
   qualification_gate_sha256: string;
   qualification: Lc4DevRetainedQualificationReceipt;
+  xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
   listener_evidence_manifest_sha256: string;
   runtime_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
+  asr_contract: IndependentAsrContract;
+  asr_contract_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
   immutable_ledger_genesis_sha256: string;
   audio_manifest_sha256: string;
   authorization: Lc4DevLiveAuthorizationArtifact;
@@ -452,17 +640,36 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     runtime_config_sha256: input.runtime_config_sha256,
     asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
+    asr_contract_sha256: input.asr_contract_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
   })) requireHash(digest, label);
+  if (independentAsrContractSha256(input.asr_contract)
+      !== input.asr_contract_sha256) {
+    throw new Error("LC4-DEV preflight ASR contract hash mismatch");
+  }
+  assertLc4DevAsrRunnerTrust(input.asr_runner_trust);
   if (input.audio_manifest_sha256 !== input.prepare.audio_manifest_sha256) throw new Error("LC4-DEV preflight audio manifest differs from prepare");
   if (input.qualification_gate_sha256 !== input.qualification.retained_artifact_sha256) {
     throw new Error("LC4-DEV qualification gate must be the retained passing qualification artifact");
+  }
+  assertLc4XaiFiniteManualGateDReceipt(input.xai_finite_manual_gate_d, {
+    expected_plan_trust_root_sha256:
+      input.prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
+    expected_source_commit: input.prepare.source_commit,
+    expected_source_tree_sha256: input.prepare.source_tree_sha256,
+    expected_provider_profile_manifest_sha256:
+      input.prepare.provider_profile_manifest_sha256,
+  });
+  if (input.xai_finite_manual_gate_d.receipt_sha256
+    !== input.prepare.xai_finite_manual_gate_d.receipt_sha256) {
+    throw new Error("LC4-DEV xAI finite-manual Gate D differs from prepare");
   }
   verifyDevAuthorization({
     artifact: input.authorization,
     expected_authority_public_key_fingerprint_sha256: input.expected_authority_public_key_fingerprint_sha256,
     prepare: input.prepare,
     qualification: input.qualification,
+    xai_finite_manual_gate_d: input.xai_finite_manual_gate_d,
     checked_at: input.checked_at,
     credential_identity_set_sha256: input.credential_identity_set_sha256,
     control_plane_manifest_sha256: input.control_plane_manifest_sha256,
@@ -470,10 +677,13 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     runtime_config_sha256: input.runtime_config_sha256,
     asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
+    asr_contract: input.asr_contract,
+    asr_contract_sha256: input.asr_contract_sha256,
+    asr_runner_trust: input.asr_runner_trust,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
   });
   const body = {
-    schema_version: 2 as const,
+    schema_version: 4 as const,
     execution_id: input.prepare.execution_id,
     checked_at: input.checked_at,
     prepare_sha256: input.prepare.prepare_sha256,
@@ -486,14 +696,27 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     runtime_config_sha256: input.runtime_config_sha256,
     asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
+    asr_contract: input.asr_contract,
+    asr_contract_sha256: input.asr_contract_sha256,
+    asr_runner_trust: input.asr_runner_trust,
     provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    qualification_transport_scope_sha256: input.prepare.qualification_transport_scope_sha256,
+    qualification_claim_boundary: input.prepare.qualification_claim_boundary,
+    xai_finite_manual_gate_d_receipt_sha256:
+      input.xai_finite_manual_gate_d.receipt_sha256,
+    xai_finite_manual_gate_d_transport_profile_sha256:
+      input.xai_finite_manual_gate_d.transport_profile_sha256,
+    xai_finite_manual_gate_d_claim_boundary:
+      input.xai_finite_manual_gate_d.claim_boundary,
     audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
     audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
     audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
     immutable_ledger_genesis_sha256: input.immutable_ledger_genesis_sha256,
     adapter_contract: "lc4-development-realtime-v1" as const,
     adapter_boundary: "dev_factory_unlocked_confirmatory_factory_still_frozen" as const,
-    all_six_episodes_qualified: true as const,
+    qualification_scope_verified: true as const,
+    all_episode_transports_qualified: true as const,
+    xai_finite_manual_transport_qualification: "verified" as const,
     budget_verified: true as const,
     audio_verified: true as const,
     provider_calls_authorized: true as const,
@@ -503,6 +726,7 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
     authority_trust_root_sha256: input.expected_authority_public_key_fingerprint_sha256,
     authorization: input.authorization,
     qualification: input.qualification,
+    xai_finite_manual_gate_d: input.xai_finite_manual_gate_d,
     authorization_verified: true as const,
   };
   return freeze({ ...body, preflight_sha256: hash(PREFLIGHT_DOMAIN, body) });
@@ -523,6 +747,7 @@ export function assertLc4DevLivePrepareArtifact(value: Lc4DevLivePrepareArtifact
     audio_manifest_sha256: value.audio_manifest_sha256,
     audio_bindings: value.audio_bindings,
     maximum_total_micro_usd: value.maximum_total_micro_usd,
+    xai_finite_manual_gate_d: value.xai_finite_manual_gate_d,
   });
   if (canonicalJson(rebuilt) !== canonicalJson(value)) throw new Error("LC4-DEV prepare artifact is not canonical or internally consistent");
 }
@@ -535,18 +760,35 @@ export function assertLc4DevLivePreflightArtifact(value: Lc4DevLivePreflightArti
   if (value.provider_calls_authorized !== true || value.authorization_scope !== "six_public_development_episodes_only") {
     throw new Error("LC4-DEV preflight lacks narrow provider authorization");
   }
+  if (value.qualification_scope_verified !== true
+    || value.all_episode_transports_qualified !== true
+    || value.xai_finite_manual_transport_qualification !== "verified"
+    || value.xai_finite_manual_gate_d_receipt_sha256
+      !== prepare.xai_finite_manual_gate_d.receipt_sha256
+    || value.xai_finite_manual_gate_d_transport_profile_sha256
+      !== prepare.xai_finite_manual_gate_d.transport_profile_sha256
+    || value.xai_finite_manual_gate_d_claim_boundary
+      !== "transport_qualification_only_not_efficacy_evidence"
+    || value.qualification_transport_scope_sha256 !== prepare.qualification_transport_scope_sha256
+    || value.qualification_claim_boundary !== prepare.qualification_claim_boundary) {
+    throw new Error("LC4-DEV preflight overstates retained transport qualification");
+  }
   if (now.getTime() >= Date.parse(value.expires_at)) throw new Error("LC4-DEV preflight has expired");
   const rebuilt = createLc4DevLivePreflightArtifact({
     prepare,
     checked_at: value.checked_at,
     qualification_gate_sha256: value.qualification_gate_sha256,
     qualification: value.qualification,
+    xai_finite_manual_gate_d: value.xai_finite_manual_gate_d,
     credential_identity_set_sha256: value.credential_identity_set_sha256,
     control_plane_manifest_sha256: value.control_plane_manifest_sha256,
     listener_evidence_manifest_sha256: value.listener_evidence_manifest_sha256,
     runtime_config_sha256: value.runtime_config_sha256,
     asr_evaluator_build_sha256: value.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: value.asr_evaluator_toolchain_sha256,
+    asr_contract: value.asr_contract,
+    asr_contract_sha256: value.asr_contract_sha256,
+    asr_runner_trust: value.asr_runner_trust,
     immutable_ledger_genesis_sha256: value.immutable_ledger_genesis_sha256,
     audio_manifest_sha256: prepare.audio_manifest_sha256,
     authorization: value.authorization,
@@ -686,6 +928,50 @@ function assertControl(receipt: Lc4DevControlReceipt, arm: Arm): void {
   }
 }
 
+export function assertLc4DevRepairPlaybackReceiptBinding(input: Readonly<{
+  receipt: Lc4DevRepairPlaybackReceipt;
+  episode_id: string;
+  opportunity_id: string;
+  opportunity_index: number;
+  decision_receipt_sha256: string;
+  repair: Lc4DevRepairPlayback;
+  repair_exchange: Pick<
+    Lc4DevExchangeEvidence,
+    | "provider_exchange_sha256"
+    | "listener_evidence_sha256"
+    | "playback_authority_receipt_sha256"
+  >;
+}>): void {
+  const { playback_receipt_sha256: claimedReceipt, ...receiptBody } =
+    input.receipt;
+  requireHash(claimedReceipt, "LC4-DEV repair playback receipt");
+  if (claimedReceipt !== hash(REPAIR_PLAYBACK_DOMAIN, receiptBody)
+    || input.receipt.schema_version !== 1
+    || input.receipt.protocol_id !== "HACC-LC4-DEV-v1"
+    || input.receipt.episode_id !== input.episode_id
+    || input.receipt.canonical_opportunity_id !== input.opportunity_id
+    || input.receipt.canonical_ordinal !== input.opportunity_index
+    || input.receipt.canonical_horizon !== 60
+    || input.receipt.advances_canonical_horizon !== false
+    || input.receipt.recursive_repair_observation !== null
+    || input.receipt.decision_receipt_sha256
+      !== input.decision_receipt_sha256
+    || input.receipt.repair_pcm_id !== input.repair.repair_pcm_id
+    || input.receipt.submitted_pcm_sha256 !== input.repair.pcm_sha256
+    || input.receipt.submitted_pcm_byte_length !== input.repair.pcm_byte_length
+    || input.receipt.submitted_sample_rate_hz !== input.repair.sample_rate_hz
+    || input.receipt.provider_exchange_sha256
+      !== input.repair_exchange.provider_exchange_sha256
+    || input.receipt.listener_evidence_sha256
+      !== input.repair_exchange.listener_evidence_sha256
+    || input.receipt.playback_authority_receipt_sha256
+      !== input.repair_exchange.playback_authority_receipt_sha256) {
+    throw new Error(
+      "LC4-DEV repair playback receipt differs from its selected repair, exchange, or decision",
+    );
+  }
+}
+
 function assertCallerBranchExchangeAuthority(input: Readonly<{
   projection: JsonValue;
   decision: Lc4DevCallerBranchDecision | null;
@@ -797,7 +1083,18 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     previousEvent = event.event_sha256;
   };
 
-  const assertExchangeReplayBinding = async (exchange: Lc4DevExchangeEvidence): Promise<void> => {
+  const assertExchangeReplayBinding = async (
+    exchange: Lc4DevExchangeEvidence,
+    expected: Readonly<{
+      episode: Lc4DevLiveEpisodePlan;
+      opportunity_id: string;
+      segment_ordinal: 1 | 2 | 3;
+      playback_kind: "canonical" | "repair";
+      caller_pcm_sha256: string;
+      caller_pcm_byte_length: number;
+      caller_pcm: Uint8Array;
+    }>,
+  ): Promise<void> => {
     requireHash(exchange.provider_exchange_sha256, "LC4-DEV provider exchange");
     requireHash(exchange.listener_evidence_sha256, "LC4-DEV listener evidence");
     if (exchange.provider_exchange_evidence.evidence_sha256 !== exchange.provider_exchange_sha256
@@ -808,7 +1105,29 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     if (canonicalJson(retainedProjection) !== canonicalJson(exchange.provider_exchange_projection)) {
       throw new Error("LC4-DEV provider exchange projection differs from its retained replay bytes");
     }
-    await input.dependencies.evidence.assertResolvable(exchange.listener_evidence);
+    const retainedListenerProjection =
+      await input.dependencies.evidence.resolveJson(exchange.listener_evidence);
+    assertLc4ProviderExchangeReplayProjection(retainedProjection, {
+      run_id: expected.episode.episode_id,
+      opportunity_id: expected.opportunity_id,
+      segment_ordinal: expected.segment_ordinal,
+      playback_kind: expected.playback_kind,
+      caller_pcm_sha256: expected.caller_pcm_sha256,
+      caller_pcm_byte_length: expected.caller_pcm_byte_length,
+      response_control_kind: expected.episode.arm === "hacc"
+        ? "hacc_response_plan"
+        : "native_context",
+      provider_profile: createLc4ProviderExecutionProfile(expected.episode.provider),
+      input_audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
+      caller_pcm: expected.caller_pcm,
+      listener_consumed_pcm: exchange.assistant_pcm,
+      listener_evidence_projection: retainedListenerProjection,
+      listener_evidence_reference: exchange.listener_evidence,
+      listener_manifest_sha256:
+        input.preflight.listener_evidence_manifest_sha256,
+      evaluator_build_sha256:
+        input.preflight.asr_evaluator_build_sha256,
+    });
   };
 
   const retainFailure = async (failure: Lc4DevFailureEvidence) => {
@@ -1024,6 +1343,21 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 caller_pcm_sha256: expectedCallerPcmSha256,
                 caller_pcm_byte_length: callerPcm.byteLength,
               });
+              if (exchange.playback_kind !== "canonical"
+                || exchange.opportunity_id !== opportunity.id
+                || exchange.assistant_pcm.byteLength < 2
+                || exchange.assistant_pcm.byteLength % 2 !== 0) {
+                throw new Error("LC4-DEV provider exchange evidence is incomplete");
+              }
+              await assertExchangeReplayBinding(exchange, {
+                episode,
+                opportunity_id: opportunity.id,
+                segment_ordinal: segmentOrdinal,
+                playback_kind: "canonical",
+                caller_pcm_sha256: expectedCallerPcmSha256,
+                caller_pcm_byte_length: callerPcm.byteLength,
+                caller_pcm: callerPcm,
+              });
             } catch (error) {
               const failure = isLc4DevFailureEvidenceError(error)
                 ? error.failure
@@ -1062,10 +1396,6 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 ? error
                 : new Lc4DevFailureEvidenceError(failure, retainedFailure);
             }
-            if (exchange.playback_kind !== "canonical" || exchange.opportunity_id !== opportunity.id || exchange.assistant_pcm.byteLength < 2 || exchange.assistant_pcm.byteLength % 2 !== 0) {
-              throw new Error("LC4-DEV provider exchange evidence is incomplete");
-            }
-            await assertExchangeReplayBinding(exchange);
             failureClass = "evidence";
             const assistantReceipt = await bounded("assistant-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
               episode_id: episode.episode_id,
@@ -1100,6 +1430,9 @@ export async function executeLc4DevLiveRun(input: Readonly<{
             }, [repairDecisionEvidence]);
             let effectiveExchangeSha256 = exchange.provider_exchange_sha256;
             let effectiveListenerEvidenceSha256 = exchange.listener_evidence_sha256;
+            let effectiveAssistantPcmSha256 = assistantReceipt.artifact_sha256;
+            let effectiveRepairEvidenceReferences:
+              readonly Lc4DevReplayArtifactReference[] = Object.freeze([]);
             if (repairDecision.playback) {
               const repair = repairDecision.playback;
               const repairCallerReceipt = await bounded("repair-caller-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
@@ -1118,6 +1451,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 advances_canonical_horizon: false,
               }, [repairDecisionEvidence, repairCallerReceipt.evidence]);
               let repairExchange: Lc4DevExchangeEvidence;
+              let repairExchangeReturned = false;
               responseGenerationsRequested += 1;
               try {
                 repairExchange = await bounded("repair-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeRepair({
@@ -1126,8 +1460,24 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                   decision_receipt: repairDecision.receipt,
                   control_receipt: control,
                 }));
+                repairExchangeReturned = true;
                 providerCallsStarted += 1;
                 responseGenerationsCompleted += 1;
+                if (repairExchange.playback_kind !== "repair"
+                  || repairExchange.opportunity_id !== opportunity.id
+                  || repairExchange.assistant_pcm.byteLength < 2
+                  || repairExchange.assistant_pcm.byteLength % 2 !== 0) {
+                  throw new Error("LC4-DEV repair exchange evidence is incomplete");
+                }
+                await assertExchangeReplayBinding(repairExchange, {
+                  episode,
+                  opportunity_id: opportunity.id,
+                  segment_ordinal: segmentOrdinal,
+                  playback_kind: "repair",
+                  caller_pcm_sha256: repair.pcm_sha256,
+                  caller_pcm_byte_length: repair.pcm_byte_length,
+                  caller_pcm: repair.pcm,
+                });
               } catch (error) {
                 const failure = isLc4DevFailureEvidenceError(error)
                   ? error.failure
@@ -1139,6 +1489,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                       caller_pcm_byte_length: repair.pcm_byte_length,
                       role: "primary_exchange",
                       playback_kind: "repair",
+                      post_exchange_completed: repairExchangeReturned,
                     });
                 const retainedFailure = isLc4DevFailureEvidenceError(error) && error.retained_evidence !== null
                   ? error.retained_evidence
@@ -1165,11 +1516,6 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                   ? error
                   : new Lc4DevFailureEvidenceError(failure, retainedFailure);
               }
-              if (repairExchange.playback_kind !== "repair" || repairExchange.opportunity_id !== opportunity.id
-                || repairExchange.assistant_pcm.byteLength < 2 || repairExchange.assistant_pcm.byteLength % 2 !== 0) {
-                throw new Error("LC4-DEV repair exchange evidence is incomplete");
-              }
-              await assertExchangeReplayBinding(repairExchange);
               const repairAssistantReceipt = await bounded("repair-assistant-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
                 episode_id: episode.episode_id,
                 opportunity_id: opportunity.id,
@@ -1187,6 +1533,16 @@ export async function executeLc4DevLiveRun(input: Readonly<{
                 playback_authority_receipt_sha256: repairExchange.playback_authority_receipt_sha256,
                 recursive_repair_observation: null,
               });
+              assertLc4DevRepairPlaybackReceiptBinding({
+                receipt: playbackReceipt,
+                episode_id: episode.episode_id,
+                opportunity_id: opportunity.id,
+                opportunity_index: opportunity.index,
+                decision_receipt_sha256:
+                  repairDecision.receipt.decision_receipt_sha256,
+                repair,
+                repair_exchange: repairExchange,
+              });
               const { playback_receipt_sha256: claimedPlayback, ...playbackBody } = playbackReceipt;
               const playbackEvidence = await input.dependencies.evidence.retainJson({
                 kind: "repair_playback",
@@ -1199,12 +1555,33 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               repairPlaybacks += 1;
               effectiveExchangeSha256 = repairExchange.provider_exchange_sha256;
               effectiveListenerEvidenceSha256 = repairExchange.listener_evidence_sha256;
+              effectiveAssistantPcmSha256 = repairAssistantReceipt.artifact_sha256;
+              effectiveRepairEvidenceReferences = Object.freeze([
+                repairExchange.provider_exchange_evidence,
+                repairExchange.listener_evidence,
+                repairAssistantReceipt.evidence,
+              ]);
               await append("repair_completed", episode.episode_id, opportunity.id, {
+                decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
                 playback_receipt_sha256: playbackReceipt.playback_receipt_sha256,
                 repair_exchange_sha256: repairExchange.provider_exchange_sha256,
                 repair_listener_evidence_sha256: repairExchange.listener_evidence_sha256,
+                repair_assistant_pcm_sha256: repairAssistantReceipt.artifact_sha256,
+                canonical_provider_exchange_sha256: exchange.provider_exchange_sha256,
+                canonical_listener_evidence_sha256: exchange.listener_evidence_sha256,
+                canonical_assistant_pcm_sha256: assistantReceipt.artifact_sha256,
+                effective_provider_exchange_sha256: repairExchange.provider_exchange_sha256,
+                effective_listener_evidence_sha256: repairExchange.listener_evidence_sha256,
+                effective_assistant_pcm_sha256: repairAssistantReceipt.artifact_sha256,
                 advances_canonical_horizon: false,
-              }, [playbackEvidence, repairExchange.provider_exchange_evidence, repairExchange.listener_evidence]);
+              }, [
+                repairDecisionEvidence,
+                playbackEvidence,
+                exchange.provider_exchange_evidence,
+                exchange.listener_evidence,
+                assistantReceipt.evidence,
+                ...effectiveRepairEvidenceReferences,
+              ]);
             }
             const finalized = await session.finalizeOpportunity({
               opportunity_id: opportunity.id,
@@ -1220,11 +1597,12 @@ export async function executeLc4DevLiveRun(input: Readonly<{
             await append("opportunity_completed", episode.episode_id, opportunity.id, {
               canonical_provider_exchange_sha256: exchange.provider_exchange_sha256,
               canonical_listener_evidence_sha256: exchange.listener_evidence_sha256,
+              canonical_assistant_pcm_sha256: assistantReceipt.artifact_sha256,
               effective_provider_exchange_sha256: effectiveExchangeSha256,
               effective_listener_evidence_sha256: effectiveListenerEvidenceSha256,
+              effective_assistant_pcm_sha256: effectiveAssistantPcmSha256,
               decision_receipt_sha256: repairDecision.receipt.decision_receipt_sha256,
               opportunity_receipt_sha256: finalized.opportunity_receipt_sha256,
-              assistant_pcm_sha256: assistantReceipt.artifact_sha256,
               caller_pcm_sha256: expectedCallerPcmSha256,
               caller_branch_decision_sha256: branchDecisionEvidence?.evidence_sha256 ?? null,
               caller_branch_exchange_join_sha256: branchDecision ? sha256Hex(
@@ -1242,6 +1620,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
               repairDecisionEvidence,
               finalized.opportunity_finalization,
               assistantReceipt.evidence,
+              ...effectiveRepairEvidenceReferences,
               ...(branchDecisionEvidence ? [branchDecisionEvidence] : []),
             ]);
           }

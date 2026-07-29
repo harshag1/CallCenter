@@ -10,8 +10,9 @@ import {
 
 export const BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT = Object.freeze({
   openai: Object.freeze({
-    supported: false as const,
-    reason: "webrtc_remote_track_bypasses_pcm_quarantine" as const,
+    supported: true as const,
+    evidenceLevel: "captured_remote_track_pcm_quarantine_and_audio_context_schedule" as const,
+    capture: "webrtc_remote_track_to_muted_pcm_processor" as const,
   }),
   xai: Object.freeze({
     supported: true as const,
@@ -32,7 +33,7 @@ export function boundedSpeechResponseId(value: unknown, label: string): string {
 
 export function pushQuarantinedPcm16Base64(
   config: BrowserOutboundSpeechGateConfig,
-  provider: Extract<ServerRealtimeProvider, "xai" | "gemini">,
+  provider: Extract<ServerRealtimeProvider, "openai" | "xai" | "gemini">,
   responseId: string,
   base64: string,
   sampleRateHz = 24_000,
@@ -67,7 +68,7 @@ function withoutAudio(decision: OutboundSpeechGateDecision): Omit<OutboundSpeech
 
 export async function finalizeQuarantinedSpeech(args: Readonly<{
   config: BrowserOutboundSpeechGateConfig;
-  provider: Extract<ServerRealtimeProvider, "xai" | "gemini">;
+  provider: Extract<ServerRealtimeProvider, "openai" | "xai" | "gemini">;
   responseId: string;
   terminalStatus: RealtimeResponseTerminalStatus;
   audioContext: AudioContext;

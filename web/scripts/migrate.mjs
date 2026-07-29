@@ -10,8 +10,13 @@ import { resolveDatabaseSslMode } from "../lib/database-ssl.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "migrations");
-const runtimeUrl = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
-const migrationUrl = process.env.MIGRATION_DATABASE_URL;
+const nonBlankEnvironmentValue = (value) => {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+};
+const runtimeUrl = nonBlankEnvironmentValue(process.env.DATABASE_URL)
+  ?? nonBlankEnvironmentValue(process.env.SUPABASE_DB_URL);
+const migrationUrl = nonBlankEnvironmentValue(process.env.MIGRATION_DATABASE_URL);
 const leastPrivilegeRequired = process.env.NODE_ENV === "production"
   || process.env.DATABASE_ENFORCE_LEAST_PRIVILEGE === "true";
 if (leastPrivilegeRequired && !migrationUrl) {

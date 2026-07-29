@@ -53,3 +53,11 @@ An empty audible-semantic criterion set is now explicitly
 `not_applicable/no_registered_audible_semantic_criteria`. Its semantic verdict
 is `null`; it is never converted to a vacuous pass. Applicable audible criteria
 continue to fail closed on missing or unverifiable listener evidence.
+
+Applicable phrase matches are polarity-aware. Explicit and contracted
+negation, questions, uncertainty, stale/rejected framing, and later
+correction/retraction cannot earn affirmative listener credit merely because
+the registered words appear. Every semantic plan, replay, listener artifact,
+and launch scoring contract binds the exact deterministic scorer version and
+build hash; artifacts from the earlier unversioned token-inclusion matcher are
+not publication-compatible.

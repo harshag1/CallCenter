@@ -6,10 +6,8 @@ import type {
   ServerRealtimeProvider,
 } from "./realtime/client/types";
 import type { ConversationState } from "./conversation-kernel";
-import type { FlowExecutionState } from "./flow-runtime";
-import type { PreDispatchDecision, PostDispatchDecision } from "./action-policy-kernel";
+import type { PostDispatchDecision, PreDispatchDecision } from "./action-policy-kernel";
 import type { CompiledRealtimeContextPacket } from "./realtime-context-packet";
-import type { DurableVoiceWorker } from "./voice-workers/store";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_CODE = /^[a-z][a-z0-9_]{0,127}$/;
@@ -29,12 +27,101 @@ const POLICY_REASON_CODES = new Set([
 ]);
 const MAX_OBSERVATIONS = 10_000;
 const MAX_REDACTED_ITEMS = 256;
+export const DEFAULT_OPERATIONS_STALE_AFTER_MS = 120_000;
+export const PUBLIC_CALL_OPERATIONS_STATUSES = [
+  "active",
+  "dialing",
+  "completed",
+  "failed",
+] as const;
+
+export type PublicCallOperationsStatus =
+  | typeof PUBLIC_CALL_OPERATIONS_STATUSES[number]
+  | "redacted_unknown";
+
+const PUBLIC_CALL_OPERATIONS_STATUS_SET = new Set<string>(
+  PUBLIC_CALL_OPERATIONS_STATUSES,
+);
+const PUBLIC_ACTION_STATUSES = new Set([
+  "reserved",
+  "succeeded",
+  "failed",
+  "indeterminate",
+]);
+const PUBLIC_WORKER_STATUSES = new Set([
+  "pending",
+  "running",
+  "cancel_requested",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "indeterminate",
+  "completed",
+]);
+const PUBLIC_KERNEL_WORKER_STATUSES = new Set([
+  "running",
+  "completed",
+  "cancelled",
+]);
+const PUBLIC_POLICY_DECISIONS = new Set([
+  "allow",
+  "deny",
+  "require_confirmation",
+  "accept",
+  "reject",
+  "quarantine",
+  "require_reconciliation",
+]);
+const PUBLIC_RECOVERY_KINDS = new Set([
+  "action_reconciled",
+  "worker_checkpointed",
+  "worker_reclaimed",
+  "worker_indeterminate",
+]);
+const PUBLIC_WORKER_DELIVERY_STATES = new Set([
+  "not_settled",
+  "awaiting_delivery",
+  "delivered",
+  "terminal",
+]);
 
 type FrozenRecord = Readonly<Record<string, number>>;
+type PublicWorkerStatus =
+  | "pending"
+  | "running"
+  | "cancel_requested"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "indeterminate"
+  | "completed"
+  | "redacted_unknown";
+type PublicKernelWorkerStatus =
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "redacted_unknown";
+type PublicRecoveryKind =
+  | OperationsRecoveryObservation["kind"]
+  | "redacted_unknown";
 
 export type PolicyDecisionObservation =
-  | Readonly<{ stage: "pre_dispatch"; observedAtMs: number; decision: PreDispatchDecision }>
-  | Readonly<{ stage: "post_dispatch"; observedAtMs: number; decision: PostDispatchDecision }>;
+  | Readonly<{
+      stage: "pre_dispatch";
+      observedAtMs: number;
+      decision: Readonly<
+        Pick<PreDispatchDecision, "decision" | "reason" | "action">
+        & Partial<Omit<PreDispatchDecision, "decision" | "reason" | "action">>
+      >;
+    }>
+  | Readonly<{
+      stage: "post_dispatch";
+      observedAtMs: number;
+      decision: Readonly<
+        Pick<PostDispatchDecision, "decision" | "reason">
+        & Partial<Omit<PostDispatchDecision, "decision" | "reason">>
+      >;
+    }>;
 
 export type ContextPacketObservation = Readonly<{
   observedAtMs: number;
@@ -53,6 +140,96 @@ export type CallCostObservation = Readonly<{
   observedAtMs: number;
 }>;
 
+export type OperationsActionReceipt = Readonly<{
+  id: string;
+  tool: string;
+  capabilityEpoch: number;
+  dispatchAttempt?: number;
+  status:
+    | "reserved"
+    | "succeeded"
+    | "failed"
+    | "indeterminate"
+    | "redacted_unknown";
+  dispatchStartedAt?: string;
+  reservedAt: string;
+  settledAt?: string;
+  reconciliationProofId?: string;
+  /** Content-free structural code or server-side redaction input; never emitted verbatim. */
+  error?: string;
+}>;
+
+export type OperationsFlowState = Readonly<{
+  capabilityEpoch: number | null;
+  revision: number;
+  actionReceipts: readonly OperationsActionReceipt[];
+}>;
+
+export type OperationsConversationAuthority = Readonly<{
+  kind: "materialized_head";
+  revision: number;
+  headSha256: string;
+  snapshotCapturedAtMs: number;
+  /** The operations read is forbidden from folding the conversation event log. */
+  eventRowsRead: 0;
+}>;
+
+export type OperationsActionSummary = Readonly<{
+  total: number;
+  byStatus: Readonly<Record<string, number>>;
+  maxCapabilityEpoch: number | null;
+}>;
+
+export type OperationsDurableWorker = Readonly<{
+  id: string;
+  parentWorkerId: string | null;
+  status: string;
+  authority: Readonly<{ policyEpoch: number | null }>;
+  leaseExpiresAt: string | null;
+  cancellationEpoch: number;
+  checkpoint?: unknown | null;
+  checkpointPresent?: boolean;
+  result?: unknown | null;
+  resultPresent?: boolean;
+  error?: unknown | null;
+  errorPresent?: boolean;
+  settledAt: string | null;
+  /** Content-free state materialized from the durable worker/inbox tables. */
+  deliveryState?: "not_settled" | "awaiting_delivery" | "delivered" | "terminal";
+}>;
+
+export type OperationsSourceObservation = Readonly<{
+  source: "flow" | "conversation" | "workers" | "policy";
+  observedAtMs: number | null;
+}>;
+
+export type OperationsRecoveryObservation = Readonly<{
+  kind: "action_reconciled" | "worker_checkpointed" | "worker_reclaimed" | "worker_indeterminate";
+  subjectId: string;
+  observedAtMs: number;
+}>;
+
+export type OperationsCountSummary = Readonly<{
+  total: number;
+  byStatus: Readonly<Record<string, number>>;
+}>;
+
+export type OperationsWorkerSummary = OperationsCountSummary & Readonly<{
+  byDeliveryState?: Readonly<Record<string, number>>;
+}>;
+
+export type OperationsPolicySummary = Readonly<{
+  observations: number;
+  denials: number;
+  byDecision: Readonly<Record<string, number>>;
+}>;
+
+export type OperationsRecoverySummary = Readonly<{
+  observations: number;
+  byKind: Readonly<Record<string, number>>;
+  lastObservedAtMs: number | null;
+}>;
+
 export type CallOperationsProjectionInput = Readonly<{
   callId: string;
   /** Per-tenant secret used only for irreversible HMAC identities in this projection. */
@@ -61,14 +238,26 @@ export type CallOperationsProjectionInput = Readonly<{
   realtimeEvents?: readonly NormalizedRealtimeEvent[];
   wireObservations?: readonly RealtimeWireObservation[];
   conversationState?: ConversationState;
-  flowState?: Pick<
-    FlowExecutionState,
-    "status" | "nodeId" | "currentStep" | "completedSteps" | "capabilityEpoch" | "revision" | "actionReceipts"
-  >;
+  conversationAuthority?: OperationsConversationAuthority;
+  flowState?: OperationsFlowState;
+  actionSummary?: OperationsActionSummary;
   policyDecisions?: readonly PolicyDecisionObservation[];
-  durableWorkers?: readonly DurableVoiceWorker[];
+  durableWorkers?: readonly OperationsDurableWorker[];
+  /**
+   * Complete identity index for the durable aggregate. Required whenever
+   * `durableWorkerSummary` covers workers omitted from the bounded detail
+   * window, so kernel/durable union membership remains exact.
+   */
+  durableWorkerIds?: readonly string[];
+  durableWorkerSummary?: OperationsWorkerSummary;
   contextPackets?: readonly ContextPacketObservation[];
   costObservations?: readonly CallCostObservation[];
+  policySummary?: OperationsPolicySummary;
+  callStatus?: string;
+  sourceObservations?: readonly OperationsSourceObservation[];
+  sourceStaleAfterMs?: number;
+  recoveryObservations?: readonly OperationsRecoveryObservation[];
+  recoverySummary?: OperationsRecoverySummary;
 }>;
 
 export type MetricDistribution = Readonly<{
@@ -118,8 +307,10 @@ export type CallOperationsProjection = Readonly<{
     catalogDigests: readonly string[];
     flowRevision: number | null;
     drift: readonly (
+      | "packet_conversation_vs_materialized"
       | "packet_policy_vs_kernel"
       | "packet_capability_vs_flow"
+      | "flow_capability_unavailable"
       | "worker_policy_stale"
       | "receipt_capability_ahead"
     )[];
@@ -154,13 +345,14 @@ export type CallOperationsProjection = Readonly<{
   workers: Readonly<{
     total: number;
     byStatus: FrozenRecord;
+    byDeliveryState: FrozenRecord;
     items: readonly Readonly<{
       workerKey: string;
       parentWorkerKey: string | null;
-      status: string;
-      kernelStatus: "running" | "completed" | "cancelled" | null;
+      status: PublicWorkerStatus;
+      kernelStatus: PublicKernelWorkerStatus | null;
       deliveryState: "not_settled" | "awaiting_delivery" | "delivered" | "terminal";
-      policyEpoch: number;
+      policyEpoch: number | null;
       staleAuthority: boolean;
       leaseState: "none" | "active" | "expired";
       cancellationEpoch: number;
@@ -168,6 +360,29 @@ export type CallOperationsProjection = Readonly<{
       resultPresent: boolean;
       errorPresent: boolean;
       settledAtMs: number | null;
+    }>[];
+  }>;
+  freshness: Readonly<{
+    callStatus: PublicCallOperationsStatus | null;
+    active: boolean;
+    staleAfterMs: number;
+    maximumAgeMs: number | null;
+    staleSources: readonly OperationsSourceObservation["source"][];
+    sources: readonly Readonly<{
+      source: OperationsSourceObservation["source"];
+      observedAtMs: number | null;
+      ageMs: number | null;
+      state: "current" | "stale" | "settled" | "unavailable";
+    }>[];
+  }>;
+  recovery: Readonly<{
+    observations: number;
+    byKind: FrozenRecord;
+    lastObservedAtMs: number | null;
+    recent: readonly Readonly<{
+      kind: PublicRecoveryKind;
+      subjectKey: string;
+      observedAtMs: number;
     }>[];
   }>;
   context: Readonly<{
@@ -211,6 +426,7 @@ export type CallOperationsProjection = Readonly<{
     | "indeterminate_action"
     | "indeterminate_worker"
     | "worker_delivery_pending"
+    | "stale_operations_source"
     | "context_turns_omitted"
     | "cost_not_reconciled"
   )[];
@@ -232,6 +448,37 @@ function publicCode(value: string | undefined): string | null {
   return value && SAFE_CODE.test(value) ? value : null;
 }
 
+/**
+ * Converts the database lifecycle value into a deliberately closed,
+ * content-free management status. Unknown values can be operationally useful
+ * as a signal, but their raw bytes must never cross the operations boundary.
+ */
+export function normalizePublicCallOperationsStatus(
+  value: unknown,
+): PublicCallOperationsStatus | null {
+  if (value === undefined || value === null) return null;
+  return typeof value === "string" && PUBLIC_CALL_OPERATIONS_STATUS_SET.has(value)
+    ? value as typeof PUBLIC_CALL_OPERATIONS_STATUSES[number]
+    : "redacted_unknown";
+}
+
+function normalizeClosedCode(value: unknown, allowed: ReadonlySet<string>): string {
+  return typeof value === "string" && allowed.has(value)
+    ? value
+    : "redacted_unknown";
+}
+
+function normalizePublicWorkerStatus(value: unknown): PublicWorkerStatus {
+  return normalizeClosedCode(value, PUBLIC_WORKER_STATUSES) as PublicWorkerStatus;
+}
+
+function normalizePublicKernelWorkerStatus(value: unknown): PublicKernelWorkerStatus {
+  return normalizeClosedCode(
+    value,
+    PUBLIC_KERNEL_WORKER_STATUSES,
+  ) as PublicKernelWorkerStatus;
+}
+
 function policyReasonCode(value: string): string | null {
   return POLICY_REASON_CODES.has(value) ? value : null;
 }
@@ -240,6 +487,34 @@ function freezeCounts(values: readonly string[]): FrozenRecord {
   const counts: Record<string, number> = {};
   for (const value of values) counts[value] = (counts[value] ?? 0) + 1;
   return Object.freeze(Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right))));
+}
+
+function validateAndNormalizeCountRecord(
+  value: Readonly<Record<string, number>>,
+  expectedTotal: number,
+  label: string,
+  normalizeKey: (key: string) => string,
+): FrozenRecord {
+  const entries = Object.entries(value);
+  if (entries.length > MAX_OBSERVATIONS) {
+    throw new Error(`${label} exceeds ${MAX_OBSERVATIONS} labels`);
+  }
+  let total = 0;
+  const normalized: Record<string, number> = {};
+  for (const [key, count] of entries) {
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`${label} contains an invalid count`);
+    }
+    total += count;
+    const publicKey = normalizeKey(key);
+    normalized[publicKey] = (normalized[publicKey] ?? 0) + count;
+  }
+  if (!Number.isSafeInteger(expectedTotal) || expectedTotal < 0 || total !== expectedTotal) {
+    throw new Error(`${label} does not sum to its total`);
+  }
+  return Object.freeze(Object.fromEntries(
+    Object.entries(normalized).sort(([left], [right]) => left.localeCompare(right)),
+  ));
 }
 
 function distribution(samples: readonly number[]): MetricDistribution {
@@ -278,6 +553,10 @@ function addUniqueNumber(target: Set<number>, value: number): void {
   target.add(value);
 }
 
+function addOptionalUniqueNumber(target: Set<number>, value: number | null): void {
+  if (value !== null) addUniqueNumber(target, value);
+}
+
 /**
  * Produces a bounded, content-free management view of one call. It accepts
  * existing runtime objects directly, so providers and integrations do not need
@@ -290,6 +569,30 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
     : input.redactionKey.byteLength;
   if (keyBytes < 16) throw new Error("operations redaction key must contain at least 16 bytes");
   assertSafeInteger(input.generatedAtMs, "projection timestamp");
+  if (input.conversationAuthority) {
+    assertSafeInteger(input.conversationAuthority.revision, "materialized conversation revision");
+    assertSafeInteger(
+      input.conversationAuthority.snapshotCapturedAtMs,
+      "materialized conversation snapshot timestamp",
+    );
+    if (
+      input.conversationAuthority.kind !== "materialized_head"
+      || !SHA256.test(input.conversationAuthority.headSha256)
+      || input.conversationAuthority.snapshotCapturedAtMs !== input.generatedAtMs
+      || input.conversationAuthority.eventRowsRead !== 0
+    ) {
+      throw new Error("materialized conversation authority is not bound to this bounded snapshot");
+    }
+    if (
+      input.conversationState
+      && (
+        input.conversationState.eventCount !== input.conversationAuthority.revision
+        || input.conversationState.headHash !== input.conversationAuthority.headSha256
+      )
+    ) {
+      throw new Error("materialized conversation authority conflicts with the supplied conversation state");
+    }
+  }
 
   const events = input.realtimeEvents ?? [];
   const wires = input.wireObservations ?? [];
@@ -297,12 +600,24 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
   const packets = input.contextPackets ?? [];
   const costs = input.costObservations ?? [];
   const durableWorkers = input.durableWorkers ?? [];
+  const durableWorkerIds = input.durableWorkerIds;
+  const sourceObservations = input.sourceObservations ?? [];
+  const recoveryObservations = input.recoveryObservations ?? [];
   assertBounded(events, "realtime events");
   assertBounded(wires, "wire observations");
   assertBounded(decisions, "policy decisions");
   assertBounded(packets, "context packets");
   assertBounded(costs, "cost observations");
   assertBounded(durableWorkers, "durable workers");
+  if (durableWorkerIds !== undefined) assertBounded(durableWorkerIds, "durable worker identity index");
+  assertBounded(sourceObservations, "operations source observations");
+  assertBounded(recoveryObservations, "recovery observations");
+
+  const sourceStaleAfterMs = input.sourceStaleAfterMs ?? DEFAULT_OPERATIONS_STALE_AFTER_MS;
+  if (!Number.isSafeInteger(sourceStaleAfterMs) || sourceStaleAfterMs < 1_000 || sourceStaleAfterMs > 86_400_000) {
+    throw new Error("operations stale threshold must be between 1000 and 86400000 milliseconds");
+  }
+  const publicCallStatus = normalizePublicCallOperationsStatus(input.callStatus);
 
   const callKey = hmac(input.redactionKey, "hacc/operations/call/v1", input.callId);
   const providers = [...new Set<ServerRealtimeProvider>([
@@ -417,48 +732,108 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
       throw new Error("context packet byte evidence does not match its serialized value");
     }
     const authority = observation.packet.value.authority;
+    assertSafeInteger(authority.conversationRevision, "context packet conversation revision");
     addUniqueNumber(observedPolicyEpochs, authority.policyEpoch);
     addUniqueNumber(observedCapabilityEpochs, authority.capabilityEpoch);
     if (!SHA256.test(authority.capabilityCatalogDigest)) throw new Error("context packet catalog digest must be SHA-256");
     catalogDigests.add(authority.capabilityCatalogDigest);
   }
   if (input.conversationState) {
+    assertSafeInteger(input.conversationState.eventCount, "conversation revision");
     addUniqueNumber(observedPolicyEpochs, input.conversationState.policy.epoch);
     for (const checkpoint of input.conversationState.flowCheckpoints) {
       addUniqueNumber(observedCapabilityEpochs, checkpoint.capabilityEpoch);
+      assertSafeInteger(checkpoint.flowRevision, "flow checkpoint revision");
+    }
+    if (input.conversationState.currentFlowCheckpoint) {
+      addUniqueNumber(
+        observedCapabilityEpochs,
+        input.conversationState.currentFlowCheckpoint.capabilityEpoch,
+      );
+      assertSafeInteger(
+        input.conversationState.currentFlowCheckpoint.flowRevision,
+        "current flow checkpoint revision",
+      );
+    }
+    for (const worker of input.conversationState.workers) {
+      addUniqueNumber(observedPolicyEpochs, worker.policyEpoch);
     }
   }
   if (input.flowState) {
-    addUniqueNumber(observedCapabilityEpochs, input.flowState.capabilityEpoch);
+    assertSafeInteger(input.flowState.revision, "flow revision");
+    addOptionalUniqueNumber(observedCapabilityEpochs, input.flowState.capabilityEpoch);
     for (const receipt of input.flowState.actionReceipts) {
       addUniqueNumber(observedCapabilityEpochs, receipt.capabilityEpoch);
+      assertSafeInteger(receipt.dispatchAttempt ?? 0, "action dispatch attempt");
+      if (
+        typeof receipt.tool !== "string"
+        || Buffer.byteLength(receipt.tool, "utf8") < 1
+        || Buffer.byteLength(receipt.tool, "utf8") > 256
+      ) {
+        throw new Error("action receipt tool identity must contain 1 to 256 UTF-8 bytes");
+      }
     }
   }
-  for (const worker of durableWorkers) addUniqueNumber(observedPolicyEpochs, worker.authority.policyEpoch);
+  addOptionalUniqueNumber(
+    observedCapabilityEpochs,
+    input.actionSummary?.maxCapabilityEpoch ?? null,
+  );
+  for (const worker of durableWorkers) {
+    addOptionalUniqueNumber(observedPolicyEpochs, worker.authority.policyEpoch);
+    assertSafeInteger(worker.cancellationEpoch, "worker cancellation epoch");
+  }
 
   const latestPacket = [...packets].sort((left, right) => right.observedAtMs - left.observedAtMs)[0]?.packet ?? null;
   const kernelPolicyEpoch = input.conversationState?.policy.epoch ?? latestPacket?.value.authority.policyEpoch ?? null;
-  const flowCapabilityEpoch = input.flowState?.capabilityEpoch
-    ?? input.conversationState?.currentFlowCheckpoint?.capabilityEpoch
-    ?? latestPacket?.value.authority.capabilityEpoch
-    ?? null;
+  const actionSummaryMaxCapabilityEpoch =
+    input.actionSummary?.maxCapabilityEpoch ?? null;
+  const flowCapabilityEpoch = input.flowState
+    ? input.flowState.capabilityEpoch
+    : input.conversationState?.currentFlowCheckpoint?.capabilityEpoch
+      ?? latestPacket?.value.authority.capabilityEpoch
+      ?? null;
   const authorityDrift = new Set<CallOperationsProjection["authority"]["drift"][number]>();
+  if (input.flowState?.capabilityEpoch === null) {
+    authorityDrift.add("flow_capability_unavailable");
+  }
+  if (
+    latestPacket
+    && input.conversationAuthority
+    && (
+      latestPacket.value.authority.conversationRevision
+        !== input.conversationAuthority.revision
+      || latestPacket.value.authority.conversationHeadSha256
+        !== input.conversationAuthority.headSha256
+    )
+  ) {
+    authorityDrift.add("packet_conversation_vs_materialized");
+  }
   if (latestPacket && input.conversationState
     && latestPacket.value.authority.policyEpoch !== input.conversationState.policy.epoch) {
     authorityDrift.add("packet_policy_vs_kernel");
   }
   if (latestPacket && input.flowState
-    && latestPacket.value.authority.capabilityEpoch !== input.flowState.capabilityEpoch) {
+    && (input.flowState.capabilityEpoch === null
+      || latestPacket.value.authority.capabilityEpoch !== input.flowState.capabilityEpoch)) {
     authorityDrift.add("packet_capability_vs_flow");
   }
-  if (kernelPolicyEpoch !== null
-    && durableWorkers.some((worker) =>
-      !["succeeded", "failed", "cancelled"].includes(worker.status)
-      && worker.authority.policyEpoch !== kernelPolicyEpoch)) {
+  if (durableWorkers.some((worker) =>
+    !["succeeded", "failed", "cancelled", "indeterminate"].includes(
+      normalizePublicWorkerStatus(worker.status),
+    )
+    && (worker.authority.policyEpoch === null
+      || (kernelPolicyEpoch !== null && worker.authority.policyEpoch !== kernelPolicyEpoch)))) {
     authorityDrift.add("worker_policy_stale");
   }
-  if (flowCapabilityEpoch !== null
-    && (input.flowState?.actionReceipts ?? []).some((receipt) => receipt.capabilityEpoch > flowCapabilityEpoch)) {
+  if (
+    flowCapabilityEpoch !== null
+    && (
+      actionSummaryMaxCapabilityEpoch !== null
+        ? actionSummaryMaxCapabilityEpoch > flowCapabilityEpoch
+        : (input.flowState?.actionReceipts ?? []).some((receipt) =>
+            receipt.capabilityEpoch > flowCapabilityEpoch)
+    )
+  ) {
     authorityDrift.add("receipt_capability_ahead");
   }
 
@@ -474,15 +849,104 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
       const action = observation.stage === "pre_dispatch" ? observation.decision.action : null;
       return Object.freeze({
         stage: observation.stage,
-        decision: observation.decision.decision,
+        decision: normalizeClosedCode(
+          observation.decision.decision,
+          PUBLIC_POLICY_DECISIONS,
+        ),
         reasonCode: policyReasonCode(reason),
         reasonSha256: hmac(input.redactionKey, "hacc/operations/policy-reason/v1", reason),
         actionKey: action === null ? null : hmac(input.redactionKey, "hacc/operations/action/v1", action),
         observedAtMs: observation.observedAtMs,
       });
     });
+  const observedPolicyCounts = freezeCounts(decisions.map(({ decision }) =>
+    normalizeClosedCode(decision.decision, PUBLIC_POLICY_DECISIONS)));
+  const projectedPolicySummary = input.policySummary
+    ? {
+        observations: input.policySummary.observations,
+        denials: input.policySummary.denials,
+        byDecision: validateAndNormalizeCountRecord(
+          input.policySummary.byDecision,
+          input.policySummary.observations,
+          "policy decision summary",
+          (decision) => normalizeClosedCode(decision, PUBLIC_POLICY_DECISIONS),
+        ),
+      }
+    : {
+        observations: decisions.length,
+        denials: deniedDecisions.length,
+        byDecision: observedPolicyCounts,
+      };
+  if (
+    !Number.isSafeInteger(projectedPolicySummary.denials)
+    || projectedPolicySummary.denials < deniedDecisions.length
+    || projectedPolicySummary.denials > projectedPolicySummary.observations
+    || projectedPolicySummary.observations < decisions.length
+  ) {
+    throw new Error("policy decision summary contradicts its projected observations");
+  }
+  const knownSummarizedDenials = (projectedPolicySummary.byDecision.deny ?? 0)
+    + (projectedPolicySummary.byDecision.require_confirmation ?? 0)
+    + (projectedPolicySummary.byDecision.reject ?? 0)
+    + (projectedPolicySummary.byDecision.quarantine ?? 0)
+    + (projectedPolicySummary.byDecision.require_reconciliation ?? 0);
+  const unknownPolicyDecisions = projectedPolicySummary.byDecision.redacted_unknown ?? 0;
+  if (
+    projectedPolicySummary.denials < knownSummarizedDenials
+    || projectedPolicySummary.denials > knownSummarizedDenials + unknownPolicyDecisions
+  ) {
+    throw new Error("policy decision summary denial count is inconsistent");
+  }
+  for (const [decision, count] of Object.entries(observedPolicyCounts)) {
+    if ((projectedPolicySummary.byDecision[decision] ?? 0) < count) {
+      throw new Error("policy decision summary contradicts its projected observations");
+    }
+  }
 
   const receipts = input.flowState?.actionReceipts ?? [];
+  const observedActionCounts = freezeCounts(receipts.map(({ status }) =>
+    normalizeClosedCode(status, PUBLIC_ACTION_STATUSES)));
+  const projectedActionSummary = input.actionSummary
+    ? {
+        total: input.actionSummary.total,
+        byStatus: validateAndNormalizeCountRecord(
+          input.actionSummary.byStatus,
+          input.actionSummary.total,
+          "action receipt summary",
+          (status) => normalizeClosedCode(status, PUBLIC_ACTION_STATUSES),
+        ),
+        maxCapabilityEpoch: input.actionSummary.maxCapabilityEpoch,
+      }
+    : {
+        total: receipts.length,
+        byStatus: observedActionCounts,
+        maxCapabilityEpoch: receipts.length === 0
+          ? null
+          : Math.max(...receipts.map(({ capabilityEpoch }) => capabilityEpoch)),
+      };
+  if (
+    projectedActionSummary.total > MAX_OBSERVATIONS
+    || projectedActionSummary.total < receipts.length
+    || (projectedActionSummary.maxCapabilityEpoch !== null
+      && (!Number.isSafeInteger(projectedActionSummary.maxCapabilityEpoch)
+        || projectedActionSummary.maxCapabilityEpoch < 0))
+    || (projectedActionSummary.total === 0)
+      !== (projectedActionSummary.maxCapabilityEpoch === null)
+  ) {
+    throw new Error("action receipt summary contradicts its projected observations");
+  }
+  for (const [status, count] of Object.entries(observedActionCounts)) {
+    if ((projectedActionSummary.byStatus[status] ?? 0) < count) {
+      throw new Error("action receipt summary contradicts its projected observations");
+    }
+  }
+  if (
+    receipts.some(({ capabilityEpoch }) =>
+      projectedActionSummary.maxCapabilityEpoch === null
+      || capabilityEpoch > projectedActionSummary.maxCapabilityEpoch)
+  ) {
+    throw new Error("action receipt summary maximum capability epoch is incomplete");
+  }
   const indeterminateReceipts = receipts
     .filter(({ status }) => status === "indeterminate")
     .sort((left, right) => Date.parse(right.settledAt ?? right.reservedAt) - Date.parse(left.settledAt ?? left.reservedAt))
@@ -505,7 +969,14 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
     });
 
   const kernelWorkers = new Map((input.conversationState?.workers ?? []).map((worker) => [worker.workerId, worker]));
-  const durableWorkerIds = new Set(durableWorkers.map(({ id }) => id));
+  const projectedDurableIds = durableWorkers.map(({ id }) => id);
+  if (
+    projectedDurableIds.some((id) => !id || id.length > 2_048)
+    || new Set(projectedDurableIds).size !== projectedDurableIds.length
+  ) {
+    throw new Error("durable worker detail identities must be unique and bounded");
+  }
+  const kernelOnlyWorkerStatuses: PublicWorkerStatus[] = [];
   type ProjectedWorkerItem = CallOperationsProjection["workers"]["items"][number];
   const allWorkerItems: ProjectedWorkerItem[] = durableWorkers
     .map((worker): ProjectedWorkerItem => {
@@ -518,41 +989,128 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
       if (leaseExpiryMs !== null && !Number.isFinite(leaseExpiryMs)) {
         throw new Error("voice worker has an invalid lease timestamp");
       }
-      const terminal = ["succeeded", "failed", "cancelled", "indeterminate"].includes(worker.status);
-      const deliveryState = kernel?.status === "completed"
-        ? "delivered"
-        : worker.status === "succeeded"
-          ? "awaiting_delivery"
-          : terminal
-            ? "terminal"
-            : "not_settled";
+      const publicStatus = normalizePublicWorkerStatus(worker.status);
+      const publicKernelStatus = kernel === null
+        ? null
+        : normalizePublicKernelWorkerStatus(kernel.status);
+      const terminal = ["succeeded", "failed", "cancelled", "indeterminate"].includes(publicStatus);
+      const deliveryState = worker.deliveryState
+        ?? (publicKernelStatus === "completed"
+          ? "delivered"
+          : publicStatus === "succeeded"
+            ? "awaiting_delivery"
+            : terminal
+              ? "terminal"
+              : "not_settled");
+      if (
+        (deliveryState === "delivered" && publicStatus !== "succeeded")
+        || (deliveryState === "awaiting_delivery" && publicStatus !== "succeeded")
+        || (deliveryState === "terminal" && !terminal)
+        || (deliveryState === "not_settled" && terminal)
+      ) {
+        throw new Error("durable worker delivery state contradicts its lifecycle status");
+      }
       return Object.freeze({
         workerKey: hmac(input.redactionKey, "hacc/operations/worker/v1", worker.id),
         parentWorkerKey: worker.parentWorkerId === null
           ? null
           : hmac(input.redactionKey, "hacc/operations/worker/v1", worker.parentWorkerId),
-        status: worker.status,
-        kernelStatus: kernel?.status ?? null,
+        status: publicStatus,
+        kernelStatus: publicKernelStatus,
         deliveryState,
         policyEpoch: worker.authority.policyEpoch,
-        staleAuthority: kernelPolicyEpoch !== null && !terminal && worker.authority.policyEpoch !== kernelPolicyEpoch,
+        staleAuthority: !terminal && (
+          worker.authority.policyEpoch === null
+          || (kernelPolicyEpoch !== null && worker.authority.policyEpoch !== kernelPolicyEpoch)
+        ),
         leaseState: leaseExpiryMs === null ? "none" : leaseExpiryMs > input.generatedAtMs ? "active" : "expired",
         cancellationEpoch: worker.cancellationEpoch,
-        checkpointPresent: worker.checkpoint !== null,
-        resultPresent: worker.result !== null,
-        errorPresent: worker.error !== null,
+        checkpointPresent: worker.checkpointPresent ?? (worker.checkpoint !== null && worker.checkpoint !== undefined),
+        resultPresent: worker.resultPresent ?? (worker.result !== null && worker.result !== undefined),
+        errorPresent: worker.errorPresent ?? (worker.error !== null && worker.error !== undefined),
         settledAtMs,
       } as const);
     });
+  const durableWorkerStatuses = durableWorkers.map(({ status }) =>
+    normalizePublicWorkerStatus(status));
+  const durableWorkerDeliveryStates = allWorkerItems.map(({ deliveryState }) =>
+    deliveryState);
+  const projectedDurableWorkerSummary = input.durableWorkerSummary
+    ? {
+        total: input.durableWorkerSummary.total,
+        byStatus: validateAndNormalizeCountRecord(
+          input.durableWorkerSummary.byStatus,
+          input.durableWorkerSummary.total,
+          "durable worker summary",
+          normalizePublicWorkerStatus,
+        ),
+        byDeliveryState: input.durableWorkerSummary.byDeliveryState
+          ? validateAndNormalizeCountRecord(
+              input.durableWorkerSummary.byDeliveryState,
+              input.durableWorkerSummary.total,
+              "durable worker delivery summary",
+              (state) => normalizeClosedCode(state, PUBLIC_WORKER_DELIVERY_STATES),
+            )
+          : input.durableWorkerSummary.total === durableWorkers.length
+            ? freezeCounts(durableWorkerDeliveryStates)
+            : null,
+      }
+    : {
+        total: durableWorkers.length,
+        byStatus: freezeCounts(durableWorkerStatuses),
+        byDeliveryState: freezeCounts(durableWorkerDeliveryStates),
+      };
+  if (projectedDurableWorkerSummary.total > MAX_OBSERVATIONS) {
+    throw new Error(`durable worker summary exceeds ${MAX_OBSERVATIONS} workers`);
+  }
+  if (projectedDurableWorkerSummary.byDeliveryState === null) {
+    throw new Error("complete durable worker delivery summary is required for a bounded detail window");
+  }
+  if (projectedDurableWorkerSummary.total < durableWorkers.length) {
+    throw new Error("durable worker summary is smaller than its projected worker items");
+  }
+  for (const [status, count] of Object.entries(freezeCounts(durableWorkerStatuses))) {
+    if ((projectedDurableWorkerSummary.byStatus[status] ?? 0) < count) {
+      throw new Error("durable worker summary contradicts its projected worker items");
+    }
+  }
+  for (const [state, count] of Object.entries(freezeCounts(durableWorkerDeliveryStates))) {
+    if ((projectedDurableWorkerSummary.byDeliveryState[state] ?? 0) < count) {
+      throw new Error("durable worker delivery summary contradicts its projected worker items");
+    }
+  }
+  if (
+    durableWorkerIds === undefined
+    && kernelWorkers.size > 0
+    && projectedDurableWorkerSummary.total > projectedDurableIds.length
+  ) {
+    throw new Error("complete durable worker identity index is required for a bounded detail window");
+  }
+  const completeDurableIds = durableWorkerIds ?? projectedDurableIds;
+  if (
+    completeDurableIds.some((id) => !id || id.length > 2_048)
+    || new Set(completeDurableIds).size !== completeDurableIds.length
+    || (durableWorkerIds !== undefined
+      && completeDurableIds.length !== projectedDurableWorkerSummary.total)
+  ) {
+    throw new Error("durable worker identity index must exactly cover the durable worker summary");
+  }
+  const completeDurableIdSet = new Set(completeDurableIds);
+  if (projectedDurableIds.some((id) => !completeDurableIdSet.has(id))) {
+    throw new Error("durable worker identity index omits a projected worker item");
+  }
   for (const worker of kernelWorkers.values()) {
-    if (durableWorkerIds.has(worker.workerId)) continue;
-    const terminal = worker.status !== "running";
+    if (completeDurableIdSet.has(worker.workerId)) continue;
+    const publicKernelStatus = normalizePublicKernelWorkerStatus(worker.status);
+    const terminal = publicKernelStatus === "completed" || publicKernelStatus === "cancelled";
+    const publicStatus = normalizePublicWorkerStatus(worker.status);
+    kernelOnlyWorkerStatuses.push(publicStatus);
     allWorkerItems.push(Object.freeze({
       workerKey: hmac(input.redactionKey, "hacc/operations/worker/v1", worker.workerId),
       parentWorkerKey: null,
-      status: worker.status,
-      kernelStatus: worker.status,
-      deliveryState: worker.status === "completed" ? "delivered" : terminal ? "terminal" : "not_settled",
+      status: publicStatus,
+      kernelStatus: publicKernelStatus,
+      deliveryState: publicKernelStatus === "completed" ? "delivered" : terminal ? "terminal" : "not_settled",
       policyEpoch: worker.policyEpoch,
       staleAuthority: kernelPolicyEpoch !== null && !terminal && worker.policyEpoch !== kernelPolicyEpoch,
       leaseState: "none",
@@ -566,7 +1124,27 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
   const workerItems = allWorkerItems
     .sort((left, right) => left.workerKey.localeCompare(right.workerKey))
     .slice(0, MAX_REDACTED_ITEMS);
-  const allWorkerStatuses = allWorkerItems.map(({ status }) => status);
+  const combinedWorkerCounts: Record<string, number> = { ...projectedDurableWorkerSummary.byStatus };
+  const combinedWorkerDeliveryCounts: Record<string, number> = {
+    ...projectedDurableWorkerSummary.byDeliveryState,
+  };
+  for (const status of kernelOnlyWorkerStatuses) {
+    combinedWorkerCounts[status] = (combinedWorkerCounts[status] ?? 0) + 1;
+  }
+  for (const worker of allWorkerItems.slice(durableWorkers.length)) {
+    combinedWorkerDeliveryCounts[worker.deliveryState] =
+      (combinedWorkerDeliveryCounts[worker.deliveryState] ?? 0) + 1;
+  }
+  const projectedWorkerSummary = {
+    total: projectedDurableWorkerSummary.total + kernelOnlyWorkerStatuses.length,
+    byStatus: Object.freeze(Object.fromEntries(
+      Object.entries(combinedWorkerCounts).sort(([left], [right]) => left.localeCompare(right)),
+    )),
+    byDeliveryState: Object.freeze(Object.fromEntries(
+      Object.entries(combinedWorkerDeliveryCounts)
+        .sort(([left], [right]) => left.localeCompare(right)),
+    )),
+  };
 
   const responseTimings = new Map<string, {
     start?: ReturnType<typeof eventClock>;
@@ -658,16 +1236,142 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
     && [...costScopes.values()].every((scope) => scope.reconciled !== undefined);
   const reconciledMicroUsd = costTotal("reconciled");
 
+  const sourceMap = new Map<OperationsSourceObservation["source"], number | null>();
+  for (const observation of sourceObservations) {
+    if (sourceMap.has(observation.source)) throw new Error("operations source observations contain a duplicate source");
+    if (observation.observedAtMs !== null) {
+      assertSafeInteger(observation.observedAtMs, "operations source timestamp");
+    }
+    sourceMap.set(observation.source, observation.observedAtMs);
+  }
+  const recoveryFreshness = new Map<OperationsSourceObservation["source"], number>();
+  for (const observation of recoveryObservations) {
+    if (!observation.subjectId || observation.subjectId.length > 2_048) {
+      throw new Error("recovery subject identity must be bounded");
+    }
+    assertSafeInteger(observation.observedAtMs, "recovery observation timestamp");
+    const publicKind = normalizeClosedCode(
+      observation.kind,
+      PUBLIC_RECOVERY_KINDS,
+    );
+    const source = publicKind === "action_reconciled"
+      ? "flow"
+      : publicKind === "redacted_unknown"
+        ? null
+        : "workers";
+    if (source === null) continue;
+    recoveryFreshness.set(
+      source,
+      Math.max(recoveryFreshness.get(source) ?? 0, observation.observedAtMs),
+    );
+  }
+  const activeCall = publicCallStatus === "active" || publicCallStatus === "dialing";
+  const terminalCall = publicCallStatus === "completed" || publicCallStatus === "failed";
+  const freshnessSources = (["flow", "conversation", "workers", "policy"] as const).map((source) => {
+    const sourceObservedAtMs = sourceMap.get(source) ?? null;
+    const recoveryObservedAtMs = recoveryFreshness.get(source) ?? null;
+    const observedAtMs = sourceObservedAtMs === null
+      ? recoveryObservedAtMs
+      : recoveryObservedAtMs === null
+        ? sourceObservedAtMs
+        : Math.max(sourceObservedAtMs, recoveryObservedAtMs);
+    const ageMs = observedAtMs === null ? null : Math.max(0, input.generatedAtMs - observedAtMs);
+    return Object.freeze({
+      source,
+      observedAtMs,
+      ageMs,
+      state: observedAtMs === null
+        ? "unavailable"
+        : terminalCall
+          ? "settled"
+          : (ageMs ?? 0) > sourceStaleAfterMs
+            ? "stale"
+            : "current",
+    } as const);
+  });
+  const staleSources = freshnessSources
+    .filter(({ state }) => state === "stale")
+    .map(({ source }) => source);
+  const observedAges = freshnessSources.flatMap(({ ageMs }) => ageMs === null ? [] : [ageMs]);
+
+  const recoveryItems = [...recoveryObservations]
+    .map((observation) => {
+      const publicKind = normalizeClosedCode(
+        observation.kind,
+        PUBLIC_RECOVERY_KINDS,
+      ) as PublicRecoveryKind;
+      return Object.freeze({
+        kind: publicKind,
+        subjectKey: hmac(
+          input.redactionKey,
+          `hacc/operations/recovery/${publicKind}/v1`,
+          observation.subjectId,
+        ),
+        observedAtMs: observation.observedAtMs,
+      });
+    })
+    .sort((left, right) => right.observedAtMs - left.observedAtMs
+      || left.kind.localeCompare(right.kind)
+      || left.subjectKey.localeCompare(right.subjectKey))
+    .slice(0, MAX_REDACTED_ITEMS);
+  const observedRecoveryCounts = freezeCounts(recoveryObservations.map(({ kind }) =>
+    normalizeClosedCode(kind, PUBLIC_RECOVERY_KINDS)));
+  const projectedRecoverySummary = input.recoverySummary
+    ? {
+        observations: input.recoverySummary.observations,
+        byKind: validateAndNormalizeCountRecord(
+          input.recoverySummary.byKind,
+          input.recoverySummary.observations,
+          "recovery summary",
+          (kind) => normalizeClosedCode(kind, PUBLIC_RECOVERY_KINDS),
+        ),
+        lastObservedAtMs: input.recoverySummary.lastObservedAtMs,
+      }
+    : {
+        observations: recoveryObservations.length,
+        byKind: observedRecoveryCounts,
+        lastObservedAtMs: recoveryObservations.length === 0
+          ? null
+          : Math.max(...recoveryObservations.map(({ observedAtMs }) => observedAtMs)),
+      };
+  if (
+    projectedRecoverySummary.observations < recoveryObservations.length
+    || (projectedRecoverySummary.lastObservedAtMs !== null
+      && (!Number.isSafeInteger(projectedRecoverySummary.lastObservedAtMs)
+        || projectedRecoverySummary.lastObservedAtMs < 0))
+    || (projectedRecoverySummary.observations === 0) !== (projectedRecoverySummary.lastObservedAtMs === null)
+  ) {
+    throw new Error("recovery summary contradicts its projected observations");
+  }
+  for (const [kind, count] of Object.entries(observedRecoveryCounts)) {
+    if ((projectedRecoverySummary.byKind[kind] ?? 0) < count) {
+      throw new Error("recovery summary contradicts its projected observations");
+    }
+  }
+  const latestProjectedRecovery = recoveryItems.at(0)?.observedAtMs ?? null;
+  if (
+    latestProjectedRecovery !== null
+    && (projectedRecoverySummary.lastObservedAtMs === null
+      || projectedRecoverySummary.lastObservedAtMs < latestProjectedRecovery)
+  ) {
+    throw new Error("recovery summary last observation predates its projected observations");
+  }
+
   const attention = new Set<CallOperationsProjection["attention"][number]>();
   if (connectionEpochs.some(({ failureObserved }) => failureObserved)) attention.add("connection_failure");
   if (connectionEpochs.some(({ closeObserved, cleanClose }) => closeObserved && cleanClose !== true)) {
     attention.add("unclean_connection_close");
   }
   if (authorityDrift.size > 0) attention.add("authority_drift");
-  if (denialItems.length > 0) attention.add("policy_denial");
-  if (indeterminateReceipts.length > 0) attention.add("indeterminate_action");
-  if (workerItems.some(({ status }) => status === "indeterminate")) attention.add("indeterminate_worker");
-  if (workerItems.some(({ deliveryState }) => deliveryState === "awaiting_delivery")) attention.add("worker_delivery_pending");
+  if (projectedPolicySummary.denials > 0) attention.add("policy_denial");
+  if ((projectedActionSummary.byStatus.indeterminate ?? 0) > 0) {
+    attention.add("indeterminate_action");
+  }
+  if ((projectedWorkerSummary.byStatus.indeterminate ?? 0) > 0) attention.add("indeterminate_worker");
+  if ((projectedWorkerSummary.byDeliveryState.awaiting_delivery ?? 0) > 0) {
+    attention.add("worker_delivery_pending");
+  }
+  if (staleSources.length > 0) attention.add("stale_operations_source");
   if (sortedPackets.some(({ packet }) => packet.value.omittedRecentTurnCount > 0)) attention.add("context_turns_omitted");
   if (costScopes.size > 0 && !everyScopeReconciled) attention.add("cost_not_reconciled");
 
@@ -685,10 +1389,12 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
       epochs: Object.freeze(connectionDetails),
     }),
     authority: Object.freeze({
-      conversationRevision: input.conversationState?.eventCount
+      conversationRevision: input.conversationAuthority?.revision
+        ?? input.conversationState?.eventCount
         ?? latestPacket?.value.authority.conversationRevision
         ?? null,
-      conversationHeadSha256: input.conversationState?.headHash
+      conversationHeadSha256: input.conversationAuthority?.headSha256
+        ?? input.conversationState?.headHash
         ?? latestPacket?.value.authority.conversationHeadSha256
         ?? null,
       policyEpoch: kernelPolicyEpoch,
@@ -700,20 +1406,35 @@ export function projectCallOperations(input: CallOperationsProjectionInput): Cal
       drift: Object.freeze([...authorityDrift].sort()),
     }),
     policy: Object.freeze({
-      observations: decisions.length,
-      denials: deniedDecisions.length,
-      byDecision: freezeCounts(decisions.map(({ decision }) => decision.decision)),
+      observations: projectedPolicySummary.observations,
+      denials: projectedPolicySummary.denials,
+      byDecision: projectedPolicySummary.byDecision,
       recentDenials: Object.freeze(denialItems),
     }),
     actions: Object.freeze({
-      total: receipts.length,
-      byStatus: freezeCounts(receipts.map(({ status }) => status)),
+      total: projectedActionSummary.total,
+      byStatus: projectedActionSummary.byStatus,
       indeterminate: Object.freeze(indeterminateReceipts),
     }),
     workers: Object.freeze({
-      total: allWorkerItems.length,
-      byStatus: freezeCounts(allWorkerStatuses),
+      total: projectedWorkerSummary.total,
+      byStatus: projectedWorkerSummary.byStatus,
+      byDeliveryState: projectedWorkerSummary.byDeliveryState,
       items: Object.freeze(workerItems),
+    }),
+    freshness: Object.freeze({
+      callStatus: publicCallStatus,
+      active: activeCall,
+      staleAfterMs: sourceStaleAfterMs,
+      maximumAgeMs: observedAges.length === 0 ? null : Math.max(...observedAges),
+      staleSources: Object.freeze(staleSources),
+      sources: Object.freeze(freshnessSources),
+    }),
+    recovery: Object.freeze({
+      observations: projectedRecoverySummary.observations,
+      byKind: projectedRecoverySummary.byKind,
+      lastObservedAtMs: projectedRecoverySummary.lastObservedAtMs,
+      recent: Object.freeze(recoveryItems),
     }),
     context: Object.freeze({
       packetCount: sortedPackets.length,

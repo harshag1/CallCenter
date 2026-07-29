@@ -1,6 +1,6 @@
 # HACC-LC4-v1 frozen realtime provider profiles
 
-Status: documentation-verified on 2026-07-22; hash-bound in
+Status: documentation-verified on 2026-07-28; hash-bound in
 `web/lib/benchmark/lc4-provider-profiles.ts`; **provider execution remains
 unauthorized** by this artifact.
 
@@ -17,7 +17,7 @@ are the intended differences.
 |---|---|---:|---|---|
 | OpenAI | `gpt-realtime-2.1` / `marin` | 24 kHz -> 24 kHz | commit, then response | per-response instructions override session instructions |
 | Gemini | `gemini-3.1-flash-live-preview` / `Aoede` | 16 kHz -> 24 kHz | explicit activity start/end | advisory realtime user-text stream; **not system-equivalent** |
-| xAI | `grok-voice-think-fast-1.0` / `ara` | 24 kHz -> 24 kHz | provider `server_vad`: speech stop, automatic commit, automatic initial response | acknowledged `session.update.instructions` before the first audio packet |
+| xAI | `grok-voice-think-fast-1.0` / `ara` | 24 kHz -> 24 kHz | finite prerecorded clips: one explicit commit, then one response request | per-response instructions override session instructions |
 
 ## Known provider asymmetries
 
@@ -33,18 +33,33 @@ are the intended differences.
   the common gateway rather than relying on provider-native async semantics.
 - Gemini's setup-complete message does not echo the requested setup, so exact
   provider acknowledgement cannot be proved from that event. OpenAI's adapter
-  requires exact transport acknowledgement. xAI requires a per-turn
-  `session.update`/`session.updated` barrier; an exact empty
-  `turn_detection` echo remains conditional until the paid spoken Gate B.
-- xAI freezes documented server VAD at threshold `0.85`, silence `500 ms`, and
-  prefix padding `333 ms`; idle-timeout and transcription controls are omitted.
-  The caller PCM is paced
-  only after the per-turn context and exact closed tool frontier are
-  acknowledged. The client sends neither `input_audio_buffer.commit` nor the
-  initial `response.create`; after a tool result it sends exactly one explicit
-  continuation `response.create`. Barge-in/interruption is prohibited in LC4.
+  requires exact transport acknowledgement. The separately qualified xAI
+  server-VAD path requires a per-turn `session.update`/`session.updated`
+  barrier; an exact empty `turn_detection` echo remains conditional until the
+  paid spoken Gate B.
+- LC4 efficacy cells use xAI's documented manual turn mode for finite
+  prerecorded caller clips. Native and HACC receive the same byte-exact PCM,
+  one `input_audio_buffer.commit`, the matching commit acknowledgement, and one
+  initial `response.create`; neither arm receives a VAD delimiter. This removes
+  endpoint timing from the within-provider treatment comparison.
+- xAI server VAD remains a separate interactive-transport qualification at
+  threshold `0.85`, silence `500 ms`, and prefix padding `333 ms`.
+  That qualification uses the disclosed bounded zero-PCM delimiter and proves
+  lifecycle compatibility only. It does not authorize or score the finite-clip
+  Native-versus-HACC efficacy cells.
 - Temperature and reasoning controls are omitted for all matched arms. That is
   arm parity, not cross-provider equivalence: provider defaults may differ.
+- Planned connection refreshes use the same conversation-replay compiler in
+  both arms. It accepts only chronological caller TTS source text,
+  assistant transcripts already derived from the exact captured output PCM by
+  the signed listener evaluator, and provider-visible tool results. This reuses
+  the scored audio path and does not enable an extra provider transcription
+  stream or make an additional API call. The compiler rejects oracle-,
+  semantic-evaluator-, future-, or non-conversation inputs. HACC
+  adds its structured state commitment to that replay; Native does not receive
+  it. Receipt hashes, corpus opportunity ordinals, source labels, and other
+  replay-integrity metadata remain host-side. Rebuilding a Native prompt from
+  corpus fact annotations is prohibited.
 
 ## Frozen lifecycle evidence policies
 
@@ -64,12 +79,13 @@ profiles satisfy that requirement differently:
   content, terminal, and provider-reported usage must bind to that identity on
   the same connection epoch and input turn; this is host causal evidence, not a
   claim that Gemini issued the ID.
-- xAI uses an explicitly disclosed zero-PCM end-of-speech delimiter after the
-  byte-exact caller audio. The delimiter is transport evidence, excluded from
-  caller-audio accounting, and must precede native speech stop, automatic
-  commit, and automatic initial response. Any root-response audio before the
-  terminal function call is retained in response-scoped quarantine with
-  `released_audio_bytes = 0`; only the explicit post-tool continuation may
+- xAI finite-clip evidence binds the exact caller PCM, one explicit commit and
+  its acknowledgement, one initial response request, the tool result, and the
+  distinct post-tool continuation. The separately qualified server-VAD path
+  additionally binds its disclosed delimiter prefix, native speech stop,
+  automatic commit, and automatic initial response. Any root-response audio
+  before the terminal function call is retained in response-scoped quarantine
+  with `released_audio_bytes = 0`; only the explicit post-tool continuation may
   provide caller-playable output.
 
 Missing, conflicting, reordered, or provenance-free lifecycle evidence makes
@@ -86,3 +102,95 @@ HACC efficacy.
 This manifest satisfies only the LC4 protocol's provider-profile prerequisite.
 It is not provider-call evidence, efficacy evidence, a preregistration, or
 permission to open a paid socket.
+
+## Qualification boundary
+
+The retained xAI Gate B evidence predating this profile exercises the separate
+`provider_native_server_vad` transport. It does **not** qualify or authorize the
+new `manual_commit` finite-clip transport by implication. The manual transport
+is the intended efficacy-cell boundary, while server VAD remains an interactive
+transport check; neither label is evidence that the provider accepted the
+current implementation.
+
+Gate D is the only admission bridge between those scopes. It must be a fresh,
+source/profile-bound, one-shot xAI manual clip that proves commit
+acknowledgement, the initial tool response, one authoritative result, and the
+distinct post-tool continuation. Gate D is transport-compatibility evidence,
+not Native-versus-HACC efficacy evidence. Until its signed receipt and trust
+root replay successfully, no xAI efficacy cell may be admitted, published, or
+used in a launch claim. The older server-VAD receipt cannot substitute for it.
+
+### Gate D operator
+
+Run Gate D only from the exact clean commit that will run LC4-DEV. The raw
+credential is accepted only from `XAI_API_KEY` or the absolute private file
+named by `BENCHMARK_PROVIDER_ENV_FILE`; it is never accepted as a CLI flag or
+written to an artifact. Authority and terminal Ed25519 keys must be distinct
+private files. The evidence root must be a physical `0700` directory outside
+the source repository; every command resolves both paths, binds the root's
+device and inode, and fails if an alias points custody back inside the checkout
+or the directory identity changes. The harmless clip is headerless mono PCM16
+at 24 kHz.
+
+```bash
+cd web
+export BENCHMARK_PROVIDER_ENV_FILE=/absolute/private/provider.env
+
+npm run benchmark:lc4:xai-gate-d:prepare -- \
+  --repository-root /absolute/path/to/repository \
+  --evidence-root /absolute/private/new-gate-d-root \
+  --harmless-clip-pcm /absolute/path/to/harmless-24khz-mono.pcm \
+  --authority-private-key /absolute/private/gate-d-authority.pem
+
+npm run benchmark:lc4:xai-gate-d:authorize -- \
+  --repository-root /absolute/path/to/repository \
+  --evidence-root /absolute/private/new-gate-d-root \
+  --authority-private-key /absolute/private/gate-d-authority.pem \
+  --terminal-private-key /absolute/private/gate-d-terminal.pem \
+  --trust-root-fingerprint PLAN_TRUST_ROOT_FROM_PREPARE
+
+npm run benchmark:lc4:xai-gate-d:run -- \
+  --repository-root /absolute/path/to/repository \
+  --evidence-root /absolute/private/new-gate-d-root \
+  --harmless-clip-pcm /absolute/path/to/harmless-24khz-mono.pcm \
+  --terminal-private-key /absolute/private/gate-d-terminal.pem \
+  --trust-root-fingerprint PLAN_TRUST_ROOT_FROM_PREPARE
+
+npm run benchmark:lc4:xai-gate-d:report -- \
+  --repository-root /absolute/path/to/repository \
+  --evidence-root /absolute/private/new-gate-d-root \
+  --trust-root-fingerprint PLAN_TRUST_ROOT_FROM_PREPARE
+```
+
+`run` consumes its authorization marker before constructing the production
+client. Gate D v2 retains that marker's canonical preimage and physical file
+identity, a bounded content-free execution replay, and a terminal-signed
+package manifest binding the plan, authorization, claim, production adapter,
+execution, source/tree, transport profiles, and budget. Plan-authority and
+terminal keys must differ. It opens at most one provider session, permits
+exactly two generation phases and one gateway roundtrip, and conservatively
+settles the separate $1.00 authority. Failure after the marker exists is
+terminal for that evidence root: there is no retry, reconnect, resume, or
+fallback path.
+
+Gate D is client-observed evidence signed by the operator's terminal key; xAI
+does not attest the package. Its PCM hashes and non-empty byte counts prove
+that the client captured transport bytes, not that a human heard intelligible
+audio or that downstream playback completed.
+
+The `$1.00` value is a per-authorization, per-evidence-root conservative
+liability, not a provider invoice or billing-meter receipt. Operators must
+also reserve it in the campaign-wide benchmark ledger; creating a fresh Gate D
+root does not reset the user-approved aggregate spend ceiling.
+
+## Current artifact compatibility
+
+The finite-manual transport split changes the meaning of both qualification
+targets and production execution profiles. Current tooling therefore accepts
+only qualification runner `v6` plans (plan schema `2`, terminal schema `4`),
+retained DEV qualification receipt schema `4`, DEV live runner `v3`
+prepare/preflight/authorization artifacts (schema `3`), production runner
+foundation `v2`, and provider execution profile `v3`. Hash and signature
+domains were advanced with those versions; artifacts from an older domain are
+historical evidence only and fail replay/admission rather than being upgraded
+in place.

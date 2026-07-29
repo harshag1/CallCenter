@@ -8,11 +8,16 @@ import {
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   assertLc4ProviderProfileManifest,
+  lc4XaiTransportProfileForPurpose,
+  type Lc4XaiTransportMode,
+  type Lc4XaiTransportPurpose,
 } from "./lc4-provider-profiles";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 
 export const LC4_RUNNER_PROTOCOL = "HACC-LC4-v1" as const;
-export const LC4_RUNNER_FOUNDATION_VERSION = "LC4-PRODUCTION-RUNNER-FOUNDATION-v1" as const;
+export const LC4_RUNNER_FOUNDATION_VERSION = "LC4-PRODUCTION-RUNNER-FOUNDATION-v2" as const;
+export const LC4_PROVIDER_EXECUTION_PROFILE_VERSION =
+  "HACC-LC4-PROVIDER-EXECUTION-PROFILE-v3" as const;
 export const LC4_EPISODES = 144 as const;
 export const LC4_PAIRS = 72 as const;
 export const LC4_TEMPLATES = 24 as const;
@@ -23,8 +28,8 @@ export const LC4_SCHEDULING_CEILING_MICRO_USD = 900_000_000 as const;
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
-const SCHEDULE_DOMAIN = "harshas-amazing-call-center/lc4-production-schedule-shape/v1\n";
-const EPISODE_DOMAIN = "harshas-amazing-call-center/lc4-production-episode-manifest/v1\n";
+const SCHEDULE_DOMAIN = "harshas-amazing-call-center/lc4-production-schedule-shape/v2\n";
+const EPISODE_DOMAIN = "harshas-amazing-call-center/lc4-production-episode-manifest/v2\n";
 const QUALIFICATION_DOMAIN = "harshas-amazing-call-center/lc4-production-qualification-gate/v1\n";
 const GENERATOR_JOIN_CONTRACT_DOMAIN = "harshas-amazing-call-center/lc4-generator-schedule-join-contract/v1\n";
 const GENERATOR_JOIN_DOMAIN = "harshas-amazing-call-center/lc4-generator-schedule-join/v1\n";
@@ -41,6 +46,7 @@ export type Lc4SegmentShape = Readonly<{
 }>;
 
 export type Lc4ProviderExecutionProfile = Readonly<{
+  execution_profile_version: typeof LC4_PROVIDER_EXECUTION_PROFILE_VERSION;
   provider: LiveStsProvider;
   model: string;
   voice: string;
@@ -49,6 +55,9 @@ export type Lc4ProviderExecutionProfile = Readonly<{
   turn_boundary: string;
   context_authority: string;
   provider_profile_sha256: string;
+  transport_mode: Lc4XaiTransportMode | null;
+  transport_profile_sha256: string | null;
+  transport_purpose: Lc4XaiTransportPurpose | null;
 }>;
 
 export type Lc4PairShape = Readonly<{
@@ -85,7 +94,7 @@ export type Lc4EpisodeShape = Readonly<{
 }>;
 
 export type Lc4ProductionScheduleShape = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: typeof LC4_RUNNER_PROTOCOL;
   runner_foundation_version: typeof LC4_RUNNER_FOUNDATION_VERSION;
   status: "shape_frozen_provider_execution_forbidden";
@@ -141,19 +150,38 @@ export const LC4_PROVIDER_EPISODE_RESERVATION_MICRO_USD = Object.freeze({
   xai: 2_096_258,
 } satisfies Record<LiveStsProvider, number>);
 
-function profileFor(provider: LiveStsProvider): Lc4ProviderExecutionProfile {
+export function createLc4ProviderExecutionProfile(
+  provider: LiveStsProvider,
+  xaiPurpose: Lc4XaiTransportPurpose = "finite_prerecorded_efficacy",
+): Lc4ProviderExecutionProfile {
   assertLc4ProviderProfileManifest(LC4_PROVIDER_PROFILE_MANIFEST);
   const profile = LC4_PROVIDER_PROFILE_MANIFEST.providers[provider];
-  return Object.freeze({
+  const xaiTransport = provider === "xai"
+    ? lc4XaiTransportProfileForPurpose(xaiPurpose)
+    : null;
+  const body = Object.freeze({
+    execution_profile_version: LC4_PROVIDER_EXECUTION_PROFILE_VERSION,
     provider,
     model: profile.model,
     voice: profile.voice,
     input_sample_rate_hz: profile.input_sample_rate_hz,
     output_sample_rate_hz: profile.output_sample_rate_hz,
-    turn_boundary: profile.turn_boundary,
+    turn_boundary: xaiTransport?.turn_boundary ?? profile.turn_boundary,
     context_authority: profile.context_delivery.authority,
-    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v2\n${canonicalJson(profile)}`),
+    transport_mode: xaiTransport?.transport_mode ?? null,
+    transport_profile_sha256: xaiTransport?.transport_profile_sha256 ?? null,
+    transport_purpose: xaiTransport?.purpose ?? null,
   });
+  return Object.freeze({
+    ...body,
+    provider_profile_sha256: sha256Hex(
+      `hacc-lc4/provider-execution-profile/v3\n${canonicalJson(body)}`,
+    ),
+  });
+}
+
+function profileFor(provider: LiveStsProvider): Lc4ProviderExecutionProfile {
+  return createLc4ProviderExecutionProfile(provider);
 }
 
 function scheduleBody() {
@@ -203,7 +231,7 @@ function scheduleBody() {
     throw new Error("LC4 episode reservations exceed the frozen scheduling ceiling");
   }
   return Object.freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     protocol_id: LC4_RUNNER_PROTOCOL,
     runner_foundation_version: LC4_RUNNER_FOUNDATION_VERSION,
     status: "shape_frozen_provider_execution_forbidden" as const,
@@ -513,7 +541,7 @@ export type Lc4BudgetReservationReceipt = Readonly<{
 }>;
 
 export type Lc4EpisodeManifest = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   protocol_id: typeof LC4_RUNNER_PROTOCOL;
   runner_foundation_version: typeof LC4_RUNNER_FOUNDATION_VERSION;
   run_id: string;
@@ -556,6 +584,18 @@ export function createLc4EpisodeManifest(input: Readonly<{
   budget_reservation: Lc4BudgetReservationReceipt;
   opportunities: readonly Lc4OpportunityBinding[];
 }>): Lc4EpisodeManifest {
+  if (input.schedule.schema_version !== 2
+    || input.schedule.runner_foundation_version !== LC4_RUNNER_FOUNDATION_VERSION) {
+    throw new Error("LC4 production schedule uses a stale foundation schema");
+  }
+  const {
+    schedule_sha256: claimedScheduleSha256,
+    ...scheduleBodyWithoutHash
+  } = input.schedule;
+  if (claimedScheduleSha256
+    !== sha256Hex(`${SCHEDULE_DOMAIN}${canonicalJson(scheduleBodyWithoutHash)}`)) {
+    throw new Error("LC4 production schedule hash mismatch");
+  }
   const episode = input.schedule.episode_shapes.find((candidate) => candidate.run_id === input.run_id);
   if (!episode) throw new Error("episode is absent from the frozen LC4 schedule");
   if (input.schedule.provider_calls_authorized !== false) throw new Error("LC4 foundation cannot authorize provider execution");
@@ -601,7 +641,7 @@ export function createLc4EpisodeManifest(input: Readonly<{
     throw new Error("LC4 opportunity IDs must be unique");
   }
   const body = Object.freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     protocol_id: LC4_RUNNER_PROTOCOL,
     runner_foundation_version: LC4_RUNNER_FOUNDATION_VERSION,
     run_id: episode.run_id,

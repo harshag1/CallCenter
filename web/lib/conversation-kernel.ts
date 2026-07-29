@@ -19,6 +19,9 @@ const MAX_TEXT_LENGTH = 4_096;
 const MAX_FACTS_PER_DELIVERY = 32;
 const MAX_ADVISORIES_PER_DELIVERY = 16;
 const MAX_DEPENDENCIES_PER_WORKER = 64;
+export const MAX_ACTIVE_WORKERS_PER_GOAL = 8;
+const MAX_PROJECTED_TERMINAL_WORKERS_PER_GOAL = 8;
+const MAX_PROJECTED_WORKER_PURPOSE_BYTES = 256;
 const MAX_UNRESOLVED_FLOW_ACTIONS = 64;
 const MAX_INVARIANTS = 64;
 const MIN_CONTEXT_BYTES = 256;
@@ -29,6 +32,18 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function boundedUtf8Text(value: string, maximumBytes: number): string {
+  if (utf8Bytes(value) <= maximumBytes) return value;
+  let lower = 0;
+  let upper = value.length;
+  while (lower < upper) {
+    const middle = Math.ceil((lower + upper) / 2);
+    if (utf8Bytes(value.slice(0, middle)) <= maximumBytes) lower = middle;
+    else upper = middle - 1;
+  }
+  return value.slice(0, lower).replace(/[\uD800-\uDBFF]$/, "");
 }
 
 function compareCodeUnits(left: string, right: string): number {
@@ -213,6 +228,14 @@ const WorkerCancelledSchema = z.object({
   reason: TextSchema,
 }).strict();
 
+const WorkerFinishedSchema = z.object({
+  type: z.literal("worker.finished"),
+  workerId: IdSchema,
+  status: z.enum(["failed", "cancelled", "indeterminate"]),
+  reasonCode: IdSchema,
+  evidenceSha256: HashSchema,
+}).strict();
+
 const WorkerFactSchema = z.object({
   key: IdSchema,
   value: JsonValueSchema,
@@ -264,6 +287,7 @@ export const ConversationEventPayloadSchema = z.discriminatedUnion("type", [
   FlowCheckpointRecordedSchema,
   WorkerSpawnedSchema,
   WorkerCancelledSchema,
+  WorkerFinishedSchema,
   WorkerResultDeliveredSchema,
   AdvisoryRecordedSchema,
 ]);
@@ -325,7 +349,13 @@ export interface WorkerRecord {
   readonly policyEpoch: number;
   readonly dependencies: readonly z.infer<typeof FactDependencySchema>[];
   readonly spawnedSequence: number;
-  readonly status: "running" | "completed" | "cancelled";
+  readonly status:
+    | "running"
+    | "completed"
+    | "cancelled"
+    | "failed"
+    | "indeterminate"
+    | "superseded";
 }
 
 export interface WorkerDeliveryRecord {
@@ -627,6 +657,11 @@ function applyEvent(state: MutableState, event: ConversationEvent): void {
       if (state.workers.has(payload.workerId)) throw new Error(`worker ${payload.workerId} already exists`);
       if (state.currentGoalId !== payload.goalId) throw new Error("worker must bind to the current goal");
       if (payload.policyEpoch !== state.policy.epoch) throw new Error("worker must bind to the current policy epoch");
+      if ([...state.workers.values()].filter(
+        ({ goalId, status }) => goalId === payload.goalId && status === "running",
+      ).length >= MAX_ACTIVE_WORKERS_PER_GOAL) {
+        throw new Error(`goal cannot have more than ${MAX_ACTIVE_WORKERS_PER_GOAL} active workers`);
+      }
       for (const dependency of payload.dependencies) {
         if (state.facts.get(dependency.key)?.revision !== dependency.revision) {
           throw new Error(`worker dependency ${dependency.key} is not current`);
@@ -643,6 +678,14 @@ function applyEvent(state: MutableState, event: ConversationEvent): void {
       const worker = state.workers.get(payload.workerId);
       if (!worker || worker.status !== "running") throw new Error(`worker ${payload.workerId} is not running`);
       worker.status = "cancelled";
+      return;
+    }
+    case "worker.finished": {
+      const worker = state.workers.get(payload.workerId);
+      if (!worker || worker.status !== "running") {
+        throw new Error(`worker ${payload.workerId} is not running`);
+      }
+      worker.status = payload.status;
       return;
     }
     case "worker.result_delivered": {
@@ -674,13 +717,13 @@ function applyEvent(state: MutableState, event: ConversationEvent): void {
         status = "rejected";
         reason = "worker goal is no longer active";
       } else if (payload.policyEpoch !== worker.policyEpoch || payload.policyEpoch !== state.policy.epoch) {
-        status = "deferred";
+        status = "rejected";
         reason = "policy epoch changed while worker was running";
       } else if (!dependenciesMatch(payload.dependencyFactRevisions, worker.dependencies)) {
         status = "rejected";
         reason = "delivery dependency declaration differs from spawn contract";
       } else if (worker.dependencies.some(({ key, revision }) => state.facts.get(key)?.revision !== revision)) {
-        status = "deferred";
+        status = "rejected";
         reason = "an authoritative dependency fact changed while worker was running";
       }
       const applied = status === "accepted";
@@ -689,7 +732,10 @@ function applyEvent(state: MutableState, event: ConversationEvent): void {
         deliveryId: payload.deliveryId, workerId: payload.workerId, eventId: event.eventId,
         status, reason, appliedSequence: applied ? event.sequence : null, logicalHash,
       });
-      if (!applied || !worker) return;
+      if (!applied || !worker) {
+        if (status === "rejected" && worker?.status === "running") worker.status = "superseded";
+        return;
+      }
       worker.status = "completed";
       for (const fact of payload.facts) {
         state.acceptedWorkerFacts.push({
@@ -756,9 +802,26 @@ export interface ContextProjection {
     "nodeId" | "currentStep" | "completedStepCount" | "unresolvedActionIds" | "stateDigest"
   > | null;
   readonly openCommitments: readonly Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
-  readonly currentGoalWorkers: readonly Pick<WorkerRecord, "workerId" | "purpose" | "status">[];
-  readonly acceptedWorkerFacts: readonly Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
-  readonly recentAdvisoryEpisodes: readonly Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
+  readonly currentGoalWorkers: readonly (Pick<WorkerRecord, "workerId" | "purpose" | "status"> & Readonly<{
+    /** The purpose originated in model/caller-controlled worker input. */
+    purposeTrust: "untrusted_advisory";
+  }>)[];
+  readonly omittedTerminalWorkerCount: number;
+  readonly acceptedWorkerFacts: readonly (Pick<
+    AcceptedWorkerFact,
+    "key" | "value" | "evidenceId" | "workerId"
+  > & Readonly<{
+    /** Delivery admission does not promote worker-authored content to truth. */
+    valueTrust: "untrusted_advisory";
+    /** An opaque citation identifier is evidence metadata, never an instruction. */
+    citationTrust: "untrusted_advisory";
+  }>)[];
+  readonly recentAdvisoryEpisodes: readonly (Pick<
+    AdvisoryEpisode,
+    "episodeId" | "text" | "source"
+  > & Readonly<{
+    textTrust: "untrusted_advisory";
+  }>)[];
 }
 
 export interface ProjectedContext {
@@ -801,9 +864,10 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     currentGoal: Pick<ConversationGoal, "goalId" | "description"> | null;
     currentFlowCheckpoint: ContextProjection["currentFlowCheckpoint"];
     openCommitments: Pick<ConversationCommitment, "commitmentId" | "goalId" | "description">[];
-    currentGoalWorkers: Pick<WorkerRecord, "workerId" | "purpose" | "status">[];
-    acceptedWorkerFacts: Pick<AcceptedWorkerFact, "key" | "value" | "evidenceId" | "workerId">[];
-    recentAdvisoryEpisodes: Pick<AdvisoryEpisode, "episodeId" | "text" | "source">[];
+    currentGoalWorkers: Array<ContextProjection["currentGoalWorkers"][number]>;
+    omittedTerminalWorkerCount: number;
+    acceptedWorkerFacts: Array<ContextProjection["acceptedWorkerFacts"][number]>;
+    recentAdvisoryEpisodes: Array<ContextProjection["recentAdvisoryEpisodes"][number]>;
   } = {
     schemaVersion: 1,
     policyEpoch: state.policy.epoch,
@@ -813,6 +877,7 @@ export function projectConversationContext(state: ConversationState, byteBudget:
     currentFlowCheckpoint: null,
     openCommitments: [],
     currentGoalWorkers: [],
+    omittedTerminalWorkerCount: 0,
     acceptedWorkerFacts: [],
     recentAdvisoryEpisodes: [],
   };
@@ -848,9 +913,32 @@ export function projectConversationContext(state: ConversationState, byteBudget:
       commitmentId: commitment.commitmentId, goalId: commitment.goalId, description: commitment.description,
     })));
   if (state.currentGoal) {
-    projection.currentGoalWorkers.push(...state.workers
-      .filter(({ goalId }) => goalId === state.currentGoal?.goalId)
-      .map(({ workerId, purpose, status }) => ({ workerId, purpose, status })));
+    const goalWorkers = state.workers
+      .filter(({ goalId }) => goalId === state.currentGoal?.goalId);
+    const activeWorkers = goalWorkers
+      .filter(({ status }) => status === "running");
+    if (activeWorkers.length > MAX_ACTIVE_WORKERS_PER_GOAL) {
+      throw new Error("conversation state exceeds the active worker invariant");
+    }
+    const terminalWorkers = goalWorkers
+      .filter(({ status }) => status !== "running")
+      .sort((left, right) =>
+        right.spawnedSequence - left.spawnedSequence
+        || compareCodeUnits(left.workerId, right.workerId));
+    projection.omittedTerminalWorkerCount = Math.max(
+      0,
+      terminalWorkers.length - MAX_PROJECTED_TERMINAL_WORKERS_PER_GOAL,
+    );
+    projection.currentGoalWorkers.push(...[
+      ...activeWorkers,
+      ...terminalWorkers.slice(0, MAX_PROJECTED_TERMINAL_WORKERS_PER_GOAL),
+    ]
+      .map(({ workerId, purpose, status }) => ({
+        workerId,
+        purpose: boundedUtf8Text(purpose, MAX_PROJECTED_WORKER_PURPOSE_BYTES),
+        status,
+        purposeTrust: "untrusted_advisory" as const,
+      })));
   }
   const requiredControlBytes = projectionBytes(projection);
   if (requiredControlBytes > byteBudget) {
@@ -871,12 +959,24 @@ export function projectConversationContext(state: ConversationState, byteBudget:
   }
   for (const fact of [...latestWorkerFactByKey.values()]
     .sort((left, right) => right.acceptedSequence - left.acceptedSequence || compareCodeUnits(left.key, right.key))) {
-    const item = { key: fact.key, value: fact.value, evidenceId: fact.evidenceId, workerId: fact.workerId };
+    const item = {
+      key: fact.key,
+      value: fact.value,
+      evidenceId: fact.evidenceId,
+      workerId: fact.workerId,
+      valueTrust: "untrusted_advisory" as const,
+      citationTrust: "untrusted_advisory" as const,
+    };
     tryOptionalMutation(() => projection.acceptedWorkerFacts.push(item), () => { projection.acceptedWorkerFacts.pop(); });
   }
   for (const episode of [...state.advisories]
     .sort((left, right) => right.sequence - left.sequence || compareCodeUnits(left.episodeId, right.episodeId))) {
-    const item = { episodeId: episode.episodeId, text: episode.text, source: episode.source };
+    const item = {
+      episodeId: episode.episodeId,
+      text: episode.text,
+      source: episode.source,
+      textTrust: "untrusted_advisory" as const,
+    };
     tryOptionalMutation(() => projection.recentAdvisoryEpisodes.push(item), () => { projection.recentAdvisoryEpisodes.pop(); });
   }
   const serialized = canonicalJson(projection);

@@ -5,8 +5,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { q, qOne } from "./db";
 import { mcpGatewaySecret } from "./high-authority-secrets";
-import { research } from "./xai";
 import { searchKnowledge, hasReadyDocuments } from "./knowledge";
+import {
+  createServerInferenceRuntime,
+  type ServerInferenceAuthority,
+} from "./server-inference";
 import {
   AgentFlowSchema,
   actionPolicyFor,
@@ -115,6 +118,16 @@ import {
   activeFlowContext,
   activeFlowControlDefinitions,
 } from "./active-capability-flow";
+import { deriveActiveReadOnlyWorkerManifest } from "./voice-workers/capability-manifest";
+import type { VoiceWorkerCapabilityManifest } from "./voice-workers/schema";
+import { MAX_ACTIVE_WORKERS_PER_GOAL } from "./conversation-kernel";
+import {
+  buildGovernedLaunchTaskWorkerInput,
+  deriveGovernedLaunchTaskIdentity,
+  governedLaunchTaskResult,
+  governedLaunchTaskRunActionResult,
+  reconcileIndeterminateGovernedLaunchTask,
+} from "./governed-launch-task-recovery";
 
 const L = log("mcp");
 const MAX_HOLD_S = 20;
@@ -139,6 +152,9 @@ const DEFINITIVE_BUILTIN_REJECTION_CODES = new Set([
   "invalid_email",
   "invalid_phone",
   "internet_disabled",
+  "governed_worker_preflight_required",
+  "governed_worker_read_capability_required",
+  "governed_worker_limit_reached",
 ]);
 const ACTION_ARGUMENT_MAX_BYTES = 240 * 1024;
 const MAX_ACTION_VALIDATORS = 1_024;
@@ -223,6 +239,9 @@ type ToolInvocationMeta = {
   actionContext?: VoiceToolExecutionContext;
   preparedExtension?: PreparedVoiceToolInvocation;
   preparedGeneratedInvocation?: PreparedToolInvocation;
+  preparedWorkerCapabilityManifest?: VoiceWorkerCapabilityManifest;
+  /** Host-only shared spend authority for nested background research. */
+  serverInferenceAuthority?: ServerInferenceAuthority;
 };
 type McpToolDef = VoiceToolDefinition;
 
@@ -330,16 +349,77 @@ function saveEvent(scope: Scope, type: string, payload: unknown) {
   ]).catch(() => {});
 }
 
-/** Preflight real-call Twilio REST authority before the flow effect boundary. */
-async function preflightBuiltInVoiceAction(scope: Scope, name: string): Promise<void> {
-  if (name !== "contact_support" && name !== "end_call") return;
-  const call = await qOne<{ twilio_call_sid: string | null }>(
-    "SELECT twilio_call_sid FROM calls WHERE id = $1",
-    [scope.callId]
-  );
-  if (!call?.twilio_call_sid) return;
-  twilioAccountSid();
-  twilioRestAuthorization();
+type BuiltInVoiceActionPreflight =
+  | Readonly<{
+      ok: true;
+      workerCapabilityManifest?: VoiceWorkerCapabilityManifest;
+    }>
+  | Readonly<{
+      ok: false;
+      error: string;
+      code: string;
+    }>;
+
+/**
+ * Resolves every local prerequisite which can prove non-execution before the
+ * durable dispatch boundary. In particular, a worker manifest is derived and
+ * frozen here; discovering an empty read surface after dispatch would
+ * incorrectly turn a zero-effect rejection into an indeterminate write.
+ */
+async function preflightBuiltInVoiceAction(
+  scope: Scope,
+  name: string,
+  ctx: CallCtx,
+  state: FlowExecutionState,
+): Promise<BuiltInVoiceActionPreflight> {
+  if (name === "launch_task") {
+    try {
+      const authority = await activeCapabilityAuthorityFromContext(scope, ctx, state);
+      const backgroundTools = (await listToolCatalogFor(scope, ctx))
+        .filter((tool) => BACKGROUND_TOOL_NAMES.has(tool.name));
+      const workerCapabilityManifest = deriveActiveReadOnlyWorkerManifest({
+        catalog: authority.catalog,
+        executableBackgroundToolNames: backgroundTools.map(({ name: toolName }) => toolName),
+      });
+      if (!process.env.WORKER_DATABASE_URL) {
+        return Object.freeze({
+          ok: false as const,
+          error: "durable governed-worker execution is not configured for this deployment",
+          code: "governed_worker_runtime_not_configured",
+        });
+      }
+      return Object.freeze({
+        ok: true as const,
+        workerCapabilityManifest,
+      });
+    } catch {
+      return Object.freeze({
+        ok: false as const,
+        error: "the active Flow step grants no background-safe read capability for this worker",
+        code: "governed_worker_read_capability_required",
+      });
+    }
+  }
+  if (name !== "contact_support" && name !== "end_call") {
+    return Object.freeze({ ok: true as const });
+  }
+  try {
+    const call = await qOne<{ twilio_call_sid: string | null }>(
+      "SELECT twilio_call_sid FROM calls WHERE id = $1",
+      [scope.callId]
+    );
+    if (call?.twilio_call_sid) {
+      twilioAccountSid();
+      twilioRestAuthorization();
+    }
+    return Object.freeze({ ok: true as const });
+  } catch {
+    return Object.freeze({
+      ok: false as const,
+      error: "real-call provider REST authority is unavailable",
+      code: "provider_rest_authority_unavailable",
+    });
+  }
 }
 
 function publicAuditOptions(
@@ -397,6 +477,31 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
 
   tools.push(
     {
+      name: "check_worker",
+      description:
+        "Check only the lifecycle status of one previously returned worker_id. Worker content is never returned here; use it only if it appears in the fresh HACC durable context packet attached by the host.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          worker_id: { type: "string", format: "uuid" },
+        },
+        required: ["worker_id"],
+      },
+      effect: "read",
+    },
+    {
+      name: "get_worker_updates",
+      description:
+        "Request a fresh HACC durable context packet after background work. This returns no worker-authored content directly; only host-admitted updates inside the attached packet may be used.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+      effect: "read",
+    },
+    {
       name: "hold",
       description: `Put the caller on a brief hold (max ${MAX_HOLD_S}s). Say you'll check first, then call this. Returns when the hold is over.`,
       inputSchema: { type: "object", properties: { seconds: { type: "number" } }, required: ["seconds"] },
@@ -425,15 +530,15 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
     {
       name: "launch_task",
       description:
-        "Hand read-only research to a background assistant with this call's transcript and search/table-read tools. Consequential email, text, or data writes must stay in a receipt-backed live flow. `when:'now'` runs immediately; `when:'end_of_call'` runs after hangup.",
+        "Spawn a durable, governed read-only research worker. Its immutable capability manifest is the exact intersection of reads granted at this Flow checkpoint and the background gateway. Results are policy-checked into a later durable context packet; consequential actions remain in the live Flow.",
       inputSchema: {
         type: "object",
         properties: {
           command: { type: "string", description: "Read-only research instruction, e.g. 'find the relevant membership policy and summarize the applicable steps'." },
-          when: { type: "string", enum: ["now", "end_of_call"], default: "end_of_call" },
         },
         required: ["command"],
       },
+      effect: "write",
     },
     {
       name: "read_table",
@@ -447,6 +552,7 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
         },
         required: ["table"],
       },
+      effect: "read",
     },
     {
       name: "write_table",
@@ -461,8 +567,19 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
         },
         required: ["table", "row"],
       },
+      effect: "write",
     }
   );
+
+  // A pinned empty dataset list means this call has no table authority. Never
+  // degrade an empty enum into an unrestricted string: that would let a long-
+  // running call or worker discover tables added after its runtime snapshot.
+  if (ctx.datasetSlugs.length === 0) {
+    for (const name of ["read_table", "write_table"]) {
+      const index = tools.findIndex((tool) => tool.name === name);
+      if (index >= 0) tools.splice(index, 1);
+    }
+  }
 
   if (ctx.holdMusic) {
     tools.push({
@@ -477,6 +594,7 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
       name: "search",
       description: `Search the live web for current facts${ctx.allowedDomains.length ? ` (restricted to: ${ctx.allowedDomains.join(", ")})` : ""}. Takes several seconds — ALWAYS say a short natural line first ("Let me look that up for you…") so the caller is never in silence, THEN call this.`,
       inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      effect: "read",
     });
   }
   if (ctx.docsReady) {
@@ -484,6 +602,7 @@ async function listToolCatalogFor(scope: Scope, loaded?: CallCtx): Promise<McpTo
       name: "search_knowledge",
       description: "Semantic search over the company's uploaded documents (policies, manuals, FAQs). Prefer this over web search for company-specific questions.",
       inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      effect: "read",
     });
   }
   for (const t of ctx.mintedTools) {
@@ -517,6 +636,8 @@ const FLOW_CONTROL_TOOLS = new Set([
   "get_flow_state",
   "run_action",
   "reconcile_action",
+  "check_worker",
+  "get_worker_updates",
 ]);
 const LEGACY_AUTHORITY_BEARING_CONTROLS = new Set([
   "classify",
@@ -659,7 +780,11 @@ function leasedActionsFor(
   const ref = state.currentStep && !state.completedSteps.includes(state.currentStep)
     ? findStep(ctx.flow, state.currentStep)
     : undefined;
-  return catalog.filter((tool) => allowed.has(tool.name) && !FLOW_CONTROL_TOOLS.has(tool.name)).map((tool) => {
+  return catalog.filter((tool) =>
+    allowed.has(tool.name)
+    && !FLOW_CONTROL_TOOLS.has(tool.name)
+    && realtimeToolIsConfigured(tool.name)
+  ).map((tool) => {
     const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === tool.name)
       ?? alwaysActionPolicies(ctx.flow).find((candidate) => candidate.tool === tool.name);
     const signed = signFlowCapability({
@@ -691,7 +816,25 @@ const FLOW_V1_DIRECT_BUSINESS_TOOLS = new Set([
   "hold",
   "play_hold_music",
 ]);
-const FLOW_V1_DIRECT_CONTROLS = new Set(["classify", "begin_step"]);
+const FLOW_V1_DIRECT_CONTROLS = new Set([
+  "classify",
+  "begin_step",
+  "check_worker",
+  "get_worker_updates",
+]);
+const WORKER_PULL_CONTROLS = new Set(["check_worker", "get_worker_updates"]);
+
+/**
+ * Provider-visible realtime catalogs must not advertise a tool that the
+ * stock realtime route cannot execute. Web search is deliberately available
+ * only inside a governed worker carrying its parent spend authority, and
+ * launch_task requires the isolated worker database principal.
+ */
+function realtimeToolIsConfigured(name: string): boolean {
+  if (name === "search") return false;
+  if (name === "launch_task") return Boolean(process.env.WORKER_DATABASE_URL);
+  return true;
+}
 
 function assertFlowV1DirectAttachmentsAreSafe(ctx: CallCtx): void {
   if (ctx.mintedTools.length || ctx.extensionTools.length || ctx.externalMcpServers.length) {
@@ -721,7 +864,8 @@ function assertFlowV1DirectAttachmentsAreSafe(ctx: CallCtx): void {
 
 async function activeCapabilityAuthorityFromContext(
   scope: Scope,
-  ctx: CallCtx
+  ctx: CallCtx,
+  recoveredFlowState?: FlowExecutionState,
 ): Promise<ActiveCapabilityAuthority> {
   const catalog = await listToolCatalogFor(scope, ctx);
   const digest = runtimeDigest(ctx, catalog);
@@ -729,8 +873,11 @@ async function activeCapabilityAuthorityFromContext(
     assertFlowV1DirectAttachmentsAreSafe(ctx);
     const sources: ActiveCapabilitySource[] = catalog
       .filter((definition) =>
-        FLOW_V1_DIRECT_CONTROLS.has(definition.name) ||
-        FLOW_V1_DIRECT_BUSINESS_TOOLS.has(definition.name)
+        realtimeToolIsConfigured(definition.name)
+        && (
+          FLOW_V1_DIRECT_CONTROLS.has(definition.name)
+          || FLOW_V1_DIRECT_BUSINESS_TOOLS.has(definition.name)
+        )
       )
       .map((definition) => ({
         kind: "direct" as const,
@@ -759,8 +906,11 @@ async function activeCapabilityAuthorityFromContext(
     });
   }
 
-  const state = await recoverStaleFlowActionsAtomic(scope.callId);
-  const controls = activeFlowControlDefinitions(ctx.flow, state).map((definition) => ({
+  const state = recoveredFlowState ?? await recoverStaleFlowActionsAtomic(scope.callId);
+  const controls = [
+    ...activeFlowControlDefinitions(ctx.flow, state),
+    ...catalog.filter((definition) => WORKER_PULL_CONTROLS.has(definition.name)),
+  ].map((definition) => ({
     kind: "direct" as const,
     definition,
   }));
@@ -800,6 +950,35 @@ export async function activeCapabilityAuthorityFor(scope: Scope): Promise<Active
   return activeCapabilityAuthorityFromContext(scope, await loadCtx(scope));
 }
 
+/**
+ * Host-only binding consumed by the stock provider route. The catalog and Flow
+ * checkpoint come from one recovered state read, so the live conversation
+ * projector cannot accidentally pair valid artifacts from different revisions.
+ * Flow v1 remains a fail-closed compatibility route without checkpoint
+ * authority; it cannot manufacture a Flow v2 state.
+ */
+export async function activeConversationRouteAuthorityFor(scope: Scope): Promise<Readonly<{
+  authority: ActiveCapabilityAuthority;
+  flow: Readonly<{ runtimeDigest: string; state: FlowExecutionState }> | null;
+}>> {
+  const ctx = await loadCtx(scope);
+  if (flowToolExposure(ctx.flow) === "direct") {
+    return Object.freeze({
+      authority: await activeCapabilityAuthorityFromContext(scope, ctx),
+      flow: null,
+    });
+  }
+  const state = await recoverStaleFlowActionsAtomic(scope.callId);
+  const authority = await activeCapabilityAuthorityFromContext(scope, ctx, state);
+  return Object.freeze({
+    authority,
+    flow: Object.freeze({
+      runtimeDigest: authority.catalog.runtime_digest,
+      state,
+    }),
+  });
+}
+
 type ActiveCapabilityInvocationMeta = Readonly<{
   invocationId: string;
   expectedCatalog: ActiveCatalogExpectation;
@@ -822,13 +1001,49 @@ export async function callActiveCapability(
 
   let admission: McpToolInvocationAdmission;
   try {
-    admission = await admitMcpToolInvocation({
+    const launchTaskArguments = logicalName === "run_action"
+      && modelArguments.name === "launch_task"
+      && modelArguments.arguments
+      && typeof modelArguments.arguments === "object"
+      && !Array.isArray(modelArguments.arguments)
+      ? modelArguments.arguments as Record<string, unknown>
+      : null;
+    const invocationIdentity = {
       callId: scope.callId,
       providerInvocationId: meta.invocationId,
       logicalName,
       modelArguments,
       expectedCatalog: meta.expectedCatalog,
-    });
+    };
+    admission = launchTaskArguments
+      ? await admitMcpToolInvocation(invocationIdentity, {
+        recoverExpired: async () => {
+        // The outer provider receipt outlives the Flow dispatch lease. Once it
+        // expires, first make abandoned post-boundary Flow ownership explicit,
+        // then prove the deterministic worker spawn and promote that same
+        // receipt. No second worker is ever created.
+        await recoverStaleFlowActionsAtomic(scope.callId);
+        const flowReceiptId = receiptIdForInvocation(scope.callId, meta.invocationId);
+        const recovered = await reconcileIndeterminateGovernedLaunchTask({
+          callId: scope.callId,
+          organizationId: scope.orgId,
+          conversationId: scope.callId,
+          receiptId: flowReceiptId,
+          runtimeDigest: runtimeDigest(ctx, staticCatalog),
+        });
+        if (!recovered.reconciled) {
+          if (recovered.pending) throw new Error("launch_task reconciliation is pending");
+          return null;
+        }
+        return {
+          result: governedLaunchTaskRunActionResult(
+            recovered.result.worker_id,
+            recovered.receiptId,
+          ),
+        };
+        },
+      })
+      : await admitMcpToolInvocation(invocationIdentity);
   } catch (error) {
     // Provider-triggerable admission failures deliberately do not write the
     // shared logs table: without a durable receipt identity, repeated malformed
@@ -959,14 +1174,18 @@ export async function listToolsFor(scope: Scope): Promise<McpToolDef[]> {
   if (flowToolExposure(ctx.flow) === "direct") {
     assertFlowV1DirectAttachmentsAreSafe(ctx);
     return catalog.filter((definition) =>
-      FLOW_V1_DIRECT_CONTROLS.has(definition.name) ||
-      FLOW_V1_DIRECT_BUSINESS_TOOLS.has(definition.name)
+      realtimeToolIsConfigured(definition.name)
+      && (
+        FLOW_V1_DIRECT_CONTROLS.has(definition.name)
+        || FLOW_V1_DIRECT_BUSINESS_TOOLS.has(definition.name)
+      )
     );
   }
 
   const classify = catalog.find((tool) => tool.name === "classify");
   const controls: McpToolDef[] = [
     ...(classify ? [classify] : []),
+    ...catalog.filter((tool) => WORKER_PULL_CONTROLS.has(tool.name)),
     {
       name: "enter_step",
       description: "Enter one of the step paths returned by classify, complete_step, or get_flow_state. Returns only the context and action schemas needed for that step.",
@@ -1055,8 +1274,26 @@ export async function callToolForAudience(
   if (audience === "background" && !BACKGROUND_TOOL_NAMES.has(name)) {
     return { error: `tool "${name}" is not available to background tasks`, code: "wrong_tool_audience" };
   }
+  if (name === "search" && !meta.serverInferenceAuthority) {
+    return audience === "background"
+      ? {
+          error: "background web search requires its parent operation spend authority",
+          code: "background_inference_authority_required",
+        }
+      : {
+          error: "live web search requires an explicit per-call spend authority",
+          code: "realtime_inference_authority_required",
+        };
+  }
   const ctx = await loadCtx(scope);
   const catalog = await listToolCatalogFor(scope, ctx);
+  if (audience === "background") {
+    const invalidArguments = validateCatalogActionArguments(
+      catalog.find((definition) => definition.name === name),
+      args,
+    );
+    if (invalidArguments) return invalidArguments;
+  }
   if (audience === "realtime" && flowToolExposure(ctx.flow) === "direct") {
     assertFlowV1DirectAttachmentsAreSafe(ctx);
     if (!FLOW_V1_DIRECT_CONTROLS.has(name) && !FLOW_V1_DIRECT_BUSINESS_TOOLS.has(name)) {
@@ -1682,6 +1919,38 @@ async function executeActionReconciliation(
 ): Promise<unknown> {
   const catalog = await listToolCatalogFor(scope, ctx);
   const digest = runtimeDigest(ctx, catalog);
+  // launch_task has a host-owned exact read-back contract rather than a
+  // builder-authored reconciliation spec. A fresh reconcile_action invocation
+  // after reconnect must recover the deterministic existing worker spawn even
+  // when the original provider invocation id will never be repeated.
+  const flowState = await loadFlowState(scope.callId);
+  const receipt = flowState.actionReceipts.find(({ id }) => id === receiptId);
+  if (receipt?.tool === "launch_task") {
+    const recovered = await reconcileIndeterminateGovernedLaunchTask({
+      callId: scope.callId,
+      organizationId: scope.orgId,
+      conversationId: scope.callId,
+      receiptId,
+      runtimeDigest: digest,
+    });
+    if (!recovered.reconciled) {
+      return {
+        error: recovered.error,
+        code: recovered.code,
+        receipt_id: recovered.receiptId,
+        ...(recovered.pending ? { pending: true } : {}),
+        ...(recovered.proofId ? { proof_id: recovered.proofId } : {}),
+      };
+    }
+    return {
+      reconciled: true,
+      replayed: recovered.replayed,
+      outcome: "committed",
+      receipt_id: recovered.receiptId,
+      proof_id: recovered.proofId,
+      result: recovered.result,
+    };
+  }
   const admission = await prepareActionReconciliation(scope, ctx, receiptId, digest, catalog);
   if ("error" in admission) return admission;
   if (!admission.execute) {
@@ -1764,6 +2033,43 @@ async function dispatch(
   }
 
   switch (name) {
+    case "check_worker": {
+      if (
+        Object.keys(args).length !== 1
+        || typeof args.worker_id !== "string"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          args.worker_id,
+        )
+      ) {
+        return {
+          error: "check_worker requires exactly one worker_id UUID",
+          code: "invalid_worker_id",
+        };
+      }
+      const { loadDurableVoiceWorkerStatus } = await import("./voice-workers/store");
+      const worker = await loadDurableVoiceWorkerStatus({
+        workerId: args.worker_id,
+        organizationId: scope.orgId,
+        conversationId: scope.callId,
+      });
+      return worker
+        ? { found: true, worker_id: worker.id, status: worker.status }
+        : { found: false };
+    }
+
+    case "get_worker_updates": {
+      if (Object.keys(args).length !== 0) {
+        return {
+          error: "get_worker_updates accepts no arguments",
+          code: "invalid_worker_update_request",
+        };
+      }
+      // The stock MCP route attaches a newly compiled host packet after every
+      // tool call. Returning no content here prevents a status poll from
+      // becoming an alternate, ungoverned worker-result channel.
+      return { ok: true };
+    }
+
     case "classify": {
       const id = String(args.topic);
       const node = id === "other" ? fallbackNode(ctx.flow) : ctx.flow.nodes.find((n) => n.id === id && n.kind === "topic");
@@ -2029,6 +2335,7 @@ async function dispatch(
             };
       };
       let preparedExtension: PreparedVoiceToolInvocation | undefined;
+      let preparedWorkerCapabilityManifest: VoiceWorkerCapabilityManifest | undefined;
       if (pinnedExtension) {
         const preflight = await voiceToolExtensions.preflightPinned(
           action,
@@ -2090,14 +2397,14 @@ async function dispatch(
       }
 
       if (!generatedAction && !remote && !pinnedExtension) {
-        try {
-          await preflightBuiltInVoiceAction(scope, action);
-        } catch {
+        const preflight = await preflightBuiltInVoiceAction(scope, action, ctx, state);
+        if (!preflight.ok) {
           return rejectBeforeDispatch(
-            "real-call provider REST authority is unavailable",
-            "provider_rest_authority_unavailable"
+            preflight.error,
+            preflight.code,
           );
         }
+        preparedWorkerCapabilityManifest = preflight.workerCapabilityManifest;
       }
 
       const dispatchPermit = await markFlowActionDispatchStartedAtomic(scope.callId, {
@@ -2124,6 +2431,7 @@ async function dispatch(
           actionContext,
           ...(preparedExtension ? { preparedExtension } : {}),
           ...(preparedGeneratedInvocation ? { preparedGeneratedInvocation } : {}),
+          ...(preparedWorkerCapabilityManifest ? { preparedWorkerCapabilityManifest } : {}),
         }, ctx);
       } catch (error) {
         const message = error instanceof Error ? error.message : "action execution failed without a result";
@@ -2334,7 +2642,16 @@ async function dispatch(
         error: `unknown table "${table}". Available: ${ctx.datasetSlugs.join(", ")}`,
         code: "unknown_table",
       };
-      return { table: res.dataset.slug, count: res.rows.length, rows: res.rows.map((r) => ({ id: r.id, ...r.data })) };
+      return {
+        table: res.dataset.slug,
+        count: res.rows.length,
+        rows: res.rows.map((row) => ({
+          // Keep host-owned row identity outside business data. A dataset
+          // column named `id` can no longer overwrite citation provenance.
+          row_id: row.id,
+          data: row.data,
+        })),
+      };
     }
 
     case "write_table": {
@@ -2480,31 +2797,161 @@ async function dispatch(
     }
 
     case "launch_task": {
-      const when = args.when === "now" ? "now" : "end_of_call";
-      const row = await qOne<{ id: string }>(
-        `INSERT INTO call_tasks (call_id, org_id, agent_id, command, trigger_at)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-        [scope.callId, scope.orgId, scope.agentId, String(args.command), when]
-      );
-      if (when === "now") {
-        const [{ waitUntil }, { runCallTask }] = await Promise.all([import("@vercel/functions"), import("./tasks")]);
-        waitUntil(runCallTask(row!.id).catch(() => {}));
+      if (
+        !meta.actionContext?.idempotencyKey
+        || !meta.actionContext.runtimeDigest
+        || !meta.actionContext.receiptId
+      ) {
+        return {
+          error: "durable worker spawn requires Flow v2 gateway authority",
+          code: "governed_worker_authority_required",
+        };
       }
-      return {
-        ok: true, task_id: row!.id,
-        message: when === "now" ? "Background assistant started — it works in parallel, continue the call." : "Queued — it will run right after this call ends.",
-      };
+      const command = String(args.command ?? "").trim();
+      if (!command || Buffer.byteLength(command, "utf8") > 4_096) {
+        return { error: "worker command must contain 1 to 4096 UTF-8 bytes", code: "invalid_worker_command" };
+      }
+      const [
+        { createPostgresConversationRuntime },
+        { createPostgresConversationCallCoordinator },
+        { waitUntil },
+        { runGovernedCallWorker },
+      ] = await Promise.all([
+        import("./conversation-runtime-postgres"),
+        import("./conversation-call-coordinator-postgres"),
+        import("@vercel/functions"),
+        import("./governed-call-worker-executor"),
+      ]);
+      const conversationRuntime = createPostgresConversationRuntime();
+      const loaded = await conversationRuntime.load({
+        conversationId: scope.callId,
+        organizationId: scope.orgId,
+      });
+      const goal = loaded.state.currentGoal;
+      const checkpoint = loaded.state.currentFlowCheckpoint;
+      if (!goal || !checkpoint || checkpoint.runtimeDigest !== meta.actionContext.runtimeDigest) {
+        return {
+          error: "durable conversation authority is not synchronized with the active Flow",
+          code: "governed_worker_checkpoint_required",
+        };
+      }
+      const activeWorkerCount = loaded.state.workers.filter(
+        (worker) => worker.goalId === goal.goalId && worker.status === "running",
+      ).length;
+      if (activeWorkerCount >= MAX_ACTIVE_WORKERS_PER_GOAL) {
+        return {
+          error: `the active goal already has ${MAX_ACTIVE_WORKERS_PER_GOAL} background workers`,
+          code: "governed_worker_limit_reached",
+        };
+      }
+      const call = await qOne<{ agent_version: number }>(
+        `SELECT c.agent_version
+         FROM calls c JOIN agents a ON a.id = c.agent_id
+         WHERE c.id = $1 AND c.agent_id = $2 AND a.org_id = $3 AND c.status = 'active'`,
+        [scope.callId, scope.agentId, scope.orgId],
+      );
+      if (!call) {
+        return { error: "active call authority is unavailable", code: "active_call_required" };
+      }
+      const launchIdentity = deriveGovernedLaunchTaskIdentity({
+        conversationId: scope.callId,
+        organizationId: scope.orgId,
+        flowActionIdempotencyKey: meta.actionContext.idempotencyKey,
+      });
+      const currentFlowState = await recoverStaleFlowActionsAtomic(scope.callId);
+      const actionReceipt = currentFlowState.actionReceipts.find(
+        ({ id }) => id === meta.actionContext?.receiptId,
+      );
+      const occurredAtMs = actionReceipt ? Date.parse(actionReceipt.reservedAt) : Number.NaN;
+      if (!Number.isSafeInteger(occurredAtMs) || occurredAtMs < 0) {
+        throw new Error("governed worker spawn is missing its stable Flow reservation time");
+      }
+      const activeAuthority = await activeCapabilityAuthorityFromContext(scope, ctx, currentFlowState);
+      const capabilityManifest = meta.preparedWorkerCapabilityManifest;
+      if (!capabilityManifest) {
+        return {
+          error: "durable worker dispatch is missing its preflighted immutable read manifest",
+          code: "governed_worker_preflight_required",
+        };
+      }
+      const coordinator = createPostgresConversationCallCoordinator();
+      const result = await coordinator.runTurn({
+        scope: {
+          conversationId: scope.callId,
+          organizationId: scope.orgId,
+        },
+        turnId: launchIdentity.turnId,
+        occurredAtMs,
+        workers: [{
+          operationId: launchIdentity.operationId,
+          request: {
+            workerKind: "call.research",
+            authority: {
+              v: 1,
+              conversationId: scope.callId,
+              organizationId: scope.orgId,
+              agentId: scope.agentId,
+              agentVersion: call.agent_version,
+              source: "voice_call",
+              sourceCallId: scope.callId,
+              goalId: goal.goalId,
+              policyEpoch: loaded.state.policy.epoch,
+              factDependencies: loaded.state.facts.map(({ key, revision }) => ({ key, revision })),
+            },
+            workerInput: buildGovernedLaunchTaskWorkerInput({
+              command,
+              receiptId: meta.actionContext.receiptId,
+              runtimeDigest: meta.actionContext.runtimeDigest,
+              identity: launchIdentity,
+            }),
+            capabilityManifest,
+            sourceCallId: scope.callId,
+          },
+        }],
+        packet: {
+          capabilityCatalogDigest: activeAuthority.catalog.catalog_digest,
+          capabilityEpoch: activeAuthority.catalog.capability_epoch,
+          capabilities: activeAuthority.catalog.tools.map((tool) => ({
+            name: tool.logical_name,
+            description: tool.description,
+          })),
+          recentAudibleTurns: [],
+          byteBudget: 32_768,
+        },
+      });
+      const worker = result.workers[0]?.value;
+      if (!worker) throw new Error("governed worker spawn returned no durable worker");
+      if (worker.id !== launchIdentity.workerId) {
+        throw new Error("governed worker spawn returned a non-deterministic worker identity");
+      }
+      waitUntil(runGovernedCallWorker({
+        workerId: worker.id,
+        organizationId: scope.orgId,
+        conversationId: scope.callId,
+      }, {
+        // The MCP route has a 60-second host lifetime. Leave ten seconds for
+        // settlement; the authenticated minute drain is the durable backstop.
+        hostDeadlineAtMs: Date.now() + 50_000,
+      }).catch(() => null));
+      return governedLaunchTaskResult(worker.id);
     }
 
     case "search": {
       if (!ctx.internetEnabled) return { error: "internet access is disabled for this org", code: "internet_disabled" };
-      const text = await research(
+      const inference = createServerInferenceRuntime({
+        purpose: "background_task",
+        workload: "research",
+        authority: meta.serverInferenceAuthority!,
+      });
+      const result = await inference.research(
         `Answer for a live phone agent: 2-3 dense factual sentences, no preamble. Run AT MOST ONE web search.${ctx.allowedDomains.length ? ` Only use information from these domains: ${ctx.allowedDomains.join(", ")}.` : ""}`,
         String(args.query),
-        400,
-        ctx.allowedDomains.length ? ctx.allowedDomains : undefined
+        {
+          maxOutputTokens: 400,
+          allowedDomains: ctx.allowedDomains.length ? ctx.allowedDomains : undefined,
+        },
       );
-      return { findings: text };
+      return { findings: result.text };
     }
 
     case "search_knowledge": {

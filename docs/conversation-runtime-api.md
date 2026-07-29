@@ -59,12 +59,20 @@ Worker executors use the lower-level claim, heartbeat, checkpoint, settle, and c
 
 ## Current release boundary
 
-These APIs and migrations `033`–`036` are implemented and tested. They are not yet the default MCP/provider call path. Before enabling them for live traffic, add a shadow adapter that:
+The live browser/MCP path now:
 
 1. mirrors Flow checkpoints into the conversation log;
-2. compiles and injects the bounded packet on every authority change and reconnect;
-3. routes live action reservations through governed admission;
-4. replaces `launch_task` with registered worker recipes; and
-5. records playback evidence before claiming spoken-output guardrails.
+2. compiles and injects a bounded packet on session creation/reconnect and
+   refreshes it after MCP calls;
+3. spawns `launch_task` work through an immutable, active-catalog-derived
+   read-only worker manifest;
+4. rechecks worker results against current dependencies before exactly-once
+   application; and
+5. labels transcripts and worker/model output as untrusted advisory data.
+
+Flow v2 receipts still own live action reservations. General governed action
+admission and a unified production repair controller remain non-default. The
+optional browser speech gate covers exact phrases/secrets and does not establish
+general spoken safety or PSTN playback.
 
 Provider adapters should depend on this surface. None of these primitives should depend on provider-owned conversation history.

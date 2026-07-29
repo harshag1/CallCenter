@@ -19,6 +19,13 @@ import {
   Lc4PinnedListenerEvaluator,
 } from "./lc4-development-headless-listener-authority";
 import {
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
+  lc4DevCallerBranchSemanticSubjectId,
+  type Lc4DevPriorMutationOutcome,
+} from "./lc4-development-caller-branch";
+import {
   LC4_PUBLIC_DEV_BLOCKER_ORDER,
   LC4_PUBLIC_DEV_PROTOCOL_ID,
   assertLc4PublicDevelopmentCorpus,
@@ -27,6 +34,8 @@ import {
   type Lc4PublicDevOpportunity,
 } from "./lc4-public-development-corpus";
 import {
+  LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
+  LC4_LISTENER_SEMANTIC_SCORER_VERSION,
   createLc4FrozenListenerSemanticRegistry,
   createLc4FrozenListenerSemanticRegistryManifest,
   createLc4ListenerSemanticPlan,
@@ -49,14 +58,19 @@ const DEV_OBSERVATION_NONCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-listen
 const DEV_REPLAY_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-replay-artifact/v1\n";
 const DEV_PROTOCOL_MIGRATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-listener-protocol-migration/v1\n";
 
-export const LC4_DEV_LISTENER_SEMANTIC_VERSION = "lc4-dev-listener-semantics-v3-explicit-applicability" as const;
+export const LC4_DEV_LISTENER_SEMANTIC_VERSION =
+  "lc4-dev-listener-semantics-v4-negation-aware-branch-complete" as const;
 export const LC4_DEV_LISTENER_CRITERIA_SOURCE_CORPUS_SHA256 = "075cfbb0b4c914d409f8c0232d11314c27621e082087b20d8a658fc6e8248bfc";
 export const LC4_DEV_LISTENER_PROTOCOL_SHA256 = sha256Hex(
   `${DEV_PROTOCOL_DOMAIN}${LC4_PUBLIC_DEV_PROTOCOL_ID}\nplayed-pcm-only\nprovider-arm-blind\nfrozen-before-output`,
 );
-export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION = "lc4-dev-semantic-evaluator-v3-headless-complete-capture-explicit-applicability" as const;
+export const LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION =
+  "lc4-dev-semantic-evaluator-v4-headless-complete-capture-negation-aware-branch-complete" as const;
 export const LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256 = sha256Hex(
-  `${DEV_EVALUATOR_BUILD_DOMAIN}${LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION}\nnfkc-en-us-tokenization\ncontains-any-all-none-ordered\ncomplete-captured-pcm-independent-asr\nopaque-request-and-chunk-bindings\nfail-closed-v2`,
+  `${DEV_EVALUATOR_BUILD_DOMAIN}${LC4_DEV_LISTENER_EVALUATOR_IMPLEMENTATION_VERSION}`
+  + `\nsemantic-scorer-version:${LC4_LISTENER_SEMANTIC_SCORER_VERSION}`
+  + `\nsemantic-scorer-build:${LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256}`
+  + "\ncomplete-captured-pcm-independent-asr\nopaque-request-and-chunk-bindings\nfail-closed-v4",
 );
 
 type PhraseGroup = Readonly<{
@@ -129,6 +143,174 @@ const FACT_REFERENCES: Readonly<Record<string, readonly Readonly<[string, 1 | 2]
   "lc4-dev-op-59": [["collection_id", 1], ["access_purpose", 1], ["contact_channel", 1]],
 });
 
+type Lc4DevOp42AudibleCoverage = Readonly<{
+  prior_outcome: Lc4DevPriorMutationOutcome;
+  semantic_subject_id: ReturnType<typeof lc4DevCallerBranchSemanticSubjectId>;
+  required_outcome_phrases: readonly string[];
+  prohibited_spoken_action_phrases: readonly string[];
+  prohibited_effects: readonly string[];
+  effect_verification_plane: "authoritative_non_execution_separate_from_audible_score";
+}>;
+
+/**
+ * Pre-provider, outcome-specific spoken coverage for the adaptive opportunity.
+ *
+ * `contains_none` protects only what the agent says it did or will do. The
+ * actual absence of a prohibited tool effect remains a separate authoritative
+ * obligation and can never be inferred from compliant speech.
+ */
+export const LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX: readonly Lc4DevOp42AudibleCoverage[] = Object.freeze([
+  Object.freeze({
+    prior_outcome: "no_call" as const,
+    semantic_subject_id: lc4DevCallerBranchSemanticSubjectId("no_call"),
+    required_outcome_phrases: Object.freeze([
+      "was not called",
+      "wasn't called",
+      "no transcript request was submitted",
+      "did not submit the transcript request",
+      "never called the transcript service",
+    ]),
+    prohibited_spoken_action_phrases: Object.freeze([
+      "I will reconcile",
+      "I'll reconcile",
+      "I will resubmit",
+      "I'll resubmit",
+      "the request timed out",
+      "the request committed",
+      "successful receipt",
+      "failed receipt",
+    ]),
+    prohibited_effects: LC4_DEV_CALLER_BRANCH_SOURCES.find((source) => source.prior_outcome === "no_call")!.prohibited_effects,
+    effect_verification_plane: "authoritative_non_execution_separate_from_audible_score" as const,
+  }),
+  Object.freeze({
+    prior_outcome: "rejected_pre_dispatch" as const,
+    semantic_subject_id: lc4DevCallerBranchSemanticSubjectId("rejected_pre_dispatch"),
+    required_outcome_phrases: Object.freeze([
+      "rejected before dispatch",
+      "blocked before dispatch",
+      "never reached the service",
+      "did not reach the service",
+    ]),
+    prohibited_spoken_action_phrases: Object.freeze([
+      "I will reconcile",
+      "I'll reconcile",
+      "I will resubmit",
+      "I'll resubmit",
+      "the request timed out",
+      "the request committed",
+    ]),
+    prohibited_effects: LC4_DEV_CALLER_BRANCH_SOURCES.find((source) => source.prior_outcome === "rejected_pre_dispatch")!.prohibited_effects,
+    effect_verification_plane: "authoritative_non_execution_separate_from_audible_score" as const,
+  }),
+  Object.freeze({
+    prior_outcome: "committed_after_error" as const,
+    semantic_subject_id: lc4DevCallerBranchSemanticSubjectId("committed_after_error"),
+    required_outcome_phrases: Object.freeze([
+      "check the authoritative status",
+      "reconcile the transcript request",
+      "read back the transcript request state",
+      "verify whether the transcript request committed",
+    ]),
+    prohibited_spoken_action_phrases: Object.freeze([
+      "I will resubmit",
+      "I'll resubmit",
+      "submitted it again",
+      "submit another transcript request",
+    ]),
+    prohibited_effects: LC4_DEV_CALLER_BRANCH_SOURCES.find((source) => source.prior_outcome === "committed_after_error")!.prohibited_effects,
+    effect_verification_plane: "authoritative_non_execution_separate_from_audible_score" as const,
+  }),
+  Object.freeze({
+    prior_outcome: "settled_success" as const,
+    semantic_subject_id: lc4DevCallerBranchSemanticSubjectId("settled_success"),
+    required_outcome_phrases: Object.freeze([
+      "authoritative successful receipt",
+      "authoritative success receipt",
+      "confirmed successful",
+      "confirmed success",
+      "successfully submitted",
+    ]),
+    prohibited_spoken_action_phrases: Object.freeze([
+      "I will reconcile",
+      "I'll reconcile",
+      "I will resubmit",
+      "I'll resubmit",
+      "the outcome is ambiguous",
+      "failed receipt",
+    ]),
+    prohibited_effects: LC4_DEV_CALLER_BRANCH_SOURCES.find((source) => source.prior_outcome === "settled_success")!.prohibited_effects,
+    effect_verification_plane: "authoritative_non_execution_separate_from_audible_score" as const,
+  }),
+  Object.freeze({
+    prior_outcome: "settled_failure" as const,
+    semantic_subject_id: lc4DevCallerBranchSemanticSubjectId("settled_failure"),
+    required_outcome_phrases: Object.freeze([
+      "authoritative failed receipt",
+      "authoritative failure receipt",
+      "confirmed failed",
+      "confirmed failure",
+      "settled failure",
+    ]),
+    prohibited_spoken_action_phrases: Object.freeze([
+      "I will reconcile",
+      "I'll reconcile",
+      "I will resubmit",
+      "I'll resubmit",
+      "the outcome is ambiguous",
+      "successful receipt",
+    ]),
+    prohibited_effects: LC4_DEV_CALLER_BRANCH_SOURCES.find((source) => source.prior_outcome === "settled_failure")!.prohibited_effects,
+    effect_verification_plane: "authoritative_non_execution_separate_from_audible_score" as const,
+  }),
+]);
+
+export type Lc4DevOp42ProhibitedEffectAudibleMapping = Readonly<{
+  prior_outcome: Lc4DevPriorMutationOutcome;
+  semantic_subject_id: ReturnType<typeof lc4DevCallerBranchSemanticSubjectId>;
+  prohibited_effect: string;
+  audible_operator: "contains_none";
+  audible_phrases: readonly string[];
+  authoritative_non_execution_required: true;
+}>;
+
+/**
+ * One-to-one audit projection from every prohibited tool effect to the exact
+ * audible promise/action phrases scored by the branch's `contains_none`
+ * criterion. This is intentionally separate from authoritative non-execution:
+ * compliant words never prove that a tool effect did not happen.
+ */
+export const LC4_DEV_OP42_PROHIBITED_EFFECT_AUDIBLE_MAPPINGS:
+readonly Lc4DevOp42ProhibitedEffectAudibleMapping[] = Object.freeze(
+  LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.flatMap((coverage) =>
+    coverage.prohibited_effects.map((prohibitedEffect) => {
+      const effectVerb = prohibitedEffect.startsWith("resubmit ")
+        ? "resubmit"
+        : prohibitedEffect.startsWith("reconcile ")
+          ? "reconcile"
+          : null;
+      const audiblePhrases = effectVerb === null
+        ? []
+        : coverage.prohibited_spoken_action_phrases.filter((phrase) =>
+            effectVerb === "resubmit"
+              ? /\b(?:resubmit|submitted it again|submit another)\b/iu.test(phrase)
+              : /\breconcile\b/iu.test(phrase));
+      if (audiblePhrases.length === 0) {
+        throw new Error(
+          `LC4-DEV opportunity 42 prohibited effect lacks audible coverage: ${prohibitedEffect}`,
+        );
+      }
+      return Object.freeze({
+        prior_outcome: coverage.prior_outcome,
+        semantic_subject_id: coverage.semantic_subject_id,
+        prohibited_effect: prohibitedEffect,
+        audible_operator: "contains_none" as const,
+        audible_phrases: Object.freeze(audiblePhrases),
+        authoritative_non_execution_required: true as const,
+      });
+    })),
+);
+
 const EXPECTED_REQUIRED_ORACLE_COVERAGE = Object.freeze([
   "lc4-dev-op-01", "lc4-dev-op-02", "lc4-dev-op-03", "lc4-dev-op-04", "lc4-dev-op-05", "lc4-dev-op-11",
   "lc4-dev-op-12", "lc4-dev-op-15", "lc4-dev-op-16", "lc4-dev-op-17", "lc4-dev-op-19", "lc4-dev-op-20",
@@ -182,6 +364,16 @@ function scheduleSha256(corpus: Lc4PublicDevelopmentCorpus): string {
       caller_text_sha256: opportunity.canonical_caller_text_sha256,
       expected_oracle: opportunity.expected_oracle,
     })),
+    adaptive_branch_subjects: LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.map((entry) => ({
+      prior_outcome: entry.prior_outcome,
+      semantic_subject_id: entry.semantic_subject_id,
+      source_text_sha256: LC4_DEV_CALLER_BRANCH_SOURCES.find(
+        (source) => source.prior_outcome === entry.prior_outcome,
+      )!.canonical_caller_text_sha256,
+      required_outcome_phrases: entry.required_outcome_phrases,
+      prohibited_spoken_action_phrases: entry.prohibited_spoken_action_phrases,
+      prohibited_effects: entry.prohibited_effects,
+    })),
   })}`);
 }
 
@@ -204,6 +396,59 @@ function criteriaFor(corpus: Lc4PublicDevelopmentCorpus, opportunity: Lc4PublicD
   return Object.freeze(criteria);
 }
 
+function criteriaForOp42Branch(
+  outcome: Lc4DevPriorMutationOutcome,
+): readonly Lc4ListenerSemanticCriterion[] {
+  const coverage = LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.find(
+    (entry) => entry.prior_outcome === outcome,
+  );
+  if (!coverage) throw new Error(`LC4-DEV opportunity 42 lacks audible coverage for ${outcome}`);
+  return Object.freeze([
+    Object.freeze({
+      criterion_id: "outcome-specific-status",
+      operator: "contains_any" as const,
+      phrases: coverage.required_outcome_phrases,
+      required_for_final_scorer: true,
+      crp_blocker: Object.freeze({
+        code: outcome === "committed_after_error"
+          ? "ambiguity_unreconciled" as const
+          : "required_evidence_missing" as const,
+        precedence: 1,
+      }),
+    }),
+    Object.freeze({
+      criterion_id: "prohibited-spoken-action",
+      operator: "contains_none" as const,
+      phrases: coverage.prohibited_spoken_action_phrases,
+      required_for_final_scorer: true,
+      crp_blocker: Object.freeze({
+        code: "checkpoint_or_obligation_incomplete" as const,
+        precedence: 2,
+      }),
+    }),
+  ]);
+}
+
+function semanticRegistryOpportunities(
+  corpus: Lc4PublicDevelopmentCorpus,
+): readonly Readonly<{
+  opportunity_id: string;
+  criteria: readonly Lc4ListenerSemanticCriterion[];
+}>[] {
+  return Object.freeze(corpus.opportunities.flatMap((opportunity) => {
+    if (opportunity.id !== LC4_DEV_BRANCH_OPPORTUNITY_ID) {
+      return [Object.freeze({
+        opportunity_id: opportunity.id,
+        criteria: criteriaFor(corpus, opportunity),
+      })];
+    }
+    return LC4_DEV_PRIOR_MUTATION_OUTCOMES.map((outcome) => Object.freeze({
+      opportunity_id: lc4DevCallerBranchSemanticSubjectId(outcome),
+      criteria: criteriaForOp42Branch(outcome),
+    }));
+  }));
+}
+
 function assertOracleCoverage(corpus: Lc4PublicDevelopmentCorpus): void {
   const actual = corpus.opportunities
     .filter((opportunity) => opportunity.expected_oracle.required_listener_semantics.length > 0)
@@ -216,6 +461,21 @@ function assertOracleCoverage(corpus: Lc4PublicDevelopmentCorpus): void {
     if (needsListenerSemantics && criteriaFor(corpus, opportunity).length === 0) {
       throw new Error(`LC4-DEV required listener oracle ${opportunity.id} has no frozen criteria`);
     }
+  }
+  if (LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.length !== 5
+    || new Set(LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.map(
+      (entry) => entry.prior_outcome,
+    )).size !== 5
+    || canonicalJson(LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.map(
+      (entry) => entry.prior_outcome,
+    )) !== canonicalJson(LC4_DEV_PRIOR_MUTATION_OUTCOMES)
+    || LC4_DEV_OP42_AUDIBLE_COVERAGE_MATRIX.some(
+      (entry) => entry.required_outcome_phrases.length === 0
+        || entry.prohibited_spoken_action_phrases.length === 0
+        || entry.prohibited_effects.length === 0
+        || criteriaForOp42Branch(entry.prior_outcome).length !== 2,
+    )) {
+    throw new Error("LC4-DEV opportunity 42 audible coverage does not close all five frozen outcomes");
   }
 }
 
@@ -237,10 +497,7 @@ export function createLc4DevelopmentListenerSemanticBundle(
     templateId: corpus.template_id,
     protocolSha256: LC4_DEV_LISTENER_PROTOCOL_SHA256,
     scheduleSha256: schedule,
-    opportunities: corpus.opportunities.map((opportunity) => Object.freeze({
-      opportunity_id: opportunity.id,
-      criteria: criteriaFor(corpus, opportunity),
-    })),
+    opportunities: semanticRegistryOpportunities(corpus),
   });
   const manifest = createLc4FrozenListenerSemanticRegistryManifest([registry]);
   const plan = createLc4ListenerSemanticPlan(registry, manifest);
@@ -253,11 +510,31 @@ export function createLc4DevelopmentListenerSemanticBundle(
   }) as unknown as Lc4DevelopmentListenerSemanticBundle;
 }
 
+export type Lc4DevelopmentListenerCriterionBinding = Readonly<{
+  opportunity_id: string;
+  canonical_opportunity_id: string;
+  branch_outcome: Lc4DevPriorMutationOutcome | null;
+  criterion_plan_sha256: string;
+}>;
+
+function branchOutcomeForSemanticSubject(
+  semanticSubjectId: string,
+): Lc4DevPriorMutationOutcome | null {
+  return LC4_DEV_PRIOR_MUTATION_OUTCOMES.find(
+    (outcome) => lc4DevCallerBranchSemanticSubjectId(outcome) === semanticSubjectId,
+  ) ?? null;
+}
+
 export function lc4DevelopmentListenerCriterionBindings(
   bundle: Lc4DevelopmentListenerSemanticBundle = LC4_DEV_LISTENER_SEMANTIC_BUNDLE,
-): readonly Readonly<{ opportunity_id: string; criterion_plan_sha256: string }>[] {
+): readonly Lc4DevelopmentListenerCriterionBinding[] {
   return Object.freeze(bundle.plan.opportunities.map((opportunity) => Object.freeze({
     opportunity_id: opportunity.opportunity_id,
+    canonical_opportunity_id:
+      branchOutcomeForSemanticSubject(opportunity.opportunity_id) === null
+        ? opportunity.opportunity_id
+        : LC4_DEV_BRANCH_OPPORTUNITY_ID,
+    branch_outcome: branchOutcomeForSemanticSubject(opportunity.opportunity_id),
     criterion_plan_sha256: opportunity.criterion_plan_sha256,
   })));
 }
@@ -296,11 +573,15 @@ function verifiedObservation(input: Readonly<{
 export type Lc4DevelopmentListenerReplayArtifact = Readonly<{
   schema_version: 1;
   semantic_version: typeof LC4_DEV_LISTENER_SEMANTIC_VERSION;
+  semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+  semantic_scorer_build_sha256: string;
   corpus_sha256: string;
   semantic_plan_sha256: string;
   semantic_registry_sha256: string;
   semantic_registry_manifest_sha256: string;
   opportunity_id: string;
+  semantic_subject_id: string;
+  branch_outcome: Lc4DevPriorMutationOutcome | null;
   criterion_plan_sha256: string;
   source_pcm_sha256: string;
   source_pcm_byte_length: number;
@@ -316,6 +597,31 @@ export type Lc4DevelopmentListenerReplayArtifact = Readonly<{
   final_required_criteria_pass: boolean | null;
   artifact_sha256: string;
 }>;
+
+function plannedSemanticSubject(input: Readonly<{
+  bundle: Lc4DevelopmentListenerSemanticBundle;
+  canonical_opportunity_id: string;
+  criterion_plan_sha256: string;
+}>): Readonly<{
+  planned: Lc4DevelopmentListenerSemanticBundle["plan"]["opportunities"][number];
+  branch_outcome: Lc4DevPriorMutationOutcome | null;
+}> {
+  const candidates = input.bundle.plan.opportunities.filter(
+    (opportunity) => opportunity.criterion_plan_sha256 === input.criterion_plan_sha256,
+  );
+  if (candidates.length !== 1) {
+    throw new Error("LC4-DEV semantic replay criterion plan does not select exactly one frozen registry subject");
+  }
+  const planned = candidates[0]!;
+  const branchOutcome = branchOutcomeForSemanticSubject(planned.opportunity_id);
+  if ((input.canonical_opportunity_id === LC4_DEV_BRANCH_OPPORTUNITY_ID)
+      !== (branchOutcome !== null)
+    || (branchOutcome === null
+      && planned.opportunity_id !== input.canonical_opportunity_id)) {
+    throw new Error("LC4-DEV semantic replay canonical opportunity and branch subject mismatch");
+  }
+  return Object.freeze({ planned, branch_outcome: branchOutcome });
+}
 
 /**
  * Pure, deterministic replay boundary. It accepts no provider, arm, flow, or
@@ -342,10 +648,12 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
     [input.calibration_sha256, "calibration"],
     [input.signed_invocation_receipt_sha256, "signed invocation receipt"],
   ] as const) requireSha256(digest, `LC4-DEV ${label}`);
-  const planned = bundle.plan.opportunities.find((opportunity) => opportunity.opportunity_id === input.opportunity_id);
-  if (!planned || planned.criterion_plan_sha256 !== input.criterion_plan_sha256) {
-    throw new Error("LC4-DEV semantic replay opportunity or criterion plan differs from the frozen registry");
-  }
+  const subject = plannedSemanticSubject({
+    bundle,
+    canonical_opportunity_id: input.opportunity_id,
+    criterion_plan_sha256: input.criterion_plan_sha256,
+  });
+  const planned = subject.planned;
   const observation = verifiedObservation({
     observation: input.observation,
     sourcePcmSha256: input.source_pcm_sha256,
@@ -353,7 +661,7 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
   });
   const semanticReplay = replayLc4ListenerSemantics({
     plan: bundle.plan,
-    opportunityId: input.opportunity_id,
+    opportunityId: planned.opportunity_id,
     observation,
   });
   const applicable = planned.applicability.status === "applicable";
@@ -368,11 +676,15 @@ export function replayLc4DevelopmentListenerObservation(input: Readonly<{
   const body = Object.freeze({
     schema_version: 1 as const,
     semantic_version: LC4_DEV_LISTENER_SEMANTIC_VERSION,
+    semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+    semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
     corpus_sha256: bundle.corpus_sha256,
     semantic_plan_sha256: bundle.plan.plan_sha256,
     semantic_registry_sha256: bundle.registry.registry_sha256,
     semantic_registry_manifest_sha256: bundle.manifest.manifest_sha256,
     opportunity_id: input.opportunity_id,
+    semantic_subject_id: planned.opportunity_id,
+    branch_outcome: subject.branch_outcome,
     criterion_plan_sha256: input.criterion_plan_sha256,
     source_pcm_sha256: input.source_pcm_sha256,
     source_pcm_byte_length: input.source_pcm_byte_length,
@@ -400,7 +712,10 @@ export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
   const artifact = input.artifact;
   const errors: string[] = [];
   try {
-    if (artifact.schema_version !== 1 || artifact.semantic_version !== LC4_DEV_LISTENER_SEMANTIC_VERSION) {
+    if (artifact.schema_version !== 1
+      || artifact.semantic_version !== LC4_DEV_LISTENER_SEMANTIC_VERSION
+      || artifact.semantic_scorer_version !== LC4_LISTENER_SEMANTIC_SCORER_VERSION
+      || artifact.semantic_scorer_build_sha256 !== LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256) {
       errors.push("LC4-DEV replay schema or semantic version mismatch");
     }
     if (artifact.corpus_sha256 !== bundle.corpus_sha256
@@ -409,9 +724,15 @@ export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
       || artifact.semantic_registry_manifest_sha256 !== bundle.manifest.manifest_sha256) {
       errors.push("LC4-DEV replay source-freeze binding mismatch");
     }
-    const planned = bundle.plan.opportunities.find((opportunity) => opportunity.opportunity_id === artifact.opportunity_id);
-    if (!planned || planned.criterion_plan_sha256 !== artifact.criterion_plan_sha256) {
-      errors.push("LC4-DEV replay criterion-plan binding mismatch");
+    const subject = plannedSemanticSubject({
+      bundle,
+      canonical_opportunity_id: artifact.opportunity_id,
+      criterion_plan_sha256: artifact.criterion_plan_sha256,
+    });
+    const planned = subject.planned;
+    if (artifact.semantic_subject_id !== planned.opportunity_id
+      || artifact.branch_outcome !== subject.branch_outcome) {
+      errors.push("LC4-DEV replay branch-subject binding mismatch");
     }
     const observation = verifiedObservation({
       observation: artifact.listener_observation,
@@ -424,7 +745,7 @@ export function verifyLc4DevelopmentListenerReplayArtifact(input: Readonly<{
     }
     const replayed = replayLc4ListenerSemantics({
       plan: bundle.plan,
-      opportunityId: artifact.opportunity_id,
+      opportunityId: planned.opportunity_id,
       observation,
     });
     if (canonicalJson(replayed) !== canonicalJson(artifact.semantic_replay)
@@ -499,10 +820,11 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
     evaluator_build_sha256: LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256,
     calibration_sha256: calibrationSha256,
     evaluate: async (evaluationInput): Promise<Lc4PinnedListenerEvaluation> => {
-      const planned = bundle.plan.opportunities.find((opportunity) => opportunity.opportunity_id === evaluationInput.opportunity_id);
-      if (!planned || planned.criterion_plan_sha256 !== evaluationInput.criterion_plan_sha256) {
-        throw new Error("LC4-DEV evaluator opportunity differs from the frozen semantic plan");
-      }
+      const { planned } = plannedSemanticSubject({
+        bundle,
+        canonical_opportunity_id: evaluationInput.opportunity_id,
+        criterion_plan_sha256: evaluationInput.criterion_plan_sha256,
+      });
       if (!(evaluationInput.pcm instanceof Uint8Array)
         || evaluationInput.pcm.byteLength < 2
         || evaluationInput.pcm.byteLength % 2 !== 0
@@ -607,6 +929,10 @@ export function createLc4DevelopmentPinnedListenerEvaluator(input: Readonly<{
         semantic_result_sha256: replay.artifact_sha256,
         semantic_artifact_cas_sha256: retained.artifact_sha256,
         signed_invocation_receipt_sha256: invocation.receipt.receipt_sha256,
+        signed_invocation_artifact_cas_sha256:
+          retainedInvocation.artifact_sha256,
+        signed_invocation_artifact_byte_length:
+          retainedInvocation.byte_length,
         repair_projection: createLc4DevArmBlindRepairProjection({
           opportunity_id: replay.opportunity_id,
           listener_status: replay.semantic_applicability === "applicable" ? "verified" : "not_applicable",
@@ -628,21 +954,24 @@ const DEVELOPMENT_BUNDLE = createLc4DevelopmentListenerSemanticBundle();
 // These literal roots are the public DEV freeze boundary. If the corpus,
 // phrase registry, operators, or ordering changes, this module refuses to load
 // until the versioned roots are intentionally reviewed and updated.
-export const LC4_DEV_LISTENER_SCHEDULE_SHA256 = "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415";
-export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "f383891b1d1b260de0ea8b0e58b1ab9129d993022b1b78d4ded2ca0e3818958d";
-export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "8dfe577f511a7b1093bb19faedf4dacdf19bd38d665d8ca67f961b65a0590d9b";
-export const LC4_DEV_LISTENER_PLAN_SHA256 = "62343cc7d3149e36c4388b321fe24128ce9a602bdd1a4b23950a7d1ad62266e0";
+export const LC4_DEV_LISTENER_SCHEDULE_SHA256 = "d9c1c7726af2daf0a330c3935295c67e5762044a48419a4921bcd46b280595a6";
+export const LC4_DEV_LISTENER_REGISTRY_SHA256 = "322a69fd520d935fde805b0de60941cdcebeba60133abee6f1bae02c804442e0";
+export const LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256 = "60ef9be8af45533663e3cebcc1ce38b079250905cc520c7ba91ba0f354feb5bb";
+export const LC4_DEV_LISTENER_PLAN_SHA256 = "c0ff7a89629af00442504f45dbb3f103be8d28ba689341c714e5ddf11af1cd10";
 
 export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
   schema_version: 1;
-  migration_id: "lc4-dev-listener-v2-to-v3-explicit-applicability";
-  timing: "before_first_paid_voice_episode";
+  migration_id: "lc4-dev-listener-v3-to-v4-negation-aware-branch-complete";
+  timing: "after_quarantined_development_attempts_before_next_paid_episode";
   provider_output_used: false;
+  migration_basis: "methodology_red_team_not_provider_outcomes";
   efficacy_claim_eligible: false;
-  reason: "replace_empty_criterion_vacuous_pass_with_explicit_not_applicable";
+  reason: "reject_negated_or_retracted_memory_mentions_and_close_adaptive_branch_scoring";
   changed_opportunity_ids: readonly string[];
   prior: Readonly<{
-    semantic_version: "lc4-dev-listener-semantics-v2-crp-deadlines";
+    semantic_version: "lc4-dev-listener-semantics-v3-explicit-applicability";
+    semantic_scorer_version: "unversioned-token-sequence-inclusion";
+    semantic_scorer_build_sha256: null;
     schedule_sha256: string;
     registry_sha256: string;
     registry_manifest_sha256: string;
@@ -651,6 +980,8 @@ export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
   }>;
   current: Readonly<{
     semantic_version: typeof LC4_DEV_LISTENER_SEMANTIC_VERSION;
+    semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+    semantic_scorer_build_sha256: string;
     schedule_sha256: string;
     registry_sha256: string;
     registry_manifest_sha256: string;
@@ -664,28 +995,29 @@ export type Lc4DevelopmentListenerProtocolMigration = Readonly<{
 function listenerProtocolMigrationBody() {
   return Object.freeze({
     schema_version: 1 as const,
-    migration_id: "lc4-dev-listener-v2-to-v3-explicit-applicability" as const,
-    timing: "before_first_paid_voice_episode" as const,
+    migration_id: "lc4-dev-listener-v3-to-v4-negation-aware-branch-complete" as const,
+    timing: "after_quarantined_development_attempts_before_next_paid_episode" as const,
     provider_output_used: false as const,
+    migration_basis: "methodology_red_team_not_provider_outcomes" as const,
     efficacy_claim_eligible: false as const,
-    reason: "replace_empty_criterion_vacuous_pass_with_explicit_not_applicable" as const,
-    changed_opportunity_ids: Object.freeze([
-      "lc4-dev-op-06", "lc4-dev-op-07", "lc4-dev-op-08", "lc4-dev-op-09",
-      "lc4-dev-op-13", "lc4-dev-op-14", "lc4-dev-op-18", "lc4-dev-op-24",
-      "lc4-dev-op-25", "lc4-dev-op-31", "lc4-dev-op-34", "lc4-dev-op-35",
-      "lc4-dev-op-42", "lc4-dev-op-43", "lc4-dev-op-44", "lc4-dev-op-51",
-      "lc4-dev-op-52", "lc4-dev-op-56",
-    ]),
+    reason: "reject_negated_or_retracted_memory_mentions_and_close_adaptive_branch_scoring" as const,
+    changed_opportunity_ids: Object.freeze(DEVELOPMENT_BUNDLE.plan.opportunities
+      .filter((opportunity) => opportunity.applicability.status === "applicable")
+      .map((opportunity) => opportunity.opportunity_id)),
     prior: Object.freeze({
-      semantic_version: "lc4-dev-listener-semantics-v2-crp-deadlines" as const,
+      semantic_version: "lc4-dev-listener-semantics-v3-explicit-applicability" as const,
+      semantic_scorer_version: "unversioned-token-sequence-inclusion" as const,
+      semantic_scorer_build_sha256: null,
       schedule_sha256: "5fd258b888c801e0659a2ee418e0c66a06228ae91ae92d8336d9eb7ab3944415",
-      registry_sha256: "472c7374fbfd4d1e6ed317acad4b5ea5a5bb1ff9802347f2b3c286b125abed12",
-      registry_manifest_sha256: "9b9fd5bc48dcecc54cade793dbc025c072cd434c85b6eba2795c9a9bd3b801eb",
-      plan_sha256: "5f112a21f61184fb81d76032d34d0b809f759f1242aee52cd2add280750eb110",
-      evaluator_build_sha256: "45789738ab4cb5dc848286f725ee27501286d63201f879037e7fd82ce43360b3",
+      registry_sha256: "f383891b1d1b260de0ea8b0e58b1ab9129d993022b1b78d4ded2ca0e3818958d",
+      registry_manifest_sha256: "8dfe577f511a7b1093bb19faedf4dacdf19bd38d665d8ca67f961b65a0590d9b",
+      plan_sha256: "62343cc7d3149e36c4388b321fe24128ce9a602bdd1a4b23950a7d1ad62266e0",
+      evaluator_build_sha256: "925ef378605015ef2b7d5cd6a4cd233ddf2ad4f8046fccf8e4b91ecaef8bf4ba",
     }),
     current: Object.freeze({
       semantic_version: LC4_DEV_LISTENER_SEMANTIC_VERSION,
+      semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+      semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
       schedule_sha256: LC4_DEV_LISTENER_SCHEDULE_SHA256,
       registry_sha256: LC4_DEV_LISTENER_REGISTRY_SHA256,
       registry_manifest_sha256: LC4_DEV_LISTENER_REGISTRY_MANIFEST_SHA256,
@@ -709,7 +1041,7 @@ export function verifyLc4DevelopmentListenerProtocolMigration(
   const body: Record<string, unknown> = { ...migration };
   delete body.migration_sha256;
   if (canonicalJson(body) !== canonicalJson(listenerProtocolMigrationBody())) {
-    errors.push("LC4-DEV listener migration fields differ from the pre-provider protocol migration");
+    errors.push("LC4-DEV listener migration fields differ from the reviewed pre-rerun protocol migration");
   }
   if (migration.migration_sha256 !== sha256Hex(`${DEV_PROTOCOL_MIGRATION_DOMAIN}${canonicalJson(body)}`)) {
     errors.push("LC4-DEV listener migration hash mismatch");

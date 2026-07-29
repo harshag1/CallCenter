@@ -38,10 +38,26 @@ export async function runLc4LaunchBenchmarkCli(
     const command = args[0];
     const parsed = flags(args.slice(1));
     if (command === "publish") {
-      exact(parsed, ["--evidence-root", "--output-root"]);
+      exact(parsed, [
+        "--evidence-root",
+        "--output-root",
+        "--authority-trust-root-sha256",
+        "--gate-d-receipt",
+        "--gate-d-invocation-marker",
+        "--gate-d-trust-root-sha256",
+      ]);
       const artifact = await publishLc4LaunchBenchmark({
         evidence_root: parsed["--evidence-root"]!,
         output_root: parsed["--output-root"]!,
+        authority_trust_root_sha256:
+          parsed["--authority-trust-root-sha256"]!,
+        xai_finite_manual_gate_d: {
+          receipt_path: parsed["--gate-d-receipt"]!,
+          invocation_marker_path:
+            parsed["--gate-d-invocation-marker"]!,
+          plan_trust_root_sha256:
+            parsed["--gate-d-trust-root-sha256"]!,
+        },
       });
       io.stdout(canonicalJson({
         valid: true,
@@ -54,11 +70,28 @@ export async function runLc4LaunchBenchmarkCli(
       return 0;
     }
     if (command === "verify") {
-      exact(parsed, ["--evidence-root", "--public-json", "--public-markdown"]);
+      exact(parsed, [
+        "--evidence-root",
+        "--public-json",
+        "--public-markdown",
+        "--authority-trust-root-sha256",
+        "--gate-d-receipt",
+        "--gate-d-invocation-marker",
+        "--gate-d-trust-root-sha256",
+      ]);
       const artifact = await verifyPublishedLc4LaunchBenchmark({
         evidence_root: parsed["--evidence-root"]!,
         public_json: parsed["--public-json"]!,
         public_markdown: parsed["--public-markdown"]!,
+        authority_trust_root_sha256:
+          parsed["--authority-trust-root-sha256"]!,
+        xai_finite_manual_gate_d: {
+          receipt_path: parsed["--gate-d-receipt"]!,
+          invocation_marker_path:
+            parsed["--gate-d-invocation-marker"]!,
+          plan_trust_root_sha256:
+            parsed["--gate-d-trust-root-sha256"]!,
+        },
       });
       io.stdout(canonicalJson({
         valid: true,

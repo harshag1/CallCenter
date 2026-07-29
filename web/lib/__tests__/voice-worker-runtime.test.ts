@@ -200,7 +200,30 @@ describe("durable worker to conversation-log adapter", () => {
     });
   });
 
-  it("lets the kernel defer a correctly signed result after a dependency correction", () => {
+  it("bounds a valid long private summary before projecting it into the kernel advisory", () => {
+    const preparedResult = prepareVoiceWorkerResult({
+      ...result,
+      summary: "x".repeat(8_192),
+    });
+    const worker = {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83bd",
+      conversationId,
+      authority: authority(),
+      input: workerInput,
+      resultSha256: preparedResult.resultSha256,
+    };
+    const delivery = workerResultConversationPayload(worker, {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83be",
+      conversationId,
+      workerId: worker.id,
+      result: preparedResult.result,
+      resultSha256: preparedResult.resultSha256,
+    });
+
+    expect(delivery.advisories[0]?.text).toHaveLength(4_096);
+  });
+
+  it("permanently rejects a correctly signed result after a dependency correction", () => {
     const preparedResult = prepareVoiceWorkerResult(result);
     const worker = {
       id: "8916eb0a-5332-4f4c-a330-746c516e83bd", conversationId,
@@ -225,7 +248,7 @@ describe("durable worker to conversation-log adapter", () => {
       result: preparedResult.result, resultSha256: preparedResult.resultSha256,
     }));
     expect(foldConversation(log).deliveries.at(-1)).toMatchObject({
-      status: "deferred", reason: "an authoritative dependency fact changed while worker was running",
+      status: "rejected", reason: "an authoritative dependency fact changed while worker was running",
     });
   });
 });

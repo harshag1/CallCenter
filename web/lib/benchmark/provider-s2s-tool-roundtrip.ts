@@ -188,6 +188,7 @@ export type Lc4S2sRoundtripFailureClass =
   | "server_vad_control_ack_missing"
   | "server_vad_speech_start_missing"
   | "server_vad_speech_stop_missing"
+  | "server_vad_delimiter_exhausted"
   | "server_vad_auto_commit_missing"
   | "server_vad_auto_response_missing"
   | "server_vad_event_order_invalid"
@@ -241,7 +242,7 @@ export type Lc4S2sRoundtripExecution = Readonly<{
   tool_schema_sha256: typeof LC4_S2S_TOOL_SCHEMA_SHA256;
   response_generation_requested: boolean;
   provider_auto_response_observed: boolean;
-  turn_boundary_mode: "manual_commit" | "provider_native_server_vad";
+  turn_boundary_mode: "manual_commit" | "provider_activity_markers" | "provider_native_server_vad";
   server_vad_setting_sha256: string | null;
   server_vad_transport_disclosure_sha256: string | null;
   transport_parity_sha256: string | null;
@@ -672,7 +673,6 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   if (sha256Hex(input.audio.data) !== input.audioObject.sha256
     || input.audio.data.byteLength !== input.audioObject.byte_length
     || input.audio.sampleRateHz !== input.audioObject.sample_rate_hz) throw new Error("LC4 S2S roundtrip audio differs from its preregistered CAS object");
-
   const wire: RealtimeWireObservation[] = [];
   const usage: NormalizedRealtimeUsage[] = [];
   const operations: string[] = [];
@@ -1115,7 +1115,13 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
           throw new Error("xAI server-VAD silence-tail delivery contract failed");
         }
         transportSuffixPlan = fullTransportSuffixPlan;
-        transportSuffixCompletion = "full_plan_delivered";
+        if (speechStopObservationSha256 === null && failure === "none") {
+          failure = "server_vad_delimiter_exhausted";
+          throw new Error("xAI server-VAD delimiter exhausted without provider-native speech stop");
+        }
+        transportSuffixCompletion = speechStopObservationSha256 === null
+          ? "full_plan_delivered"
+          : "provider_native_speech_stop";
       } catch (error) {
         const appendedChunks = error instanceof RealtimeAudioDeliveryError
           ? error.chunks_appended
@@ -1151,9 +1157,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         });
         transportSuffixCompletion = "provider_native_speech_stop";
       }
-      operations.push(transportSuffixCompletion === "full_plan_delivered"
-        ? "deterministic_server_vad_silence_tail_paced_20ms"
-        : "server_vad_silence_tail_accepted_at_native_stop");
+      operations.push("server_vad_silence_tail_accepted_at_native_stop");
     }
     inputAudioEvidence = projectRoundtripInputAudioEvidence(wire, {
       chunk_sha256s: freeze(plan.frames.map((frame) => sha256Hex(frame.data))),
@@ -1525,7 +1529,11 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
     response_generation_requested: responseRequested,
     provider_auto_response_observed: providerAutoResponseObserved,
-    turn_boundary_mode: input.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+    turn_boundary_mode: input.provider === "xai"
+      ? "provider_native_server_vad" as const
+      : input.provider === "gemini"
+        ? "provider_activity_markers" as const
+        : "manual_commit" as const,
     server_vad_setting_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_SHA256 : null,
     server_vad_transport_disclosure_sha256: input.provider === "xai"
       ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256
@@ -1575,6 +1583,14 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.tool_schema_sha256 !== LC4_S2S_TOOL_SCHEMA_SHA256
     || execution.compact_control_sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
     || !verifyRealtimeWireObservationChain(execution.wire_observations).valid) throw new Error("LC4 S2S roundtrip evidence contract is invalid");
+  const expectedTurnBoundaryMode = execution.provider === "xai"
+    ? "provider_native_server_vad"
+    : execution.provider === "gemini"
+      ? "provider_activity_markers"
+      : "manual_commit";
+  if (execution.turn_boundary_mode !== expectedTurnBoundaryMode) {
+    throw new Error("LC4 S2S roundtrip turn-boundary mode differs from its provider transport");
+  }
   if (execution.transport_failure_diagnostic !== null) {
     assertRealtimeTransportFailureDiagnostic(execution.transport_failure_diagnostic);
   }
@@ -1634,6 +1650,7 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
       ));
       if (suffix === undefined
         || suffix.purpose !== LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose
+        || suffix.completion !== "provider_native_speech_stop"
         || suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
         || !isAcceptedXaiServerVadSilenceTail(suffix)
         || suffix.chunk_sha256s.length !== suffix.chunk_count

@@ -6,7 +6,7 @@ This runbook covers the standalone Twilio Media Streams bridge in Harsha's Amazi
 
 ## Runtime inventory
 
-- Node.js 20.9 or newer; the container uses Node 22 Alpine.
+- Node.js 20.19.x, 22.13.x or newer 22.x, or 24+; the container uses Node 22 Alpine.
 - One HTTP listener, default port `8080`.
 - WebSocket upgrade path: exactly `/stream`.
 - Liveness: `GET /health` and `GET /health/live`.

@@ -9,10 +9,9 @@ import {
 } from "../lc4-development-whisper-runtime";
 
 const PATHS = Object.freeze({
-  whisper_cli_path: "/opt/homebrew/Cellar/whisper-cpp/1.9.1/bin/whisper-cli",
-  model_path:
-    "/Users/harsha/.cache/hacc-benchmark/whisper/ggml-large-v3-turbo-q5_0.bin",
-  ffmpeg_path: "/opt/homebrew/Cellar/ffmpeg@7/7.1.3_2/bin/ffmpeg",
+  whisper_cli_path: "/opt/hacc/test-toolchain/whisper-cli",
+  model_path: "/opt/hacc/test-toolchain/ggml-large-v3-turbo-q5_0.bin",
+  ffmpeg_path: "/opt/hacc/test-toolchain/ffmpeg",
 });
 
 describe("LC4-DEV pinned whisper.cpp runtime", () => {

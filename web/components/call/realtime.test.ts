@@ -120,6 +120,32 @@ function successfulFetch(providerConnection: typeof connection | Record<string, 
   });
 }
 
+function speechGuardrailBootstrap(provider: "openai" | "xai" | "gemini" = "openai") {
+  return {
+    schemaVersion: 1,
+    mode: "enforce",
+    organizationId: "00000000-0000-4000-8000-0000000000a1",
+    provider,
+    callId: CALL_ID,
+    asrEndpoint: "/api/voice/outbound-speech/asr",
+    policy: {
+      evidencePolicy: "independent_asr_required",
+      maxBufferedAudioBytes: 8 * 1024 * 1024,
+      maxBufferedAudioMs: 120_000,
+      maxCollectionLatencyMs: 150_000,
+      maxDecisionLatencyMs: 15_000,
+      onViolation: "suppress",
+      onEvidenceFailure: "suppress",
+      secrets: [],
+      forbiddenTerminalClaims: [{
+        phrase: "your refund is complete",
+        ruleId: "refund.requires_receipt",
+      }],
+      terminalClaimsAuthorized: false,
+    },
+  };
+}
+
 describe("browser realtime call privacy and lifecycle", () => {
   const track = { stop: vi.fn() } as unknown as MediaStreamTrack;
   const mic = { getTracks: () => [track] } as unknown as MediaStream;
@@ -219,6 +245,56 @@ describe("browser realtime call privacy and lifecycle", () => {
         events: { type: string; payload: unknown }[];
       }).events);
     expect(events).toContainEqual({ type: "outbound_speech_gate", payload: evidence });
+  });
+
+  it("automatically composes the server-authored exact-PCM guardrail on the stock call path", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "/api/voice/token") {
+        return Response.json({
+          callId: CALL_ID,
+          connection,
+          speechGuardrail: speechGuardrailBootstrap(),
+        });
+      }
+      return Response.json({ ok: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onSpeechGuardrailStatus = vi.fn();
+    const call = new RealtimeCall({
+      onTranscript: vi.fn(),
+      onState: vi.fn(),
+      onSpeechGuardrailStatus,
+    });
+
+    await call.start("agent-id");
+    const start = mocks.transport.start.mock.calls[0][0] as RealtimeTransportStart;
+    expect(start.outboundSpeechGate?.gate).toBeInstanceOf(OutboundSpeechGate);
+    expect(call.speechGuardrailStatus).toEqual({
+      state: "enforcing",
+      provider: "openai",
+      evidence: "exact_pcm_independent_asr",
+      playout: "quarantined_until_response_decision",
+    });
+    expect(onSpeechGuardrailStatus).toHaveBeenCalledWith(call.speechGuardrailStatus);
+    await call.stop();
+  });
+
+  it("fails a guarded call before microphone capture on malformed or cross-provider authority", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "/api/voice/token") {
+        return Response.json({
+          callId: CALL_ID,
+          connection,
+          speechGuardrail: speechGuardrailBootstrap("gemini"),
+        });
+      }
+      return Response.json({ ok: true });
+    }));
+    const call = new RealtimeCall({ onTranscript: vi.fn(), onState: vi.fn() });
+    await expect(call.start("agent-id")).rejects.toThrow("mismatched speech authority");
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(mocks.createTransport).not.toHaveBeenCalled();
+    expect(mocks.transport.start).not.toHaveBeenCalled();
   });
 
   it("binds opted-in capture and upload to the exact consent receipt", async () => {

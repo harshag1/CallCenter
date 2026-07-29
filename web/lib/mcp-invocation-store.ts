@@ -52,6 +52,17 @@ export type McpToolInvocationIdentity = Readonly<{
   }>;
 }>;
 
+export type McpExpiredInvocationRecovery = (
+  receipt: Readonly<{
+    receiptId: string;
+    callId: string;
+    providerInvocationId: string;
+    logicalName: string;
+    modelArguments: Readonly<Record<string, unknown>>;
+    leaseExpiresAt: string;
+  }>,
+) => Promise<Readonly<{ result: unknown }> | null>;
+
 function receiptIdFor(callId: string, providerInvocationId: string): string {
   const bytes = createHash("sha256")
     .update("hacc/mcp-tool-invocation-receipt/v1\0", "utf8")
@@ -180,9 +191,34 @@ async function quarantineExpired(receipt: StoredReceipt): Promise<StoredReceipt 
   );
 }
 
+async function settleRecoveredExpired(
+  receipt: StoredReceipt,
+  recoveredResult: unknown,
+): Promise<StoredReceipt | null> {
+  const wireResult = toJsonWireValue(recoveredResult);
+  if (Buffer.byteLength(JSON.stringify(wireResult), "utf8") > MCP_MAX_PERSISTED_RESULT_BYTES) {
+    throw new RangeError("recovered MCP tool result exceeds the durable replay limit");
+  }
+  return qOne<StoredReceipt>(
+    `SELECT id,call_id,provider_invocation_id,logical_name,model_arguments,model_arguments_hash,
+            active_catalog_digest,active_catalog_epoch,status,
+            owner_token,lease_expires_at,result,result_hash
+     FROM settle_mcp_tool_invocation($1,$2,'completed',$3::jsonb,$4,true)`,
+    [
+      receipt.id,
+      receipt.owner_token,
+      JSON.stringify(wireResult),
+      hashFlowValue(wireResult),
+    ],
+  );
+}
+
 export async function admitMcpToolInvocation(
   identity: McpToolInvocationIdentity,
-  options: Readonly<{ replayWaitMs?: number }> = {}
+  options: Readonly<{
+    replayWaitMs?: number;
+    recoverExpired?: McpExpiredInvocationRecovery;
+  }> = {}
 ): Promise<McpToolInvocationAdmission> {
   const {
     callId,
@@ -268,6 +304,40 @@ export async function admitMcpToolInvocation(
     }
     const replay = terminalResult(receipt);
     if (replay) return replay;
+  }
+
+  const leaseExpiresAt = new Date(receipt.lease_expires_at).getTime();
+  if (
+    options.recoverExpired
+    && Number.isFinite(leaseExpiresAt)
+    && leaseExpiresAt <= Date.now()
+  ) {
+    let recovered: Awaited<ReturnType<McpExpiredInvocationRecovery>>;
+    try {
+      recovered = await options.recoverExpired(Object.freeze({
+        receiptId: receipt.id,
+        callId: receipt.call_id,
+        providerInvocationId: receipt.provider_invocation_id,
+        logicalName: receipt.logical_name,
+        modelArguments: Object.freeze({ ...receipt.model_arguments }),
+        leaseExpiresAt: new Date(receipt.lease_expires_at).toISOString(),
+      }));
+    } catch {
+      // A transient proof/readback failure must not destroy a potentially
+      // recoverable receipt. Leave it executing so an exact replay can retry.
+      return pending(receipt.id);
+    }
+    if (recovered) {
+      try {
+        const settled = await settleRecoveredExpired(receipt, recovered.result);
+        const replay = settled ? terminalResult(settled) : terminalResult(
+          await loadReceipt(callId, providerInvocationId) ?? receipt,
+        );
+        if (replay) return replay;
+      } catch {
+        return pending(receipt.id);
+      }
+    }
   }
 
   const quarantined = await quarantineExpired(receipt);

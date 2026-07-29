@@ -151,12 +151,15 @@ additional adapter during server bootstrap with
 `registerRealtimeProvider(...)`; it does not need to edit a core provider
 switch or widen the built-in TypeScript union. The registry snapshots public
 metadata, rejects duplicate IDs, validates capability/hook consistency, checks
-returned browser/server connection metadata, and lets operators unregister
+returned browser/server connection metadata, requires an exact-provider tenant
+funding authority for extension browser mints, and lets operators unregister
 only non-built-in extensions.
 
 Registration deliberately lives in `server-only` code. Provider credentials
 must remain behind an ephemeral-token or bridge factory, and an extension must
-never return a long-lived provider key in its browser connection payload. A
+never return a long-lived provider key in its browser connection payload. The
+browser factory receives an explicit exact-provider tenant funding authority;
+omitting it is not a deployment-key fallback. A
 custom browser transport still needs a matching client-side consumer in the
 self-hosted UI. Preserve Flow/MCP semantics, and do not advertise native
 telephony unless the adapter declares `native-pcmu`, supplies a direct WSS
@@ -169,4 +172,13 @@ Use the [Communication Provider Adapter v1 contract](../web/lib/communications/R
 
 The adapter contract deliberately lets configuration validation, request preparation, and quoting throw before the durable provider-attempt claim. An integrator must catch and normalize those pre-dispatch exceptions as a definite local rejection/`not_sent` outcome; do not accidentally map them to post-dispatch `indeterminate`. Once the provider dispatch hook is entered, an exception cannot prove absence and remains indeterminate and non-retry-safe.
 
-Twilio and Resend still use their existing operator-action approval, reservation, and settlement paths. They have not migrated to this contract, so the new seam does not yet make those providers configuration-swappable.
+Browser-approved Resend email and Twilio SMS retain the existing
+operator-action approval/reservation ledger and now enter their provider only
+through Adapter v1. The bridge consumes the already-exclusive operator
+execution as Adapter v1 authority, recomputes the exact destination-bound quote,
+uses the execution UUID for Resend idempotency, and persists the full private
+adapter receipt. Public/model projections deliberately omit provider IDs,
+destinations, message bodies, configuration, and credentials. Twilio SMS
+declares `exclusive-framework-ledger` because the Messages API path does not
+provide the same provider-key contract. Outbound voice and number purchasing
+have not migrated yet and therefore are not configuration-swappable.

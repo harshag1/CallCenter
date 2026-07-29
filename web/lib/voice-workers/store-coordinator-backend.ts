@@ -6,7 +6,9 @@ import {
   requestDurableVoiceWorkerCancellation,
   spawnGovernedDurableVoiceWorker,
   type DurableConversationInboxMessage,
+  type DurableConversationResultInboxMessage,
   type DurableVoiceWorker,
+  type DurableVoiceWorkerDelivery,
 } from "./store";
 import {
   VoiceWorkerCheckpointSchema,
@@ -66,6 +68,21 @@ function assertScope(
       worker.authority.agentId !== authority.agentId) {
     throw new Error("durable voice worker crossed its governed conversation scope");
   }
+}
+
+function succeededDeliveryProjection(worker: DurableVoiceWorker): DurableVoiceWorkerDelivery | null {
+  if (worker.status !== "succeeded" || !worker.resultSha256 || !worker.settledAt) return null;
+  return Object.freeze({
+    id: worker.id,
+    conversationId: worker.conversationId,
+    organizationId: worker.organizationId,
+    sourceCallId: worker.sourceCallId,
+    authority: worker.authority,
+    authoritySha256: worker.authoritySha256,
+    status: "succeeded",
+    resultSha256: worker.resultSha256,
+    settledAt: worker.settledAt,
+  });
 }
 
 function eventIdentity(
@@ -245,6 +262,19 @@ export function createDurableStoreGovernedWorkerBackend(
           message.id !== input.messageId || !message.deliveryToken) {
         throw new Error("claimed worker result crossed scope or lacks a delivery lease");
       }
+      const deliveryWorker = succeededDeliveryProjection(worker);
+      if (message.kind !== "result" || !deliveryWorker) {
+        return Object.freeze({
+          worker: projectSnapshot(worker),
+          messageId: input.messageId,
+          disposition: "not_ready" as const,
+          resultSha256: worker.resultSha256,
+          conversationEventId: null,
+          conversationEventSha256: null,
+          reason: "the claimed update is not an applicable succeeded worker result",
+        });
+      }
+      const resultMessage: DurableConversationResultInboxMessage = message;
       const conversationEvent = eventIdentity(
         input.authority,
         `deliver/${message.id}`,
@@ -263,14 +293,14 @@ export function createDurableStoreGovernedWorkerBackend(
             input.authority.conversationId,
             `result-application:${input.idempotencyKey}`
           ),
-          worker,
-          message,
+          worker: deliveryWorker,
+          message: resultMessage,
         });
         return Object.freeze({
           worker: projectSnapshot(worker),
           messageId: message.id,
           disposition: "accepted" as const,
-          resultSha256: message.resultSha256,
+          resultSha256: resultMessage.resultSha256,
           conversationEventId: applied.event.eventId,
           conversationEventSha256: applied.event.hash,
           reason: null,
@@ -281,7 +311,7 @@ export function createDurableStoreGovernedWorkerBackend(
           worker: projectSnapshot(worker),
           messageId: message.id,
           disposition: error.decision.status,
-          resultSha256: message.resultSha256,
+          resultSha256: resultMessage.resultSha256,
           conversationEventId: null,
           conversationEventSha256: null,
           reason: error.decision.reason ?? "conversation policy did not accept the worker result",

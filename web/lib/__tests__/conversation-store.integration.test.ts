@@ -40,10 +40,11 @@ integration("033 conversation event database serialization", () => {
     key: string,
     eventId: string,
     factKey: string,
+    conversationId = ids.conversation,
   ) {
     const unsignedEvent = canonicalJson({
       version: 1,
-      conversationId: ids.conversation,
+      conversationId,
       sequence: head.sequence + 1,
       previousHash: head.sha256,
       ...draft(eventId, factKey),
@@ -132,5 +133,196 @@ integration("033 conversation event database serialization", () => {
       head.sequence,
     ]);
     expect(wrongOrg.rows).toEqual([]);
+  });
+
+  it("replays only the exact expected-head-anchored contiguous range after the head advances", async () => {
+    const conversationId = randomUUID();
+    await pool.query("SELECT * FROM ensure_voice_conversation($1,$2,$3,1,NULL)", [
+      conversationId,
+      ids.org,
+      ids.agent,
+    ]);
+
+    const first = sqlBatch(
+      { sequence: 0, sha256: GENESIS_HASH },
+      "replay:first",
+      "replay-first",
+      "replay.first",
+      conversationId,
+    );
+    const firstItem = (JSON.parse(first.batchText) as BatchItem[])[0];
+    await pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, GENESIS_HASH, first.batchText, first.batchSha256],
+    );
+
+    const second = sqlBatch(
+      { sequence: 1, sha256: first.eventHash },
+      "replay:second",
+      "replay-second",
+      "replay.second",
+      conversationId,
+    );
+    const secondItem = (JSON.parse(second.batchText) as BatchItem[])[0];
+    await pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, first.eventHash, second.batchText, second.batchSha256],
+    );
+
+    const third = sqlBatch(
+      { sequence: 2, sha256: second.eventHash },
+      "replay:third",
+      "replay-third",
+      "replay.third",
+      conversationId,
+    );
+    const thirdItem = (JSON.parse(third.batchText) as BatchItem[])[0];
+    await pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, second.eventHash, third.batchText, third.batchSha256],
+    );
+
+    const exactRangeText = canonicalJson([firstItem, secondItem]);
+    const exactReplay = await pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, GENESIS_HASH, exactRangeText, digest(exactRangeText)],
+    );
+    expect(exactReplay.rows.map((row) => [row.sequence, row.event_id])).toEqual([
+      ["1", "replay-first"],
+      ["2", "replay-second"],
+    ]);
+
+    const reorderedText = canonicalJson([secondItem, firstItem]);
+    await expect(pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, GENESIS_HASH, reorderedText, digest(reorderedText)],
+    )).rejects.toMatchObject({ message: "voice_conversation_event_batch_replay_invalid" });
+
+    const gappedText = canonicalJson([firstItem, thirdItem]);
+    await expect(pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, GENESIS_HASH, gappedText, digest(gappedText)],
+    )).rejects.toMatchObject({ message: "voice_conversation_event_batch_replay_invalid" });
+
+    await expect(pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, "e".repeat(64), exactRangeText, digest(exactRangeText)],
+    )).rejects.toMatchObject({ message: "voice_conversation_event_batch_replay_invalid" });
+
+    const count = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM voice_conversation_events WHERE conversation_id=$1",
+      [conversationId],
+    );
+    expect(count.rows[0].count).toBe("3");
+    const head = await pool.query<{ head_sequence: string; head_sha256: string }>(
+      "SELECT * FROM read_voice_conversation_head($1,$2)",
+      [conversationId, ids.org],
+    );
+    expect(head.rows[0]).toEqual({
+      head_sequence: "3",
+      head_sha256: third.eventHash,
+    });
+  });
+
+  it("rejects an all-existing contiguous replay whose durable previous-hash chain is broken", async () => {
+    const conversationId = randomUUID();
+    await pool.query("SELECT * FROM ensure_voice_conversation($1,$2,$3,1,NULL)", [
+      conversationId,
+      ids.org,
+      ids.agent,
+    ]);
+
+    const first = sqlBatch(
+      { sequence: 0, sha256: GENESIS_HASH },
+      "broken:first",
+      "broken-first",
+      "broken.first",
+      conversationId,
+    );
+    const firstItem = (JSON.parse(first.batchText) as BatchItem[])[0];
+    const brokenPreviousHash = "f".repeat(64);
+    const second = sqlBatch(
+      { sequence: 1, sha256: brokenPreviousHash },
+      "broken:second",
+      "broken-second",
+      "broken.second",
+      conversationId,
+    );
+    const secondItem = (JSON.parse(second.batchText) as BatchItem[])[0];
+
+    for (const [item, sequence] of [[firstItem, 1], [secondItem, 2]] as const) {
+      const unsigned = JSON.parse(item.unsignedEvent) as {
+        eventId: string;
+        occurredAtMs: number;
+        payload: { type: string };
+        previousHash: string;
+      };
+      await pool.query(
+        `INSERT INTO voice_conversation_events(
+           conversation_id, org_id, sequence, event_id, idempotency_key,
+           occurred_at_ms, event_type, payload, previous_event_sha256,
+           event_sha256, unsigned_event_text
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)`,
+        [
+          conversationId,
+          ids.org,
+          sequence,
+          unsigned.eventId,
+          item.idempotencyKey,
+          unsigned.occurredAtMs,
+          unsigned.payload.type,
+          JSON.stringify(unsigned.payload),
+          unsigned.previousHash,
+          item.eventHash,
+          item.unsignedEvent,
+        ],
+      );
+    }
+    await pool.query(
+      `UPDATE voice_conversations
+       SET event_head_sequence=2, event_head_sha256=$3
+       WHERE id=$1 AND org_id=$2`,
+      [conversationId, ids.org, second.eventHash],
+    );
+
+    const brokenRangeText = canonicalJson([firstItem, secondItem]);
+    await expect(pool.query(
+      "SELECT * FROM append_voice_conversation_events($1,$2,$3,$4,$5)",
+      [conversationId, ids.org, GENESIS_HASH, brokenRangeText, digest(brokenRangeText)],
+    )).rejects.toMatchObject({ message: "voice_conversation_event_batch_replay_invalid" });
+  });
+
+  it("exposes only the exact-replay wrapper to the backend runtime role", async () => {
+    const privileges = await pool.query<{
+      rolname: string;
+      wrapper_execute: boolean;
+      internal_execute: boolean;
+    }>(
+      `SELECT role.rolname,
+              has_function_privilege(
+                role.oid,
+                'public.append_voice_conversation_events(uuid,uuid,text,text,text)',
+                'EXECUTE'
+              ) AS wrapper_execute,
+              has_function_privilege(
+                role.oid,
+                'public.append_voice_conversation_events_v1_internal(uuid,uuid,text,text,text)',
+                'EXECUTE'
+              ) AS internal_execute
+       FROM pg_roles role
+       WHERE role.rolname IN (
+         'hacc_backend',
+         'hacc_voice_worker',
+         'hacc_voice_worker_runtime',
+         'hacc_worker'
+       )
+       ORDER BY role.rolname`,
+    );
+    expect(privileges.rows).toEqual([
+      { rolname: "hacc_backend", wrapper_execute: true, internal_execute: false },
+      { rolname: "hacc_voice_worker", wrapper_execute: false, internal_execute: false },
+      { rolname: "hacc_voice_worker_runtime", wrapper_execute: false, internal_execute: false },
+      { rolname: "hacc_worker", wrapper_execute: false, internal_execute: false },
+    ]);
   });
 });

@@ -23,7 +23,7 @@ CREATE OR REPLACE FUNCTION public.spawn_governed_voice_worker(
   source_call_identity uuid DEFAULT NULL,
   parent_worker_identity uuid DEFAULT NULL
 ) RETURNS TABLE(conversation_event jsonb, worker_job jsonb)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $spawn_governed_voice_worker$
 DECLARE
   unsigned_event jsonb;
@@ -123,7 +123,7 @@ CREATE OR REPLACE FUNCTION public.apply_governed_voice_worker_result(
   unsigned_event_text text,
   event_sha256 text
 ) RETURNS TABLE(conversation_event jsonb, inbox_message jsonb)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $apply_governed_voice_worker_result$
 DECLARE
   message public.voice_conversation_inbox%ROWTYPE;

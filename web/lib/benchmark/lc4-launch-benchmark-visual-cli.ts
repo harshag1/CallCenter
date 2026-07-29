@@ -28,16 +28,38 @@ export async function runLc4LaunchBenchmarkVisualCli(
 ): Promise<number> {
   try {
     if (args[0] !== "publish") {
-      throw new Error("usage: lc4-launch-benchmark-visual publish --public-json /absolute/path --output-root /absolute/path");
+      throw new Error(
+        "usage: lc4-launch-benchmark-visual publish --evidence-root /absolute/path --public-json /absolute/path --public-markdown /absolute/path --output-root /absolute/path --authority-trust-root-sha256 SHA256 --gate-d-receipt /absolute/path --gate-d-invocation-marker /absolute/path --gate-d-trust-root-sha256 SHA256",
+      );
     }
     const parsed = flags(args.slice(1));
-    const expected = ["--output-root", "--public-json"];
+    const expected = [
+      "--authority-trust-root-sha256",
+      "--evidence-root",
+      "--gate-d-invocation-marker",
+      "--gate-d-receipt",
+      "--gate-d-trust-root-sha256",
+      "--output-root",
+      "--public-json",
+      "--public-markdown",
+    ];
     if (canonicalJson(Object.keys(parsed).sort()) !== canonicalJson(expected)) {
       throw new Error(`LC4 launch benchmark visual CLI requires exactly: ${expected.join(", ")}`);
     }
     const result = await publishLc4LaunchBenchmarkVisual({
+      evidence_root: parsed["--evidence-root"]!,
       public_json: parsed["--public-json"]!,
+      public_markdown: parsed["--public-markdown"]!,
       output_root: parsed["--output-root"]!,
+      authority_trust_root_sha256:
+        parsed["--authority-trust-root-sha256"]!,
+      xai_finite_manual_gate_d: {
+        receipt_path: parsed["--gate-d-receipt"]!,
+        invocation_marker_path:
+          parsed["--gate-d-invocation-marker"]!,
+        plan_trust_root_sha256:
+          parsed["--gate-d-trust-root-sha256"]!,
+      },
     });
     io.stdout(canonicalJson({
       valid: true,

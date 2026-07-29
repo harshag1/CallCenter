@@ -139,9 +139,25 @@ At first connection, the call pins a digest-verified runtime manifest containing
 The builder exposes two deterministic primitives:
 
 - `validate_flow` checks JSON shape, duplicate IDs, action/binding grants, entry count, dangling graph edges, unknown transition targets, nesting depth, and node reachability.
-- `test_flow_scenario` walks receipt-free topic/step/output transitions using the same pure engine as live calls. It does not currently mock business actions or mint successful receipts.
+- `test_flow_scenario` is a pure simulator that can exercise receipt-backed
+  actions, settlement, indeterminate reconciliation, process interruptions,
+  worker completion, and exact terminal assertions. It never executes a real
+  downstream integration.
 
-Use `validate_flow` before attaching any flow. Use `test_flow_scenario` for topology-only cases, and add action fixtures or integration tests for receipt-bound paths. The tested [deep Flow v2 example pack](../examples/flows/README.md) walks long receipt-backed paths and states every unsupported domain primitive and integration obligation. The smaller [membership and returns example](../examples/flows/membership-and-returns.json) is illustrative: it demonstrates typed receipt bindings and action policies but references domain actions that an operator must implement and seed. Notification outputs deliberately record provider acceptance rather than delivery; use a verified delivery webhook/read-back before naming an output `delivered`. Unit tests cover flow topology, evidence, stale grants, idempotency, immutable snapshots, and unsafe receipt paths under `web/lib/__tests__`.
+Use `validate_flow` before attaching any flow. Use `test_flow_scenario` with
+explicit deterministic action/receipt fixtures, then add integration tests for
+the actual downstream adapters. The tested
+[deep Flow v2 example pack](../examples/flows/README.md) walks long
+receipt-backed paths and states every unsupported domain primitive and
+integration obligation. The smaller
+[membership and returns example](../examples/flows/membership-and-returns.json)
+is illustrative: it demonstrates typed receipt bindings and action policies
+but references domain actions that an operator must implement and seed.
+Notification outputs deliberately record provider acceptance rather than
+delivery; use a verified delivery webhook/read-back before naming an output
+`delivered`. Unit tests cover flow topology, evidence, stale grants,
+idempotency, immutable snapshots, and unsafe receipt paths under
+`web/lib/__tests__`.
 
 ## Backward compatibility
 

@@ -1,6 +1,7 @@
 services:
   db:
-    image: pgvector/pgvector:pg16
+    # Multi-architecture OCI index for pgvector/pgvector:pg16, resolved 2026-07-28.
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     environment:
       POSTGRES_DB: voice_agents
       POSTGRES_USER: postgres

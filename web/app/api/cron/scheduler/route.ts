@@ -14,6 +14,7 @@ import {
 import { authorizeCronRequest } from "@/lib/cron-auth";
 import { sweepGeneratedToolCleanup } from "@/lib/toolfactory/cleanup";
 import { sweepExpiredOperatorPrivateDisplays } from "@/lib/operator-action-maintenance";
+import { drainGovernedCallWorkers } from "@/lib/governed-worker-drain";
 
 const L = log("cron/scheduler");
 export const maxDuration = 120;
@@ -106,6 +107,16 @@ export async function GET(req: Request) {
     cleanupRequired: 0,
     unavailable: true as const,
   }));
+  const governedWorkerDrain = await drainGovernedCallWorkers({
+    maximumWorkers: 2,
+    wallClockMs: 45_000,
+  }).catch(() => ({
+    attempted: 0,
+    executed: 0,
+    claimRaces: 0,
+    timeBudgetExhausted: false,
+    unavailable: true as const,
+  }));
 
   return NextResponse.json({
     processed: Object.keys(results).length,
@@ -114,6 +125,7 @@ export async function GET(req: Request) {
     analyzed: unanalyzed.length,
     tasks: tasksRun,
     generatedToolCleanup,
+    governedWorkerDrain,
     expiredOperatorDisplaysScrubbed,
     operatorDisplayScrubUnavailable,
     staleRecordingCallsClosed,

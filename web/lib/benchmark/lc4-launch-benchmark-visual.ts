@@ -16,9 +16,10 @@ import sharp from "sharp";
 import { sha256Hex } from "./artifacts";
 import {
   assertLc4LaunchBenchmarkArtifact,
-  readLc4LaunchBenchmarkPublicJson,
+  verifyPublishedLc4LaunchBenchmark,
   type Lc4LaunchBenchmarkArtifact,
 } from "./lc4-launch-benchmark";
+import type { Lc4PublicationGateDInput } from "./lc4-publication-transport-provenance";
 
 const PROVIDERS = Object.freeze(["openai", "gemini", "xai"] as const);
 const WIDTH = 1600;
@@ -40,7 +41,7 @@ export type Lc4LaunchBenchmarkVisualBuffers = Readonly<{
 }>;
 
 function absolute(path: string, label: string): string {
-  if (!isAbsolute(path) || resolve(path) !== path) {
+  if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) {
     throw new Error(`${label} must be an absolute normalized path`);
   }
   return path;
@@ -234,20 +235,75 @@ async function publishBuffers(
   }
 }
 
-export async function publishLc4LaunchBenchmarkVisual(input: Readonly<{
-  public_json: string;
+async function publishLc4LaunchBenchmarkVisualArtifact(input: Readonly<{
+  artifact: Lc4LaunchBenchmarkArtifact;
   output_root: string;
 }>): Promise<Readonly<{
   benchmark_sha256: string;
   files: typeof LC4_LAUNCH_BENCHMARK_VISUAL_FILENAMES;
 }>> {
-  const publicJson = absolute(input.public_json, "LC4 launch benchmark visual public JSON");
   const outputRoot = absolute(input.output_root, "LC4 launch benchmark visual output root");
-  const artifact = await readLc4LaunchBenchmarkPublicJson({ public_json: publicJson });
-  const buffers = await createLc4LaunchBenchmarkVisualBuffers(artifact);
-  await publishBuffers(outputRoot, buffers, artifact.benchmark_sha256);
+  assertLc4LaunchBenchmarkArtifact(input.artifact);
+  const buffers = await createLc4LaunchBenchmarkVisualBuffers(input.artifact);
+  await publishBuffers(outputRoot, buffers, input.artifact.benchmark_sha256);
   return Object.freeze({
-    benchmark_sha256: artifact.benchmark_sha256,
+    benchmark_sha256: input.artifact.benchmark_sha256,
     files: LC4_LAUNCH_BENCHMARK_VISUAL_FILENAMES,
   });
+}
+
+/**
+ * Release visual publication is evidence-bound. The public JSON and Markdown
+ * are first reproduced from the complete retained evidence root (including
+ * the independently replayed terminal budget) and exact Gate D authority.
+ * Supplying a self-authored six-cell JSON file is therefore insufficient.
+ */
+export async function publishLc4LaunchBenchmarkVisual(input: Readonly<{
+  evidence_root: string;
+  public_json: string;
+  public_markdown: string;
+  output_root: string;
+  authority_trust_root_sha256: string;
+  xai_finite_manual_gate_d: Lc4PublicationGateDInput;
+}>): Promise<Readonly<{
+  benchmark_sha256: string;
+  files: typeof LC4_LAUNCH_BENCHMARK_VISUAL_FILENAMES;
+}>> {
+  const evidenceRoot = absolute(
+    input.evidence_root,
+    "LC4 launch benchmark visual evidence root",
+  );
+  const publicJson = absolute(input.public_json, "LC4 launch benchmark visual public JSON");
+  const publicMarkdown = absolute(
+    input.public_markdown,
+    "LC4 launch benchmark visual public Markdown",
+  );
+  const outputRoot = absolute(input.output_root, "LC4 launch benchmark visual output root");
+  const artifact = await verifyPublishedLc4LaunchBenchmark({
+    evidence_root: evidenceRoot,
+    public_json: publicJson,
+    public_markdown: publicMarkdown,
+    authority_trust_root_sha256: input.authority_trust_root_sha256,
+    xai_finite_manual_gate_d: input.xai_finite_manual_gate_d,
+  });
+  return publishLc4LaunchBenchmarkVisualArtifact({
+    artifact,
+    output_root: outputRoot,
+  });
+}
+
+/**
+ * Unsafe unit-test helper for renderer/atomic-write tests only. It is not
+ * reachable from the visual CLI or any release publication entry point.
+ */
+export async function unsafePublishLc4LaunchBenchmarkVisualForTestsOnly(
+  input: Readonly<{
+    artifact: Lc4LaunchBenchmarkArtifact;
+    output_root: string;
+  }>,
+): ReturnType<typeof publishLc4LaunchBenchmarkVisualArtifact> {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("unsafe LC4 launch visual publication is test-only");
+  }
+  return publishLc4LaunchBenchmarkVisualArtifact(input);
 }

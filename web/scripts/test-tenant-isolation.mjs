@@ -18,6 +18,7 @@ const SHA_B = "b".repeat(64);
 // receive the normal hacc_backend_all policy or be reviewed and added here with
 // the no-direct-CRUD assertions below.
 const FUNCTION_ONLY_RELATIONS = new Set([
+  "hacc_private.post_call_analysis_runs",
   "public.conversation_call_action_intents",
   "public.flow_action_policy_decisions",
   "public.voice_conversation_calls",
@@ -418,6 +419,8 @@ async function main() {
   let apiCredentialSinkCrudDenials = 0;
   let apiApplicationRelationCrudDenials = 0;
   let apiProtectedRelations = [];
+  let callOperationsStaleExecuteGrantsRevoked = false;
+  let callOperationsOwnerGraphRejectionVerified = false;
   const migrationApplications = new Map();
   try {
     await mkdir(socket, { mode: 0o700 });
@@ -487,6 +490,18 @@ async function main() {
       // migrations must remain idempotent without weakening RLS, grants,
       // credential binding, cleanup, call authority, capability rotation, or
       // invocation-receipt truth.
+      // Seed the exact stale ACL state migration 039 must repair. Revoking
+      // PUBLIC alone is insufficient because role-specific EXECUTE grants
+      // survive CREATE OR REPLACE.
+      await migrator.query(
+        `GRANT EXECUTE ON FUNCTION public.read_call_operations_snapshot(uuid,uuid)
+           TO PUBLIC, anon, authenticated, service_role, hacc_worker,
+              hacc_runtime, hacc_worker_runtime`
+      );
+      await migrator.query(
+        `GRANT EXECUTE ON FUNCTION public.read_call_operations_snapshot(uuid,uuid)
+           TO hacc_backend WITH GRANT OPTION`
+      );
       const reapplicationFiles = migrationFiles.filter((name) => {
         const prefix = Number.parseInt(name.slice(0, 3), 10);
         return prefix >= 16;
@@ -505,6 +520,117 @@ async function main() {
             { cause: error }
           );
         }
+      }
+
+      const callOperationsPrivileges = await migrator.query(
+        `SELECT
+           has_function_privilege('hacc_backend',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS backend_execute,
+           has_function_privilege('anon',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS anon_execute,
+           has_function_privilege('authenticated',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS authenticated_execute,
+           has_function_privilege('service_role',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS service_role_execute,
+           has_function_privilege('hacc_worker',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS worker_execute,
+           has_function_privilege('hacc_runtime',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS runtime_execute,
+           has_function_privilege('hacc_worker_runtime',
+             'public.read_call_operations_snapshot(uuid,uuid)', 'EXECUTE') AS worker_runtime_execute,
+           EXISTS (
+             SELECT 1
+             FROM pg_proc procedure
+             CROSS JOIN LATERAL aclexplode(procedure.proacl) privilege
+             JOIN pg_roles role ON role.oid = privilege.grantee
+             WHERE procedure.oid =
+               'public.read_call_operations_snapshot(uuid,uuid)'::regprocedure
+               AND role.rolname = 'hacc_runtime'
+               AND privilege.privilege_type = 'EXECUTE'
+           ) AS runtime_direct_execute,
+           EXISTS (
+             SELECT 1
+             FROM pg_proc procedure
+             CROSS JOIN LATERAL aclexplode(procedure.proacl) privilege
+             JOIN pg_roles role ON role.oid = privilege.grantee
+             WHERE procedure.oid =
+               'public.read_call_operations_snapshot(uuid,uuid)'::regprocedure
+               AND role.rolname = 'hacc_worker_runtime'
+               AND privilege.privilege_type = 'EXECUTE'
+           ) AS worker_runtime_direct_execute,
+           EXISTS (
+             SELECT 1
+             FROM pg_proc procedure
+             CROSS JOIN LATERAL aclexplode(procedure.proacl) privilege
+             JOIN pg_roles role ON role.oid = privilege.grantee
+             WHERE procedure.oid =
+               'public.read_call_operations_snapshot(uuid,uuid)'::regprocedure
+               AND role.rolname = 'hacc_backend'
+               AND privilege.privilege_type = 'EXECUTE'
+               AND privilege.is_grantable
+           ) AS backend_execute_grant_option`
+      );
+      invariant(
+        callOperationsPrivileges.rows[0]?.backend_execute === true
+          && callOperationsPrivileges.rows[0]?.anon_execute === false
+          && callOperationsPrivileges.rows[0]?.authenticated_execute === false
+          && callOperationsPrivileges.rows[0]?.service_role_execute === false
+          && callOperationsPrivileges.rows[0]?.worker_execute === false
+          && callOperationsPrivileges.rows[0]?.runtime_execute === true
+          && callOperationsPrivileges.rows[0]?.worker_runtime_execute === false
+          && callOperationsPrivileges.rows[0]?.runtime_direct_execute === false
+          && callOperationsPrivileges.rows[0]?.worker_runtime_direct_execute === false
+          && callOperationsPrivileges.rows[0]?.backend_execute_grant_option === false,
+        "migration 039 reapplication did not remove stale call-operations EXECUTE grants"
+      );
+      callOperationsStaleExecuteGrantsRevoked = true;
+    });
+
+    await withClient(socket, port, owner, async (superuser) => {
+      const migration039 = await readFile(
+        new URL("039_call_operations_read_projection.sql", migrationsDir),
+        "utf8"
+      );
+      await superuser.query(
+        "CREATE ROLE hacc_projection_owner_bridge NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"
+      );
+      try {
+        // A runtime role must never reach the SECURITY DEFINER owner, even
+        // transitively. ACL normalization cannot remove an owner's implicit
+        // EXECUTE privilege, so migration 039 must reject this topology.
+        await superuser.query(
+          "GRANT hacc_migrator TO hacc_projection_owner_bridge"
+        );
+        await superuser.query(
+          "GRANT hacc_projection_owner_bridge TO hacc_worker_runtime"
+        );
+        await superuser.query("BEGIN");
+        await superuser.query("SET LOCAL ROLE hacc_migrator");
+        let rejection;
+        try {
+          await superuser.query(migration039);
+        } catch (error) {
+          rejection = error;
+        }
+        await superuser.query("ROLLBACK");
+        invariant(
+          rejection?.code === "42501"
+            && rejection?.message ===
+              "call_operations_function_owner_is_runtime_role",
+          "migration 039 accepted a runtime descendant of its function owner"
+        );
+        callOperationsOwnerGraphRejectionVerified = true;
+      } finally {
+        await superuser.query("ROLLBACK").catch(() => undefined);
+        await superuser.query(
+          "REVOKE hacc_projection_owner_bridge FROM hacc_worker_runtime"
+        ).catch(() => undefined);
+        await superuser.query(
+          "REVOKE hacc_migrator FROM hacc_projection_owner_bridge"
+        ).catch(() => undefined);
+        await superuser.query(
+          "DROP ROLE IF EXISTS hacc_projection_owner_bridge"
+        ).catch(() => undefined);
       }
     });
 
@@ -2044,6 +2170,9 @@ async function main() {
       roles_tested: ["anon", "authenticated", "service_role", "hacc_runtime", "hacc_worker_runtime"],
       api_application_relation_crud_denials: apiApplicationRelationCrudDenials,
       api_credential_sink_crud_denials: apiCredentialSinkCrudDenials,
+      call_operations_stale_execute_grants_revoked: callOperationsStaleExecuteGrantsRevoked,
+      call_operations_owner_graph_rejection_verified:
+        callOperationsOwnerGraphRejectionVerified,
       mcp_persistence_tables_with_backend_full_crud: 5,
       concurrent_claims: 2,
       scheduled_call_monotonicity_checks: 3,

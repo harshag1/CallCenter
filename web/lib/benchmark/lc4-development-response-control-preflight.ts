@@ -26,11 +26,11 @@ export const LC4_DEV_HACC_RESPONSE_CONTROL_MAX_BYTES = Object.freeze({
 } satisfies Readonly<Record<LiveStsProvider, number>>);
 
 /**
- * Native intentionally carries the benchmark's strong full-context comparator,
- * which is about 34–36 KiB in the frozen corpus. Its explicit 64 KiB benchmark
- * allowance is separate from the general Gemini client's 4 KiB default.
+ * Native gets a small, byte-stable continuation plus the common gateway
+ * contract. It must never need a raised provider limit to carry host-derived
+ * state, Flow structure, or evaluator criteria.
  */
-export const LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES = 64 * 1024;
+export const LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES = 4 * 1024;
 
 export function lc4DevResponseControlMaximumBytes(
   provider: LiveStsProvider,

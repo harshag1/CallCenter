@@ -53,6 +53,7 @@ import {
   createProductionRealtimeClient,
   productionOpenAiCompatibleSessionUpdate,
   productionSessionPayloadParitySha256,
+  type XaiRealtimeTurnBoundary,
 } from "./production-realtime-provider";
 import { parseBenchmarkEnvironmentFile } from "./environment";
 import {
@@ -99,8 +100,8 @@ import {
   type Lc4QualificationBudgetEvidence,
 } from "./lc4-qualification-budget";
 
-export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v5" as const;
-export const LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-AUTHORIZATION-v4" as const;
+export const LC4_QUALIFICATION_V3_RUNNER_VERSION = "HACC-LC4-QUALIFICATION-RUNNER-v6" as const;
+export const LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION = "HACC-LC4-QUALIFICATION-AUTHORIZATION-v5" as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD = 3_000_000 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS = 6 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS = 3 as const;
@@ -109,25 +110,27 @@ export const LC4_QUALIFICATION_V3_MAXIMUM_TOOL_ROUNDTRIPS = 3 as const;
 export const LC4_QUALIFICATION_V3_MAXIMUM_AUTHORIZATION_TTL_MS = 3_600_000 as const;
 export const LC4_QUALIFICATION_V3_PROVIDER_ORDER = Object.freeze(["openai", "gemini", "xai"] as const);
 export const LC4_XAI_SERVER_VAD_SETTING_SHA256 = XAI_SERVER_VAD_SETTING_SHA256;
+export const LC4_QUALIFICATION_XAI_TURN_BOUNDARY = "provider_native_server_vad" as const;
 
-const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
-const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
-const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
-const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
-const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v6\n";
-const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n";
+const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v5\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n";
+const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v5\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v5\n";
+const TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v7\n";
 const REPLAY_AGGREGATE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-replay-aggregate/v1\n";
 const CREDENTIAL_DOMAIN = "harshas-amazing-call-center/provider-credential/v1\n";
 const CREDENTIAL_SET_DOMAIN = "harshas-amazing-call-center/provider-credential-set/v1\n";
 const SOURCE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-git-tree/v1\n";
-const INVOCATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-invocation/v4\n";
-const INVOCATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-invocation-artifact/v4\n";
-const REFUSAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal/v4\n";
-const REFUSAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-artifact/v4\n";
-const REFUSAL_PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-package/v4\n";
-const REFUSAL_ERROR_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-error/v4\n";
+const INVOCATION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-invocation/v5\n";
+const INVOCATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-invocation-artifact/v5\n";
+const REFUSAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal/v5\n";
+const REFUSAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-artifact/v5\n";
+const REFUSAL_PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-package/v5\n";
+const REFUSAL_ERROR_DOMAIN = "harshas-amazing-call-center/lc4-qualification-refusal-error/v5\n";
 const XAI_SERVER_VAD_GATE_A_RISK_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-a-risk/v2\n";
 const XAI_SERVER_VAD_GATE_B_BINDING_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-b-binding/v1\n";
+const QUALIFICATION_CONDITION_DOMAIN = "harshas-amazing-call-center/lc4-qualification-v3-condition/v2\n";
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
@@ -185,7 +188,7 @@ export class Lc4QualificationV3BoundaryError extends Error {
 }
 
 export type Lc4QualificationV3PlanBody = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
   protocol_id: "HACC-LC4-v1";
   plan_id: string;
@@ -210,6 +213,7 @@ export type Lc4QualificationV3PlanBody = Readonly<{
     compact_control_sha256: typeof LC4_S2S_COMPACT_CONTROL_SHA256;
     packetizer_sha256: typeof LC4_S2S_PACKETIZER_SHA256;
     audio_delivery_profile_sha256: string;
+    qualification_turn_boundary: "manual_commit" | "provider_activity_markers" | typeof LC4_QUALIFICATION_XAI_TURN_BOUNDARY;
     production_session_payload_sha256: string | null;
     xai_transport_parity_sha256: string | null;
     setup_sessions: 1;
@@ -265,7 +269,7 @@ export type Lc4QualificationV3AuthorizationArtifact = SignedArtifact<Lc4Qualific
 
 export type Lc4QualificationV3InvocationBody = Readonly<{
   schema_version: 1;
-  invocation_version: "HACC-LC4-QUALIFICATION-INVOCATION-v4";
+  invocation_version: "HACC-LC4-QUALIFICATION-INVOCATION-v5";
   attempt_id: string;
   invoked_at: string;
   plan_artifact_sha256: string;
@@ -285,7 +289,7 @@ export type Lc4QualificationV3InvocationArtifact = SignedArtifact<Lc4Qualificati
 
 export type Lc4QualificationV3RefusalBody = Readonly<{
   schema_version: 1;
-  refusal_version: "HACC-LC4-QUALIFICATION-REFUSAL-v4";
+  refusal_version: "HACC-LC4-QUALIFICATION-REFUSAL-v5";
   attempt_id: string;
   refused_at: string;
   stage: "source" | "credentials";
@@ -312,15 +316,15 @@ export type Lc4QualificationV3RefusalBody = Readonly<{
 
 export type Lc4QualificationV3RefusalPackage = Readonly<{
   schema_version: 1;
-  package_version: "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v4";
+  package_version: "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v5";
   authorization: Lc4QualificationV3AuthorizationArtifact;
   refusal: SignedArtifact<Lc4QualificationV3RefusalBody>;
   package_sha256: string;
 }>;
 
 export type Lc4QualificationV3TerminalBody = Readonly<{
-  schema_version: 3;
-  terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v6";
+  schema_version: 4;
+  terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v7";
   runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
   attempt_id: string;
   plan_artifact_sha256: string;
@@ -474,7 +478,12 @@ export type Lc4XaiServerVadGateBBindingArtifact = Readonly<{
 type Dependencies = Readonly<{
   inspectGitSource(repositoryRoot: string): Promise<Lc4QualificationV3GitSource>;
   loadCredentials(repositoryRoot: string): Promise<Readonly<Record<LiveStsProvider, string>>>;
-  createClient(provider: LiveStsProvider, configuration: TrialSessionConfiguration, apiKey: string): NormalizedRealtimeClient;
+  createClient(
+    provider: LiveStsProvider,
+    configuration: TrialSessionConfiguration,
+    apiKey: string,
+    options: Readonly<{ xaiTurnBoundary?: XaiRealtimeTurnBoundary }>,
+  ): NormalizedRealtimeClient;
   materializeAudio(input: Readonly<{ root: string; renderer?: Lc4S2sAudioRenderer }>): Promise<Lc4S2sAudioFixtureArtifact>;
   executeRoundtrip(input: Parameters<typeof executeLc4S2sToolRoundtrip>[0]): Promise<Lc4S2sRoundtripExecution>;
 }>;
@@ -1322,11 +1331,43 @@ function setupConfiguration(provider: LiveStsProvider): TrialSessionConfiguratio
     initialPrompt: instructions,
     renderedCapabilitySnapshot,
     providerTools: freeze([LC4_S2S_TOOL]),
-    conditionHash: sha256Hex(`harshas-amazing-call-center/lc4-qualification-v3-condition/v1\n${provider}\n${instructions}`),
+    conditionHash: sha256Hex(`${QUALIFICATION_CONDITION_DOMAIN}${canonicalJson({
+      provider,
+      qualification_turn_boundary: qualificationTurnBoundary(provider),
+      instructions,
+    })}`),
     inputAudioFormat: freeze({ encoding: "pcm16" as const, sampleRateHz: spec.sampleRateHz, channels: 1 as const }),
     audioDeliveryProfile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
     audioDeliveryProfileHash: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
   });
+}
+
+function qualificationTurnBoundary(
+  provider: LiveStsProvider,
+): "manual_commit" | "provider_activity_markers" | typeof LC4_QUALIFICATION_XAI_TURN_BOUNDARY {
+  if (provider === "xai") return LC4_QUALIFICATION_XAI_TURN_BOUNDARY;
+  return provider === "gemini" ? "provider_activity_markers" : "manual_commit";
+}
+
+function qualificationClientOptions(
+  provider: LiveStsProvider,
+): Readonly<{ xaiTurnBoundary?: XaiRealtimeTurnBoundary }> {
+  return provider === "xai"
+    ? freeze({ xaiTurnBoundary: LC4_QUALIFICATION_XAI_TURN_BOUNDARY })
+    : freeze({});
+}
+
+function qualificationProductionSessionPayloadSha256(
+  provider: Exclude<LiveStsProvider, "gemini">,
+  configuration: TrialSessionConfiguration,
+): string {
+  return provider === "xai"
+    ? productionSessionPayloadParitySha256(
+      "xai",
+      configuration,
+      LC4_QUALIFICATION_XAI_TURN_BOUNDARY,
+    )
+    : productionSessionPayloadParitySha256("openai", configuration);
 }
 
 export function createLc4QualificationV3Targets(): readonly ProviderQualificationTarget[] {
@@ -1366,7 +1407,11 @@ function planBodySha256(body: Omit<Lc4QualificationV3PlanBody, "plan_sha256">): 
 function expectedXaiTransportParitySha256(configuration: TrialSessionConfiguration): string {
   if (configuration.provider !== "xai") throw new Error("xAI transport parity requires xAI configuration");
   const compiled = withXaiServerVadPcmSession(
-    productionOpenAiCompatibleSessionUpdate("xai", configuration),
+    productionOpenAiCompatibleSessionUpdate(
+      "xai",
+      configuration,
+      LC4_QUALIFICATION_XAI_TURN_BOUNDARY,
+    ),
   );
   return xaiServerVadTransportParitySha256(compiled, configuration.model);
 }
@@ -1375,7 +1420,8 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
   assertSignedArtifact({ artifact, expectedFingerprint: trustRootFingerprint, signingDomain: PLAN_DOMAIN, artifactDomain: PLAN_ARTIFACT_DOMAIN });
   const { plan_sha256, ...body } = artifact.body;
   if (planBodySha256(body) !== plan_sha256) throw new Error("LC4 qualification v3 plan body hash mismatch");
-  if (artifact.body.runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION
+  if (artifact.body.schema_version !== 2
+    || artifact.body.runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION
     || artifact.body.maximum_total_micro_usd !== LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD
     || artifact.body.maximum_provider_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
     || artifact.body.maximum_paid_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
@@ -1393,12 +1439,13 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
     const expected = expectedTargets[index]!;
     const expectedPayloadSha256 = target.provider === "gemini"
       ? null
-      : productionSessionPayloadParitySha256(target.provider, expected.configuration);
+      : qualificationProductionSessionPayloadSha256(target.provider, expected.configuration);
     const expectedTransportParitySha256 = target.provider === "xai"
       ? expectedXaiTransportParitySha256(expected.configuration)
       : null;
     if (target.provider !== expected.provider
       || target.model !== expected.model
+      || target.qualification_turn_boundary !== qualificationTurnBoundary(target.provider)
       || target.production_session_payload_sha256 !== expectedPayloadSha256
       || target.xai_transport_parity_sha256 !== expectedTransportParitySha256) {
       throw new Error("LC4 qualification v3 plan session payload parity differs from production");
@@ -1431,7 +1478,7 @@ export async function prepareLc4QualificationV3(input: Readonly<{
   const planId = input.planId ?? randomUUID();
   requireId(planId, "LC4 qualification v3 plan ID");
   const unsignedBody = freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     protocol_id: "HACC-LC4-v1" as const,
     plan_id: planId,
@@ -1459,9 +1506,10 @@ export async function prepareLc4QualificationV3(input: Readonly<{
         compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
         packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
         audio_delivery_profile_sha256: trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE),
+        qualification_turn_boundary: qualificationTurnBoundary(provider),
         production_session_payload_sha256: provider === "gemini"
           ? null
-          : productionSessionPayloadParitySha256(provider, configuration),
+          : qualificationProductionSessionPayloadSha256(provider, configuration),
         xai_transport_parity_sha256: provider === "xai"
           ? expectedXaiTransportParitySha256(configuration)
           : null,
@@ -1507,7 +1555,8 @@ export function assertLc4QualificationV3Authorization(input: Readonly<{
   assertSignedArtifact({ artifact: input.artifact, expectedFingerprint: input.trustRootFingerprint, signingDomain: AUTHORIZATION_DOMAIN, artifactDomain: AUTHORIZATION_ARTIFACT_DOMAIN });
   const body = input.artifact.body;
   const plan = input.plan.body;
-  if (body.authorization_version !== LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION
+  if (body.schema_version !== 1
+    || body.authorization_version !== LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION
     || body.plan_artifact_sha256 !== input.plan.artifact_sha256
     || body.plan_sha256 !== plan.plan_sha256
     || body.source_commit !== plan.source.source_commit
@@ -1578,7 +1627,7 @@ function createInvocationArtifact(input: Readonly<{
 }>): Lc4QualificationV3InvocationArtifact {
   const body: Lc4QualificationV3InvocationBody = freeze({
     schema_version: 1 as const,
-    invocation_version: "HACC-LC4-QUALIFICATION-INVOCATION-v4" as const,
+    invocation_version: "HACC-LC4-QUALIFICATION-INVOCATION-v5" as const,
     attempt_id: input.authorization.body.authorization_id,
     invoked_at: input.invokedAt,
     plan_artifact_sha256: input.plan.artifact_sha256,
@@ -1615,7 +1664,7 @@ function assertInvocationArtifact(
   });
   const body = artifact.body;
   if (body.schema_version !== 1
-    || body.invocation_version !== "HACC-LC4-QUALIFICATION-INVOCATION-v4"
+    || body.invocation_version !== "HACC-LC4-QUALIFICATION-INVOCATION-v5"
     || body.authorization_consumed !== true
     || body.attempt_id !== authorization.body.authorization_id
     || body.plan_artifact_sha256 !== plan.artifact_sha256
@@ -1682,7 +1731,7 @@ async function retainPreProviderRefusal(input: Readonly<{
 }>): Promise<Lc4QualificationV3RefusalPackage> {
   const body: Lc4QualificationV3RefusalBody = freeze({
     schema_version: 1,
-    refusal_version: "HACC-LC4-QUALIFICATION-REFUSAL-v4",
+    refusal_version: "HACC-LC4-QUALIFICATION-REFUSAL-v5",
     attempt_id: input.authorization.body.authorization_id,
     refused_at: input.refusedAt,
     stage: input.stage,
@@ -1709,7 +1758,7 @@ async function retainPreProviderRefusal(input: Readonly<{
   });
   const packageBody = freeze({
     schema_version: 1 as const,
-    package_version: "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v4" as const,
+    package_version: "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v5" as const,
     authorization: input.authorization,
     refusal,
   });
@@ -1733,7 +1782,7 @@ function assertRefusalPackage(input: Readonly<{
 }>): void {
   const { package_sha256, ...packageBody } = input.artifact;
   if (input.artifact.schema_version !== 1
-    || input.artifact.package_version !== "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v4"
+    || input.artifact.package_version !== "HACC-LC4-QUALIFICATION-REFUSAL-PACKAGE-v5"
     || package_sha256 !== sha256Hex(`${REFUSAL_PACKAGE_DOMAIN}${canonicalJson(packageBody)}`)) {
     throw new Error("LC4 qualification v3 refusal package failed integrity");
   }
@@ -1992,7 +2041,12 @@ export async function runLc4QualificationV3(input: Readonly<{
         await reassertLc4QualificationV3ExistingRoot(rootIdentity);
         assertLc4QualificationV3ProviderAdmission(signedAuthorizationExpiresAt, now());
         providerSessionsOpened += 1;
-        return dependencies.createClient(target.provider, target.configuration, apiKey);
+        return dependencies.createClient(
+          target.provider,
+          target.configuration,
+          apiKey,
+          qualificationClientOptions(target.provider),
+        );
       },
       now,
       qualificationId: attemptId,
@@ -2027,7 +2081,12 @@ export async function runLc4QualificationV3(input: Readonly<{
         const execution = await dependencies.executeRoundtrip({
           provider,
           model: target.model,
-          client: dependencies.createClient(provider, target.configuration, credentials[provider]),
+          client: dependencies.createClient(
+            provider,
+            target.configuration,
+            credentials[provider],
+            qualificationClientOptions(provider),
+          ),
           audio,
           audioObject: plan.body.audio_fixture.provider_renditions[provider],
           profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
@@ -2259,8 +2318,8 @@ export async function runLc4QualificationV3(input: Readonly<{
     envelopePath: "qualification-package-envelope.json",
   });
   const terminalWithoutHash = freeze({
-    schema_version: 3 as const,
-    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v6" as const,
+    schema_version: 4 as const,
+    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v7" as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     attempt_id: attemptId,
     plan_artifact_sha256: plan.artifact_sha256,
@@ -2421,8 +2480,8 @@ export async function reportLc4QualificationV3(input: Readonly<{
     });
     const { terminal_sha256, ...terminalBody } = terminal.body;
     if (terminal_sha256 !== sha256Hex(`${TERMINAL_DOMAIN}${canonicalJson(terminalBody)}`)
-      || terminal.body.schema_version !== 3
-      || terminal.body.terminal_version !== "HACC-LC4-QUALIFICATION-TERMINAL-v6"
+      || terminal.body.schema_version !== 4
+      || terminal.body.terminal_version !== "HACC-LC4-QUALIFICATION-TERMINAL-v7"
       || terminal.body.plan_artifact_sha256 !== plan.artifact_sha256
       || terminal.body.authorization_artifact_sha256 !== authorization.artifact_sha256
       || terminal.body.source_commit !== plan.body.source.source_commit

@@ -11,6 +11,9 @@ import type {
 import { createLc4DevelopmentDefaultOperatorRuntime } from "../lc4-development-default-runtime";
 import { createLc4DevLivePrepareArtifact } from "../lc4-development-live-runner";
 import type { Lc4DevOperatorSigner } from "../lc4-development-operator-cli";
+import {
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+} from "../lc4-provider-profiles";
 
 const LC4_REAL_ASR_INTEGRATION = process.env.LC4_REAL_ASR_INTEGRATION;
 
@@ -65,6 +68,13 @@ describe.runIf(Boolean(LC4_REAL_ASR_INTEGRATION))(
         source_tree_sha256: "2".repeat(64),
         audio_manifest_sha256: manifest.manifest_sha256,
         audio_bindings: manifest.caller_audio_bindings,
+        xai_finite_manual_gate_d: {
+          receipt_sha256: sha256Hex("synthetic-gate-d-receipt"),
+          plan_authority_trust_root_sha256:
+            sha256Hex("synthetic-gate-d-authority"),
+          transport_profile_sha256:
+            LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256,
+        },
       });
       const signer = operatorSigner();
       const evidenceRoot = requiredEnvironmentPath("LC4_DEV_EVIDENCE_ROOT");

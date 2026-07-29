@@ -8,15 +8,20 @@ import { industrialFieldServiceCompilerInput } from "../industrial-field-service
 import {
   Lc4ProviderInputAudioDeliveryError,
   Lc4RealtimeProviderBridge,
-  assertLc4RotationSubstantiveFactParity,
+  assertLc4RotationConversationParity,
+  assertLc4XaiManualTurnCausality,
+  assertLc4XaiManualTurnReplayProjection,
   createLc4FrozenProductionRealtimeAdapter,
+  createLc4DevRotationContext,
+  createLc4DevSessionConfiguration,
   createLc4HaccRotationStatePacket,
-  createLc4StrongNativeContinuityPacket,
-  type Lc4NativeContinuityFactInput,
+  createLc4NativeConversationReplayPacket,
+  type Lc4NativeConversationTurnInput,
   type Lc4ListenerEvidenceHandoff,
   type Lc4RealtimeEpisodeManifest,
   type Lc4RotationContext,
-  type Lc4StrongNativeContinuityPacket,
+  type Lc4NativeConversationReplayPacket,
+  type Lc4XaiManualTurnCausalityEvidence,
 } from "../lc4-production-provider-adapter";
 import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
@@ -24,7 +29,10 @@ import {
 } from "../lc4-development-gateway-bridge";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
-import { Lc4DevFailureEvidenceError } from "../lc4-development-failure-evidence";
+import {
+  Lc4DevFailureEvidenceError,
+  createLc4DevFailureEvidence,
+} from "../lc4-development-failure-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import {
   LC4_DEV_BRANCH_OPPORTUNITY_ID,
@@ -43,10 +51,12 @@ import type { Lc4DevCallerBranchPlaybackBinding } from "../lc4-development-realt
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
 import {
   compileLc4ProductionScheduleShape,
+  createLc4ProviderExecutionProfile,
   createLc4EpisodeManifest,
   createLc4QualificationGateReceipt,
   type Lc4EpisodeManifest,
   type Lc4OpportunityBinding,
+  type Lc4ProviderExecutionProfile,
 } from "../lc4-production-runner-foundation";
 import {
   advanceHaccSpeechGuardrailState,
@@ -70,6 +80,11 @@ import type {
   RealtimeWireObservation,
   RealtimeWireObservationListener,
 } from "../../realtime/client/types";
+import { realtimeWireIdentitySha256 } from "../../realtime/client/wire-evidence";
+import {
+  LC4_XAI_MANUAL_TURN_CAUSALITY_DOMAIN,
+  lc4XaiManualResponseWireIdentitySha256,
+} from "../lc4-xai-manual-turn-causality";
 import {
   LC4_XAI_SERVER_VAD_SHA256,
   LC4_XAI_SERVER_VAD_SILENCE_TAIL,
@@ -234,7 +249,9 @@ function configuration(value: Lc4EpisodeManifest): TrialSessionConfiguration {
   return Object.freeze({
     provider: profile.provider,
     model: profile.model,
-    conditionId: "host-managed-harness",
+    conditionId: value.episode_shape.arm === "native"
+      ? "raw-full"
+      : "host-managed-harness",
     instructions: `public base instructions ${ORACLE_SECRET}`,
     initialPrompt: `public base instructions ${ORACLE_SECRET}`,
     renderedCapabilitySnapshot: "<capability_snapshot />",
@@ -259,71 +276,93 @@ function bindFirstOpportunityPcm(value: Lc4EpisodeManifest, pcm: Uint8Array): Lc
   });
 }
 
-function publicFacts(): readonly Lc4NativeContinuityFactInput[] {
-  return Object.freeze([
-    {
-      fact_id: "caller-site-id",
-      source: "listener_heard_caller",
-      public_text: "The caller identified the site as North Plant.",
-      available_after_opportunity: 3,
-      provenance_receipt_sha256: "1".repeat(64),
-      listener_status: "heard_verified",
-      visibility: "public_non_sensitive",
-      oracle_derived: false,
-      future_derived: false,
-      private_value_included: false,
+function forgeManifestProviderProfile(
+  value: Lc4EpisodeManifest,
+  providerProfile: Lc4ProviderExecutionProfile,
+): Lc4EpisodeManifest {
+  return Object.freeze({
+    ...value,
+    episode_shape: Object.freeze({
+      ...value.episode_shape,
+      provider_profile: providerProfile,
+    }),
+  });
+}
+
+function publicConversationTurns(
+  availableThroughOpportunity: 20 | 40,
+): readonly Lc4NativeConversationTurnInput[] {
+  return Object.freeze(Array.from(
+    { length: availableThroughOpportunity },
+    (_, offset) => {
+      const opportunity = offset + 1;
+      const callerSequence = offset * 2 + 1;
+      const assistantSequence = callerSequence + 1;
+      return [
+        Object.freeze({
+          turn_id: `conversation.${String(callerSequence).padStart(3, "0")}.caller`,
+          sequence: callerSequence,
+          speaker: "caller" as const,
+          source: "caller_tts_source_bound_to_pcm" as const,
+          text: opportunity === 12
+            ? "Correction: the current site is South Plant, not North Plant."
+            : `Caller utterance ${opportunity}.`,
+          available_after_opportunity: opportunity,
+          provenance_receipt_sha256: sha256Hex(`caller-pcm:${opportunity}`),
+          provider_conversation_source: true as const,
+          oracle_derived: false as const,
+          future_derived: false as const,
+          semantic_evaluator_derived: false as const,
+        }),
+        Object.freeze({
+          turn_id: `conversation.${String(assistantSequence).padStart(3, "0")}.assistant`,
+          sequence: assistantSequence,
+          speaker: "assistant" as const,
+          source: "listener_exact_captured_pcm_asr" as const,
+          text: `Provider-native assistant transcript ${opportunity}.`,
+          available_after_opportunity: opportunity,
+          provenance_receipt_sha256: sha256Hex(`assistant-pcm:${opportunity}`),
+          provider_conversation_source: true as const,
+          oracle_derived: false as const,
+          future_derived: false as const,
+          semantic_evaluator_derived: false as const,
+        }),
+      ];
     },
-    {
-      fact_id: "assistant-promised-followup",
-      source: "listener_heard_assistant",
-      public_text: "The assistant promised to confirm the service window before scheduling.",
-      available_after_opportunity: 7,
-      provenance_receipt_sha256: "2".repeat(64),
-      listener_status: "heard_verified",
-      visibility: "public_non_sensitive",
-      oracle_derived: false,
-      future_derived: false,
-      private_value_included: false,
-    },
-    {
-      fact_id: "lookup-service-window",
-      source: "authoritative_arm_common_result",
-      public_text: "The arm-common lookup returned a Tuesday 9-11 AM service window.",
-      available_after_opportunity: 12,
-      provenance_receipt_sha256: "3".repeat(64),
-      listener_status: "not_applicable",
-      visibility: "public_non_sensitive",
-      oracle_derived: false,
-      future_derived: false,
-      private_value_included: false,
-    },
-    {
-      fact_id: "initial-public-policy",
-      source: "prior_native_visible_context",
-      public_text: "The public cancellation policy allows changes until 24 hours before the visit.",
-      available_after_opportunity: 1,
-      provenance_receipt_sha256: "4".repeat(64),
-      listener_status: "not_applicable",
-      visibility: "public_non_sensitive",
-      oracle_derived: false,
-      future_derived: false,
-      private_value_included: false,
-    },
-  ] satisfies readonly Lc4NativeContinuityFactInput[]);
+  ).flat());
+}
+
+function devEpisodeForComparator(
+  arm: "native" | "hacc",
+  provider: "openai" | "gemini" | "xai" = "openai",
+): Lc4DevLiveEpisodePlan {
+  const profile = createLc4ProviderExecutionProfile(provider);
+  return Object.freeze({
+    episode_id: `lc4-dev-${provider}-${arm}-comparator`,
+    pair_id: `lc4-dev-${provider}-comparator`,
+    pair_position: arm === "native" ? 1 : 2,
+    provider,
+    arm,
+    model: profile.model,
+    voice: profile.voice,
+    maximum_micro_usd: 1_000_000,
+    opportunity_binding_set_sha256: sha256Hex(`comparator:${provider}`),
+  });
 }
 
 function nativeRotationPacket(
   value: Lc4EpisodeManifest,
   previousReceipt: string,
   from: 1 | 2,
-): Lc4StrongNativeContinuityPacket {
-  return createLc4StrongNativeContinuityPacket({
+): Lc4NativeConversationReplayPacket {
+  const availableThroughOpportunity = (from * 20) as 20 | 40;
+  return createLc4NativeConversationReplayPacket({
     run_id: value.run_id,
     from_segment_ordinal: from,
     to_segment_ordinal: (from + 1) as 2 | 3,
-    available_through_opportunity: (from * 20) as 20 | 40,
+    available_through_opportunity: availableThroughOpportunity,
     previous_session_rotation_receipt_sha256: previousReceipt,
-    facts: publicFacts(),
+    conversation_turns: publicConversationTurns(availableThroughOpportunity),
   });
 }
 
@@ -332,7 +371,6 @@ function haccRotationContext(
   previousReceipt: string,
   from: 1 | 2,
 ): Lc4RotationContext {
-  const native = nativeRotationPacket(value, previousReceipt, from);
   return Object.freeze({
     kind: "hacc_structured_state" as const,
     packet: createLc4HaccRotationStatePacket({
@@ -343,7 +381,7 @@ function haccRotationContext(
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: "5".repeat(64),
       response_plan_chain_head_sha256: "6".repeat(64),
-      facts: native.facts,
+      conversation_turns: publicConversationTurns((from * 20) as 20 | 40),
     }),
   });
 }
@@ -362,7 +400,11 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   #serverVadSpeechStarted = false;
   #serverVadStopped = false;
   #serverVadConsecutiveSilenceChunks = 0;
+  #geminiInputOpen = false;
+  #manualCommitOrdinal = 0;
   readonly #serverVadStopAfterSilenceChunks: number | null;
+  readonly #xaiServerVad: boolean;
+  readonly #serverVadEmitsSpeechStarted: boolean;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
@@ -374,16 +416,22 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     terminalStatus: "completed" | "failed" | "incomplete" | "interrupted" | "cancelled" = "completed",
     serverVadStopAfterSilenceChunks: number | null =
       LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
+    xaiServerVad = false,
+    serverVadEmitsSpeechStarted = true,
   ) {
     this.provider = provider;
     this.events = events;
     this.#toolRoundtrip = toolRoundtrip;
     this.#terminalStatus = terminalStatus;
     this.#serverVadStopAfterSilenceChunks = serverVadStopAfterSilenceChunks;
+    this.#xaiServerVad = xaiServerVad;
+    this.#serverVadEmitsSpeechStarted = serverVadEmitsSpeechStarted;
   }
 
   get serverVadTransportParitySha256() {
-    return this.provider === "xai" ? LC4_XAI_SERVER_VAD_SHA256 : undefined;
+    return this.provider === "xai" && this.#xaiServerVad
+      ? LC4_XAI_SERVER_VAD_SHA256
+      : undefined;
   }
 
   async connect() { this.events.push("connect"); this.state = "ready"; }
@@ -406,14 +454,46 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   onWireEvent() { return () => undefined; }
   onWireObservation(listener: RealtimeWireObservationListener) { this.#wire.add(listener); return () => this.#wire.delete(listener); }
   appendInputAudio(audio: Pcm16Audio) {
-    if (this.provider === "xai" && this.#serverVadStopped) {
+    if (this.provider === "xai" && this.#xaiServerVad && this.#serverVadStopped) {
       throw new Error(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
     }
     this.events.push("append");
     this.appendedAudio.push(Object.freeze({ ...audio, data: Uint8Array.from(audio.data) }));
-    this.wire(this.provider === "xai" ? "input_audio_buffer.append" : "input_audio", { plaintext: ORACLE_SECRET });
-    if (this.provider !== "xai") return;
-    if (!this.#serverVadSpeechStarted) {
+    if (this.provider === "gemini") {
+      if (!this.#geminiInputOpen) {
+        this.wire("realtimeInput.activityStart", {
+          audio: { direction: "input", activity: "start" },
+        });
+        this.#geminiInputOpen = true;
+      }
+      const encoded = Buffer.from(audio.data).toString("base64");
+      this.wire("realtimeInput.audio", {
+        audio: {
+          direction: "input",
+          chunks: [{
+            validCanonicalBase64: true,
+            byteLength: audio.data.byteLength,
+            sha256: sha256Hex(audio.data),
+            encodedBytes: Buffer.byteLength(encoded, "utf8"),
+            mimeTypeRecognized: true,
+            format: {
+              encoding: "pcm16",
+              sampleRateHz: audio.sampleRateHz,
+              channels: 1,
+            },
+          }],
+        },
+      });
+    } else {
+      this.wire(
+        this.provider === "xai"
+          ? "input_audio_buffer.append"
+          : "input_audio",
+        { plaintext: ORACLE_SECRET },
+      );
+    }
+    if (this.provider !== "xai" || !this.#xaiServerVad) return;
+    if (!this.#serverVadSpeechStarted && this.#serverVadEmitsSpeechStarted) {
       this.#emitServerVadSpeechStarted();
     }
     this.#serverVadConsecutiveSilenceChunks = audio.data.every((byte) => byte === 0)
@@ -487,10 +567,41 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       context_authority: preparation.contextAuthority,
     });
   }
-  commitInputAudio() { this.events.push("commit"); this.wire("input.commit", {}); }
+  commitInputAudio() {
+    this.events.push("commit");
+    if (this.provider === "gemini") {
+      if (!this.#geminiInputOpen) {
+        throw new Error("Gemini fixture input activity is not open");
+      }
+      this.wire("realtimeInput.activityEnd", {
+        audio: { direction: "input", activity: "end" },
+      });
+      this.#geminiInputOpen = false;
+      return;
+    }
+    this.#manualCommitOrdinal += 1;
+    this.wire("input_audio_buffer.commit", {});
+  }
   async waitForInputAudioCommit() {
     this.events.push("commit-ack");
-    return Object.freeze({ provider: "xai" as const, connectionEpoch: 1, commitOrdinal: 1, status: "acknowledged" as const });
+    const acknowledgement = this.wire("input_audio_buffer.committed", {}, "inbound");
+    const wireObservation = wireReference(acknowledgement);
+    this.emit({
+      type: "input.audio_committed",
+      provider: this.provider,
+      receivedAtMs: 1,
+      wireType: acknowledgement.wireType,
+      connectionEpoch: 1,
+      commitOrdinal: this.#manualCommitOrdinal,
+      wireObservation,
+    });
+    return Object.freeze({
+      provider: "xai" as const,
+      connectionEpoch: 1,
+      commitOrdinal: this.#manualCommitOrdinal,
+      status: "acknowledged" as const,
+      wireObservation,
+    });
   }
   sendTurn() { throw new Error("bridge must use append/commit, not sendTurn"); }
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean) {
@@ -498,15 +609,18 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.events.push(`submit:${String(createResponse)}`);
     this.submittedToolResults.push({ results, createResponse });
     if (this.provider === "gemini") {
+      this.wire("toolResponse", {}, "outbound");
       queueMicrotask(() => {
-        const responseId = "provider-tool-response-plaintext";
+        const responseId = `provider-tool-response-plaintext-${this.#responseOrdinal}`;
         if (this.submittedToolResults.length === 1) {
+          const toolCallObservation = this.wire("toolCall", {}, "inbound");
           this.emit({
             type: "tool.calls",
             provider: this.provider,
             receivedAtMs: 3,
             wireType: "toolCall",
             responseId,
+            wireObservation: wireReference(toolCallObservation),
             calls: [{
               callId: "call-2",
               name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
@@ -518,23 +632,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
           });
           return;
         }
-        this.emit({
-          type: "output.audio",
-          provider: this.provider,
-          receivedAtMs: 3,
-          wireType: "serverContent.modelTurn.part.inlineData",
-          responseId,
-          audio: new Uint8Array([1, 0, 2, 0]),
-          format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
-        });
-        this.emit({
-          type: "response.completed",
-          provider: this.provider,
-          receivedAtMs: 4,
-          wireType: "serverContent.turnComplete",
-          responseId,
-          status: this.#terminalStatus,
-        });
+        this.#emitGeminiTerminalResponse(responseId);
       });
     }
   }
@@ -543,17 +641,20 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.#serverVadAutoResponse = false;
     if (!serverVadAutoResponse) {
       this.events.push("create");
-      this.wire("response.create", {});
+      if (this.provider !== "gemini") this.wire("response.create", {});
     }
     if (this.provider === "gemini" && this.#toolRoundtrip && this.#responseOrdinal > 0) return;
     queueMicrotask(() => {
       this.#responseOrdinal += 1;
       if (this.#toolRoundtrip && this.#responseOrdinal === 1) {
         const responseId = "provider-tool-response-plaintext";
-        this.wire("response.created", {}, "inbound");
+        const responseStarted = this.provider === "gemini"
+          ? this.wire("toolCall", {}, "inbound")
+          : this.wire("response.created", { response_id: responseId }, "inbound");
         this.emit({
           type: "response.started", provider: this.provider, receivedAtMs: 1,
-          wireType: "response.created", responseId,
+          wireType: responseStarted.wireType, responseId,
+          wireObservation: wireReference(responseStarted),
           ...(serverVadAutoResponse ? {
             causalBinding: {
               trigger: "server_vad_speech_stopped" as const,
@@ -569,6 +670,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             receivedAtMs: 2,
             wireType: "toolCall",
             responseId,
+            wireObservation: wireReference(responseStarted),
             calls: [{
               callId: "call-1",
               name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
@@ -615,11 +717,16 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         }
         return;
       }
-      const responseId = "provider-response-plaintext";
-      this.wire("response.created", {}, "inbound");
+      const responseId = `provider-response-plaintext-${this.#responseOrdinal}`;
+      if (this.provider === "gemini") {
+        this.#emitGeminiTerminalResponse(responseId);
+        return;
+      }
+      const responseStarted = this.wire("response.created", { response_id: responseId }, "inbound");
       this.emit({
         type: "response.started", provider: this.provider, receivedAtMs: 1,
         wireType: "response.created", responseId,
+        wireObservation: wireReference(responseStarted),
         ...(serverVadAutoResponse ? {
           causalBinding: {
             trigger: "server_vad_speech_stopped" as const,
@@ -627,6 +734,16 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             triggerObservationSha256: this.#latestWireHash("input_audio_buffer.speech_stopped"),
           },
         } : {}),
+      });
+      this.emit({
+        type: "output.transcript",
+        provider: this.provider,
+        receivedAtMs: 2,
+        wireType: "response.output_audio_transcript.done",
+        responseId,
+        phase: "final",
+        text: `Provider-native assistant transcript ${this.#responseOrdinal}.`,
+        source: "audio",
       });
       this.emit({
         type: "output.audio",
@@ -645,6 +762,74 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         responseId,
         status: this.#terminalStatus,
       });
+    });
+  }
+
+  #emitGeminiTerminalResponse(responseId: string) {
+    const audio = new Uint8Array([1, 0, 2, 0]);
+    const encoded = Buffer.from(audio).toString("base64");
+    const audioObservation = this.wire("serverContent", {
+      audio: {
+        direction: "output",
+        chunks: [{
+          validCanonicalBase64: true,
+          byteLength: audio.byteLength,
+          sha256: sha256Hex(audio),
+          encodedBytes: Buffer.byteLength(encoded, "utf8"),
+          mimeTypeRecognized: true,
+          format: {
+            encoding: "pcm16",
+            sampleRateHz: 24_000,
+            channels: 1,
+          },
+        }],
+      },
+    }, "inbound");
+    this.emit({
+      type: "response.started",
+      provider: "gemini",
+      receivedAtMs: 2,
+      wireType: "serverContent",
+      responseId,
+      wireObservation: wireReference(audioObservation),
+    });
+    this.emit({
+      type: "output.transcript",
+      provider: "gemini",
+      receivedAtMs: 2,
+      wireType: "serverContent",
+      responseId,
+      phase: "final",
+      text: `Provider-native assistant transcript ${this.#responseOrdinal}.`,
+      source: "audio",
+      wireObservation: wireReference(audioObservation),
+    });
+    this.emit({
+      type: "output.audio",
+      provider: "gemini",
+      receivedAtMs: 3,
+      wireType: "serverContent",
+      responseId,
+      audio,
+      format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+      wireObservation: wireReference(audioObservation),
+    });
+    const terminalStatus = this.#terminalStatus === "completed"
+      ? "completed"
+      : this.#terminalStatus === "interrupted"
+        ? "interrupted"
+        : "failed";
+    const terminalObservation = this.wire("serverContent", {
+      terminal: { status: terminalStatus },
+    }, "inbound");
+    this.emit({
+      type: "response.completed",
+      provider: "gemini",
+      receivedAtMs: 4,
+      wireType: "serverContent",
+      responseId,
+      status: this.#terminalStatus,
+      wireObservation: wireReference(terminalObservation),
     });
   }
 
@@ -675,7 +860,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       projectionSha256: sha256Hex(canonicalJson(projection)),
       previousObservationSha256,
       observationSha256,
-      identities: {},
+      identities: typeof projection.response_id === "string"
+        ? { responseIdSha256: realtimeWireIdentitySha256("response", projection.response_id) }
+        : {},
       projection,
     });
     this.#wireHistory.push({ wireType, observationSha256 });
@@ -692,6 +879,30 @@ function wireReference(observation: RealtimeWireObservation) {
     observationSha256: observation.observationSha256,
     payloadSha256: observation.payloadSha256,
     projectionSha256: observation.projectionSha256,
+  });
+}
+
+function rehashXaiManualTurnCausality(
+  input: Lc4XaiManualTurnCausalityEvidence,
+): Lc4XaiManualTurnCausalityEvidence {
+  const body = {
+    schema_version: input.schema_version,
+    connection_epoch: input.connection_epoch,
+    commit_observation_sha256: input.commit_observation_sha256,
+    commit_sequence: input.commit_sequence,
+    commit_ack_observation_sha256: input.commit_ack_observation_sha256,
+    commit_ack_sequence: input.commit_ack_sequence,
+    response_create_observation_sha256: input.response_create_observation_sha256,
+    response_create_sequence: input.response_create_sequence,
+    response_start_observation_sha256: input.response_start_observation_sha256,
+    response_start_sequence: input.response_start_sequence,
+    response_id_sha256: input.response_id_sha256,
+  };
+  return Object.freeze({
+    ...body,
+    causality_sha256: sha256Hex(
+      `${LC4_XAI_MANUAL_TURN_CAUSALITY_DOMAIN}${canonicalJson(body)}`,
+    ),
   });
 }
 
@@ -811,6 +1022,83 @@ class HangingRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class XaiResponseBeforeAckRealtimeClient extends FakeRealtimeClient {
+  override commitInputAudio() {
+    super.commitInputAudio();
+    const responseStarted = this.wire("response.created", {}, "inbound");
+    this.emit({
+      type: "response.started",
+      provider: "xai",
+      receivedAtMs: 1,
+      wireType: responseStarted.wireType,
+      responseId: "unsolicited-response-before-ack",
+      wireObservation: wireReference(responseStarted),
+    });
+  }
+}
+
+class XaiMissingCommitAckEventRealtimeClient extends FakeRealtimeClient {
+  override async waitForInputAudioCommit() {
+    this.events.push("commit-ack-without-event");
+    const acknowledgement = this.wire("input_audio_buffer.committed", {}, "inbound");
+    return Object.freeze({
+      provider: "xai" as const,
+      connectionEpoch: 1,
+      commitOrdinal: 1,
+      status: "acknowledged" as const,
+      wireObservation: wireReference(acknowledgement),
+    });
+  }
+}
+
+class XaiResponseBeforeCreateRealtimeClient extends FakeRealtimeClient {
+  override async waitForInputAudioCommit() {
+    const acknowledgement = await super.waitForInputAudioCommit();
+    const responseStarted = this.wire("response.created", {}, "inbound");
+    this.emit({
+      type: "response.started",
+      provider: "xai",
+      receivedAtMs: 2,
+      wireType: responseStarted.wireType,
+      responseId: "unsolicited-response-before-create",
+      wireObservation: wireReference(responseStarted),
+    });
+    return acknowledgement;
+  }
+}
+
+class XaiDuplicateCommitAckRealtimeClient extends FakeRealtimeClient {
+  override async waitForInputAudioCommit() {
+    const acknowledgement = await super.waitForInputAudioCommit();
+    const duplicate = this.wire("input_audio_buffer.committed", {}, "inbound");
+    this.emit({
+      type: "input.audio_committed",
+      provider: "xai",
+      receivedAtMs: 2,
+      wireType: duplicate.wireType,
+      connectionEpoch: 1,
+      commitOrdinal: 1,
+      wireObservation: wireReference(duplicate),
+    });
+    return acknowledgement;
+  }
+}
+
+class XaiUnsolicitedVadRealtimeClient extends FakeRealtimeClient {
+  override appendInputAudio(audio: Pcm16Audio) {
+    super.appendInputAudio(audio);
+    const speechStarted = this.wire("input_audio_buffer.speech_started", {}, "inbound");
+    this.emit({
+      type: "input.speech_activity",
+      provider: "xai",
+      receivedAtMs: 1,
+      wireType: speechStarted.wireType,
+      phase: "started",
+      wireObservation: wireReference(speechStarted),
+    });
+  }
+}
+
 class ProviderConnectionCloseRealtimeClient extends FakeRealtimeClient {
   override createResponse() {
     this.events.push("create");
@@ -837,15 +1125,25 @@ async function openDevFailureFixture(input: Readonly<{
   client: FakeRealtimeClient;
   listener?: Lc4ListenerEvidenceHandoff["accept"];
   audioDeliveryRuntime?: ConstructorParameters<typeof Lc4RealtimeProviderBridge>[1];
+  xaiTransportPurpose?:
+    | "finite_prerecorded_efficacy"
+    | "interactive_transport_qualification";
+  arm?: "native" | "hacc";
+  assistantListenerTranscript?: string;
 }>) {
-  const base = manifest("hacc", input.client.provider);
+  const arm = input.arm ?? "hacc";
+  const base = manifest(arm, input.client.provider);
+  const providerProfile = createLc4ProviderExecutionProfile(
+    input.client.provider,
+    input.xaiTransportPurpose ?? "finite_prerecorded_efficacy",
+  );
   const corpus = createLc4PublicDevelopmentCorpus();
   const episode: Lc4DevLiveEpisodePlan = Object.freeze({
-    episode_id: `lc4-dev-${input.client.provider}-hacc-failure-fixture`,
+    episode_id: `lc4-dev-${input.client.provider}-${arm}-failure-fixture`,
     pair_id: `lc4-dev-${input.client.provider}-failure-fixture`,
     pair_position: 2,
     provider: input.client.provider,
-    arm: "hacc",
+    arm,
     model: base.episode_shape.provider_profile.model,
     voice: base.episode_shape.provider_profile.voice,
     maximum_micro_usd: 1_000,
@@ -857,7 +1155,7 @@ async function openDevFailureFixture(input: Readonly<{
     episode_shape: Object.freeze({
       provider: episode.provider,
       arm: episode.arm,
-      provider_profile: base.episode_shape.provider_profile,
+      provider_profile: providerProfile,
     }),
     opportunities: Object.freeze(corpus.opportunities.map((opportunity, index) => {
       const pcm = new Uint8Array([index + 1, 7, 11, 13]);
@@ -876,6 +1174,8 @@ async function openDevFailureFixture(input: Readonly<{
     kind: "listener_evidence",
     body: Object.freeze({ fixture: "failure-listener-evidence" }),
   });
+  const assistantListenerTranscript = input.assistantListenerTranscript
+    ?? "Exact assistant speech reconstructed from captured PCM.";
   const listenerResult = Object.freeze({
     listener_evidence_sha256: listenerEvidence.evidence_sha256,
     listener_evidence: listenerEvidence,
@@ -888,6 +1188,9 @@ async function openDevFailureFixture(input: Readonly<{
       final_required_criteria_pass: true,
     }),
     playback_authority_receipt_sha256: sha256Hex("failure-playback-authority"),
+    assistant_conversation_transcript: assistantListenerTranscript,
+    assistant_conversation_transcript_sha256: sha256Hex(assistantListenerTranscript),
+    assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr" as const,
   });
   const gateway: Lc4DevGatewayExecutor = Object.freeze({
     kind: "lc4-dev-arm-aware-gateway-v1",
@@ -895,11 +1198,18 @@ async function openDevFailureFixture(input: Readonly<{
     currentResponsePreparation: fixtureContinuationPreparation,
     async execute() { throw new Error("failure fixture gateway must not execute"); },
   });
-  const bridge = new Lc4RealtimeProviderBridge(() => input.client, input.audioDeliveryRuntime);
+  const bridge = new Lc4RealtimeProviderBridge(
+    () => input.client,
+    input.audioDeliveryRuntime,
+    Object.freeze({
+      xai_transport_purpose:
+        input.xaiTransportPurpose ?? "finite_prerecorded_efficacy",
+    }),
+  );
   const session = await bridge.openSegment({
     manifest: devManifest,
     segment: base.episode_shape.segments[0]!,
-    profile: base.episode_shape.provider_profile,
+    profile: providerProfile,
     configuration: Object.freeze({
       ...configuration(base),
       providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
@@ -1093,6 +1403,9 @@ async function openCallerBranchPreflight(input: Readonly<{
             final_required_criteria_pass: true,
           }),
           playback_authority_receipt_sha256: sha256Hex(`branch-preflight-playback:${capture.opportunity_id}`),
+          assistant_conversation_transcript: "Branch fixture assistant speech from captured PCM.",
+          assistant_conversation_transcript_sha256: sha256Hex("Branch fixture assistant speech from captured PCM."),
+          assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr" as const,
         });
       },
     },
@@ -1111,7 +1424,7 @@ async function openCallerBranchPreflight(input: Readonly<{
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: sha256Hex(`branch-preflight-flow:${input.provider}:${input.outcome}:${from}`),
       response_plan_chain_head_sha256: sha256Hex(`branch-preflight-plan:${input.provider}:${input.outcome}:${from}`),
-      facts: [],
+      conversation_turns: publicConversationTurns((from * 20) as 20 | 40),
     }),
   });
   const firstSegment = await open(1, null);
@@ -1392,7 +1705,7 @@ describe("LC4 production realtime adapter bridge", () => {
     }
   });
 
-  it("delivers and replay-binds the full frozen xAI server-VAD silence tail without changing caller PCM", async () => {
+  it("delivers and replay-binds a native stop on the final frozen xAI delimiter frame without changing caller PCM", async () => {
     let monotonicMs = 0;
     const events: string[] = [];
     const client = new FakeRealtimeClient(
@@ -1401,9 +1714,11 @@ describe("LC4 production realtime adapter bridge", () => {
       false,
       "completed",
       LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+      true,
     );
     const fixture = await openDevFailureFixture({
       client,
+      xaiTransportPurpose: "interactive_transport_qualification",
       audioDeliveryRuntime: {
         monotonicNowMs: () => monotonicMs,
         async sleep(delayMs, signal) {
@@ -1425,7 +1740,7 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(evidence.server_vad_transport_suffix).toMatchObject({
       schema_version: 1,
       purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
-      completion: "full_plan_delivered",
+      completion: "provider_native_speech_stop",
       policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
       pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
       audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
@@ -1434,7 +1749,7 @@ describe("LC4 production realtime adapter bridge", () => {
       frame_bytes: 960,
       tail_bytes: 960,
     });
-    expect(evidence.operation_order).toContain("server_vad_silence_tail_delivery_completed");
+    expect(evidence.operation_order).toContain("server_vad_silence_tail_prefix_accepted");
     expect(events.filter((event) => event === "connect")).toHaveLength(1);
     expect(events.filter((event) => event === "commit")).toHaveLength(0);
     expect(events.filter((event) => event === "create")).toHaveLength(0);
@@ -1447,7 +1762,7 @@ describe("LC4 production realtime adapter bridge", () => {
     await expect(replayEvidenceFixture().retainJson({
       kind: "provider_exchange",
       body: mutatedProjection as JsonValue,
-      domain_prefix: "harshas-amazing-call-center/lc4-provider-exchange-evidence/v3\n",
+      domain_prefix: "harshas-amazing-call-center/lc4-provider-exchange-evidence/v4\n",
       expected_evidence_sha256: evidence.evidence_sha256,
     })).rejects.toThrow();
 
@@ -1459,14 +1774,397 @@ describe("LC4 production realtime adapter bridge", () => {
     await fixture.session.close();
   });
 
-  it("fails closed when xAI never reports speech stop after the full frozen silence tail", async () => {
-    vi.useFakeTimers();
-    try {
+  it("uses the signed exact-captured-PCM listener transcript for provider-neutral reconnect history", async () => {
+    const listenerTranscript = "Exact assistant speech reconstructed from captured PCM.";
+    const fixture = await openDevFailureFixture({
+      client: new FakeRealtimeClient("openai", []),
+      assistantListenerTranscript: listenerTranscript,
+    });
+    const evidence = await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    expect(evidence.provider_output_transcript_sha256)
+      .toBe(sha256Hex("Provider-native assistant transcript 1."));
+    expect(evidence).toMatchObject({
+      assistant_conversation_transcript_sha256: sha256Hex(listenerTranscript),
+      assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr",
+      dev_assistant_conversation_transcript: listenerTranscript,
+      dev_assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr",
+    });
+    expect(JSON.stringify(evidence.replay_projection)).not.toContain(listenerTranscript);
+    expect(JSON.stringify(evidence.dev_listener_result)).not.toContain(listenerTranscript);
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("listener-transcript-finalization"),
+      repair_played: false,
+    });
+    await fixture.session.close();
+  });
+
+  it("uses one explicit commit and response for finite xAI clips without altering or suffixing caller PCM", async () => {
+    const events: string[] = [];
+    const client = new FakeRealtimeClient(
+      "xai",
+      events,
+      false,
+      "completed",
+      null,
+      false,
+    );
+    const fixture = await openDevFailureFixture({
+      client,
+    });
+    const evidence = await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+
+    expect(evidence).toMatchObject({
+      caller_pcm_sha256: sha256Hex(fixture.caller_pcm),
+      caller_pcm_byte_length: fixture.caller_pcm.byteLength,
+      transport_mode: "manual_commit",
+      server_vad_setting_sha256: null,
+      server_vad_transport_disclosure_sha256: null,
+      server_vad_transport_suffix: null,
+      per_turn_session_update_observation_sha256: null,
+      per_turn_session_ack_observation_sha256: null,
+      xai_manual_turn_causality: {
+        schema_version: 1,
+        connection_epoch: 1,
+      },
+    });
+    const causality = evidence.xai_manual_turn_causality!;
+    expect([
+      causality.commit_sequence,
+      causality.commit_ack_sequence,
+      causality.response_create_sequence,
+      causality.response_start_sequence,
+    ]).toEqual([...[
+      causality.commit_sequence,
+      causality.commit_ack_sequence,
+      causality.response_create_sequence,
+      causality.response_start_sequence,
+    ]].sort((left, right) => left - right));
+    expect(assertLc4XaiManualTurnCausality(causality, evidence.wire_observations)).toBe(causality);
+    expect(causality.response_id_sha256).toBe(
+      lc4XaiManualResponseWireIdentitySha256("provider-response-plaintext-1"),
+    );
+    expect(causality.response_id_sha256).not.toBe(sha256Hex("provider-response-plaintext-1"));
+    expect(() => assertLc4XaiManualTurnCausality({
+      ...causality,
+      schema_version: 2,
+    }, evidence.wire_observations)).toThrow(/schema version/u);
+
+    const plainShaIdentity = rehashXaiManualTurnCausality({
+      ...causality,
+      response_id_sha256: sha256Hex("provider-response-plaintext-1"),
+    });
+    expect(() => assertLc4XaiManualTurnCausality(
+      plainShaIdentity,
+      evidence.wire_observations,
+    )).toThrow(/causality/u);
+
+    const crossTurnIdentity = rehashXaiManualTurnCausality({
+      ...causality,
+      response_id_sha256: lc4XaiManualResponseWireIdentitySha256(
+        "provider-response-plaintext-other-turn",
+      ),
+    });
+    expect(() => assertLc4XaiManualTurnCausality(
+      crossTurnIdentity,
+      evidence.wire_observations,
+    )).toThrow(/causality/u);
+
+    const reorderedWire = [...evidence.wire_observations];
+    const commitIndex = reorderedWire.findIndex(
+      (observation) => observation.observation_sha256 === causality.commit_observation_sha256,
+    );
+    const acknowledgementIndex = reorderedWire.findIndex(
+      (observation) => observation.observation_sha256 === causality.commit_ack_observation_sha256,
+    );
+    [reorderedWire[commitIndex], reorderedWire[acknowledgementIndex]] = [
+      reorderedWire[acknowledgementIndex]!,
+      reorderedWire[commitIndex]!,
+    ];
+    expect(() => assertLc4XaiManualTurnCausality(causality, reorderedWire))
+      .toThrow(/reordered|chain-tampered/u);
+
+    const tamperedWire = evidence.wire_observations.map((observation) => (
+      observation.observation_sha256 === causality.response_create_observation_sha256
+        ? { ...observation, wire_type: "input_audio_buffer.commit" }
+        : observation
+    ));
+    expect(() => assertLc4XaiManualTurnCausality(causality, tamperedWire))
+      .toThrow(/causal role/u);
+
+    expect(() => assertLc4XaiManualTurnReplayProjection(evidence.replay_projection))
+      .not.toThrow();
+    const tamperedReplay = JSON.parse(JSON.stringify(evidence.replay_projection)) as Record<string, unknown>;
+    const replayCausality = tamperedReplay.xai_manual_turn_causality as
+      Lc4XaiManualTurnCausalityEvidence;
+    tamperedReplay.xai_manual_turn_causality = rehashXaiManualTurnCausality({
+      ...replayCausality,
+      response_id_sha256: sha256Hex("provider-response-plaintext-1"),
+    });
+    expect(() => assertLc4XaiManualTurnReplayProjection(tamperedReplay as JsonValue))
+      .toThrow(/causality/u);
+
+    const forged = {
+      ...causality,
+      response_create_sequence: causality.commit_ack_sequence,
+    } as Lc4XaiManualTurnCausalityEvidence;
+    expect(() => assertLc4XaiManualTurnCausality(forged, evidence.wire_observations))
+      .toThrow(/causality/u);
+    expect(evidence.operation_order).toEqual([
+      "caller_pcm_delivery_started",
+      "caller_pcm_delivery_completed",
+      "response_plan_prepared",
+      "caller_pcm_committed",
+      "caller_pcm_commit_acknowledged",
+      "response_generation_requested",
+      "assistant_pcm_captured",
+      "listener_evidence_handed_off",
+    ]);
+    expect(events.filter((event) => event === "commit")).toHaveLength(1);
+    expect(events.filter((event) => event === "commit-ack")).toHaveLength(1);
+    expect(events.filter((event) => event === "create")).toHaveLength(1);
+    expect(events).not.toContain("session-update");
+    expect(client.appendedAudio).toHaveLength(1);
+    expect(client.appendedAudio[0]?.data).toEqual(fixture.caller_pcm);
+    expect(evidence.dev_assistant_conversation_transcript)
+      .toBe("Exact assistant speech reconstructed from captured PCM.");
+    expect(evidence.dev_assistant_conversation_transcript_source)
+      .toBe("listener_exact_captured_pcm_asr");
+    expect(evidence.provider_output_transcript_sha256)
+      .toBe(sha256Hex("Provider-native assistant transcript 1."));
+
+    const repairDecisionReceiptSha256 = sha256Hex("xai-manual-repair-decision");
+    const repairEvidence = await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      playback_kind: "repair",
+      repair_binding: {
+        decision_receipt_sha256: repairDecisionReceiptSha256,
+        repair_pcm_id: "xai-manual-repair-pcm",
+        pcm_sha256: sha256Hex(fixture.caller_pcm),
+        pcm_byte_length: fixture.caller_pcm.byteLength,
+        sample_rate_hz: 24_000,
+      },
+    });
+    expect(repairEvidence.playback_kind).toBe("repair");
+    expect(repairEvidence.xai_manual_turn_causality).not.toBeNull();
+    expect(repairEvidence.xai_manual_turn_causality!.commit_sequence)
+      .toBeGreaterThan(causality.response_start_sequence);
+    expect(repairEvidence.provider_output_transcript_sha256)
+      .toBe(sha256Hex("Provider-native assistant transcript 2."));
+    expect(repairEvidence.provider_output_transcript_sha256)
+      .not.toBe(evidence.provider_output_transcript_sha256);
+    expect(assertLc4XaiManualTurnCausality(
+      repairEvidence.xai_manual_turn_causality!,
+      repairEvidence.wire_observations,
+    )).toBe(repairEvidence.xai_manual_turn_causality);
+
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: repairDecisionReceiptSha256,
+      repair_played: true,
+    });
+    await fixture.session.close();
+  });
+
+  it("rejects an xAI server-VAD client under the finite/manual execution profile before caller audio", async () => {
+    const client = new FakeRealtimeClient(
+      "xai",
+      [],
+      false,
+      "completed",
+      LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
+      true,
+    );
+    await expect(openDevFailureFixture({ client })).rejects.toThrow(
+      /client turn boundary differs from its declared transport profile/u,
+    );
+    expect(client.appendedAudio).toHaveLength(0);
+  });
+
+  it("rejects an xAI manual client under the interactive/server-VAD execution profile before caller audio", async () => {
+    const client = new FakeRealtimeClient(
+      "xai",
+      [],
+      false,
+      "completed",
+      null,
+      false,
+    );
+    await expect(openDevFailureFixture({
+      client,
+      xaiTransportPurpose: "interactive_transport_qualification",
+    })).rejects.toThrow(
+      /client turn boundary differs from its declared transport profile/u,
+    );
+    expect(client.appendedAudio).toHaveLength(0);
+  });
+
+  it.each([
+    ["response before commit acknowledgement", XaiResponseBeforeAckRealtimeClient],
+    ["response after acknowledgement but before create", XaiResponseBeforeCreateRealtimeClient],
+    ["missing normalized commit acknowledgement", XaiMissingCommitAckEventRealtimeClient],
+    ["duplicate commit acknowledgement", XaiDuplicateCommitAckRealtimeClient],
+    ["unsolicited server-VAD event", XaiUnsolicitedVadRealtimeClient],
+  ] as const)("fails closed on xAI manual-turn %s", async (_case, Client) => {
+    const client = new Client("xai", [], false, "completed", null, false);
+    const fixture = await openDevFailureFixture({
+      client,
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(["adapter_contract", "audio_delivery"]).toContain(error.failure.failure_class);
+    expect(error.failure.response_completed).toBe(false);
+    expect(error.failure.operation_order).not.toContain("response_completed");
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("fails immediately and distinctly when xAI exhausts the 100-frame delimiter after speech-start without native stop", async () => {
+    let monotonicMs = 0;
+    const events: string[] = [];
+    const client = new FakeRealtimeClient("xai", events, false, "completed", null, true);
+    const fixture = await openDevFailureFixture({
+      client,
+      xaiTransportPurpose: "interactive_transport_qualification",
+      audioDeliveryRuntime: {
+        monotonicNowMs: () => monotonicMs,
+        async sleep(delayMs, signal) {
+          if (signal.aborted) throw new Error("test delivery aborted");
+          monotonicMs += delayMs;
+        },
+      },
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "audio_append",
+      failure_code: "server_vad_delimiter_exhausted",
+      failure_class: "provider_external",
+      caller_pcm_byte_length: fixture.caller_pcm.byteLength,
+      caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_completed: false,
+    });
+    expect(error.failure.operation_order).toEqual([
+      "response_plan_session_update_sent",
+      "response_plan_session_update_acknowledged",
+      "caller_pcm_delivery_started",
+      "server_vad_speech_started",
+      "caller_pcm_delivery_completed",
+      "server_vad_silence_tail_delivery_started",
+      "server_vad_silence_tail_delivery_exhausted",
+    ]);
+    expect(error.failure.server_vad_delimiter_exhaustion).toMatchObject({
+      completion: "full_plan_delivered",
+      policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+      pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+      audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+      duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+      chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+      frame_bytes: 960,
+      tail_bytes: 960,
+    });
+    expect(() => createLc4DevFailureEvidence({
+      ...error.failure,
+      server_vad_delimiter_exhaustion: {
+        ...error.failure.server_vad_delimiter_exhaustion!,
+        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count - 1,
+      },
+    })).toThrow(/exact hard-cap commitment/u);
+    expect(client.appendedAudio).toHaveLength(1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
+    expect(events.filter((event) => event === "connect")).toHaveLength(1);
+    expect(events.filter((event) => event === "commit")).toHaveLength(0);
+    expect(events.filter((event) => event === "create")).toHaveLength(0);
+    await caughtFailure(fixture.session.close());
+  });
+
+  it("retains exact full-cap failure evidence when xAI never emits speech-start", async () => {
+    let monotonicMs = 0;
+    const events: string[] = [];
+    const client = new FakeRealtimeClient("xai", events, false, "completed", null, true, false);
+    const fixture = await openDevFailureFixture({
+      client,
+      xaiTransportPurpose: "interactive_transport_qualification",
+      audioDeliveryRuntime: {
+        monotonicNowMs: () => monotonicMs,
+        async sleep(delayMs, signal) {
+          if (signal.aborted) throw new Error("test delivery aborted");
+          monotonicMs += delayMs;
+        },
+      },
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    expect(error.failure).toMatchObject({
+      failure_stage: "audio_append",
+      failure_code: "server_vad_delimiter_exhausted",
+      failure_class: "provider_external",
+      caller_pcm_byte_length: fixture.caller_pcm.byteLength,
+      caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
+      response_generation_requested: false,
+      response_generation_started: false,
+      response_terminal_observed: false,
+      response_completed: false,
+      output_pcm_byte_length: 0,
+      gateway_batch_count: 0,
+      gateway_fatal_class: "none",
+    });
+    expect(error.failure.operation_order).toEqual([
+      "response_plan_session_update_sent",
+      "response_plan_session_update_acknowledged",
+      "caller_pcm_delivery_started",
+      "caller_pcm_delivery_completed",
+      "server_vad_silence_tail_delivery_started",
+      "server_vad_silence_tail_delivery_exhausted",
+    ]);
+    expect(error.failure.server_vad_delimiter_exhaustion).toMatchObject({
+      completion: "full_plan_delivered",
+      policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
+      pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
+      audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+      duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.duration_ms,
+      chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count,
+      frame_bytes: 960,
+      tail_bytes: 960,
+      scheduled_offsets_ms: Array.from(
+        { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count },
+        (_, index) => index * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms,
+      ),
+    });
+    expect(client.appendedAudio).toHaveLength(1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
+    expect(events.filter((event) => event === "commit")).toHaveLength(0);
+    expect(events.filter((event) => event === "create")).toHaveLength(0);
+    await caughtFailure(fixture.session.close());
+  });
+
+  it.each(["native", "hacc"] as const)(
+    "accepts delayed xAI stop at frame 55 with byte-exact delimiter evidence in the %s arm",
+    async (arm) => {
       let monotonicMs = 0;
-      const events: string[] = [];
-      const client = new FakeRealtimeClient("xai", events, false, "completed", null);
+      const client = new FakeRealtimeClient("xai", [], false, "completed", 55, true);
       const fixture = await openDevFailureFixture({
         client,
+        xaiTransportPurpose: "interactive_transport_qualification",
+        arm,
         audioDeliveryRuntime: {
           monotonicNowMs: () => monotonicMs,
           async sleep(delayMs, signal) {
@@ -1475,41 +2173,38 @@ describe("LC4 production realtime adapter bridge", () => {
           },
         },
       });
-      const pending = caughtFailure(fixture.session.exchange({
+      const nativeInstructions = "Use the public native-context fixture and the common gateway.";
+      const evidence = await fixture.session.exchange({
         opportunity_id: fixture.opportunity_id,
         caller_pcm: fixture.caller_pcm,
-        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
-      }));
-      await vi.advanceTimersByTimeAsync(45_000);
-      const error = await pending;
-      expect(error.failure).toMatchObject({
-        failure_stage: "provider_wait",
-        failure_code: "provider_response_timeout",
-        failure_class: "timeout",
-        caller_pcm_byte_length: fixture.caller_pcm.byteLength,
-        caller_pcm_appended_byte_length: fixture.caller_pcm.byteLength,
-        response_generation_requested: false,
-        response_generation_started: false,
-        response_completed: false,
+        response_control: arm === "hacc"
+          ? { kind: "hacc_response_plan", plan: responsePlan() }
+          : {
+              kind: "native_context",
+              instructions: nativeInstructions,
+              instructions_sha256: sha256Hex(nativeInstructions),
+            },
       });
-      expect(error.failure.operation_order).toEqual([
-        "response_plan_session_update_sent",
-        "response_plan_session_update_acknowledged",
-        "caller_pcm_delivery_started",
-        "server_vad_speech_started",
-        "caller_pcm_delivery_completed",
-        "server_vad_silence_tail_delivery_started",
-        "server_vad_silence_tail_delivery_completed",
-      ]);
-      expect(client.appendedAudio).toHaveLength(1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count);
-      expect(events.filter((event) => event === "connect")).toHaveLength(1);
-      expect(events.filter((event) => event === "commit")).toHaveLength(0);
-      expect(events.filter((event) => event === "create")).toHaveLength(0);
-      await caughtFailure(fixture.session.close());
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+      expect(evidence.server_vad_transport_suffix).toMatchObject({
+        completion: "provider_native_speech_stop",
+        audio_bytes: 55 * 960,
+        duration_ms: 1_100,
+        chunk_count: 55,
+        pcm_sha256: sha256Hex(new Uint8Array(55 * 960)),
+      });
+      expect(evidence.input_audio_delivery.pcm_sha256).toBe(sha256Hex(fixture.caller_pcm));
+      expect(client.appendedAudio.slice(1)).toHaveLength(55);
+      expect(client.appendedAudio.slice(1).every((chunk) => chunk.data.every((byte) => byte === 0))).toBe(true);
+      expect(client.events.filter((event) => event === "commit")).toHaveLength(0);
+      expect(client.events.filter((event) => event === "create")).toHaveLength(0);
+      await fixture.session.finalizeOpportunity!({
+        opportunity_id: fixture.opportunity_id,
+        decision_receipt_sha256: sha256Hex(`delayed-stop-${arm}`),
+        repair_played: false,
+      });
+      await fixture.session.close();
+    },
+  );
 
   it("rejects an xAI speech stop before the frozen minimum delimiter without fallback generation", async () => {
     let monotonicMs = 0;
@@ -1520,9 +2215,11 @@ describe("LC4 production realtime adapter bridge", () => {
       false,
       "completed",
       LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count - 1,
+      true,
     );
     const fixture = await openDevFailureFixture({
       client,
+      xaiTransportPurpose: "interactive_transport_qualification",
       audioDeliveryRuntime: {
         monotonicNowMs: () => monotonicMs,
         async sleep(delayMs, signal) {
@@ -1580,11 +2277,33 @@ describe("LC4 production realtime adapter bridge", () => {
   });
 
   it("sanitizes evidence-assembly failures after a completed provider response", async () => {
-    const cyclic: Record<string, unknown> = { private_transcript: "SENTINEL" };
-    cyclic.self = cyclic;
+    const cyclicEvidence: Record<string, unknown> = {
+      private_transcript: "SENTINEL",
+    };
+    cyclicEvidence.self = cyclicEvidence;
+    const transcript =
+      "Exact assistant speech reconstructed from captured PCM.";
+    const listenerResult = {
+      listener_evidence_sha256: sha256Hex("cyclic-listener-evidence"),
+      listener_evidence: cyclicEvidence,
+      repair_projection: createLc4DevArmBlindRepairProjection({
+        opportunity_id: "lc4-dev-op-01",
+        listener_status: "verified",
+        semantic_result_sha256: sha256Hex("cyclic-semantic-result"),
+        semantic_replay_sha256: sha256Hex("cyclic-semantic-replay"),
+        unmet_blocker_codes: [],
+        final_required_criteria_pass: true,
+      }),
+      playback_authority_receipt_sha256:
+        sha256Hex("cyclic-playback-authority"),
+      assistant_conversation_transcript: transcript,
+      assistant_conversation_transcript_sha256: sha256Hex(transcript),
+      assistant_conversation_transcript_source:
+        "listener_exact_captured_pcm_asr" as const,
+    };
     const fixture = await openDevFailureFixture({
       client: new FakeRealtimeClient("openai", []),
-      listener: async () => cyclic as never,
+      listener: async () => listenerResult as never,
     });
     const error = await caughtFailure(fixture.session.exchange({
       opportunity_id: fixture.opportunity_id,
@@ -1746,9 +2465,7 @@ describe("LC4 production realtime adapter bridge", () => {
       && chunk.sampleRateHz === value.episode_shape.provider_profile.input_sample_rate_hz
     ))).toBe(true);
     expect(Buffer.concat(delivered.map((chunk) => Buffer.from(chunk.data))).equals(Buffer.from(pcm))).toBe(true);
-    expect(sleeps).toHaveLength(provider === "xai"
-      ? chunkCount - 1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count
-      : chunkCount - 1);
+    expect(sleeps).toHaveLength(chunkCount - 1);
     expect(sleeps.every((delay) => delay === 20)).toBe(true);
     expect(evidence.input_audio_delivery).toMatchObject({
       frame_byte_length: frameBytes,
@@ -1763,55 +2480,27 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(evidence.input_audio_delivery.chunks.map((chunk) => chunk.appended_at_offset_ms)).toEqual(
       Array.from({ length: chunkCount }, (_, index) => index * 20),
     );
-    const appendStart = provider === "xai" ? 3 : 1;
+    const appendStart = 1;
     expect(events.slice(appendStart, appendStart + chunkCount)).toEqual(
       Array.from({ length: chunkCount }, () => "append"),
     );
     expect(events.slice(appendStart + chunkCount)).toEqual(provider === "xai"
-      ? [...Array.from(
-          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
-          () => "append",
-        ), "listener"]
+      ? ["prepare", "commit", "commit-ack", "create", "listener"]
       : ["prepare", "commit", "create", "listener"]);
     if (provider === "xai") {
-      const suffix = allDelivered.slice(chunkCount);
-      expect(suffix).toHaveLength(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count);
-      expect(suffix.every((chunk) => chunk.data.every((byte) => byte === 0))).toBe(true);
-      expect(Buffer.concat(suffix.map((chunk) => Buffer.from(chunk.data))).byteLength)
-        .toBe(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length);
-      expect(events.slice(1, 3)).toEqual(["session-update", "session-updated"]);
-      expect(events.filter((event) => event === "commit")).toHaveLength(0);
-      expect(events.filter((event) => event === "create")).toHaveLength(0);
-      expect(evidence.transport_mode).toBe("provider_native_server_vad");
+      expect(allDelivered).toHaveLength(chunkCount);
+      expect(events.filter((event) => event === "commit")).toHaveLength(1);
+      expect(events.filter((event) => event === "create")).toHaveLength(1);
+      expect(evidence.transport_mode).toBe("manual_commit");
       expect(evidence.input_audio_delivery.total_byte_length).toBe(pcm.byteLength);
-      expect(evidence.server_vad_transport_suffix).toEqual({
-        schema_version: 1,
-        purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
-        completion: "provider_native_speech_stop",
-        policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
-        pcm_sha256: sha256Hex(new Uint8Array(LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length)),
-        audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_byte_length,
-        duration_ms: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_duration_ms,
-        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
-        frame_bytes: 960,
-        tail_bytes: 960,
-        delivery_profile_sha256: configuration(value).audioDeliveryProfileHash,
-        scheduled_offsets_ms: Array.from(
-          { length: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
-          (_, index) => index * 20,
-        ),
-      });
+      expect(evidence.server_vad_transport_suffix).toBeNull();
       expect(evidence.operation_order).toEqual([
-        "response_plan_session_update_sent",
-        "response_plan_session_update_acknowledged",
         "caller_pcm_delivery_started",
-        "server_vad_speech_started",
         "caller_pcm_delivery_completed",
-        "server_vad_silence_tail_delivery_started",
-        "server_vad_speech_stopped",
-        "caller_pcm_auto_committed",
-        "response_generation_auto_started",
-        "server_vad_silence_tail_prefix_accepted",
+        "response_plan_prepared",
+        "caller_pcm_committed",
+        "caller_pcm_commit_acknowledged",
+        "response_generation_requested",
         "assistant_pcm_captured",
         "listener_evidence_handed_off",
       ]);
@@ -1908,9 +2597,7 @@ describe("LC4 production realtime adapter bridge", () => {
         input_committed: false,
         response_requested: false,
       });
-      expect(events).toEqual(provider === "xai"
-        ? ["connect", "session-update", "session-updated", "append", "close"]
-        : ["connect", "append", "close"]);
+      expect(events).toEqual(["connect", "append", "close"]);
       await expect(session.exchange({
         opportunity_id: "op-01",
         caller_pcm: pcm,
@@ -2038,6 +2725,146 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it.each([
+    {
+      name: "context authority",
+      provider: "openai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        context_authority: "forged_self_asserted_authority",
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "provider profile digest",
+      provider: "openai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        provider_profile_sha256: "f".repeat(64),
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "provider voice",
+      provider: "openai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        voice: "forged-voice",
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "input sample rate",
+      provider: "openai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        input_sample_rate_hz: 16_000,
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "output sample rate",
+      provider: "openai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        output_sample_rate_hz: 16_000,
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "transport mode",
+      provider: "xai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        transport_mode: "provider_native_server_vad",
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "transport purpose",
+      provider: "xai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        transport_purpose: "interactive_transport_qualification",
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "transport profile digest",
+      provider: "xai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        transport_profile_sha256: "e".repeat(64),
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "turn boundary",
+      provider: "xai" as const,
+      forge: (profile: Lc4ProviderExecutionProfile) => Object.freeze({
+        ...profile,
+        turn_boundary: "forged_turn_boundary",
+      }) as Lc4ProviderExecutionProfile,
+    },
+    {
+      name: "complete self-consistent alternate transport profile",
+      provider: "xai" as const,
+      forge: () => createLc4ProviderExecutionProfile(
+        "xai",
+        "interactive_transport_qualification",
+      ),
+    },
+  ])(
+    "rejects a forged $name even when the manifest repeats it exactly",
+    async ({ provider, forge }) => {
+      const value = manifest("hacc", provider);
+      const forgedProfile = forge(value.episode_shape.provider_profile);
+      const forgedManifest = forgeManifestProviderProfile(value, forgedProfile);
+      let factoryCalls = 0;
+      const bridge = new Lc4RealtimeProviderBridge((runtimeProvider) => {
+        factoryCalls += 1;
+        return new FakeRealtimeClient(runtimeProvider, []);
+      });
+      await expect(bridge.openSegment({
+        manifest: forgedManifest,
+        segment: forgedManifest.episode_shape.segments[0]!,
+        profile: forgedProfile,
+        configuration: configuration(value),
+        rotation_context: null,
+        listener: { accept() {} },
+      })).rejects.toThrow("frozen production provider profile");
+      expect(factoryCalls).toBe(0);
+    },
+  );
+
+  it.each([
+    {
+      name: "condition assigned to the opposite randomized arm",
+      mutate: (base: TrialSessionConfiguration) => Object.freeze({
+        ...base,
+        conditionId: "raw-full" as const,
+      }),
+    },
+    {
+      name: "self-described provider tool catalog",
+      mutate: (base: TrialSessionConfiguration) => Object.freeze({
+        ...base,
+        providerTools: Object.freeze([Object.freeze({
+          ...LOCAL_TOOL_PROXY_FUNCTION,
+          description: `${LOCAL_TOOL_PROXY_FUNCTION.description} forged`,
+        })]),
+      }),
+    },
+  ])("rejects a forged $name before opening a provider connection", async ({ mutate }) => {
+    const value = manifest("hacc", "openai");
+    let factoryCalls = 0;
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      factoryCalls += 1;
+      return new FakeRealtimeClient(provider, []);
+    });
+    await expect(bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: mutate(configuration(value)),
+      rotation_context: null,
+      listener: { accept() {} },
+    })).rejects.toThrow("frozen production provider profile");
+    expect(factoryCalls).toBe(0);
+  });
+
   it.each(["failed", "incomplete", "interrupted", "cancelled"] as const)(
     "rejects a Gemini %s terminal even when the provider emitted PCM",
     async (terminalStatus) => {
@@ -2150,7 +2977,11 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     let fake: FakeRealtimeClient | null = null;
     const bridge = new Lc4RealtimeProviderBridge((provider) => {
-      fake = new FakeRealtimeClient(provider, events, true);
+      // xAI emits speech-stop, auto-response, and the tool call synchronously
+      // between paced delimiter frames. Frame 56 must observe the post-stop
+      // guard, preserve the accepted 55-frame prefix, and continue exactly
+      // once without treating the pending tool turn as an append failure.
+      fake = new FakeRealtimeClient(provider, events, true, "completed", provider === "xai" ? 55 : undefined);
       return fake;
     });
     const session = await bridge.openSegment({
@@ -2177,6 +3008,9 @@ describe("LC4 production realtime adapter bridge", () => {
               final_required_criteria_pass: true,
             }),
             playback_authority_receipt_sha256: sha256Hex("dev-playback-authority"),
+            assistant_conversation_transcript: "DEV fixture assistant speech from captured PCM.",
+            assistant_conversation_transcript_sha256: sha256Hex("DEV fixture assistant speech from captured PCM."),
+            assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr" as const,
           };
         },
       },
@@ -2194,33 +3028,19 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(events).toEqual(provider === "gemini"
       ? ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "submit:false", "create", "listener"]
       : provider === "xai"
-        ? [
-            "connect",
-            "session-update",
-            "session-updated",
-            ...Array.from(
-              { length: 1 + LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count },
-              () => "append",
-            ),
-            "submit:false",
-            "create",
-            "listener",
-          ]
+        ? ["connect", "append", "prepare", "commit", "commit-ack", "create", "submit:false", "create", "listener"]
         : ["connect", "append", "prepare", "commit", "create", "submit:false", "create", "listener"]);
     expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
     if (provider === "xai") {
-      expect(evidence.server_vad_transport_suffix).toMatchObject({
-        completion: "provider_native_speech_stop",
-        chunk_count: LC4_XAI_SERVER_VAD_SILENCE_TAIL.minimum_accepted_chunk_count,
-      });
-      expect(evidence.operation_order).toContain("server_vad_silence_tail_prefix_accepted");
-      expect(evidence.operation_order).not.toContain("response_generation_requested");
-      expect(events.filter((event) => event === "commit")).toHaveLength(0);
-      // The sole response.create is the required post-tool continuation, never
-      // a fallback initial generation after the provider-native VAD stop.
-      expect(events.filter((event) => event === "create")).toHaveLength(1);
+      expect(evidence.transport_mode).toBe("manual_commit");
+      expect(evidence.transport_purpose).toBe("finite_prerecorded_efficacy");
+      expect(evidence.server_vad_transport_suffix).toBeNull();
+      expect(evidence.operation_order).toContain("caller_pcm_committed");
+      expect(evidence.operation_order).toContain("response_generation_requested");
+      expect(events.filter((event) => event === "commit")).toHaveLength(1);
+      expect(events.filter((event) => event === "create")).toHaveLength(2);
       expect(events.filter((event) => event === "connect")).toHaveLength(1);
     }
     expect(JSON.stringify(evidence.dev_gateway_receipt_set?.receipts)).not.toContain("PUBLIC-17");
@@ -2299,7 +3119,121 @@ describe("LC4 production realtime adapter bridge", () => {
     await session.close();
   });
 
-  it("gives reopened Native and HACC sessions exact substantive-fact parity", () => {
+  it("keeps model, voice, task, gateway, audio, and transport configuration arm-identical", () => {
+    const preflightSha256 = "a".repeat(64);
+    for (const provider of ["openai", "gemini", "xai"] as const) {
+      const nativeEpisode = devEpisodeForComparator("native", provider);
+      const haccEpisode = devEpisodeForComparator("hacc", provider);
+      expect({
+        provider: nativeEpisode.provider,
+        model: nativeEpisode.model,
+        voice: nativeEpisode.voice,
+        maximum_micro_usd: nativeEpisode.maximum_micro_usd,
+        opportunity_binding_set_sha256: nativeEpisode.opportunity_binding_set_sha256,
+      }).toEqual({
+        provider: haccEpisode.provider,
+        model: haccEpisode.model,
+        voice: haccEpisode.voice,
+        maximum_micro_usd: haccEpisode.maximum_micro_usd,
+        opportunity_binding_set_sha256: haccEpisode.opportunity_binding_set_sha256,
+      });
+      const native = createLc4DevSessionConfiguration(
+        nativeEpisode,
+        preflightSha256,
+      );
+      const hacc = createLc4DevSessionConfiguration(
+        haccEpisode,
+        preflightSha256,
+      );
+      const common = (configuration: TrialSessionConfiguration) => ({
+        provider: configuration.provider,
+        model: configuration.model,
+        instructions: configuration.instructions,
+        initialPrompt: configuration.initialPrompt,
+        renderedCapabilitySnapshot: configuration.renderedCapabilitySnapshot,
+        providerTools: configuration.providerTools,
+        inputAudioFormat: configuration.inputAudioFormat,
+        audioDeliveryProfile: configuration.audioDeliveryProfile,
+        audioDeliveryProfileHash: configuration.audioDeliveryProfileHash,
+      });
+      expect(common(native)).toEqual(common(hacc));
+      expect(native.conditionId).toBe("raw-full");
+      expect(hacc.conditionId).toBe("host-managed-harness");
+    }
+  });
+
+  it("replays corrections as chronological conversation, never as corpus annotations or evaluator state", () => {
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const turns: Lc4NativeConversationTurnInput[] = [];
+    const append = (
+      speaker: "caller" | "assistant",
+      text: string,
+      opportunity: number,
+    ) => {
+      const sequence = turns.length + 1;
+      turns.push(Object.freeze({
+        turn_id: `conversation.${String(sequence).padStart(3, "0")}.${speaker}`,
+        sequence,
+        speaker,
+        source: speaker === "caller"
+          ? "caller_tts_source_bound_to_pcm"
+          : "listener_exact_captured_pcm_asr",
+        text,
+        available_after_opportunity: opportunity,
+        provenance_receipt_sha256: sha256Hex(`${speaker}-pcm:${opportunity}`),
+        provider_conversation_source: true,
+        oracle_derived: false,
+        future_derived: false,
+        semantic_evaluator_derived: false,
+      }));
+    };
+    for (const opportunity of corpus.opportunities.slice(0, 20)) {
+      append("caller", opportunity.canonical_caller_text, opportunity.index);
+      append("assistant", `Actual provider transcript for opportunity ${opportunity.index}.`, opportunity.index);
+    }
+    const common = {
+      segment_ordinal: 2 as const,
+      previous_rotation_receipt_sha256: "7".repeat(64),
+      flow_state_sha256: "8".repeat(64),
+      response_plan_chain_head_sha256: "9".repeat(64),
+      conversation_turns: turns,
+    };
+    const native = createLc4DevRotationContext({
+      ...common,
+      episode: devEpisodeForComparator("native"),
+    });
+    const hacc = createLc4DevRotationContext({
+      ...common,
+      episode: devEpisodeForComparator("hacc"),
+    });
+    if (native.kind !== "native_conversation_replay" || hacc.kind !== "hacc_structured_state") {
+      throw new Error("unexpected comparator rotation kinds");
+    }
+    expect(native.packet.conversation_replay_sha256).toBe(hacc.packet.conversation_replay_sha256);
+    expect(native.packet.conversation_turns).toEqual(hacc.packet.conversation_turns);
+    const nativeWire = canonicalJson(native.packet);
+    const oldRecord = "MPL-1042";
+    const correctedRecord = "MPL-1402";
+    expect(nativeWire.indexOf(oldRecord)).toBeGreaterThanOrEqual(0);
+    expect(nativeWire.indexOf(correctedRecord)).toBeGreaterThan(nativeWire.indexOf(oldRecord));
+    for (const forbidden of [
+      "fact_bindings",
+      "current_public_state",
+      "required_listener_semantics",
+      "prohibited_effects",
+      "expected_oracle",
+      "patron_record version 2",
+      common.flow_state_sha256,
+      common.response_plan_chain_head_sha256,
+    ]) {
+      expect(nativeWire, `Native rotation leaked ${forbidden}`).not.toContain(forbidden);
+    }
+    const haccWire = canonicalJson(hacc.packet);
+    expect(haccWire).toContain(common.flow_state_sha256);
+    expect(haccWire).toContain(common.response_plan_chain_head_sha256);
+  });
+
+  it("gives reopened Native and HACC wrappers the same chronological provider conversation", () => {
     const value = manifest("native");
     const previousReceipt = "7".repeat(64);
     const native = nativeRotationPacket(value, previousReceipt, 1);
@@ -2311,22 +3245,28 @@ describe("LC4 production realtime adapter bridge", () => {
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: "8".repeat(64),
       response_plan_chain_head_sha256: "9".repeat(64),
-      facts: native.facts,
+      conversation_turns: publicConversationTurns(20),
     });
-    expect(() => assertLc4RotationSubstantiveFactParity(native, hacc)).not.toThrow();
-    expect(hacc.facts.map(({ fact_id, public_text, substantive_sha256, available_after_opportunity }) => ({
-      fact_id,
-      public_text,
-      substantive_sha256,
+    expect(() => assertLc4RotationConversationParity(native, hacc)).not.toThrow();
+    expect(hacc.conversation_turns.map(({ turn_id, sequence, speaker, source, text, transcript_sha256, available_after_opportunity }) => ({
+      turn_id,
+      sequence,
+      speaker,
+      source,
+      text,
+      transcript_sha256,
       available_after_opportunity,
-    }))).toEqual(native.facts.map(({ fact_id, public_text, substantive_sha256, available_after_opportunity }) => ({
-      fact_id,
-      public_text,
-      substantive_sha256,
+    }))).toEqual(native.conversation_turns.map(({ turn_id, sequence, speaker, source, text, transcript_sha256, available_after_opportunity }) => ({
+      turn_id,
+      sequence,
+      speaker,
+      source,
+      text,
+      transcript_sha256,
       available_after_opportunity,
     })));
 
-    const changedText = "A substantively different service window.";
+    const changedText = "A different caller utterance that was never spoken.";
     const changedHacc = createLc4HaccRotationStatePacket({
       run_id: value.run_id,
       from_segment_ordinal: 1,
@@ -2335,32 +3275,49 @@ describe("LC4 production realtime adapter bridge", () => {
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: "8".repeat(64),
       response_plan_chain_head_sha256: "9".repeat(64),
-      facts: native.facts.map((fact, index) => index === 0
-        ? { ...fact, public_text: changedText, substantive_sha256: sha256Hex(changedText) }
-        : fact),
+      conversation_turns: publicConversationTurns(20).map((turn, index) => index === 0
+        ? { ...turn, text: changedText }
+        : turn),
     });
-    expect(() => assertLc4RotationSubstantiveFactParity(native, changedHacc)).toThrow("differ in available substantive facts");
+    expect(() => assertLc4RotationConversationParity(native, changedHacc)).toThrow("differ in provider conversation replay");
   });
 
-  it("rejects future, oracle-derived, private, and source-unverified Native continuity facts", () => {
+  it("rejects future, oracle-derived, evaluator-derived, and non-conversation Native replay turns", () => {
     const value = manifest("native");
-    const base = publicFacts()[0]!;
-    const packet = (fact: Lc4NativeContinuityFactInput) => createLc4StrongNativeContinuityPacket({
+    const turns = publicConversationTurns(20);
+    const base = turns[0]!;
+    const packet = (turn: Lc4NativeConversationTurnInput) => createLc4NativeConversationReplayPacket({
       run_id: value.run_id,
       from_segment_ordinal: 1,
       to_segment_ordinal: 2,
       available_through_opportunity: 20,
       previous_session_rotation_receipt_sha256: "7".repeat(64),
-      facts: [fact],
+      conversation_turns: [turn, ...turns.slice(1)],
     });
-    expect(() => packet({ ...base, available_after_opportunity: 21 })).toThrow("future-unavailable");
-    expect(() => packet({ ...base, oracle_derived: true } as unknown as Lc4NativeContinuityFactInput)).toThrow("forbids private, oracle, future");
-    expect(() => packet({ ...base, private_value_included: true } as unknown as Lc4NativeContinuityFactInput)).toThrow("forbids private, oracle, future");
-    expect(() => packet({ ...base, listener_status: "not_applicable" })).toThrow("lacks its required source evidence");
-    expect(() => packet({ ...base, source: "oracle_fixture" } as unknown as Lc4NativeContinuityFactInput)).toThrow("source is inadmissible");
+    expect(() => packet({ ...base, available_after_opportunity: 21 })).toThrow("future or out-of-order");
+    expect(() => packet({ ...base, oracle_derived: true } as unknown as Lc4NativeConversationTurnInput)).toThrow("forbids oracle, semantic-evaluator, future");
+    expect(() => packet({ ...base, semantic_evaluator_derived: true } as unknown as Lc4NativeConversationTurnInput)).toThrow("forbids oracle, semantic-evaluator, future");
+    expect(() => packet({ ...base, provider_conversation_source: false } as unknown as Lc4NativeConversationTurnInput)).toThrow("non-conversation state");
+    expect(() => packet({ ...base, source: "oracle_fixture" } as unknown as Lc4NativeConversationTurnInput)).toThrow("source is inadmissible");
+    const withoutFirstAssistant = turns.map((turn, index) => index === 1
+      ? {
+          ...turn,
+          turn_id: "conversation.002.tool",
+          speaker: "tool" as const,
+          source: "provider_visible_tool_result" as const,
+        }
+      : turn);
+    expect(() => createLc4NativeConversationReplayPacket({
+      run_id: value.run_id,
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: "7".repeat(64),
+      conversation_turns: withoutFirstAssistant,
+    })).toThrow("omits caller/assistant evidence for opportunity 1");
   });
 
-  it("injects a receipt-bound strong Native packet at reopen and exposes only its hashes in evidence", async () => {
+  it("injects only receipt-bound raw conversation at Native reopen and exposes only its hashes in evidence", async () => {
     const value = manifest("native");
     const configurations: TrialSessionConfiguration[] = [];
     const bridge = new Lc4RealtimeProviderBridge((provider, providerConfiguration) => {
@@ -2382,11 +3339,27 @@ describe("LC4 production realtime adapter bridge", () => {
       segment: value.episode_shape.segments[1]!,
       profile: value.episode_shape.provider_profile,
       configuration: configuration(value),
-      rotation_context: { kind: "strong_native", packet },
+      rotation_context: { kind: "native_conversation_replay", packet },
       listener: { accept() {} },
     });
-    expect(configurations[1]?.instructions).toContain("<lc4_strong_native_continuity");
-    for (const fact of packet.facts) expect(configurations[1]?.instructions).toContain(fact.public_text);
+    expect(configurations[1]?.instructions).toContain("<lc4_provider_conversation>");
+    for (const turn of packet.conversation_turns) expect(configurations[1]?.instructions).toContain(turn.text);
+    for (const forbiddenMetadata of [
+      "available_after_opportunity",
+      "conversation_replay_sha256",
+      "from_segment_ordinal",
+      "packet_sha256",
+      "previous_session_rotation_receipt_sha256",
+      "provenance_receipt_sha256",
+      "run_id",
+      "source",
+      "to_segment_ordinal",
+      "transcript_sha256",
+      "turn_id",
+    ]) {
+      expect(configurations[1]?.instructions, `Native reconnect leaked ${forbiddenMetadata}`)
+        .not.toContain(forbiddenMetadata);
+    }
     const nativeContext = "native continuation response context";
     const evidence = await second.exchange({
       opportunity_id: "op-21",
@@ -2394,12 +3367,12 @@ describe("LC4 production realtime adapter bridge", () => {
       response_control: { kind: "native_context", instructions: nativeContext, instructions_sha256: sha256Hex(nativeContext) },
     });
     expect(evidence).toMatchObject({
-      rotation_context_kind: "strong_native",
+      rotation_context_kind: "native_conversation_replay",
       rotation_context_sha256: packet.packet_sha256,
-      rotation_substantive_fact_set_sha256: packet.substantive_fact_set_sha256,
+      rotation_conversation_replay_sha256: packet.conversation_replay_sha256,
     });
     const encodedEvidence = JSON.stringify(evidence);
-    for (const fact of packet.facts) expect(encodedEvidence).not.toContain(fact.public_text);
+    for (const turn of packet.conversation_turns) expect(encodedEvidence).not.toContain(turn.text);
     await second.close();
   });
 
@@ -2425,9 +3398,9 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     await expect(reopen(null)).rejects.toThrow("requires a receipt-bound rotation context");
     const packet = nativeRotationPacket(value, receipt.rotation_receipt_sha256, 1);
-    await expect(reopen({ kind: "strong_native", packet: { ...packet, packet_sha256: "f".repeat(64) } })).rejects.toThrow("integrity failed");
+    await expect(reopen({ kind: "native_conversation_replay", packet: { ...packet, packet_sha256: "f".repeat(64) } })).rejects.toThrow("integrity failed");
     const stalePacket = nativeRotationPacket(value, "8".repeat(64), 1);
-    await expect(reopen({ kind: "strong_native", packet: stalePacket })).rejects.toThrow("prior session receipt");
+    await expect(reopen({ kind: "native_conversation_replay", packet: stalePacket })).rejects.toThrow("prior session receipt");
     await expect(reopen(haccRotationContext(value, receipt.rotation_receipt_sha256, 1))).rejects.toThrow("differs from the randomized arm");
   });
 

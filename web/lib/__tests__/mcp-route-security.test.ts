@@ -2,20 +2,32 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   verifyScope: vi.fn(),
-  activeCapabilityAuthorityFor: vi.fn(),
+  activeConversationRouteAuthorityFor: vi.fn(),
   callActiveCapability: vi.fn(),
+  preparePostgresLiveConversationRoute: vi.fn(),
   qOne: vi.fn(),
   resolveVoiceProviderConfig: vi.fn(),
+  logError: vi.fn(),
 }));
 
 vi.mock("@/lib/voice", () => ({ verifyScope: mocks.verifyScope }));
 vi.mock("@/lib/mcp", () => ({
-  activeCapabilityAuthorityFor: mocks.activeCapabilityAuthorityFor,
+  activeConversationRouteAuthorityFor: mocks.activeConversationRouteAuthorityFor,
   callActiveCapability: mocks.callActiveCapability,
+}));
+vi.mock("@/lib/live-conversation-route-postgres", () => ({
+  preparePostgresLiveConversationRoute: mocks.preparePostgresLiveConversationRoute,
 }));
 vi.mock("@/lib/db", () => ({ qOne: mocks.qOne }));
 vi.mock("@/lib/realtime/config", () => ({
   resolveVoiceProviderConfig: mocks.resolveVoiceProviderConfig,
+}));
+vi.mock("@/lib/log", () => ({
+  log: () => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: mocks.logError,
+  }),
 }));
 vi.mock("@/lib/mcp-client", async () => import("../mcp-client"));
 
@@ -25,6 +37,7 @@ import { POST } from "../../app/api/mcp/route";
 import { AuthorityClient } from "../../../bridge/lib/authority-client.js";
 
 const originalGatewaySecret = process.env.MCP_GATEWAY_SECRET;
+const BASE_TIME = Date.parse("2026-07-28T20:00:00.000Z");
 const scope = {
   aud: "mcp",
   callId: "call-1",
@@ -102,11 +115,28 @@ const EXPECTED_CATALOG = Object.freeze({
   catalog_digest: CATALOG_DIGEST,
   capability_epoch: 7,
 });
+const REALTIME_CONTEXT_PACKET = Object.freeze({
+  schemaVersion: 1,
+  authority: {
+    conversationHeadSha256: "d".repeat(64),
+    conversationRevision: 3,
+    policyEpoch: 0,
+    capabilityEpoch: ACTIVE_CATALOG.capability_epoch,
+    capabilityCatalogDigest: ACTIVE_CATALOG.catalog_digest,
+  },
+  durable: {},
+  capabilities: [],
+  recentAudibleTurns: [],
+  omittedRecentTurnCount: 0,
+});
 
 function gatewayEnvelope(outcome: unknown, catalog = ACTIVE_CATALOG) {
   return {
     schema_version: 1,
-    outcome,
+    outcome: {
+      ...(outcome as Record<string, unknown>),
+      hacc_realtime_context_packet: REALTIME_CONTEXT_PACKET,
+    },
     active_capability_catalog: catalog,
   };
 }
@@ -205,7 +235,15 @@ describe("MCP gateway request boundary", () => {
       }
       return null;
     });
-    mocks.activeCapabilityAuthorityFor.mockResolvedValue(ACTIVE_AUTHORITY);
+    mocks.activeConversationRouteAuthorityFor.mockResolvedValue({
+      authority: ACTIVE_AUTHORITY,
+      flow: null,
+    });
+    mocks.preparePostgresLiveConversationRoute.mockResolvedValue({
+      packet: {
+        value: REALTIME_CONTEXT_PACKET,
+      },
+    });
     mocks.callActiveCapability.mockResolvedValue({ ok: true });
     mocks.qOne.mockImplementation((sql: string, params) => {
       if (sql.includes("telephony_stream_bindings")) {
@@ -218,12 +256,19 @@ describe("MCP gateway request boundary", () => {
           params[0] === claims.callId && params[1] === claims.agentId && params[2] === claims.orgId &&
           params[3] === claims.providerCallId && params[4] === claims.providerAccountId &&
           params[5] === claims.providerTo
-          ? { settings: { provider: claims.provider }, voice: "test-voice" }
+          ? {
+              settings: { provider: claims.provider },
+              voice: "test-voice",
+              agent_version: 1,
+              started_at: new Date(BASE_TIME),
+            }
           : null);
       }
       return Promise.resolve({
         settings: { provider: params[0] === "call-2" ? "openai" : "gemini" },
         voice: "test-voice",
+        agent_version: 1,
+        started_at: new Date(BASE_TIME),
       });
     });
     mocks.resolveVoiceProviderConfig.mockImplementation((settings) => ({
@@ -254,7 +299,7 @@ describe("MCP gateway request boundary", () => {
       error: { code: -32700, message: "parse error" },
     });
     expect(mocks.qOne).not.toHaveBeenCalled();
-    expect(mocks.activeCapabilityAuthorityFor).not.toHaveBeenCalled();
+    expect(mocks.activeConversationRouteAuthorityFor).not.toHaveBeenCalled();
     expect(mocks.callActiveCapability).not.toHaveBeenCalled();
   });
 
@@ -295,7 +340,7 @@ describe("MCP gateway request boundary", () => {
       id: "list-tools",
       result: { tools: [] },
     });
-    expect(mocks.activeCapabilityAuthorityFor).not.toHaveBeenCalled();
+    expect(mocks.activeConversationRouteAuthorityFor).not.toHaveBeenCalled();
     expect(mocks.callActiveCapability).not.toHaveBeenCalled();
   });
 
@@ -369,14 +414,13 @@ describe("MCP gateway request boundary", () => {
       sessionId,
     }));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
       jsonrpc: "2.0",
       id: "transport-request-1",
-      result: {
-        content: [{ type: "text", text: JSON.stringify(gatewayEnvelope({ ok: true })) }],
-        isError: false,
-      },
+      result: { isError: false },
     });
+    expect(JSON.parse(responseBody.result.content[0].text)).toEqual(gatewayEnvelope({ ok: true }));
     expect(mocks.callActiveCapability).toHaveBeenCalledWith(
       bridgeScope,
       "reserve_slot",
@@ -608,7 +652,7 @@ describe("MCP gateway request boundary", () => {
   });
 
   it("returns a zero-authority blocked catalog when only post-result refresh fails", async () => {
-    mocks.activeCapabilityAuthorityFor.mockRejectedValueOnce(new Error("catalog unavailable"));
+    mocks.activeConversationRouteAuthorityFor.mockRejectedValueOnce(new Error("catalog unavailable"));
     const sessionId = await initialize();
     const response = await POST(request(toolCall("post-refresh-failure"), {
       authorization: "Bearer valid-token",
@@ -631,8 +675,59 @@ describe("MCP gateway request boundary", () => {
       tools: [],
     });
     expect(mocks.callActiveCapability.mock.invocationCallOrder[0])
-      .toBeLessThan(mocks.activeCapabilityAuthorityFor.mock.invocationCallOrder[0]);
-    expect(mocks.activeCapabilityAuthorityFor).toHaveBeenCalledTimes(1);
+      .toBeLessThan(mocks.activeConversationRouteAuthorityFor.mock.invocationCallOrder[0]);
+    expect(mocks.activeConversationRouteAuthorityFor).toHaveBeenCalledTimes(1);
+    expect(mocks.preparePostgresLiveConversationRoute).not.toHaveBeenCalled();
+    expect(mocks.logError).toHaveBeenCalledWith(
+      "post-action capability catalog refresh failed",
+      expect.objectContaining({
+        orgId: scope.orgId,
+        callId: scope.callId,
+        message: "catalog unavailable",
+      })
+    );
+    expect(mocks.logError).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves post-action epoch and revision but blocks tools when context projection fails", async () => {
+    mocks.preparePostgresLiveConversationRoute.mockRejectedValueOnce(
+      new Error("context projection unavailable")
+    );
+    const sessionId = await initialize();
+    const response = await POST(request(toolCall("post-action-context-failure"), {
+      authorization: "Bearer valid-token",
+      sessionId,
+    }));
+    const body = await response.json();
+    const envelope = JSON.parse(body.result.content[0].text);
+
+    expect(response.status).toBe(200);
+    expect(body.result.isError).toBe(false);
+    expect(envelope.outcome).toEqual({ ok: true });
+    expect(envelope.active_capability_catalog).toMatchObject({
+      availability: "blocked",
+      runtime_digest: ACTIVE_CATALOG.runtime_digest,
+      capability_epoch: ACTIVE_CATALOG.capability_epoch,
+      state_revision: ACTIVE_CATALOG.state_revision,
+      scope: ACTIVE_CATALOG.scope,
+      active_context: {
+        blocked: true,
+        reason: "context_packet_refresh_failed",
+      },
+      tools: [],
+    });
+    expect(envelope.active_capability_catalog.catalog_digest)
+      .not.toBe(EXPECTED_CATALOG.catalog_digest);
+    expect(mocks.activeConversationRouteAuthorityFor).toHaveBeenCalledTimes(1);
+    expect(mocks.preparePostgresLiveConversationRoute).toHaveBeenCalledTimes(1);
+    expect(mocks.logError).toHaveBeenCalledWith(
+      "post-action durable context packet refresh failed",
+      expect.objectContaining({
+        orgId: scope.orgId,
+        callId: scope.callId,
+        message: "context projection unavailable",
+      })
+    );
   });
 
   it("keeps durable identity stable across reconnect sessions and JSON-RPC id resets", async () => {
@@ -779,7 +874,7 @@ describe("MCP gateway request boundary", () => {
       });
     }
     expect(mocks.callActiveCapability).not.toHaveBeenCalled();
-    expect(mocks.activeCapabilityAuthorityFor).not.toHaveBeenCalled();
+    expect(mocks.activeConversationRouteAuthorityFor).not.toHaveBeenCalled();
   });
 
   it("rejects missing arguments, unsafe ids, batches, and non-JSON content before dispatch", async () => {

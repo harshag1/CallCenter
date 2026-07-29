@@ -611,3 +611,46 @@ failed root is immutable and nonpublishable, cannot be retried or resumed, and
 contributes no Native/HACC score or graph. Any next paid attempt requires a new
 source commit, qualification, evidence root, keys, authorization, and full
 one-shot six-cell execution.
+
+## 2026-07-28 six-episode attempt at `f75d1d2`
+
+**Failed xAI server-VAD liveness turn. No partial score is admissible.**
+
+The exact-source qualification passed all three pinned providers; its xAI
+receipt covers the retained server-VAD transport and does not qualify the later
+finite-manual efficacy transport. The DEV run then completed OpenAI Native,
+OpenAI HACC, Gemini HACC, Gemini Native, and the first eight xAI Native
+opportunities. Its terminal accounting records:
+
+- episodes started/completed: **5/4**;
+- canonical opportunities submitted/completed: **249/248**;
+- registered repairs submitted/completed: **16/16**;
+- response generations requested/completed: **265/264**;
+- paid retries: **0**.
+
+At xAI Native opportunity 9, the adapter delivered all 101,142 caller PCM
+bytes, observed `speech_started`, and delivered the full frozen 800 ms
+zero-PCM transport delimiter. No `speech_stopped`, automatic commit, response
+start, output PCM, provider fatal, or terminal response followed. Five
+heartbeats arrived during the wait, proving inbound socket liveness but not
+media ingestion. The exact cause therefore remains an unresolved xAI
+server-VAD/media-liveness boundary, not a proven network transient.
+
+- primary failure evidence:
+  `e51ee7c631fc6aa3ca8c816ca4d4c5172e9b09b0791db3d9dbeb2d4caab119c1`;
+- cleanup failure evidence:
+  `2f8b8e7abc76bcb0421e24103dd0d808e4be3818a8132b8fc2c566f9638d0a52`;
+- run:
+  `d98b0d6e1b009dde600f37986904f082b9e52dab098a935420c191d537aa880a`;
+- package:
+  `5d2ecd3f17f8474db4ec400ca5b9f3101bed290059a4f3a0ecefcb3df4570de3`;
+- budget evidence/head:
+  `9ccf17639c355402fbbd19cc2b9ebd1bafe7231ab193c1712ea0dbac7d9589b4` /
+  `d7f48980a0a2e25ea668ce33ea40347de89e7686fbce30b654af958e45906122`.
+
+The filesystem ledger conservatively settled **$12.50**, cancelled unopened
+xAI HACC, and has **$0.00** active. The root is immutable, cannot be retried or
+resumed, and contributes no result cell or launch graph. No xAI efficacy cell
+may be admitted from this receipt; a fresh source/profile-bound Gate D manual
+clip must first produce a signed replay-verifiable receipt, and that receipt is
+transport compatibility evidence rather than a Native-versus-HACC result.

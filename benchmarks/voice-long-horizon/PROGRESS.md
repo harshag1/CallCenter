@@ -746,3 +746,81 @@ root is failed, immutable, and nonpublishable; none of its completed cells may
 be extracted into a score or launch graph. A new source commit, qualification,
 evidence root, keys, authorization, and full one-shot six-cell run are required
 before any Native/HACC efficacy statement.
+
+## 2026-07-28 — `f75d1d2` one-shot exposed xAI VAD liveness boundary
+
+The exact-source qualification passed all three providers with zero retries.
+Its xAI evidence covers the retained server-VAD transport only; it does not
+qualify the later finite-manual efficacy transport. The following DEV run
+completed four full 60-opportunity cells and eight xAI Native turns before
+failing closed at xAI Native opportunity 9.
+
+The failed turn delivered all 101,142 caller PCM bytes in 106 chunks and the
+full separate 800 ms zero-PCM delimiter. xAI emitted `speech_started` but no
+`speech_stopped`, automatic commit, response start, output, provider fatal, or
+terminal response before the bounded timeout. Five provider pings arrived
+during the wait, so the socket remained inbound-live. The evidence excludes
+the prior missing-delimiter defect but cannot distinguish provider VAD state
+from one-way media-ingestion loss.
+
+- episodes started/completed: **5/4**;
+- canonical opportunities submitted/completed: **249/248**;
+- registered repairs completed: **16/16**;
+- provider calls completed: **264**;
+- paid retries: **0**;
+- run/package: `d98b0d6e1b009dde600f37986904f082b9e52dab098a935420c191d537aa880a` / `5d2ecd3f17f8474db4ec400ca5b9f3101bed290059a4f3a0ecefcb3df4570de3`;
+- primary/cleanup failure evidence: `e51ee7c631fc6aa3ca8c816ca4d4c5172e9b09b0791db3d9dbeb2d4caab119c1` / `2f8b8e7abc76bcb0421e24103dd0d808e4be3818a8132b8fc2c566f9638d0a52`;
+- DEV conservative settlement: **$12.50**, active authority **$0.00**.
+
+The root is immutable, nonpublishable, and contributes no partial score or
+graph.
+
+The next source revision separates estimands instead of hiding the failure:
+finite prerecorded xAI LC4 calls use the documented manual boundary
+(`turn_detection: null`, exact PCM, one commit acknowledgement, one initial
+response request), while interactive server-VAD qualification remains
+separate. The live server-VAD delimiter is independently extended to a
+replay-bound 2,000 ms hard cap and fails immediately on exhaustion. Transport
+mode, purpose, profile hash, commit/acknowledgement/request/start ordering, and
+qualification scope are machine-bound through profiles, signed admission,
+evidence, and replay. Provider-free validation passed 2,708 tests with 59
+skips, plus lint and TypeScript.
+
+No new paid run is authorized by this entry. A new immutable source commit and
+a small, one-shot xAI Gate D manual finite-clip qualification must produce a
+signed replay-verifiable receipt before another six-cell one-shot. Gate D is
+transport evidence only: it admits the finite-manual path but does not itself
+support a Native-versus-HACC score or launch claim.
+
+## 2026-07-28 — Active-catalog artifact refreshed for durable context packets
+
+The production provider-instruction wrapper now tells the model to replace the
+prior durable context packet when a tool result returns
+`outcome.hacc_realtime_context_packet`. The canonical `$0` active-catalog
+generator was run twice from the same source and toolchain; the two 37,398-byte
+pretty JSON artifacts were byte-identical with SHA-256
+`2a5eb967ea915816ab9fa70bcf32b8522236309983d3d789c54c4979886c3013`.
+
+This intentional wrapper change adds exactly 115 bytes to every measured
+active provider-instruction block. The wrapper is now 892 bytes, up from 777;
+active instruction blocks are 11,848–12,594 bytes with median 12,255, up from
+11,733–12,479 with median 12,140. Their rough T4 range is now 2,962–3,149 with
+median 3,064. Tool counts, logical-entry bytes, full-catalog bytes, compiler
+containment, the 64/64 frozen exposure census, and zero private-leak findings
+are unchanged.
+
+- portable semantic result:
+  `7ec332b0db56908924ceef07151a033d90fa0bf56c2145bdf1f65e8373d65442`;
+- source manifest:
+  `9dd1fda3382d3566dbd0f93fdbcaa03634c57fc430831e2013362b7fc0b63fba`;
+- deterministic build manifest:
+  `d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455`;
+- observed toolchain manifest:
+  `419ad3ce70d8af1ce32b62146dcd48b32459eef083f0268edc82164904e74a25`;
+- source/build/toolchain-bound evidence:
+  `6d7969749fcb0d5080e9f5b93913aeea8093ef427b64b5ab224f0eb18cf263bb`;
+- provider spend: **$0.00**.
+
+This remains C1 serialization and containment evidence. It does not establish
+provider token usage, billed savings, invocation success, model quality,
+reduced drift, or superiority over a native realtime agent.

@@ -35,6 +35,7 @@ import {
   type LiveStsProvider,
   type LiveStsRunSummary,
 } from "../lib/benchmark/live-sts-development-experiment";
+import { resolveBenchmarkEnvironment } from "../lib/benchmark/environment";
 import { LONG_HORIZON_SCENARIO_SUITE } from "../lib/benchmark/long-horizon-scenario-suite";
 import {
   createPairedAudioManifest,
@@ -352,44 +353,21 @@ async function verifyFixtures(root: string, plan: ExperimentPlan): Promise<void>
   }
 }
 
-function parseEnv(text: string): Record<string, string> {
-  const values: Record<string, string> = {};
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
-    if (!match) continue;
-    let value = match[2].trim();
-    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    values[match[1]] = value;
-  }
-  return values;
-}
-
 async function providerKeys(): Promise<Readonly<Record<LiveStsProvider, string>>> {
-  const candidates = [
-    resolve(REPOSITORY_ROOT, "web/.env.local"),
-    "/Users/harsha/Desktop/gpu-hub-harness/.secrets/staging-runtime-provider.env",
-  ];
-  const merged: Record<string, string> = { ...process.env } as Record<string, string>;
-  for (const path of candidates) {
-    try {
-      Object.assign(merged, parseEnv(await readFile(path, "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-  const required = {
-    openai: merged.OPENAI_API_KEY,
-    gemini: merged.GEMINI_API_KEY,
-    xai: merged.XAI_API_KEY,
-  };
-  for (const [provider, key] of Object.entries(required)) {
-    if (!key || key.length < 12) throw new Error(`missing ${provider} provider credential`);
-  }
-  return Object.freeze(required as Record<LiveStsProvider, string>);
+  const explicitEnvFile = process.env.BENCHMARK_PROVIDER_ENV_FILE;
+  const environment = await resolveBenchmarkEnvironment({
+    names: ["OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY"],
+    explicitEnvFiles: explicitEnvFile ? [explicitEnvFile] : [],
+    repositoryRoot: REPOSITORY_ROOT,
+    webRoot: resolve(REPOSITORY_ROOT, "web"),
+    gpuHubRoot: null,
+    cwd: process.cwd(),
+  });
+  return Object.freeze({
+    openai: environment.require("OPENAI_API_KEY"),
+    gemini: environment.require("GEMINI_API_KEY"),
+    xai: environment.require("XAI_API_KEY"),
+  });
 }
 
 function createClient(provider: LiveStsProvider, configuration: TrialSessionConfiguration, apiKey: string): NormalizedRealtimeClient {

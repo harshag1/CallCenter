@@ -14,10 +14,15 @@ import {
   type BrowserOutboundSpeechGateConfig,
   type BrowserRealtimeTransport,
 } from "./providers/types";
+import {
+  createBrowserSpeechGuardrail,
+  type BrowserSpeechGuardrailStatus,
+} from "./browser-speech-guardrail";
 
 type Handlers = {
   onTranscript: (who: "caller" | "agent", text: string) => void;
   onState: (state: "connecting" | "live" | "ended" | "error") => void;
+  onSpeechGuardrailStatus?: (status: BrowserSpeechGuardrailStatus) => void;
 };
 
 type FetchFailure = "timeout" | "deadline_exhausted" | "request_failed";
@@ -99,6 +104,7 @@ export class RealtimeCall {
   private endedReported = false;
   private providerClosed = false;
   private readonly persistenceLossStages = new Set<string>();
+  speechGuardrailStatus: BrowserSpeechGuardrailStatus | null = null;
   callId = "";
 
   constructor(private handlers: Handlers) {}
@@ -140,6 +146,7 @@ export class RealtimeCall {
         callId?: string;
         connection?: BrowserRealtimeConnection;
         recordingUploadToken?: string;
+        speechGuardrail?: unknown;
       };
       if (!response.ok || !payload.callId || !payload.connection) throw new Error(payload.error ?? "voice session failed");
       // Retain the allocated server identity before validating optional capabilities so every
@@ -154,6 +161,21 @@ export class RealtimeCall {
       } else if (payload.recordingUploadToken !== undefined) {
         throw new Error("voice session issued an unexpected recording upload capability");
       }
+      if (opts.outboundSpeechGate && payload.speechGuardrail !== undefined) {
+        throw new Error("browser call received two outbound speech authorities");
+      }
+      // Validate a required guardrail before asking for microphone permission.
+      // Any malformed, cross-call, or cross-provider authority terminates the
+      // allocated server call without creating a local media path.
+      const automaticGuardrail = createBrowserSpeechGuardrail({
+        value: payload.speechGuardrail,
+        provider: payload.connection.provider,
+        callId: this.callId,
+        onEvidence: () => {},
+      });
+      this.speechGuardrailStatus = automaticGuardrail.status;
+      this.handlers.onSpeechGuardrailStatus?.(automaticGuardrail.status);
+      const outboundSpeechGate = opts.outboundSpeechGate ?? automaticGuardrail.config ?? undefined;
       this.assertStartActive(startAbortController);
 
       this.context = new AudioContext({ sampleRate: 24000 });
@@ -201,12 +223,12 @@ export class RealtimeCall {
         mic: this.mic,
         audioContext: this.context,
         recordingDestination,
-        ...(opts.outboundSpeechGate ? {
+        ...(outboundSpeechGate ? {
           outboundSpeechGate: {
-            ...opts.outboundSpeechGate,
+            ...outboundSpeechGate,
             onEvidence: (evidence) => {
               this.queueEvent("outbound_speech_gate", evidence);
-              opts.outboundSpeechGate!.onEvidence(evidence);
+              outboundSpeechGate.onEvidence(evidence);
             },
           },
         } : {}),

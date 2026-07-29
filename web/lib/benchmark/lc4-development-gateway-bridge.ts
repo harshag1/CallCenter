@@ -7,6 +7,7 @@ import {
   createHaccProviderResponsePlanView,
   type HaccResponsePlan,
 } from "./response-plan";
+import { renderLc4ListenerAssertionContract } from "./lc4-listener-assertion-contract";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -168,10 +169,17 @@ export function renderLc4DevHaccResponsePlan(
     designated_reconciliation_intents: designatedReconciliationIntents,
     gateway_contract: lc4DevGatewayContract(eligibleSemanticIntents),
   });
-  return `<hacc_response_plan>\n${canonicalJson(view)}\n</hacc_response_plan>`;
+  return [
+    `<hacc_response_plan>\n${canonicalJson(view)}\n</hacc_response_plan>`,
+    renderLc4ListenerAssertionContract(),
+  ].join("\n");
 }
 
-/** Native keeps its full context but receives the exact same callable vocabulary. */
+/**
+ * Native receives one static, arm-common callable vocabulary. Its surrounding
+ * instructions are byte-stable and contain no host projection of the active
+ * flow, current facts, evaluator criteria, or expected next action.
+ */
 export function appendLc4DevNativeGatewayContract(
   instructions: string,
   phase: "canonical" | "repair" = "canonical",
@@ -180,7 +188,11 @@ export function appendLc4DevNativeGatewayContract(
   const contract = lc4DevGatewayContract(
     phase === "canonical" ? LC4_DEV_SEMANTIC_INTENTS : Object.freeze([]),
   );
-  return `${instructions}\n<lc4_gateway_contract>\n${canonicalJson(contract)}\n</lc4_gateway_contract>`;
+  return [
+    instructions,
+    `<lc4_gateway_contract>\n${canonicalJson(contract)}\n</lc4_gateway_contract>`,
+    renderLc4ListenerAssertionContract(),
+  ].join("\n");
 }
 
 type Arm = Lc4DevLiveEpisodePlan["arm"];

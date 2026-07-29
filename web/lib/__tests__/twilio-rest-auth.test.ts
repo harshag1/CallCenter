@@ -7,6 +7,7 @@ const ACCOUNT_SID = `AC${"a".repeat(32)}`;
 const API_KEY_SID = `SK${"b".repeat(32)}`;
 const API_KEY_SECRET = "restricted-api-key-secret-123456789";
 const ROOT_AUTH_TOKEN = "root-auth-token-must-never-fund-rest";
+const MESSAGE_SID = `SM${"e".repeat(32)}`;
 
 describe("Twilio outbound REST credential boundary", () => {
   beforeEach(() => {
@@ -53,10 +54,16 @@ describe("Twilio outbound REST credential boundary", () => {
     vi.stubEnv("TWILIO_API_KEY_ACCOUNT_SID", ACCOUNT_SID);
     vi.stubEnv("TWILIO_API_KEY_SID", API_KEY_SID);
     vi.stubEnv("TWILIO_API_KEY_SECRET", API_KEY_SECRET);
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      sid: MESSAGE_SID,
+      status: "queued",
+    }), { status: 201 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await sendSms("+14155550101", "hello");
+    await expect(sendSms("+14155550101", "hello")).resolves.toEqual({
+      providerMessageId: MESSAGE_SID,
+      providerStatus: "queued",
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];

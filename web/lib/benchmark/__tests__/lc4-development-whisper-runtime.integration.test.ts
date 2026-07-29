@@ -150,6 +150,19 @@ describe.runIf(Boolean(LC4_REAL_ASR_INTEGRATION))(
         },
       });
       expect(retained).toHaveLength(2);
+      expect(evaluation.signed_invocation_artifact_cas_sha256)
+        .toBe(sha256Hex(retained[0]!));
+      expect(evaluation.signed_invocation_artifact_byte_length)
+        .toBe(retained[0]!.byteLength);
+      expect(JSON.parse(Buffer.from(retained[0]!).toString("utf8")))
+        .toEqual(expect.objectContaining({
+          request: expect.any(Object),
+          result: expect.any(Object),
+          receipt: expect.objectContaining({
+            receipt_sha256:
+              evaluation.signed_invocation_receipt_sha256,
+          }),
+        }));
     }, 120_000);
   },
 );

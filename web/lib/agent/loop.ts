@@ -16,9 +16,15 @@ import {
   projectOperatorActionProposal,
   type OperatorActionProposal,
 } from "./tools/operator-capability-policy";
+import {
+  OPERATOR_TURN_INFERENCE_LIMITS,
+  assertOperatorTurnInferenceActive,
+  createOperatorTurnInferenceAuthority,
+  reserveOperatorToolCalls,
+} from "./operator-turn-inference-authority";
 
 const L = log("agent/loop");
-const MAX_ROUNDS = 10;
+const MAX_ROUNDS = OPERATOR_TURN_INFERENCE_LIMITS.maxBuilderRequests;
 const HISTORY_LIMIT = 40;
 
 export type LoopEvent =
@@ -44,9 +50,19 @@ export async function* runOperator(
   userText: string,
   agentId: string | null,
   origin: string,
-  openFlow: { id?: string; label?: string } | null = null
+  openFlow: { id?: string; label?: string } | null = null,
+  signal?: AbortSignal,
 ): AsyncGenerator<LoopEvent> {
-  const ctx: ToolCtx = { orgId: session.orgId, email: session.email, agentId, origin, threadId };
+  const inferenceAuthority = createOperatorTurnInferenceAuthority({}, signal);
+  assertOperatorTurnInferenceActive(inferenceAuthority);
+  const ctx: ToolCtx = Object.freeze({
+    orgId: session.orgId,
+    email: session.email,
+    agentId,
+    origin,
+    threadId,
+    inferenceAuthority,
+  });
   // One least-authority snapshot drives both provider exposure and dispatch for
   // the entire turn. Individual funded tools still recheck live policy before
   // reserving quota, so revocation can shrink but never widen authority.
@@ -104,7 +120,10 @@ export async function* runOperator(
     const textDeltas: string[] = [];
     let calls: { id: string; name: string; arguments: string }[] = [];
 
-    for await (const ev of streamBuilderModel(messages, { tools: catalog.tools })) {
+    for await (const ev of streamBuilderModel(messages, {
+      authority: inferenceAuthority,
+      tools: catalog.tools,
+    })) {
       if (ev.type === "text") {
         text += ev.delta;
         textDeltas.push(ev.delta);
@@ -138,6 +157,30 @@ export async function* runOperator(
     messages.push(assistantMsg);
     await saveMessage(session.orgId, threadId, "assistant", assistantMsg);
 
+    try {
+      // Reserve the whole provider-emitted batch before executing its first
+      // tool. Oversized batches therefore have zero partial side effects.
+      reserveOperatorToolCalls(inferenceAuthority, calls.length);
+    } catch {
+      for (const call of calls) {
+        yield { type: "tool", name: call.name, status: "start" };
+        const toolMsg: BuilderChatMessage = {
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({ error: "operator_turn_tool_budget_exhausted" }),
+        };
+        messages.push(toolMsg);
+        await saveMessage(session.orgId, threadId, "tool", toolMsg);
+        yield { type: "tool", name: call.name, status: "error" };
+      }
+      yield {
+        type: "notice",
+        text: "This turn reached its tool or time budget. Continue with another message.",
+      };
+      yield { type: "done" };
+      return;
+    }
+
     if (fundedCalls.length && calls.length !== 1) {
       for (const call of calls) {
         yield { type: "tool", name: call.name, status: "start" };
@@ -157,15 +200,21 @@ export async function* runOperator(
 
     let awaitingHumanConfirmation = false;
     let stopAfterFundedBoundary = false;
+    let stopAfterTurnBoundary = false;
     for (const call of calls) {
       const tool = catalog.byName.get(call.name);
       const fundedCall = (FUNDED_OPERATOR_CAPABILITIES as readonly string[]).includes(call.name);
       yield { type: "tool", name: call.name, status: "start" };
       let output: unknown;
       try {
+        assertOperatorTurnInferenceActive(inferenceAuthority);
         const args = call.arguments ? JSON.parse(call.arguments) : {};
         if (!tool) throw new Error(`unknown tool ${call.name}`);
         const result = await tool.execute(args, ctx);
+        // A tool admitted before expiry may settle after disconnect/deadline.
+        // Its underlying effect cannot be undone, but no late model-visible
+        // output or UI projection may escape into this cancelled turn.
+        assertOperatorTurnInferenceActive(inferenceAuthority);
         output = result.output;
         if (result.operatorActionConfirmation) {
           if (!fundedCall) {
@@ -200,6 +249,12 @@ export async function* runOperator(
       } catch (e) {
         output = { error: fundedCall ? "funded_action_proposal_unavailable" : (e as Error).message };
         if (fundedCall) stopAfterFundedBoundary = true;
+        try {
+          assertOperatorTurnInferenceActive(inferenceAuthority);
+        } catch {
+          output = { error: "operator_turn_inference_unavailable" };
+          stopAfterTurnBoundary = true;
+        }
         L.error("tool crashed", { tool: call.name, err: (e as Error).message, orgId: ctx.orgId });
         yield { type: "tool", name: call.name, status: "error" };
       }
@@ -215,8 +270,19 @@ export async function* runOperator(
       yield { type: "done" };
       return;
     }
+    if (stopAfterTurnBoundary) {
+      yield {
+        type: "notice",
+        text: "This turn reached its tool or time budget. Continue with another message.",
+      };
+      yield { type: "done" };
+      return;
+    }
   }
 
-  yield { type: "notice", text: "Stopped after 10 tool rounds — continue with another message." };
+  yield {
+    type: "notice",
+    text: "Stopped at the per-turn inference limit — continue with another message.",
+  };
   yield { type: "done" };
 }

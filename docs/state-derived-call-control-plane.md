@@ -1,6 +1,17 @@
 # State-derived call control plane
 
-Status: implementation proposal informed by the retained HACC-LC3-v6 development run. The provider-neutral benchmark path now pushes a hash-bound response plan and current capability catalog at every HACC caller turn, with exact transcript replay and provider-free canary coverage. Its common realtime gateway also projects internal actions to exact provider-facing semantic intents, rejects already-parsed semantic-invalid attempts without effects, bounds correction batches, and exposes no executable tool frontier during speech-repair playback. A general production-route repair controller, the audio-bound slot extractor, and default live-route worker orchestration remain proposed. None of these mechanisms has yet demonstrated a HACC efficacy advantage in a prospectively frozen provider experiment.
+Status: partially integrated implementation informed by the retained
+HACC-LC3-v6 development run. The live browser/MCP path injects durable context
+packets and runs `launch_task` through governed read-only workers. The
+provider-neutral benchmark path pushes a hash-bound response plan and current
+capability catalog at every HACC caller turn, with exact transcript replay and
+provider-free canary coverage. Its common realtime gateway projects internal
+actions to exact provider-facing semantic intents, rejects already-parsed
+semantic-invalid attempts without effects, bounds correction batches, and
+exposes no executable tool frontier during speech-repair playback. A general
+production-route repair controller and audio-bound slot extractor remain
+proposed. None of these mechanisms has yet demonstrated a HACC efficacy
+advantage in a prospectively frozen provider experiment.
 
 Related sources: [retained v6 result receipt](../benchmarks/voice-long-horizon/evidence/HACC_LC3_V6_RESULTS.md), [frozen v6 protocol](../benchmarks/voice-long-horizon/HACC_LC3_V6_PROTOCOL.md), [Flow v2](flow-v2.md), [durable conversation runtime](durable-conversation-runtime.md), [mission runtime](mission-runtime.md), and [tool extension boundary](extending-tools.md).
 
@@ -29,8 +40,8 @@ These are development observations, not a publication result. The retained compa
 | Consequential effects | Receipt reservation, dispatch-state tracking, indeterminate outcomes, and explicit read-only reconciliation exist. | A durable, idempotent reconciliation worker is enqueued automatically from an indeterminate post-dispatch receipt and feeds its authoritative result back into the next response plan. |
 | Caller audio | The benchmark retains caller PCM and includes a calibrated input-ASR gate. Model/provider transcripts remain the primary live action-argument path. | A pinned, current-schema-limited extractor produces evidence-bound slot candidates directly from caller PCM. Low-confidence values cause clarification; no hidden expected value is available to the extractor. |
 | Repair | The LC4 common-provider path distinguishes already-parsed semantic mistakes from fatal parse/provenance faults, atomically rejects semantic-invalid batches with zero effect, permits at most three semantic correction batches, and forbids effect calls during its separate speech-repair playback. Ordinary live routes do not yet share one uniform controller. | One production-route same-turn repair policy is allowed for eligible rejection classes, with a machine-readable repair packet, unchanged world state, and no disclosure of expected private values. |
-| Async work | The repository has durable read-only worker and result-delivery primitives plus hash-chained conversation events. Current live provider sessions are not wired to them as the default path. | Reconciliation and declared follow-through jobs carry parent/receipt/policy lineage, survive disconnects, and can complete only preauthorized, idempotent obligations. |
-| Context packet | A durable conversation packet compiler exists, but current provider sessions do not receive its packets by default. | The response plan becomes the minimal per-turn control packet and is composed with only the relevant conversational working set. |
+| Async work | Live `launch_task` derives an immutable read-only manifest, atomically spawns an exactly scoped governed worker, and can deliver an accepted result into a later packet as untrusted advisory content. `waitUntil` is the latency path; the authenticated minute scheduler supplies bounded process-loss pickup through an isolated exact-only worker principal and a durable three-attempt ceiling. | Reconciliation and declared follow-through jobs carry parent/receipt/policy lineage, survive disconnects, and can complete only preauthorized, idempotent obligations. |
+| Context packet | Session creation/reconnect injects the durable packet and MCP results refresh it. | Make the response plan the minimal per-turn control packet everywhere and compose it with only the relevant conversational working set. |
 
 The proposal is therefore primarily integration and interface work over existing primitives. It is not a claim that the complete control plane already runs on OpenAI, Gemini, or xAI.
 

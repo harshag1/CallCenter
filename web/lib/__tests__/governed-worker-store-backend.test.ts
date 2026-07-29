@@ -138,6 +138,7 @@ function durableWorker(overrides: Partial<DurableVoiceWorker> = {}): DurableVoic
 
 function inbox(): DurableConversationInboxMessage {
   return {
+    kind: "result",
     id: ids.message,
     conversationId: ids.conversation,
     workerId: ids.worker,
@@ -149,6 +150,7 @@ function inbox(): DurableConversationInboxMessage {
     deliveryCount: 1,
     applicationId: null,
     appliedContextVersion: null,
+    createdAt: "2026-07-28T17:00:00.000Z",
     appliedAt: null,
     acknowledgedAt: null,
   };

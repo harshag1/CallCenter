@@ -1,18 +1,20 @@
 import "server-only";
 
 import type {
+  BrowserProviderFundingAuthority,
   BrowserRealtimeConnection,
   RealtimeAudioFormat,
   RealtimeProviderAdapter,
   ServerRealtimeConnection,
   VoiceSessionSpec,
 } from "../types";
+import { browserProviderRootFromFundingAuthority } from "../browser-funding-authority";
 import { browserProviderSessionSpec } from "./browser-direct-mcp";
 import { buildOpenAIClientSecretPayload, buildOpenAISession } from "./openai-protocol";
 
 const API = "https://api.openai.com/v1";
 
-function apiKey() {
+function deploymentApiKey() {
   if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is required for the OpenAI voice provider");
   return process.env.OPENAI_API_KEY;
 }
@@ -21,10 +23,20 @@ export function buildOpenAISessionUpdate(spec: VoiceSessionSpec, audio: Realtime
   return { type: "session.update", session: buildOpenAISession(spec, audio) };
 }
 
-async function mintToken(spec: VoiceSessionSpec): Promise<string> {
+async function mintToken(
+  spec: VoiceSessionSpec,
+  fundingAuthority: BrowserProviderFundingAuthority<"openai">,
+): Promise<string> {
   const response = await fetch(`${API}/realtime/client_secrets`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${browserProviderRootFromFundingAuthority(
+        fundingAuthority,
+        "openai",
+        "OPENAI_API_KEY",
+      )}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(buildOpenAIClientSecretPayload(buildOpenAISession(spec, "pcm"))),
   });
   if (!response.ok) throw new Error(`OpenAI realtime token ${response.status}: ${(await response.text()).slice(0, 300)}`);
@@ -34,7 +46,7 @@ async function mintToken(spec: VoiceSessionSpec): Promise<string> {
   return token;
 }
 
-export const openaiAdapter: RealtimeProviderAdapter = {
+export const openaiAdapter = {
   id: "openai",
   label: "OpenAI Realtime API",
   defaultModel: "gpt-realtime-2.1",
@@ -49,7 +61,10 @@ export const openaiAdapter: RealtimeProviderAdapter = {
     notes: ["GPT-Live is not yet available in the API", "WebRTC is preferred for browser media"],
   },
   buildSessionUpdate: buildOpenAISessionUpdate,
-  async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+  async createBrowserConnection(
+    spec: VoiceSessionSpec & { provider: "openai" },
+    fundingAuthority: BrowserProviderFundingAuthority<"openai">,
+  ): Promise<BrowserRealtimeConnection> {
     if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
     const providerSpec = browserProviderSessionSpec(spec);
     return {
@@ -57,7 +72,7 @@ export const openaiAdapter: RealtimeProviderAdapter = {
       transport: "webrtc",
       model: spec.model,
       voice: spec.voice,
-      token: await mintToken(providerSpec),
+      token: await mintToken(providerSpec, fundingAuthority),
       endpoint: `${API}/realtime/calls`,
       toolProxyUrl: spec.toolProxyUrl,
       toolProxyToken: spec.toolProxyToken,
@@ -71,9 +86,9 @@ export const openaiAdapter: RealtimeProviderAdapter = {
       model: spec.model,
       voice: spec.voice,
       wsUrl: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(spec.model)}`,
-      headers: { Authorization: `Bearer ${apiKey()}` },
+      headers: { Authorization: `Bearer ${deploymentApiKey()}` },
       sessionUpdate: buildOpenAISessionUpdate(spec, audio),
       wireProtocol: "openai-realtime",
     };
   },
-};
+} satisfies RealtimeProviderAdapter;

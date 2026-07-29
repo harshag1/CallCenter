@@ -163,7 +163,7 @@ CREATE OR REPLACE FUNCTION public.append_voice_conversation_events(
   batch_text text,
   batch_sha256 text
 ) RETURNS SETOF public.voice_conversation_events
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, extensions, public
 AS $append_voice_conversation_events$
 DECLARE
   conversation public.voice_conversations%ROWTYPE;

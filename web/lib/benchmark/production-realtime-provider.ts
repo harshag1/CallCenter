@@ -16,6 +16,10 @@ import type { NormalizedRealtimeClient } from "../realtime/client/types";
 import { LC4_XAI_SERVER_VAD } from "./xai-server-vad";
 import { canonicalJson, sha256Hex } from "./artifacts";
 
+export type XaiRealtimeTurnBoundary =
+  | "manual_commit"
+  | "provider_native_server_vad";
+
 function parseEnv(text: string): Record<string, string> {
   const values: Record<string, string> = {};
   for (const rawLine of text.split(/\r?\n/)) {
@@ -73,7 +77,10 @@ export function createProductionRealtimeClient(
   provider: LiveStsProvider,
   configuration: TrialSessionConfiguration,
   apiKey: string,
-  options: Readonly<{ geminiMaxDynamicControlBytes?: number }> = {},
+  options: Readonly<{
+    geminiMaxDynamicControlBytes?: number;
+    xaiTurnBoundary?: XaiRealtimeTurnBoundary;
+  }> = {},
 ): NormalizedRealtimeClient {
   const spec = LIVE_STS_PROVIDER_SPECS[provider];
   if (configuration.provider !== provider) {
@@ -96,7 +103,12 @@ export function createProductionRealtimeClient(
         : { maxDynamicControlBytes: options.geminiMaxDynamicControlBytes }),
     });
   }
-  const sessionUpdate = productionOpenAiCompatibleSessionUpdate(provider, configuration);
+  const xaiTurnBoundary = options.xaiTurnBoundary ?? "provider_native_server_vad";
+  const sessionUpdate = productionOpenAiCompatibleSessionUpdate(
+    provider,
+    configuration,
+    provider === "xai" ? xaiTurnBoundary : undefined,
+  );
   return provider === "openai"
     ? createOpenAIRealtimeClient({
         apiKey,
@@ -112,15 +124,19 @@ export function createProductionRealtimeClient(
         connectTimeoutMs: 15_000,
         enableResumption: false,
         requireStrictSessionConfigurationParity: false,
-        // Provider-native server VAD owns initial commit/response creation.
-        // LC4 additionally requires the ordered behavioral lifecycle per turn.
-        unexpectedManualTurnDetectionPolicy: "diagnose",
+        // Finite prerecorded benchmark clips fail closed if the provider
+        // contradicts manual turn mode. Interactive/server-VAD paths retain
+        // their separately qualified provider-native lifecycle.
+        unexpectedManualTurnDetectionPolicy: xaiTurnBoundary === "manual_commit"
+          ? "fail"
+          : "diagnose",
       });
 }
 
 export function productionOpenAiCompatibleSessionUpdate(
   provider: Exclude<LiveStsProvider, "gemini">,
   configuration: TrialSessionConfiguration,
+  xaiTurnBoundary: XaiRealtimeTurnBoundary = "provider_native_server_vad",
 ): Readonly<Record<string, unknown>> {
   if (configuration.provider !== provider) throw new Error("realtime provider differs from the session payload configuration");
   const spec = LIVE_STS_PROVIDER_SPECS[provider];
@@ -141,7 +157,9 @@ export function productionOpenAiCompatibleSessionUpdate(
         session: {
           voice: spec.voice,
           instructions: configuration.instructions,
-          turn_detection: LC4_XAI_SERVER_VAD,
+          turn_detection: xaiTurnBoundary === "manual_commit"
+            ? { type: null }
+            : LC4_XAI_SERVER_VAD,
           audio: { input: {}, output: {} },
           tools: configuration.providerTools,
           tool_choice: "auto",
@@ -152,16 +170,52 @@ export function productionOpenAiCompatibleSessionUpdate(
 export function productionSessionPayloadParitySha256(
   provider: Exclude<LiveStsProvider, "gemini">,
   configuration: TrialSessionConfiguration,
+  xaiTurnBoundary: XaiRealtimeTurnBoundary = "provider_native_server_vad",
 ): string {
-  const base = productionOpenAiCompatibleSessionUpdate(provider, configuration);
+  const base = productionOpenAiCompatibleSessionUpdate(provider, configuration, xaiTurnBoundary);
   const compiled = provider === "xai"
-    ? withXaiServerVadPcmSession(base)
+    ? xaiTurnBoundary === "manual_commit"
+      ? withManualPcmSession("xai", base)
+      : withXaiServerVadPcmSession(base)
     : withManualPcmSession("openai", base);
   return sha256Hex(
-    `harshas-amazing-call-center/production-realtime-session-payload/v1\n${canonicalJson({
+    `harshas-amazing-call-center/production-realtime-session-payload/v2\n${canonicalJson({
       provider,
       model: configuration.model,
+      turnBoundary: provider === "xai" ? xaiTurnBoundary : "manual_commit",
       sessionUpdate: compiled,
+    })}`,
+  );
+}
+
+/**
+ * Non-treatment transport commitment for finite prerecorded xAI turns.
+ * Instructions are deliberately excluded: Native and HACC vary their context
+ * construction by design, while model, voice, manual boundary, PCM, tool
+ * frontier, and resumption policy must remain identical within the pair.
+ */
+export function xaiFiniteManualTransportParitySha256(
+  configuration: TrialSessionConfiguration,
+): string {
+  const compiled = withManualPcmSession(
+    "xai",
+    productionOpenAiCompatibleSessionUpdate(
+      "xai",
+      configuration,
+      "manual_commit",
+    ),
+  );
+  const session = compiled.session as Record<string, unknown>;
+  return sha256Hex(
+    `harshas-amazing-call-center/xai-finite-manual-transport-parity/v1\n${canonicalJson({
+      provider: "xai",
+      model: configuration.model,
+      voice: session.voice ?? null,
+      turn_detection: session.turn_detection ?? null,
+      audio: session.audio ?? null,
+      tool_choice: session.tool_choice ?? null,
+      tools: Array.isArray(session.tools) ? session.tools : [],
+      resumption: session.resumption ?? null,
     })}`,
   );
 }

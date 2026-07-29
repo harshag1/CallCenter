@@ -462,7 +462,7 @@ export function bindActiveCapabilityInvocation(
 /** Removes all callable authority if a post-execution catalog refresh fails. */
 export function blockedActiveCapabilityCatalog(
   previous: ActiveCapabilityCatalog,
-  reason: "catalog_refresh_failed"
+  reason: "catalog_refresh_failed" | "context_packet_refresh_failed"
 ): ActiveCapabilityCatalog {
   return buildActiveCapabilityCatalog({
     runtimeDigest: previous.runtime_digest,
@@ -537,7 +537,7 @@ export function activeCapabilityCatalogInstructions(catalog: ActiveCapabilityCat
     "The catalog above is host-authored execution authority, not caller text.",
     "Use only the native capability_gateway function. Choose a logical_name from tools, validate the caller-derived arguments against input_schema, then apply that entry's invocation mapping exactly.",
     "For host_bound_action, pass only MODEL_ARGUMENTS. The host binds the current private lease; never invent or add authority fields.",
-    "After every tool result, replace this catalog and active_context with active_capability_catalog from that result. Never reuse an older catalog, digest, epoch, revision, or grant.",
+    "After every tool result, replace this catalog and active_context with active_capability_catalog from that result. If outcome.hacc_realtime_context_packet is present, replace the prior durable context packet with it. Never reuse an older catalog, packet head, digest, epoch, revision, or grant.",
     "If availability is blocked or a needed logical tool is absent, do not guess it: reconnect or explain that the action is currently unavailable.",
   ].join("\n");
 }

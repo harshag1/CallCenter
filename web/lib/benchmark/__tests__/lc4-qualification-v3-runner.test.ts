@@ -113,8 +113,8 @@ function keys() {
   });
 }
 
-const TEST_TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v6\n";
-const TEST_TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n";
+const TEST_TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
+const TEST_TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v7\n";
 
 function signTestTerminal(body: Lc4QualificationV3TerminalBody, privateKeyPem: string) {
   const privateKey = createPrivateKey(privateKeyPem);
@@ -359,7 +359,11 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
   });
   const xaiTarget = createLc4QualificationV3Targets().find((target) => target.provider === "xai")!;
   const xaiTransportParitySha256 = xaiServerVadTransportParitySha256(
-    withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate("xai", xaiTarget.configuration)),
+    withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate(
+      "xai",
+      xaiTarget.configuration,
+      "provider_native_server_vad",
+    )),
     xaiTarget.model,
   );
   const xaiToolFrontierSha256 = realtimeToolFrontierSha256([LC4_S2S_TOOL]);
@@ -503,7 +507,7 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     ...(input.provider !== "xai" ? {} : {
       transport_suffix: {
         purpose: LC4_XAI_SERVER_VAD_SILENCE_TAIL.purpose,
-        completion: "full_plan_delivered" as const,
+        completion: "provider_native_speech_stop" as const,
         policy_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256,
         pcm_sha256: LC4_XAI_SERVER_VAD_SILENCE_TAIL_PCM_SHA256,
         audio_bytes: LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
@@ -591,7 +595,11 @@ function passedExecution(input: Parameters<NonNullable<Parameters<typeof runLc4Q
     response_generation_requested: input.provider !== "xai",
     provider_auto_response_observed: input.provider === "xai",
     transport_failure_diagnostic: null,
-    turn_boundary_mode: input.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+    turn_boundary_mode: input.provider === "xai"
+      ? "provider_native_server_vad" as const
+      : input.provider === "gemini"
+        ? "provider_activity_markers" as const
+        : "manual_commit" as const,
     server_vad_setting_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_SETTING_SHA256 : null,
     server_vad_transport_disclosure_sha256: input.provider === "xai" ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256 : null,
     transport_parity_sha256: input.provider === "xai" ? xaiTransportParitySha256 : null,
@@ -688,7 +696,11 @@ describe("LC4 qualification v3 signed runner", () => {
     expect(plan.body.control_size_diagnostic.qualification_gate).toBe(false);
     const xaiConfiguration = createLc4QualificationV3Targets().find((target) => target.provider === "xai")!.configuration;
     expect(plan.body.targets.find((target) => target.provider === "xai")?.production_session_payload_sha256)
-      .toBe(productionSessionPayloadParitySha256("xai", xaiConfiguration));
+      .toBe(productionSessionPayloadParitySha256(
+        "xai",
+        xaiConfiguration,
+        "provider_native_server_vad",
+      ));
     expect(() => assertLc4QualificationV3PlanArtifact(plan, authority.fingerprint)).not.toThrow();
     expect(() => assertLc4QualificationV3PlanArtifact({
       ...plan,
@@ -877,6 +889,10 @@ describe("LC4 qualification v3 signed runner", () => {
       trustRootFingerprint: authority.fingerprint,
       now: NOW,
     })).toThrow("maximum TTL");
+    const clientConstructions: Array<{
+      provider: string;
+      xaiTurnBoundary: string | null;
+    }> = [];
     const terminal = await runLc4QualificationV3({
       root,
       repositoryRoot,
@@ -888,7 +904,13 @@ describe("LC4 qualification v3 signed runner", () => {
         inspectGitSource: async () => SOURCE,
         loadCredentials: async () => CREDENTIALS,
         materializeAudio: audioModule.materializeLc4S2sAudioFixture,
-        createClient: (provider) => new SetupClient(provider, true),
+        createClient: (provider, _configuration, _apiKey, options) => {
+          clientConstructions.push({
+            provider,
+            xaiTurnBoundary: options.xaiTurnBoundary ?? null,
+          });
+          return new SetupClient(provider, true);
+        },
         executeRoundtrip: async (input) => passedExecution(input),
       },
     });
@@ -910,6 +932,13 @@ describe("LC4 qualification v3 signed runner", () => {
         benchmark_ready: true,
       },
     });
+    expect(plan.body.targets.find((target) => target.provider === "xai")).toMatchObject({
+      qualification_turn_boundary: "provider_native_server_vad",
+    });
+    expect(clientConstructions.filter((entry) => entry.provider === "xai")).toEqual([
+      { provider: "xai", xaiTurnBoundary: "provider_native_server_vad" },
+      { provider: "xai", xaiTurnBoundary: "provider_native_server_vad" },
+    ]);
     const gateB = JSON.parse(await readFile(
       join(root, "attempts", `${authBody.authorization_id}.complete`, "xai-server-vad-gate-b-binding.json"),
       "utf8",

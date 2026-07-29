@@ -1,10 +1,13 @@
 import "server-only";
 
 import type {
+  BrowserProviderFundingAuthority,
   BrowserRealtimeConnection,
   RealtimeProviderAdapter,
   ServerRealtimeConnection,
+  VoiceSessionSpec,
 } from "../types";
+import { browserProviderRootFromFundingAuthority } from "../browser-funding-authority";
 import { browserProviderSessionSpec } from "./browser-direct-mcp";
 import {
   buildXaiBrowserProtocols,
@@ -14,15 +17,24 @@ import {
 
 const API = "https://api.x.ai/v1";
 
-function apiKey() {
+function deploymentApiKey() {
   if (!process.env.XAI_API_KEY) throw new Error("XAI_API_KEY is required for the xAI voice provider");
   return process.env.XAI_API_KEY;
 }
 
-async function mintToken(): Promise<string> {
+async function mintToken(
+  fundingAuthority: BrowserProviderFundingAuthority<"xai">,
+): Promise<string> {
   const response = await fetch(`${API}/realtime/client_secrets`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${browserProviderRootFromFundingAuthority(
+        fundingAuthority,
+        "xai",
+        "XAI_API_KEY",
+      )}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(buildXaiClientSecretPayload()),
   });
   if (!response.ok) throw new Error(`xAI realtime token ${response.status}: ${(await response.text()).slice(0, 300)}`);
@@ -32,7 +44,7 @@ async function mintToken(): Promise<string> {
   return token;
 }
 
-export const xaiAdapter: RealtimeProviderAdapter = {
+export const xaiAdapter = {
   id: "xai",
   label: "xAI Voice Agent API",
   defaultModel: "grok-voice-think-fast-1.0",
@@ -50,10 +62,13 @@ export const xaiAdapter: RealtimeProviderAdapter = {
     ],
   },
   buildSessionUpdate: buildXaiSessionUpdate,
-  async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+  async createBrowserConnection(
+    spec: VoiceSessionSpec & { provider: "xai" },
+    fundingAuthority: BrowserProviderFundingAuthority<"xai">,
+  ): Promise<BrowserRealtimeConnection> {
     if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
     const providerSpec = browserProviderSessionSpec(spec);
-    const token = await mintToken();
+    const token = await mintToken(fundingAuthority);
     return {
       provider: "xai",
       transport: "websocket",
@@ -77,9 +92,9 @@ export const xaiAdapter: RealtimeProviderAdapter = {
       model: spec.model,
       voice: spec.voice,
       wsUrl: `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(spec.model)}`,
-      headers: { Authorization: `Bearer ${apiKey()}` },
+      headers: { Authorization: `Bearer ${deploymentApiKey()}` },
       sessionUpdate: buildXaiSessionUpdate(spec, audio),
       wireProtocol: "openai-realtime",
     };
   },
-};
+} satisfies RealtimeProviderAdapter;

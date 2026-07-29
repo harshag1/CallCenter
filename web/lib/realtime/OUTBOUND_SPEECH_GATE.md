@@ -21,9 +21,11 @@ For each response, the transport integration must:
 8. Call `expireResponse` from the collection watchdog. A stalled response is
    suppressed, not partially released.
 
-The default policy requires an independent ASR receipt bound to the SHA-256,
-byte length, format, and duration of the exact concatenated held PCM. A provider
-transcript may corroborate that result, but it is not exact PCM coverage.
+The default policy requires a versioned, server-HMAC-authenticated independent
+ASR receipt bound to the organization, web call, voice provider, provider
+response ID, PCM SHA-256, byte length, sample rate, transcript hash, ASR model,
+and decision. A provider transcript may corroborate that result, but it is not
+exact PCM coverage.
 
 This strong mode adds at least the full generated-utterance duration plus ASR
 time before first playout. The defaults cap collection at 150 seconds, buffered
@@ -57,17 +59,85 @@ also avoid logging the in-memory policy object, ASR input, or raw ASR receipt.
 - A `suppress_and_regenerate` decision invokes the optional host-owned repair
   callback with hashes and safe rule IDs only; the rejected audio is never
   exposed to that callback or playout.
-- The browser OpenAI WebRTC adapter connects the remote media source directly
-  to `AudioContext.destination`. It therefore rejects startup before gateway,
-  WebRTC, or network side effects whenever an outbound gate is requested. A
-  real enforcement integration must replace that connection with a
-  capture/worklet buffer or use a server WebSocket audio path. Observing the
-  data-channel transcript while the media track remains connected is not
-  enforcement.
+- The browser OpenAI WebRTC adapter now replaces the direct remote-track
+  destination edge with `remote track -> muted PCM processor -> zero-gain
+  destination` whenever a gate is present. Float samples from that graph are
+  converted to PCM16 and held by the same response-scoped gate. The data
+  channel terminal waits one bounded render tail before sealing the response,
+  then only released PCM is scheduled into `AudioContext`. Recording receives
+  that released schedule, never the quarantined remote track. If capture nodes
+  are unavailable, a second remote audio track appears, response identities
+  overlap, or the media/data-channel boundary drifts, the guarded connection
+  closes instead of adding a direct playout fallback.
 
-The option is not enabled by default because the product must supply an
-independent ASR implementation and policy. Calls without the option retain the
-legacy direct-playout behavior and must not be described as speech-guarded.
+## Enabling the stock browser path
+
+The ordinary `CallWidget -> RealtimeCall` path automatically composes the gate
+when the token response contains a server-authored `speechGuardrail` bootstrap.
+Agent versions can opt in with:
+
+```json
+{
+  "speech_guardrail": {
+    "mode": "enforce",
+    "forbidden_terminal_claims": [
+      {
+        "phrase": "your refund is complete",
+        "rule_id": "refund.requires_receipt"
+      }
+    ],
+    "secrets": [
+      {
+        "value": "the literal phrase that must never be spoken",
+        "rule_id": "privacy.protected_phrase"
+      }
+    ]
+  }
+}
+```
+
+The operator `update_agent` tool accepts this object directly. The host removes
+it from provider settings, fingerprints configured secrets, and binds the
+bootstrap to the exact call and provider. The browser validates that authority
+before asking for microphone permission.
+
+Independent ASR is a same-origin, authenticated route over the exact aggregate
+PCM. It verifies canonical base64, byte count, duration, sample rate, SHA-256,
+active web-call ownership, provider identity, and that speech enforcement is
+enabled before invoking ASR. A durable one-shot claim binds that request before
+provider dispatch. Exact settled replays return the authenticated cached
+receipt; pending, failed, indeterminate, or identity-changing replays never
+dispatch again. Per-call and serialized per-organization/day limits reserve
+the conservative ASR ceiling before spend.
+
+The route requires the authenticated tenant's encrypted OpenAI BYOK credential.
+The deployment `OPENAI_API_KEY` is deliberately not ASR spend authority. Each
+receipt is HMAC-SHA-256 authenticated under
+`HACC_OUTBOUND_SPEECH_ASR_RECEIPT_HMAC_KEY`; cached receipts are reverified
+server-side, while the browser and gate independently recompute the transcript
+and canonical receipt digests against the exact call/provider/response/PCM
+tuple. Transcript text never enters the content-free gate audit event.
+
+Before enabling a per-agent policy or deployment-wide enforcement, configure
+an independent receipt key plus explicit integer micro-USD ceilings:
+
+```dotenv
+HACC_OUTBOUND_SPEECH_ASR_RECEIPT_HMAC_KEY=
+HACC_OUTBOUND_SPEECH_ASR_MAX_MICRO_USD_PER_WEB_CALL=120000
+HACC_OUTBOUND_SPEECH_ASR_MAX_MICRO_USD_PER_ORG_DAY=600000
+```
+
+Generate the blank key with `openssl rand -base64 48`. The example limits are
+$0.12 per web call and $0.60 per organization per UTC day. A missing, malformed,
+or exhausted authority fails before provider dispatch.
+
+Set `HACC_REQUIRE_BROWSER_SPEECH_GUARDRAILS=1` to make enforcement mandatory
+for every browser call. Only absent, `0`, and `1` are accepted; a typo fails
+closed instead of silently disabling enforcement. In that mode, a missing
+tenant ASR credential, malformed policy, cross-call bootstrap, unavailable
+OpenAI WebRTC capture graph, or ASR failure fails closed. Without the deployment
+setting or per-agent opt-in, calls retain legacy direct playout and the UI
+reports no `speech guarded` status.
 
 ## Security boundary
 

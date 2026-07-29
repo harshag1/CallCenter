@@ -61,7 +61,9 @@ The application remains authoritative for tenancy, call ownership, provider sele
 
 ## Quick start
 
-Requirements: Node.js 20.9+, an application implementing the four same-origin endpoints above, Twilio, and a supported hosted realtime provider key.
+Requirements: Node.js 20.19.x, 22.13.x or newer 22.x, or 24+; an
+application implementing the four same-origin endpoints above; Twilio; and a
+supported hosted realtime provider key.
 
 ```bash
 cd bridge

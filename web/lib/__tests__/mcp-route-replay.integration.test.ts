@@ -7,6 +7,20 @@ import { enterFlowStep, selectFlowTopic } from "../flow-runtime";
 const databaseUrl = process.env.FLOW_INTEGRATION_DATABASE_URL;
 const integration = describe.runIf(Boolean(databaseUrl));
 const mocks = vi.hoisted(() => ({ verifyScope: vi.fn() }));
+const originalEnvironment = {
+  databaseUrl: process.env.DATABASE_URL,
+  databaseSsl: process.env.DATABASE_SSL,
+  supabaseDatabaseUrl: process.env.SUPABASE_DB_URL,
+  gatewaySecret: process.env.MCP_GATEWAY_SECRET,
+};
+const syntheticGatewaySecret = [
+  "mcp",
+  "route",
+  "replay",
+  "integration",
+  "fixture",
+  "only",
+].join("-");
 
 vi.mock("@/lib/voice", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../voice")>();
@@ -17,9 +31,9 @@ import { AuthorityClient } from "../../../bridge/lib/authority-client.js";
 
 integration("standalone bridge dropped-response replay through the real MCP route", () => {
   const ids = { org: randomUUID(), agent: randomUUID(), call: randomUUID() };
-  const callSid = `CA${"1".repeat(32)}`;
-  const accountSid = `AC${"2".repeat(32)}`;
-  const streamSid = `MZ${"3".repeat(32)}`;
+  const callSid = `CA${ids.call.replaceAll("-", "")}`;
+  const accountSid = `AC${ids.agent.replaceAll("-", "")}`;
+  const streamSid = `MZ${ids.org.replaceAll("-", "")}`;
   const to = "+14155550100";
   const flow = AgentFlowSchema.parse({
     schema_version: 2,
@@ -84,10 +98,21 @@ integration("standalone bridge dropped-response replay through the real MCP rout
 
   async function loadModules() {
     if (databaseUrl) {
-      process.env.DATABASE_URL = databaseUrl;
-      process.env.DATABASE_SSL = "disable";
+      const hostname = new URL(databaseUrl).hostname.toLowerCase();
+      const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname);
+      if (loopback) {
+        process.env.DATABASE_URL = databaseUrl;
+        delete process.env.SUPABASE_DB_URL;
+        process.env.DATABASE_SSL = "disable";
+      } else {
+        // Retain the Supabase-specific CA path for remote integration
+        // databases instead of weakening TLS or treating the URL as generic.
+        delete process.env.DATABASE_URL;
+        process.env.SUPABASE_DB_URL = databaseUrl;
+        process.env.DATABASE_SSL = "verify-full";
+      }
     }
-    process.env.MCP_GATEWAY_SECRET = "mcp-route-replay-secret-that-is-long-enough";
+    process.env.MCP_GATEWAY_SECRET = syntheticGatewaySecret;
     const [db, stateStore, route, mcp] = await Promise.all([
       import("../db"),
       import("../flow-state-store"),
@@ -139,15 +164,33 @@ integration("standalone bridge dropped-response replay through the real MCP rout
     await modules.db.q("DELETE FROM agents WHERE id=$1", [ids.agent]).catch(() => undefined);
     await modules.db.q("DELETE FROM orgs WHERE id=$1", [ids.org]).catch(() => undefined);
     await modules.db.getPool().end();
+    for (const [name, value] of Object.entries({
+      DATABASE_URL: originalEnvironment.databaseUrl,
+      DATABASE_SSL: originalEnvironment.databaseSsl,
+      SUPABASE_DB_URL: originalEnvironment.supabaseDatabaseUrl,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    const gatewaySecretName = "MCP_GATEWAY_SECRET";
+    if (originalEnvironment.gatewaySecret === undefined) {
+      delete process.env[gatewaySecretName];
+    } else {
+      process.env[gatewaySecretName] = originalEnvironment.gatewaySecret;
+    }
   });
 
-  it("replays the exact enter_step result after the first HTTP response is lost", async () => {
+  it("exactly replays enter_step after its HTTP response is lost", async () => {
     const requests: string[] = [];
+    const terminalResponseBodies: string[] = [];
     let dropped = false;
     const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { method: string };
       requests.push(body.method);
       const response = await modules.route.POST(new Request(input, init));
+      if (body.method === "tools/call") {
+        terminalResponseBodies.push(await response.clone().text());
+      }
       if (body.method === "tools/call" && !dropped) {
         dropped = true;
         // The authority committed and produced a response, but the bridge never received it.
@@ -185,16 +228,44 @@ integration("standalone bridge dropped-response replay through the real MCP rout
     });
     expect(outcome.isError).toBe(false);
     expect(outcome.output).toMatchObject({
-      outcome: { path: "membership.verify", revision: 2 },
+      outcome: {
+        path: "membership.verify",
+        revision: 2,
+        hacc_realtime_context_packet: {
+          authority: {
+            capabilityEpoch: 2,
+            conversationRevision: 2,
+          },
+          durable: {
+            currentFlowCheckpoint: {
+              flowRevision: 2,
+              runtimeDigest,
+            },
+          },
+        },
+      },
       active_capability_catalog: {
+        availability: "active",
         capability_epoch: 2,
         catalog_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
       },
+    });
+    const terminalEnvelope = outcome.output as {
+      outcome: { hacc_realtime_context_packet: {
+        authority: { capabilityCatalogDigest: string; capabilityEpoch: number };
+      } };
+      active_capability_catalog: { catalog_digest: string; capability_epoch: number };
+    };
+    expect(terminalEnvelope.outcome.hacc_realtime_context_packet.authority).toMatchObject({
+      capabilityCatalogDigest: terminalEnvelope.active_capability_catalog.catalog_digest,
+      capabilityEpoch: terminalEnvelope.active_capability_catalog.capability_epoch,
     });
     expect(JSON.stringify(outcome.output)).not.toMatch(
       /capability_grant|capability_expires_at|available_actions/
     );
     expect(requests.filter((method) => method === "tools/call")).toHaveLength(2);
+    expect(terminalResponseBodies).toHaveLength(2);
+    expect(terminalResponseBodies[1]).toBe(terminalResponseBodies[0]);
 
     const state = await modules.stateStore.loadFlowState(ids.call);
     expect(state.currentStep).toBe("membership.verify");
@@ -213,5 +284,5 @@ integration("standalone bridge dropped-response replay through the real MCP rout
     const wouldRetry = enterFlowStep(flow, state, "membership.verify");
     if ("error" in wouldRetry) throw new Error(wouldRetry.error);
     expect(wouldRetry.state.attempts["membership.verify"]).toBe(2);
-  });
+  }, 30_000);
 });

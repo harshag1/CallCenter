@@ -102,31 +102,58 @@ export async function POST(req: Request) {
   const origin = requirePublicOrigin();
 
   const encoder = new TextEncoder();
-  const stream = new ReadableStream({
+  const turnController = new AbortController();
+  let cancelled = false;
+  let iterator: AsyncGenerator<unknown> | null = null;
+  const abortFromRequest = (): void => {
+    cancelled = true;
+    turnController.abort(new Error("operator request cancelled"));
+  };
+  req.signal.addEventListener("abort", abortFromRequest, { once: true });
+  if (req.signal.aborted) abortFromRequest();
+
+  const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const ev of runOperator(
+        iterator = runOperator(
           session,
           body.threadId,
           body.message,
           body.agentId,
           origin,
           body.openFlow,
-        )) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+          turnController.signal,
+        );
+        for await (const ev of iterator) {
+          if (cancelled || turnController.signal.aborted) break;
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(ev)}\n\n`),
+          );
         }
       } catch {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({
-            type: "notice",
-            text: "Operator request failed.",
-            code: "operator_request_failed",
-          })}\n\n`)
-        );
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`));
+        if (!cancelled && !turnController.signal.aborted) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({
+              type: "notice",
+              text: "Operator request failed.",
+              code: "operator_request_failed",
+            })}\n\n`),
+          );
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`),
+          );
+        }
       } finally {
-        controller.close();
+        req.signal.removeEventListener("abort", abortFromRequest);
+        await iterator?.return(undefined).catch(() => undefined);
+        if (!cancelled) controller.close();
       }
+    },
+    async cancel() {
+      cancelled = true;
+      turnController.abort(new Error("operator response stream cancelled"));
+      req.signal.removeEventListener("abort", abortFromRequest);
+      await iterator?.return(undefined).catch(() => undefined);
     },
   });
   return new Response(stream, {

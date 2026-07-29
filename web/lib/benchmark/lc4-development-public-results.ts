@@ -5,7 +5,7 @@ import {
   link,
   lstat,
   mkdir,
-  readFile,
+  open,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -31,11 +31,21 @@ import {
   type Lc4DevLiveRunArtifact,
 } from "./lc4-development-live-runner";
 import { assertLc4DevOperatorAuthorizationDag, LC4_DEV_OPERATOR_FILENAMES } from "./lc4-development-operator-cli";
+import {
+  assertLc4PublicationTransportProvenance,
+  verifyLc4PublicationTransportProvenance,
+  type Lc4PublicationGateDInput,
+  type Lc4PublicationTransportProvenance,
+} from "./lc4-publication-transport-provenance";
+import {
+  replayLc4PublicationTransportEvidence,
+  type Lc4PublicationTransportReplay,
+} from "./lc4-publication-transport-replay";
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES = 1024 * 1024;
-const PUBLIC_RESULT_DOMAIN = "harshas-amazing-call-center/lc4-dev-public-result/v1\n";
+const PUBLIC_RESULT_DOMAIN = "harshas-amazing-call-center/lc4-dev-public-result/v4\n";
 
 export const LC4_DEV_PUBLIC_RESULT_FILENAMES = Object.freeze({
   json: "HACC_LC4_DEV_PUBLIC_RESULT.json",
@@ -43,7 +53,7 @@ export const LC4_DEV_PUBLIC_RESULT_FILENAMES = Object.freeze({
 });
 
 export type Lc4DevPublicResultArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 4;
   artifact_type: "hacc_lc4_dev_public_result";
   protocol_id: "HACC-LC4-DEV-v1";
   evidence_class: "C3";
@@ -77,7 +87,9 @@ export type Lc4DevPublicResultArtifact = Readonly<{
     }>[];
     matched_provider_pairs: 3;
     no_retry_after_paid_open: true;
+    cells: Lc4PublicationTransportProvenance["cells"];
   }>;
+  qualification: Omit<Lc4PublicationTransportProvenance, "cells">;
   evaluation: Readonly<{
     task_results_available: boolean;
     evidence_complete: boolean;
@@ -108,19 +120,23 @@ export type Lc4DevPublicResultArtifact = Readonly<{
     contains_pcm_or_audio: false;
     contains_wire_payloads: false;
     contains_local_paths: false;
-    contains_credential_or_key_identities: false;
+    contains_private_credential_or_signing_key_material: false;
+    contains_public_authority_trust_root: true;
+    contains_provider_session_ids: false;
+    contains_gate_d_receipt_path_or_trust_root: false;
   }>;
   limitations: readonly [
     "six development episodes are mechanism evidence, not an efficacy estimate",
     "authority scores are published only when the complete evidence DAG replays",
     "no Native-versus-HACC superiority claim is authorized by this artifact",
+    "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
   ];
   public_result_sha256: string;
 }>;
 
 type AuthorityReplay = Lc4DevAuthorityReportInput & Readonly<{ errors?: readonly string[] }>;
 
-export type Lc4DevPublicResultDependencies = Readonly<{
+type Lc4DevEvidenceReplayDependencies = Readonly<{
   replay_authority_report?: typeof replayLc4DevAuthorityReport;
   replay_budget_evidence?: typeof replayLc4DevBudgetEvidence;
 }>;
@@ -134,14 +150,23 @@ type VerifiedEvidence = Readonly<{
   package: Lc4DevRunPackage;
   report: Lc4DevLiveReportArtifact;
   authority: AuthorityReplay;
+  transport_replay: Lc4PublicationTransportReplay;
 }>;
 
 function freeze<T>(value: T): T {
   return immutableJson(value) as unknown as T;
 }
 
+function requireHash(value: string, label: string): void {
+  if (!HASH.test(value)) {
+    throw new Error(`${label} must be one lowercase SHA-256`);
+  }
+}
+
 function absolute(path: string, label: string): string {
-  if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`${label} must be an absolute normalized path`);
+  if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) {
+    throw new Error(`${label} must be an absolute normalized path`);
+  }
   return path;
 }
 
@@ -151,16 +176,86 @@ async function assertRealDirectory(path: string, label: string): Promise<void> {
 }
 
 async function readBoundedJson<T>(path: string, label: string): Promise<T> {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
-    throw new Error(`${label} must be one regular, non-linked file`);
-  }
-  if (metadata.size < 2 || metadata.size > MAX_JSON_BYTES) throw new Error(`${label} has an invalid size`);
+  const encoded = await readBoundedRegularFile(
+    path,
+    label,
+    MAX_JSON_BYTES,
+  );
   try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
+    return JSON.parse(encoded) as T;
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`${label} is not valid JSON`);
     throw error;
+  }
+}
+
+async function readBoundedRegularFile(
+  path: string,
+  label: string,
+  maximumBytes: number,
+): Promise<string> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new Error(`${label} must be one bounded regular, non-linked file`);
+  }
+  try {
+    const [descriptorBefore, pathBefore] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    const safe = (descriptor: typeof descriptorBefore, pathMetadata: typeof pathBefore): boolean =>
+      descriptor.isFile()
+      && pathMetadata.isFile()
+      && !pathMetadata.isSymbolicLink()
+      && descriptor.dev === pathMetadata.dev
+      && descriptor.ino === pathMetadata.ino
+      && descriptor.nlink === BigInt(1)
+      && pathMetadata.nlink === BigInt(1)
+      && descriptor.size >= BigInt(2)
+      && descriptor.size <= BigInt(maximumBytes)
+      && pathMetadata.size === descriptor.size;
+    if (!safe(descriptorBefore, pathBefore)) {
+      throw new Error(`${label} must be one bounded regular, non-linked file`);
+    }
+    const expectedBytes = Number(descriptorBefore.size);
+    const bytes = Buffer.alloc(expectedBytes);
+    let offset = 0;
+    while (offset < expectedBytes) {
+      const result = await handle.read(
+        bytes,
+        offset,
+        expectedBytes - offset,
+        offset,
+      );
+      if (result.bytesRead <= 0) {
+        throw new Error(`${label} changed while it was being read`);
+      }
+      offset += result.bytesRead;
+    }
+    const overflow = await handle.read(
+      Buffer.allocUnsafe(1),
+      0,
+      1,
+      expectedBytes,
+    );
+    const [descriptorAfter, pathAfter] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    if (overflow.bytesRead !== 0
+      || !safe(descriptorAfter, pathAfter)
+      || descriptorAfter.dev !== descriptorBefore.dev
+      || descriptorAfter.ino !== descriptorBefore.ino
+      || descriptorAfter.size !== descriptorBefore.size
+      || descriptorAfter.mtimeNs !== descriptorBefore.mtimeNs
+      || descriptorAfter.ctimeNs !== descriptorBefore.ctimeNs) {
+      throw new Error(`${label} changed while it was being read`);
+    }
+    return bytes.toString("utf8");
+  } finally {
+    await handle.close();
   }
 }
 
@@ -182,10 +277,15 @@ function assertReportBoundary(report: Lc4DevLiveReportArtifact): void {
   }
 }
 
-export async function verifyLc4DevEvidenceRoot(
+async function verifyLc4DevEvidenceRootWithDependencies(
   evidenceRootInput: string,
-  dependencies: Lc4DevPublicResultDependencies = {},
+  authorityTrustRootSha256: string,
+  dependencies: Lc4DevEvidenceReplayDependencies,
 ): Promise<VerifiedEvidence> {
+  requireHash(
+    authorityTrustRootSha256,
+    "LC4-DEV external authority trust root",
+  );
   const evidenceRoot = absolute(evidenceRootInput, "LC4-DEV evidence root");
   await assertRealDirectory(evidenceRoot, "LC4-DEV evidence root");
   const [prepare, preflight, run, lease, budget, packageArtifact, storedReport] = await Promise.all([
@@ -205,7 +305,8 @@ export async function verifyLc4DevEvidenceRoot(
   assertLc4DevLivePreflightArtifact(preflight, prepare, new Date(preflight.checked_at));
   assertLc4DevOperatorAuthorizationDag({
     preflight,
-    expected_authority_public_key_fingerprint_sha256: preflight.authority_trust_root_sha256,
+    expected_authority_public_key_fingerprint_sha256:
+      authorityTrustRootSha256,
   });
   if (run.execution_id !== prepare.execution_id
     || run.prepare_sha256 !== prepare.prepare_sha256
@@ -227,11 +328,21 @@ export async function verifyLc4DevEvidenceRoot(
 
   const casRoot = resolve(evidenceRoot, LC4_DEV_OPERATOR_FILENAMES.cas);
   await assertRealDirectory(casRoot, "LC4-DEV CAS root");
-  const authority = await (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
-    run,
-    preflight,
-    cas_root_dir: casRoot,
-  });
+  const [authority, transportReplay] = await Promise.all([
+    (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
+      run,
+      preflight,
+      cas_root_dir: casRoot,
+    }),
+    replayLc4PublicationTransportEvidence({
+      prepare,
+      preflight,
+      run,
+      cas_root_dir: casRoot,
+      expected_authority_trust_root_sha256:
+        authorityTrustRootSha256,
+    }),
+  ]);
   const expectedReport = createLc4DevLiveReportArtifact(run, authority, {
     run_package_sha256: packageArtifact.package_sha256,
     budget_lease_sha256: lease.lease_sha256,
@@ -243,7 +354,56 @@ export async function verifyLc4DevEvidenceRoot(
     throw new Error("LC4-DEV stored report does not reproduce from independently replayed evidence");
   }
   assertReportBoundary(storedReport);
-  return freeze({ prepare, preflight, run, lease, budget, package: packageArtifact, report: storedReport, authority });
+  return freeze({
+    prepare,
+    preflight,
+    run,
+    lease,
+    budget,
+    package: packageArtifact,
+    report: storedReport,
+    authority,
+    transport_replay: transportReplay,
+  });
+}
+
+/**
+ * Replays the complete on-disk evidence DAG with the production verifiers.
+ *
+ * Publication code must use this function. In particular, it deliberately has
+ * no dependency-injection seam: a caller cannot substitute a successful
+ * budget or authority replay for the retained evidence.
+ */
+export async function verifyLc4DevEvidenceRoot(
+  input: Readonly<{
+    evidence_root: string;
+    authority_trust_root_sha256: string;
+  }>,
+): Promise<VerifiedEvidence> {
+  return verifyLc4DevEvidenceRootWithDependencies(
+    input.evidence_root,
+    input.authority_trust_root_sha256,
+    Object.freeze({}),
+  );
+}
+
+/**
+ * Unsafe unit-test seam. It is intentionally not used by either publication
+ * CLI and must never be wired into a release/export path.
+ */
+export async function unsafeVerifyLc4DevEvidenceRootForTestsOnly(
+  evidenceRootInput: string,
+  authorityTrustRootSha256: string,
+  dependencies: Lc4DevEvidenceReplayDependencies,
+): Promise<VerifiedEvidence> {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("unsafe LC4 evidence replay dependencies are test-only");
+  }
+  return verifyLc4DevEvidenceRootWithDependencies(
+    evidenceRootInput,
+    authorityTrustRootSha256,
+    dependencies,
+  );
 }
 
 function safeModel(value: string): string {
@@ -251,7 +411,29 @@ function safeModel(value: string): string {
   return value;
 }
 
-export function createLc4DevPublicResultArtifact(evidence: VerifiedEvidence): Lc4DevPublicResultArtifact {
+export function createLc4DevPublicResultArtifact(
+  evidence: VerifiedEvidence,
+  transportProvenance: Lc4PublicationTransportProvenance,
+): Lc4DevPublicResultArtifact {
+  assertLc4PublicationTransportProvenance(transportProvenance);
+  if (transportProvenance.development_transport_run_sha256
+      !== evidence.run.run_sha256
+    || transportProvenance.development_transport_replay_sha256
+      !== evidence.transport_replay.replay_sha256
+    || transportProvenance.canonical_provider_exchange_count
+      !== evidence.transport_replay.canonical_provider_exchange_count
+    || transportProvenance.repair_provider_exchange_count
+      !== evidence.transport_replay.repair_provider_exchange_count
+    || transportProvenance.total_response_generation_count
+      !== evidence.transport_replay.total_response_generation_count
+    || transportProvenance.repair_provider_exchange_count
+      !== evidence.run.repair_playbacks
+    || transportProvenance.total_response_generation_count
+      !== evidence.run.response_generations_completed) {
+    throw new Error(
+      "LC4-DEV public transport provenance differs from the exact replayed run evidence",
+    );
+  }
   const terminalReservations = evidence.budget.reservations.every((reservation) => reservation.status === "settled" || reservation.status === "cancelled");
   const publishable = evidence.run.status === "completed"
     && evidence.run.episodes_started === 6
@@ -287,20 +469,29 @@ export function createLc4DevPublicResultArtifact(evidence: VerifiedEvidence): Lc
   }
   const byProvider = (["openai", "gemini", "xai"] as const).map((provider) => {
     const episodes = evidence.prepare.episodes.filter((episode) => episode.provider === provider);
+    const transportCells = transportProvenance.cells.filter((cell) =>
+      cell.provider === provider);
     if (episodes.length !== 2
       || new Set(episodes.map((episode) => episode.model)).size !== 1
-      || canonicalJson(episodes.map((episode) => episode.arm).sort()) !== canonicalJson(["hacc", "native"])) {
+      || canonicalJson(episodes.map((episode) => episode.arm).sort()) !== canonicalJson(["hacc", "native"])
+      || transportCells.length !== 2
+      || canonicalJson(transportCells.map((cell) => cell.arm).sort())
+        !== canonicalJson(["hacc", "native"])) {
+      throw new Error(`LC4-DEV ${provider} public pair is incomplete or internally inconsistent`);
+    }
+    const model = safeModel(episodes[0]!.model);
+    if (transportCells.some((cell) => cell.model !== model)) {
       throw new Error(`LC4-DEV ${provider} public pair is incomplete or internally inconsistent`);
     }
     return Object.freeze({
       provider,
-      model: safeModel(episodes[0]!.model),
+      model,
       arms: Object.freeze(["native", "hacc"] as const),
       opportunities_per_episode: 60 as const,
     });
   });
   const body = {
-    schema_version: 1 as const,
+    schema_version: 4 as const,
     artifact_type: "hacc_lc4_dev_public_result" as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     evidence_class: "C3" as const,
@@ -329,6 +520,46 @@ export function createLc4DevPublicResultArtifact(evidence: VerifiedEvidence): Lc
       providers: Object.freeze(byProvider),
       matched_provider_pairs: 3 as const,
       no_retry_after_paid_open: true as const,
+      cells: transportProvenance.cells,
+    }),
+    qualification: Object.freeze({
+      schema_version: transportProvenance.schema_version,
+      provider_profile_manifest_sha256:
+        transportProvenance.provider_profile_manifest_sha256,
+      development_transport_run_sha256:
+        transportProvenance.development_transport_run_sha256,
+      development_transport_replay_sha256:
+        transportProvenance.development_transport_replay_sha256,
+      canonical_provider_exchange_count:
+        transportProvenance.canonical_provider_exchange_count,
+      repair_provider_exchange_count:
+        transportProvenance.repair_provider_exchange_count,
+      total_response_generation_count:
+        transportProvenance.total_response_generation_count,
+      canonical_exchange_replay_set_sha256:
+        transportProvenance.canonical_exchange_replay_set_sha256,
+      response_generation_replay_set_sha256:
+        transportProvenance.response_generation_replay_set_sha256,
+      listener_authority_trust_root_sha256:
+        transportProvenance.listener_authority_trust_root_sha256,
+      listener_authority_replay_set_sha256:
+        transportProvenance.listener_authority_replay_set_sha256,
+      listener_invocation_replay_set_sha256:
+        transportProvenance.listener_invocation_replay_set_sha256,
+      retained_gate_b_transport_scope_sha256:
+        transportProvenance.retained_gate_b_transport_scope_sha256,
+      retained_gate_b_receipt_sha256:
+        transportProvenance.retained_gate_b_receipt_sha256,
+      retained_gate_b_claim_boundary:
+        transportProvenance.retained_gate_b_claim_boundary,
+      xai_finite_manual_transport_qualification:
+        transportProvenance.xai_finite_manual_transport_qualification,
+      xai_finite_manual_gate_d_receipt_sha256:
+        transportProvenance.xai_finite_manual_gate_d_receipt_sha256,
+      xai_finite_manual_transport_profile_sha256:
+        transportProvenance.xai_finite_manual_transport_profile_sha256,
+      xai_finite_manual_claim_boundary:
+        transportProvenance.xai_finite_manual_claim_boundary,
     }),
     evaluation: Object.freeze({
       task_results_available: evidence.report.task_results_available,
@@ -360,12 +591,16 @@ export function createLc4DevPublicResultArtifact(evidence: VerifiedEvidence): Lc
       contains_pcm_or_audio: false as const,
       contains_wire_payloads: false as const,
       contains_local_paths: false as const,
-      contains_credential_or_key_identities: false as const,
+      contains_private_credential_or_signing_key_material: false as const,
+      contains_public_authority_trust_root: true as const,
+      contains_provider_session_ids: false as const,
+      contains_gate_d_receipt_path_or_trust_root: false as const,
     }),
     limitations: Object.freeze([
       "six development episodes are mechanism evidence, not an efficacy estimate",
       "authority scores are published only when the complete evidence DAG replays",
       "no Native-versus-HACC superiority claim is authorized by this artifact",
+      "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
     ] as const),
   };
   return freeze({ ...body, public_result_sha256: sha256Hex(`${PUBLIC_RESULT_DOMAIN}${canonicalJson(body)}`) });
@@ -378,6 +613,9 @@ function value(value: number | null): string {
 export function renderLc4DevPublicResultMarkdown(result: Lc4DevPublicResultArtifact): string {
   assertLc4DevPublicResultArtifact(result);
   const providers = result.design.providers.map((entry) => `| ${entry.provider} | ${entry.model} | Native + HACC | 60 each |`).join("\n");
+  const transports = result.design.cells.map((entry) =>
+    `| ${entry.provider} | ${entry.model} | ${entry.arm === "hacc" ? "HACC" : "Native"} | ${entry.transport_purpose ?? "not_applicable"} | ${entry.turn_boundary_control} | ${entry.wire_turn_boundary} | ${entry.output_audio_lineage_scope} | ${entry.model_identity_verification} | ${entry.qualification_scope} | \`${entry.transport_profile_sha256}\` |`
+  ).join("\n");
   return `# HACC LC4-DEV public result\n\n` +
     `C3 mechanism evidence only. This artifact is not confirmatory provider-efficacy evidence and does not authorize a Native-versus-HACC superiority claim.\n\n` +
     `## Result\n\n` +
@@ -393,12 +631,21 @@ export function renderLc4DevPublicResultMarkdown(result: Lc4DevPublicResultArtif
     `| Conservative ledger liability | $${(result.budget.conservative_settled_micro_usd / 1_000_000).toFixed(6)} |\n\n` +
     `## Matched development design\n\n` +
     `| Provider | Realtime model | Arms | Opportunities |\n|---|---|---|---:|\n${providers}\n\n` +
+    `## Transport and qualification provenance\n\n` +
+    `| Provider | Model | Arm | Purpose | Boundary control | Wire turn boundary | Output audio lineage | Model identity | Qualification scope | Profile SHA-256 |\n|---|---|---|---|---|---|---|---|---|---|\n${transports}\n\n` +
+    `The xAI finite prerecorded manual-commit transport has a separately verified Gate D receipt. Gate D is transport qualification only and is not efficacy evidence.\n\n` +
     `## Reproducibility\n\n` +
+    `- Listener authority trust root: \`${result.qualification.listener_authority_trust_root_sha256}\`\n` +
+    `- Listener authority replay set: \`${result.qualification.listener_authority_replay_set_sha256}\`\n` +
+    `- Listener invocation replay set: \`${result.qualification.listener_invocation_replay_set_sha256}\`\n` +
+    `- Response-generation replay set: \`${result.qualification.response_generation_replay_set_sha256}\`\n` +
+    `- Response generations: ${result.qualification.total_response_generation_count} (${result.qualification.canonical_provider_exchange_count} canonical + ${result.qualification.repair_provider_exchange_count} registered repair)\n` +
     `- Source commit: \`${result.execution.source_commit}\`\n` +
     `- Run package: \`${result.integrity.run_package_sha256}\`\n` +
     `- Verified report: \`${result.integrity.report_sha256}\`\n` +
     `- Public result: \`${result.public_result_sha256}\`\n\n` +
-    `The public files intentionally exclude transcripts, PCM/audio, wire payloads, local paths, and credential or signing-key identities.\n`;
+    `The listener authority root printed above is a reproducibility commitment, not a trust bootstrap. Verifiers must supply the expected root independently from a trusted signed release tag or release announcement; using this JSON or Markdown as its own expected root is forbidden.\n\n` +
+    `The public files intentionally exclude transcripts, PCM/audio, wire payloads, local paths, private credentials, and signing-key material. They publish only the independently supplied authority trust-root digest needed to reproduce verification.\n`;
 }
 
 function inspectPublicValue(value: unknown, key = "root"): void {
@@ -418,7 +665,9 @@ function inspectPublicValue(value: unknown, key = "root"): void {
   if (value && typeof value === "object") {
     for (const [childKey, child] of Object.entries(value)) {
       const negativePrivacyDeclaration = childKey.startsWith("contains_") && child === false;
+      const publicTransportDescriptor = childKey === "wire_turn_boundary";
       if (!negativePrivacyDeclaration
+        && !publicTransportDescriptor
         && /(?:transcript|pcm|wire|(?:^|_)path(?:_|$)|credential|signature|authorization|nonce|fingerprint|(?:^|_)key(?:_|$))/iu.test(childKey)) {
         throw new Error(`LC4-DEV public result contains forbidden field ${childKey}`);
       }
@@ -432,21 +681,117 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
   if (!HASH.test(claimed) || sha256Hex(`${PUBLIC_RESULT_DOMAIN}${canonicalJson(body)}`) !== claimed) {
     throw new Error("LC4-DEV public result hash mismatch");
   }
-  if (result.schema_version !== 1
+  const transportProvenance = {
+    ...result.qualification,
+    cells: result.design.cells,
+  } as Lc4PublicationTransportProvenance;
+  assertLc4PublicationTransportProvenance(transportProvenance);
+  const exactKeys = (candidate: object, expected: readonly string[]) =>
+    canonicalJson(Object.keys(candidate).sort())
+      === canonicalJson([...expected].sort());
+  const exactProviderKeys = ["provider", "model", "arms", "opportunities_per_episode"] as const;
+  const exactIntegrityKeys = [
+    "prepare_sha256",
+    "preflight_sha256",
+    "run_sha256",
+    "run_package_sha256",
+    "budget_evidence_sha256",
+    "budget_terminal_ledger_head_sha256",
+    "authority_replay_set_sha256",
+    "report_sha256",
+  ] as const;
+  if (result.schema_version !== 4
     || result.artifact_type !== "hacc_lc4_dev_public_result"
     || result.protocol_id !== "HACC-LC4-DEV-v1"
     || result.evidence_class !== "C3"
     || result.study_role !== "development_mechanism_evidence_only"
     || result.efficacy_claim_eligible !== false
     || result.confirmatory_reuse_permitted !== false
+    || result.interpretation
+      !== "C3 mechanism evidence only; not confirmatory provider efficacy evidence"
+    || !exactKeys(result, [
+      "schema_version",
+      "artifact_type",
+      "protocol_id",
+      "evidence_class",
+      "study_role",
+      "efficacy_claim_eligible",
+      "confirmatory_reuse_permitted",
+      "interpretation",
+      "execution",
+      "design",
+      "qualification",
+      "evaluation",
+      "budget",
+      "integrity",
+      "privacy",
+      "limitations",
+      "public_result_sha256",
+    ])
+    || !exactKeys(result.execution, [
+      "execution_id",
+      "source_commit",
+      "source_tree_sha256",
+      "started_at",
+      "completed_at",
+      "status",
+      "planned_episodes",
+      "episodes_started",
+      "episodes_completed",
+      "planned_opportunities",
+      "opportunities_submitted",
+      "opportunities_completed",
+      "response_generations_completed",
+      "repair_playbacks",
+      "paid_retry_count",
+    ])
+    || !/^[a-f0-9]{40}$/u.test(result.execution.source_commit)
+    || !HASH.test(result.execution.source_tree_sha256)
+    || !Number.isFinite(Date.parse(result.execution.started_at))
+    || !Number.isFinite(Date.parse(result.execution.completed_at))
+    || !exactKeys(result.design, [
+      "providers",
+      "matched_provider_pairs",
+      "no_retry_after_paid_open",
+      "cells",
+    ])
     || result.design.providers.length !== 3
+    || canonicalJson(result.design.providers.map((entry) =>
+      entry.provider).sort()) !== canonicalJson(["gemini", "openai", "xai"])
+    || result.design.providers.some((entry) =>
+      !exactKeys(entry, exactProviderKeys)
+      || safeModel(entry.model) !== entry.model
+      || canonicalJson(entry.arms) !== canonicalJson(["native", "hacc"])
+      || entry.opportunities_per_episode !== 60
+      || result.design.cells.filter((cell) =>
+        cell.provider === entry.provider).length !== 2
+      || result.design.cells.filter((cell) =>
+        cell.provider === entry.provider).some((cell) =>
+        cell.model !== entry.model))
+    || result.design.cells.length !== 6
     || result.design.matched_provider_pairs !== 3
+    || result.design.no_retry_after_paid_open !== true
     || result.execution.planned_episodes !== 6
     || result.execution.planned_opportunities !== 360
     || result.execution.paid_retry_count !== 0
     || result.execution.status !== "completed"
+    || result.execution.episodes_started !== 6
     || result.execution.episodes_completed !== 6
+    || result.execution.opportunities_submitted !== 360
     || result.execution.opportunities_completed !== 360
+    || !Number.isSafeInteger(result.execution.response_generations_completed)
+    || result.execution.response_generations_completed < 360
+    || !Number.isSafeInteger(result.execution.repair_playbacks)
+    || result.execution.repair_playbacks < 0
+    || !exactKeys(result.evaluation, [
+      "task_results_available",
+      "evidence_complete",
+      "execution_evidence_complete",
+      "authority_scoreability",
+      "authority_passed",
+      "authority_evaluated",
+      "authority_evidence_invalid",
+    ])
     || result.evaluation.task_results_available !== true
     || result.evaluation.evidence_complete !== true
     || result.evaluation.execution_evidence_complete !== true
@@ -454,8 +799,40 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
     || result.evaluation.authority_evidence_invalid !== 0
     || result.evaluation.authority_evaluated !== 6
     || result.evaluation.authority_passed === null
+    || !Number.isSafeInteger(result.evaluation.authority_passed)
+    || result.evaluation.authority_passed < 0
+    || result.evaluation.authority_passed > result.evaluation.authority_evaluated
+    || !exactKeys(result.budget, [
+      "maximum_total_micro_usd",
+      "conservative_settled_micro_usd",
+      "active_reservations_micro_usd",
+      "reservations_terminal",
+    ])
+    || !Number.isSafeInteger(result.budget.maximum_total_micro_usd)
+    || result.budget.maximum_total_micro_usd <= 0
+    || !Number.isSafeInteger(result.budget.conservative_settled_micro_usd)
+    || result.budget.conservative_settled_micro_usd < 0
     || result.budget.active_reservations_micro_usd !== 0
-    || result.budget.reservations_terminal !== true) {
+    || result.budget.reservations_terminal !== true
+    || !exactKeys(result.integrity, exactIntegrityKeys)
+    || Object.values(result.integrity).some((digest) =>
+      digest === null || !HASH.test(digest))
+    || canonicalJson(result.privacy) !== canonicalJson({
+      contains_transcripts: false,
+      contains_pcm_or_audio: false,
+      contains_wire_payloads: false,
+      contains_local_paths: false,
+      contains_private_credential_or_signing_key_material: false,
+      contains_public_authority_trust_root: true,
+      contains_provider_session_ids: false,
+      contains_gate_d_receipt_path_or_trust_root: false,
+    })
+    || canonicalJson(result.limitations) !== canonicalJson([
+      "six development episodes are mechanism evidence, not an efficacy estimate",
+      "authority scores are published only when the complete evidence DAG replays",
+      "no Native-versus-HACC superiority claim is authorized by this artifact",
+      "listener authority trust must come from a trusted release tag or announcement independent of these public result files",
+    ])) {
     throw new Error("LC4-DEV public result claim boundary or frozen design drifted");
   }
   inspectPublicValue(result);
@@ -500,11 +877,23 @@ async function publishPair(outputRoot: string, json: string, markdown: string): 
 export async function publishLc4DevPublicResult(input: Readonly<{
   evidence_root: string;
   output_root: string;
-  dependencies?: Lc4DevPublicResultDependencies;
+  authority_trust_root_sha256: string;
+  xai_finite_manual_gate_d: Lc4PublicationGateDInput;
 }>): Promise<Lc4DevPublicResultArtifact> {
   const outputRoot = absolute(input.output_root, "LC4-DEV public output root");
-  const verified = await verifyLc4DevEvidenceRoot(input.evidence_root, input.dependencies);
-  const result = createLc4DevPublicResultArtifact(verified);
+  const verified = await verifyLc4DevEvidenceRoot({
+    evidence_root: input.evidence_root,
+    authority_trust_root_sha256: input.authority_trust_root_sha256,
+  });
+  const transportProvenance = await verifyLc4PublicationTransportProvenance({
+    prepare: verified.prepare,
+    preflight: verified.preflight,
+    run_sha256: verified.run.run_sha256,
+    authority_trust_root_sha256: input.authority_trust_root_sha256,
+    transport_replay: verified.transport_replay,
+    gate_d: input.xai_finite_manual_gate_d,
+  });
+  const result = createLc4DevPublicResultArtifact(verified, transportProvenance);
   const json = `${canonicalJson(result)}\n`;
   const markdown = renderLc4DevPublicResultMarkdown(result);
   await publishPair(outputRoot, json, markdown);
@@ -515,25 +904,36 @@ export async function verifyLc4DevPublicResult(input: Readonly<{
   evidence_root: string;
   public_json: string;
   public_markdown: string;
-  dependencies?: Lc4DevPublicResultDependencies;
+  authority_trust_root_sha256: string;
+  xai_finite_manual_gate_d: Lc4PublicationGateDInput;
 }>): Promise<Lc4DevPublicResultArtifact> {
   const publicJsonPath = absolute(input.public_json, "LC4-DEV public JSON");
   const publicMarkdownPath = absolute(input.public_markdown, "LC4-DEV public Markdown");
-  const [verified, published, markdownMetadata] = await Promise.all([
-    verifyLc4DevEvidenceRoot(input.evidence_root, input.dependencies),
+  const [verified, published, markdown] = await Promise.all([
+    verifyLc4DevEvidenceRoot({
+      evidence_root: input.evidence_root,
+      authority_trust_root_sha256: input.authority_trust_root_sha256,
+    }),
     readBoundedJson<Lc4DevPublicResultArtifact>(publicJsonPath, "LC4-DEV public JSON"),
-    lstat(publicMarkdownPath),
+    readBoundedRegularFile(
+      publicMarkdownPath,
+      "LC4-DEV public Markdown",
+      MAX_MARKDOWN_BYTES,
+    ),
   ]);
-  if (!markdownMetadata.isFile() || markdownMetadata.isSymbolicLink() || markdownMetadata.nlink !== 1
-    || markdownMetadata.size < 2 || markdownMetadata.size > MAX_MARKDOWN_BYTES) {
-    throw new Error("LC4-DEV public Markdown must be one bounded regular, non-linked file");
-  }
   assertLc4DevPublicResultArtifact(published);
-  const expected = createLc4DevPublicResultArtifact(verified);
+  const transportProvenance = await verifyLc4PublicationTransportProvenance({
+    prepare: verified.prepare,
+    preflight: verified.preflight,
+    run_sha256: verified.run.run_sha256,
+    authority_trust_root_sha256: input.authority_trust_root_sha256,
+    transport_replay: verified.transport_replay,
+    gate_d: input.xai_finite_manual_gate_d,
+  });
+  const expected = createLc4DevPublicResultArtifact(verified, transportProvenance);
   if (canonicalJson(published) !== canonicalJson(expected)) {
     throw new Error("LC4-DEV public JSON does not reproduce from the immutable evidence root");
   }
-  const markdown = await readFile(publicMarkdownPath, "utf8");
   if (markdown !== renderLc4DevPublicResultMarkdown(expected)) {
     throw new Error("LC4-DEV public Markdown does not reproduce from the verified public JSON");
   }

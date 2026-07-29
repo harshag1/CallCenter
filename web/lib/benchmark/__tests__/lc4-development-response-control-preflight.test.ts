@@ -35,7 +35,7 @@ describe("LC4-DEV response-control fail-before-paid sizing", () => {
     ).toThrow("actual_bytes=4100 max_bytes=4096");
   });
 
-  it("keeps Native's explicit benchmark-only allowance separate from Gemini's HACC default", () => {
+  it("forbids a raised Native allowance that could carry a host state dump", () => {
     expect(lc4DevResponseControlMaximumBytes("gemini", "hacc")).toBe(4_096);
     expect(lc4DevResponseControlMaximumBytes("gemini", "native")).toBe(
       LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES,
@@ -46,9 +46,18 @@ describe("LC4-DEV response-control fail-before-paid sizing", () => {
         arm: "native",
         opportunity_id: "lc4-dev-op-60",
         strategy: "no_gateway_dispatch",
-        rendered_control: "x".repeat(35_522),
+        rendered_control: "x".repeat(4_096),
       }),
-    ).toBe(35_522);
+    ).toBe(4_096);
+    expect(() =>
+      assertLc4DevResponseControlFits({
+        provider: "gemini",
+        arm: "native",
+        opportunity_id: "lc4-dev-op-60",
+        strategy: "no_gateway_dispatch",
+        rendered_control: "x".repeat(4_097),
+      }),
+    ).toThrow("actual_bytes=4097 max_bytes=4096");
   });
 
   it("accepts the exact HACC boundary and rejects one byte above it", () => {

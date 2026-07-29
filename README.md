@@ -29,11 +29,24 @@ The result is a repeatable state machine that still leaves the realtime model fr
 - An experimental [mission runtime](docs/mission-runtime.md) for multi-goal calls, safe detours, proof-carrying obligations, adaptive authority, saga compensation, and state-bound cross-channel continuation when one fixed flow is the wrong abstraction.
 - A provider-neutral [durable conversation runtime](docs/durable-conversation-runtime.md): one PostgreSQL-backed hash-chained event authority, conflict-safe transactions, Flow checkpoint bindings, authority-stamped corrections, suspended/resumable goals, commitments, and deterministic byte-bounded realtime packets that fail closed on mandatory-state overflow.
 - A deterministic action-policy firewall with argument/fact/receipt predicates, numeric limits, proposal/readback-bound confirmation, revision/epoch invalidation, postcondition quarantine, and provider-visible result projection. The governed reservation API locks Flow state, evaluates against database time and durable call count, and appends bounded decision evidence in the same transaction as an allowed receipt.
-- A durable read-only worker substrate with immutable capability manifests, exclusive leases, heartbeats, cancellation epochs, crash recovery, cited results, and at-least-once delivery with exactly-once application. Governed spawn and result delivery are atomic with the conversation log. It is an integration primitive; the live `launch_task` MCP path has not yet been migrated to it.
+- A durable read-only worker substrate with immutable capability manifests,
+  exact scoped claims, heartbeats, cancellation epochs, crash recovery, cited
+  dataset/knowledge results, and at-least-once delivery with exactly-once
+  application. Free-form web-research prose remains uncited, untrusted
+  advisory text. The live
+  `launch_task` path atomically spawns a governed worker; accepted results enter
+  a later context packet as explicitly untrusted advisory data.
+- A [budget-aware server inference boundary](docs/server-inference.md) for background call tasks, post-call QA, onboarding, and grounded research. xAI, OpenAI, and Gemini use one server-owned interface with explicit capability differences, hard per-operation request/input/output/time ceilings, and no retries or silent provider fallback.
 - Atomic reserve-before-dispatch action receipts, step/call/argument idempotency policies, stale-call rejection, and explicit indeterminate-outcome recovery.
+- An authenticated, tenant-scoped [call operations read API](docs/call-operations-projection.md) that joins durable Flow checkpoints, action receipts, guardrail decisions, workers, recovery events, and source freshness into bounded content-free management state.
 - A tested model-attempt firewall in the common-provider benchmark path that admits whole tool batches atomically, separates recoverable semantic mistakes from fatal provenance faults, records zero-effect rejection receipts, bounds correction loops, and removes executable authority from speech-repair turns.
 - Provider adapters for xAI Voice, OpenAI Realtime, and Gemini Live.
 - Browser calling over WebSocket or WebRTC, plus a bounded, authenticated Twilio Media Streams transport bridge for xAI/OpenAI. The bridge remains development/non-production until release-commit provider, PSTN, load, and crash-loss artifacts exist.
+- An optional browser-only outbound-speech quarantine for all three bundled
+  adapters. It blocks exact normalized forbidden phrases and configured secret
+  literals before `AudioContext` scheduling and can add tenant-funded OpenAI
+  ASR. It adds full-utterance/ASR latency and is not semantic safety, PSTN
+  coverage, or proof that a human heard the audio.
 - A scoped MCP gateway with expiring revision-bound capabilities and state-scoped tool allowlists.
 - First-class extension manifests for voice tools and builder/operator tools.
 - Generated edge-tool infrastructure, external MCP servers, datasets, document search, operator-approved email/SMS/calls, transfers, callbacks, campaigns, browser-call recordings, transcripts, and experiments. Builder-driven tool creation is currently withheld pending a funded-approval adapter.
@@ -46,11 +59,19 @@ The result is a repeatable state machine that still leaves the realtime model fr
 |---|---|
 | Flow v2, scoped MCP gateway, action receipts, and browser calling | Integrated into the current application path |
 | xAI/OpenAI Twilio bridge | Implemented as a bounded development transport; not production-qualified |
-| Durable conversation log, bounded context compiler, action-policy kernel, governed worker store, and call-turn coordinator | Implemented and locally tested composition root; not yet the default provider/MCP route path |
+| Durable conversation log, bounded context compiler, governed read-only workers, and call-turn coordinator | Integrated into session creation/reconnect and MCP refresh; the newer general action-policy reservation remains non-default |
 | Validated realtime provider registry | Protected OpenAI, xAI, and Gemini built-ins plus typed self-hosted registration |
 | Mission runtime | Experimental; not release-critical runtime authority |
 
-The default live route path still uses Flow v2 and the legacy `launch_task` implementation. The provider registry is extensible, and a tested composition root now joins durable conversation state, Flow checkpoints, governed action reservations, atomic worker spawn, and fresh provider-neutral context packets. Existing call routes have not yet adopted that coordinator, so its existence is not evidence that ordinary live calls already receive those packets or governed worker results.
+The default live path keeps Flow v2 receipts as action authority. Session
+creation and reconnect mirror Flow state into the durable conversation log and
+inject a bounded provider-neutral packet; MCP results refresh that packet. The
+live `launch_task` tool now derives an immutable read-only manifest from the
+active catalog and spawns an exactly scoped governed worker. A worker result is
+rechecked against current dependencies and can appear only in a later packet,
+where it remains untrusted advisory content. The newer general action-policy
+reservation and a unified production repair controller are implemented
+substrates, not the default action path.
 
 ## Realtime provider matrix
 
@@ -76,7 +97,7 @@ The repository includes a [long-horizon reliability benchmark](benchmarks/voice-
 - **C2:** across 1,000 deterministic seeded fault schedules, the intentionally unenforced controller passed 245 while the mission runtime passed 1,000; a separate fixed ToolWorld suite contained 160/160 unsafe schedules. These are synthetic/offline engineering comparisons, not raw voice-model experiments.
 - **Gateway fault containment:** 33 deterministic executions of the real LC4 gateway coordinator covered clean controls plus semantic, mixed-batch, repair-phase, provenance, replay, abuse, and delivery faults across OpenAI-, Gemini-, and xAI-shaped events. It contained 15/15 recoverable faults, failed closed on 15/15 security faults, made 0 unauthorized executor calls, emitted 0 false authority projections, and made 0 provider/network calls. This is provider-free mechanism evidence, not a model comparison. See the [deterministic fault-injection artifact](benchmarks/voice-long-horizon/evidence/HACC_LC4_GATEWAY_FAULT_INJECTION.md).
 - **C3, historical v14 canary:** 18 scheduled cells produced 104 completed voice-to-voice turns. Gemini tied at 2/3 raw and 2/3 harness; xAI tied at 3/3 and 3/3; OpenAI rejected all sessions for quota. That batch did not include independent audio-semantic scoring. See its [sanitized aggregate evidence](benchmarks/voice-long-horizon/evidence/usefulness-live-canary-v14.aggregate.json).
-- **Latest paid evaluator-development batch (HACC-LC3-v6):** 18 production-API episodes, nine matched pairs, yielded Native 0/9 versus HACC 0/9 for both mission completion and strict alignment. Only 8/18 episodes reached all 20 turns (Native 5/9, HACC 3/9). The batch exposed evaluator, output-voice calibration, playback, and provenance defects, so it is retained for mechanism discovery and cannot support a public efficacy graph. See the [immutable result receipt](benchmarks/voice-long-horizon/evidence/HACC_LC3_V6_RESULTS.md).
+- **Latest completed paid comparative dataset (HACC-LC3-v6):** 18 production-API episodes, nine matched pairs, yielded Native 0/9 versus HACC 0/9 for both mission completion and strict alignment. Only 8/18 episodes reached all 20 turns (Native 5/9, HACC 3/9). The batch exposed evaluator, output-voice calibration, playback, and provenance defects, so it is retained for mechanism discovery and cannot support a public efficacy graph. Later paid LC4 qualification and development attempts are retained as failed or quarantined transport/mechanism evidence, not completed comparative scores. See the [immutable LC3 receipt](benchmarks/voice-long-horizon/evidence/HACC_LC3_V6_RESULTS.md) and [LC4 failed-attempt record](benchmarks/voice-long-horizon/evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md).
 - **Output-voice evaluator calibration:** 54 production calibration utterances were retained across three development batches. The final provider-neutral spoken form and pinned local `large-v3-turbo-q5_0` ASR passed 18/18 exact provider/model/voice fixtures with 0/144 normalized word errors, zero critical-slot false negatives, and zero false positives. This makes the output-voice evaluator admissible for a future frozen run; it is not evidence that HACC outperforms Native. See the [complete calibration trail](benchmarks/voice-long-horizon/evidence/HACC_LC4_OUTPUT_VOICE_CALIBRATION.md).
 - **Context-substrate evidence:** across 1,000 seeded 500–2,000-turn schedules, a 2,048-byte kernel packet retained 13,000/13,000 registered policy, goal, fact, correction, and commitment units. An equally byte-bounded recent-turn window retained 83/13,000; unbounded history averaged 116,110 bytes. At 1,024 bytes the kernel failed closed on all 1,000 schedules instead of silently dropping control state. This is a deterministic retention comparison, not an STS model result. See [method and limits](benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md).
 - **C4/C5:** unavailable. This repository does not claim that models remember better, drift less, or that the framework outperforms raw OpenAI, xAI, Gemini, or voice agents generally.
@@ -97,14 +118,16 @@ flowchart LR
   Runtime --> DB["Postgres: checkpoints, calls, workers, evidence"]
 ```
 
-- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers, MCP, data layer, and 36 ordered migrations (`001`–`036`). See the [runtime API guide](docs/conversation-runtime-api.md).
+- `web/` — Next.js app, API routes, builder, flow/runtime kernels, providers,
+  MCP, data layer, and the ordered migrations in `web/migrations/`. See the
+  [runtime API guide](docs/conversation-runtime-api.md).
 - `bridge/` — optional standalone Twilio Media Streams bridge. The legacy in-app `/api/bridge` compatibility route is disabled by default and cannot be enabled in production.
 - `examples/` — the tested [deep Flow v2 example pack](examples/flows/README.md) and a multi-goal mission example.
 - `docs/` — architecture, provider, flow, and extension guides.
 
 ## Quick start
 
-Prerequisites: Node.js 22.13.0 (pinned in `.node-version` and `.nvmrc`). Supported runtimes are Node.js 20.19.x, 22.13.x or newer 22.x releases, and Node.js 24+. You also need npm, Docker, `XAI_API_KEY` for the current builder/onboarding chat, and a key for the realtime provider you want to call.
+Prerequisites: Node.js 22.13.0 (pinned in `.node-version` and `.nvmrc`). Supported runtimes are Node.js 20.19.x, 22.13.x or newer 22.x releases, and Node.js 24+. You also need npm, Docker, a key for the configured builder/server-inference provider, and a key for the realtime provider you want to call.
 
 ```bash
 git clone https://github.com/harshag1/CallCenter.git harsha-amazing-call-center
@@ -113,13 +136,15 @@ docker compose up -d --wait db
 cp web/.env.example web/.env.local
 ```
 
-Generate four independent secrets and add them to `web/.env.local`:
+Generate six independent secrets and add them to `web/.env.local`:
 
 ```bash
 openssl rand -hex 32  # AUTH_CODE_HMAC_SECRET
 openssl rand -hex 32  # MCP_GATEWAY_SECRET
 openssl rand -hex 32  # CAMPAIGN_COMMITMENT_SECRET
+openssl rand -hex 32  # CALL_OPERATIONS_REDACTION_SECRET
 openssl rand -hex 32  # ENV_VAULT_MASTER_KEY
+openssl rand -hex 32  # CRON_SECRET
 ```
 
 Paste those values into the matching blank entries. Configure `XAI_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`, and explicitly set the following only when you accept spending your own provider key during local development:
@@ -130,7 +155,7 @@ PUBLIC_ORIGIN=http://localhost:3000
 ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true
 ```
 
-The flag is effective only outside production with a plain-HTTP loopback `PUBLIC_ORIGIN` (`localhost`, `127.0.0.1`, or `[::1]`). It permits local builder, onboarding-AI, and browser-session provider spend; production and non-loopback origins ignore it. This release does not yet provide tenant-scoped BYOK or a durable provider-budget authority for those routes.
+The flag is effective only outside production with a plain-HTTP loopback `PUBLIC_ORIGIN` (`localhost`, `127.0.0.1`, or `[::1]`). It permits local builder, onboarding-AI, and browser-session provider spend; production and non-loopback origins ignore it. OpenAI/xAI browser calls have a separate authenticated tenant-BYOK path documented in [web/README.md](web/README.md); Gemini does not yet. Browser adapters require explicit provider-bound funding authority and never interpret an omitted argument as permission to read a deployment key. No provider root is returned to the browser.
 
 Then run:
 
@@ -138,8 +163,27 @@ Then run:
 cd web
 npm ci
 npm run db:migrate
+```
+
+`launch_task` deliberately has a second database credential. For the bundled
+local Postgres only, enable the narrow role created by migration 044 and put
+its URL in `web/.env.local`:
+
+```bash
+cd ..
+WORKER_DB_PASSWORD="$(openssl rand -hex 24)"
+docker compose exec -T db psql -U postgres -d voice_agents -v ON_ERROR_STOP=1 \
+  -c "ALTER ROLE hacc_voice_worker_runtime LOGIN PASSWORD '${WORKER_DB_PASSWORD}'"
+# Add this exact URL with the generated password to web/.env.local:
+# WORKER_DATABASE_URL=postgresql://hacc_voice_worker_runtime:<password>@localhost:5432/voice_agents
+# WORKER_DATABASE_RUNTIME_ROLE=hacc_voice_worker_runtime
+cd web
 npm run dev
 ```
+
+Do not reuse the web, scheduled-dialer, or migration-owner database credential.
+In production, provision and rotate the worker login through your secret
+manager; see [database tenancy](docs/database-tenancy.md).
 
 For local login, either configure Resend or add the terminal-only OTP opt-in to `web/.env.local` before starting the app:
 
@@ -155,7 +199,7 @@ to xAI, but it can use xAI, OpenAI, or Gemini through the server-owned
 `HACC_BUILDER_PROVIDER` and optional `HACC_BUILDER_MODEL` settings. Configure
 the selected provider's API key; see [web/README.md](web/README.md).
 
-Gemini browser calls can run under the loopback-only development opt-in. xAI/OpenAI browser calls require a non-loopback public HTTPS gateway, while the deployment-funded session route intentionally denies non-loopback origins. Their browser transports are implemented, but exercising them through the stock web route now requires replacing that boundary with reviewed tenant BYOK or durable provider-budget authority; copying the development flag to a tunnel or deployment will not work.
+All three browser providers can run under the loopback-only development opt-in. Outside that exact local path, xAI/OpenAI browser calls require an organization-scoped BYOK root stored through `/api/voice/providers`; Gemini browser calls remain unavailable because this release has no production Gemini BYOK path. The server uses a tenant root only to mint the provider's ephemeral browser credential. Copying the development-funded flag to a tunnel or deployment still does not authorize spend.
 
 Keep any tunnel access-restricted. The stock email-OTP flow is demo self-registration: any verified email becomes a high-authority operator, and the builder includes spend-bearing and server-side tools. Read [SECURITY.md](SECURITY.md) before making the app reachable from the public internet.
 
@@ -180,8 +224,8 @@ Use `XAI_API_KEY` instead of `OPENAI_API_KEY` for xAI. Set the web application's
 
 | Integration | Configure | Boundary |
 |---|---|---|
-| xAI browser voice | `XAI_API_KEY` | Ephemeral browser transport implemented; stock funded-session route cannot satisfy both its public-gateway requirement and loopback-only spend gate |
-| OpenAI browser voice | `OPENAI_API_KEY` | WebRTC transport implemented; stock funded-session route cannot satisfy both its public-gateway requirement and loopback-only spend gate |
+| xAI browser voice | Tenant BYOK, or `XAI_API_KEY` plus loopback development opt-in | Ephemeral WebSocket token; local authority requires plain-HTTP loopback, while tenant BYOK requires canonical non-loopback HTTPS |
+| OpenAI browser voice | Tenant BYOK, or `OPENAI_API_KEY` plus loopback development opt-in | Ephemeral WebRTC token; local authority requires plain-HTTP loopback, while tenant BYOK requires canonical non-loopback HTTPS |
 | Gemini browser voice | `GEMINI_API_KEY`, loopback development spend opt-in | Single-use Live token; default `gemini-3.1-flash-live-preview`; no production BYOK path yet |
 | Resend | `RESEND_API_KEY`, verified `EMAIL_FROM` | Send API acceptance is not inbox delivery; operator-composed email requires exact browser approval |
 | Twilio | Account SID, inbound auth token, restricted REST API key, owned number, `TELEPHONY_RECEIPT_SECRET`, `BRIDGE_WS_URL` | Inbound signatures and outbound authority are separate; provider acceptance is not call/SMS delivery |
@@ -215,7 +259,7 @@ The builder's `validate_flow` primitive performs executable schema/topology chec
 - Add a self-hosted live-call tool in [`web/lib/voice-tools/extensions.ts`](web/lib/voice-tools/extensions.ts).
 - Add a tenant-scoped builder/operator primitive in [`web/lib/agent/tools/extensions.ts`](web/lib/agent/tools/extensions.ts), starting from the compiling [membership-summary extension](examples/operator-tools/membership-summary.ts).
 - Build an adapter against the [Realtime Provider Plugin v1 contract](web/lib/realtime/plugins/README.md), then install its server-facing runtime adapter with `registerRealtimeProvider(...)` during self-hosted server bootstrap. Registration is typed for custom string-literal IDs, rejects duplicates and capability/hook mismatches, protects the bundled OpenAI/xAI/Gemini adapters, and makes extensions visible to the provider catalog without editing a core switch. A custom browser provider still needs a matching client-side transport consumer; registration stays server-only so credentials and adapter code cannot enter the browser bundle.
-- Build an email/SMS/voice/number adapter against the [Communication Provider Adapter v1 contract](web/lib/communications/README.md). Twilio and Resend have not migrated to it and are not configuration-swappable through that contract yet.
+- Build an email/SMS/voice/number adapter against the [Communication Provider Adapter v1 contract](web/lib/communications/README.md). Browser-approved Resend email and Twilio SMS now dispatch through that contract; outbound voice and number purchasing retain their stricter existing Twilio ledgers while their adapter migration remains open.
 - Register setup metadata in [`web/lib/integrations/registry.ts`](web/lib/integrations/registry.ts).
 - Connect a remote MCP server with the builder's `add_mcp_server` tool.
 
@@ -231,10 +275,12 @@ npm run build
 
 `npm run check` runs Vitest, ESLint, and TypeScript. Run it from a clean checkout before deployment; focused tests passing in one subsystem are not a substitute for this repository-wide gate.
 
-The default command conditionally leaves 59 tests pending: 19 PostgreSQL
-integration suites (56 tests) and two environment-qualified real-ASR suites
-(three tests). Release verification runs the database suites against a
-disposable cluster via `npm run db:test-isolation`; see
+The default command conditionally leaves the environment-qualified PostgreSQL
+and real-ASR suites pending. Their exact source-bound inventory and test counts
+are generated in
+[`GATE0_SKIP_INVENTORY.json`](benchmarks/voice-long-horizon/GATE0_SKIP_INVENTORY.json).
+Release verification runs every database suite against a disposable cluster
+via `npm run db:test-isolation`; see
 [database tenancy](docs/database-tenancy.md). LC4 result publication separately
 requires a clean-commit-scoped [real-ASR environment receipt](benchmarks/voice-long-horizon/ASR_ENVIRONMENT_QUALIFICATION.md).
 
@@ -264,7 +310,24 @@ The example database URL uses plaintext only for local loopback Docker. Producti
 
 ## Project status
 
-This is an ambitious starting point, not a hosted compliance product. The repository includes a tested composition root for the conversation kernel, Flow checkpoint authority, action reservations, governed worker spawn, and bounded provider packets, but existing live-call routes do not use it by default: Flow v2 remains the production action authority, the old `launch_task` implementation remains live, and worker-result delivery is not yet projected into ordinary provider sessions. Do not describe the architecture target as completed production integration. Gemini Live and its ephemeral tokens are preview APIs. Gemini PSTN is not implemented and requires a tested transcoding bridge. Provider-native resumption is not treated as workflow authority; durable checkpoint recovery is application-owned. The included Twilio bridge is development/non-production for the evidence gaps above. Recording persistence is implemented for browser calls only—neither Twilio bridge path records PSTN audio. Operators must add admission policy, rate limiting, retention, consent, audit, incident response, and jurisdiction-specific controls before a public or consequential deployment.
+This is an ambitious starting point, not a hosted compliance product. The live
+browser path now uses durable packets and governed `launch_task` workers, while
+Flow v2 receipts remain the action authority. Worker dispatch uses a durable
+job plus an exact, heartbeated execution attempt; the stock low-latency trigger
+uses `waitUntil`, and the authenticated minute scheduler provides bounded
+process-loss pickup with a durable three-attempt ceiling. Configure the
+separate `hacc_voice_worker_runtime` credential and `CRON_SECRET`; without the
+worker credential, `launch_task` rejects before dispatch. General governed
+action reservation and one unified repair controller are not yet the default
+live path. Gemini Live and its ephemeral
+tokens are preview APIs. Gemini PSTN is not implemented and requires a tested
+transcoding bridge. Provider-native resumption is not workflow authority;
+durable checkpoint recovery is application-owned. The included Twilio bridge
+is development/non-production for the evidence gaps above. Recording
+persistence is implemented for browser calls only—neither Twilio bridge path
+records PSTN audio. Operators must add admission policy, rate limiting,
+retention, consent, audit, incident response, and jurisdiction-specific
+controls before a public or consequential deployment.
 
 ## Contributing
 

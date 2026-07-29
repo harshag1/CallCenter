@@ -17,13 +17,18 @@ import {
 import { createLc4CapturedOutput, type Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
+  assertLc4XaiTransportProfile,
   assertLc4ProviderProfileManifest,
+  lc4XaiTransportProfileForPurpose,
+  type Lc4XaiTransportProfile,
+  type Lc4XaiTransportPurpose,
 } from "./lc4-provider-profiles";
 import type {
   Lc4OpportunityBinding,
   Lc4ProviderExecutionProfile,
   Lc4SegmentShape,
 } from "./lc4-production-runner-foundation";
+import { createLc4ProviderExecutionProfile } from "./lc4-production-runner-foundation";
 import {
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
@@ -46,7 +51,6 @@ import {
 } from "./lc4-development-caller-branch";
 import {
   appendLc4DevNativeGatewayContract,
-  isLc4DevSemanticGatewayFunction,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
   renderLc4DevHaccResponsePlan,
@@ -57,10 +61,13 @@ import {
   createLc4PublicDevelopmentCorpus,
   type Lc4PublicDevOpportunity,
 } from "./lc4-public-development-corpus";
+import { LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT } from "./lc4-development-control-plane";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
-import { createProductionRealtimeClient } from "./production-realtime-provider";
+import {
+  createProductionRealtimeClient,
+  xaiFiniteManualTransportParitySha256,
+} from "./production-realtime-provider";
 import type { Lc4DevBudgetLifecycle } from "./lc4-development-budget";
-import { LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES } from "./lc4-development-response-control-preflight";
 import { assertHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
@@ -76,8 +83,17 @@ import {
   type NormalizedRealtimeClient,
   type NormalizedRealtimeEvent,
   type RealtimeWireObservation,
+  type RealtimeWireObservationAttribution,
 } from "../realtime/client/types";
-import { isLocalToolProxyFunction } from "../realtime/client/types";
+import {
+  LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
+  LOCAL_TOOL_PROXY_FUNCTION,
+  PROVIDER_PROVENANCE_META_KEY,
+} from "../realtime/client/types";
+import {
+  realtimeWireIdentitySha256,
+  realtimeWireProjectionSha256,
+} from "../realtime/client/wire-evidence";
 import {
   realtimeToolFrontierSha256,
   XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR,
@@ -91,62 +107,100 @@ import {
   LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256,
 } from "./xai-server-vad";
 import { LC4_DEV_AUDIO_DELIVERY_PROFILE } from "./lc4-development-audio-contract";
+import {
+  LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
+  LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY,
+} from "./lc4-production-provider-contract";
+import {
+  createLc4XaiManualTurnCausality,
+  lc4XaiManualResponseWireIdentitySha256,
+  type Lc4XaiManualTurnCausalityEvidence,
+} from "./lc4-xai-manual-turn-causality";
+import {
+  LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
+  LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+  assertLc4XaiFiniteManualGateDExecutionEvidence,
+  lc4XaiFiniteManualGateDExecutionReplaySha256,
+  type Lc4XaiFiniteManualGateDAuthorizationArtifact,
+  type Lc4XaiFiniteManualGateDExecutionEvidence,
+  type Lc4XaiFiniteManualGateDPlanArtifact,
+  type Lc4XaiFiniteManualGateDProductionAdapter,
+} from "./lc4-xai.manual-qualification";
 
-export const LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION = "lc4-production-provider-adapter-v3" as const;
+export {
+  assertLc4XaiManualTurnCausality,
+  assertLc4XaiManualTurnReplayProjection,
+  type Lc4XaiManualTurnCausalityEvidence,
+} from "./lc4-xai-manual-turn-causality";
+
+export { LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION }
+  from "./lc4-production-provider-contract";
 export const LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN = true as const;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-continuity-packet/v1\n";
-const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-rotation-state-packet/v1\n";
-const ROTATION_FACT_SET_DOMAIN = "harshas-amazing-call-center/lc4-rotation-fact-set/v1\n";
-const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v3\n";
+const NATIVE_CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-native-conversation-replay/v2\n";
+const HACC_ROTATION_DOMAIN = "harshas-amazing-call-center/lc4-hacc-conversation-state-rotation/v2\n";
+const ROTATION_CONVERSATION_DOMAIN = "harshas-amazing-call-center/lc4-rotation-conversation-replay/v2\n";
+const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v4\n";
+export const LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN =
+  "harshas-amazing-call-center/lc4-gemini-server-content-output-attribution/v1\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
 const SEGMENT_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-provider-session-rotation/v1\n";
-const NATIVE_CONTINUITY_SOURCES = new Set([
-  "listener_heard_caller",
-  "listener_heard_assistant",
-  "authoritative_arm_common_result",
-  "prior_native_visible_context",
+const CONVERSATION_TURN_SOURCES = new Set([
+  "caller_tts_source_bound_to_pcm",
+  "listener_exact_captured_pcm_asr",
+  "provider_native_output_transcript",
+  "provider_visible_tool_result",
 ] as const);
 
-export type Lc4NativeContinuityFactInput = Readonly<{
-  fact_id: string;
-  source: "listener_heard_caller" | "listener_heard_assistant" | "authoritative_arm_common_result" | "prior_native_visible_context";
-  public_text: string;
+export type Lc4AssistantConversationTranscriptSource =
+  | "listener_exact_captured_pcm_asr"
+  | "provider_native_output_transcript";
+
+export type Lc4NativeConversationTurnInput = Readonly<{
+  turn_id: string;
+  sequence: number;
+  speaker: "caller" | "assistant" | "tool";
+  source:
+    | "caller_tts_source_bound_to_pcm"
+    | Lc4AssistantConversationTranscriptSource
+    | "provider_visible_tool_result";
+  text: string;
   available_after_opportunity: number;
   provenance_receipt_sha256: string;
-  listener_status: "heard_verified" | "not_applicable";
-  visibility: "public_non_sensitive";
+  provider_conversation_source: true;
   oracle_derived: false;
   future_derived: false;
-  private_value_included: false;
+  semantic_evaluator_derived: false;
 }>;
 
-export type Lc4RotationSubstantiveFact = Readonly<{
-  fact_id: string;
-  source: Lc4NativeContinuityFactInput["source"];
-  public_text: string;
-  substantive_sha256: string;
+export type Lc4RotationConversationTurn = Readonly<{
+  turn_id: string;
+  sequence: number;
+  speaker: Lc4NativeConversationTurnInput["speaker"];
+  source: Lc4NativeConversationTurnInput["source"];
+  text: string;
+  transcript_sha256: string;
   available_after_opportunity: number;
   provenance_receipt_sha256: string;
 }>;
 
-export type Lc4StrongNativeContinuityPacket = Readonly<{
-  schema_version: 1;
-  packet_type: "strong_native_listener_and_receipt_continuity";
+export type Lc4NativeConversationReplayPacket = Readonly<{
+  schema_version: 2;
+  packet_type: "native_provider_conversation_replay";
   run_id: string;
   from_segment_ordinal: 1 | 2;
   to_segment_ordinal: 2 | 3;
   available_through_opportunity: 20 | 40;
   previous_session_rotation_receipt_sha256: string;
-  facts: readonly Lc4RotationSubstantiveFact[];
-  substantive_fact_set_sha256: string;
+  conversation_turns: readonly Lc4RotationConversationTurn[];
+  conversation_replay_sha256: string;
   packet_sha256: string;
 }>;
 
 export type Lc4HaccRotationStatePacket = Readonly<{
-  schema_version: 1;
-  packet_type: "hacc_structured_state_rotation";
+  schema_version: 2;
+  packet_type: "hacc_provider_conversation_plus_structured_state";
   run_id: string;
   from_segment_ordinal: 1 | 2;
   to_segment_ordinal: 2 | 3;
@@ -154,28 +208,26 @@ export type Lc4HaccRotationStatePacket = Readonly<{
   previous_session_rotation_receipt_sha256: string;
   flow_state_sha256: string;
   response_plan_chain_head_sha256: string;
-  facts: readonly Readonly<{
-    fact_id: string;
-    public_text: string;
-    substantive_sha256: string;
-    available_after_opportunity: number;
-    provenance_receipt_sha256: string;
-  }>[];
-  substantive_fact_set_sha256: string;
+  conversation_turns: readonly Lc4RotationConversationTurn[];
+  conversation_replay_sha256: string;
   packet_sha256: string;
 }>;
 
-function hashFactSet(facts: readonly Readonly<{
-  fact_id: string;
-  substantive_sha256: string;
+function hashConversationReplay(turns: readonly Readonly<{
+  turn_id: string;
+  sequence: number;
+  speaker: "caller" | "assistant" | "tool";
+  source: Lc4NativeConversationTurnInput["source"];
+  transcript_sha256: string;
   available_after_opportunity: number;
 }>[]): string {
-  // Receipts are necessarily arm-local (the spoken outputs differ). Compare
-  // fact content and availability here; each packet separately binds provenance.
-  return sha256Hex(`${ROTATION_FACT_SET_DOMAIN}${canonicalJson(facts.map((fact) => ({
-    fact_id: fact.fact_id,
-    substantive_sha256: fact.substantive_sha256,
-    available_after_opportunity: fact.available_after_opportunity,
+  return sha256Hex(`${ROTATION_CONVERSATION_DOMAIN}${canonicalJson(turns.map((turn) => ({
+    turn_id: turn.turn_id,
+    sequence: turn.sequence,
+    speaker: turn.speaker,
+    source: turn.source,
+    transcript_sha256: turn.transcript_sha256,
+    available_after_opportunity: turn.available_after_opportunity,
   })))}`);
 }
 
@@ -183,62 +235,92 @@ function assertRotationBoundary(from: 1 | 2, to: 2 | 3, available: 20 | 40): voi
   if (to !== from + 1 || available !== from * 20) throw new Error("LC4 rotation packet boundary is invalid");
 }
 
-export function createLc4StrongNativeContinuityPacket(input: Readonly<{
+function validateConversationTurns(
+  inputTurns: readonly Lc4NativeConversationTurnInput[],
+  availableThroughOpportunity: 20 | 40,
+): readonly Lc4RotationConversationTurn[] {
+  if (inputTurns.length < availableThroughOpportunity * 2) {
+    throw new Error("LC4 rotation conversation omits an audible caller or assistant turn");
+  }
+  if (inputTurns.length > 192) throw new Error("LC4 rotation conversation exceeds 192 provider-conversation turns");
+  let textBytes = 0;
+  let priorOpportunity = 0;
+  const turns = inputTurns.map((turn, index) => {
+    safeId(turn.turn_id, "LC4 rotation conversation turn ID");
+    if (turn.sequence !== index + 1) throw new Error("LC4 rotation conversation sequence is not exact and contiguous");
+    if (!CONVERSATION_TURN_SOURCES.has(turn.source)) throw new Error("LC4 rotation conversation source is inadmissible");
+    const sourceMatchesSpeaker = turn.speaker === "caller"
+      ? turn.source === "caller_tts_source_bound_to_pcm"
+      : turn.speaker === "assistant"
+        ? turn.source === "listener_exact_captured_pcm_asr"
+          || turn.source === "provider_native_output_transcript"
+        : turn.source === "provider_visible_tool_result";
+    if (!sourceMatchesSpeaker) {
+      throw new Error("LC4 rotation conversation speaker differs from its provider-conversation source");
+    }
+    if (!turn.text.trim() || turn.text.length > 4_000) throw new Error("LC4 rotation conversation text is invalid");
+    textBytes += Buffer.byteLength(turn.text, "utf8");
+    if (!SHA256.test(turn.provenance_receipt_sha256)) throw new Error("LC4 rotation conversation provenance receipt is invalid");
+    if (!Number.isSafeInteger(turn.available_after_opportunity)
+      || turn.available_after_opportunity < 1
+      || turn.available_after_opportunity > availableThroughOpportunity
+      || turn.available_after_opportunity < priorOpportunity) {
+      throw new Error("LC4 rotation conversation includes a future or out-of-order turn");
+    }
+    priorOpportunity = turn.available_after_opportunity;
+    if (turn.provider_conversation_source !== true
+      || turn.oracle_derived !== false
+      || turn.future_derived !== false
+      || turn.semantic_evaluator_derived !== false) {
+      throw new Error("LC4 rotation conversation forbids oracle, semantic-evaluator, future, or non-conversation state");
+    }
+    return Object.freeze({
+      turn_id: turn.turn_id,
+      sequence: turn.sequence,
+      speaker: turn.speaker,
+      source: turn.source,
+      text: turn.text,
+      transcript_sha256: sha256Hex(turn.text),
+      available_after_opportunity: turn.available_after_opportunity,
+      provenance_receipt_sha256: turn.provenance_receipt_sha256,
+    });
+  });
+  if (textBytes > 128_000) throw new Error("LC4 rotation conversation exceeds its text budget");
+  if (new Set(turns.map((turn) => turn.turn_id)).size !== turns.length) {
+    throw new Error("LC4 rotation conversation turn IDs must be unique");
+  }
+  for (let opportunity = 1; opportunity <= availableThroughOpportunity; opportunity += 1) {
+    const opportunityTurns = turns.filter((turn) => turn.available_after_opportunity === opportunity);
+    if (!opportunityTurns.some((turn) => turn.speaker === "caller")
+      || !opportunityTurns.some((turn) => turn.speaker === "assistant")) {
+      throw new Error(`LC4 rotation conversation omits caller/assistant evidence for opportunity ${opportunity}`);
+    }
+  }
+  return Object.freeze(turns);
+}
+
+export function createLc4NativeConversationReplayPacket(input: Readonly<{
   run_id: string;
   from_segment_ordinal: 1 | 2;
   to_segment_ordinal: 2 | 3;
   available_through_opportunity: 20 | 40;
   previous_session_rotation_receipt_sha256: string;
-  facts: readonly Lc4NativeContinuityFactInput[];
-}>): Lc4StrongNativeContinuityPacket {
+  conversation_turns: readonly Lc4NativeConversationTurnInput[];
+}>): Lc4NativeConversationReplayPacket {
   safeId(input.run_id, "LC4 native continuity run ID");
   assertRotationBoundary(input.from_segment_ordinal, input.to_segment_ordinal, input.available_through_opportunity);
   if (!SHA256.test(input.previous_session_rotation_receipt_sha256)) throw new Error("LC4 native continuity rotation receipt is invalid");
-  if (input.facts.length > 64) throw new Error("LC4 native continuity exceeds 64 substantive facts");
-  let publicTextBytes = 0;
-  const facts = input.facts.map((fact) => {
-    safeId(fact.fact_id, "LC4 native continuity fact ID");
-    if (!NATIVE_CONTINUITY_SOURCES.has(fact.source)) throw new Error("LC4 native continuity fact source is inadmissible");
-    if (!fact.public_text.trim() || fact.public_text.length > 1_000) throw new Error("LC4 native continuity public text is invalid");
-    publicTextBytes += Buffer.byteLength(fact.public_text, "utf8");
-    if (!SHA256.test(fact.provenance_receipt_sha256)) throw new Error("LC4 native continuity provenance receipt is invalid");
-    if (!Number.isSafeInteger(fact.available_after_opportunity)
-      || fact.available_after_opportunity < 1
-      || fact.available_after_opportunity > input.available_through_opportunity) {
-      throw new Error("LC4 native continuity includes a future-unavailable fact");
-    }
-    if (
-      fact.visibility !== "public_non_sensitive"
-      || fact.oracle_derived !== false
-      || fact.future_derived !== false
-      || fact.private_value_included !== false
-    ) throw new Error("LC4 native continuity forbids private, oracle, future, or sensitive facts");
-    const listenerSource = fact.source === "listener_heard_caller" || fact.source === "listener_heard_assistant";
-    if ((listenerSource && fact.listener_status !== "heard_verified")
-      || (!listenerSource && fact.listener_status !== "not_applicable")) {
-      throw new Error("LC4 native continuity fact lacks its required source evidence");
-    }
-    return Object.freeze({
-      fact_id: fact.fact_id,
-      source: fact.source,
-      public_text: fact.public_text,
-      substantive_sha256: sha256Hex(fact.public_text),
-      available_after_opportunity: fact.available_after_opportunity,
-      provenance_receipt_sha256: fact.provenance_receipt_sha256,
-    });
-  }).sort((left, right) => left.fact_id.localeCompare(right.fact_id));
-  if (publicTextBytes > 20_000) throw new Error("LC4 native continuity exceeds its public text budget");
-  if (new Set(facts.map((fact) => fact.fact_id)).size !== facts.length) throw new Error("LC4 native continuity fact IDs must be unique");
+  const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
   const body = Object.freeze({
-    schema_version: 1 as const,
-    packet_type: "strong_native_listener_and_receipt_continuity" as const,
+    schema_version: 2 as const,
+    packet_type: "native_provider_conversation_replay" as const,
     run_id: input.run_id,
     from_segment_ordinal: input.from_segment_ordinal,
     to_segment_ordinal: input.to_segment_ordinal,
     available_through_opportunity: input.available_through_opportunity,
     previous_session_rotation_receipt_sha256: input.previous_session_rotation_receipt_sha256,
-    facts: Object.freeze(facts),
-    substantive_fact_set_sha256: hashFactSet(facts),
+    conversation_turns: conversationTurns,
+    conversation_replay_sha256: hashConversationReplay(conversationTurns),
   });
   return Object.freeze({ ...body, packet_sha256: sha256Hex(`${NATIVE_CONTINUITY_DOMAIN}${canonicalJson(body)}`) });
 }
@@ -251,42 +333,17 @@ export function createLc4HaccRotationStatePacket(input: Readonly<{
   previous_session_rotation_receipt_sha256: string;
   flow_state_sha256: string;
   response_plan_chain_head_sha256: string;
-  facts: readonly Pick<Lc4RotationSubstantiveFact, "fact_id" | "public_text" | "substantive_sha256" | "available_after_opportunity" | "provenance_receipt_sha256">[];
+  conversation_turns: readonly Lc4NativeConversationTurnInput[];
 }>): Lc4HaccRotationStatePacket {
   safeId(input.run_id, "LC4 HACC rotation run ID");
   assertRotationBoundary(input.from_segment_ordinal, input.to_segment_ordinal, input.available_through_opportunity);
   for (const digest of [input.previous_session_rotation_receipt_sha256, input.flow_state_sha256, input.response_plan_chain_head_sha256]) {
     if (!SHA256.test(digest)) throw new Error("LC4 HACC rotation hash is invalid");
   }
-  if (input.facts.length > 64) throw new Error("LC4 HACC rotation exceeds 64 substantive facts");
-  let publicTextBytes = 0;
-  const facts = input.facts.map((fact) => {
-    safeId(fact.fact_id, "LC4 HACC rotation fact ID");
-    if (!SHA256.test(fact.substantive_sha256) || !SHA256.test(fact.provenance_receipt_sha256)) {
-      throw new Error("LC4 HACC rotation fact hash is invalid");
-    }
-    if (!fact.public_text.trim() || fact.public_text.length > 1_000 || sha256Hex(fact.public_text) !== fact.substantive_sha256) {
-      throw new Error("LC4 HACC rotation public fact text is invalid");
-    }
-    publicTextBytes += Buffer.byteLength(fact.public_text, "utf8");
-    if (!Number.isSafeInteger(fact.available_after_opportunity)
-      || fact.available_after_opportunity < 1
-      || fact.available_after_opportunity > input.available_through_opportunity) {
-      throw new Error("LC4 HACC rotation includes a future-unavailable fact");
-    }
-    return Object.freeze({
-      fact_id: fact.fact_id,
-      public_text: fact.public_text,
-      substantive_sha256: fact.substantive_sha256,
-      available_after_opportunity: fact.available_after_opportunity,
-      provenance_receipt_sha256: fact.provenance_receipt_sha256,
-    });
-  }).sort((left, right) => left.fact_id.localeCompare(right.fact_id));
-  if (publicTextBytes > 20_000) throw new Error("LC4 HACC rotation exceeds its public text budget");
-  if (new Set(facts.map((fact) => fact.fact_id)).size !== facts.length) throw new Error("LC4 HACC rotation fact IDs must be unique");
+  const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
   const body = Object.freeze({
-    schema_version: 1 as const,
-    packet_type: "hacc_structured_state_rotation" as const,
+    schema_version: 2 as const,
+    packet_type: "hacc_provider_conversation_plus_structured_state" as const,
     run_id: input.run_id,
     from_segment_ordinal: input.from_segment_ordinal,
     to_segment_ordinal: input.to_segment_ordinal,
@@ -294,49 +351,48 @@ export function createLc4HaccRotationStatePacket(input: Readonly<{
     previous_session_rotation_receipt_sha256: input.previous_session_rotation_receipt_sha256,
     flow_state_sha256: input.flow_state_sha256,
     response_plan_chain_head_sha256: input.response_plan_chain_head_sha256,
-    facts: Object.freeze(facts),
-    substantive_fact_set_sha256: hashFactSet(facts),
+    conversation_turns: conversationTurns,
+    conversation_replay_sha256: hashConversationReplay(conversationTurns),
   });
   return Object.freeze({ ...body, packet_sha256: sha256Hex(`${HACC_ROTATION_DOMAIN}${canonicalJson(body)}`) });
 }
 
-export function assertLc4RotationSubstantiveFactParity(
-  native: Lc4StrongNativeContinuityPacket,
+export function assertLc4RotationConversationParity(
+  native: Lc4NativeConversationReplayPacket,
   hacc: Lc4HaccRotationStatePacket,
 ): void {
-  const validatedNative = assertStrongNativeContinuityPacket(native);
+  const validatedNative = assertNativeConversationReplayPacket(native);
   const validatedHacc = assertHaccRotationStatePacket(hacc);
   if (
     validatedNative.from_segment_ordinal !== validatedHacc.from_segment_ordinal
     || validatedNative.to_segment_ordinal !== validatedHacc.to_segment_ordinal
     || validatedNative.available_through_opportunity !== validatedHacc.available_through_opportunity
-    || validatedNative.substantive_fact_set_sha256 !== validatedHacc.substantive_fact_set_sha256
-  ) throw new Error("LC4 native and HACC rotation packets differ in available substantive facts");
+    || validatedNative.conversation_replay_sha256 !== validatedHacc.conversation_replay_sha256
+  ) throw new Error("LC4 Native and HACC rotation wrappers differ in provider conversation replay");
 }
 
-function assertStrongNativeContinuityPacket(packet: Lc4StrongNativeContinuityPacket): Lc4StrongNativeContinuityPacket {
-  const rebuilt = createLc4StrongNativeContinuityPacket({
+function assertNativeConversationReplayPacket(packet: Lc4NativeConversationReplayPacket): Lc4NativeConversationReplayPacket {
+  const rebuilt = createLc4NativeConversationReplayPacket({
     run_id: packet.run_id,
     from_segment_ordinal: packet.from_segment_ordinal,
     to_segment_ordinal: packet.to_segment_ordinal,
     available_through_opportunity: packet.available_through_opportunity,
     previous_session_rotation_receipt_sha256: packet.previous_session_rotation_receipt_sha256,
-    facts: packet.facts.map((fact) => ({
-      fact_id: fact.fact_id,
-      source: fact.source,
-      public_text: fact.public_text,
-      available_after_opportunity: fact.available_after_opportunity,
-      provenance_receipt_sha256: fact.provenance_receipt_sha256,
-      listener_status: fact.source === "listener_heard_caller" || fact.source === "listener_heard_assistant"
-        ? "heard_verified"
-        : "not_applicable",
-      visibility: "public_non_sensitive",
+    conversation_turns: packet.conversation_turns.map((turn) => ({
+      turn_id: turn.turn_id,
+      sequence: turn.sequence,
+      speaker: turn.speaker,
+      source: turn.source,
+      text: turn.text,
+      available_after_opportunity: turn.available_after_opportunity,
+      provenance_receipt_sha256: turn.provenance_receipt_sha256,
+      provider_conversation_source: true,
       oracle_derived: false,
       future_derived: false,
-      private_value_included: false,
+      semantic_evaluator_derived: false,
     })),
   });
-  if (canonicalJson(rebuilt) !== canonicalJson(packet)) throw new Error("LC4 native continuity packet integrity failed");
+  if (canonicalJson(rebuilt) !== canonicalJson(packet)) throw new Error("LC4 Native conversation replay packet integrity failed");
   return rebuilt;
 }
 
@@ -349,20 +405,54 @@ function assertHaccRotationStatePacket(packet: Lc4HaccRotationStatePacket): Lc4H
     previous_session_rotation_receipt_sha256: packet.previous_session_rotation_receipt_sha256,
     flow_state_sha256: packet.flow_state_sha256,
     response_plan_chain_head_sha256: packet.response_plan_chain_head_sha256,
-    facts: packet.facts,
+    conversation_turns: packet.conversation_turns.map((turn) => ({
+      turn_id: turn.turn_id,
+      sequence: turn.sequence,
+      speaker: turn.speaker,
+      source: turn.source,
+      text: turn.text,
+      available_after_opportunity: turn.available_after_opportunity,
+      provenance_receipt_sha256: turn.provenance_receipt_sha256,
+      provider_conversation_source: true,
+      oracle_derived: false,
+      future_derived: false,
+      semantic_evaluator_derived: false,
+    })),
   });
   if (canonicalJson(rebuilt) !== canonicalJson(packet)) throw new Error("LC4 HACC rotation state packet integrity failed");
   return rebuilt;
 }
 
+/**
+ * Provider-visible reconnect history is deliberately smaller than the
+ * integrity packet retained by the host. A raw Native model sees only the
+ * chronological roles and content that already crossed its conversation
+ * boundary—not run IDs, corpus opportunity ordinals, provenance receipts,
+ * evaluator labels, or host state hashes.
+ */
+function renderRotationConversationForProvider(
+  turns: readonly Lc4RotationConversationTurn[],
+): string {
+  const conversation = turns.map((turn) => Object.freeze({
+    role: turn.speaker,
+    content: turn.text,
+  }));
+  return [
+    "Continue from this chronological provider conversation replay.",
+    "<lc4_provider_conversation>",
+    canonicalJson(conversation),
+    "</lc4_provider_conversation>",
+  ].join("\n");
+}
+
 export type Lc4RotationContext =
-  | Readonly<{ kind: "strong_native"; packet: Lc4StrongNativeContinuityPacket }>
+  | Readonly<{ kind: "native_conversation_replay"; packet: Lc4NativeConversationReplayPacket }>
   | Readonly<{ kind: "hacc_structured_state"; packet: Lc4HaccRotationStatePacket }>;
 
 type ValidatedRotationContext = Readonly<{
   kind: "none" | Lc4RotationContext["kind"];
   packet_sha256: string | null;
-  substantive_fact_set_sha256: string | null;
+  conversation_replay_sha256: string | null;
   rendered: string | null;
 }>;
 
@@ -380,8 +470,80 @@ export type Lc4SanitizedWireObservation = Readonly<{
   identity_hashes: RealtimeWireObservation["identities"];
 }>;
 
+export type Lc4GeminiOutputAudioChunkAttribution = Readonly<{
+  output_chunk_index: number;
+  frame_chunk_index: number;
+  pcm_sha256: string;
+  byte_length: number;
+  mime_type: "audio/pcm;rate=24000";
+  format: Readonly<{
+    encoding: "pcm16";
+    sample_rate_hz: 24_000;
+    channels: 1;
+  }>;
+}>;
+
+export type Lc4GeminiServerContentFrameAttribution = Readonly<{
+  server_content_index: number;
+  interval_index: number;
+  wire_observation: Readonly<{
+    connection_epoch: number;
+    sequence: number;
+    observation_sha256: string;
+    payload_sha256: string;
+    payload_byte_length: number;
+    projection_sha256: string;
+  }>;
+  /**
+   * Complete privacy-safe projection emitted by the Gemini wire observer.
+   * It contains hashes and counters, never transcript text or encoded PCM.
+   * Retaining this preimage is what lets replay independently recompute the
+   * exact wire projection hash instead of trusting a bare digest.
+   */
+  redacted_projection: JsonValue;
+  output_audio_chunks: readonly Lc4GeminiOutputAudioChunkAttribution[];
+  terminal_status: "completed" | "failed" | "interrupted" | null;
+}>;
+
+export type Lc4GeminiIntervalFrameAttribution = Readonly<{
+  interval_index: number;
+  direction: "inbound" | "outbound";
+  wire_type: string;
+  wire_observation: Lc4GeminiServerContentFrameAttribution["wire_observation"];
+  redacted_projection: JsonValue;
+}>;
+
+/**
+ * Future Gemini evidence contract. Historical provider-exchange v2 artifacts
+ * do not carry this object and remain explicitly completeness-unverified.
+ */
+export type Lc4GeminiOutputAttribution = Readonly<{
+  schema_version: 1;
+  contract: "gemini_server_content_output_audio_attribution";
+  completeness: "verified_activity_end_to_terminal";
+  observation_scope: "client_observed_wire_frames";
+  activity_end: Readonly<{
+    connection_epoch: number;
+    sequence: number;
+    observation_sha256: string;
+  }>;
+  terminal: Readonly<{
+    connection_epoch: number;
+    sequence: number;
+    observation_sha256: string;
+    status: "completed";
+  }>;
+  interval_observation_sha256s: readonly string[];
+  interval_frames: readonly Lc4GeminiIntervalFrameAttribution[];
+  server_content_frames: readonly Lc4GeminiServerContentFrameAttribution[];
+  output_audio_chunk_count: number;
+  output_audio_byte_length: number;
+  output_audio_pcm_sha256: string;
+  attribution_sha256: string;
+}>;
+
 export type Lc4ProviderExchangeEvidence = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   adapter_version: typeof LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION;
   run_id: string;
   opportunity_id: string;
@@ -392,7 +554,10 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   caller_pcm_byte_length: number;
   rotation_context_kind: ValidatedRotationContext["kind"];
   rotation_context_sha256: string | null;
-  rotation_substantive_fact_set_sha256: string | null;
+  rotation_conversation_replay_sha256: string | null;
+  provider_output_transcript_sha256: string | null;
+  assistant_conversation_transcript_sha256: string | null;
+  assistant_conversation_transcript_source: Lc4AssistantConversationTranscriptSource | null;
   response_control_kind: "native_context" | "hacc_response_plan";
   response_plan_sha256: string | null;
   response_plan_body: HaccResponsePlan | null;
@@ -403,6 +568,12 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   requested_runtime_identity: Readonly<{ provider: LiveStsProvider; model: string; voice: string }>;
   effective_runtime_identity: Readonly<{ provider: LiveStsProvider; model: string; voice: string }>;
   output_capture: Lc4CapturedOutput;
+  /**
+   * `null` on non-Gemini exchanges. Historical Gemini evidence may omit this
+   * field entirely; only this versioned contract can upgrade output-wire
+   * completeness from unverified to verified.
+   */
+  gemini_output_attribution: Lc4GeminiOutputAttribution | null;
   wire_observations: readonly Lc4SanitizedWireObservation[];
   wire_observation_set_sha256: string;
   /**
@@ -417,6 +588,8 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
     pcm_sha256: string;
   }>;
   transport_mode: "manual_commit" | "provider_native_server_vad";
+  transport_purpose: Lc4XaiTransportPurpose | null;
+  transport_profile_sha256: string;
   transport_parity_sha256: string;
   tool_frontier_sha256: string;
   server_vad_setting_sha256: string | null;
@@ -424,12 +597,20 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
   server_vad_transport_suffix: Lc4XaiServerVadTransportSuffixEvidence | null;
   per_turn_session_update_observation_sha256: string | null;
   per_turn_session_ack_observation_sha256: string | null;
+  xai_manual_turn_causality: Lc4XaiManualTurnCausalityEvidence | null;
   operation_order: readonly Lc4ProviderExchangeOperation[];
   evidence_sha256: string;
   /** DEV-only phase binding; absent from frozen confirmatory artifacts. */
   playback_kind?: "canonical" | "repair";
   repair_decision_receipt_sha256?: string | null;
   dev_listener_result?: Awaited<ReturnType<Lc4DevelopmentListenerSink["accept"]>> | null;
+  /**
+   * DEV-only in-memory value used to construct a raw chronological replay at
+   * a planned reconnect. The retained replay projection contains only its
+   * hash, so no raw transcript is written into benchmark evidence.
+   */
+  dev_assistant_conversation_transcript?: string;
+  dev_assistant_conversation_transcript_source?: Lc4AssistantConversationTranscriptSource;
   replay_projection: JsonValue;
 }>;
 
@@ -455,6 +636,7 @@ export type Lc4ProviderExchangeOperation =
   | "caller_pcm_delivery_completed"
   | "server_vad_silence_tail_delivery_started"
   | "server_vad_silence_tail_delivery_completed"
+  | "server_vad_silence_tail_delivery_exhausted"
   | "server_vad_silence_tail_prefix_accepted"
   | "response_plan_prepared"
   | "caller_pcm_committed"
@@ -478,7 +660,23 @@ export type Lc4ListenerEvidenceHandoff = Readonly<{
 export type Lc4RealtimeClientFactory = (
   provider: LiveStsProvider,
   configuration: TrialSessionConfiguration,
+  transportProfile: Lc4XaiTransportProfile | null,
 ) => NormalizedRealtimeClient | Promise<NormalizedRealtimeClient>;
+
+export type Lc4RealtimeProviderBridgeProfilePolicy = Readonly<{
+  /**
+   * Bridge-owned purpose, never selected from an episode/profile supplied to
+   * openSegment. The efficacy adapter stays finite/manual; the isolated
+   * transport qualification must opt into server VAD when it constructs its
+   * own bridge.
+   */
+  xai_transport_purpose: Lc4XaiTransportPurpose;
+}>;
+
+const LC4_FINITE_EFFICACY_PROFILE_POLICY =
+  Object.freeze({
+    xai_transport_purpose: "finite_prerecorded_efficacy" as const,
+  });
 
 /**
  * Protocol-neutral subset consumed by the wire bridge. Confirmatory manifest
@@ -575,18 +773,31 @@ function safeId(value: string, label: string): string {
   return value;
 }
 
-function assertExactProfile(input: Lc4OpenRealtimeSegmentInput): void {
+function assertExactProfile(
+  input: Lc4OpenRealtimeSegmentInput,
+  profilePolicy: Lc4RealtimeProviderBridgeProfilePolicy,
+): void {
   assertLc4ProviderProfileManifest(LC4_PROVIDER_PROFILE_MANIFEST);
-  const frozen = LC4_PROVIDER_PROFILE_MANIFEST.providers[input.profile.provider];
+  const provider = input.configuration.provider;
+  const expectedProfile = createLc4ProviderExecutionProfile(
+    provider,
+    profilePolicy.xai_transport_purpose,
+  );
+  const expectedConditionId = input.manifest.episode_shape.arm === "native"
+    ? "raw-full"
+    : "host-managed-harness";
+  const expectedProviderTool = input.manifest.protocol_id === "HACC-LC4-DEV-v1"
+    ? LC4_DEV_SEMANTIC_GATEWAY_FUNCTION
+    : LOCAL_TOOL_PROXY_FUNCTION;
   if (
-    input.profile.provider !== input.manifest.episode_shape.provider
-    || input.profile.model !== frozen.model
-    || input.profile.voice !== frozen.voice
-    || input.profile.input_sample_rate_hz !== frozen.input_sample_rate_hz
-    || input.profile.output_sample_rate_hz !== frozen.output_sample_rate_hz
-    || input.configuration.provider !== input.profile.provider
-    || input.configuration.model !== input.profile.model
-    || input.configuration.inputAudioFormat.sampleRateHz !== input.profile.input_sample_rate_hz
+    input.manifest.episode_shape.provider !== provider
+    || canonicalJson(input.profile) !== canonicalJson(expectedProfile)
+    || canonicalJson(input.manifest.episode_shape.provider_profile)
+      !== canonicalJson(expectedProfile)
+    || canonicalJson(input.profile) !== canonicalJson(input.manifest.episode_shape.provider_profile)
+    || input.configuration.model !== expectedProfile.model
+    || input.configuration.conditionId !== expectedConditionId
+    || input.configuration.inputAudioFormat.sampleRateHz !== expectedProfile.input_sample_rate_hz
     || input.configuration.inputAudioFormat.encoding !== "pcm16"
     || input.configuration.inputAudioFormat.channels !== 1
     || input.configuration.audioDeliveryProfile.schemaVersion !== 1
@@ -594,10 +805,18 @@ function assertExactProfile(input: Lc4OpenRealtimeSegmentInput): void {
     || input.configuration.audioDeliveryProfile.pace !== "realtime"
     || input.configuration.audioDeliveryProfileHash !== trialAudioDeliveryProfileHash(input.configuration.audioDeliveryProfile)
     || input.configuration.providerTools.length !== 1
-    || !(input.manifest.protocol_id === "HACC-LC4-DEV-v1"
-      ? isLc4DevSemanticGatewayFunction(input.configuration.providerTools[0])
-      : isLocalToolProxyFunction(input.configuration.providerTools[0]))
+    || canonicalJson(input.configuration.providerTools[0])
+      !== canonicalJson(expectedProviderTool)
   ) throw new Error("LC4 realtime segment differs from its frozen production provider profile");
+  if (provider === "xai") {
+    const xaiProfile = lc4XaiTransportProfileForPurpose(
+      profilePolicy.xai_transport_purpose,
+    );
+    assertLc4XaiTransportProfile(
+      xaiProfile,
+      profilePolicy.xai_transport_purpose,
+    );
+  }
 }
 
 function validateRotationContext(
@@ -608,7 +827,7 @@ function validateRotationContext(
     if (input.rotation_context !== null || previousRotationReceiptSha256 !== null) {
       throw new Error("LC4 first segment forbids a rotation context");
     }
-    return Object.freeze({ kind: "none", packet_sha256: null, substantive_fact_set_sha256: null, rendered: null });
+    return Object.freeze({ kind: "none", packet_sha256: null, conversation_replay_sha256: null, rendered: null });
   }
   if (input.rotation_context === null || previousRotationReceiptSha256 === null) {
     throw new Error("LC4 reopened segment requires a receipt-bound rotation context");
@@ -616,8 +835,8 @@ function validateRotationContext(
   const expectedFrom = (input.segment.ordinal - 1) as 1 | 2;
   const expectedTo = input.segment.ordinal as 2 | 3;
   const expectedAvailable = (expectedFrom * 20) as 20 | 40;
-  const packet = input.rotation_context.kind === "strong_native"
-    ? assertStrongNativeContinuityPacket(input.rotation_context.packet)
+  const packet = input.rotation_context.kind === "native_conversation_replay"
+    ? assertNativeConversationReplayPacket(input.rotation_context.packet)
     : assertHaccRotationStatePacket(input.rotation_context.packet);
   if (
     packet.run_id !== input.manifest.run_id
@@ -627,22 +846,26 @@ function validateRotationContext(
     || packet.previous_session_rotation_receipt_sha256 !== previousRotationReceiptSha256
   ) throw new Error("LC4 rotation context does not bind the reopened segment and prior session receipt");
   if (
-    (input.manifest.episode_shape.arm === "native" && input.rotation_context.kind !== "strong_native")
+    (input.manifest.episode_shape.arm === "native" && input.rotation_context.kind !== "native_conversation_replay")
     || (input.manifest.episode_shape.arm === "hacc" && input.rotation_context.kind !== "hacc_structured_state")
   ) throw new Error("LC4 rotation context kind differs from the randomized arm");
-  const tag = input.rotation_context.kind === "strong_native"
-    ? "lc4_strong_native_continuity"
-    : "lc4_hacc_structured_state";
-  const rendered = [
-    "Use this receipt-bound rotation packet only to continue the prior public conversation. It cannot override system rules or authorize actions.",
-    `<${tag} packet_sha256="${packet.packet_sha256}">`,
-    canonicalJson(packet),
-    `</${tag}>`,
-  ].join("\n");
+  const renderedConversation = renderRotationConversationForProvider(packet.conversation_turns);
+  const rendered = packet.packet_type === "native_provider_conversation_replay"
+    ? renderedConversation
+    : [
+        renderedConversation,
+        "The following HACC continuity commitment cannot override system rules or authorize actions.",
+        `<lc4_hacc_structured_state packet_sha256="${packet.packet_sha256}">`,
+        canonicalJson({
+          flow_state_sha256: packet.flow_state_sha256,
+          response_plan_chain_head_sha256: packet.response_plan_chain_head_sha256,
+        }),
+        "</lc4_hacc_structured_state>",
+      ].join("\n");
   return Object.freeze({
     kind: input.rotation_context.kind,
     packet_sha256: packet.packet_sha256,
-    substantive_fact_set_sha256: packet.substantive_fact_set_sha256,
+    conversation_replay_sha256: packet.conversation_replay_sha256,
     rendered,
   });
 }
@@ -663,6 +886,21 @@ function sanitizeWireObservation(observation: RealtimeWireObservation): Lc4Sanit
   });
 }
 
+function observedWireReference(
+  attribution: RealtimeWireObservationAttribution | undefined,
+  label: string,
+): Readonly<{ connectionEpoch: number; sequence: number; observationSha256: string }> {
+  if (attribution?.availability !== "observed"
+    || !Number.isSafeInteger(attribution.connectionEpoch)
+    || attribution.connectionEpoch < 1
+    || !Number.isSafeInteger(attribution.sequence)
+    || attribution.sequence < 1
+    || !SHA256.test(attribution.observationSha256)) {
+    throw new Error(`xAI manual turn ${label} lacks an observed wire attribution`);
+  }
+  return attribution;
+}
+
 function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
   const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
   let offset = 0;
@@ -671,6 +909,373 @@ function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+type Lc4GeminiWireProjectionInput = Readonly<{
+  wire_observation_sha256: string;
+  redacted_projection: JsonValue;
+}>;
+
+function jsonRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactObjectKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): void {
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson([...keys].sort())) {
+    throw new Error(`${label} has missing or unknown fields`);
+  }
+}
+
+function immutableJsonValue(value: unknown): JsonValue {
+  return JSON.parse(canonicalJson(value)) as JsonValue;
+}
+
+function geminiWirePointer(
+  observation: Lc4SanitizedWireObservation,
+): Lc4GeminiServerContentFrameAttribution["wire_observation"] {
+  return Object.freeze({
+    connection_epoch: observation.connection_epoch,
+    sequence: observation.sequence,
+    observation_sha256: observation.observation_sha256,
+    payload_sha256: observation.payload_sha256,
+    payload_byte_length: observation.payload_bytes,
+    projection_sha256: observation.projection_sha256,
+  });
+}
+
+function parseGeminiServerContentProjection(input: Readonly<{
+  projection: JsonValue;
+  outputChunkStart: number;
+}>): Readonly<{
+  chunks: readonly Lc4GeminiOutputAudioChunkAttribution[];
+  terminalStatus: Lc4GeminiServerContentFrameAttribution["terminal_status"];
+}> {
+  const projection = jsonRecord(input.projection, "LC4 Gemini redacted serverContent projection");
+  const allowedKeys = new Set(["audio", "terminal", "text", "usage"]);
+  if (Object.keys(projection).some((key) => !allowedKeys.has(key))) {
+    throw new Error("LC4 Gemini redacted serverContent projection has an unsupported field");
+  }
+  if (projection.text !== undefined) {
+    if (!Array.isArray(projection.text)
+      || projection.text.length < 1
+      || projection.text.length > 128) {
+      throw new Error("LC4 Gemini redacted serverContent text evidence is invalid");
+    }
+    const kinds = new Set([
+      "input_transcript",
+      "output_transcript",
+      "model_text",
+    ]);
+    for (const [index, candidate] of projection.text.entries()) {
+      const text = jsonRecord(
+        candidate,
+        `LC4 Gemini redacted serverContent text evidence ${index + 1}`,
+      );
+      exactObjectKeys(
+        text,
+        ["kind", "sha256", "byteLength"],
+        `LC4 Gemini redacted serverContent text evidence ${index + 1}`,
+      );
+      if (!kinds.has(String(text.kind))
+        || !SHA256.test(String(text.sha256))
+        || !Number.isSafeInteger(text.byteLength)
+        || (text.byteLength as number) < 0
+        || (text.byteLength as number) > 1_000_000) {
+        throw new Error("LC4 Gemini redacted serverContent text evidence is invalid");
+      }
+    }
+  }
+  if (projection.usage !== undefined) {
+    const usage = jsonRecord(
+      projection.usage,
+      "LC4 Gemini redacted serverContent usage evidence",
+    );
+    const allowedUsageKeys = new Set([
+      "inputTextTokens",
+      "inputAudioTokens",
+      "cachedInputTokens",
+      "cachedInputTextTokens",
+      "cachedInputAudioTokens",
+      "outputTextTokens",
+      "outputAudioTokens",
+      "totalInputTokens",
+      "totalOutputTokens",
+      "totalTokens",
+    ]);
+    const usageKeys = Object.keys(usage);
+    if (usageKeys.length < 1
+      || usageKeys.some((key) => !allowedUsageKeys.has(key))
+      || Object.values(usage).some((value) =>
+        !Number.isSafeInteger(value)
+        || (value as number) < 0
+        || (value as number) > 1_000_000_000_000)) {
+      throw new Error("LC4 Gemini redacted serverContent usage evidence is invalid");
+    }
+  }
+  const chunks: Lc4GeminiOutputAudioChunkAttribution[] = [];
+  if (projection.audio !== undefined) {
+    const audio = jsonRecord(projection.audio, "LC4 Gemini redacted output audio");
+    exactObjectKeys(audio, ["direction", "chunks"], "LC4 Gemini redacted output audio");
+    if (audio.direction !== "output" || !Array.isArray(audio.chunks) || audio.chunks.length < 1) {
+      throw new Error("LC4 Gemini redacted output audio is invalid");
+    }
+    for (const [index, candidate] of audio.chunks.entries()) {
+      const chunk = jsonRecord(candidate, `LC4 Gemini output audio chunk ${index + 1}`);
+      exactObjectKeys(chunk, [
+        "validCanonicalBase64",
+        "byteLength",
+        "sha256",
+        "encodedBytes",
+        "mimeTypeRecognized",
+        "format",
+      ], `LC4 Gemini output audio chunk ${index + 1}`);
+      const format = jsonRecord(
+        chunk.format,
+        `LC4 Gemini output audio chunk ${index + 1} format`,
+      );
+      exactObjectKeys(
+        format,
+        ["encoding", "sampleRateHz", "channels"],
+        `LC4 Gemini output audio chunk ${index + 1} format`,
+      );
+      const byteLength = chunk.byteLength;
+      if (chunk.validCanonicalBase64 !== true
+        || chunk.mimeTypeRecognized !== true
+        || !Number.isSafeInteger(byteLength)
+        || (byteLength as number) < 2
+        || (byteLength as number) % 2 !== 0
+        || !SHA256.test(String(chunk.sha256))
+        || chunk.encodedBytes !== 4 * Math.ceil((byteLength as number) / 3)
+        || format.encoding !== "pcm16"
+        || format.sampleRateHz !== 24_000
+        || format.channels !== 1) {
+        throw new Error("LC4 Gemini output audio chunk projection is not canonical PCM16");
+      }
+      chunks.push(Object.freeze({
+        output_chunk_index: input.outputChunkStart + index + 1,
+        frame_chunk_index: index + 1,
+        pcm_sha256: String(chunk.sha256),
+        byte_length: byteLength as number,
+        mime_type: "audio/pcm;rate=24000" as const,
+        format: Object.freeze({
+          encoding: "pcm16" as const,
+          sample_rate_hz: 24_000 as const,
+          channels: 1 as const,
+        }),
+      }));
+    }
+  }
+  let terminalStatus: Lc4GeminiServerContentFrameAttribution["terminal_status"] = null;
+  if (projection.terminal !== undefined) {
+    const terminal = jsonRecord(projection.terminal, "LC4 Gemini redacted terminal");
+    exactObjectKeys(terminal, ["status"], "LC4 Gemini redacted terminal");
+    if (terminal.status !== "completed"
+      && terminal.status !== "failed"
+      && terminal.status !== "interrupted") {
+      throw new Error("LC4 Gemini redacted terminal status is invalid");
+    }
+    terminalStatus = terminal.status;
+  }
+  return Object.freeze({
+    chunks: Object.freeze(chunks),
+    terminalStatus,
+  });
+}
+
+/**
+ * Creates the only Gemini output-lineage artifact that is allowed to claim a
+ * complete client-observed activityEnd-to-terminal frame attribution. The
+ * complete redacted projection preimage for every serverContent frame is
+ * retained and re-hashed; a list of bare projection digests is insufficient.
+ */
+export function createLc4GeminiOutputAttribution(input: Readonly<{
+  observations: readonly Lc4SanitizedWireObservation[];
+  wire_projections: readonly Lc4GeminiWireProjectionInput[];
+  capture: Lc4CapturedOutput;
+}>): Lc4GeminiOutputAttribution {
+  if (input.capture.provider !== "gemini"
+    || input.capture.format.encoding !== "pcm16"
+    || input.capture.format.sample_rate_hz !== 24_000
+    || input.capture.format.channels !== 1
+    || input.capture.chunks.length < 1) {
+    throw new Error("LC4 Gemini output attribution capture is invalid");
+  }
+  const observations = input.observations;
+  if (observations.length < 2
+    || observations.some((observation) => observation.provider !== "gemini")) {
+    throw new Error("LC4 Gemini output attribution wire set is invalid");
+  }
+  const activityEnds = observations.filter((observation) =>
+    observation.direction === "outbound"
+    && observation.wire_type === "realtimeInput.activityEnd");
+  if (activityEnds.length !== 1) {
+    throw new Error("LC4 Gemini output attribution requires one activityEnd");
+  }
+  const activityEnd = activityEnds[0]!;
+  const projections = new Map<string, JsonValue>();
+  for (const entry of input.wire_projections) {
+    if (!SHA256.test(entry.wire_observation_sha256)
+      || projections.has(entry.wire_observation_sha256)) {
+      throw new Error("LC4 Gemini interval projection attribution is duplicate or invalid");
+    }
+    projections.set(
+      entry.wire_observation_sha256,
+      immutableJsonValue(entry.redacted_projection),
+    );
+  }
+  const observationsAfterEnd = observations.filter((observation) =>
+    observation.connection_epoch === activityEnd.connection_epoch
+    && observation.sequence > activityEnd.sequence);
+  if (observationsAfterEnd.length < 1
+    || projections.size !== observationsAfterEnd.length) {
+    throw new Error("LC4 Gemini output attribution omits or adds an interval projection");
+  }
+  const intervalFrames = observationsAfterEnd.map((observation, index) => {
+    const projection = projections.get(observation.observation_sha256);
+    if (projection === undefined
+      || realtimeWireProjectionSha256(
+        jsonRecord(projection, "LC4 Gemini redacted interval projection"),
+      ) !== observation.projection_sha256) {
+      throw new Error("LC4 Gemini interval projection preimage differs from its wire hash");
+    }
+    if (observation.wire_type === "mixedServerMessage") {
+      throw new Error("LC4 Gemini output attribution forbids mixed server messages");
+    }
+    const projectionRecord = jsonRecord(
+      projection,
+      "LC4 Gemini redacted interval projection",
+    );
+    if (observation.wire_type !== "serverContent"
+      && (projectionRecord.audio !== undefined
+        || projectionRecord.terminal !== undefined)) {
+      throw new Error("LC4 Gemini output or terminal escaped a serverContent frame");
+    }
+    return Object.freeze({
+      observation,
+      projection,
+      interval: Object.freeze({
+        interval_index: index + 1,
+        direction: observation.direction,
+        wire_type: observation.wire_type,
+        wire_observation: geminiWirePointer(observation),
+        redacted_projection: projection,
+      }),
+    });
+  });
+  const parsedFrames = intervalFrames
+    .filter((frame) =>
+      frame.observation.direction === "inbound"
+      && frame.observation.wire_type === "serverContent")
+    .map((frame) => Object.freeze({
+      ...frame,
+      parsed: parseGeminiServerContentProjection({
+        projection: frame.projection,
+        outputChunkStart: 0,
+      }),
+    }));
+  if (parsedFrames.length < 1) {
+    throw new Error("LC4 Gemini output attribution has no serverContent frame");
+  }
+  const terminalFrames = parsedFrames.filter((frame) =>
+    frame.parsed.terminalStatus !== null);
+  if (terminalFrames.length !== 1
+    || terminalFrames[0]!.parsed.terminalStatus !== "completed") {
+    throw new Error("LC4 Gemini output attribution requires one completed terminal");
+  }
+  const terminalObservation = terminalFrames[0]!.observation;
+  if (observationsAfterEnd.at(-1)!.observation_sha256
+    !== terminalObservation.observation_sha256) {
+    throw new Error("LC4 Gemini output attribution contains a post-terminal frame");
+  }
+  const interval = observationsAfterEnd;
+  if (interval.length < 1
+    || interval.at(-1)!.observation_sha256 !== terminalObservation.observation_sha256) {
+    throw new Error("LC4 Gemini output attribution interval is incomplete");
+  }
+  const intervalIndex = new Map(interval.map((observation, index) =>
+    [observation.observation_sha256, index + 1] as const));
+  let outputChunkCount = 0;
+  const frames = parsedFrames.map((frame, index) => {
+    const parsed = parseGeminiServerContentProjection({
+      projection: frame.projection,
+      outputChunkStart: outputChunkCount,
+    });
+    outputChunkCount += parsed.chunks.length;
+    const position = intervalIndex.get(frame.observation.observation_sha256);
+    if (position === undefined) {
+      throw new Error("LC4 Gemini serverContent escaped its activityEnd-to-terminal interval");
+    }
+    return Object.freeze({
+      server_content_index: index + 1,
+      interval_index: position,
+      wire_observation: geminiWirePointer(frame.observation),
+      redacted_projection: frame.projection,
+      output_audio_chunks: parsed.chunks,
+      terminal_status: parsed.terminalStatus,
+    });
+  });
+  const attributedChunks = frames.flatMap((frame) => frame.output_audio_chunks);
+  if (attributedChunks.length !== input.capture.chunks.length) {
+    throw new Error("LC4 Gemini output attribution chunk count differs from capture");
+  }
+  for (const [index, attributed] of attributedChunks.entries()) {
+    const captured = input.capture.chunks[index]!;
+    if (attributed.output_chunk_index !== index + 1
+      || attributed.pcm_sha256 !== captured.receipt.pcm_sha256
+      || attributed.pcm_sha256 !== sha256Hex(captured.pcm)
+      || attributed.byte_length !== captured.receipt.byte_length
+      || attributed.byte_length !== captured.pcm.byteLength) {
+      throw new Error("LC4 Gemini output attribution chunk differs from exact capture PCM");
+    }
+  }
+  const capturedPcm = concatenate(input.capture.chunks.map((chunk) => chunk.pcm));
+  const outputAudioByteLength = attributedChunks.reduce(
+    (total, chunk) => total + chunk.byte_length,
+    0,
+  );
+  if (outputAudioByteLength !== input.capture.generated_byte_length
+    || capturedPcm.byteLength !== outputAudioByteLength
+    || sha256Hex(capturedPcm) !== input.capture.generated_pcm_sha256) {
+    throw new Error("LC4 Gemini output attribution aggregate differs from capture");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    contract: "gemini_server_content_output_audio_attribution" as const,
+    completeness: "verified_activity_end_to_terminal" as const,
+    observation_scope: "client_observed_wire_frames" as const,
+    activity_end: Object.freeze({
+      connection_epoch: activityEnd.connection_epoch,
+      sequence: activityEnd.sequence,
+      observation_sha256: activityEnd.observation_sha256,
+    }),
+    terminal: Object.freeze({
+      connection_epoch: terminalObservation.connection_epoch,
+      sequence: terminalObservation.sequence,
+      observation_sha256: terminalObservation.observation_sha256,
+      status: "completed" as const,
+    }),
+    interval_observation_sha256s: Object.freeze(
+      interval.map((observation) => observation.observation_sha256),
+    ),
+    interval_frames: Object.freeze(intervalFrames.map((frame) => frame.interval)),
+    server_content_frames: Object.freeze(frames),
+    output_audio_chunk_count: attributedChunks.length,
+    output_audio_byte_length: outputAudioByteLength,
+    output_audio_pcm_sha256: input.capture.generated_pcm_sha256,
+  });
+  return Object.freeze({
+    ...body,
+    attribution_sha256: sha256Hex(
+      `${LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN}${canonicalJson(body)}`,
+    ),
+  });
 }
 
 function createXaiServerVadTransportSuffixEvidence(input: Readonly<{
@@ -707,6 +1312,25 @@ function createXaiServerVadTransportSuffixEvidence(input: Readonly<{
       Array.from({ length: input.chunk_count }, (_, index) => index * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms),
     ),
   });
+}
+
+/**
+ * Finite audio must never fall through to the generic response timer after the
+ * complete transport delimiter has been delivered. The diagnostic retains the
+ * exact full-cap suffix commitment without treating it as caller audio.
+ */
+export class Lc4XaiServerVadDelimiterExhaustedError extends Error {
+  readonly suffix: Lc4XaiServerVadTransportSuffixEvidence
+    & Readonly<{ completion: "full_plan_delivered" }>;
+
+  constructor(
+    suffix: Lc4XaiServerVadTransportSuffixEvidence
+      & Readonly<{ completion: "full_plan_delivered" }>,
+  ) {
+    super("xAI server-VAD delimiter exhausted without provider-native speech stop");
+    this.name = "Lc4XaiServerVadDelimiterExhaustedError";
+    this.suffix = suffix;
+  }
 }
 
 async function deliverXaiServerVadTransportSuffix(input: Readonly<{
@@ -748,8 +1372,24 @@ async function deliverXaiServerVadTransportSuffix(input: Readonly<{
         chunk.byte_length !== plan.frame_byte_length
         || chunk.scheduled_offset_ms !== index * LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_ms
       ))) throw new Error("xAI server-VAD silence-tail full delivery contract failed");
-    return createXaiServerVadTransportSuffixEvidence({
+    const fullCapEvidence = createXaiServerVadTransportSuffixEvidence({
       completion: "full_plan_delivered",
+      chunk_count: receipt.chunk_count,
+      frame_bytes: receipt.frame_byte_length,
+      delivery_profile_sha256: input.delivery_profile_sha256,
+    });
+    const phase = input.server_vad_phase();
+    if (phase !== "stopped" && phase !== "committed" && phase !== "responding") {
+      if (fullCapEvidence.completion !== "full_plan_delivered") {
+        throw new Error("xAI server-VAD full-cap evidence has an invalid completion");
+      }
+      throw new Lc4XaiServerVadDelimiterExhaustedError(fullCapEvidence as (
+        Lc4XaiServerVadTransportSuffixEvidence
+        & Readonly<{ completion: "full_plan_delivered" }>
+      ));
+    }
+    return createXaiServerVadTransportSuffixEvidence({
+      completion: "provider_native_speech_stop",
       chunk_count: receipt.chunk_count,
       frame_bytes: receipt.frame_byte_length,
       delivery_profile_sha256: input.delivery_profile_sha256,
@@ -817,6 +1457,7 @@ function abortWait(signal: AbortSignal): Readonly<{ promise: Promise<never>; dis
 export class Lc4RealtimeProviderBridge {
   readonly #factory: Lc4RealtimeClientFactory;
   readonly #audioDeliveryRuntime: RealtimeAudioDeliveryRuntime;
+  readonly #profilePolicy: Lc4RealtimeProviderBridgeProfilePolicy;
   #active = false;
   #sessionOrdinal = 0;
   #previousRotationReceiptSha256: string | null = null;
@@ -824,14 +1465,21 @@ export class Lc4RealtimeProviderBridge {
   constructor(
     factory: Lc4RealtimeClientFactory,
     audioDeliveryRuntime: RealtimeAudioDeliveryRuntime = SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME,
+    profilePolicy: Lc4RealtimeProviderBridgeProfilePolicy =
+      LC4_FINITE_EFFICACY_PROFILE_POLICY,
   ) {
+    if (profilePolicy.xai_transport_purpose !== "finite_prerecorded_efficacy"
+      && profilePolicy.xai_transport_purpose !== "interactive_transport_qualification") {
+      throw new Error("LC4 realtime bridge profile policy is invalid");
+    }
     this.#factory = factory;
     this.#audioDeliveryRuntime = audioDeliveryRuntime;
+    this.#profilePolicy = Object.freeze({ ...profilePolicy });
   }
 
   async openSegment(input: Lc4OpenRealtimeSegmentInput): Promise<Lc4RealtimeSegmentSession> {
     if (this.#active) throw new Error("LC4 provider session must close before rotation opens the next segment");
-    assertExactProfile(input);
+    assertExactProfile(input, this.#profilePolicy);
     if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !input.dev_gateway) {
       throw new Error("LC4-DEV provider session requires an executable arm-aware gateway bridge");
     }
@@ -851,11 +1499,32 @@ export class Lc4RealtimeProviderBridge {
           ...input.configuration,
           instructions: `${input.configuration.instructions}\n${rotationContext.rendered}`,
         });
-    const client = await this.#factory(input.profile.provider, effectiveConfiguration);
+    const runtimeTransportProfile = input.profile.provider === "xai"
+      ? lc4XaiTransportProfileForPurpose(input.profile.transport_purpose!)
+      : null;
+    const client = await this.#factory(
+      input.profile.provider,
+      effectiveConfiguration,
+      runtimeTransportProfile,
+    );
     if (client.provider !== input.profile.provider) throw new Error("LC4 realtime client provider identity mismatch");
+    const xaiTransportMode = runtimeTransportProfile?.transport_mode ?? null;
+    const usesXaiServerVad = client.provider === "xai"
+      && xaiTransportMode === "provider_native_server_vad";
+    const usesXaiManualTurn = client.provider === "xai"
+      && xaiTransportMode === "manual_commit";
+    if (client.provider === "xai") {
+      const parity = client.serverVadTransportParitySha256;
+      if (usesXaiServerVad !== (typeof parity === "string" && SHA256.test(parity))) {
+        throw new Error("LC4 xAI client turn boundary differs from its declared transport profile");
+      }
+    }
     const wire: Lc4SanitizedWireObservation[] = [];
     const outputByResponse = new Map<string, Uint8Array[]>();
+    const outputTranscriptByResponse = new Map<string, string>();
+    const responseIdsByOpportunity = new Map<string, string[]>();
     const outputFormatByResponse = new Map<string, Readonly<{ encoding: "pcm16"; sampleRateHz: number; channels: 1 }>>();
+    const geminiWireProjections = new Map<string, JsonValue>();
     const terminalByResponse = new Set<string>();
     const completedByResponse = new Set<string>();
     const waiters = new Map<string, () => void>();
@@ -864,6 +1533,25 @@ export class Lc4RealtimeProviderBridge {
     let rootResponseId: string | null = null;
     let currentOperationOrder: Lc4ProviderExchangeOperation[] | null = null;
     let serverVadPhase: "none" | "started" | "stopped" | "committed" | "responding" = "none";
+    let manualTurnPhase:
+      | "idle"
+      | "audio_buffering"
+      | "audio_buffered"
+      | "commit_sent"
+      | "commit_acknowledged"
+      | "response_create_armed"
+      | "response_create_sent"
+      | "response_started" = "idle";
+    let manualCommitObservation: Lc4SanitizedWireObservation | null = null;
+    let manualCommitAckObservation: Lc4SanitizedWireObservation | null = null;
+    let manualResponseCreateObservation: Lc4SanitizedWireObservation | null = null;
+    let manualResponseStartObservation: Lc4SanitizedWireObservation | null = null;
+    let manualRootResponseIdSha256: string | null = null;
+    let manualCommitOrdinal: number | null = null;
+    let lastManualCommitOrdinal = 0;
+    let manualCommitWireFloor = 0;
+    let manualResponseCreateWireFloor = 0;
+    let manualTransportFatal: Error | null = null;
     let terminalError: Error | null = null;
     let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
     let hostCloseInitiated = false;
@@ -877,10 +1565,104 @@ export class Lc4RealtimeProviderBridge {
           },
         })
       : null;
-    const unsubscribeWire = client.onWireObservation?.((observation) => wire.push(sanitizeWireObservation(observation)));
+    const unsubscribeWire = client.onWireObservation?.((observation) => {
+      wire.push(sanitizeWireObservation(observation));
+      if (observation.provider === "gemini") {
+        geminiWireProjections.set(
+          observation.observationSha256,
+          immutableJsonValue(observation.projection),
+        );
+      }
+    });
+    const failManualTransport = (message: string) => {
+      manualTransportFatal ??= new Error(message);
+      terminalError = manualTransportFatal;
+      terminalFailureCode = "server_vad_protocol_failure";
+      waiters.get(currentOpportunity ?? "")?.();
+    };
+    const resolveManualWireObservation = (
+      attribution: RealtimeWireObservationAttribution | undefined,
+      direction: "inbound" | "outbound",
+      wireType: string,
+      label: string,
+    ): Lc4SanitizedWireObservation | null => {
+      try {
+        const reference = observedWireReference(attribution, label);
+        const matches = wire.filter((observation) => (
+          observation.observation_sha256 === reference.observationSha256
+        ));
+        if (matches.length !== 1) throw new Error(`${label} is not uniquely present in the wire chain`);
+        const observation = matches[0]!;
+        if (observation.provider !== "xai"
+          || observation.direction !== direction
+          || observation.wire_type !== wireType
+          || observation.connection_epoch !== reference.connectionEpoch
+          || observation.sequence !== reference.sequence) {
+          throw new Error(`${label} attribution differs from its wire observation`);
+        }
+        return observation;
+      } catch (error) {
+        failManualTransport(error instanceof Error ? error.message : String(error));
+        return null;
+      }
+    };
+    const findManualResponseCreateObservation = (): Lc4SanitizedWireObservation | null => {
+      const candidates = wire.slice(manualResponseCreateWireFloor).filter((observation) => (
+        observation.provider === "xai"
+        && observation.direction === "outbound"
+        && observation.wire_type === "response.create"
+      ));
+      if (candidates.length !== 1) {
+        failManualTransport("xAI manual turn response.create must produce exactly one outbound wire observation");
+        return null;
+      }
+      return candidates[0]!;
+    };
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
       devGateway?.observe(event);
-      if (event.type === "input.speech_activity" && client.provider === "xai") {
+      if (usesXaiManualTurn && event.type === "input.speech_activity") {
+        failManualTransport("xAI manual turn received an unsolicited server-VAD speech event");
+      }
+      if (usesXaiManualTurn && event.type === "input.audio_committed") {
+        if (manualTurnPhase !== "commit_sent"
+          || currentOpportunity === null
+          || event.provider !== "xai"
+          || event.connectionEpoch < 1
+          || event.commitOrdinal !== lastManualCommitOrdinal + 1) {
+          failManualTransport("xAI manual turn commit acknowledgement is missing, foreign, or duplicated");
+        } else {
+          if (manualCommitObservation === null) {
+            const commits = wire.slice(manualCommitWireFloor).filter((observation) => (
+              observation.provider === "xai"
+              && observation.direction === "outbound"
+              && observation.wire_type === "input_audio_buffer.commit"
+            ));
+            if (commits.length === 1) manualCommitObservation = commits[0]!;
+            else failManualTransport(
+              "xAI manual turn acknowledgement does not follow exactly one outbound commit",
+            );
+          }
+          const observation = resolveManualWireObservation(
+            event.wireObservation,
+            "inbound",
+            "input_audio_buffer.committed",
+            "commit acknowledgement",
+          );
+          if (observation) {
+            if (manualCommitObservation === null
+              || observation.connection_epoch !== manualCommitObservation.connection_epoch
+              || observation.sequence <= manualCommitObservation.sequence) {
+              failManualTransport("xAI manual turn commit acknowledgement is not causally after its commit");
+            } else {
+              manualCommitAckObservation = observation;
+              manualCommitOrdinal = event.commitOrdinal;
+              lastManualCommitOrdinal = event.commitOrdinal;
+              manualTurnPhase = "commit_acknowledged";
+            }
+          }
+        }
+      }
+      if (event.type === "input.speech_activity" && usesXaiServerVad) {
         if (event.phase === "started" && serverVadPhase === "none") {
           serverVadPhase = "started";
           currentOperationOrder?.push("server_vad_speech_started");
@@ -892,7 +1674,7 @@ export class Lc4RealtimeProviderBridge {
           terminalFailureCode = "server_vad_protocol_failure";
         }
       }
-      if (event.type === "input.audio_committed" && client.provider === "xai") {
+      if (event.type === "input.audio_committed" && usesXaiServerVad) {
         if (serverVadPhase !== "stopped") {
           terminalError = new Error("xAI server-VAD auto-commit is unbound");
           terminalFailureCode = "server_vad_protocol_failure";
@@ -903,7 +1685,56 @@ export class Lc4RealtimeProviderBridge {
       }
       if (event.type === "response.started") {
         activeResponseId = event.responseId;
-        if (client.provider === "xai" && rootResponseId === null) {
+        if (currentOpportunity !== null) {
+          const responseIds = responseIdsByOpportunity.get(currentOpportunity) ?? [];
+          if (!responseIds.includes(event.responseId)) responseIds.push(event.responseId);
+          responseIdsByOpportunity.set(currentOpportunity, responseIds);
+        }
+        if (usesXaiManualTurn && rootResponseId === null) {
+          if (currentOpportunity === null
+            || (manualTurnPhase !== "response_create_armed"
+              && manualTurnPhase !== "response_create_sent")) {
+            failManualTransport("xAI manual root response started before commit acknowledgement and response.create");
+          } else {
+            if (manualResponseCreateObservation === null) {
+              manualResponseCreateObservation = findManualResponseCreateObservation();
+            }
+            const startObservation = resolveManualWireObservation(
+              event.wireObservation,
+              "inbound",
+              "response.created",
+              "response start",
+            );
+            if (manualResponseCreateObservation && startObservation) {
+              if (manualCommitAckObservation === null
+                || manualResponseCreateObservation.connection_epoch
+                  !== manualCommitAckObservation.connection_epoch
+                || startObservation.connection_epoch
+                  !== manualResponseCreateObservation.connection_epoch
+                || manualResponseCreateObservation.sequence
+                  <= manualCommitAckObservation.sequence
+                || startObservation.sequence <= manualResponseCreateObservation.sequence) {
+                failManualTransport("xAI manual root response is not causally after commit/ack/create");
+              } else {
+                const normalizedWireResponseIdentity =
+                  startObservation.identity_hashes.responseIdSha256;
+                if (normalizedWireResponseIdentity === undefined
+                  || normalizedWireResponseIdentity
+                    !== lc4XaiManualResponseWireIdentitySha256(event.responseId)) {
+                  failManualTransport(
+                    "xAI manual root response identity differs from its normalized response.created wire identity",
+                  );
+                  return;
+                }
+                manualResponseStartObservation = startObservation;
+                manualRootResponseIdSha256 = normalizedWireResponseIdentity;
+                rootResponseId = event.responseId;
+                manualTurnPhase = "response_started";
+              }
+            }
+          }
+        }
+        if (usesXaiServerVad && rootResponseId === null) {
           if (serverVadPhase !== "committed"
             || event.causalBinding?.trigger !== "server_vad_speech_stopped") {
             terminalError = new Error("xAI root response is not causally bound to the server-VAD speech stop");
@@ -915,7 +1746,7 @@ export class Lc4RealtimeProviderBridge {
           }
         }
       }
-      if (event.type === "turn.interrupted" && client.provider === "xai") {
+      if (event.type === "turn.interrupted" && usesXaiServerVad) {
         terminalError = new Error("xAI interruption is prohibited by the frozen LC4 transport");
         terminalFailureCode = "server_vad_protocol_failure";
         waiters.get(currentOpportunity ?? "")?.();
@@ -937,6 +1768,9 @@ export class Lc4RealtimeProviderBridge {
         const chunks = outputByResponse.get(event.responseId) ?? [];
         chunks.push(Uint8Array.from(event.audio));
         outputByResponse.set(event.responseId, chunks);
+      }
+      if (event.type === "output.transcript" && event.text.trim()) {
+        outputTranscriptByResponse.set(event.responseId, event.text.trim());
       }
       if (event.type === "response.completed") {
         activeResponseId = event.responseId;
@@ -971,6 +1805,11 @@ export class Lc4RealtimeProviderBridge {
         terminalError = new Error(`provider error: ${event.code ?? "unspecified"}`);
         terminalFailureCode = "provider_fatal";
         waiters.get(currentOpportunity ?? "")?.();
+      }
+      if (usesXaiManualTurn
+        && event.type === "error"
+        && event.code === "unexpected_input_audio_commit_acknowledgement") {
+        failManualTransport("xAI manual turn received an unmatched or duplicate commit acknowledgement");
       }
       if (event.type === "connection.closed" && !hostCloseInitiated) {
         // Socket close reasons are provider-controlled plaintext. Preserve only
@@ -1098,6 +1937,9 @@ export class Lc4RealtimeProviderBridge {
       } else if (failureInput.stage === "server_vad_control_ack") {
         failureCode = "server_vad_control_ack_failed";
         failureClass = "adapter_contract";
+      } else if (failureInput.error instanceof Lc4XaiServerVadDelimiterExhaustedError) {
+        failureCode = "server_vad_delimiter_exhausted";
+        failureClass = "provider_external";
       } else if (failureInput.stage === "response_prepare"
         && failureInput.error instanceof RealtimeDynamicControlLimitError) {
         failureCode = "response_control_too_large";
@@ -1166,6 +2008,9 @@ export class Lc4RealtimeProviderBridge {
         gateway_batch_count: gateway.batch_count,
         gateway_fatal_class: gateway.fatal_class,
         secondary_failure_evidence_sha256: null,
+        ...(failureInput.error instanceof Lc4XaiServerVadDelimiterExhaustedError
+          ? { server_vad_delimiter_exhaustion: failureInput.error.suffix }
+          : {}),
       });
     };
     const failureFromClose = (error: unknown) => {
@@ -1243,6 +2088,7 @@ export class Lc4RealtimeProviderBridge {
         completedByResponse.clear();
         try {
         if (closed || !this.#active || client.state !== "ready") throw new Error("LC4 realtime segment session is not open");
+        if (manualTransportFatal) throw manualTransportFatal;
         if (currentOpportunity !== null) throw new Error("LC4 realtime segment allows only one in-flight opportunity");
         const opportunityId = safeId(exchangeInput.opportunity_id, "LC4 opportunity ID");
         const playbackKind = exchangeInput.playback_kind ?? "canonical";
@@ -1353,8 +2199,25 @@ export class Lc4RealtimeProviderBridge {
           );
         }
         const wireStart = wire.length;
+        for (const priorResponseId of responseIdsByOpportunity.get(opportunityId) ?? []) {
+          outputTranscriptByResponse.delete(priorResponseId);
+        }
+        // A canonical exchange and its optional repair deliberately share an
+        // opportunity ID. Reset response membership here so the repair replay
+        // cannot accidentally concatenate or duplicate the canonical
+        // assistant transcript.
+        responseIdsByOpportunity.set(opportunityId, []);
         currentOpportunity = opportunityId;
         serverVadPhase = "none";
+        manualTurnPhase = usesXaiManualTurn ? "audio_buffering" : "idle";
+        manualCommitObservation = null;
+        manualCommitAckObservation = null;
+        manualResponseCreateObservation = null;
+        manualResponseStartObservation = null;
+        manualRootResponseIdSha256 = null;
+        manualCommitOrdinal = null;
+        manualCommitWireFloor = 0;
+        manualResponseCreateWireFloor = 0;
         currentOperationOrder = operationOrder;
         terminalError = null;
         terminalFailureCode = null;
@@ -1381,9 +2244,11 @@ export class Lc4RealtimeProviderBridge {
         // never by changing the provider function schema relative to Native.
         const toolFrontier = input.configuration.providerTools;
         const toolFrontierSha256 = realtimeToolFrontierSha256(toolFrontier);
-        const transportParitySha256 = client.provider === "xai"
+        const transportParitySha256 = usesXaiServerVad
           ? client.serverVadTransportParitySha256
-          : input.profile.provider_profile_sha256;
+          : client.provider === "xai"
+            ? xaiFiniteManualTransportParitySha256(effectiveConfiguration)
+            : input.profile.provider_profile_sha256;
         if (!transportParitySha256 || !SHA256.test(transportParitySha256)) {
           throw new Error("LC4 provider transport parity hash is unavailable");
         }
@@ -1392,7 +2257,7 @@ export class Lc4RealtimeProviderBridge {
         let serverVadTransportSuffix: Lc4XaiServerVadTransportSuffixEvidence | null = null;
         const completed = new Promise<void>((resolve) => waiters.set(opportunityId, resolve));
         try {
-          if (client.provider === "xai") {
+          if (usesXaiServerVad) {
             diagnosticStage = "server_vad_control_ack";
             if (typeof client.prepareServerVadTurn !== "function") {
               throw new Error("xAI provider-native server-VAD preparation barrier is unavailable");
@@ -1452,17 +2317,25 @@ export class Lc4RealtimeProviderBridge {
           providerInputAppended = true;
           assertExchangeActive(exchangeSignal.signal);
           operationOrder.push("caller_pcm_delivery_completed");
-          if (client.provider === "xai") {
+          if (usesXaiManualTurn) manualTurnPhase = "audio_buffered";
+          if (usesXaiServerVad) {
             diagnosticStage = "audio_append";
             operationOrder.push("server_vad_silence_tail_delivery_started");
-            serverVadTransportSuffix = await deliverXaiServerVadTransportSuffix({
-              client,
-              delivery_profile: input.configuration.audioDeliveryProfile,
-              delivery_profile_sha256: input.configuration.audioDeliveryProfileHash,
-              runtime: this.#audioDeliveryRuntime,
-              signal: exchangeSignal.signal,
-              server_vad_phase: () => serverVadPhase,
-            });
+            try {
+              serverVadTransportSuffix = await deliverXaiServerVadTransportSuffix({
+                client,
+                delivery_profile: input.configuration.audioDeliveryProfile,
+                delivery_profile_sha256: input.configuration.audioDeliveryProfileHash,
+                runtime: this.#audioDeliveryRuntime,
+                signal: exchangeSignal.signal,
+                server_vad_phase: () => serverVadPhase,
+              });
+            } catch (error) {
+              if (error instanceof Lc4XaiServerVadDelimiterExhaustedError) {
+                operationOrder.push("server_vad_silence_tail_delivery_exhausted");
+              }
+              throw error;
+            }
             operationOrder.push(serverVadTransportSuffix.completion === "full_plan_delivered"
               ? "server_vad_silence_tail_delivery_completed"
               : "server_vad_silence_tail_prefix_accepted");
@@ -1476,10 +2349,68 @@ export class Lc4RealtimeProviderBridge {
             });
             operationOrder.push("response_plan_prepared");
             diagnosticStage = "audio_commit";
+            manualCommitWireFloor = wire.length;
+            if (usesXaiManualTurn) manualTurnPhase = "commit_sent";
             client.commitInputAudio();
             operationOrder.push("caller_pcm_committed");
+            if (client.provider === "xai") {
+              const commits = wire.slice(manualCommitWireFloor).filter((observation) => (
+                observation.provider === "xai"
+                && observation.direction === "outbound"
+                && observation.wire_type === "input_audio_buffer.commit"
+              ));
+              if (commits.length !== 1) {
+                throw new Error("xAI manual turn commit must produce exactly one outbound wire observation");
+              }
+              manualCommitObservation = commits[0]!;
+              if (typeof client.waitForInputAudioCommit !== "function") {
+                throw new Error("LC4 finite-clip xAI commit acknowledgement barrier is unavailable");
+              }
+              const acknowledgement = await client.waitForInputAudioCommit(5_000);
+              const acknowledgementReference = observedWireReference(
+                acknowledgement.wireObservation,
+                "commit acknowledgement barrier",
+              );
+              const observedCommitAck =
+                manualCommitAckObservation as Lc4SanitizedWireObservation | null;
+              if (acknowledgement.provider !== "xai"
+                || acknowledgement.status !== "acknowledged"
+                || String(manualTurnPhase) !== "commit_acknowledged"
+                || observedCommitAck === null
+                || manualCommitOrdinal === null
+                || acknowledgement.connectionEpoch !== manualCommitObservation.connection_epoch
+                || acknowledgement.commitOrdinal !== manualCommitOrdinal
+                || acknowledgementReference.observationSha256
+                  !== observedCommitAck.observation_sha256
+                || acknowledgementReference.connectionEpoch
+                  !== observedCommitAck.connection_epoch
+                || acknowledgementReference.sequence !== observedCommitAck.sequence) {
+                throw new Error("xAI manual turn commit acknowledgement barrier is missing, foreign, or duplicated");
+              }
+              operationOrder.push("caller_pcm_commit_acknowledged");
+            }
             diagnosticStage = "response_request";
+            if (usesXaiManualTurn) {
+              manualResponseCreateWireFloor = wire.length;
+              manualTurnPhase = "response_create_armed";
+            }
             client.createResponse();
+            if (usesXaiManualTurn) {
+              manualResponseCreateObservation ??= findManualResponseCreateObservation();
+              const observedCreate =
+                manualResponseCreateObservation as Lc4SanitizedWireObservation | null;
+              const observedCommitAck =
+                manualCommitAckObservation as Lc4SanitizedWireObservation | null;
+              if (!observedCreate
+                || observedCommitAck === null
+                || observedCreate.connection_epoch !== observedCommitAck.connection_epoch
+                || observedCreate.sequence <= observedCommitAck.sequence) {
+                throw new Error("xAI manual response.create is not causally after its commit acknowledgement");
+              }
+              if (manualTurnPhase === "response_create_armed") {
+                manualTurnPhase = "response_create_sent";
+              }
+            }
             operationOrder.push("response_generation_requested");
           }
           diagnosticStage = "provider_wait";
@@ -1528,10 +2459,79 @@ export class Lc4RealtimeProviderBridge {
             sampleRateHz: input.profile.output_sample_rate_hz,
             chunks: chunks.map((chunk, index) => ({ chunkId: `${opportunityId}-chunk-${index + 1}`, pcm: chunk })),
           });
+          const providerOutputTranscript = (responseIdsByOpportunity.get(opportunityId) ?? [activeResponseId])
+            .map((responseId) => outputTranscriptByResponse.get(responseId)?.trim() ?? "")
+            .filter(Boolean)
+            .join("\n")
+            .trim();
           const opportunityWire = Object.freeze(wire.slice(wireStart));
           const wireObservationSetSha256 = sha256Hex(
             `harshas-amazing-call-center/lc4-wire-observation-set/v1\n${canonicalJson(opportunityWire)}`,
           );
+          const geminiOutputAttribution = input.profile.provider === "gemini"
+            ? createLc4GeminiOutputAttribution({
+                observations: opportunityWire,
+                wire_projections: opportunityWire
+                  .filter((observation) => {
+                    const activityEnd = opportunityWire.find((candidate) =>
+                      candidate.provider === "gemini"
+                      && candidate.direction === "outbound"
+                      && candidate.wire_type === "realtimeInput.activityEnd");
+                    return activityEnd !== undefined
+                      && observation.connection_epoch === activityEnd.connection_epoch
+                      && observation.sequence > activityEnd.sequence;
+                  })
+                  .map((observation) => {
+                    const redactedProjection = geminiWireProjections.get(
+                      observation.observation_sha256,
+                    );
+                    if (redactedProjection === undefined) {
+                      throw new Error(
+                        "LC4 Gemini output attribution lacks an interval projection preimage",
+                      );
+                    }
+                    return Object.freeze({
+                      wire_observation_sha256: observation.observation_sha256,
+                      redacted_projection: redactedProjection,
+                    });
+                  }),
+                capture,
+              })
+            : null;
+          const xaiManualTurnCausality = usesXaiManualTurn
+            ? (() => {
+                const commit =
+                  manualCommitObservation as Lc4SanitizedWireObservation | null;
+                const commitAck =
+                  manualCommitAckObservation as Lc4SanitizedWireObservation | null;
+                const responseCreate =
+                  manualResponseCreateObservation as Lc4SanitizedWireObservation | null;
+                const responseStart =
+                  manualResponseStartObservation as Lc4SanitizedWireObservation | null;
+                if (String(manualTurnPhase) !== "response_started"
+                  || commit === null
+                  || commitAck === null
+                  || responseCreate === null
+                  || responseStart === null
+                  || manualRootResponseIdSha256 === null) {
+                  throw new Error("xAI manual turn lacks complete commit/ack/create/start wire causality");
+                }
+                const causalityBody = Object.freeze({
+                  schema_version: 1 as const,
+                  connection_epoch: commit.connection_epoch,
+                  commit_observation_sha256: commit.observation_sha256,
+                  commit_sequence: commit.sequence,
+                  commit_ack_observation_sha256: commitAck.observation_sha256,
+                  commit_ack_sequence: commitAck.sequence,
+                  response_create_observation_sha256: responseCreate.observation_sha256,
+                  response_create_sequence: responseCreate.sequence,
+                  response_start_observation_sha256: responseStart.observation_sha256,
+                  response_start_sequence: responseStart.sequence,
+                  response_id_sha256: manualRootResponseIdSha256,
+                });
+                return createLc4XaiManualTurnCausality(causalityBody, opportunityWire);
+              })()
+            : null;
           diagnosticStage = "listener_handoff";
           const listenerResult = await input.listener.accept({
             capture,
@@ -1548,9 +2548,44 @@ export class Lc4RealtimeProviderBridge {
           if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !listenerResult) {
             throw new Error("LC4-DEV exchange completed without signed listener semantic evidence");
           }
+          const listenerTranscript = listenerResult?.assistant_conversation_transcript;
+          const listenerTranscriptSha256 = listenerResult?.assistant_conversation_transcript_sha256;
+          const listenerTranscriptSource = listenerResult?.assistant_conversation_transcript_source;
+          const hasAnyListenerTranscriptField = listenerTranscript !== undefined
+            || listenerTranscriptSha256 !== undefined
+            || listenerTranscriptSource !== undefined;
+          const hasCompleteListenerTranscript = typeof listenerTranscript === "string"
+            && listenerTranscript.trim().length > 0
+            && typeof listenerTranscriptSha256 === "string"
+            && listenerTranscriptSha256 === sha256Hex(listenerTranscript)
+            && listenerTranscriptSource === "listener_exact_captured_pcm_asr";
+          if (hasAnyListenerTranscriptField && !hasCompleteListenerTranscript) {
+            throw new Error("LC4-DEV listener conversation transcript is partial, empty, or hash-invalid");
+          }
+          if (input.manifest.protocol_id === "HACC-LC4-DEV-v1" && !hasCompleteListenerTranscript) {
+            throw new Error("LC4-DEV reconnect requires the signed exact-captured-PCM listener transcript");
+          }
+          const assistantConversationTranscript = hasCompleteListenerTranscript
+            ? listenerTranscript
+            : providerOutputTranscript || null;
+          const assistantConversationTranscriptSource:
+            Lc4AssistantConversationTranscriptSource | null =
+            hasCompleteListenerTranscript
+              ? "listener_exact_captured_pcm_asr"
+              : providerOutputTranscript
+                ? "provider_native_output_transcript"
+                : null;
+          const retainedListenerResult = listenerResult
+            ? Object.freeze({
+                listener_evidence_sha256: listenerResult.listener_evidence_sha256,
+                repair_projection: listenerResult.repair_projection,
+                playback_authority_receipt_sha256: listenerResult.playback_authority_receipt_sha256,
+                listener_evidence: listenerResult.listener_evidence,
+              })
+            : null;
           diagnosticStage = "exchange_evidence";
           const body = Object.freeze({
-            schema_version: 2 as const,
+            schema_version: 3 as const,
             adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
             run_id: input.manifest.run_id,
             opportunity_id: opportunityId,
@@ -1561,7 +2596,14 @@ export class Lc4RealtimeProviderBridge {
             caller_pcm_byte_length: callerPcm.byteLength,
             rotation_context_kind: rotationContext.kind,
             rotation_context_sha256: rotationContext.packet_sha256,
-            rotation_substantive_fact_set_sha256: rotationContext.substantive_fact_set_sha256,
+            rotation_conversation_replay_sha256: rotationContext.conversation_replay_sha256,
+            provider_output_transcript_sha256: providerOutputTranscript
+              ? sha256Hex(providerOutputTranscript)
+              : null,
+            assistant_conversation_transcript_sha256: assistantConversationTranscript
+              ? sha256Hex(assistantConversationTranscript)
+              : null,
+            assistant_conversation_transcript_source: assistantConversationTranscriptSource,
             response_control_kind: exchangeInput.response_control.kind,
             response_plan_sha256: responsePlan?.plan_sha256 ?? null,
             response_plan_body: responsePlan,
@@ -1580,6 +2622,7 @@ export class Lc4RealtimeProviderBridge {
               voice: input.profile.voice,
             }),
             output_capture: capture,
+            gemini_output_attribution: geminiOutputAttribution,
             wire_observations: opportunityWire,
             wire_observation_set_sha256: wireObservationSetSha256,
             dev_gateway_receipt_set: devGatewayReceiptSet,
@@ -1588,23 +2631,27 @@ export class Lc4RealtimeProviderBridge {
               profile_sha256: input.configuration.audioDeliveryProfileHash,
               pcm_sha256: sha256Hex(callerPcm),
             }),
-            transport_mode: client.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+            transport_mode: usesXaiServerVad ? "provider_native_server_vad" as const : "manual_commit" as const,
+            transport_purpose: input.profile.transport_purpose,
+            transport_profile_sha256: input.profile.transport_profile_sha256
+              ?? input.profile.provider_profile_sha256,
             transport_parity_sha256: transportParitySha256,
             tool_frontier_sha256: toolFrontierSha256,
-            server_vad_setting_sha256: client.provider === "xai" ? LC4_XAI_SERVER_VAD_SHA256 : null,
-            server_vad_transport_disclosure_sha256: client.provider === "xai"
+            server_vad_setting_sha256: usesXaiServerVad ? LC4_XAI_SERVER_VAD_SHA256 : null,
+            server_vad_transport_disclosure_sha256: usesXaiServerVad
               ? LC4_XAI_SERVER_VAD_TRANSPORT_DISCLOSURE_SHA256
               : null,
             server_vad_transport_suffix: serverVadTransportSuffix,
             per_turn_session_update_observation_sha256: perTurnSessionUpdateObservationSha256,
             per_turn_session_ack_observation_sha256: perTurnSessionAckObservationSha256,
+            xai_manual_turn_causality: xaiManualTurnCausality,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
             ...(input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? {
               playback_kind: playbackKind,
               caller_branch_authority: callerBranchAuthority,
               caller_branch_decision_sha256: callerBranchAuthority?.decision_sha256 ?? null,
               repair_decision_receipt_sha256: exchangeInput.repair_binding?.decision_receipt_sha256 ?? null,
-              dev_listener_result: listenerResult ?? null,
+              dev_listener_result: retainedListenerResult,
             } : {}),
           });
           const replayProjection = Object.freeze({
@@ -1616,6 +2663,12 @@ export class Lc4RealtimeProviderBridge {
             evidence_sha256: sha256Hex(
               `${PROVIDER_EXCHANGE_EVIDENCE_DOMAIN}${canonicalJson(replayProjection)}`,
             ),
+            ...(input.manifest.protocol_id === "HACC-LC4-DEV-v1"
+              ? {
+                  dev_assistant_conversation_transcript: assistantConversationTranscript!,
+                  dev_assistant_conversation_transcript_source: assistantConversationTranscriptSource!,
+                }
+              : {}),
             replay_projection: replayProjection,
           });
           assertExchangeActive(exchangeSignal.signal);
@@ -1658,7 +2711,12 @@ export class Lc4RealtimeProviderBridge {
         }
       },
       finalizeOpportunity: input.manifest.protocol_id === "HACC-LC4-DEV-v1" ? async (finalizeInput) => {
-        if (closed || poisoned || this.#active === false || client.state !== "ready" || currentOpportunity !== null) {
+        if (closed
+          || poisoned
+          || manualTransportFatal !== null
+          || this.#active === false
+          || client.state !== "ready"
+          || currentOpportunity !== null) {
           throw new Error("LC4-DEV opportunity cannot finalize on a closed, poisoned, or in-flight segment");
         }
         if (!pendingDevOpportunity || pendingDevOpportunity.opportunity_id !== finalizeInput.opportunity_id) {
@@ -1716,6 +2774,17 @@ export class Lc4RealtimeProviderBridge {
           this.#active = false;
           throw new Error("LC4 realtime segment lost provider readiness before rotation");
         }
+        if (manualTransportFatal !== null) {
+          closed = true;
+          poisoned = true;
+          segmentAbort.abort();
+          hostCloseInitiated = true;
+          client.close(1011, "LC4 xAI manual transport protocol failure");
+          unsubscribeEvent();
+          unsubscribeWire?.();
+          this.#active = false;
+          throw new Error("LC4 xAI manual transport failure forbids a rotation receipt");
+        }
         const hadUnfinalizedDevOpportunity = pendingDevOpportunity !== null;
         closed = true;
         segmentAbort.abort();
@@ -1741,7 +2810,7 @@ export class Lc4RealtimeProviderBridge {
           previous_rotation_receipt_sha256: this.#previousRotationReceiptSha256,
           rotation_context_kind: rotationContext.kind,
           rotation_context_sha256: rotationContext.packet_sha256,
-          rotation_substantive_fact_set_sha256: rotationContext.substantive_fact_set_sha256,
+          rotation_conversation_replay_sha256: rotationContext.conversation_replay_sha256,
         });
         const receipt = sha256Hex(`harshas-amazing-call-center/lc4-provider-session-rotation/v1\n${canonicalJson(body)}`);
         this.#previousRotationReceiptSha256 = receipt;
@@ -1768,9 +2837,13 @@ export type Lc4FrozenProductionRealtimeAdapter = Readonly<{
 export function createLc4FrozenProductionRealtimeAdapter(input: Readonly<{
   credentials: Readonly<Record<LiveStsProvider, string>>;
 }>): Lc4FrozenProductionRealtimeAdapter {
-  const bridge = new Lc4RealtimeProviderBridge((provider, configuration) => (
-    createProductionRealtimeClient(provider, configuration, input.credentials[provider])
-  ));
+  const bridge = new Lc4RealtimeProviderBridge((provider, configuration, transportProfile) => (
+    createProductionRealtimeClient(provider, configuration, input.credentials[provider], (
+      provider === "xai"
+        ? { xaiTurnBoundary: transportProfile!.transport_mode }
+        : {}
+    ))
+  ), SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME);
   return Object.freeze({
     kind: "production-realtime-frozen" as const,
     openSegment: async (segment) => {
@@ -1803,16 +2876,7 @@ function devProfile(episode: Lc4DevLiveEpisodePlan): Lc4ProviderExecutionProfile
   if (episode.model !== profile.model || episode.voice !== profile.voice) {
     throw new Error("LC4-DEV episode differs from the frozen provider profile");
   }
-  return Object.freeze({
-    provider: episode.provider,
-    model: profile.model,
-    voice: profile.voice,
-    input_sample_rate_hz: profile.input_sample_rate_hz,
-    output_sample_rate_hz: profile.output_sample_rate_hz,
-    turn_boundary: profile.turn_boundary,
-    context_authority: profile.context_delivery.authority,
-    provider_profile_sha256: sha256Hex(`hacc-lc4/provider-execution-profile/v2\n${canonicalJson(profile)}`),
-  });
+  return createLc4ProviderExecutionProfile(episode.provider);
 }
 
 function devSegment(ordinal: 1 | 2 | 3): Lc4SegmentShape {
@@ -1826,15 +2890,13 @@ function devSegment(ordinal: 1 | 2 | 3): Lc4SegmentShape {
   });
 }
 
-function devConfiguration(episode: Lc4DevLiveEpisodePlan, preflightSha256: string): TrialSessionConfiguration {
+export function createLc4DevSessionConfiguration(
+  episode: Lc4DevLiveEpisodePlan,
+  preflightSha256: string,
+): TrialSessionConfiguration {
   const profile = devProfile(episode);
   const conditionId = episode.arm === "native" ? "raw-full" : "host-managed-harness";
-  const base = [
-    "You are participating in the public HACC-LC4-DEV municipal oral-history voice-agent mechanism test.",
-    "Treat all caller details as fictional benchmark data. Speak naturally and follow only the context available in this turn.",
-    "Never claim an external action completed without an authoritative tool receipt. Use capability_gateway for every tool request.",
-    "This is development mechanism evidence only, never confirmatory efficacy evidence.",
-  ].join(" ");
+  const base = LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT;
   const delivery = LC4_DEV_AUDIO_DELIVERY_PROFILE;
   const body = Object.freeze({
     provider: episode.provider,
@@ -1906,8 +2968,50 @@ type DevEpisodeRuntime = {
   previous_rotation_receipt_sha256: string | null;
   flow_state_sha256: string;
   response_plan_chain_head_sha256: string;
+  conversation_turns: Lc4NativeConversationTurnInput[];
   next_segment: 1 | 2 | 3;
 };
+
+/**
+ * Pure, provider-free reconnect compiler. Its only semantic input is the
+ * chronological conversation that actually crossed the provider boundary.
+ * HACC adds its structured state hashes; Native never receives them.
+ */
+export function createLc4DevRotationContext(input: Readonly<{
+  episode: Lc4DevLiveEpisodePlan;
+  segment_ordinal: 2 | 3;
+  previous_rotation_receipt_sha256: string;
+  flow_state_sha256: string;
+  response_plan_chain_head_sha256: string;
+  conversation_turns: readonly Lc4NativeConversationTurnInput[];
+}>): Lc4RotationContext {
+  const boundary = ((input.segment_ordinal - 1) * 20) as 20 | 40;
+  const conversationTurns = input.conversation_turns.filter(
+    (turn) => turn.available_after_opportunity <= boundary,
+  );
+  const native = createLc4NativeConversationReplayPacket({
+    run_id: input.episode.episode_id,
+    from_segment_ordinal: (input.segment_ordinal - 1) as 1 | 2,
+    to_segment_ordinal: input.segment_ordinal,
+    available_through_opportunity: boundary,
+    previous_session_rotation_receipt_sha256: input.previous_rotation_receipt_sha256,
+    conversation_turns: conversationTurns,
+  });
+  const hacc = createLc4HaccRotationStatePacket({
+    run_id: input.episode.episode_id,
+    from_segment_ordinal: (input.segment_ordinal - 1) as 1 | 2,
+    to_segment_ordinal: input.segment_ordinal,
+    available_through_opportunity: boundary,
+    previous_session_rotation_receipt_sha256: input.previous_rotation_receipt_sha256,
+    flow_state_sha256: input.flow_state_sha256,
+    response_plan_chain_head_sha256: input.response_plan_chain_head_sha256,
+    conversation_turns: conversationTurns,
+  });
+  assertLc4RotationConversationParity(native, hacc);
+  return input.episode.arm === "native"
+    ? Object.freeze({ kind: "native_conversation_replay" as const, packet: native })
+    : Object.freeze({ kind: "hacc_structured_state" as const, packet: hacc });
+}
 
 /**
  * The only paid-capable LC4-DEV adapter. It is bound to one expiring preflight,
@@ -1978,19 +3082,20 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         if (runtime || previous_rotation_receipt_sha256 !== null) throw new Error("LC4-DEV first segment cannot resume an existing runtime");
         await input.budget_authority.beforeEpisodeSocketOpen(episode);
         runtime = {
-          bridge: new Lc4RealtimeProviderBridge((provider, configuration) => (
+          bridge: new Lc4RealtimeProviderBridge((provider, configuration, transportProfile) => (
             createProductionRealtimeClient(
               provider,
               configuration,
               input.credentials[provider],
-              provider === "gemini" && episode.arm === "native"
-                ? { geminiMaxDynamicControlBytes: LC4_DEV_NATIVE_RESPONSE_CONTROL_MAX_BYTES }
+              provider === "xai"
+                ? { xaiTurnBoundary: transportProfile!.transport_mode }
                 : {},
             )
-          )),
+          ), SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME),
           previous_rotation_receipt_sha256: null,
           flow_state_sha256: sha256Hex(`lc4-dev-flow-genesis\n${input.preflight.preflight_sha256}\n${episode.episode_id}`),
           response_plan_chain_head_sha256: sha256Hex(`lc4-dev-plan-genesis\n${input.preflight.preflight_sha256}\n${episode.episode_id}`),
+          conversation_turns: [],
           next_segment: 1,
         };
         runtimes.set(episode.episode_id, runtime);
@@ -2001,53 +3106,15 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         throw new Error("LC4-DEV segment rotation does not continue the adapter-owned runtime");
       }
       let rotationContext: Lc4RotationContext | null = null;
-      if (segment_ordinal > 1) {
-        const boundary = ((segment_ordinal - 1) * 20) as 20 | 40;
-        const priorReceipt = runtime.previous_rotation_receipt_sha256!;
-        const providerBindings = input.prepare.audio_bindings.filter((binding) => binding.provider === episode.provider);
-        const factsById = new Map<string, Lc4NativeContinuityFactInput>();
-        for (const opportunity of corpus.opportunities.slice(0, boundary)) {
-          const binding = providerBindings[opportunity.index - 1]!;
-          for (const fact of opportunity.fact_bindings) {
-            const factId = `${fact.fact_key}.v${fact.version}`;
-            if (!factsById.has(factId)) {
-              factsById.set(factId, Object.freeze({
-                fact_id: factId,
-                source: "listener_heard_caller" as const,
-                public_text: `${fact.fact_key} version ${fact.version}: ${canonicalJson(fact.value)}`,
-                available_after_opportunity: opportunity.index,
-                provenance_receipt_sha256: binding.pcm_sha256,
-                listener_status: "heard_verified" as const,
-                visibility: "public_non_sensitive" as const,
-                oracle_derived: false as const,
-                future_derived: false as const,
-                private_value_included: false as const,
-              }));
-            }
-          }
-        }
-        const native = createLc4StrongNativeContinuityPacket({
-          run_id: episode.episode_id,
-          from_segment_ordinal: (segment_ordinal - 1) as 1 | 2,
-          to_segment_ordinal: segment_ordinal as 2 | 3,
-          available_through_opportunity: boundary,
-          previous_session_rotation_receipt_sha256: priorReceipt,
-          facts: [...factsById.values()],
-        });
-        const hacc = createLc4HaccRotationStatePacket({
-          run_id: episode.episode_id,
-          from_segment_ordinal: (segment_ordinal - 1) as 1 | 2,
-          to_segment_ordinal: segment_ordinal as 2 | 3,
-          available_through_opportunity: boundary,
-          previous_session_rotation_receipt_sha256: priorReceipt,
+      if (segment_ordinal === 2 || segment_ordinal === 3) {
+        rotationContext = createLc4DevRotationContext({
+          episode,
+          segment_ordinal,
+          previous_rotation_receipt_sha256: runtime.previous_rotation_receipt_sha256!,
           flow_state_sha256: runtime.flow_state_sha256,
           response_plan_chain_head_sha256: runtime.response_plan_chain_head_sha256,
-          facts: native.facts,
+          conversation_turns: runtime.conversation_turns,
         });
-        assertLc4RotationSubstantiveFactParity(native, hacc);
-        rotationContext = episode.arm === "native"
-          ? Object.freeze({ kind: "strong_native" as const, packet: native })
-          : Object.freeze({ kind: "hacc_structured_state" as const, packet: hacc });
       }
       const manifest = devManifest(input.prepare, episode);
       let activeCanonicalOpportunity: Lc4PublicDevOpportunity | null = null;
@@ -2055,7 +3122,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         manifest,
         segment: devSegment(segment_ordinal),
         profile: manifest.episode_shape.provider_profile,
-        configuration: devConfiguration(episode, input.preflight.preflight_sha256),
+        configuration: createLc4DevSessionConfiguration(episode, input.preflight.preflight_sha256),
         rotation_context: rotationContext,
         listener: {
           accept: async (handoff) => {
@@ -2194,6 +3261,61 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           expected_evidence_sha256: evidence.evidence_sha256,
         });
         await input.evidence.assertResolvable(listenerResult.listener_evidence);
+        const assistantTranscript = evidence.dev_assistant_conversation_transcript ?? "";
+        const assistantTranscriptSource = evidence.dev_assistant_conversation_transcript_source;
+        if (!assistantTranscript
+          || evidence.assistant_conversation_transcript_sha256 !== sha256Hex(assistantTranscript)
+          || (assistantTranscriptSource !== "listener_exact_captured_pcm_asr"
+            && assistantTranscriptSource !== "provider_native_output_transcript")) {
+          throw new Error("LC4-DEV raw conversation replay lacks its hash-bound assistant transcript");
+        }
+        const callerText = exchangeInput.playback_kind === "canonical"
+          ? exchangeInput.opportunity.canonical_caller_text
+          : corpus.repair_policy.library.find(
+              (repair) => repair.id === exchangeInput.repair_binding?.repair_pcm_id,
+            )?.canonical_caller_text;
+        if (!callerText) throw new Error("LC4-DEV raw conversation replay lacks its exact spoken caller source text");
+        const appendConversationTurn = (
+          speaker: Lc4NativeConversationTurnInput["speaker"],
+          source: Lc4NativeConversationTurnInput["source"],
+          text: string,
+          provenanceReceiptSha256: string,
+        ) => {
+          const sequence = runtime!.conversation_turns.length + 1;
+          runtime!.conversation_turns.push(Object.freeze({
+            turn_id: `conversation.${String(sequence).padStart(3, "0")}.${speaker}`,
+            sequence,
+            speaker,
+            source,
+            text,
+            available_after_opportunity: exchangeInput.opportunity.index,
+            provenance_receipt_sha256: provenanceReceiptSha256,
+            provider_conversation_source: true as const,
+            oracle_derived: false as const,
+            future_derived: false as const,
+            semantic_evaluator_derived: false as const,
+          }));
+        };
+        appendConversationTurn(
+          "caller",
+          "caller_tts_source_bound_to_pcm",
+          callerText,
+          sha256Hex(exchangeInput.caller_pcm),
+        );
+        for (const projection of evidence.dev_gateway_receipt_set?.authority_projections ?? []) {
+          appendConversationTurn(
+            "tool",
+            "provider_visible_tool_result",
+            canonicalJson(projection.provider_output),
+            projection.projection_sha256,
+          );
+        }
+        appendConversationTurn(
+          "assistant",
+          assistantTranscriptSource,
+          assistantTranscript,
+          evidence.output_capture.generated_pcm_sha256,
+        );
         if (exchangeInput.playback_kind === "canonical") {
           pendingOpportunity = Object.freeze({
             opportunity: exchangeInput.opportunity,
@@ -2299,5 +3421,682 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         },
       });
     },
+  });
+}
+
+const LC4_XAI_GATE_D_INITIAL_CONTROL = [
+  "This is a harmless transport qualification, not a user conversation and not an efficacy test.",
+  "First speak one short audible sentence confirming the transport probe started.",
+  "Then call capability_gateway exactly once with tool_name transport.probe and an empty arguments object.",
+  "After the authoritative tool result arrives, speak one short audible sentence confirming completion.",
+  "Do not call any other tool and do not claim any real-world action.",
+].join(" ");
+const LC4_XAI_GATE_D_CONTINUATION_CONTROL = [
+  "The authoritative harmless transport-probe receipt has been returned.",
+  "Speak one short audible completion sentence. Do not call another tool.",
+].join(" ");
+const LC4_XAI_GATE_D_TOOL_RESULT = Object.freeze({
+  ok: true as const,
+  tool_name: "transport.probe" as const,
+  authority: "local_capability_gateway_transport_probe" as const,
+  side_effects: false as const,
+});
+const LC4_XAI_GATE_D_RESULT_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-tool-result/v1\n";
+const LC4_XAI_GATE_D_CONTINUATION_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-continuation/v1\n";
+
+function lc4XaiGateDConfiguration(
+  plan: Lc4XaiFiniteManualGateDPlanArtifact,
+): TrialSessionConfiguration {
+  const profile = LC4_PROVIDER_PROFILE_MANIFEST.providers.xai;
+  const delivery = LC4_DEV_AUDIO_DELIVERY_PROFILE;
+  return Object.freeze({
+    provider: "xai" as const,
+    model: profile.model,
+    conditionId: "host-managed-harness" as const,
+    instructions: LC4_XAI_GATE_D_INITIAL_CONTROL,
+    initialPrompt: LC4_XAI_GATE_D_INITIAL_CONTROL,
+    renderedCapabilitySnapshot: "<gate_d capability=\"transport.probe\" />",
+    providerTools: Object.freeze([LOCAL_TOOL_PROXY_FUNCTION]),
+    conditionHash: sha256Hex(canonicalJson({
+      gate_version: plan.body.gate_version,
+      plan_sha256: plan.body.plan_sha256,
+      initial_control_sha256: sha256Hex(LC4_XAI_GATE_D_INITIAL_CONTROL),
+      continuation_control_sha256:
+        sha256Hex(LC4_XAI_GATE_D_CONTINUATION_CONTROL),
+      tool_result_sha256: sha256Hex(
+        `${LC4_XAI_GATE_D_RESULT_DOMAIN}${canonicalJson(LC4_XAI_GATE_D_TOOL_RESULT)}`,
+      ),
+    })),
+    inputAudioFormat: Object.freeze({
+      encoding: "pcm16" as const,
+      sampleRateHz: profile.input_sample_rate_hz,
+      channels: 1 as const,
+    }),
+    audioDeliveryProfile: delivery,
+    audioDeliveryProfileHash: trialAudioDeliveryProfileHash(delivery),
+  });
+}
+
+function lc4GateDObservedAttribution(
+  attribution: RealtimeWireObservationAttribution | undefined,
+  observations: readonly Lc4SanitizedWireObservation[],
+  expected: Readonly<{
+    direction: "inbound" | "outbound";
+    wire_type: string;
+    label: string;
+  }>,
+): Lc4SanitizedWireObservation {
+  const reference = observedWireReference(attribution, expected.label);
+  const matches = observations.filter((observation) => (
+    observation.observation_sha256 === reference.observationSha256
+  ));
+  if (matches.length !== 1
+    || matches[0]!.provider !== "xai"
+    || matches[0]!.direction !== expected.direction
+    || matches[0]!.wire_type !== expected.wire_type
+    || matches[0]!.connection_epoch !== reference.connectionEpoch
+    || matches[0]!.sequence !== reference.sequence) {
+    throw new Error(`Gate D ${expected.label} lacks one role-correct wire observation`);
+  }
+  return matches[0]!;
+}
+
+function lc4GateDExactlyOneWire(
+  observations: readonly Lc4SanitizedWireObservation[],
+  start: number,
+  direction: "inbound" | "outbound",
+  wireType: string,
+  label: string,
+): Lc4SanitizedWireObservation {
+  const matches = observations.slice(start).filter((observation) => (
+    observation.provider === "xai"
+    && observation.direction === direction
+    && observation.wire_type === wireType
+  ));
+  if (matches.length !== 1) {
+    throw new Error(`Gate D ${label} must produce exactly one wire observation`);
+  }
+  return matches[0]!;
+}
+
+function lc4GateDConcatenate(chunks: readonly Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(
+    chunks.reduce((total, chunk) => total + chunk.byteLength, 0),
+  );
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+type Lc4XaiGateDClientFactory = (
+  configuration: TrialSessionConfiguration,
+  apiKey: string,
+) => NormalizedRealtimeClient;
+
+async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
+  caller_pcm: Uint8Array;
+  plan: Lc4XaiFiniteManualGateDPlanArtifact;
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+  api_key: string;
+  client_factory: Lc4XaiGateDClientFactory;
+}>): Promise<Lc4XaiFiniteManualGateDExecutionEvidence> {
+  if (typeof input.api_key !== "string"
+    || input.api_key.length < 12
+    || input.api_key !== input.api_key.trim()
+    || /[\u0000-\u001f\u007f]/u.test(input.api_key)) {
+    throw new Error("Gate D xAI executor credential is absent or malformed");
+  }
+  if (input.plan.body.production_adapter_binding_sha256
+      !== LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256
+    || input.authorization.body.production_adapter_binding_sha256
+      !== LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256) {
+    throw new Error("Gate D artifacts differ from the frozen production adapter binding");
+  }
+  const callerPcm = Uint8Array.from(input.caller_pcm);
+  const configuration = lc4XaiGateDConfiguration(input.plan);
+  const client = input.client_factory(configuration, input.api_key);
+  if (client.provider !== "xai"
+    || typeof client.waitForInputAudioCommit !== "function"
+    || typeof client.prepareToolContinuation !== "function"
+    || typeof client.onWireObservation !== "function") {
+    throw new Error("Gate D production client lacks the required xAI manual transport surface");
+  }
+
+  const wire: Lc4SanitizedWireObservation[] = [];
+  const initialPcm: Uint8Array[] = [];
+  const postToolPcm: Uint8Array[] = [];
+  let rootResponseId: string | null = null;
+  let postToolResponseId: string | null = null;
+  let rootResponseStart: Lc4SanitizedWireObservation | null = null;
+  let postToolResponseStart: Lc4SanitizedWireObservation | null = null;
+  let initialPcmObservation: Lc4SanitizedWireObservation | null = null;
+  let postToolPcmObservation: Lc4SanitizedWireObservation | null = null;
+  let toolCallObservation: Lc4SanitizedWireObservation | null = null;
+  let toolResultObservation: Lc4SanitizedWireObservation | null = null;
+  let continuationObservation: Lc4SanitizedWireObservation | null = null;
+  let terminalObservation: Lc4SanitizedWireObservation | null = null;
+  let capabilityGatewayToolCallSha256: string | null = null;
+  let capabilityGatewayCallIdSha256: string | null = null;
+  let capabilityGatewayToolResultSha256: string | null = null;
+  let postToolContinuationSha256: string | null = null;
+  let postToolContinuationOriginResponseIdSha256: string | null = null;
+  let postToolResponseIdSha256: string | null = null;
+  let toolResultSubmissionEvents = 0;
+  let continuationRequests = 0;
+  let toolRoundtrips = 0;
+  let fatal: Error | null = null;
+  let settle!: () => void;
+  const completed = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  const fail = (message: string) => {
+    fatal ??= new Error(message);
+    settle();
+  };
+  const unsubscribeWire = client.onWireObservation((observation) => {
+    wire.push(sanitizeWireObservation(observation));
+  });
+  const unsubscribeEvent = client.onEvent((event) => {
+    try {
+      if (event.type === "input.speech_activity") {
+        fail("Gate D manual transport received an unsolicited server-VAD event");
+        return;
+      }
+      if (event.type === "response.started") {
+        const observation = lc4GateDObservedAttribution(
+          event.wireObservation,
+          wire,
+          {
+            direction: "inbound",
+            wire_type: "response.created",
+            label: "response start",
+          },
+        );
+        if (rootResponseId === null) {
+          rootResponseId = event.responseId;
+          rootResponseStart = observation;
+        } else if (postToolResponseId === null) {
+          if (toolRoundtrips !== 1 || continuationRequests !== 1) {
+            fail("Gate D post-tool response started before its exact continuation request");
+            return;
+          }
+          if (event.responseId === rootResponseId) {
+            fail("Gate D post-tool response reused the initial response identity");
+            return;
+          }
+          postToolResponseId = event.responseId;
+          postToolResponseIdSha256 =
+            lc4XaiManualResponseWireIdentitySha256(event.responseId);
+          if (observation.identity_hashes.responseIdSha256
+            !== postToolResponseIdSha256) {
+            fail("Gate D post-tool response start has a foreign response identity");
+            return;
+          }
+          postToolResponseStart = observation;
+        } else {
+          fail("Gate D observed more than two generation phases");
+        }
+        return;
+      }
+      if (event.type === "output.audio") {
+        const observation = lc4GateDObservedAttribution(
+          event.wireObservation,
+          wire,
+          {
+            direction: "inbound",
+            wire_type: "response.audio.delta",
+            label: "assistant PCM",
+          },
+        );
+        if (event.format.encoding !== "pcm16"
+          || event.format.sampleRateHz
+            !== LC4_PROVIDER_PROFILE_MANIFEST.providers.xai.output_sample_rate_hz
+          || event.format.channels !== 1) {
+          fail("Gate D assistant PCM differs from the frozen provider profile");
+          return;
+        }
+        if (event.responseId === rootResponseId && postToolResponseId === null) {
+          initialPcm.push(Uint8Array.from(event.audio));
+          initialPcmObservation ??= observation;
+        } else if (event.responseId === postToolResponseId) {
+          postToolPcm.push(Uint8Array.from(event.audio));
+          postToolPcmObservation ??= observation;
+        } else {
+          fail("Gate D assistant PCM has an unbound response identity");
+        }
+        return;
+      }
+      if (event.type === "tool.dispatch") {
+        if (toolRoundtrips !== 0
+          || event.dispatches.length !== 1
+          || event.responseId !== rootResponseId
+          || initialPcm.length === 0) {
+          fail("Gate D requires one tool call after audible initial PCM");
+          return;
+        }
+        const dispatch = event.dispatches[0]!;
+        const expectedArguments = {
+          tool_name: "transport.probe",
+          arguments: {},
+        };
+        const expectedProvenance = Object.freeze({
+          schemaVersion: 1 as const,
+          provider: "xai" as const,
+          nativeCallId: dispatch.callId,
+          nativeResponseId: event.responseId,
+          terminalWireType: event.wireType,
+          ...(dispatch.provenance.nativeItemId === undefined
+            ? {}
+            : { nativeItemId: dispatch.provenance.nativeItemId }),
+          ...(dispatch.provenance.terminalEventId === undefined
+            ? {}
+            : { terminalEventId: dispatch.provenance.terminalEventId }),
+        });
+        if (event.gateway !== "capability_gateway"
+          || dispatch.request.method !== "tools/call"
+          || dispatch.request.params.name !== "transport.probe"
+          || canonicalJson(dispatch.request.params.arguments)
+            !== canonicalJson(expectedArguments.arguments)
+          || dispatch.request.params._meta[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]
+            !== dispatch.callId
+          || canonicalJson(
+            dispatch.request.params._meta[PROVIDER_PROVENANCE_META_KEY],
+          ) !== canonicalJson(expectedProvenance)
+          || canonicalJson(dispatch.provenance)
+            !== canonicalJson(expectedProvenance)) {
+          fail("Gate D provider requested a tool outside the harmless closed probe");
+          return;
+        }
+        toolCallObservation = lc4GateDObservedAttribution(
+          event.wireObservation,
+          wire,
+          {
+            direction: "inbound",
+            wire_type: "response.done",
+            label: "capability-gateway executable call batch",
+          },
+        );
+        const rootResponseIdSha256 =
+          lc4XaiManualResponseWireIdentitySha256(event.responseId);
+        capabilityGatewayCallIdSha256 =
+          realtimeWireIdentitySha256("call", dispatch.callId);
+        if (toolCallObservation.identity_hashes.responseIdSha256
+              !== rootResponseIdSha256
+          || toolCallObservation.identity_hashes.callIdSha256
+              !== capabilityGatewayCallIdSha256) {
+          fail("Gate D capability-gateway call has foreign wire identities");
+          return;
+        }
+        capabilityGatewayToolCallSha256 = sha256Hex(canonicalJson({
+          name: event.gateway,
+          arguments: expectedArguments,
+          response_id_sha256: rootResponseIdSha256,
+          call_id_sha256: capabilityGatewayCallIdSha256,
+        }));
+        capabilityGatewayToolResultSha256 = sha256Hex(
+          `${LC4_XAI_GATE_D_RESULT_DOMAIN}${canonicalJson({
+            result: LC4_XAI_GATE_D_TOOL_RESULT,
+            origin_response_id_sha256: rootResponseIdSha256,
+            call_id_sha256: capabilityGatewayCallIdSha256,
+          })}`,
+        );
+        postToolContinuationSha256 = sha256Hex(
+          `${LC4_XAI_GATE_D_CONTINUATION_DOMAIN}${canonicalJson({
+            additional_instructions_sha256:
+              sha256Hex(LC4_XAI_GATE_D_CONTINUATION_CONTROL),
+            tool_result_sha256: capabilityGatewayToolResultSha256,
+            origin_response_id_sha256: rootResponseIdSha256,
+            call_id_sha256: capabilityGatewayCallIdSha256,
+          })}`,
+        );
+        client.prepareToolContinuation!({
+          additionalInstructions: LC4_XAI_GATE_D_CONTINUATION_CONTROL,
+          contextSha256: sha256Hex(LC4_XAI_GATE_D_CONTINUATION_CONTROL),
+          contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+        });
+        const resultFloor = wire.length;
+        client.submitToolResults([{
+          callId: dispatch.callId,
+          output: LC4_XAI_GATE_D_TOOL_RESULT,
+        }], false);
+        toolResultObservation = lc4GateDExactlyOneWire(
+          wire,
+          resultFloor,
+          "outbound",
+          "conversation.item.create",
+          "capability-gateway tool result",
+        );
+        if (toolResultSubmissionEvents !== 1
+          || toolResultObservation.identity_hashes.callIdSha256
+            !== capabilityGatewayCallIdSha256) {
+          fail("Gate D capability-gateway result has a foreign call identity");
+          return;
+        }
+        toolRoundtrips = 1;
+        const continuationFloor = wire.length;
+        client.createResponse();
+        continuationObservation = lc4GateDExactlyOneWire(
+          wire,
+          continuationFloor,
+          "outbound",
+          "response.create",
+          "post-tool continuation",
+        );
+        return;
+      }
+      if (event.type === "tool.continuation.requested") {
+        if (toolRoundtrips !== 1
+          || continuationRequests !== 0
+          || rootResponseId === null
+          || event.originResponseId !== rootResponseId
+          || event.responseIdSource !== "provider"
+          || event.wireType !== "response.create") {
+          fail("Gate D continuation request has a foreign root response identity");
+          return;
+        }
+        continuationRequests = 1;
+        postToolContinuationOriginResponseIdSha256 =
+          lc4XaiManualResponseWireIdentitySha256(event.originResponseId);
+        return;
+      }
+      if (event.type === "tool.results.submitted") {
+        if (toolResultSubmissionEvents !== 0
+          || capabilityGatewayCallIdSha256 === null
+          || rootResponseId === null
+          || event.responseId !== rootResponseId
+          || event.responseIdSource !== "provider"
+          || event.callIds.length !== 1
+          || realtimeWireIdentitySha256("call", event.callIds[0]!)
+            !== capabilityGatewayCallIdSha256
+          || event.continuationRequested) {
+          fail("Gate D tool-result submission has foreign call or response authority");
+          return;
+        }
+        toolResultSubmissionEvents = 1;
+        return;
+      }
+      if (event.type === "response.completed") {
+        if (event.status !== "completed") {
+          fail("Gate D provider response did not complete");
+          return;
+        }
+        if (postToolResponseId !== null
+          && event.responseId !== rootResponseId
+          && event.responseId !== postToolResponseId) {
+          fail("Gate D terminal event has an unbound response identity");
+          return;
+        }
+        if (postToolResponseId !== null
+          && event.responseId === postToolResponseId) {
+          terminalObservation = lc4GateDObservedAttribution(
+            event.wireObservation,
+            wire,
+            {
+              direction: "inbound",
+              wire_type: "response.done",
+              label: "terminal response",
+            },
+          );
+          if (terminalObservation.identity_hashes.responseIdSha256
+            !== postToolResponseIdSha256) {
+            fail("Gate D terminal observation has a foreign response identity");
+            return;
+          }
+          settle();
+        }
+        return;
+      }
+      if (event.type === "error" && event.fatal) {
+        fail("Gate D provider emitted a fatal transport error");
+      } else if (event.type === "connection.closed") {
+        fail("Gate D provider connection closed before the terminal response");
+      }
+    } catch (error) {
+      fail(error instanceof Error ? error.message : "Gate D event validation failed");
+    }
+  });
+
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let commit: Lc4SanitizedWireObservation | null = null;
+  let commitAck: Lc4SanitizedWireObservation | null = null;
+  let responseCreate: Lc4SanitizedWireObservation | null = null;
+  try {
+    await client.connect();
+    if (client.state !== "ready") {
+      throw new Error("Gate D xAI session did not remain ready");
+    }
+    client.appendInputAudio({
+      encoding: "pcm16",
+      sampleRateHz:
+        LC4_PROVIDER_PROFILE_MANIFEST.providers.xai.input_sample_rate_hz,
+      channels: 1,
+      data: callerPcm,
+    });
+    client.prepareResponse({
+      additionalInstructions: LC4_XAI_GATE_D_INITIAL_CONTROL,
+      contextSha256: sha256Hex(LC4_XAI_GATE_D_INITIAL_CONTROL),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+    });
+    const commitFloor = wire.length;
+    client.commitInputAudio();
+    commit = lc4GateDExactlyOneWire(
+      wire,
+      commitFloor,
+      "outbound",
+      "input_audio_buffer.commit",
+      "manual commit",
+    );
+    const acknowledgement = await client.waitForInputAudioCommit(5_000);
+    commitAck = lc4GateDObservedAttribution(
+      acknowledgement.wireObservation,
+      wire,
+      {
+        direction: "inbound",
+        wire_type: "input_audio_buffer.committed",
+        label: "manual commit acknowledgement",
+      },
+    );
+    if (acknowledgement.provider !== "xai"
+      || acknowledgement.status !== "acknowledged"
+      || acknowledgement.connectionEpoch !== commit.connection_epoch
+      || acknowledgement.commitOrdinal !== 1
+      || commitAck.sequence <= commit.sequence) {
+      throw new Error("Gate D manual commit acknowledgement is foreign or duplicated");
+    }
+    const responseCreateFloor = wire.length;
+    client.createResponse();
+    responseCreate = lc4GateDExactlyOneWire(
+      wire,
+      responseCreateFloor,
+      "outbound",
+      "response.create",
+      "initial response request",
+    );
+    timeout = setTimeout(() => {
+      fail("Gate D provider response timed out");
+    }, 45_000);
+    await completed;
+    if (fatal) throw fatal;
+    if (toolRoundtrips !== 1
+      || rootResponseId === null
+      || postToolResponseId === null
+      || rootResponseStart === null
+      || postToolResponseStart === null
+      || initialPcmObservation === null
+      || postToolPcmObservation === null
+      || toolCallObservation === null
+      || toolResultObservation === null
+      || continuationObservation === null
+      || terminalObservation === null
+      || capabilityGatewayToolCallSha256 === null
+      || capabilityGatewayCallIdSha256 === null
+      || capabilityGatewayToolResultSha256 === null
+      || postToolContinuationSha256 === null
+      || postToolContinuationOriginResponseIdSha256 === null
+      || postToolResponseIdSha256 === null
+      || toolResultSubmissionEvents !== 1
+      || continuationRequests !== 1) {
+      throw new Error("Gate D did not produce the complete two-phase tool roundtrip");
+    }
+    const initial = lc4GateDConcatenate(initialPcm);
+    const postTool = lc4GateDConcatenate(postToolPcm);
+    if (initial.byteLength < 2 || postTool.byteLength < 2) {
+      throw new Error("Gate D did not produce audible PCM in both generation phases");
+    }
+    // Event listeners advance this FSM while the awaited completion promise is
+    // pending; capture the validated terminal snapshot for TypeScript and for
+    // the evidence assembly below.
+    const rootStart =
+      rootResponseStart as Lc4SanitizedWireObservation;
+    const postStart =
+      postToolResponseStart as Lc4SanitizedWireObservation;
+    const initialAudio =
+      initialPcmObservation as Lc4SanitizedWireObservation;
+    const postAudio =
+      postToolPcmObservation as Lc4SanitizedWireObservation;
+    const gatewayCall =
+      toolCallObservation as Lc4SanitizedWireObservation;
+    const gatewayResult =
+      toolResultObservation as Lc4SanitizedWireObservation;
+    const continuation =
+      continuationObservation as Lc4SanitizedWireObservation;
+    const terminal =
+      terminalObservation as Lc4SanitizedWireObservation;
+    const rootResponseIdSha256 =
+      lc4XaiManualResponseWireIdentitySha256(rootResponseId);
+    if (rootStart.identity_hashes.responseIdSha256 !== rootResponseIdSha256
+      || initialAudio.identity_hashes.responseIdSha256
+        !== rootResponseIdSha256
+      || gatewayCall.identity_hashes.responseIdSha256
+        !== rootResponseIdSha256
+      || gatewayCall.identity_hashes.callIdSha256
+        !== capabilityGatewayCallIdSha256
+      || gatewayResult.identity_hashes.callIdSha256
+        !== capabilityGatewayCallIdSha256
+      || postToolContinuationOriginResponseIdSha256
+        !== rootResponseIdSha256
+      || postToolResponseIdSha256 === rootResponseIdSha256
+      || postStart.identity_hashes.responseIdSha256
+        !== postToolResponseIdSha256
+      || postAudio.identity_hashes.responseIdSha256
+        !== postToolResponseIdSha256
+      || terminal.identity_hashes.responseIdSha256
+        !== postToolResponseIdSha256) {
+      throw new Error(
+        "Gate D response, tool-call, result, continuation, and terminal identities are not continuous",
+      );
+    }
+    const manualTurnCausality = createLc4XaiManualTurnCausality({
+      schema_version: 1,
+      connection_epoch: commit.connection_epoch,
+      commit_observation_sha256: commit.observation_sha256,
+      commit_sequence: commit.sequence,
+      commit_ack_observation_sha256: commitAck.observation_sha256,
+      commit_ack_sequence: commitAck.sequence,
+      response_create_observation_sha256: responseCreate.observation_sha256,
+      response_create_sequence: responseCreate.sequence,
+      response_start_observation_sha256: rootStart.observation_sha256,
+      response_start_sequence: rootStart.sequence,
+      response_id_sha256: rootResponseIdSha256,
+    }, wire);
+    const withoutReplay = Object.freeze({
+      schema_version: 2 as const,
+      provider: "xai" as const,
+      model: input.plan.body.model,
+      voice: input.plan.body.voice,
+      transport_purpose: "finite_prerecorded_efficacy" as const,
+      transport_mode: "manual_commit" as const,
+      transport_profile_sha256: input.plan.body.transport_profile_sha256,
+      production_adapter_binding_sha256:
+        LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+      caller_pcm_sha256: sha256Hex(callerPcm),
+      caller_pcm_byte_length: callerPcm.byteLength,
+      caller_pcm_appended_sha256: sha256Hex(callerPcm),
+      caller_pcm_appended_byte_length: callerPcm.byteLength,
+      provider_sessions_opened: 1 as const,
+      generation_phases: 2 as const,
+      capability_gateway_tool_roundtrips: 1 as const,
+      retries: 0 as const,
+      reconnects: 0 as const,
+      fallbacks: 0 as const,
+      operation_order: LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
+      manual_turn_causality: manualTurnCausality,
+      wire_observations: Object.freeze([...wire]),
+      initial_assistant_pcm_sha256: sha256Hex(initial),
+      initial_assistant_pcm_byte_length: initial.byteLength,
+      initial_assistant_pcm_observation_sha256:
+        initialAudio.observation_sha256,
+      capability_gateway_tool_call_sha256:
+        capabilityGatewayToolCallSha256,
+      capability_gateway_call_id_sha256:
+        capabilityGatewayCallIdSha256,
+      capability_gateway_tool_call_observation_sha256:
+        gatewayCall.observation_sha256,
+      capability_gateway_tool_result_sha256:
+        capabilityGatewayToolResultSha256,
+      capability_gateway_tool_result_observation_sha256:
+        gatewayResult.observation_sha256,
+      post_tool_continuation_sha256: postToolContinuationSha256,
+      post_tool_continuation_origin_response_id_sha256:
+        postToolContinuationOriginResponseIdSha256,
+      post_tool_continuation_observation_sha256:
+        continuation.observation_sha256,
+      post_tool_response_id_sha256: postToolResponseIdSha256,
+      post_tool_response_start_observation_sha256:
+        postStart.observation_sha256,
+      post_tool_assistant_pcm_sha256: sha256Hex(postTool),
+      post_tool_assistant_pcm_byte_length: postTool.byteLength,
+      post_tool_assistant_pcm_observation_sha256:
+        postAudio.observation_sha256,
+      terminal_observation_sha256: terminal.observation_sha256,
+    });
+    const evidence = Object.freeze({
+      ...withoutReplay,
+      replay_sha256:
+        lc4XaiFiniteManualGateDExecutionReplaySha256(withoutReplay),
+    });
+    assertLc4XaiFiniteManualGateDExecutionEvidence({
+      evidence,
+      plan: input.plan,
+    });
+    return evidence;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    unsubscribeEvent();
+    unsubscribeWire();
+    client.close(1000, "LC4 Gate D complete");
+  }
+}
+
+/**
+ * The sole paid Gate D adapter. The API credential is accepted only in memory
+ * by the operator and is never placed in a plan, authorization, terminal, or
+ * receipt artifact.
+ */
+export function createLc4XaiFiniteManualGateDProductionAdapter(
+  apiKey: string,
+): Lc4XaiFiniteManualGateDProductionAdapter {
+  return Object.freeze({
+    [LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY]: true as const,
+    kind: "lc4-production-provider-adapter/xai-finite-manual-gate-d-v1",
+    production_adapter_binding_sha256:
+      LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+    execute: (input) => executeLc4XaiGateDWithClientFactory({
+      ...input,
+      api_key: apiKey,
+      client_factory: (configuration, credential) => (
+        createProductionRealtimeClient(
+          "xai",
+          configuration,
+          credential,
+          { xaiTurnBoundary: "manual_commit" },
+        )
+      ),
+    }),
   });
 }

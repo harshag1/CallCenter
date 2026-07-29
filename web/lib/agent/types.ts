@@ -2,6 +2,7 @@
 // types.ts — operator-agent tool contract and execution context.
 
 import type { Surface, Flow } from "../surface-dsl";
+import type { OperatorTurnInferenceAuthority } from "./operator-turn-inference-authority";
 
 export type ToolCtx = {
   orgId: string;
@@ -11,6 +12,10 @@ export type ToolCtx = {
   /** Present only for authenticated operator-chat turns. Funded action
    * proposals are bound to this thread but approval tokens never enter it. */
   threadId?: string;
+  /** Host-only, process-local authority shared by every builder sample and
+   * nested research request in this authenticated turn. It is never serialized
+   * into model/tool output. */
+  inferenceAuthority?: OperatorTurnInferenceAuthority;
 };
 
 export type ToolResult = {

@@ -27,6 +27,23 @@ export const LC4_DEV_PRIOR_MUTATION_OUTCOMES = Object.freeze([
 
 export type Lc4DevPriorMutationOutcome = typeof LC4_DEV_PRIOR_MUTATION_OUTCOMES[number];
 
+export type Lc4DevCallerBranchSemanticSubjectId =
+  `lc4-dev-op-42:${Lc4DevPriorMutationOutcome}`;
+
+/**
+ * The listener registry freezes one subject per possible post-mutation branch.
+ * Keeping the outcome in the semantic identity prevents a transcript for one
+ * branch from earning credit against another branch's expectations.
+ */
+export function lc4DevCallerBranchSemanticSubjectId(
+  outcome: Lc4DevPriorMutationOutcome,
+): Lc4DevCallerBranchSemanticSubjectId {
+  if (!LC4_DEV_PRIOR_MUTATION_OUTCOMES.includes(outcome)) {
+    throw new Error("LC4-DEV caller branch semantic subject has an invalid outcome");
+  }
+  return `lc4-dev-op-42:${outcome}`;
+}
+
 export type Lc4DevCallerBranchSource = Readonly<{
   prior_outcome: Lc4DevPriorMutationOutcome;
   source_id: string;
@@ -433,6 +450,13 @@ export function lc4DevBranchedOpportunity(
   if (!source || source.source_id !== decision.source_id || source.canonical_caller_text_sha256 !== decision.source_text_sha256) {
     throw new Error("LC4-DEV branched opportunity differs from its signed decision source");
   }
+  return projectedBranchOpportunity(canonical, source);
+}
+
+function projectedBranchOpportunity(
+  canonical: Lc4PublicDevOpportunity,
+  source: Lc4DevCallerBranchSource,
+): Lc4PublicDevOpportunity {
   const effective = {
     ...canonical,
     canonical_caller_text: source.canonical_caller_text,
@@ -452,6 +476,29 @@ export function lc4DevBranchedOpportunity(
     }),
   } satisfies Lc4PublicDevOpportunity;
   return freeze(effective);
+}
+
+/**
+ * Fail-closed inverse of {@link lc4DevBranchedOpportunity}. The listener sink
+ * uses this only after the production adapter has verified the signed branch
+ * decision. Exact projection matching keeps branch selection independent of
+ * model output and rejects a caller text/oracle/event splice.
+ */
+export function lc4DevPriorMutationOutcomeForBranchedOpportunity(
+  canonical: Lc4PublicDevOpportunity,
+  projected: Lc4PublicDevOpportunity,
+): Lc4DevPriorMutationOutcome {
+  if (canonical.id !== LC4_DEV_BRANCH_OPPORTUNITY_ID || canonical.index !== 42
+    || projected.id !== LC4_DEV_BRANCH_OPPORTUNITY_ID || projected.index !== 42) {
+    throw new Error("LC4-DEV caller branch projection is valid only for canonical opportunity 42");
+  }
+  const matches = LC4_DEV_CALLER_BRANCH_SOURCES.filter((source) =>
+    canonicalJson(projectedBranchOpportunity(canonical, source)) === canonicalJson(projected)
+  );
+  if (matches.length !== 1) {
+    throw new Error("LC4-DEV caller branch projection does not select exactly one frozen outcome");
+  }
+  return matches[0]!.prior_outcome;
 }
 
 export function lc4DevBranchedOpportunitySha256(opportunity: Lc4PublicDevOpportunity): string {

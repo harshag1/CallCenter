@@ -63,19 +63,31 @@ create an unnecessary code-execution and configuration-oracle boundary.
 
 ## Current integration boundary
 
-The existing Resend and Twilio implementations have not yet been moved behind
-this interface. They continue to use the established operator-action approval,
-reservation, and settlement boundary. The new contract and synthetic
-conformance suite are a safe extension seam, not a claim that swapping a
-provider is already configuration-only.
+Browser-approved Resend email and Twilio SMS use
+`operator-provider-adapters.ts` in the real operator dispatcher. They preserve
+the established operator-action approval, reservation, replay, and settlement
+ledger: the adapter authority claimer accepts only that ledger's exact,
+exclusive execution UUID and exact approved cost bindings. Resend receives the
+UUID as its provider idempotency key. Twilio SMS declares
+`exclusive-framework-ledger` and remains do-not-retry after ambiguity.
+
+The durable private operator result contains the complete Adapter v1 receipt,
+including the opaque provider message ID and integrity/reconciliation bindings.
+The browser and model projections continue to expose only the established safe
+accepted/count fields. Provider errors, credentials, destinations, and message
+content never enter the adapter receipt.
+
+Outbound Twilio voice and phone-number purchasing have not yet moved behind
+this interface. They retain their existing call/number-specific authority and
+reconciliation ledgers; swapping those providers is not configuration-only.
 
 The contract also cannot prove that provider code truly honors an idempotency
 key or validates a webhook correctly. Each production adapter needs provider
 fixture tests and, where available, a capped sandbox/canary before making those
 claims.
 
-`providerMessageId` and `providerStatus` remain durable operator evidence in the
-receipt schema. Some providers may place customer-linked data in those fields,
-so receipts are not model- or end-user-safe presentation objects. A production
-adapter should return opaque provider IDs and the UI/API projection must redact
-or key-bind them before disclosure.
+`providerMessageId` and terminal `providerStatus` remain durable operator
+evidence in the receipt schema. Some providers may place customer-linked data
+in those fields, so receipts are not model- or end-user-safe presentation
+objects. The bundled operator adapters require bounded opaque IDs, and the
+UI/API projection redacts them.

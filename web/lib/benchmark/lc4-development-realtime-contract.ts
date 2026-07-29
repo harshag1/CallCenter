@@ -82,5 +82,14 @@ export type Lc4DevelopmentListenerSink = Readonly<{
     repair_projection: Lc4DevArmBlindRepairProjection;
     playback_authority_receipt_sha256: string;
     listener_evidence: Lc4DevReplayArtifactReference;
+    /**
+     * In-memory only: the exact transcript already produced by the signed
+     * captured-PCM evaluator. It is used to rebuild provider conversation
+     * history at a planned reconnect and is not duplicated as plaintext into
+     * provider-exchange replay evidence.
+     */
+    assistant_conversation_transcript?: string;
+    assistant_conversation_transcript_sha256?: string;
+    assistant_conversation_transcript_source?: "listener_exact_captured_pcm_asr";
   }>>;
 }>;

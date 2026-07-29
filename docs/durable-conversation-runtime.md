@@ -1,6 +1,8 @@
 # Durable conversation runtime
 
-Status: implemented shared-state foundation, not yet the default live-call path or a provider-superiority claim.
+Status: durable packets and governed read-only workers are integrated into the
+live browser/MCP path; general governed action admission remains non-default.
+This is not a provider-superiority claim.
 
 ## Implementation snapshot
 
@@ -13,7 +15,20 @@ At this release boundary, the repository contains these independently testable f
 - migrations `032` and `034` plus `web/lib/voice-workers/*` implement the durable read-only worker queue and atomically couple governed spawn/result delivery to the conversation event log.
 - migrations `035` and `036` plus `reserveGovernedFlowActionAtomic` lock current Flow/call authority, evaluate the policy kernel using database time and durable dispatch count, prove the call belongs to the coordinator's conversation and organization, and persist immutable decision and full replay-intent records in the same transaction as an allowed reservation. A coordinator action identity cannot be replayed with different policy, facts, receipts, or confirmation evidence.
 
-The important remaining boundary is wiring, not an omitted authority design: the current MCP gateway still calls the legacy Flow reservation and xAI-based `launch_task` paths, provider sessions do not yet receive packets from the durable compiler, and spoken-output safety has not been implemented. Therefore this foundation must be shadowed on live calls before it replaces the current route. Do not describe it as production-complete or as a general realtime guardrail.
+Session creation and reconnect now mirror the current Flow checkpoint and
+inject a bounded packet; MCP tool results refresh the packet. `launch_task`
+derives an immutable read-only manifest from the active catalog, atomically
+spawns an exactly scoped governed worker, and reconciles crash gaps between
+worker creation, Flow settlement, and outer MCP settlement. Accepted results
+enter a later packet as untrusted advisory content. Flow v2 receipts still own
+live action authority: the newer general governed action reservation and one
+uniform repair controller are not the default route. The stock executor is
+triggered through `waitUntil`; the authenticated minute scheduler is the
+bounded process-loss backstop and exact-claims at most two workers per tick
+under one wall-clock deadline. Each read-only worker has a durable
+three-execution ceiling. `WORKER_DATABASE_URL` must use the isolated
+`hacc_voice_worker_runtime` login, and missing worker configuration rejects
+`launch_task` before its dispatch boundary.
 
 The checked-in [context retention result](../benchmarks/voice-long-horizon/CONTEXT_KERNEL_RETENTION_V1.md) measures the pure projector only. HACC-VMR-v1 has no provider effectiveness result.
 
@@ -106,7 +121,7 @@ The runtime separates proposals, evidence, authority, execution, and settlement.
 | Policy firewall | Admit or reject a proposal against current heads and issue a short-lived lease | Dispatch an action or trust model-supplied epochs/grants |
 | Effect gateway | Reserve a receipt, dispatch once for the reservation owner, settle or mark indeterminate | Retry an uncertain mutation without downstream idempotency or reconciliation proof |
 | Worker executor | Claim a durable job, heartbeat, produce a content-addressed result | Inject a result directly into model context or bypass delivery-time policy |
-| Context projector | Select and render bounded, provenance-labelled state | Create new authoritative facts or omit registered blocking obligations silently |
+| Context projector | Select and render bounded, provenance-labelled state | Create new authoritative facts, reinterpret advisory text as instructions, or omit registered blocking obligations silently |
 
 The canonical model-visible action remains only:
 
@@ -163,6 +178,23 @@ A deterministic projector can be perfectly consistent and still forget the impor
 - **recall:** whether every registered future-relevant fact, correction, obligation, and worker result appears by its first required opportunity under the frozen byte budget.
 
 Model-written summaries stay advisory. Promotion requires a typed extraction plus acceptable authority evidence; a fluent summary cannot overwrite a receipt.
+
+### Packet injection boundary
+
+The serialized packet envelope is host-authored, but that does not make every
+string inside it trusted. The packet carries explicit field-level trust labels:
+recent caller/agent transcript text, worker input/purpose, worker-returned
+values, citation identifiers, and worker/model summaries are
+`untrusted_advisory`. They may contain instruction-shaped text and must be
+treated as quoted evidence only. They cannot override policy invariants, Flow
+state, capability authority, confirmation receipts, tool arguments, or system
+instructions.
+
+Raw worker citation URI/title/excerpt fields remain private content-addressed
+evidence. Only an opaque, still-untrusted citation identifier may enter the
+bounded packet. “Accepted worker fact” means the host admitted the delivery
+against its goal, epoch, and dependency contract; it is not a claim that the
+worker-authored value is independently authoritative.
 
 ## Realtime policy firewall
 
@@ -238,7 +270,11 @@ Provider facts in this section were checked against official documentation on Ju
 
 ## Spoken-output scope
 
-The first runtime slice guards action authority and durable state. It does **not** yet prove that spoken output obeys privacy, safety, disclosure, or truthfulness policy.
+The optional browser speech gate quarantines a complete generated utterance
+before scheduling it across the xAI, Gemini, and OpenAI browser adapters. It
+matches exact normalized forbidden phrases and configured secret literals, and
+can use tenant-funded OpenAI ASR as an independent second check. That is a
+narrow mechanism, not general semantic safety.
 
 Provider transcripts are not proof of what a caller heard. A spoken-output claim requires:
 
@@ -249,7 +285,13 @@ Provider transcripts are not proof of what a caller heard. A spoken-output claim
 - `unverifiable` for missing or low-confidence evidence;
 - a policy action for pre-playback blocking, post-playback incident handling, or both.
 
-Until that layer exists, say “tool-effect policy firewall,” not “all realtime guardrails.” The model may still speak an unsafe sentence even when the gateway blocks the related tool call.
+The gate adds full-utterance plus ASR latency. Its receipt proves that accepted
+bytes reached the browser's `AudioContext` scheduling boundary; it does not
+prove physical playback or human hearing. It does not cover PSTN, paraphrases,
+implication, or general truthfulness. Say “tool-effect policy firewall” and
+“optional exact-phrase browser quarantine,” not “all realtime guardrails.” The
+model may still speak an unsafe sentence even when the gateway blocks the
+related tool call.
 
 ## Public API direction
 

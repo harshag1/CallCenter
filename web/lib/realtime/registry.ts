@@ -3,8 +3,11 @@ import "server-only";
 import { geminiAdapter } from "./providers/gemini";
 import { openaiAdapter } from "./providers/openai";
 import { xaiAdapter } from "./providers/xai";
+import { isAuthorizedLocalDeploymentBrowserFunding } from "./browser-funding-authority";
 import type {
+  BrowserProviderFundingAuthority,
   BrowserRealtimeConnection,
+  LocalDeploymentBrowserFundingAuthority,
   ProviderCapabilities,
   ProviderDefinition,
   RealtimeAudioFormat,
@@ -38,6 +41,25 @@ export type RegisteredBrowserRealtimeConnection<Id extends string = string> = {
   [key: string]: unknown;
 };
 
+export type RegisteredBrowserProviderRootCredential<Id extends string = string> =
+  Readonly<{
+    source: "tenant_byok";
+    provider: Id;
+    apiKey: string;
+  }>;
+
+export type RegisteredBrowserFundingAuthority<Id extends string = string> =
+  | RegisteredBrowserProviderRootCredential<Id>
+  | (
+      Id extends VoiceProviderId
+        ? LocalDeploymentBrowserFundingAuthority<Id>
+        : never
+    );
+
+type AnyRegisteredBrowserFundingAuthority =
+  | RegisteredBrowserProviderRootCredential<string>
+  | LocalDeploymentBrowserFundingAuthority;
+
 export type RegisteredServerRealtimeConnection<Id extends string = string> = {
   provider: Id;
   model: string;
@@ -69,6 +91,7 @@ export type RealtimeProviderRegistration<Id extends string = string> = {
   capabilities: ProviderCapabilities;
   createBrowserConnection(
     spec: RegisteredVoiceSessionSpec<Id>,
+    fundingAuthority: RegisteredBrowserFundingAuthority<Id>,
   ): Promise<RegisteredBrowserRealtimeConnection<Id>>;
   createServerConnection(
     spec: RegisteredVoiceSessionSpec<Id>,
@@ -295,6 +318,40 @@ function assertBrowserConnection<Id extends string>(
   }
 }
 
+function assertBrowserFundingAuthority<Id extends string>(
+  spec: RegisteredVoiceSessionSpec<Id>,
+  authority: AnyRegisteredBrowserFundingAuthority,
+): void {
+  if (authority?.source === "tenant_byok") {
+    if (
+      authority.provider === spec.provider
+      && spec.provider !== "gemini"
+      && typeof authority.apiKey === "string"
+      && Buffer.byteLength(authority.apiKey, "utf8") >= 16
+      && Buffer.byteLength(authority.apiKey, "utf8") <= 4 * 1024
+      && authority.apiKey.trim() === authority.apiKey
+      && !/[\u0000-\u001f\u007f]/.test(authority.apiKey)
+    ) return;
+    registryError(
+      "capability_mismatch",
+      `provider "${spec.provider}" received an invalid browser funding authority`,
+    );
+  }
+  if (
+    (spec.provider === "xai"
+      || spec.provider === "openai"
+      || spec.provider === "gemini")
+    && isAuthorizedLocalDeploymentBrowserFunding(
+      authority,
+      spec.provider as VoiceProviderId,
+    )
+  ) return;
+  registryError(
+    "capability_mismatch",
+    `provider "${spec.provider}" received an invalid browser funding authority`,
+  );
+}
+
 function assertServerConnection<Id extends string>(
   adapter: Readonly<RealtimeProviderRegistration<Id>>,
   spec: RegisteredVoiceSessionSpec<Id>,
@@ -414,10 +471,27 @@ export class RealtimeProviderRegistry {
 
   async createBrowserConnection<Id extends string>(
     spec: RegisteredVoiceSessionSpec<Id>,
+    fundingAuthority: RegisteredBrowserFundingAuthority<NoInfer<Id>>,
   ): Promise<RegisteredBrowserRealtimeConnection<Id>> {
     const adapter = this.get(spec.provider);
     assertSessionProvider(adapter.id, spec);
-    const connection = await adapter.createBrowserConnection(spec);
+    assertBrowserFundingAuthority(
+      spec,
+      fundingAuthority as AnyRegisteredBrowserFundingAuthority,
+    );
+    const connection = await adapter.createBrowserConnection(
+      spec,
+      fundingAuthority,
+    );
+    if (
+      fundingAuthority.source === "tenant_byok"
+      && JSON.stringify(connection).includes(fundingAuthority.apiKey)
+    ) {
+      registryError(
+        "capability_mismatch",
+        `provider "${adapter.id}" exposed its browser funding authority`,
+      );
+    }
     assertBrowserConnection(adapter, spec, connection);
     return connection;
   }
@@ -533,16 +607,22 @@ export function providerCatalog(): readonly RegisteredProviderDefinition[] {
   return registry.catalog();
 }
 
-export function createBrowserRealtimeConnection(
-  spec: VoiceSessionSpec,
+export function createBrowserRealtimeConnection<Id extends VoiceProviderId>(
+  spec: VoiceSessionSpec & { provider: Id },
+  fundingAuthority: BrowserProviderFundingAuthority<NoInfer<Id>>,
 ): Promise<BrowserRealtimeConnection>;
 export function createBrowserRealtimeConnection<Id extends string>(
   spec: RegisteredVoiceSessionSpec<Id>,
+  fundingAuthority: RegisteredBrowserFundingAuthority<NoInfer<Id>>,
 ): Promise<RegisteredBrowserRealtimeConnection<Id>>;
 export function createBrowserRealtimeConnection(
   spec: RegisteredVoiceSessionSpec,
+  fundingAuthority: AnyRegisteredBrowserFundingAuthority,
 ): Promise<RegisteredBrowserRealtimeConnection> {
-  return registry.createBrowserConnection(spec);
+  return registry.createBrowserConnection<string>(
+    spec,
+    fundingAuthority as RegisteredBrowserProviderRootCredential<string>,
+  );
 }
 
 export function createServerRealtimeConnection(

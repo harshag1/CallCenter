@@ -4,10 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
+import {
+  INDEPENDENT_ASR_RESULT_SCHEMA_SHA256,
+  independentAsrContractSha256,
+  type IndependentAsrContract,
+} from "../audible-evidence";
 import {
   LC4_DEV_ADAPTER_BOUNDARY,
   assertLc4DevLivePrepareArtifact,
+  assertLc4DevRepairPlaybackReceiptBinding,
   createLc4DevLivePreflightArtifact,
   createLc4DevLivePrepareArtifact,
   createLc4DevRetainedQualificationReceipt,
@@ -21,19 +27,52 @@ import {
   type Lc4DevelopmentRealtimeAdapter,
 } from "../lc4-development-live-runner";
 import { createLc4DevArmBlindRepairProjection } from "../lc4-development-headless-listener-authority";
+import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import {
   LC4_DEV_PINNED_VOICE,
   materializeLc4DevelopmentAudio,
   type Lc4DevAudioRenderer,
 } from "../lc4-development-audio-materializer";
-import { createLc4DevRepairPlaybackController } from "../lc4-development-repair-playback";
+import {
+  createLc4DevRepairPlaybackController,
+  type Lc4DevRepairPlayback,
+  type Lc4DevRepairPlaybackReceipt,
+} from "../lc4-development-repair-playback";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
-import { LC4_PROVIDER_PROFILE_MANIFEST } from "../lc4-provider-profiles";
+import {
+  LC4_PROVIDER_PROFILE_MANIFEST,
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+} from "../lc4-provider-profiles";
+import {
+  LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
+  LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY,
+} from "../lc4-production-provider-contract";
+import {
+  LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
+  LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+  createLc4XaiFiniteManualGateDAuthorization,
+  createLc4XaiFiniteManualGateDPlan,
+  createLc4XaiFiniteManualGateDSigner,
+  executeLc4XaiFiniteManualGateD,
+  lc4XaiFiniteManualGateDExecutionReplaySha256,
+  type Lc4XaiFiniteManualGateDExecutionEvidence,
+  type Lc4XaiFiniteManualGateDProductionAdapter,
+  type Lc4XaiFiniteManualGateDReceipt,
+} from "../lc4-xai.manual-qualification";
+import {
+  lc4XaiManualResponseWireIdentitySha256,
+  type Lc4SanitizedWireObservation,
+} from "../lc4-xai-manual-turn-causality";
 import {
   LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN,
   createLc4DevelopmentRealtimeAdapter,
   lc4DevCredentialIdentitySetSha256,
 } from "../lc4-production-provider-adapter";
+import { createLc4ProviderExecutionProfile } from "../lc4-production-runner-foundation";
+import {
+  LC4_DEV_AUDIO_DELIVERY_PROFILE,
+  LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+} from "../lc4-development-audio-contract";
 import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
 import type { HaccResponsePlan } from "../response-plan";
 import {
@@ -128,10 +167,50 @@ const COMPLETE_RUN_BUDGET = Object.freeze({
   budget_replay_verified: true as const,
 });
 const branchKeys = generateKeyPairSync("ed25519");
+const asrRunnerKeys = generateKeyPairSync("ed25519");
+const gateDAuthorityKeys = generateKeyPairSync("ed25519");
+const gateDTerminalKeys = generateKeyPairSync("ed25519");
 const branchIdentity = Object.freeze({
   key_id: "lc4-dev-live-runner-branch-test",
   private_key_pem: branchKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   public_key_pem: branchKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+});
+const asrContract: IndependentAsrContract = Object.freeze({
+  schema_version: 1,
+  contract_id: "lc4-dev-live-runner-test-asr",
+  engine: Object.freeze({
+    implementation: "whisper.cpp",
+    source_repository: "https://github.com/ggml-org/whisper.cpp",
+    source_revision: "a".repeat(40),
+    executable_sha256: sha256Hex("fixture-asr-executable"),
+    dependency_lock_sha256: sha256Hex("fixture-asr-dependency-lock"),
+    model_id: "ggml-large-v3-turbo",
+    model_revision: "b".repeat(40),
+    weights_sha256: sha256Hex("fixture-asr-weights"),
+  }),
+  decoding: Object.freeze({
+    language: "en",
+    task: "transcribe",
+    temperature_milli: 0,
+    beam_size: 5,
+    best_of: 5,
+    word_timestamps: true,
+    condition_on_previous_text: false,
+    initial_prompt_sha256: null,
+  }),
+  resampling_profile_sha256: sha256Hex("fixture-asr-resampling-profile"),
+  result_schema_sha256: INDEPENDENT_ASR_RESULT_SCHEMA_SHA256,
+});
+const asrContractSha256 = independentAsrContractSha256(asrContract);
+const asrRunnerPublicKey = asrRunnerKeys.publicKey.export({
+  type: "spki",
+  format: "der",
+});
+const asrRunnerTrust = Object.freeze({
+  key_id: "lc4-dev-live-runner-test-asr",
+  public_key_spki_base64: asrRunnerPublicKey.toString("base64"),
+  public_key_fingerprint_sha256: sha256Hex(asrRunnerPublicKey),
+  signature_algorithm: "Ed25519" as const,
 });
 
 function repairProjection(opportunityId: string) {
@@ -145,16 +224,481 @@ function repairProjection(opportunityId: string) {
   });
 }
 
+const WIRE_OBSERVATION_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-wire-observation-set/v1\n";
+const XAI_MANUAL_CAUSALITY_DOMAIN =
+  "harshas-amazing-call-center/lc4-xai-manual-turn-causality/v1\n";
+const LISTENER_EVIDENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
+const CAS_RECEIPT_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
+
+type FixtureProvider = "openai" | "gemini" | "xai";
+type FixtureWireRole = Readonly<{
+  direction: "inbound" | "outbound";
+  wire_type: string;
+  identity_hashes?: Readonly<Record<string, string>>;
+  payload_sha256?: string;
+  payload_bytes?: number;
+  projection_sha256?: string;
+}>;
+type FixtureListenerLineage = Readonly<{
+  body: Record<string, unknown>;
+  reference: Readonly<{
+    schema_version: 1;
+    retention_version: "lc4-dev-replay-evidence-v1";
+    kind: "listener_evidence";
+    evidence_sha256: string;
+    byte_length: number;
+    content_encoding: "domain-prefixed-canonical-json";
+    domain_prefix: typeof LISTENER_EVIDENCE_DOMAIN;
+  }>;
+  repair_projection: ReturnType<typeof repairProjection>;
+  playback_authority_receipt_sha256: string;
+}>;
+
+const providerProjectionListenerLineage =
+  new WeakMap<object, FixtureListenerLineage>();
+
+function domainHash(domain: string, value: unknown): string {
+  return sha256Hex(`${domain}${canonicalJson(value)}`);
+}
+
+function fixtureCallerFrames(
+  value: Uint8Array,
+  sampleRateHz: number,
+): readonly Uint8Array[] {
+  const frameBytes = sampleRateHz
+    * 2
+    * LC4_DEV_AUDIO_DELIVERY_PROFILE.chunkMs
+    / 1_000;
+  const frames: Uint8Array[] = [];
+  for (let offset = 0; offset < value.byteLength; offset += frameBytes) {
+    frames.push(value.slice(offset, Math.min(value.byteLength, offset + frameBytes)));
+  }
+  return frames;
+}
+
+function fixturePcmProjection(value: Uint8Array, sampleRateHz: number) {
+  return {
+    validCanonicalBase64: true as const,
+    byteLength: value.byteLength,
+    sha256: sha256Hex(value),
+    encodedBytes: Buffer.byteLength(Buffer.from(value).toString("base64"), "utf8"),
+    format: {
+      encoding: "pcm16" as const,
+      sampleRateHz,
+      channels: 1 as const,
+    },
+  };
+}
+
+function fixtureInputWireRole(
+  provider: FixtureProvider,
+  value: Uint8Array,
+  sampleRateHz: number,
+): FixtureWireRole {
+  const base64 = Buffer.from(value).toString("base64");
+  if (provider === "gemini") {
+    const event = {
+      realtimeInput: {
+        audio: {
+          data: base64,
+          mimeType: `audio/pcm;rate=${sampleRateHz}`,
+        },
+      },
+    };
+    const serialized = JSON.stringify(event);
+    return {
+      direction: "outbound",
+      wire_type: "realtimeInput.audio",
+      payload_sha256: sha256Hex(serialized),
+      payload_bytes: Buffer.byteLength(serialized),
+      projection_sha256: realtimeWireProjectionSha256({
+        audio: {
+          direction: "input",
+          chunks: [{
+            ...fixturePcmProjection(value, sampleRateHz),
+            mimeTypeRecognized: true,
+          }],
+        },
+      }),
+    };
+  }
+  const event = {
+    type: "input_audio_buffer.append",
+    audio: base64,
+  };
+  const serialized = JSON.stringify(event);
+  return {
+    direction: "outbound",
+    wire_type: "input_audio_buffer.append",
+    payload_sha256: sha256Hex(serialized),
+    payload_bytes: Buffer.byteLength(serialized),
+    projection_sha256: realtimeWireProjectionSha256({
+      audio: fixturePcmProjection(value, sampleRateHz),
+    }),
+  };
+}
+
+function fixtureOutputWireRole(
+  value: Uint8Array,
+  sampleRateHz: number,
+  responseIdSha256: string,
+): FixtureWireRole {
+  return {
+    direction: "inbound",
+    wire_type: "response.audio.delta",
+    identity_hashes: { responseIdSha256 },
+    projection_sha256: realtimeWireProjectionSha256({
+      audio: fixturePcmProjection(value, sampleRateHz),
+    }),
+  };
+}
+
+function fixtureGeminiOutputRole(
+  value: Uint8Array,
+  sampleRateHz: number,
+): FixtureWireRole {
+  return {
+    direction: "inbound",
+    wire_type: "serverContent",
+    projection_sha256: realtimeWireProjectionSha256({
+      audio: {
+        direction: "output",
+        chunks: [{
+          ...fixturePcmProjection(value, sampleRateHz),
+          mimeTypeRecognized: true,
+        }],
+      },
+    }),
+  };
+}
+
+function fixtureWireObservations(
+  provider: FixtureProvider,
+  seed: string,
+  roles: readonly FixtureWireRole[],
+) {
+  let previous: string | null = null;
+  return roles.map((role, index) => {
+    const observationSha256 = sha256Hex(
+      `${seed}:observation:${index}:${role.wire_type}:${previous ?? "root"}`,
+    );
+    const observation = {
+      provider,
+      direction: role.direction,
+      connection_epoch: 1,
+      sequence: index + 1,
+      wire_type: role.wire_type,
+      payload_sha256: role.payload_sha256
+        ?? sha256Hex(`${seed}:payload:${index}:${role.wire_type}`),
+      payload_bytes: role.payload_bytes ?? 17,
+      projection_sha256: role.projection_sha256
+        ?? realtimeWireProjectionSha256({}),
+      observation_sha256: observationSha256,
+      previous_observation_sha256: previous,
+      identity_hashes: role.identity_hashes ?? {},
+    };
+    previous = observationSha256;
+    return observation;
+  });
+}
+
 function providerExchangeProjection(
   callerPcm: Uint8Array,
+  assistantPcm: Uint8Array,
   callerBranchBinding: Lc4DevCallerBranchPlaybackBinding | undefined,
-  extra: Record<string, unknown>,
+  extra: Record<string, unknown> & Readonly<{
+    episode_id: string;
+    opportunity_id: string;
+    provider: FixtureProvider;
+    model: string;
+    arm: "native" | "hacc";
+  }>,
+  listenerOverrides: Readonly<{
+    repair_projection?: ReturnType<typeof repairProjection>;
+    playback_authority_receipt_sha256?: string;
+  }> = {},
 ) {
   const decision = callerBranchBinding?.decision;
-  return {
+  const profile = createLc4ProviderExecutionProfile(extra.provider);
+  const playbackKind = extra.kind === "repair" ? "repair" : "canonical";
+  const opportunityOrdinal = Number.parseInt(extra.opportunity_id.match(/(\d+)$/u)?.[1] ?? "1", 10);
+  const inputFrames = fixtureCallerFrames(callerPcm, profile.input_sample_rate_hz);
+  const responseIdentity = sha256Hex(
+    `fixture-response:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+  );
+  const capture = createLc4CapturedOutput({
+    runId: extra.episode_id,
+    opportunityId: extra.opportunity_id,
+    responseId: `response-${extra.provider}-${extra.opportunity_id}-${playbackKind}`,
+    provider: extra.provider,
+    surface: "server_realtime_pcm",
+    sampleRateHz: profile.output_sample_rate_hz,
+    chunks: [{
+      chunkId: `${extra.opportunity_id}-${playbackKind}-chunk-1`,
+      pcm: assistantPcm,
+    }],
+  });
+  const outputCapture = {
+    ...capture,
+    chunks: capture.chunks.map((chunk) => chunk.receipt),
+  };
+  const wireRoles: readonly FixtureWireRole[] = extra.provider === "gemini"
+    ? [
+        { direction: "outbound", wire_type: "realtimeInput.activityStart" },
+        ...inputFrames.map((frame) =>
+          fixtureInputWireRole(extra.provider, frame, profile.input_sample_rate_hz)),
+        { direction: "outbound", wire_type: "realtimeInput.activityEnd" },
+        fixtureGeminiOutputRole(assistantPcm, profile.output_sample_rate_hz),
+        {
+          direction: "inbound",
+          wire_type: "serverContent",
+          projection_sha256: realtimeWireProjectionSha256({
+            terminal: { status: "completed" },
+          }),
+        },
+      ]
+    : [
+        ...inputFrames.map((frame) =>
+          fixtureInputWireRole(extra.provider, frame, profile.input_sample_rate_hz)),
+        { direction: "outbound", wire_type: "input_audio_buffer.commit" },
+        ...(extra.provider === "xai"
+          ? [{
+              direction: "inbound" as const,
+              wire_type: "input_audio_buffer.committed",
+            }]
+          : []),
+        { direction: "outbound", wire_type: "response.create" },
+        {
+          direction: "inbound",
+          wire_type: "response.created",
+          identity_hashes: { responseIdSha256: responseIdentity },
+        },
+        fixtureOutputWireRole(
+          assistantPcm,
+          profile.output_sample_rate_hz,
+          responseIdentity,
+        ),
+        {
+          direction: "inbound",
+          wire_type: "response.done",
+          identity_hashes: { responseIdSha256: responseIdentity },
+        },
+      ];
+  const wireObservations = fixtureWireObservations(
+    extra.provider,
+    `fixture-wire:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+    wireRoles,
+  );
+  const wireObservationSetSha256 = domainHash(
+    WIRE_OBSERVATION_SET_DOMAIN,
+    wireObservations,
+  );
+  const inputCommit = wireObservations.find((observation) =>
+    observation.wire_type === "input_audio_buffer.commit");
+  const inputCommitAck = wireObservations.find((observation) =>
+    observation.wire_type === "input_audio_buffer.committed");
+  const responseCreate = wireObservations.find((observation) =>
+    observation.wire_type === "response.create");
+  const responseStart = wireObservations.find((observation) =>
+    observation.wire_type === "response.created");
+  const manualCausalityBody = extra.provider === "xai"
+    ? {
+        schema_version: 1,
+        connection_epoch: 1,
+        commit_observation_sha256: inputCommit!.observation_sha256,
+        commit_sequence: inputCommit!.sequence,
+        commit_ack_observation_sha256: inputCommitAck!.observation_sha256,
+        commit_ack_sequence: inputCommitAck!.sequence,
+        response_create_observation_sha256: responseCreate!.observation_sha256,
+        response_create_sequence: responseCreate!.sequence,
+        response_start_observation_sha256: responseStart!.observation_sha256,
+        response_start_sequence: responseStart!.sequence,
+        response_id_sha256: responseIdentity,
+      }
+    : null;
+  const operationOrder = [
+    "caller_pcm_delivery_started",
+    "caller_pcm_delivery_completed",
+    "response_plan_prepared",
+    "caller_pcm_committed",
+    ...(extra.provider === "xai" ? ["caller_pcm_commit_acknowledged"] : []),
+    "response_generation_requested",
+    "assistant_pcm_captured",
+    "listener_evidence_handed_off",
+  ];
+  const responsePlanSha256 = extra.arm === "hacc"
+    ? sha256Hex(
+        `fixture-response-plan:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+      )
+    : null;
+  const listenerRepairProjection = listenerOverrides.repair_projection
+    ?? repairProjection(extra.opportunity_id);
+  const playbackAuthorityReceiptSha256 =
+    listenerOverrides.playback_authority_receipt_sha256
+    ?? sha256Hex(`authority:${extra.episode_id}:${extra.opportunity_id}`);
+  const assistantSha256 = sha256Hex(assistantPcm);
+  const assistantConversationTranscriptSha256 = sha256Hex(
+    `fixture-transcript:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+  );
+  const signedInvocationArtifactCasSha256 = sha256Hex(
+    `fixture-signed-invocation-artifact:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
+  );
+  const signedInvocationArtifactByteLength = 256;
+  const listenerBody = {
+    schema_version: 1,
+    dependency_version: "lc4-dev-live-dependencies-v1",
+    episode_id: extra.episode_id,
+    opportunity_id: extra.opportunity_id,
+    provider: extra.provider,
+    capture_receipt_sha256: outputCapture.capture_receipt_sha256,
+    generated_pcm_sha256: assistantSha256,
+    captured_pcm_sha256: assistantSha256,
+    evaluator_consumed_pcm_sha256: assistantSha256,
+    evaluator_consumed_byte_start: 0,
+    evaluator_consumed_byte_end: assistantPcm.byteLength,
+    evaluator_consumed_pcm_cas_receipt_sha256: domainHash(
+      CAS_RECEIPT_DOMAIN,
+      {
+        schema_version: 1,
+        algorithm: "sha256",
+        artifact_sha256: assistantSha256,
+        byte_length: assistantPcm.byteLength,
+        relative_path: `${assistantSha256.slice(0, 2)}/${assistantSha256}`,
+        media_type: "audio/pcm",
+      },
+    ),
+    headless_listener_authority_receipt_sha256:
+      playbackAuthorityReceiptSha256,
+    headless_listener_authority_receipt_cas_sha256:
+      sha256Hex(`listener-authority-cas:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`),
+    headless_listener_authority_receipt_cas_receipt_sha256:
+      sha256Hex(`listener-authority-cas-receipt:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`),
+    physical_playback_status: "not_performed_headless",
+    human_audibility_status: "not_measured_not_claimed",
+    criterion_plan_sha256:
+      sha256Hex(`listener-criterion:${extra.episode_id}:${extra.opportunity_id}`),
+    response_plan_sha256: responsePlanSha256,
+    wire_observation_set_sha256: wireObservationSetSha256,
+    signed_invocation_artifact_cas_sha256:
+      signedInvocationArtifactCasSha256,
+    signed_invocation_artifact_byte_length:
+      signedInvocationArtifactByteLength,
+    evaluation: {
+      source_pcm_sha256: assistantSha256,
+      source_pcm_byte_length: assistantPcm.byteLength,
+      evaluator_contract_sha256: sha256Hex("fixture-evaluator-contract"),
+      evaluator_build_sha256: "7".repeat(64),
+      calibration_sha256: sha256Hex("fixture-evaluator-calibration"),
+      transcript_sha256: assistantConversationTranscriptSha256,
+      semantic_result_sha256: listenerRepairProjection.semantic_result_sha256,
+      semantic_artifact_cas_sha256:
+        sha256Hex(`fixture-semantic-artifact:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`),
+      signed_invocation_receipt_sha256:
+        sha256Hex(`fixture-evaluator-invocation:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`),
+      signed_invocation_artifact_cas_sha256:
+        signedInvocationArtifactCasSha256,
+      signed_invocation_artifact_byte_length:
+        signedInvocationArtifactByteLength,
+      repair_projection: listenerRepairProjection,
+    },
+    listener_manifest_sha256: "4".repeat(64),
+  };
+  const listenerEvidenceSha256 = domainHash(
+    LISTENER_EVIDENCE_DOMAIN,
+    listenerBody,
+  );
+  const listenerReference = {
+    schema_version: 1 as const,
+    retention_version: "lc4-dev-replay-evidence-v1" as const,
+    kind: "listener_evidence" as const,
+    evidence_sha256: listenerEvidenceSha256,
+    byte_length: Buffer.byteLength(
+      `${LISTENER_EVIDENCE_DOMAIN}${canonicalJson(listenerBody)}`,
+    ),
+    content_encoding: "domain-prefixed-canonical-json" as const,
+    domain_prefix: LISTENER_EVIDENCE_DOMAIN as typeof LISTENER_EVIDENCE_DOMAIN,
+  };
+  const projection = {
     ...extra,
+    schema_version: 2,
+    adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
+    run_id: extra.episode_id,
+    segment_ordinal: Math.ceil(opportunityOrdinal / 20),
+    playback_kind: playbackKind,
+    response_control_kind: extra.arm === "hacc" ? "hacc_response_plan" : "native_context",
+    response_plan_sha256: responsePlanSha256,
     caller_pcm_sha256: sha256Hex(callerPcm),
     caller_pcm_byte_length: callerPcm.byteLength,
+    requested_runtime_identity: {
+      provider: extra.provider,
+      model: extra.model,
+      voice: profile.voice,
+    },
+    effective_runtime_identity: {
+      provider: extra.provider,
+      model: extra.model,
+      voice: profile.voice,
+    },
+    input_audio_delivery: {
+      frame_byte_length: profile.input_sample_rate_hz
+        * 2
+        * LC4_DEV_AUDIO_DELIVERY_PROFILE.chunkMs
+        / 1_000,
+      chunk_count: inputFrames.length,
+      total_byte_length: callerPcm.byteLength,
+      tail_byte_length: inputFrames.at(-1)!.byteLength,
+      last_scheduled_offset_ms:
+        (inputFrames.length - 1) * LC4_DEV_AUDIO_DELIVERY_PROFILE.chunkMs,
+      media_duration_ms:
+        callerPcm.byteLength / 2 / profile.input_sample_rate_hz * 1_000,
+      chunks: inputFrames.map((frame, index) => ({
+        chunk_index: index + 1,
+        byte_length: frame.byteLength,
+        scheduled_offset_ms:
+          index * LC4_DEV_AUDIO_DELIVERY_PROFILE.chunkMs,
+        appended_at_offset_ms:
+          index * LC4_DEV_AUDIO_DELIVERY_PROFILE.chunkMs,
+      })),
+      profile_sha256: LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
+      pcm_sha256: sha256Hex(callerPcm),
+    },
+    output_capture: outputCapture,
+    transport_mode: extra.provider === "xai" ? profile.transport_mode : "manual_commit",
+    transport_purpose: extra.provider === "xai" ? profile.transport_purpose : null,
+    transport_profile_sha256: profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
+    transport_parity_sha256: extra.provider === "xai"
+      ? sha256Hex("fixture-xai-manual-parity")
+      : profile.provider_profile_sha256,
+    tool_frontier_sha256: sha256Hex("fixture-tool-frontier"),
+    server_vad_setting_sha256: null,
+    server_vad_transport_disclosure_sha256: null,
+    server_vad_transport_suffix: null,
+    per_turn_session_update_observation_sha256: null,
+    per_turn_session_ack_observation_sha256: null,
+    xai_manual_turn_causality: manualCausalityBody === null ? null : {
+      ...manualCausalityBody,
+      causality_sha256: domainHash(
+        XAI_MANUAL_CAUSALITY_DOMAIN,
+        manualCausalityBody,
+      ),
+    },
+    operation_order: operationOrder,
+    wire_observations: wireObservations,
+    wire_observation_set_sha256: wireObservationSetSha256,
+    assistant_conversation_transcript_sha256:
+      assistantConversationTranscriptSha256,
+    assistant_conversation_transcript_source:
+      "listener_exact_captured_pcm_asr",
+    dev_listener_result: {
+      listener_evidence_sha256: listenerEvidenceSha256,
+      repair_projection: listenerRepairProjection,
+      playback_authority_receipt_sha256:
+        playbackAuthorityReceiptSha256,
+      listener_evidence: listenerReference,
+    },
     caller_branch_decision_sha256: decision?.decision_sha256 ?? null,
     caller_branch_authority: decision ? {
       decision_sha256: decision.decision_sha256,
@@ -167,7 +711,34 @@ function providerExchangeProjection(
       branch_intent: decision.branch_intent,
       reconciliation_audio_selected: decision.reconciliation_audio_selected,
     } : null,
-  };
+  } as unknown as Record<string, JsonValue>;
+  providerProjectionListenerLineage.set(projection, {
+    body: listenerBody,
+    reference: listenerReference,
+    repair_projection: listenerRepairProjection,
+    playback_authority_receipt_sha256: playbackAuthorityReceiptSha256,
+  });
+  return projection;
+}
+
+async function retainProviderListenerEvidence(
+  evidence: Lc4DevReplayEvidenceStore,
+  sourceProjection: Record<string, JsonValue>,
+) {
+  const lineage = providerProjectionListenerLineage.get(sourceProjection);
+  if (!lineage) {
+    throw new Error("provider projection fixture lacks listener lineage metadata");
+  }
+  const listenerEvidence = await evidence.retainJson({
+    kind: "listener_evidence",
+    body: lineage.body as unknown as JsonValue,
+    domain_prefix: LISTENER_EVIDENCE_DOMAIN,
+    expected_evidence_sha256: lineage.reference.evidence_sha256,
+  });
+  if (canonicalJson(listenerEvidence) !== canonicalJson(lineage.reference)) {
+    throw new Error("retained listener fixture differs from its precomputed exact reference");
+  }
+  return { listenerEvidence, lineage };
 }
 
 function renderedPcm(sampleRate: 16_000 | 24_000 | 48_000, seed: number): Uint8Array {
@@ -311,12 +882,27 @@ function qualificationFixture() {
       compact_control_sha256: LC4_S2S_COMPACT_CONTROL_SHA256,
       packetizer_sha256: LC4_S2S_PACKETIZER_SHA256,
       audio_delivery_profile_sha256: deliveryProfileSha256,
+      qualification_turn_boundary: target.provider === "xai"
+        ? "provider_native_server_vad" as const
+        : target.provider === "gemini"
+          ? "provider_activity_markers" as const
+          : "manual_commit" as const,
       production_session_payload_sha256: target.provider === "gemini"
         ? null
-        : productionSessionPayloadParitySha256(target.provider, target.configuration),
+        : target.provider === "xai"
+          ? productionSessionPayloadParitySha256(
+            "xai",
+            target.configuration,
+            "provider_native_server_vad",
+          )
+          : productionSessionPayloadParitySha256("openai", target.configuration),
       xai_transport_parity_sha256: target.provider === "xai"
         ? xaiServerVadTransportParitySha256(
-            withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate("xai", target.configuration)),
+            withXaiServerVadPcmSession(productionOpenAiCompatibleSessionUpdate(
+              "xai",
+              target.configuration,
+              "provider_native_server_vad",
+            )),
             target.model,
           )
         : null,
@@ -327,7 +913,7 @@ function qualificationFixture() {
     };
   });
   const unsignedPlanBody = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
     protocol_id: "HACC-LC4-v1" as const,
     plan_id: "lc4-dev-test-qualification-v3",
@@ -351,14 +937,14 @@ function qualificationFixture() {
   };
   const planBody = {
     ...unsignedPlanBody,
-    plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v4\n${canonicalJson(unsignedPlanBody)}`),
+    plan_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-plan/v5\n${canonicalJson(unsignedPlanBody)}`),
   };
   const plan = signArtifact({
     body: planBody,
     privateKey: planAuthority.privateKey,
     publicKey: planAuthority.publicKey,
-    signingDomain: "harshas-amazing-call-center/lc4-qualification-plan/v4\n",
-    artifactDomain: "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n",
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-plan/v5\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n",
   }) as Lc4QualificationV3PlanArtifact;
   const terminalPublicKey = terminalAuthority.publicKey.export({ type: "spki", format: "der" });
   const authorizationBody = {
@@ -386,8 +972,8 @@ function qualificationFixture() {
     body: authorizationBody,
     privateKey: planAuthority.privateKey,
     publicKey: planAuthority.publicKey,
-    signingDomain: "harshas-amazing-call-center/lc4-qualification-authorization/v4\n",
-    artifactDomain: "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n",
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-authorization/v5\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v5\n",
   }) as Lc4QualificationV3AuthorizationArtifact;
 
   const setupResults: ProviderQualificationArtifact["results"] = Object.freeze(setupTargets.map((target) => {
@@ -549,7 +1135,11 @@ function qualificationFixture() {
       sample_rate_hz: target.sample_rate_hz,
       response_id_sha256: sha256Hex(`output-response:${target.provider}`),
     },
-    turn_boundary_mode: target.provider === "xai" ? "provider_native_server_vad" as const : "manual_commit" as const,
+    turn_boundary_mode: target.provider === "xai"
+      ? "provider_native_server_vad" as const
+      : target.provider === "gemini"
+        ? "provider_activity_markers" as const
+        : "manual_commit" as const,
     server_vad_setting_sha256: target.provider === "xai" ? LC4_XAI_SERVER_VAD_SETTING_SHA256 : null,
     transport_parity_sha256: target.xai_transport_parity_sha256,
     tool_frontier_sha256: sha256Hex(`tool-frontier:${target.provider}`),
@@ -644,9 +1234,9 @@ function qualificationFixture() {
     envelopePath: "qualification-package-envelope.json",
   });
   const unsignedTerminalBody = {
-    schema_version: 3 as const,
+    schema_version: 4 as const,
     runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
-    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v6" as const,
+    terminal_version: "HACC-LC4-QUALIFICATION-TERMINAL-v7" as const,
     attempt_id: "lc4-dev-qualification-v3-attempt",
     plan_artifact_sha256: plan.artifact_sha256,
     plan_sha256: plan.body.plan_sha256,
@@ -717,14 +1307,14 @@ function qualificationFixture() {
   };
   const terminalBody = {
     ...unsignedTerminalBody,
-    terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v6\n${canonicalJson(unsignedTerminalBody)}`),
+    terminal_sha256: sha256Hex(`harshas-amazing-call-center/lc4-qualification-terminal/v7\n${canonicalJson(unsignedTerminalBody)}`),
   };
   const terminal = signArtifact({
     body: terminalBody,
     privateKey: terminalAuthority.privateKey,
     publicKey: terminalAuthority.publicKey,
-    signingDomain: "harshas-amazing-call-center/lc4-qualification-terminal/v6\n",
-    artifactDomain: "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n",
+    signingDomain: "harshas-amazing-call-center/lc4-qualification-terminal/v7\n",
+    artifactDomain: "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v7\n",
   }) as Lc4QualificationV3TerminalArtifact;
   const report = {
     schema_version: 1 as const,
@@ -772,10 +1362,207 @@ function qualificationFixture() {
   });
 }
 
-function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareArtifact>, credentialIdentity = "2".repeat(64)) {
-  const qualification = qualificationFixture();
-  const body = {
+async function gateDReceiptFixture(
+  prepare: ReturnType<typeof createLc4DevLivePrepareArtifact>,
+): Promise<Lc4XaiFiniteManualGateDReceipt> {
+  const authority = createLc4XaiFiniteManualGateDSigner(
+    gateDAuthorityKeys.privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString(),
+  );
+  const terminalSigner = createLc4XaiFiniteManualGateDSigner(
+    gateDTerminalKeys.privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString(),
+  );
+  const plan = createLc4XaiFiniteManualGateDPlan({
+    gate_id: "lc4-dev-live-gate-d",
+    prepared_at: NOW,
+    source_commit: prepare.source_commit,
+    source_tree_sha256: prepare.source_tree_sha256,
+    harmless_clip_pcm: new Uint8Array([1, 0, 2, 0]),
+    signer: authority,
+  });
+  const authorization = createLc4XaiFiniteManualGateDAuthorization({
+    plan,
+    plan_trust_root_sha256: authority.public_key_fingerprint_sha256,
+    authorization_id: "lc4-dev-live-gate-d-auth",
+    authorization_nonce_sha256: sha256Hex("lc4-dev-live-gate-d-nonce"),
+    credential_identity_sha256: sha256Hex("synthetic-provider-identity"),
+    terminal_signer: terminalSigner,
+    not_before: "2026-07-21T21:30:00.000Z",
+    expires_at: "2026-07-21T22:30:00.000Z",
+    authority_signer: authority,
+  });
+  const roles = [
+    ["outbound", "input_audio_buffer.commit"],
+    ["inbound", "input_audio_buffer.committed"],
+    ["outbound", "response.create"],
+    ["inbound", "response.created"],
+    ["inbound", "response.audio.delta"],
+    ["inbound", "response.function_call_arguments.done"],
+    ["inbound", "response.done"],
+    ["outbound", "conversation.item.create"],
+    ["outbound", "response.create"],
+    ["inbound", "response.created"],
+    ["inbound", "response.audio.delta"],
+    ["inbound", "response.done"],
+  ] as const;
+  const rootResponse = lc4XaiManualResponseWireIdentitySha256(
+    "fixture-root-response",
+  );
+  const postResponse = lc4XaiManualResponseWireIdentitySha256(
+    "fixture-post-response",
+  );
+  const callId = sha256Hex("fixture-gateway-call");
+  let previous: string | null = null;
+  const observations: Lc4SanitizedWireObservation[] = roles.map(
+    ([direction, wireType], index) => {
+      const sequence = index + 1;
+      const observation = sha256Hex(canonicalJson({
+        direction,
+        wireType,
+        sequence,
+        previous,
+      }));
+      const value = Object.freeze({
+        provider: "xai" as const,
+        direction,
+        connection_epoch: 1,
+        sequence,
+        wire_type: wireType,
+        payload_sha256: sha256Hex(`gate-d-payload:${sequence}`),
+        payload_bytes: 8,
+        projection_sha256: sha256Hex(`gate-d-projection:${sequence}`),
+        observation_sha256: observation,
+        previous_observation_sha256: previous,
+        identity_hashes: {
+          ...([4, 5, 6, 7].includes(sequence)
+            ? { responseIdSha256: rootResponse }
+            : {}),
+          ...([10, 11, 12].includes(sequence)
+            ? { responseIdSha256: postResponse }
+            : {}),
+          ...([6, 7, 8].includes(sequence)
+            ? { callIdSha256: callId }
+            : {}),
+        },
+      });
+      previous = observation;
+      return value;
+    },
+  );
+  const causalityBody = Object.freeze({
+    schema_version: 1 as const,
+    connection_epoch: 1,
+    commit_observation_sha256: observations[0]!.observation_sha256,
+    commit_sequence: 1,
+    commit_ack_observation_sha256: observations[1]!.observation_sha256,
+    commit_ack_sequence: 2,
+    response_create_observation_sha256: observations[2]!.observation_sha256,
+    response_create_sequence: 3,
+    response_start_observation_sha256: observations[3]!.observation_sha256,
+    response_start_sequence: 4,
+    response_id_sha256: rootResponse,
+  });
+  const evidenceBody = Object.freeze({
     schema_version: 2 as const,
+    provider: "xai" as const,
+    model: plan.body.model,
+    voice: plan.body.voice,
+    transport_purpose: "finite_prerecorded_efficacy" as const,
+    transport_mode: "manual_commit" as const,
+    transport_profile_sha256: plan.body.transport_profile_sha256,
+    production_adapter_binding_sha256:
+      LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+    caller_pcm_sha256: plan.body.harmless_clip.pcm_sha256,
+    caller_pcm_byte_length: plan.body.harmless_clip.pcm_byte_length,
+    caller_pcm_appended_sha256: plan.body.harmless_clip.pcm_sha256,
+    caller_pcm_appended_byte_length: plan.body.harmless_clip.pcm_byte_length,
+    provider_sessions_opened: 1 as const,
+    generation_phases: 2 as const,
+    capability_gateway_tool_roundtrips: 1 as const,
+    retries: 0 as const,
+    reconnects: 0 as const,
+    fallbacks: 0 as const,
+    operation_order: LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
+    manual_turn_causality: Object.freeze({
+      ...causalityBody,
+      causality_sha256: sha256Hex(
+        `harshas-amazing-call-center/lc4-xai-manual-turn-causality/v1\n${canonicalJson(causalityBody)}`,
+      ),
+    }),
+    wire_observations: Object.freeze(observations),
+    initial_assistant_pcm_sha256: sha256Hex("fixture-initial-pcm"),
+    initial_assistant_pcm_byte_length: 4,
+    initial_assistant_pcm_observation_sha256:
+      observations[4]!.observation_sha256,
+    capability_gateway_tool_call_sha256: sha256Hex("fixture-tool-call"),
+    capability_gateway_tool_call_observation_sha256:
+      observations[6]!.observation_sha256,
+    capability_gateway_tool_result_sha256: sha256Hex("fixture-tool-result"),
+    capability_gateway_tool_result_observation_sha256:
+      observations[7]!.observation_sha256,
+    post_tool_continuation_sha256: sha256Hex("fixture-continuation"),
+    post_tool_continuation_observation_sha256:
+      observations[8]!.observation_sha256,
+    post_tool_response_start_observation_sha256:
+      observations[9]!.observation_sha256,
+    post_tool_assistant_pcm_sha256: sha256Hex("fixture-post-pcm"),
+    post_tool_assistant_pcm_byte_length: 4,
+    post_tool_assistant_pcm_observation_sha256:
+      observations[10]!.observation_sha256,
+    capability_gateway_call_id_sha256: callId,
+    post_tool_continuation_origin_response_id_sha256: rootResponse,
+    post_tool_response_id_sha256: postResponse,
+    terminal_observation_sha256: observations[11]!.observation_sha256,
+  });
+  const evidence: Lc4XaiFiniteManualGateDExecutionEvidence = Object.freeze({
+    ...evidenceBody,
+    replay_sha256:
+      lc4XaiFiniteManualGateDExecutionReplaySha256(evidenceBody),
+  });
+  const adapter: Lc4XaiFiniteManualGateDProductionAdapter = Object.freeze({
+    [LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY]: true as const,
+    kind: "lc4-production-provider-adapter/xai-finite-manual-gate-d-v1",
+    production_adapter_binding_sha256:
+      LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+    execute: async () => evidence,
+  });
+  const root = await mkdtemp(join(tmpdir(), "hacc-gate-d-fixture-"));
+  try {
+    return await executeLc4XaiFiniteManualGateD({
+      plan,
+      authorization,
+      terminal_signer: terminalSigner,
+      credential_identity_sha256: authorization.body.credential_identity_sha256,
+      caller_pcm: new Uint8Array([1, 0, 2, 0]),
+      inspected_source: {
+        source_commit: prepare.source_commit,
+        source_tree_sha256: prepare.source_tree_sha256,
+        worktree_clean: true,
+      },
+      now: new Date(NOW),
+      completion_clock: () => new Date(Date.parse(NOW) + 1_000),
+      expected_plan_trust_root_sha256:
+        authority.public_key_fingerprint_sha256,
+      invocation_marker_path: join(root, "invocation.json"),
+      construct_production_adapter: () => adapter,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function authorizedPreflight(
+  prepare: ReturnType<typeof createLc4DevLivePrepareArtifact>,
+  credentialIdentity = "2".repeat(64),
+  suppliedGateD?: Lc4XaiFiniteManualGateDReceipt,
+) {
+  const qualification = qualificationFixture();
+  const gateD = suppliedGateD ?? await gateDReceiptFixture(prepare);
+  const body = {
+    schema_version: 4 as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     purpose: "six_public_development_episodes_only" as const,
     execution_id: prepare.execution_id,
@@ -790,7 +1577,17 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
     runtime_config_sha256: "6".repeat(64),
     asr_evaluator_build_sha256: "7".repeat(64),
     asr_evaluator_toolchain_sha256: "9".repeat(64),
+    asr_contract: asrContract,
+    asr_contract_sha256: asrContractSha256,
+    asr_runner_trust: asrRunnerTrust,
     provider_profile_manifest_sha256: prepare.provider_profile_manifest_sha256,
+    qualification_transport_scope_sha256: prepare.qualification_transport_scope_sha256,
+    qualification_claim_boundary: prepare.qualification_claim_boundary,
+    xai_finite_manual_gate_d_receipt_sha256: gateD.receipt_sha256,
+    xai_finite_manual_gate_d_plan_authority_trust_root_sha256:
+      gateD.plan_authority_trust_root_sha256,
+    xai_finite_manual_gate_d_transport_profile_sha256:
+      gateD.transport_profile_sha256,
     audio_delivery_profile_sha256: prepare.audio_delivery_profile_sha256,
     audio_packetizer_contract_sha256: prepare.audio_packetizer_contract_sha256,
     audio_execution_contract_sha256: prepare.audio_execution_contract_sha256,
@@ -814,12 +1611,16 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
     checked_at: NOW,
     qualification_gate_sha256: qualification.retained_artifact_sha256,
     qualification,
+    xai_finite_manual_gate_d: gateD,
     credential_identity_set_sha256: credentialIdentity,
     control_plane_manifest_sha256: "3".repeat(64),
     listener_evidence_manifest_sha256: "4".repeat(64),
     runtime_config_sha256: "6".repeat(64),
     asr_evaluator_build_sha256: "7".repeat(64),
     asr_evaluator_toolchain_sha256: "9".repeat(64),
+    asr_contract: asrContract,
+    asr_contract_sha256: asrContractSha256,
+    asr_runner_trust: asrRunnerTrust,
     immutable_ledger_genesis_sha256: "5".repeat(64),
     audio_manifest_sha256: prepare.audio_manifest_sha256,
     authorization,
@@ -827,7 +1628,7 @@ function authorizedPreflight(prepare: ReturnType<typeof createLc4DevLivePrepareA
   });
 }
 
-function fixtures() {
+async function fixtures() {
   const corpus = createLc4PublicDevelopmentCorpus();
   const pcm = new Map<string, Uint8Array>();
   const bindings: Lc4DevCallerAudioBinding[] = [];
@@ -852,9 +1653,38 @@ function fixtures() {
     source_tree_sha256: "c".repeat(64),
     audio_manifest_sha256: "d".repeat(64),
     audio_bindings: bindings,
+    xai_finite_manual_gate_d: {
+      receipt_sha256: sha256Hex("placeholder-replaced-before-preflight"),
+      plan_authority_trust_root_sha256:
+        sha256Hex("placeholder-gate-d-authority"),
+      transport_profile_sha256:
+        LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256,
+    },
   });
-  const preflight = authorizedPreflight(prepare);
-  return { corpus, pcm, prepare, preflight };
+  const gateD = await gateDReceiptFixture(prepare);
+  const prepareWithGateD = createLc4DevLivePrepareArtifact({
+    execution_id: prepare.execution_id,
+    created_at: prepare.created_at,
+    source_commit: prepare.source_commit,
+    source_tree_sha256: prepare.source_tree_sha256,
+    audio_manifest_sha256: prepare.audio_manifest_sha256,
+    audio_bindings: prepare.audio_bindings,
+    maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+    xai_finite_manual_gate_d: {
+      receipt_sha256: gateD.receipt_sha256,
+      plan_authority_trust_root_sha256:
+        gateD.plan_authority_trust_root_sha256,
+      transport_profile_sha256: gateD.transport_profile_sha256,
+    },
+  });
+  const preflight = await authorizedPreflight(prepareWithGateD, undefined, gateD);
+  return {
+    corpus,
+    pcm,
+    prepare: prepareWithGateD,
+    preflight,
+    gateD,
+  };
 }
 
 function control(arm: "native" | "hacc"): Lc4DevControlReceipt {
@@ -1026,8 +1856,8 @@ function retainedDependencies(input: Readonly<{
 }
 
 describe("LC4-DEV live runner", () => {
-  it("freezes exactly six paired episodes, 360 opportunities, and at most $15", () => {
-    const { prepare } = fixtures();
+  it("freezes exactly six paired episodes, 360 opportunities, and at most $15", async () => {
+    const { prepare } = await fixtures();
     expect(prepare.episodes.map((episode) => `${episode.provider}:${episode.arm}`)).toEqual([
       "openai:native", "openai:hacc", "gemini:hacc", "gemini:native", "xai:native", "xai:hacc",
     ]);
@@ -1035,16 +1865,155 @@ describe("LC4-DEV live runner", () => {
     expect(prepare.maximum_total_micro_usd).toBe(15_000_000);
     expect(prepare.episodes.reduce((sum, episode) => sum + episode.maximum_micro_usd, 0)).toBeLessThanOrEqual(15_000_000);
     expect(prepare.evidence_boundary.efficacy_claim_eligible).toBe(false);
-    expect(prepare.schema_version).toBe(2);
+    expect(prepare.schema_version).toBe(3);
     const stale = JSON.parse(canonicalJson(prepare));
     stale.audio_execution_contract_sha256 = "0".repeat(64);
     const staleBody = Object.fromEntries(Object.entries(stale).filter(([key]) => key !== "prepare_sha256"));
-    stale.prepare_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-live-prepare/v2\n${canonicalJson(staleBody)}`);
+    stale.prepare_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-live-prepare/v3\n${canonicalJson(staleBody)}`);
     expect(() => assertLc4DevLivePrepareArtifact(stale)).toThrow("not canonical or internally consistent");
+    const staleSchema = JSON.parse(canonicalJson(prepare));
+    staleSchema.schema_version = 2;
+    const staleSchemaBody = Object.fromEntries(
+      Object.entries(staleSchema).filter(([key]) => key !== "prepare_sha256"),
+    );
+    staleSchema.prepare_sha256 = sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-live-prepare/v3\n${canonicalJson(staleSchemaBody)}`,
+    );
+    expect(() => assertLc4DevLivePrepareArtifact(staleSchema))
+      .toThrow("not canonical or internally consistent");
+  });
+
+  it("rejects self-consistent repair playback receipts substituted across any authority edge", () => {
+    const repairPcm = Uint8Array.from([1, 0, 2, 0]);
+    const repair: Lc4DevRepairPlayback = Object.freeze({
+      kind: "repair",
+      advances_canonical_horizon: false,
+      recursive_repair_allowed: false,
+      episode_id: "lc4-dev-openai-native",
+      opportunity_id: "lc4-dev-op-10",
+      canonical_ordinal: 10,
+      canonical_horizon: 60,
+      provider: "openai",
+      stage_id: "stage-1",
+      blocker_code: "subject_or_goal_unresolved",
+      repair_ordinal: 1,
+      repair_pcm_id: "repair-op-10",
+      source_text_sha256: sha256Hex("repair source"),
+      pcm_sha256: sha256Hex(repairPcm),
+      pcm_byte_length: repairPcm.byteLength,
+      sample_rate_hz: 24_000,
+      channels: 1,
+      encoding: "pcm16le",
+      pcm: repairPcm,
+      decision_receipt_sha256: sha256Hex("repair decision"),
+    });
+    const repairExchange = Object.freeze({
+      provider_exchange_sha256: sha256Hex("repair exchange"),
+      listener_evidence_sha256: sha256Hex("repair listener"),
+      playback_authority_receipt_sha256:
+        sha256Hex("repair playback authority"),
+    });
+    const receiptBody: Omit<
+      Lc4DevRepairPlaybackReceipt,
+      "playback_receipt_sha256"
+    > = Object.freeze({
+      schema_version: 1,
+      protocol_id: "HACC-LC4-DEV-v1",
+      episode_id: repair.episode_id,
+      canonical_opportunity_id: repair.opportunity_id,
+      canonical_ordinal: repair.canonical_ordinal,
+      canonical_horizon: 60,
+      advances_canonical_horizon: false,
+      recursive_repair_observation: null,
+      decision_receipt_sha256: repair.decision_receipt_sha256,
+      repair_pcm_id: repair.repair_pcm_id,
+      submitted_pcm_sha256: repair.pcm_sha256,
+      submitted_pcm_byte_length: repair.pcm_byte_length,
+      submitted_sample_rate_hz: repair.sample_rate_hz,
+      provider_exchange_sha256: repairExchange.provider_exchange_sha256,
+      listener_evidence_sha256: repairExchange.listener_evidence_sha256,
+      playback_authority_receipt_sha256:
+        repairExchange.playback_authority_receipt_sha256,
+    });
+    const seal = (
+      body: Omit<Lc4DevRepairPlaybackReceipt, "playback_receipt_sha256">,
+    ): Lc4DevRepairPlaybackReceipt => Object.freeze({
+      ...body,
+      playback_receipt_sha256: sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-repair-playback-receipt/v1\n${canonicalJson(body)}`,
+      ),
+    });
+    const expectation = {
+      episode_id: repair.episode_id,
+      opportunity_id: repair.opportunity_id,
+      opportunity_index: repair.canonical_ordinal,
+      decision_receipt_sha256: repair.decision_receipt_sha256,
+      repair,
+      repair_exchange: repairExchange,
+    } as const;
+    expect(() => assertLc4DevRepairPlaybackReceiptBinding({
+      receipt: seal(receiptBody),
+      ...expectation,
+    })).not.toThrow();
+
+    const substitutions: readonly Readonly<{
+      label: string;
+      mutate: (
+        body: Omit<Lc4DevRepairPlaybackReceipt, "playback_receipt_sha256">,
+      ) => Omit<Lc4DevRepairPlaybackReceipt, "playback_receipt_sha256">;
+    }>[] = Object.freeze([
+      {
+        label: "decision",
+        mutate: (body) => ({
+          ...body,
+          decision_receipt_sha256: sha256Hex("foreign decision"),
+        }),
+      },
+      {
+        label: "repair PCM",
+        mutate: (body) => ({
+          ...body,
+          submitted_pcm_sha256: sha256Hex("foreign repair PCM"),
+        }),
+      },
+      {
+        label: "provider exchange",
+        mutate: (body) => ({
+          ...body,
+          provider_exchange_sha256: sha256Hex("foreign exchange"),
+        }),
+      },
+      {
+        label: "listener evidence",
+        mutate: (body) => ({
+          ...body,
+          listener_evidence_sha256: sha256Hex("foreign listener"),
+        }),
+      },
+      {
+        label: "playback authority",
+        mutate: (body) => ({
+          ...body,
+          playback_authority_receipt_sha256:
+            sha256Hex("foreign playback authority"),
+        }),
+      },
+    ]);
+    for (const substitution of substitutions) {
+      expect(
+        () => assertLc4DevRepairPlaybackReceiptBinding({
+          receipt: seal(substitution.mutate(receiptBody)),
+          ...expectation,
+        }),
+        substitution.label,
+      ).toThrow(
+        "repair playback receipt differs from its selected repair, exchange, or decision",
+      );
+    }
   });
 
   it("executes the exact closed loop and emits an immutable evidence-complete report", async () => {
-    const { pcm, prepare, preflight } = fixtures();
+    const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
     let opens = 0;
     let exchanges = 0;
@@ -1067,20 +2036,25 @@ describe("LC4-DEV live runner", () => {
               expect(opportunity.events.some((event) => event.kind === "authoritative-reconciliation")).toBe(false);
             }
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
-            const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
+              provider: episode.provider,
+              model: episode.model,
+              arm: episode.arm,
             });
             const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
-            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { episode_id: episode.episode_id, opportunity_id: opportunity.id });
+            const { listenerEvidence, lineage } =
+              await retainProviderListenerEvidence(evidence, projection);
             return {
               playback_kind: "canonical" as const,
               opportunity_id: opportunity.id,
               assistant_pcm: assistant,
               provider_exchange_sha256: providerEvidence.evidence_sha256,
               listener_evidence_sha256: listenerEvidence.evidence_sha256,
-              repair_projection: repairProjection(opportunity.id),
-              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              repair_projection: lineage.repair_projection,
+              playback_authority_receipt_sha256:
+                lineage.playback_authority_receipt_sha256,
               provider_exchange_projection: projection,
               provider_exchange_evidence: providerEvidence,
               listener_evidence: listenerEvidence,
@@ -1126,6 +2100,24 @@ describe("LC4-DEV live runner", () => {
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")).toHaveLength(6);
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")
       .every((event) => event.payload_sha256.length === 64)).toBe(true);
+    const firstCompleted = run.ledger.find(
+      (event) => event.event_type === "opportunity_completed",
+    )!;
+    const firstCompletedPayload = await evidence.resolveJson(
+      firstCompleted.payload_evidence,
+    ) as Record<string, JsonValue>;
+    expect(firstCompletedPayload).not.toHaveProperty("assistant_pcm_sha256");
+    expect(firstCompletedPayload).toMatchObject({
+      canonical_provider_exchange_sha256:
+        firstCompletedPayload.effective_provider_exchange_sha256,
+      canonical_listener_evidence_sha256:
+        firstCompletedPayload.effective_listener_evidence_sha256,
+      canonical_assistant_pcm_sha256:
+        firstCompletedPayload.effective_assistant_pcm_sha256,
+    });
+    expect(firstCompleted.evidence_references.filter(
+      (reference) => reference.kind === "assistant_pcm",
+    )).toHaveLength(1);
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
     await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
       event_count: 1_098,
@@ -1151,7 +2143,7 @@ describe("LC4-DEV live runner", () => {
         outputRoot: materializedRoot,
         renderer: repairAudioRenderer,
       });
-      const { pcm, prepare, preflight } = fixtures();
+      const { pcm, prepare, preflight } = await fixtures();
       const evidence = memoryEvidence();
       const realRepair = Object.fromEntries(((["openai", "gemini", "xai"] as const)).map((provider) => [
         provider,
@@ -1190,28 +2182,39 @@ describe("LC4-DEV live runner", () => {
               canonicalExchanges += 1;
               const shouldRepair = episode.episode_id === targetEpisodeId && opportunity.index === 10;
               const semanticResultSha256 = sha256Hex(`semantic-result:${episode.episode_id}:${opportunity.id}`);
-              const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+              const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
+              const listenerRepairProjection = createLc4DevArmBlindRepairProjection({
+                opportunity_id: opportunity.id,
+                listener_status: "verified",
+                semantic_result_sha256: semanticResultSha256,
+                semantic_replay_sha256: sha256Hex(`semantic-replay:${episode.episode_id}:${opportunity.id}`),
+                unmet_blocker_codes: shouldRepair ? ["subject_or_goal_unresolved"] : [],
+                final_required_criteria_pass: !shouldRepair,
+              });
+              const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
                 kind: "canonical",
                 episode_id: episode.episode_id,
                 opportunity_id: opportunity.id,
+                provider: episode.provider,
+                model: episode.model,
+                arm: episode.arm,
+              }, {
+                repair_projection: listenerRepairProjection,
+                playback_authority_receipt_sha256:
+                  sha256Hex(`canonical-authority:${episode.episode_id}:${opportunity.id}`),
               });
               const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
-              const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { kind: "canonical", episode_id: episode.episode_id, opportunity_id: opportunity.id });
+              const { listenerEvidence, lineage } =
+                await retainProviderListenerEvidence(evidence, projection);
               return {
                 playback_kind: "canonical" as const,
                 opportunity_id: opportunity.id,
-                assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+                assistant_pcm: assistant,
                 provider_exchange_sha256: providerEvidence.evidence_sha256,
                 listener_evidence_sha256: listenerEvidence.evidence_sha256,
-                repair_projection: createLc4DevArmBlindRepairProjection({
-                  opportunity_id: opportunity.id,
-                  listener_status: "verified",
-                  semantic_result_sha256: semanticResultSha256,
-                  semantic_replay_sha256: sha256Hex(`semantic-replay:${episode.episode_id}:${opportunity.id}`),
-                  unmet_blocker_codes: shouldRepair ? ["subject_or_goal_unresolved"] : [],
-                  final_required_criteria_pass: !shouldRepair,
-                }),
-                playback_authority_receipt_sha256: sha256Hex(`canonical-authority:${episode.episode_id}:${opportunity.id}`),
+                repair_projection: lineage.repair_projection,
+                playback_authority_receipt_sha256:
+                  lineage.playback_authority_receipt_sha256,
                 provider_exchange_projection: projection,
                 provider_exchange_evidence: providerEvidence,
                 listener_evidence: listenerEvidence,
@@ -1228,17 +2231,31 @@ describe("LC4-DEV live runner", () => {
               repairExchanges += 1;
               repairedCanonicalOrdinal = opportunity.index;
               pending = { opportunity_id: opportunity.id, repair_played: true };
-              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id });
-              const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id });
+              const assistant = Uint8Array.from([opportunity.index, 6, 10, 14]);
+              const projection = providerExchangeProjection(repair.pcm, assistant, undefined, {
+                kind: "repair",
+                episode_id: episode.episode_id,
+                opportunity_id: opportunity.id,
+                provider: episode.provider,
+                model: episode.model,
+                arm: episode.arm,
+              }, {
+                playback_authority_receipt_sha256:
+                  sha256Hex(`repair-authority:${episode.episode_id}:${opportunity.id}`),
+              });
+              const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
+              const { listenerEvidence, lineage } =
+                await retainProviderListenerEvidence(evidence, projection);
               return {
                 playback_kind: "repair" as const,
                 opportunity_id: opportunity.id,
-                assistant_pcm: Uint8Array.from([opportunity.index, 6, 10, 14]),
+                assistant_pcm: assistant,
                 provider_exchange_sha256: providerEvidence.evidence_sha256,
                 listener_evidence_sha256: listenerEvidence.evidence_sha256,
-                repair_projection: repairProjection(opportunity.id),
-                playback_authority_receipt_sha256: sha256Hex(`repair-authority:${episode.episode_id}:${opportunity.id}`),
-                provider_exchange_projection: { kind: "repair", episode_id: episode.episode_id, opportunity_id: opportunity.id },
+                repair_projection: lineage.repair_projection,
+                playback_authority_receipt_sha256:
+                  lineage.playback_authority_receipt_sha256,
+                provider_exchange_projection: projection,
                 provider_exchange_evidence: providerEvidence,
                 listener_evidence: listenerEvidence,
               };
@@ -1294,6 +2311,91 @@ describe("LC4-DEV live runner", () => {
       expect(canonicalAfterRepair).toBe(11);
       expect(run.ledger.filter((event) => event.event_type === "repair_audio_submitted")).toHaveLength(1);
       expect(run.ledger.filter((event) => event.event_type === "repair_completed")).toHaveLength(1);
+      const repairCompleted = run.ledger.find(
+        (event) => event.event_type === "repair_completed",
+      )!;
+      const repairedOpportunityCompleted = run.ledger.find(
+        (event) => event.event_type === "opportunity_completed"
+          && event.episode_id === targetEpisodeId
+          && event.opportunity_id === "lc4-dev-op-10",
+      )!;
+      const repairPayload = await evidence.resolveJson(
+        repairCompleted.payload_evidence,
+      ) as Record<string, JsonValue>;
+      const completedPayload = await evidence.resolveJson(
+        repairedOpportunityCompleted.payload_evidence,
+      ) as Record<string, JsonValue>;
+      const canonicalAssistantPcmSha256 = sha256Hex(
+        Uint8Array.from([10, 2, 4, 8]),
+      );
+      const effectiveAssistantPcmSha256 = sha256Hex(
+        Uint8Array.from([10, 6, 10, 14]),
+      );
+      expect(repairPayload).toMatchObject({
+        decision_receipt_sha256:
+          completedPayload.decision_receipt_sha256,
+        canonical_provider_exchange_sha256:
+          completedPayload.canonical_provider_exchange_sha256,
+        canonical_listener_evidence_sha256:
+          completedPayload.canonical_listener_evidence_sha256,
+        canonical_assistant_pcm_sha256: canonicalAssistantPcmSha256,
+        effective_provider_exchange_sha256:
+          completedPayload.effective_provider_exchange_sha256,
+        effective_listener_evidence_sha256:
+          completedPayload.effective_listener_evidence_sha256,
+        effective_assistant_pcm_sha256: effectiveAssistantPcmSha256,
+        repair_exchange_sha256:
+          completedPayload.effective_provider_exchange_sha256,
+        repair_listener_evidence_sha256:
+          completedPayload.effective_listener_evidence_sha256,
+        repair_assistant_pcm_sha256: effectiveAssistantPcmSha256,
+      });
+      expect(completedPayload).not.toHaveProperty("assistant_pcm_sha256");
+      expect(completedPayload).toMatchObject({
+        canonical_assistant_pcm_sha256: canonicalAssistantPcmSha256,
+        effective_assistant_pcm_sha256: effectiveAssistantPcmSha256,
+      });
+      for (const event of [repairCompleted, repairedOpportunityCompleted]) {
+        const assistantPcmReferences = event.evidence_references.filter(
+          (reference) => reference.kind === "assistant_pcm",
+        );
+        const providerExchangeReferences = event.evidence_references.filter(
+          (reference) => reference.kind === "provider_exchange",
+        );
+        const listenerEvidenceReferences = event.evidence_references.filter(
+          (reference) => reference.kind === "listener_evidence",
+        );
+        expect(new Set(assistantPcmReferences.map(
+          (reference) => reference.evidence_sha256,
+        ))).toEqual(new Set([
+          canonicalAssistantPcmSha256,
+          effectiveAssistantPcmSha256,
+        ]));
+        expect(new Set(providerExchangeReferences.map(
+          (reference) => reference.evidence_sha256,
+        ))).toEqual(new Set([
+          String(completedPayload.canonical_provider_exchange_sha256),
+          String(completedPayload.effective_provider_exchange_sha256),
+        ]));
+        expect(new Set(listenerEvidenceReferences.map(
+          (reference) => reference.evidence_sha256,
+        ))).toEqual(new Set([
+          String(completedPayload.canonical_listener_evidence_sha256),
+          String(completedPayload.effective_listener_evidence_sha256),
+        ]));
+      }
+      const repairDecisionReference = repairCompleted.evidence_references.find(
+        (reference) => reference.kind === "repair_decision",
+      );
+      const repairPlaybackReference = repairCompleted.evidence_references.find(
+        (reference) => reference.kind === "repair_playback",
+      );
+      expect(repairDecisionReference?.evidence_sha256).toBe(
+        String(completedPayload.decision_receipt_sha256),
+      );
+      expect(repairPlaybackReference?.evidence_sha256).toBe(
+        String(repairPayload.playback_receipt_sha256),
+      );
       expect(run.ledger).toHaveLength(1_100);
       await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
         event_count: 1_100,
@@ -1312,7 +2414,7 @@ describe("LC4-DEV live runner", () => {
   }, 30_000);
 
   it("does not retry once audio was submitted", async () => {
-    const { pcm, prepare, preflight } = fixtures();
+    const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
     let calls = 0;
     const run = await executeLc4DevLiveRun({
@@ -1412,7 +2514,7 @@ describe("LC4-DEV live runner", () => {
   });
 
   it("rejects a tampered caller-branch matrix before opening any provider segment", async () => {
-    const { pcm, prepare, preflight } = fixtures();
+    const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
     const retained = retainedDependencies({ evidence, pcm, repair: noRepairDependencies() });
     let opens = 0;
@@ -1444,7 +2546,7 @@ describe("LC4-DEV live runner", () => {
   });
 
   it("does not count the sixth episode complete when replay-valid finalization fails", async () => {
-    const { pcm, prepare, preflight } = fixtures();
+    const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
     const retained = retainedDependencies({ evidence, pcm, repair: noRepairDependencies() });
     const finalEpisodeId = prepare.episodes.at(-1)!.episode_id;
@@ -1456,23 +2558,26 @@ describe("LC4-DEV live runner", () => {
       async openSegment({ episode, segment_ordinal }) {
         return {
           async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
-            const projection = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+            const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
+            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
+              provider: episode.provider,
+              model: episode.model,
+              arm: episode.arm,
             });
             const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
-            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", {
-              episode_id: episode.episode_id,
-              opportunity_id: opportunity.id,
-            });
+            const { listenerEvidence, lineage } =
+              await retainProviderListenerEvidence(evidence, projection);
             return {
               playback_kind: "canonical" as const,
               opportunity_id: opportunity.id,
-              assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+              assistant_pcm: assistant,
               provider_exchange_sha256: providerEvidence.evidence_sha256,
               listener_evidence_sha256: listenerEvidence.evidence_sha256,
-              repair_projection: repairProjection(opportunity.id),
-              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              repair_projection: lineage.repair_projection,
+              playback_authority_receipt_sha256:
+                lineage.playback_authority_receipt_sha256,
               provider_exchange_projection: projection,
               provider_exchange_evidence: providerEvidence,
               listener_evidence: listenerEvidence,
@@ -1525,8 +2630,38 @@ describe("LC4-DEV live runner", () => {
     expect(run.ledger.filter((event) => event.event_type === "episode_terminal")).toHaveLength(5);
   });
 
-  it("counts a returned paid exchange before rejecting mutated branch replay evidence", async () => {
-    const { pcm, prepare, preflight } = fixtures();
+  it.each([
+    {
+      label: "transport mode",
+      mutate: (projection: Record<string, unknown>) => ({
+        ...projection,
+        transport_mode: "provider_native_server_vad",
+      }),
+    },
+    {
+      label: "transport profile",
+      mutate: (projection: Record<string, unknown>) => ({
+        ...projection,
+        transport_profile_sha256: sha256Hex("substituted-transport-profile"),
+      }),
+    },
+    {
+      label: "transport FSM",
+      mutate: (projection: Record<string, unknown>) => ({
+        ...projection,
+        operation_order: [
+          "caller_pcm_delivery_started",
+          "caller_pcm_delivery_completed",
+          "response_plan_prepared",
+          "response_generation_requested",
+          "caller_pcm_committed",
+          "assistant_pcm_captured",
+          "listener_evidence_handed_off",
+        ],
+      }),
+    },
+  ])("rejects a newly rehashed CAS exchange with tampered $label semantics", async ({ mutate }) => {
+    const { pcm, prepare, preflight } = await fixtures();
     const evidence = memoryEvidence();
     const adapter: Lc4DevelopmentRealtimeAdapter = {
       kind: "lc4-development-realtime-v1",
@@ -1536,32 +2671,127 @@ describe("LC4-DEV live runner", () => {
       async openSegment({ episode, segment_ordinal }) {
         return {
           async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
-            const correct = providerExchangeProjection(caller_pcm, caller_branch_binding, {
+            const assistant = Uint8Array.from([2, 4, 8, 16]);
+            const valid = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
+              provider: episode.provider,
+              model: episode.model,
+              arm: episode.arm,
+            });
+            const projection = mutate(valid);
+            // This intentionally gives the semantic mutation a fresh,
+            // internally matching CAS object and reference.
+            const providerEvidence = await testJsonEvidence(
+              evidence,
+              "provider_exchange",
+              projection,
+            );
+            const { listenerEvidence, lineage } =
+              await retainProviderListenerEvidence(evidence, valid);
+            return {
+              playback_kind: "canonical" as const,
+              opportunity_id: opportunity.id,
+              assistant_pcm: assistant,
+              provider_exchange_sha256: providerEvidence.evidence_sha256,
+              listener_evidence_sha256: listenerEvidence.evidence_sha256,
+              repair_projection: lineage.repair_projection,
+              playback_authority_receipt_sha256:
+                lineage.playback_authority_receipt_sha256,
+              provider_exchange_projection: projection,
+              provider_exchange_evidence: providerEvidence,
+              listener_evidence: listenerEvidence,
+            };
+          },
+          async exchangeRepair() {
+            throw new Error("semantic replay mutation cannot enter repair");
+          },
+          async finalizeOpportunity() {
+            throw new Error("semantic replay mutation cannot finalize");
+          },
+          async close() {
+            const retained = await testJsonEvidence(evidence, "segment_finalization", {
+              episode_id: episode.episode_id,
+              segment_ordinal,
+            });
+            return {
+              rotation_receipt_sha256: retained.evidence_sha256,
+              segment_finalization: retained,
+            };
+          },
+        };
+      },
+    };
+    const run = await executeLc4DevLiveRun({
+      prepare,
+      preflight,
+      dependencies: {
+        adapter,
+        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies() }),
+        ledger: { async append() {} },
+        now: () => new Date(NOW),
+      },
+    });
+    expect(run).toMatchObject({
+      status: "failed",
+      failure_class: "evidence",
+      episodes_started: 1,
+      opportunities_submitted: 1,
+      opportunities_completed: 0,
+      provider_calls_started: 1,
+      response_generations_completed: 1,
+    });
+    const failed = run.ledger.find((event) => event.event_type === "opportunity_failed");
+    expect(failed).toBeDefined();
+    await expect(evidence.resolveJson(
+      failed!.evidence_references.find((reference) => reference.kind === "failure_evidence")!,
+    )).resolves.toMatchObject({
+      failure_stage: "exchange_evidence",
+      failure_code: "evidence_assembly_failed",
+      failure_class: "evidence_retention",
+    });
+  });
+
+  it("counts a returned paid exchange before rejecting mutated branch replay evidence", async () => {
+    const { pcm, prepare, preflight } = await fixtures();
+    const evidence = memoryEvidence();
+    const adapter: Lc4DevelopmentRealtimeAdapter = {
+      kind: "lc4-development-realtime-v1",
+      factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+      preflight_sha256: preflight.preflight_sha256,
+      maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+      async openSegment({ episode, segment_ordinal }) {
+        return {
+          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+            const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
+            const correct = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+              episode_id: episode.episode_id,
+              opportunity_id: opportunity.id,
+              provider: episode.provider,
+              model: episode.model,
+              arm: episode.arm,
             });
             const projection = opportunity.index === 42
               ? {
                   ...correct,
                   caller_branch_authority: {
-                    ...correct.caller_branch_authority!,
+                    ...(correct.caller_branch_authority as Record<string, unknown>),
                     source_text_sha256: sha256Hex("mutated-retained-branch-source"),
                   },
                 }
               : correct;
             const providerEvidence = await testJsonEvidence(evidence, "provider_exchange", projection);
-            const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", {
-              episode_id: episode.episode_id,
-              opportunity_id: opportunity.id,
-            });
+            const { listenerEvidence, lineage } =
+              await retainProviderListenerEvidence(evidence, correct);
             return {
               playback_kind: "canonical" as const,
               opportunity_id: opportunity.id,
-              assistant_pcm: Uint8Array.from([opportunity.index, 2, 4, 8]),
+              assistant_pcm: assistant,
               provider_exchange_sha256: providerEvidence.evidence_sha256,
               listener_evidence_sha256: listenerEvidence.evidence_sha256,
-              repair_projection: repairProjection(opportunity.id),
-              playback_authority_receipt_sha256: sha256Hex(`authority:${episode.episode_id}:${opportunity.id}`),
+              repair_projection: lineage.repair_projection,
+              playback_authority_receipt_sha256:
+                lineage.playback_authority_receipt_sha256,
               provider_exchange_projection: projection,
               provider_exchange_evidence: providerEvidence,
               listener_evidence: listenerEvidence,
@@ -1630,9 +2860,13 @@ describe("LC4-DEV live runner", () => {
   });
 
   it("constructs only the preflight-bound DEV factory while confirmatory execution remains frozen", async () => {
-    const { pcm, prepare } = fixtures();
+    const { pcm, prepare, gateD } = await fixtures();
     const credentials = { openai: "test-openai-secret", gemini: "test-gemini-secret", xai: "test-xai-secret" } as const;
-    const preflight = authorizedPreflight(prepare, lc4DevCredentialIdentitySetSha256(credentials));
+    const preflight = await authorizedPreflight(
+      prepare,
+      lc4DevCredentialIdentitySetSha256(credentials),
+      gateD,
+    );
     const evidence = memoryEvidence();
     const callerBranch = callerBranchDependencies({ evidence, pcm });
     const listenerEvidence = await testJsonEvidence(evidence, "listener_evidence", { fixture: "factory-construction" });
@@ -1706,25 +2940,49 @@ describe("LC4-DEV live runner", () => {
     })).toThrow(/credentials differ/);
   });
 
-  it("rejects authorization, trust-root, qualification, credential, and audio mutations", () => {
-    const { prepare } = fixtures();
-    const valid = authorizedPreflight(prepare);
+  it("rejects authorization, trust-root, qualification, credential, and audio mutations", async () => {
+    const { prepare, gateD } = await fixtures();
+    const valid = await authorizedPreflight(prepare, undefined, gateD);
+    expect(valid).toMatchObject({
+      qualification_transport_scope_sha256: prepare.qualification_transport_scope_sha256,
+      qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified",
+      qualification_scope_verified: true,
+      all_episode_transports_qualified: true,
+      xai_finite_manual_transport_qualification: "verified",
+      xai_finite_manual_gate_d_claim_boundary:
+        "transport_qualification_only_not_efficacy_evidence",
+    });
+    expect(valid.qualification.transport_qualification_scope.excluded_episode_transports).toEqual([
+      {
+        provider: "xai",
+        turn_boundary: "manual_commit",
+        purpose: "finite_prerecorded_efficacy",
+        reason: "not_exercised_by_retained_server_vad_gate_b",
+      },
+    ]);
     const base = {
       prepare,
       checked_at: NOW,
       qualification_gate_sha256: valid.qualification_gate_sha256,
       qualification: valid.qualification,
+      xai_finite_manual_gate_d: valid.xai_finite_manual_gate_d,
       credential_identity_set_sha256: valid.credential_identity_set_sha256,
       control_plane_manifest_sha256: valid.control_plane_manifest_sha256,
       listener_evidence_manifest_sha256: valid.listener_evidence_manifest_sha256,
       runtime_config_sha256: valid.runtime_config_sha256,
       asr_evaluator_build_sha256: valid.asr_evaluator_build_sha256,
       asr_evaluator_toolchain_sha256: valid.asr_evaluator_toolchain_sha256,
+      asr_contract: valid.asr_contract,
+      asr_contract_sha256: valid.asr_contract_sha256,
+      asr_runner_trust: valid.asr_runner_trust,
       immutable_ledger_genesis_sha256: valid.immutable_ledger_genesis_sha256,
       audio_manifest_sha256: prepare.audio_manifest_sha256,
       authorization: valid.authorization,
       expected_authority_public_key_fingerprint_sha256: valid.authority_trust_root_sha256,
     };
+    const nonEd25519Spki = generateKeyPairSync("ec", {
+      namedCurve: "P-256",
+    }).publicKey.export({ type: "spki", format: "der" });
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       authorization: { ...valid.authorization, signature_base64: Buffer.from("mutated").toString("base64") },
@@ -1737,6 +2995,13 @@ describe("LC4-DEV live runner", () => {
       ...base,
       qualification: { ...valid.qualification, terminal_root_sha256: "9".repeat(64) },
     })).toThrow(/retained qualification(?: v3)? receipt|authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      qualification: {
+        ...valid.qualification,
+        transport_qualification_scope_sha256: "9".repeat(64),
+      },
+    })).toThrow(/retained qualification(?: v3)? receipt|transport scope|authorization differs/);
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       credential_identity_set_sha256: "9".repeat(64),
@@ -1753,6 +3018,46 @@ describe("LC4-DEV live runner", () => {
       ...base,
       asr_evaluator_toolchain_sha256: "0".repeat(64),
     })).toThrow(/authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_contract_sha256: "0".repeat(64),
+    })).toThrow(/ASR contract hash mismatch/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_contract: {
+        ...valid.asr_contract,
+        contract_id: "lc4-dev-live-runner-substituted-asr",
+      },
+    })).toThrow(/ASR contract hash mismatch/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_runner_trust: {
+        ...valid.asr_runner_trust,
+        key_id: "lc4-dev-live-runner-substituted-asr",
+      },
+    })).toThrow(/authorization differs/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_runner_trust: {
+        ...valid.asr_runner_trust,
+        public_key_fingerprint_sha256: "0".repeat(64),
+      },
+    })).toThrow(/pinned Ed25519 trust root/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_runner_trust: {
+        ...valid.asr_runner_trust,
+        public_key_spki_base64: Buffer.from("not-an-SPKI").toString("base64"),
+      },
+    })).toThrow(/SPKI/);
+    expect(() => createLc4DevLivePreflightArtifact({
+      ...base,
+      asr_runner_trust: {
+        ...valid.asr_runner_trust,
+        public_key_spki_base64: nonEd25519Spki.toString("base64"),
+        public_key_fingerprint_sha256: sha256Hex(nonEd25519Spki),
+      },
+    })).toThrow(/Ed25519/);
     expect(() => createLc4DevLivePreflightArtifact({
       ...base,
       audio_manifest_sha256: "9".repeat(64),
@@ -1819,6 +3124,12 @@ describe("LC4-DEV live runner", () => {
       ...qualificationInput,
       spoken_gate_evidence: valid.qualification.spoken_gate_evidence.map((evidence, index) => (
         index === 0 ? { ...evidence, post_tool_terminal_observed: false as true } : evidence
+      )),
+    })).toThrow(/Gate A\/Gate B evidence differs from its plan/);
+    expect(() => createLc4DevRetainedQualificationReceipt({
+      ...qualificationInput,
+      spoken_gate_evidence: valid.qualification.spoken_gate_evidence.map((evidence, index) => (
+        index === 1 ? { ...evidence, turn_boundary_mode: "manual_commit" as const } : evidence
       )),
     })).toThrow(/Gate A\/Gate B evidence differs from its plan/);
     expect(() => createLc4DevRetainedQualificationReceipt({

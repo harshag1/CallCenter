@@ -62,6 +62,9 @@ export type Lc4PinnedListenerEvaluation = Readonly<{
   /** Direct CAS address for offline replay of the canonical semantic artifact. */
   semantic_artifact_cas_sha256?: string;
   signed_invocation_receipt_sha256: string;
+  /** Exact canonical `{request,result,receipt}` artifact retained by the evaluator. */
+  signed_invocation_artifact_cas_sha256: string;
+  signed_invocation_artifact_byte_length: number;
   repair_projection?: Lc4DevArmBlindRepairProjection;
 }>;
 
@@ -146,6 +149,8 @@ export type Lc4HeadlessListenerHandoffReceiptBody = Readonly<{
   calibration_sha256: string;
   criterion_plan_sha256: string;
   evaluator_signed_invocation_receipt_sha256: string;
+  evaluator_signed_invocation_artifact_cas_sha256: string;
+  evaluator_signed_invocation_artifact_byte_length: number;
   transcript_sha256: string;
   semantic_result_sha256: string;
   physical_playback_status: "not_performed_headless";
@@ -231,7 +236,15 @@ function validateEvaluation(
     transcript_sha256: evaluation.transcript_sha256,
     semantic_result_sha256: evaluation.semantic_result_sha256,
     signed_invocation_receipt_sha256: evaluation.signed_invocation_receipt_sha256,
+    signed_invocation_artifact_cas_sha256:
+      evaluation.signed_invocation_artifact_cas_sha256,
   })) requireHash(digest, `LC4 listener evaluation ${label}`);
+  if (!Number.isSafeInteger(evaluation.signed_invocation_artifact_byte_length)
+    || evaluation.signed_invocation_artifact_byte_length < 2) {
+    throw new Error(
+      "LC4 listener evaluation signed invocation artifact byte length is invalid",
+    );
+  }
   if (evaluation.semantic_artifact_cas_sha256 !== undefined) {
     requireHash(evaluation.semantic_artifact_cas_sha256, "LC4 listener evaluation semantic artifact CAS hash");
   }
@@ -307,6 +320,10 @@ export function createLc4HeadlessListenerPlaybackAuthority(input: Readonly<{
         calibration_sha256: evaluation.calibration_sha256,
         criterion_plan_sha256,
         evaluator_signed_invocation_receipt_sha256: evaluation.signed_invocation_receipt_sha256,
+        evaluator_signed_invocation_artifact_cas_sha256:
+          evaluation.signed_invocation_artifact_cas_sha256,
+        evaluator_signed_invocation_artifact_byte_length:
+          evaluation.signed_invocation_artifact_byte_length,
         transcript_sha256: evaluation.transcript_sha256,
         semantic_result_sha256: evaluation.semantic_result_sha256,
         physical_playback_status: "not_performed_headless" as const,
@@ -380,12 +397,20 @@ export function assertLc4HeadlessListenerHandoffReceipt(input: Readonly<{
     receipt.body.calibration_sha256,
     receipt.body.criterion_plan_sha256,
     receipt.body.evaluator_signed_invocation_receipt_sha256,
+    receipt.body.evaluator_signed_invocation_artifact_cas_sha256,
     receipt.body.transcript_sha256,
     receipt.body.semantic_result_sha256,
     receipt.body.authority_manifest_sha256,
     receipt.body.authority_public_key_sha256,
     receipt.body.receipt_body_sha256,
   ]) requireHash(digest, "LC4 headless listener receipt hash");
+  if (!Number.isSafeInteger(
+    receipt.body.evaluator_signed_invocation_artifact_byte_length,
+  ) || receipt.body.evaluator_signed_invocation_artifact_byte_length < 2) {
+    throw new Error(
+      "LC4 headless listener receipt signed invocation artifact byte length is invalid",
+    );
+  }
   requireSafeId(receipt.body.authority_key_id, "LC4 headless listener authority key ID");
   if (receipt.signature_algorithm !== "Ed25519"
     || receipt.body.authority_key_id !== trust.keyId

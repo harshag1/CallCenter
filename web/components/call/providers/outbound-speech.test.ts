@@ -108,9 +108,12 @@ describe("browser outbound speech quarantine", () => {
     expect(onRegenerationRequired).toHaveBeenCalledWith(evidence.decision);
   });
 
-  it("advertises OpenAI direct-track gating as unsupported instead of overstating parity", () => {
+  it("advertises exact-PCM quarantine support for every stock browser provider", () => {
     expect(BROWSER_OUTBOUND_SPEECH_GATE_SUPPORT).toMatchObject({
-      openai: { supported: false, reason: "webrtc_remote_track_bypasses_pcm_quarantine" },
+      openai: {
+        supported: true,
+        capture: "webrtc_remote_track_to_muted_pcm_processor",
+      },
       xai: { supported: true },
       gemini: { supported: true },
     });

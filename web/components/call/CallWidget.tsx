@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PhoneOff, Mic } from "lucide-react";
 import { RealtimeCall } from "./realtime";
+import type { BrowserSpeechGuardrailStatus } from "./browser-speech-guardrail";
 import { mmss } from "@/components/platform/shared";
 
 export default function CallWidget({
@@ -20,6 +21,7 @@ export default function CallWidget({
 }) {
   const [state, setState] = useState<"connecting" | "live" | "ended" | "error">("connecting");
   const [caption, setCaption] = useState("");
+  const [speechGuardrail, setSpeechGuardrail] = useState<BrowserSpeechGuardrailStatus | null>(null);
   const [holdUntil, setHoldUntil] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const callRef = useRef<RealtimeCall | null>(null);
@@ -30,6 +32,7 @@ export default function CallWidget({
     const call = new RealtimeCall({
       onState: setState,
       onTranscript: (who, text) => setCaption(`${who === "caller" ? "you" : agentName}: ${text}`),
+      onSpeechGuardrailStatus: setSpeechGuardrail,
     });
     callRef.current = call;
     let iv: ReturnType<typeof setInterval> | null = null;
@@ -109,7 +112,17 @@ export default function CallWidget({
       </span>
       <Mic size={14} className="text-neutral-400" />
       <div className="min-w-0 flex-1">
-        <div className="text-xs font-medium">{agentName}</div>
+        <div className="flex items-center gap-1.5 text-xs font-medium">
+          <span>{agentName}</span>
+          {speechGuardrail?.state === "enforcing" && (
+            <span
+              className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700"
+              title="Generated speech is held until exact-PCM independent ASR policy passes"
+            >
+              speech guarded
+            </span>
+          )}
+        </div>
         <div className={`truncate text-[11px] ${holdUntil != null ? "tabular-nums text-amber-600" : "text-neutral-400"}`}>
           {statusLine}
         </div>

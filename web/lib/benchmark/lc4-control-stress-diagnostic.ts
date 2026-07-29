@@ -698,7 +698,9 @@ export async function freezeLc4ControlStressPlan(input: Readonly<{
   }
   const scheduled = cells.filter((cell) => cell.disposition === "scheduled").length;
   if (input.budget.maximum_paid_sessions !== scheduled) {
-    throw new Error("control-stress budget must pre-authorize exactly one session per scheduled cell");
+    throw new Error(
+      `control-stress budget must pre-authorize exactly one session per scheduled cell (authorized ${input.budget.maximum_paid_sessions}, scheduled ${scheduled})`,
+    );
   }
   const body = immutableJson({
     schema_version: 1,

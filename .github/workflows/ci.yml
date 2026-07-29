@@ -25,7 +25,8 @@ jobs:
       matrix:
         node:
           - "20.19.0"
-          - "22.x"
+          - "22.13.0"
+          - "24.x"
     steps:
       - name: Check out the complete repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -73,7 +74,8 @@ jobs:
       matrix:
         node:
           - "20.19.0"
-          - "22.x"
+          - "22.13.0"
+          - "24.x"
     steps:
       - name: Check out the complete repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -99,6 +101,10 @@ jobs:
       - name: Run bridge tests
         working-directory: bridge
         run: npm test
+
+      - name: Build the pinned bridge container
+        if: matrix.node == '22.13.0'
+        run: docker build --tag hacc-bridge:ci bridge
 
   public-release-audit:
     name: Public-release secret gates

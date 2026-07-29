@@ -26,6 +26,12 @@ import {
 The server-only entrypoint is intentionally separate. Importing the ordinary
 plugin barrel does not pull credential-bearing adapters into browser bundles.
 
+The registry is dynamically extensible, but registration alone is not a full
+stock-app installation. Agent selection, browser consumers, BYOK setup,
+bootstrap defaults, builder enums, and integration metadata currently recognize
+the bundled OpenAI, xAI, and Gemini providers. A self-hosted plugin must wire
+each application surface it intends to expose.
+
 ## Install in a self-hosted runtime
 
 The plugin contract owns wire normalization and conformance. The application
@@ -52,8 +58,13 @@ const communitySip = {
     sessionResumption: { supported: false, enabledByDefault: false },
     notes: ["Browser connections use short-lived, server-minted tokens."],
   },
-  createBrowserConnection: async (session) => {
-    // Mint an ephemeral token on the server. Never return COMMUNITY_SIP_TOKEN.
+  createBrowserConnection: async (session, fundingAuthority) => {
+    if (
+      fundingAuthority.source !== "tenant_byok"
+      || fundingAuthority.provider !== "community-sip"
+    ) throw new Error("community-sip tenant funding authority required");
+    // Use fundingAuthority.apiKey only to mint an ephemeral token on the
+    // server. Never return it or a deployment credential.
     return {
       provider: "community-sip",
       model: session.model,

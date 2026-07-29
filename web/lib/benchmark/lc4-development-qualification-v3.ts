@@ -48,18 +48,47 @@ import {
   type SignedLc4QualificationPackageEnvelopeV5,
 } from "./lc4-qualification-package-envelope";
 
-const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v4\n";
-const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v4\n";
-const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v6\n";
-const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v6\n";
-const AUTHORIZATION_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v4\n";
-const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v4\n";
-const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification-v3/v2\n";
-const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-qualification-v3-report/v1\n";
+const PLAN_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v5\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v5\n";
+const TERMINAL_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
+const TERMINAL_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal-artifact/v7\n";
+const AUTHORIZATION_SIGNING_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization/v5\n";
+const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-authorization-artifact/v5\n";
+const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification-v3/v3\n";
+const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-qualification-v3-report/v2\n";
 const XAI_GATE_B_BINDING_DOMAIN = "harshas-amazing-call-center/xai-server-vad-gate-b-binding/v1\n";
+const TRANSPORT_SCOPE_DOMAIN = "harshas-amazing-call-center/lc4-dev-retained-qualification-transport-scope/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_JSONL_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Exact transport scope exercised by the retained three-provider Gate B.
+ * The development efficacy matrix uses finite prerecorded clips; its xAI
+ * manual-commit transport is deliberately excluded because Gate B exercises
+ * xAI's provider-native server-VAD lifecycle instead.
+ */
+export const LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE = Object.freeze({
+  schema_version: 1 as const,
+  qualified_transports: Object.freeze([
+    Object.freeze({ provider: "openai" as const, turn_boundary: "manual_commit" as const }),
+    Object.freeze({ provider: "gemini" as const, turn_boundary: "provider_activity_markers" as const }),
+    Object.freeze({ provider: "xai" as const, turn_boundary: "provider_native_server_vad" as const }),
+  ]),
+  excluded_episode_transports: Object.freeze([
+    Object.freeze({
+      provider: "xai" as const,
+      turn_boundary: "manual_commit" as const,
+      purpose: "finite_prerecorded_efficacy" as const,
+      reason: "not_exercised_by_retained_server_vad_gate_b" as const,
+    }),
+  ]),
+  claim_boundary: "transport_qualification_applies_only_to_listed_gate_b_transports_not_every_development_episode_transport" as const,
+});
+
+export const LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256 = sha256Hex(
+  `${TRANSPORT_SCOPE_DOMAIN}${canonicalJson(LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE)}`,
+);
 
 type QualificationReport = Readonly<{
   schema_version: 1;
@@ -211,7 +240,7 @@ export type Lc4DevQualificationV3SpokenEvidence = Readonly<{
 }>;
 
 export type Lc4DevRetainedQualificationReceipt = Readonly<{
-  schema_version: 3;
+  schema_version: 4;
   protocol_id: "HACC-LC4-DEV-v1";
   qualification_protocol_id: "HACC-LC4-v1";
   qualification_runner_version: typeof LC4_QUALIFICATION_V3_RUNNER_VERSION;
@@ -234,6 +263,8 @@ export type Lc4DevRetainedQualificationReceipt = Readonly<{
   budget_evidence_sha256: string;
   budget_final_head_sha256: string;
   retained_artifact_sha256: string;
+  transport_qualification_scope: typeof LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE;
+  transport_qualification_scope_sha256: typeof LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256;
   xai_server_vad_gate_b_binding_sha256: string;
   xai_server_vad_gate_b_binding_file_sha256: string;
   plan: Lc4QualificationV3PlanArtifact;
@@ -582,6 +613,7 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     || terminal.plan_artifact_sha256 !== input.plan.artifact_sha256
     || terminal.plan_sha256 !== plan.plan_sha256
     || terminal.authorization_artifact_sha256 !== input.authorization.artifact_sha256
+    || input.authorization.body.schema_version !== 1
     || input.authorization.body.authorization_version !== LC4_QUALIFICATION_V3_AUTHORIZATION_VERSION
     || input.authorization.body.plan_artifact_sha256 !== input.plan.artifact_sha256
     || input.authorization.body.plan_sha256 !== plan.plan_sha256
@@ -670,6 +702,7 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
       || spoken.caller_audio_bytes !== target.caller_audio_bytes
       || spoken.caller_audio_sha256 !== target.caller_audio_sha256
       || spoken.delivery_profile_sha256 !== target.audio_delivery_profile_sha256
+      || spoken.turn_boundary_mode !== target.qualification_turn_boundary
       || spoken.input_audio_evidence.audio_sha256 !== target.caller_audio_sha256
       || spoken.output_audio_evidence.audio_bytes <= 0
       || result.caller_audio_bytes !== target.caller_audio_bytes
@@ -718,11 +751,13 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     budget_evidence_sha256: input.budget_evidence.evidence_sha256,
     xai_server_vad_gate_b_binding_sha256: input.xai_server_vad_gate_b_binding.binding_sha256,
     xai_server_vad_gate_b_binding_file_sha256: xaiBindingFileSha256,
+    transport_qualification_scope: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE,
+    transport_qualification_scope_sha256: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
     spoken_gate_evidence: input.spoken_gate_evidence,
   });
   const retainedArtifactSha256 = sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(retainedBody)}`);
   const body = freeze({
-    schema_version: 3 as const,
+    schema_version: 4 as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     qualification_protocol_id: "HACC-LC4-v1" as const,
     qualification_runner_version: LC4_QUALIFICATION_V3_RUNNER_VERSION,
@@ -745,6 +780,8 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
     budget_evidence_sha256: input.budget_evidence.evidence_sha256,
     budget_final_head_sha256: input.budget_evidence.final_head_sha256,
     retained_artifact_sha256: retainedArtifactSha256,
+    transport_qualification_scope: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE,
+    transport_qualification_scope_sha256: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
     xai_server_vad_gate_b_binding_sha256: input.xai_server_vad_gate_b_binding.binding_sha256,
     xai_server_vad_gate_b_binding_file_sha256: xaiBindingFileSha256,
     plan: input.plan,
@@ -763,6 +800,10 @@ export function createLc4DevRetainedQualificationReceipt(input: ReceiptInput): L
 }
 
 export function assertLc4DevRetainedQualificationReceipt(receipt: Lc4DevRetainedQualificationReceipt): void {
+  if (receipt.schema_version !== 4
+    || receipt.qualification_runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION) {
+    throw new Error("LC4-DEV retained qualification v3 receipt uses a stale schema");
+  }
   const { receipt_sha256, ...body } = receipt;
   if (sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`) !== receipt_sha256) {
     throw new Error("LC4-DEV retained qualification v3 receipt hash mismatch");

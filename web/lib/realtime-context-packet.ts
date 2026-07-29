@@ -16,6 +16,11 @@ const AudibleTurnSchema = z.object({
   turnId: z.string().min(1).max(128),
   speaker: z.enum(["caller", "agent"]),
   text: z.string().min(1).max(MAX_TURN_TEXT),
+  deliveryEvidence: z.enum([
+    "caller_input_transcript",
+    "provider_transcript_unverified_playback",
+    "playback_acknowledged",
+  ]).optional(),
   heardAtMs: z.number().int().nonnegative().safe(),
 }).strict();
 
@@ -26,9 +31,19 @@ const CapabilitySchema = z.object({
 
 export type AudibleTurn = z.infer<typeof AudibleTurnSchema>;
 export type RealtimePacketCapability = z.infer<typeof CapabilitySchema>;
+export type ProjectedAudibleTurn = AudibleTurn & Readonly<{
+  textTrust: "untrusted_advisory";
+}>;
 
 export type RealtimeContextPacket = Readonly<{
   schemaVersion: 1;
+  trustBoundary: Readonly<{
+    envelope: "host_authored";
+    authorityAndDurableControlState: "host_authoritative";
+    workerInputAndResultContent: "untrusted_advisory";
+    modelAdvisories: "untrusted_advisory";
+    recentAudibleTurnText: "untrusted_advisory";
+  }>;
   authority: Readonly<{
     conversationHeadSha256: string;
     conversationRevision: number;
@@ -38,7 +53,7 @@ export type RealtimeContextPacket = Readonly<{
   }>;
   durable: ContextProjection;
   capabilities: readonly RealtimePacketCapability[];
-  recentAudibleTurns: readonly AudibleTurn[];
+  recentAudibleTurns: readonly ProjectedAudibleTurn[];
   omittedRecentTurnCount: number;
 }>;
 
@@ -60,9 +75,11 @@ function assertUnique<T>(items: readonly T[], identity: (item: T) => string, lab
 /**
  * Compiles the provider-neutral packet for a realtime session or turn.
  * Durable control state and the host-derived capability catalog are atomic.
- * Recent caller-heard dialogue is optional and admitted newest-first only from
- * the bytes left over; it can never evict policy, facts, obligations, Flow, or
- * worker state.
+ * Recent conversation transcript is optional and admitted newest-first only
+ * from the bytes left over; it can never evict policy, facts, obligations,
+ * Flow, or worker state. `heardAtMs` is the journal event time retained for
+ * schema compatibility, not proof that an agent utterance survived barge-in;
+ * callers must inspect `deliveryEvidence`.
  */
 export function compileRealtimeContextPacket(input: Readonly<{
   state: ConversationState;
@@ -106,6 +123,13 @@ export function compileRealtimeContextPacket(input: Readonly<{
   }
   const base = {
     schemaVersion: 1 as const,
+    trustBoundary: {
+      envelope: "host_authored" as const,
+      authorityAndDurableControlState: "host_authoritative" as const,
+      workerInputAndResultContent: "untrusted_advisory" as const,
+      modelAdvisories: "untrusted_advisory" as const,
+      recentAudibleTurnText: "untrusted_advisory" as const,
+    },
     authority: {
       conversationHeadSha256: input.state.headHash,
       conversationRevision: input.state.eventCount,
@@ -115,7 +139,7 @@ export function compileRealtimeContextPacket(input: Readonly<{
     },
     durable: minimumDurable.value,
     capabilities,
-    recentAudibleTurns: [] as AudibleTurn[],
+    recentAudibleTurns: [] as ProjectedAudibleTurn[],
     omittedRecentTurnCount: recent.length,
   };
   const baseBytes = bytes(base);
@@ -126,10 +150,11 @@ export function compileRealtimeContextPacket(input: Readonly<{
   const durable = projectConversationContext(input.state, durableBudget);
   const packet: {
     schemaVersion: 1;
+    trustBoundary: RealtimeContextPacket["trustBoundary"];
     authority: RealtimeContextPacket["authority"];
     durable: ContextProjection;
     capabilities: RealtimePacketCapability[];
-    recentAudibleTurns: AudibleTurn[];
+    recentAudibleTurns: ProjectedAudibleTurn[];
     omittedRecentTurnCount: number;
   } = { ...base, durable: durable.value };
   if (bytes(packet) > input.byteBudget) {
@@ -139,7 +164,7 @@ export function compileRealtimeContextPacket(input: Readonly<{
   }
 
   for (const turn of [...recent].reverse()) {
-    packet.recentAudibleTurns.unshift(turn);
+    packet.recentAudibleTurns.unshift({ ...turn, textTrust: "untrusted_advisory" });
     packet.omittedRecentTurnCount -= 1;
     if (bytes(packet) > input.byteBudget) {
       packet.recentAudibleTurns.shift();

@@ -9,6 +9,8 @@ import {
   serverRealtimeEndpoint,
   unregisterRealtimeProvider,
   type RealtimeProviderRegistration,
+  type RegisteredBrowserProviderRootCredential,
+  type RegisteredBrowserFundingAuthority,
   type RegisteredVoiceSessionSpec,
 } from "../realtime/registry";
 
@@ -28,6 +30,16 @@ const SESSION = {
     stateRevision: 9,
   },
 } satisfies RegisteredVoiceSessionSpec<"community-sip">;
+
+function tenantAuthority<const Id extends string>(
+  provider: Id,
+): RegisteredBrowserProviderRootCredential<Id> {
+  return Object.freeze({
+    source: "tenant_byok",
+    provider,
+    apiKey: "tenant-root-for-registered-provider-tests",
+  });
+}
 
 function adapter<const Id extends string = "community-sip">(
   id: Id = "community-sip" as Id,
@@ -126,7 +138,10 @@ describe("realtime provider runtime registry", () => {
     expect(Object.isFrozen(registered.capabilities)).toBe(true);
     expect(Object.isFrozen(registered.capabilities.notes)).toBe(true);
 
-    await expect(registry.createBrowserConnection(SESSION)).resolves.toMatchObject({
+    await expect(registry.createBrowserConnection(
+      SESSION,
+      tenantAuthority("community-sip"),
+    )).resolves.toMatchObject({
       provider: "community-sip",
       model: "community-realtime-v1",
       transport: "websocket",
@@ -224,10 +239,71 @@ describe("realtime provider runtime registry", () => {
       adapter("community-sip", { createBrowserConnection: browserHook }),
     ]);
 
-    await expect(registry.createBrowserConnection(SESSION)).rejects.toMatchObject({
+    await expect(registry.createBrowserConnection(
+      SESSION,
+      tenantAuthority("community-sip"),
+    )).rejects.toMatchObject({
       code: "capability_mismatch",
     });
     expect(browserHook).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds tenant browser funding to OpenAI/xAI and rejects root-key exfiltration", async () => {
+    const root = "tenant-root-that-must-not-enter-browser-metadata";
+    const browserHook = vi.fn(async (
+      spec: RegisteredVoiceSessionSpec<"openai">,
+      credential: RegisteredBrowserFundingAuthority<"openai">,
+    ) => ({
+      provider: "openai" as const,
+      model: spec.model,
+      voice: spec.voice,
+      transport: "websocket" as const,
+      token: "provider-ephemeral-only",
+      ...(credential.source === "tenant_byok"
+        ? { accidentalDebugValue: credential.apiKey }
+        : {}),
+    }));
+    const registry = new RealtimeProviderRegistry([
+      adapter("openai", { createBrowserConnection: browserHook }),
+    ]);
+    const session = { ...SESSION, provider: "openai" } as const;
+
+    await expect(registry.createBrowserConnection(session, {
+      source: "tenant_byok",
+      provider: "xai" as "openai",
+      apiKey: root,
+    })).rejects.toMatchObject({ code: "capability_mismatch" });
+    expect(browserHook).not.toHaveBeenCalled();
+
+    await expect(registry.createBrowserConnection(session, {
+      source: "tenant_byok",
+      provider: "openai",
+      apiKey: root,
+    })).rejects.toMatchObject({ code: "capability_mismatch" });
+    expect(browserHook).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects omitted and forged local funding before provider code runs", async () => {
+    const browserHook = vi.fn(adapter("openai").createBrowserConnection);
+    const registry = new RealtimeProviderRegistry([
+      adapter("openai", { createBrowserConnection: browserHook }),
+    ]);
+    const session = { ...SESSION, provider: "openai" } as const;
+    const unsafeCreate = registry.createBrowserConnection.bind(registry) as unknown as (
+      spec: typeof session,
+      authority?: RegisteredBrowserFundingAuthority<"openai">,
+    ) => Promise<unknown>;
+
+    await expect(unsafeCreate(session)).rejects.toMatchObject({
+      code: "capability_mismatch",
+    });
+    await expect(unsafeCreate(session, {
+      source: "local_deployment_authorized",
+      provider: "openai",
+    } as unknown as RegisteredBrowserFundingAuthority<"openai">)).rejects.toMatchObject({
+      code: "capability_mismatch",
+    });
+    expect(browserHook).not.toHaveBeenCalled();
   });
 
   it("keeps credentials out of registered WSS endpoint URLs", async () => {
@@ -271,7 +347,7 @@ describe("realtime provider runtime registry", () => {
     await expect(registry.createBrowserConnection({
       ...SESSION,
       provider: "other-sip",
-    })).rejects.toMatchObject({ code: "unknown_provider" });
+    }, tenantAuthority("other-sip"))).rejects.toMatchObject({ code: "unknown_provider" });
     expect(browserHook).not.toHaveBeenCalled();
   });
 

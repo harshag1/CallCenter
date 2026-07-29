@@ -21,6 +21,10 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { canonicalJson, sha256Hex } from "./artifacts";
 import {
+  independentAsrContractSha256,
+  type IndependentAsrContract,
+} from "./audible-evidence";
+import {
   assertLc4DevAudioArtifacts,
   createLc4DevCallerAudioLoader,
   type Lc4DevAudioManifest,
@@ -28,6 +32,7 @@ import {
 } from "./lc4-development-audio-materializer";
 import {
   LC4_DEV_LIVE_HARD_CEILING_MICRO_USD,
+  assertLc4DevAsrRunnerTrust,
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   createLc4DevLivePreflightArtifact,
@@ -38,6 +43,7 @@ import {
   lc4DevLiveAuthorizationSigningBytes,
   type Lc4DevLiveAuthorizationArtifact,
   type Lc4DevLiveAuthorizationBody,
+  type Lc4DevAsrRunnerTrust,
   type Lc4DevLivePreflightArtifact,
   type Lc4DevLivePrepareArtifact,
   type Lc4DevLiveRunArtifact,
@@ -54,6 +60,11 @@ import {
 import { lc4DevCredentialIdentitySetSha256 } from "./lc4-production-provider-adapter";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import { loadLc4DevRetainedQualificationV3 } from "./lc4-development-qualification-v3";
+import {
+  assertLc4XaiFiniteManualGateDReceipt,
+  type Lc4XaiFiniteManualGateDReceipt,
+} from "./lc4-xai.manual-qualification";
+import { LC4_PROVIDER_PROFILE_MANIFEST } from "./lc4-provider-profiles";
 import {
   createLc4DevelopmentDefaultOperatorRuntime,
   type Lc4DevDefaultRuntimeConfig,
@@ -120,6 +131,9 @@ export type Lc4DevOperatorRuntimeRoots = Readonly<{
   runtime_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
+  asr_contract: IndependentAsrContract;
+  asr_contract_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
 }>;
 
 /**
@@ -427,6 +441,28 @@ export async function loadLc4DevRetainedQualification(
   });
 }
 
+export async function loadLc4XaiFiniteManualGateDReceipt(input: Readonly<{
+  receipt_path: string;
+  plan_trust_root_sha256: string;
+  expected_source_commit: string;
+  expected_source_tree_sha256: string;
+  expected_provider_profile_manifest_sha256: string;
+}>): Promise<Lc4XaiFiniteManualGateDReceipt> {
+  absolute(input.receipt_path, "LC4-DEV xAI finite-manual Gate D receipt");
+  const receipt = await readBoundedJson<Lc4XaiFiniteManualGateDReceipt>(
+    input.receipt_path,
+    "LC4-DEV xAI finite-manual Gate D receipt",
+  );
+  assertLc4XaiFiniteManualGateDReceipt(receipt, {
+    expected_plan_trust_root_sha256: input.plan_trust_root_sha256,
+    expected_source_commit: input.expected_source_commit,
+    expected_source_tree_sha256: input.expected_source_tree_sha256,
+    expected_provider_profile_manifest_sha256:
+      input.expected_provider_profile_manifest_sha256,
+  });
+  return receipt;
+}
+
 async function loadSigner(source: string): Promise<Lc4DevOperatorSigner> {
   let bytes: Buffer;
   if (source.startsWith("fd:")) {
@@ -471,11 +507,23 @@ function authorization(input: Readonly<{
   authorization_nonce_sha256: string;
   immutable_ledger_genesis_sha256: string;
 }>): Lc4DevLiveAuthorizationArtifact {
-  for (const value of Object.values(input.roots)) assertHash(value, "LC4-DEV runtime root");
+  for (const value of [
+    input.roots.control_plane_manifest_sha256,
+    input.roots.listener_evidence_manifest_sha256,
+    input.roots.runtime_config_sha256,
+    input.roots.asr_evaluator_build_sha256,
+    input.roots.asr_evaluator_toolchain_sha256,
+    input.roots.asr_contract_sha256,
+  ]) assertHash(value, "LC4-DEV runtime root");
+  if (independentAsrContractSha256(input.roots.asr_contract)
+      !== input.roots.asr_contract_sha256) {
+    throw new Error("LC4-DEV runtime ASR contract hash mismatch");
+  }
+  assertLc4DevAsrRunnerTrust(input.roots.asr_runner_trust);
   assertHash(input.authorization_nonce_sha256, "LC4-DEV authorization nonce");
   assertHash(input.immutable_ledger_genesis_sha256, "LC4-DEV ledger genesis");
   const body: Lc4DevLiveAuthorizationBody = Object.freeze({
-    schema_version: 2,
+    schema_version: 4,
     protocol_id: "HACC-LC4-DEV-v1",
     purpose: "six_public_development_episodes_only",
     execution_id: input.prepare.execution_id,
@@ -490,7 +538,18 @@ function authorization(input: Readonly<{
     runtime_config_sha256: input.roots.runtime_config_sha256,
     asr_evaluator_build_sha256: input.roots.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.roots.asr_evaluator_toolchain_sha256,
+    asr_contract: input.roots.asr_contract,
+    asr_contract_sha256: input.roots.asr_contract_sha256,
+    asr_runner_trust: input.roots.asr_runner_trust,
     provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    qualification_transport_scope_sha256: input.prepare.qualification_transport_scope_sha256,
+    qualification_claim_boundary: input.prepare.qualification_claim_boundary,
+    xai_finite_manual_gate_d_receipt_sha256:
+      input.prepare.xai_finite_manual_gate_d.receipt_sha256,
+    xai_finite_manual_gate_d_plan_authority_trust_root_sha256:
+      input.prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
+    xai_finite_manual_gate_d_transport_profile_sha256:
+      input.prepare.xai_finite_manual_gate_d.transport_profile_sha256,
     audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
     audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
     audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
@@ -534,7 +593,7 @@ function authorizationBodyWithoutGenesis(input: Readonly<{
   expires_at: string;
 }>): AuthorizationBodyWithoutLedgerGenesis {
   return Object.freeze({
-    schema_version: 2,
+    schema_version: 4,
     protocol_id: "HACC-LC4-DEV-v1",
     purpose: "six_public_development_episodes_only",
     execution_id: input.prepare.execution_id,
@@ -549,7 +608,18 @@ function authorizationBodyWithoutGenesis(input: Readonly<{
     runtime_config_sha256: input.roots.runtime_config_sha256,
     asr_evaluator_build_sha256: input.roots.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.roots.asr_evaluator_toolchain_sha256,
+    asr_contract: input.roots.asr_contract,
+    asr_contract_sha256: input.roots.asr_contract_sha256,
+    asr_runner_trust: input.roots.asr_runner_trust,
     provider_profile_manifest_sha256: input.prepare.provider_profile_manifest_sha256,
+    qualification_transport_scope_sha256: input.prepare.qualification_transport_scope_sha256,
+    qualification_claim_boundary: input.prepare.qualification_claim_boundary,
+    xai_finite_manual_gate_d_receipt_sha256:
+      input.prepare.xai_finite_manual_gate_d.receipt_sha256,
+    xai_finite_manual_gate_d_plan_authority_trust_root_sha256:
+      input.prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
+    xai_finite_manual_gate_d_transport_profile_sha256:
+      input.prepare.xai_finite_manual_gate_d.transport_profile_sha256,
     audio_delivery_profile_sha256: input.prepare.audio_delivery_profile_sha256,
     audio_packetizer_contract_sha256: input.prepare.audio_packetizer_contract_sha256,
     audio_execution_contract_sha256: input.prepare.audio_execution_contract_sha256,
@@ -668,17 +738,34 @@ export async function runLc4DevelopmentOperatorCli(
       exact(parsed, withRuntimeFlags(dependencies, [
         "--repository-root", "--audio-root", "--qualification-root", "--evidence-root",
         "--qualification-trust-root-sha256", "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
+        "--xai-gate-d-receipt", "--xai-gate-d-trust-root",
       ]));
       const reasons: string[] = [];
       let source: Lc4QualificationGitSource | null = null;
       let audio: Awaited<ReturnType<typeof loadAudio>> | null = null;
       let qualification: Lc4DevRetainedQualificationReceipt | null = null;
+      let xaiFiniteManualGateD: Lc4XaiFiniteManualGateDReceipt | null = null;
       let credentials: Readonly<Record<LiveStsProvider, string>> | null = null;
       let runtime: Lc4DevOperatorRuntime | null = null;
       let signer: Lc4DevOperatorSigner | null = null;
       try { source = await dependencies.inspect_source(parsed["--repository-root"]!); } catch { reasons.push("repository_not_clean_or_unverifiable"); }
       try { audio = await loadAudio(parsed["--audio-root"]!); } catch { reasons.push("audio_manifest_or_cas_not_verified"); }
       try { qualification = await loadLc4DevRetainedQualification(parsed["--qualification-root"]!, parsed["--qualification-trust-root-sha256"]!, io.now()); } catch { reasons.push("retained_qualification_not_verified"); }
+      if (source) {
+        try {
+          xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
+            receipt_path: parsed["--xai-gate-d-receipt"]!,
+            plan_trust_root_sha256:
+              parsed["--xai-gate-d-trust-root"]!,
+            expected_source_commit: source.source_commit,
+            expected_source_tree_sha256: source.source_tree_sha256,
+            expected_provider_profile_manifest_sha256:
+              LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+          });
+        } catch {
+          reasons.push("xai_finite_manual_gate_d_not_verified");
+        }
+      }
       try { credentials = await loadLc4DevExplicitCredentials({ provider_env_file: parsed["--provider-env-file"]!, repository_env_file: parsed["--repo-env-file"]! }); } catch { reasons.push("explicit_provider_credentials_not_verified"); }
       try { runtime = (await runtimeFromFlags(parsed, dependencies)) ?? null; } catch { reasons.push("default_runtime_dependencies_not_verified"); }
       try { signer = await loadSigner(parsed["--authority-private-key-source"]!); } catch { reasons.push("authority_signing_key_not_verified"); }
@@ -735,6 +822,8 @@ export async function runLc4DevelopmentOperatorCli(
         hard_ceiling_micro_usd: LC4_DEV_LIVE_HARD_CEILING_MICRO_USD,
         audio_verified: audio !== null,
         qualification_verified: qualification !== null,
+        xai_finite_manual_transport_qualification:
+          xaiFiniteManualGateD === null ? "not_verified" : "verified",
         credentials_verified_without_output: credentials !== null,
         source_verified_clean: source !== null,
         runtime_injected: runtimeRootsVerified,
@@ -746,7 +835,11 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "prepare") {
-      exact(parsed, ["--repository-root", "--audio-root", "--evidence-root", "--execution-id", "--maximum-micro-usd"]);
+      exact(parsed, [
+        "--repository-root", "--audio-root", "--evidence-root", "--execution-id",
+        "--maximum-micro-usd", "--xai-gate-d-receipt",
+        "--xai-gate-d-trust-root",
+      ]);
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
       assertOutside(evidenceRoot, repositoryRoot);
@@ -754,6 +847,15 @@ export async function runLc4DevelopmentOperatorCli(
       const maximum = Number(parsed["--maximum-micro-usd"]!);
       if (!Number.isSafeInteger(maximum) || maximum <= 0 || maximum > LC4_DEV_LIVE_HARD_CEILING_MICRO_USD) throw new Error("LC4-DEV maximum must be an integer from 1 through 15000000 micro-USD");
       const [source, audio] = await Promise.all([dependencies.inspect_source(repositoryRoot), loadAudio(parsed["--audio-root"]!)]);
+      const xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
+        receipt_path: parsed["--xai-gate-d-receipt"]!,
+        plan_trust_root_sha256:
+          parsed["--xai-gate-d-trust-root"]!,
+        expected_source_commit: source.source_commit,
+        expected_source_tree_sha256: source.source_tree_sha256,
+        expected_provider_profile_manifest_sha256:
+          LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      });
       const now = io.now().toISOString();
       const prepare = createLc4DevLivePrepareArtifact({
         execution_id: parsed["--execution-id"]!,
@@ -763,6 +865,13 @@ export async function runLc4DevelopmentOperatorCli(
         audio_manifest_sha256: audio.manifest.manifest_sha256,
         audio_bindings: audio.manifest.caller_audio_bindings,
         maximum_total_micro_usd: maximum,
+        xai_finite_manual_gate_d: {
+          receipt_sha256: xaiFiniteManualGateD.receipt_sha256,
+          plan_authority_trust_root_sha256:
+            xaiFiniteManualGateD.plan_authority_trust_root_sha256,
+          transport_profile_sha256:
+            xaiFiniteManualGateD.transport_profile_sha256,
+        },
       });
       const intentBody = Object.freeze({
         schema_version: 1,
@@ -775,6 +884,8 @@ export async function runLc4DevelopmentOperatorCli(
         repair_manifest_sha256: audio.repair_manifest.repair_manifest_sha256,
         maximum_total_micro_usd: prepare.maximum_total_micro_usd,
         retry_policy: prepare.retry_policy,
+        xai_finite_manual_gate_d_receipt_sha256:
+          xaiFiniteManualGateD.receipt_sha256,
         created_at: now,
       });
       const intent = Object.freeze({ ...intentBody, intent_sha256: sha256Hex(`${OPERATOR_INTENT_DOMAIN}${canonicalJson(intentBody)}`) });
@@ -788,7 +899,13 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "preflight") {
-      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--qualification-trust-root-sha256", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source", "--expires-minutes"]));
+      exact(parsed, withRuntimeFlags(dependencies, [
+        "--repository-root", "--audio-root", "--qualification-root",
+        "--qualification-trust-root-sha256", "--evidence-root",
+        "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
+        "--expires-minutes", "--xai-gate-d-receipt",
+        "--xai-gate-d-trust-root",
+      ]));
       const runtime = await runtimeFromFlags(parsed, dependencies);
       if (!runtime) throw new Error("LC4-DEV preflight requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
@@ -808,7 +925,20 @@ export async function runLc4DevelopmentOperatorCli(
         loadSigner(parsed["--authority-private-key-source"]!),
       ]);
       assertLc4DevLivePrepareArtifact(prepare);
+      const xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
+        receipt_path: parsed["--xai-gate-d-receipt"]!,
+        plan_trust_root_sha256:
+          parsed["--xai-gate-d-trust-root"]!,
+        expected_source_commit: source.source_commit,
+        expected_source_tree_sha256: source.source_tree_sha256,
+        expected_provider_profile_manifest_sha256:
+          LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      });
       if (prepare.source_commit !== source.source_commit || prepare.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV prepare differs from the current clean source");
+      if (xaiFiniteManualGateD.receipt_sha256
+        !== prepare.xai_finite_manual_gate_d.receipt_sha256) {
+        throw new Error("LC4-DEV xAI finite-manual Gate D differs from prepare");
+      }
       if (qualification.source_commit !== source.source_commit || qualification.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV retained qualification is stale for the current clean source");
       if (qualificationCredentialSetSha256(credentials) !== qualification.credential_set_sha256) throw new Error("LC4-DEV retained qualification used different credential identities");
       if (audio.manifest.manifest_sha256 !== prepare.audio_manifest_sha256) throw new Error("LC4-DEV audio differs from prepare");
@@ -840,12 +970,16 @@ export async function runLc4DevelopmentOperatorCli(
         checked_at: checkedAt.toISOString(),
         qualification_gate_sha256: qualification.retained_artifact_sha256,
         qualification,
+        xai_finite_manual_gate_d: xaiFiniteManualGateD,
         credential_identity_set_sha256: credentialIdentity,
         control_plane_manifest_sha256: roots.control_plane_manifest_sha256,
         listener_evidence_manifest_sha256: roots.listener_evidence_manifest_sha256,
         runtime_config_sha256: roots.runtime_config_sha256,
         asr_evaluator_build_sha256: roots.asr_evaluator_build_sha256,
         asr_evaluator_toolchain_sha256: roots.asr_evaluator_toolchain_sha256,
+        asr_contract: roots.asr_contract,
+        asr_contract_sha256: roots.asr_contract_sha256,
+        asr_runner_trust: roots.asr_runner_trust,
         immutable_ledger_genesis_sha256: ledgerGenesisSha256,
         audio_manifest_sha256: audio.manifest.manifest_sha256,
         authorization: finalAuthorization,
@@ -860,7 +994,13 @@ export async function runLc4DevelopmentOperatorCli(
     }
 
     if (command === "run") {
-      exact(parsed, withRuntimeFlags(dependencies, ["--repository-root", "--audio-root", "--qualification-root", "--qualification-trust-root-sha256", "--evidence-root", "--provider-env-file", "--repo-env-file", "--authority-private-key-source"]));
+      exact(parsed, withRuntimeFlags(dependencies, [
+        "--repository-root", "--audio-root", "--qualification-root",
+        "--qualification-trust-root-sha256", "--evidence-root",
+        "--provider-env-file", "--repo-env-file", "--authority-private-key-source",
+        "--xai-gate-d-receipt",
+        "--xai-gate-d-trust-root",
+      ]));
       const runtime = await runtimeFromFlags(parsed, dependencies);
       if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
@@ -883,9 +1023,24 @@ export async function runLc4DevelopmentOperatorCli(
         loadSigner(parsed["--authority-private-key-source"]!),
       ]);
       assertLc4DevLivePrepareArtifact(prepare);
+      const xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
+        receipt_path: parsed["--xai-gate-d-receipt"]!,
+        plan_trust_root_sha256:
+          parsed["--xai-gate-d-trust-root"]!,
+        expected_source_commit: source.source_commit,
+        expected_source_tree_sha256: source.source_tree_sha256,
+        expected_provider_profile_manifest_sha256:
+          LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      });
       assertLc4DevLivePreflightArtifact(preflight, prepare, io.now());
       if (source.source_commit !== prepare.source_commit || source.source_tree_sha256 !== prepare.source_tree_sha256) throw new Error("LC4-DEV run source differs from prepare");
       if (qualification.receipt_sha256 !== preflight.qualification.receipt_sha256) throw new Error("LC4-DEV run qualification differs from preflight");
+      if (xaiFiniteManualGateD.receipt_sha256
+        !== preflight.xai_finite_manual_gate_d.receipt_sha256
+        || xaiFiniteManualGateD.receipt_sha256
+          !== prepare.xai_finite_manual_gate_d.receipt_sha256) {
+        throw new Error("LC4-DEV run xAI finite-manual Gate D differs from preflight");
+      }
       if (qualification.source_commit !== source.source_commit || qualification.source_tree_sha256 !== source.source_tree_sha256) throw new Error("LC4-DEV run qualification is stale");
       if (qualificationCredentialSetSha256(credentials) !== qualification.credential_set_sha256 || lc4DevCredentialIdentitySetSha256(credentials) !== preflight.credential_identity_set_sha256) throw new Error("LC4-DEV run credentials differ from qualification or preflight");
       if (signer.public_key_fingerprint_sha256 !== preflight.authority_trust_root_sha256) throw new Error("LC4-DEV run signer differs from preflight trust root");

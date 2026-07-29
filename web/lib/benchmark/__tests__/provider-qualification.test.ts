@@ -13,6 +13,8 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   createProductionRealtimeClient,
   productionOpenAiCompatibleSessionUpdate,
+  productionSessionPayloadParitySha256,
+  xaiFiniteManualTransportParitySha256,
 } from "../production-realtime-provider";
 import type {
   NormalizedRealtimeClient,
@@ -195,6 +197,39 @@ describe("production xAI session payload", () => {
     const audio = session.audio as Record<string, unknown>;
     expect(audio.input as Record<string, unknown>).not.toHaveProperty("transcription");
     expect(session.turn_detection as Record<string, unknown>).not.toHaveProperty("idle_timeout_ms");
+  });
+
+  it("uses one explicit manual turn boundary for finite prerecorded LC4 clips", () => {
+    const config = configuration("xai", "grok-voice-think-fast-1.0", true);
+    const update = productionOpenAiCompatibleSessionUpdate(
+      "xai",
+      config,
+      "manual_commit",
+    );
+    expect(update).toMatchObject({
+      type: "session.update",
+      session: {
+        voice: "ara",
+        turn_detection: { type: null },
+        audio: { input: {}, output: {} },
+      },
+    });
+    expect(productionSessionPayloadParitySha256(
+      "xai",
+      config,
+      "manual_commit",
+    )).not.toBe(productionSessionPayloadParitySha256("xai", config, "provider_native_server_vad"));
+    expect(xaiFiniteManualTransportParitySha256({
+      ...config,
+      instructions: "native context",
+    })).toBe(xaiFiniteManualTransportParitySha256({
+      ...config,
+      instructions: "HACC state-derived context",
+    }));
+    expect(xaiFiniteManualTransportParitySha256({
+      ...config,
+      providerTools: Object.freeze([]),
+    })).not.toBe(xaiFiniteManualTransportParitySha256(config));
   });
 });
 
@@ -586,7 +621,7 @@ describe("provider qualification", () => {
     });
 
     const independentlyWrongSessionAggregate = await qualify(
-      "xai-server-vad-derived-field-aggregate",
+      "qualification-server-vad-derived-field-aggregate",
       withPaths(
         ["turn_detection.type"],
         ["session.this_is_not_an_independent_acknowledgement_gate"],
@@ -722,7 +757,7 @@ describe("provider qualification", () => {
     });
     const artifact = await qualifyProviders({
       ...prepared.input,
-      qualificationId: "xai-created-voice-default-update-lossy",
+      qualificationId: "qualification-created-voice-default-update-lossy",
       createClient: (target) => new QualificationClient(
         target,
         null,
@@ -791,7 +826,7 @@ describe("provider qualification", () => {
     });
     const artifact = await qualifyProviders({
       ...prepared.input,
-      qualificationId: "xai-exact-vad-initial-voice-tool-alias",
+      qualificationId: "qualification-exact-vad-initial-voice-tool-alias",
       targets: targets(true),
       createClient: (target) => new QualificationClient(
         target,

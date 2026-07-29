@@ -1,10 +1,10 @@
 // Author: Harsha Gundala
-// onboarding/scrape — company research from the login email domain via Grok live search.
+// onboarding/scrape — company research through configured server inference.
 
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
-import { researchJSON } from "@/lib/xai";
+import { createServerInferenceRuntime } from "@/lib/server-inference";
 import { log } from "@/lib/log";
 import { allowsLocalDevelopmentFundedAi } from "@/lib/deployment-funded-ai";
 import { PRIVATE_NO_STORE_HEADERS } from "@/lib/private-json-request";
@@ -40,12 +40,22 @@ export async function GET() {
   }
 
   try {
-    const scrape = await researchJSON<Scrape>(
+    const inference = createServerInferenceRuntime({
+      purpose: "onboarding",
+      workload: "research",
+      budget: {
+        maxProviderRequests: 1,
+        maxReservedOutputTokens: 1400,
+        maxInputBytesPerRequest: 64 * 1024,
+        requestTimeoutMs: 45_000,
+      },
+    });
+    const scrape = await inference.researchJSON<Scrape>(
       `Research the company behind the domain "${session.orgDomain}" on the live web. Reply JSON only:
 {"company":"<name>","description":"<1 sentence>","industry":"<short>","suggestions":[{"label":"<3-5 word bot idea>","purpose":"support|feedback|outbound|scheduling|sales","prompt":"<2-3 sentence bot description personalized to this company, written as if the user typed it>"}]}
-Give exactly 4 suggestions covering distinct purposes, grounded in what the company actually does.`,
+      Give exactly 4 suggestions covering distinct purposes, grounded in what the company actually does.`,
       session.orgDomain,
-      1400
+      { maxOutputTokens: 1400 },
     );
     await q("UPDATE orgs SET scrape = $2, name = COALESCE($3, name) WHERE id = $1", [
       session.orgId, JSON.stringify(scrape), scrape.company ?? null,

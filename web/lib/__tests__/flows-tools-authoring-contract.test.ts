@@ -5,6 +5,7 @@ import {
   FLOW_V2_AUTHORING_SCHEMA,
   updateFlowTool,
 } from "../agent/tools/flows-tools";
+import { updateAgent } from "../agent/tools/agents";
 import { ActionReconciliationSpecSchema } from "../action-reconciliation";
 import { validateAgentFlow } from "../flow";
 
@@ -29,14 +30,17 @@ function compileAuthoringSchema() {
 }
 
 describe("Flow v2 builder authoring contract", () => {
-  it("publishes the same explicit, closed Flow v2 schema for create and update", () => {
+  it("publishes the same explicit, closed Flow v2 schema for inbound and outbound authoring", () => {
     const createParameters = createFlowTool.parameters as SchemaObject;
     const updateParameters = updateFlowTool.parameters as SchemaObject;
+    const inboundParameters = updateAgent.parameters as SchemaObject;
 
     expect(createParameters.additionalProperties).toBe(false);
     expect(updateParameters.additionalProperties).toBe(false);
+    expect(inboundParameters.additionalProperties).toBe(false);
     expect(createParameters.properties?.flow).toBe(FLOW_V2_AUTHORING_SCHEMA);
     expect(updateParameters.properties?.flow).toBe(FLOW_V2_AUTHORING_SCHEMA);
+    expect(inboundParameters.properties?.flow).toBe(FLOW_V2_AUTHORING_SCHEMA);
   });
 
   it("accepts receipt bindings, host-bound arguments, enforced conditions, and eight nested levels", () => {

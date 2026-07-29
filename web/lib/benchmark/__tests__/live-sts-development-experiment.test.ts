@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LIVE_STS_TURNS_PER_SESSION,
@@ -10,6 +12,17 @@ import {
 } from "../live-sts-development-experiment";
 
 describe("live STS development experiment", () => {
+  it("never probes a developer-specific credential checkout", async () => {
+    const source = await readFile(
+      resolve(process.cwd(), "scripts/live-sts-development-experiment.ts"),
+      "utf8",
+    );
+    expect(source).not.toContain("/Users/");
+    expect(source).not.toContain("gpu-hub-harness");
+    expect(source).toContain("BENCHMARK_PROVIDER_ENV_FILE");
+    expect(source).toContain("gpuHubRoot: null");
+  });
+
   it("freezes 16 matched pairs and 1,024 paired speech turns before results", () => {
     const pairs = createLiveStsPairs();
     const cells = createLiveStsCells();

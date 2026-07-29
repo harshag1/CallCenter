@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { CAPABILITY_GATEWAY_FUNCTION_NAME } from "./capability-gateway";
 import {
   buildGeminiBrowserFunctionDeclarations,
@@ -7,7 +8,11 @@ import {
   isGeminiSetupCompleteMessage,
 } from "./gemini-websocket";
 import type { RealtimeTransportStart } from "./types";
-import { OutboundSpeechGate, createOutboundSpeechGatePolicy } from "@/lib/realtime/outbound-speech-gate";
+import {
+  OutboundSpeechGate,
+  createOutboundSpeechGatePolicy,
+  independentSpeechAsrReceiptDigestMessage,
+} from "@/lib/realtime/outbound-speech-gate";
 
 const ORIGIN = "https://voice.example.test";
 const TOKEN = `scope.${"a".repeat(96)}`;
@@ -479,16 +484,37 @@ describe("Gemini browser capability gateway transport", () => {
     test.args.outboundSpeechGate = {
       gate: new OutboundSpeechGate({
         policy: createOutboundSpeechGatePolicy({ evidencePolicy: "independent_asr_required" }),
-        independentAsr: vi.fn(async (input) => ({
-          text: "The safe answer",
-          audioSha256: input.audioSha256,
-          audioBytes: input.audioBytes,
-          sampleRateHz: input.audio.sampleRateHz,
-          channels: 1 as const,
-          complete: true as const,
-          engine: "test-independent-asr",
-          receiptSha256: "d".repeat(64),
-        })),
+        receiptContext: {
+          organizationId: "00000000-0000-4000-8000-0000000000a1",
+          callId: "00000000-0000-4000-8000-0000000000c1",
+        },
+        independentAsr: vi.fn(async (input) => {
+          const receipt = {
+            schemaVersion: 2 as const,
+            authorityId: "00000000-0000-4000-8000-0000000000d1",
+            organizationId: input.organizationId,
+            callId: input.callId,
+            provider: input.provider,
+            responseId: input.responseId,
+            text: "The safe answer",
+            transcriptSha256: createHash("sha256").update("The safe answer").digest("hex"),
+            audioSha256: input.audioSha256,
+            audioBytes: input.audioBytes,
+            sampleRateHz: input.audio.sampleRateHz,
+            channels: 1 as const,
+            complete: true as const,
+            engine: "test-independent-asr",
+            model: "test-model",
+            decision: "transcribed" as const,
+            receiptHmacSha256: "d".repeat(64),
+          };
+          return {
+            ...receipt,
+            receiptSha256: createHash("sha256")
+              .update(independentSpeechAsrReceiptDigestMessage(receipt))
+              .digest("hex"),
+          };
+        }),
       }),
       onEvidence,
     };

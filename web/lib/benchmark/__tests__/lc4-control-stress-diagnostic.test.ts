@@ -347,7 +347,7 @@ async function fixture() {
       reservation_binding_sha256: "d".repeat(64),
       initial_ledger_head_sha256: "e".repeat(64),
       maximum_micro_usd: 2_000_000,
-      maximum_paid_sessions: 5,
+      maximum_paid_sessions: 4,
     },
     sources,
     source_ledger: ledger,
@@ -448,15 +448,20 @@ describe("LC4 provider-control stress diagnostic", () => {
       "compact_semantic_baseline", "meaningful_2k", "meaningful_8k", "actual_current_max",
     ]);
     expect(native.every((cell) => cell.request_artifact !== null)).toBe(true);
-    expect(native.filter((cell) => cell.disposition === "scheduled")).toHaveLength(4);
+    expect(native.filter((cell) => cell.disposition === "scheduled")).toHaveLength(3);
     expect(new Set(native.map((cell) => cell.current_checkpoint_control_receipt_sha256))).toHaveLength(1);
     expect(native.every((cell) => cell.source_control_receipt_sha256s.at(-1)
       === cell.current_checkpoint_control_receipt_sha256)).toBe(true);
     const lengths = native.map((cell) => cell.request_artifact!.byte_length);
-    expect(lengths[0]).toBeLessThan(lengths[1]!);
+    expect(lengths[0]).toBe(lengths[1]);
     expect(lengths[1]).toBeGreaterThanOrEqual(2 * 1024);
     expect(lengths[2]).toBeGreaterThanOrEqual(8 * 1024);
     expect(lengths[3]).toBeGreaterThan(lengths[2]!);
+    expect(native[1]).toMatchObject({
+      disposition: "not_applicable",
+      not_applicable_reason: "duplicate_request",
+      alias_of_cell_id: native[0]!.cell_id,
+    });
     const twoK = Buffer.from(await cas.get(native[1]!.request_artifact!.artifact_sha256)).toString("utf8");
     expect(twoK).toContain("retained public fact");
     expect(twoK).not.toMatch(/padding|lorem|dummy/iu);
@@ -513,7 +518,7 @@ describe("LC4 provider-control stress diagnostic", () => {
       source_tree_oid: plan.source_tree_oid,
       source_tree_sha256: plan.source_tree_sha256,
       probe: plan.probe,
-      budget: { ...plan.budget, maximum_paid_sessions: 6 },
+      budget: { ...plan.budget, maximum_paid_sessions: 5 },
       sources,
       source_ledger: ledger,
       cas,

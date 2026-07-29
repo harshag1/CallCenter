@@ -1,19 +1,26 @@
 import "server-only";
 
 import type {
+  BrowserProviderFundingAuthority,
   BrowserRealtimeConnection,
   RealtimeProviderAdapter,
+  VoiceSessionSpec,
 } from "../types";
+import { browserProviderRootFromFundingAuthority } from "../browser-funding-authority";
 import { buildGeminiSetup } from "./gemini-protocol";
 
-function apiKey() {
-  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required for the Gemini Live provider");
-  return process.env.GEMINI_API_KEY;
-}
-
-async function mintToken(): Promise<string> {
+async function mintToken(
+  fundingAuthority: BrowserProviderFundingAuthority<"gemini">,
+): Promise<string> {
   const { GoogleGenAI } = await import("@google/genai");
-  const client = new GoogleGenAI({ apiKey: apiKey(), httpOptions: { apiVersion: "v1alpha" } });
+  const client = new GoogleGenAI({
+    apiKey: browserProviderRootFromFundingAuthority(
+      fundingAuthority,
+      "gemini",
+      "GEMINI_API_KEY",
+    ),
+    httpOptions: { apiVersion: "v1alpha" },
+  });
   const token = await client.authTokens.create({
     config: {
       uses: 1,
@@ -26,7 +33,7 @@ async function mintToken(): Promise<string> {
   return token.name;
 }
 
-export const geminiAdapter: RealtimeProviderAdapter = {
+export const geminiAdapter = {
   id: "gemini",
   label: "Gemini Live API",
   defaultModel: "gemini-3.1-flash-live-preview",
@@ -48,9 +55,12 @@ export const geminiAdapter: RealtimeProviderAdapter = {
     ],
   },
   buildSessionUpdate: buildGeminiSetup,
-  async createBrowserConnection(spec): Promise<BrowserRealtimeConnection> {
+  async createBrowserConnection(
+    spec: VoiceSessionSpec & { provider: "gemini" },
+    fundingAuthority: BrowserProviderFundingAuthority<"gemini">,
+  ): Promise<BrowserRealtimeConnection> {
     if (!spec.toolProxyRotation) throw new Error("browser tool capability rotation is required");
-    const token = await mintToken();
+    const token = await mintToken(fundingAuthority);
     return {
       provider: "gemini",
       transport: "websocket",
@@ -68,4 +78,4 @@ export const geminiAdapter: RealtimeProviderAdapter = {
   async createServerConnection(): Promise<never> {
     throw new Error("Gemini telephony needs μ-law↔PCM transcoding; use browser calls or add a transcoding bridge adapter");
   },
-};
+} satisfies RealtimeProviderAdapter;

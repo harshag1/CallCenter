@@ -64,6 +64,14 @@ describe("realtime context packet", () => {
     expect(packet.serialized).not.toContain('"OAK"');
     expect(packet.value.omittedRecentTurnCount).toBeGreaterThan(0);
     expect(packet.value.recentAudibleTurns.at(-1)?.turnId).toBe("turn-39");
+    expect(packet.value.recentAudibleTurns.at(-1)?.textTrust).toBe("untrusted_advisory");
+    expect(packet.value.trustBoundary).toEqual({
+      envelope: "host_authored",
+      authorityAndDurableControlState: "host_authoritative",
+      workerInputAndResultContent: "untrusted_advisory",
+      modelAdvisories: "untrusted_advisory",
+      recentAudibleTurnText: "untrusted_advisory",
+    });
   });
 
   it("binds the packet to the exact conversation and capability heads", () => {

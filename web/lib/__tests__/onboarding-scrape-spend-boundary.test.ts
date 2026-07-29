@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth", () => ({ getSession: mocks.getSession }));
 vi.mock("@/lib/db", () => ({ q: mocks.q, qOne: mocks.qOne }));
-vi.mock("@/lib/xai", () => ({ researchJSON: mocks.researchJSON }));
+vi.mock("@/lib/server-inference", () => ({
+  createServerInferenceRuntime: () => ({
+    researchJSON: mocks.researchJSON,
+  }),
+}));
 vi.mock("@/lib/deployment-funded-ai", () => ({
   allowsLocalDevelopmentFundedAi: mocks.allowsLocalDevelopmentFundedAi,
 }));

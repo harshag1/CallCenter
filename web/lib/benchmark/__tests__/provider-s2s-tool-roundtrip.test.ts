@@ -143,7 +143,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly omitContinuationRequestWire: boolean;
   readonly emitOpenAiMultiFrameCall: boolean;
   readonly geminiProviderNativeWireShape: boolean;
-  readonly serverVadStopAfterSuffixChunks: number;
+  readonly serverVadStopAfterSuffixChunks: number | null;
   readonly serverVadPostStopAppendError: "phase_guard" | "unrelated";
   appendedBytes = 0;
   speechStartEmitted = false;
@@ -173,7 +173,7 @@ class RoundtripClient implements NormalizedRealtimeClient {
     omitContinuationRequestWire?: boolean;
     emitOpenAiMultiFrameCall?: boolean;
     geminiProviderNativeWireShape?: boolean;
-    serverVadStopAfterSuffixChunks?: number;
+    serverVadStopAfterSuffixChunks?: number | null;
     serverVadPostStopAppendError?: "phase_guard" | "unrelated";
   }> = {}) {
     this.provider = provider;
@@ -202,8 +202,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
     this.omitContinuationRequestWire = options.omitContinuationRequestWire === true;
     this.emitOpenAiMultiFrameCall = options.emitOpenAiMultiFrameCall === true;
     this.geminiProviderNativeWireShape = options.geminiProviderNativeWireShape === true;
-    this.serverVadStopAfterSuffixChunks = options.serverVadStopAfterSuffixChunks
-      ?? LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count;
+    this.serverVadStopAfterSuffixChunks = options.serverVadStopAfterSuffixChunks === undefined
+      ? LC4_XAI_SERVER_VAD_SILENCE_TAIL.chunk_count
+      : options.serverVadStopAfterSuffixChunks;
     this.serverVadPostStopAppendError = options.serverVadPostStopAppendError ?? "phase_guard";
   }
 
@@ -685,7 +686,8 @@ class RoundtripClient implements NormalizedRealtimeClient {
         },
       });
     }
-    if (this.appendedBytes !== 24_000 * 1.2 * 2
+    if (this.serverVadStopAfterSuffixChunks === null
+      || this.appendedBytes !== 24_000 * 1.2 * 2
       + this.serverVadStopAfterSuffixChunks * 960) return;
     this.serverVadStopped = true;
     if (this.emitEarlyResponseOnCommit) {
@@ -939,6 +941,11 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         post_tool_terminal_observed: true,
         post_tool_usage_observed: true,
         tool_schema_sha256: LC4_S2S_TOOL_SCHEMA_SHA256,
+        turn_boundary_mode: provider === "xai"
+          ? "provider_native_server_vad"
+          : provider === "gemini"
+            ? "provider_activity_markers"
+            : "manual_commit",
       });
       expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
       expect(client.appendedBytes).toBe(
@@ -1057,6 +1064,32 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
     });
     expect(replay.valid).toBe(false);
     expect(replay.errors).toContain("summary_input_audio_suffix_completion_invalid");
+  });
+
+  it("fails xAI qualification at the 100-frame delimiter cap without entering the response timer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "xai" });
+    const client = new RoundtripClient("xai", { serverVadStopAfterSuffixChunks: null });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "xai", model: "xai-model", client, audio,
+      audioObject: artifact.provider_renditions.xai,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      timeoutMs: 60_000,
+    });
+
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "server_vad_delimiter_exhausted",
+      response_generation_requested: false,
+      provider_auto_response_observed: false,
+    });
+    expect(client.appendedBytes).toBe(
+      audio.data.byteLength + LC4_XAI_SERVER_VAD_SILENCE_TAIL.byte_length,
+    );
+    expect(execution.operation_order).not.toContain("response_generation_requested");
   });
 
   for (const diagnostic of [

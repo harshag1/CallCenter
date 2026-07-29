@@ -4,8 +4,8 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "e1e6029aa0b88535f8512c81496fdd3b5a7d2a99b42b5c134b7b9b5c08faf04d",
-    "source_manifest_file_count": 281,
+    "source_manifest_sha256": "980276e3c8f426e83a859e2d90bbdba15401acecd32bb6615bf66a2b8ce1a876",
+    "source_manifest_file_count": 326,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
       "web/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs}",
@@ -64,9 +64,17 @@
       "gate0_disposition": "must_run"
     },
     {
+      "path": "web/lib/__tests__/call-operations-store.integration.test.ts",
+      "content_sha256": "035b7f40054d5a21a3367ed8fb1c5c8f1f76f6760149c644479531818aac319b",
+      "test_count": 9,
+      "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
       "path": "web/lib/__tests__/conversation-store.integration.test.ts",
-      "content_sha256": "b53367b275c8b0d7b3126cfe92045d0d82f5f6dbb9fc2196a58f04ad2251dab3",
-      "test_count": 2,
+      "content_sha256": "00249a01b8e1967031f22b15e677077da7db4bca6a624f33158b6e42fb6a9ea1",
+      "test_count": 5,
       "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
       "reason_category": "missing_postgresql_integration_environment",
       "gate0_disposition": "must_run"
@@ -112,6 +120,30 @@
       "gate0_disposition": "must_run"
     },
     {
+      "path": "web/lib/__tests__/governed-launch-task-recovery.integration.test.ts",
+      "content_sha256": "3acd1c941c2606ec46b69636b7d706fbe4c6a807a75212e898afd4817c8a4599",
+      "test_count": 2,
+      "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/governed-worker-integrity.integration.test.ts",
+      "content_sha256": "6e956b2b07c275592fadc315eee7cf74dd22f2a37fe5f39d0f4b31affd41ba5e",
+      "test_count": 4,
+      "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/live-conversation-worker-projection.integration.test.ts",
+      "content_sha256": "da118b4ad6f6d304030ae4abf9223d398a0e34d9ecf93f6b81f25fad5bde0a88",
+      "test_count": 2,
+      "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
       "path": "web/lib/__tests__/mcp-invocation-store.integration.test.ts",
       "content_sha256": "279e3fb3af09fd2ef9cd01494d2d673b863e9e91c9bc4b377f47d7134e5257f4",
       "test_count": 7,
@@ -121,10 +153,18 @@
     },
     {
       "path": "web/lib/__tests__/mcp-route-replay.integration.test.ts",
-      "content_sha256": "661dbc277fcfa1855d646a83639b21a3d56de439239f16eca04d0e8adfef2499",
+      "content_sha256": "321ae836916eaa77b1e645afd3205acd51df0b3f0ae103408cedea3b86eb4b00",
       "test_count": 1,
       "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
       "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
+      "path": "web/lib/__tests__/outbound-speech-asr-authority-migration.integration.test.ts",
+      "content_sha256": "a8c2d4bfa6cfac3a977ba244b29cf07b67578e755c22fd86c24ea8638e87ccc1",
+      "test_count": 5,
+      "condition": "SECURITY_MIGRATION_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_admin_integration_environment",
       "gate0_disposition": "must_run"
     },
     {
@@ -176,8 +216,16 @@
       "gate0_disposition": "must_run"
     },
     {
+      "path": "web/lib/__tests__/voice-session-durable-route.integration.test.ts",
+      "content_sha256": "ffb6211cec8334d6fee1542083dcdf649af42601181287e9d5a74e042298c7f7",
+      "test_count": 1,
+      "condition": "FLOW_INTEGRATION_DATABASE_URL is absent",
+      "reason_category": "missing_postgresql_integration_environment",
+      "gate0_disposition": "must_run"
+    },
+    {
       "path": "web/lib/benchmark/__tests__/lc4-development-default-runtime.integration.test.ts",
-      "content_sha256": "f2dad991834ee9ce61593819f4bf5e445b5f408d20e49138af26c3de9962f1e0",
+      "content_sha256": "78758c99230fe2f97ddb1c833761c3e3544e09766a86b2af7c208a2a053cdcbb",
       "test_count": 1,
       "condition": "LC4_REAL_ASR_INTEGRATION is absent",
       "reason_category": "missing_local_asr_integration_environment",
@@ -185,17 +233,17 @@
     },
     {
       "path": "web/lib/benchmark/__tests__/lc4-development-whisper-runtime.integration.test.ts",
-      "content_sha256": "a5462064c007eaa60cce18a27965efd109d7d9bcff469fe72b6af5134ac0bad7",
+      "content_sha256": "68ea3bf304499393ec90bbf790f87b377d45ebc986153b4008f481cd017d8248",
       "test_count": 2,
       "condition": "LC4_REAL_ASR_INTEGRATION is absent",
       "reason_category": "missing_local_asr_integration_environment",
       "gate0_disposition": "environment_qualified_release_receipt"
     }
   ],
-  "total_skipped_suites_when_unconfigured": 21,
-  "total_skipped_tests_when_unconfigured": 59,
-  "public_ci_required_suites": 19,
-  "public_ci_required_tests": 56,
+  "total_skipped_suites_when_unconfigured": 27,
+  "total_skipped_tests_when_unconfigured": 85,
+  "public_ci_required_suites": 25,
+  "public_ci_required_tests": 82,
   "environment_qualified_suites": 2,
   "environment_qualified_tests": 3
 }

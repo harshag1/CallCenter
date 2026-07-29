@@ -18,6 +18,7 @@ vi.mock("../log", () => ({
 }));
 
 import { runOperator, type LoopEvent } from "../agent/loop";
+import { OPERATOR_TURN_INFERENCE_LIMITS } from "../agent/operator-turn-inference-authority";
 import {
   operatorActionArgumentsSha256,
   type OperatorActionProposal,
@@ -288,5 +289,92 @@ describe("operator loop human-confirmation boundary", () => {
     );
     expect(String(persistedToolReceipt![1][3])).toContain("funded_action_confirmation_required");
     expect(String(persistedToolReceipt![1][3])).not.toContain("must-not-enter-model-history");
+  });
+
+  it("rejects an oversized tool batch atomically before its first execution", async () => {
+    const execute = vi.fn(async () => ({ output: { ok: true } }));
+    mocks.operatorToolCatalog.mockResolvedValue(catalog([{
+      name: "custom_read",
+      description: "Read a custom source",
+      parameters: { type: "object", properties: {} },
+      execute,
+    }]));
+    const calls = Array.from(
+      { length: OPERATOR_TURN_INFERENCE_LIMITS.maxToolCalls + 1 },
+      (_, index) => ({
+        id: `call-${index}`,
+        name: "custom_read",
+        arguments: "{}",
+      }),
+    );
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
+      type: "tool_calls",
+      calls,
+    }]));
+
+    const events = await collect(runOperator(
+      session,
+      THREAD_ID,
+      "Run too many reads",
+      null,
+      "https://operator.example.test",
+    ));
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
+    expect(events.filter(
+      (event) => event.type === "tool" && event.status === "error",
+    )).toHaveLength(calls.length);
+    expect(events).toContainEqual({
+      type: "notice",
+      text: "This turn reached its tool or time budget. Continue with another message.",
+    });
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("suppresses tool output that settles after the parent turn is cancelled", async () => {
+    const parent = new AbortController();
+    const execute = vi.fn(async () => {
+      parent.abort();
+      return { output: { late_secret: "must-not-enter-model-history" } };
+    });
+    mocks.operatorToolCatalog.mockResolvedValue(catalog([{
+      name: "custom_read",
+      description: "Read a custom source",
+      parameters: { type: "object", properties: {} },
+      execute,
+    }]));
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
+      type: "tool_calls",
+      calls: [{ id: "late-call", name: "custom_read", arguments: "{}" }],
+    }]));
+
+    const events = await collect(runOperator(
+      session,
+      THREAD_ID,
+      "Run then disconnect",
+      null,
+      "https://operator.example.test",
+      null,
+      parent.signal,
+    ));
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
+    expect(events).toContainEqual({
+      type: "tool",
+      name: "custom_read",
+      status: "error",
+    });
+    expect(events).toContainEqual({
+      type: "notice",
+      text: "This turn reached its tool or time budget. Continue with another message.",
+    });
+    expect(JSON.stringify(events)).not.toContain("must-not-enter-model-history");
+    const persisted = mocks.q.mock.calls.find(([, params]) =>
+      Array.isArray(params) && params[2] === "tool"
+    );
+    expect(String(persisted?.[1][3])).toContain("operator_turn_inference_unavailable");
+    expect(String(persisted?.[1][3])).not.toContain("must-not-enter-model-history");
   });
 });

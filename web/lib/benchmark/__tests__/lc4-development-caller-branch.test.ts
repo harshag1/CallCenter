@@ -12,8 +12,10 @@ import {
   assertLc4DevCallerBranchMatrixArtifact,
   createLc4DevCallerBranchAuthority,
   createLc4DevCallerBranchMatrixArtifact,
+  lc4DevCallerBranchSemanticSubjectId,
   lc4DevBranchedOpportunity,
   lc4DevBranchedOpportunitySha256,
+  lc4DevPriorMutationOutcomeForBranchedOpportunity,
   type Lc4DevCallerBranchAudioBinding,
   type Lc4DevCallerBranchDecision,
   type Lc4DevPriorMutationOutcome,
@@ -104,8 +106,47 @@ describe("LC4-DEV signed closed-loop caller branch", () => {
       expect(projected.expected_oracle.permitted_effects).toEqual(
         outcome === "committed_after_error" ? ["read back transcript request state"] : [],
       );
+      expect(lc4DevPriorMutationOutcomeForBranchedOpportunity(
+        opportunity,
+        projected,
+      )).toBe(outcome);
+      expect(lc4DevCallerBranchSemanticSubjectId(outcome)).toBe(
+        `lc4-dev-op-42:${outcome}`,
+      );
     },
   );
+
+  it("rejects a caller-text, event, or oracle splice between branch outcomes", () => {
+    const { authority, opportunity } = fixture();
+    const settled = lc4DevBranchedOpportunity(
+      opportunity,
+      authority.decide({
+        episode_id: "lc4-dev-openai-settled",
+        provider: "openai",
+        opportunity,
+        prior_receipt: prior("settled_success"),
+      }),
+    );
+    const rejected = lc4DevBranchedOpportunity(
+      opportunity,
+      authority.decide({
+        episode_id: "lc4-dev-openai-rejected",
+        provider: "openai",
+        opportunity,
+        prior_receipt: prior("rejected_pre_dispatch"),
+      }),
+    );
+    for (const mutation of [
+      { ...settled, canonical_caller_text: rejected.canonical_caller_text },
+      { ...settled, events: rejected.events },
+      { ...settled, expected_oracle: rejected.expected_oracle },
+    ]) {
+      expect(() => lc4DevPriorMutationOutcomeForBranchedOpportunity(
+        opportunity,
+        mutation,
+      )).toThrow(/does not select exactly one frozen outcome/u);
+    }
+  });
 
   it("uses the original reconciliation source only for committed_after_error", () => {
     const { authority, opportunity } = fixture();

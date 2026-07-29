@@ -83,12 +83,8 @@ function conversationState(): ConversationState {
   };
 }
 
-function flowState(): CallOperationsProjectionInput["flowState"] {
+function flowState(): NonNullable<CallOperationsProjectionInput["flowState"]> {
   return {
-    status: "active",
-    nodeId: "private-node",
-    currentStep: "private-step",
-    completedSteps: [],
     capabilityEpoch: 5,
     revision: 8,
     actionReceipts: [
@@ -177,6 +173,13 @@ function durableWorker(): DurableVoiceWorker {
 function contextPacket() {
   const value = {
     schemaVersion: 1 as const,
+    trustBoundary: {
+      envelope: "host_authored" as const,
+      authorityAndDurableControlState: "host_authoritative" as const,
+      workerInputAndResultContent: "untrusted_advisory" as const,
+      modelAdvisories: "untrusted_advisory" as const,
+      recentAudibleTurnText: "untrusted_advisory" as const,
+    },
     authority: {
       conversationHeadSha256: HASH_A,
       conversationRevision: 11,
@@ -193,6 +196,7 @@ function contextPacket() {
       currentFlowCheckpoint: null,
       openCommitments: [],
       currentGoalWorkers: [],
+      omittedTerminalWorkerCount: 0,
       acceptedWorkerFacts: [],
       recentAdvisoryEpisodes: [],
     },
@@ -533,6 +537,457 @@ describe("projectCallOperations", () => {
       }],
     });
     expect(JSON.stringify(projection)).not.toContain("content must remain private");
+  });
+
+  it("projects active-source freshness, complete summaries, and keyed recovery without raw identities", () => {
+    const projection = projectCallOperations({
+      callId: "private-call",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      callStatus: "active",
+      sourceStaleAfterMs: 60_000,
+      sourceObservations: [
+        { source: "flow", observedAtMs: NOW - 1_000 },
+        { source: "conversation", observedAtMs: NOW - 120_000 },
+        { source: "workers", observedAtMs: null },
+        { source: "policy", observedAtMs: NOW - 2_000 },
+      ],
+      durableWorkers: [durableWorker()],
+      durableWorkerIds: ["worker-secret", "durable-worker-2", "durable-worker-3"],
+      durableWorkerSummary: {
+        total: 3,
+        byStatus: { running: 1, succeeded: 2 },
+        byDeliveryState: { not_settled: 1, awaiting_delivery: 2 },
+      },
+      policyDecisions: [],
+      policySummary: { observations: 4, denials: 1, byDecision: { allow: 3, deny: 1 } },
+      recoveryObservations: [{
+        kind: "worker_reclaimed",
+        subjectId: "private-worker-id",
+        observedAtMs: NOW - 500,
+      }],
+      recoverySummary: {
+        observations: 3,
+        byKind: { action_reconciled: 2, worker_reclaimed: 1 },
+        lastObservedAtMs: NOW - 500,
+      },
+    });
+
+    expect(projection.freshness).toMatchObject({
+      active: true,
+      staleAfterMs: 60_000,
+      maximumAgeMs: 120_000,
+      staleSources: ["conversation"],
+    });
+    expect(projection.freshness.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "flow", ageMs: 1_000, state: "current" }),
+      expect.objectContaining({ source: "conversation", ageMs: 120_000, state: "stale" }),
+      expect.objectContaining({ source: "workers", ageMs: 500, state: "current" }),
+    ]));
+    expect(projection.workers).toMatchObject({
+      total: 3,
+      byStatus: { running: 1, succeeded: 2 },
+    });
+    expect(projection.policy).toMatchObject({
+      observations: 4,
+      denials: 1,
+      byDecision: { allow: 3, deny: 1 },
+    });
+    expect(projection.recovery).toMatchObject({
+      observations: 3,
+      byKind: { action_reconciled: 2, worker_reclaimed: 1 },
+      lastObservedAtMs: NOW - 500,
+      recent: [{ kind: "worker_reclaimed", observedAtMs: NOW - 500 }],
+    });
+    expect(projection.recovery.recent[0].subjectKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(projection.attention).toEqual(expect.arrayContaining([
+      "policy_denial",
+      "stale_operations_source",
+    ]));
+    expect(JSON.stringify(projection)).not.toContain("private-worker-id");
+    expect(JSON.stringify(projection)).not.toContain("private-call");
+  });
+
+  it("forms an exact durable/kernel union when overlap falls outside the 256-item detail window", () => {
+    const durableDetails = Array.from({ length: 256 }, (_, index) => ({
+      ...durableWorker(),
+      id: `durable-detail-${index + 1}`,
+    }));
+    const durableWorkerIds = [
+      "durable-hidden-overlap",
+      ...durableDetails.map(({ id }) => id),
+    ];
+    const state = conversationState();
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      conversationState: {
+        ...state,
+        workers: [
+          {
+            workerId: "durable-hidden-overlap",
+            goalId: "goal-1",
+            purpose: "hidden overlap",
+            policyEpoch: 4,
+            dependencies: [],
+            spawnedSequence: 2,
+            status: "running",
+          },
+          {
+            workerId: "kernel-only-worker",
+            goalId: "goal-1",
+            purpose: "kernel only",
+            policyEpoch: 4,
+            dependencies: [],
+            spawnedSequence: 3,
+            status: "completed",
+          },
+        ],
+      },
+      durableWorkers: durableDetails,
+      durableWorkerIds,
+      durableWorkerSummary: {
+        total: 257,
+        byStatus: { running: 257 },
+        byDeliveryState: { not_settled: 257 },
+      },
+    });
+
+    expect(projection.workers).toMatchObject({
+      total: 258,
+      byStatus: { completed: 1, running: 257 },
+    });
+    expect(projection.workers.items).toHaveLength(256);
+    expect(JSON.stringify(projection)).not.toContain("durable-hidden-overlap");
+    expect(JSON.stringify(projection)).not.toContain("kernel-only-worker");
+  });
+
+  it("keeps action and worker attention exact when the relevant item is outside the detail windows", () => {
+    const durableDetails = Array.from({ length: 256 }, (_, index) => ({
+      ...durableWorker(),
+      id: `durable-current-${index + 1}`,
+    }));
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      flowState: {
+        capabilityEpoch: 5,
+        revision: 9,
+        actionReceipts: [],
+      },
+      actionSummary: {
+        total: 300,
+        byStatus: { succeeded: 299, indeterminate: 1 },
+        maxCapabilityEpoch: 6,
+      },
+      durableWorkers: durableDetails,
+      durableWorkerIds: [
+        ...durableDetails.map(({ id }) => id),
+        "durable-older-undelivered",
+      ],
+      durableWorkerSummary: {
+        total: 257,
+        byStatus: { running: 256, succeeded: 1 },
+        byDeliveryState: { not_settled: 256, awaiting_delivery: 1 },
+      },
+    });
+
+    expect(projection.actions).toMatchObject({
+      total: 300,
+      byStatus: { succeeded: 299, indeterminate: 1 },
+      indeterminate: [],
+    });
+    expect(projection.workers).toMatchObject({
+      total: 257,
+      byDeliveryState: { not_settled: 256, awaiting_delivery: 1 },
+    });
+    expect(projection.attention).toEqual(expect.arrayContaining([
+      "indeterminate_action",
+      "authority_drift",
+      "worker_delivery_pending",
+    ]));
+  });
+
+  it("fails closed without an exact durable identity index behind a bounded detail window", () => {
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      conversationState: conversationState(),
+      durableWorkers: [durableWorker()],
+      durableWorkerSummary: {
+        total: 2,
+        byStatus: { running: 2 },
+        byDeliveryState: { not_settled: 2 },
+      },
+    })).toThrow(/complete durable worker identity index/);
+
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      durableWorkers: [durableWorker()],
+      durableWorkerIds: ["another-worker"],
+      durableWorkerSummary: { total: 1, byStatus: { running: 1 } },
+    })).toThrow(/omits a projected worker item/);
+
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      durableWorkerIds: Array.from({ length: 10_001 }, (_, index) => `worker-${index}`),
+      durableWorkerSummary: {
+        total: 10_001,
+        byStatus: { running: 10_001 },
+        byDeliveryState: { not_settled: 10_001 },
+      },
+    })).toThrow(/exceeds 10000/);
+  });
+
+  it("advances source freshness from later recovery evidence instead of regressing to an older snapshot clock", () => {
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      callStatus: "active",
+      sourceStaleAfterMs: 60_000,
+      sourceObservations: [
+        { source: "flow", observedAtMs: NOW - 120_000 },
+        { source: "workers", observedAtMs: NOW - 180_000 },
+      ],
+      recoveryObservations: [
+        {
+          kind: "action_reconciled",
+          subjectId: "receipt-1",
+          observedAtMs: NOW - 1_000,
+        },
+        {
+          kind: "worker_checkpointed",
+          subjectId: "worker-1",
+          observedAtMs: NOW - 2_000,
+        },
+        {
+          kind: "worker_reclaimed",
+          subjectId: "worker-1",
+          observedAtMs: NOW - 500,
+        },
+      ],
+    });
+
+    expect(projection.freshness.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "flow", observedAtMs: NOW - 1_000, ageMs: 1_000, state: "current" }),
+      expect.objectContaining({ source: "workers", observedAtMs: NOW - 500, ageMs: 500, state: "current" }),
+    ]));
+    expect(projection.freshness.staleSources).not.toContain("flow");
+    expect(projection.freshness.staleSources).not.toContain("workers");
+  });
+
+  it("treats terminal source observations as settled and rejects contradictory summaries", () => {
+    const settled = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      callStatus: "completed",
+      sourceObservations: [{ source: "flow", observedAtMs: NOW - 900_000 }],
+    });
+    expect(settled.freshness.sources.find(({ source }) => source === "flow")?.state).toBe("settled");
+    expect(settled.attention).not.toContain("stale_operations_source");
+
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      durableWorkers: [durableWorker()],
+      durableWorkerSummary: { total: 1, byStatus: { succeeded: 1 } },
+    })).toThrow(/summary contradicts/);
+  });
+
+  it("keeps dialing calls freshness-sensitive", () => {
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      callStatus: "dialing",
+      sourceStaleAfterMs: 60_000,
+      sourceObservations: [{ source: "flow", observedAtMs: NOW - 900_000 }],
+    });
+
+    expect(projection.freshness).toMatchObject({
+      callStatus: "dialing",
+      active: true,
+      staleSources: ["flow"],
+    });
+    expect(projection.freshness.sources.find(({ source }) => source === "flow")?.state).toBe("stale");
+    expect(projection.attention).toContain("stale_operations_source");
+  });
+
+  it("maps arbitrary call lifecycle content to a closed public status", () => {
+    const privateStatus = "customer-email-and-provider-debug-detail";
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      callStatus: privateStatus,
+      sourceObservations: [{ source: "flow", observedAtMs: NOW - 900_000 }],
+    });
+
+    expect(projection.freshness).toMatchObject({
+      callStatus: "redacted_unknown",
+      active: false,
+      staleSources: ["flow"],
+    });
+    expect(projection.freshness.sources.find(({ source }) => source === "flow")?.state).toBe("stale");
+    expect(projection.attention).toContain("stale_operations_source");
+    expect(JSON.stringify(projection)).not.toContain(privateStatus);
+  });
+
+  it("redacts arbitrary worker detail and aggregate status labels", () => {
+    const privateDetailStatus = "caller_secret_phrase";
+    const privateAggregateStatus = "customer_email_in_status";
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      durableWorkers: [{
+        ...durableWorker(),
+        status: privateDetailStatus,
+      }],
+      durableWorkerIds: [
+        "worker-secret",
+        "omitted-worker-1",
+        "omitted-worker-2",
+      ],
+      durableWorkerSummary: {
+        total: 3,
+        byStatus: {
+          [privateDetailStatus]: 1,
+          [privateAggregateStatus]: 2,
+        },
+        byDeliveryState: { not_settled: 3 },
+      },
+    });
+
+    expect(projection.workers).toMatchObject({
+      total: 3,
+      byStatus: { redacted_unknown: 3 },
+      items: [expect.objectContaining({ status: "redacted_unknown" })],
+    });
+    const encoded = JSON.stringify(projection);
+    expect(encoded).not.toContain(privateDetailStatus);
+    expect(encoded).not.toContain(privateAggregateStatus);
+  });
+
+  it("surfaces unavailable epochs without granting fresh worker authority", () => {
+    const state = flowState();
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      flowState: {
+        ...state,
+        capabilityEpoch: null,
+      },
+      durableWorkers: [{
+        ...durableWorker(),
+        authority: {
+          ...durableWorker().authority,
+          policyEpoch: null,
+        },
+      }],
+    });
+
+    expect(projection.authority).toMatchObject({
+      capabilityEpoch: null,
+      drift: expect.arrayContaining(["flow_capability_unavailable"]),
+    });
+    expect(projection.workers.items[0]).toMatchObject({
+      policyEpoch: null,
+      staleAuthority: true,
+    });
+    expect(projection.attention).toContain("authority_drift");
+  });
+
+  it("keeps the materialized SQL head authoritative while flagging an older realtime packet", () => {
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      conversationAuthority: {
+        kind: "materialized_head",
+        revision: 12,
+        headSha256: HASH_B,
+        snapshotCapturedAtMs: NOW,
+        eventRowsRead: 0,
+      },
+      contextPackets: [{ observedAtMs: NOW - 1, packet: contextPacket() }],
+    });
+
+    expect(projection.authority).toMatchObject({
+      conversationRevision: 12,
+      conversationHeadSha256: HASH_B,
+      drift: expect.arrayContaining(["packet_conversation_vs_materialized"]),
+    });
+    expect(projection.attention).toContain("authority_drift");
+  });
+
+  it("rejects malformed authority epochs and oversized tool identities", () => {
+    const state = flowState();
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      flowState: {
+        ...state,
+        capabilityEpoch: -1,
+      },
+    })).toThrow(/authority epoch/);
+
+    expect(() => projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      flowState: {
+        ...state,
+        actionReceipts: state.actionReceipts.map((receipt, index) => ({
+          ...receipt,
+          tool: index === 0 ? "x".repeat(257) : receipt.tool,
+        })),
+      },
+    })).toThrow(/tool identity/);
+  });
+
+  it("redacts arbitrary policy and recovery aggregate labels", () => {
+    const privatePolicyLabel = "caller_secret_policy";
+    const privateRecoveryLabel = "caller_secret_recovery";
+    const projection = projectCallOperations({
+      callId: "call-1",
+      redactionKey: REDACTION_KEY,
+      generatedAtMs: NOW,
+      policySummary: {
+        observations: 2,
+        denials: 1,
+        byDecision: {
+          allow: 1,
+          [privatePolicyLabel]: 1,
+        },
+      },
+      recoverySummary: {
+        observations: 1,
+        byKind: { [privateRecoveryLabel]: 1 },
+        lastObservedAtMs: NOW - 1_000,
+      },
+    });
+
+    expect(projection.policy.byDecision).toEqual({
+      allow: 1,
+      redacted_unknown: 1,
+    });
+    expect(projection.recovery.byKind).toEqual({ redacted_unknown: 1 });
+    const encoded = JSON.stringify(projection);
+    expect(encoded).not.toContain(privatePolicyLabel);
+    expect(encoded).not.toContain(privateRecoveryLabel);
   });
 
   it("fails closed for weak redaction keys and invalid packet byte evidence", () => {

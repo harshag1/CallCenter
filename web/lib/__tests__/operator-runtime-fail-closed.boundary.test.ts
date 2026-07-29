@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdir, readFile } from "node:fs/promises";
+import ts from "typescript";
 
 const mocks = vi.hoisted(() => ({
   q: vi.fn(),
@@ -25,7 +26,13 @@ vi.mock("../telephony", () => ({
 }));
 vi.mock("../email", () => ({ sendAgentEmail: mocks.sendAgentEmail }));
 vi.mock("../sms", () => ({ sendSms: mocks.sendSms }));
-vi.mock("../xai", () => ({ research: mocks.research }));
+vi.mock("../server-inference", () => ({
+  createServerInferenceRuntime: () => ({
+    research: async (...args: unknown[]) => ({
+      text: await mocks.research(...args),
+    }),
+  }),
+}));
 vi.mock("../integrations", () => ({ integrationStatuses: mocks.integrationStatuses }));
 
 import { manageTable, queryData } from "../agent/tools/data";
@@ -58,6 +65,120 @@ async function productionTypeScriptFiles(directory: URL): Promise<URL[]> {
     return /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) ? [url] : [];
   }));
   return files.flat();
+}
+
+type ParsedProductionFile = Readonly<{
+  relative: string;
+  sourceFile: ts.SourceFile;
+}>;
+
+type StaticCallSite = Readonly<{
+  callee: string;
+  file: ParsedProductionFile;
+  node: ts.CallExpression;
+}>;
+
+type StaticNamedImport = Readonly<{
+  file: string;
+  imported: string;
+  local: string;
+  module: string;
+}>;
+
+function expressionPath(expression: ts.Expression): string {
+  if (ts.isIdentifier(expression)) return expression.text;
+  if (ts.isPropertyAccessExpression(expression)) {
+    return `${expressionPath(expression.expression)}.${expression.name.text}`;
+  }
+  if (ts.isCallExpression(expression)) {
+    return `${expressionPath(expression.expression)}()`;
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return expressionPath(expression.expression);
+  }
+  return expression.getText();
+}
+
+function staticCalls(files: readonly ParsedProductionFile[]): StaticCallSite[] {
+  const calls: StaticCallSite[] = [];
+  for (const file of files) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        calls.push({
+          callee: expressionPath(node.expression),
+          file,
+          node,
+        });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file.sourceFile);
+  }
+  return calls;
+}
+
+function staticNamedImports(
+  files: readonly ParsedProductionFile[]
+): StaticNamedImport[] {
+  const imports: StaticNamedImport[] = [];
+  for (const file of files) {
+    for (const statement of file.sourceFile.statements) {
+      if (!ts.isImportDeclaration(statement)
+          || !ts.isStringLiteral(statement.moduleSpecifier)
+          || !statement.importClause
+          || !statement.importClause.namedBindings
+          || !ts.isNamedImports(statement.importClause.namedBindings)) {
+        continue;
+      }
+      for (const element of statement.importClause.namedBindings.elements) {
+        imports.push({
+          file: file.relative,
+          imported: element.propertyName?.text ?? element.name.text,
+          local: element.name.text,
+          module: statement.moduleSpecifier.text,
+        });
+      }
+    }
+  }
+  return imports;
+}
+
+function enclosingFunctionName(node: ts.Node): string | null {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isFunctionDeclaration(current) && current.name) {
+      return current.name.text;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function enclosingMethodName(node: ts.Node): string | null {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isMethodDeclaration(current) && ts.isIdentifier(current.name)) {
+      return current.name.text;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function isInsideApprovedExecutionCallback(node: ts.Node): boolean {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      const parent = current.parent;
+      if (ts.isCallExpression(parent)
+          && parent.arguments.some((argument) => argument === current)
+          && expressionPath(parent.expression) === "approvedExecution") {
+        return true;
+      }
+    }
+    current = current.parent;
+  }
+  return false;
 }
 
 describe("operator runtime fail-closed boundary", () => {
@@ -241,6 +362,19 @@ describe("operator runtime fail-closed boundary", () => {
     expect(mocks.research).not.toHaveBeenCalled();
   });
 
+  it("fails direct web research closed without an admitted turn authority", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+
+    expect((await webSearch.execute(
+      { query: "provider docs" } as never,
+      ctx,
+    )).output).toEqual({
+      error: "operator turn inference authority is unavailable",
+    });
+    expect(mocks.research).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
   it("does not expose model-callable deployment even when legacy factory flags are configured", async () => {
     vi.stubEnv("ENABLE_TOOL_FACTORY", "true");
     vi.stubEnv("VERCEL_TOKEN", "configured-but-not-model-authority");
@@ -288,13 +422,312 @@ describe("operator runtime fail-closed boundary", () => {
     }
   });
 
+  it("mints operator-turn inference authority only at the authenticated loop root", async () => {
+    const webRoot = new URL("../../", import.meta.url);
+    const files = await productionTypeScriptFiles(webRoot);
+    const parsedFiles = await Promise.all(files.map(async (file): Promise<ParsedProductionFile> => {
+      const source = await readFile(file, "utf8");
+      const relative = decodeURIComponent(file.href.slice(webRoot.href.length));
+      return {
+        relative,
+        sourceFile: ts.createSourceFile(
+          relative,
+          source,
+          ts.ScriptTarget.Latest,
+          true,
+          relative.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+        ),
+      };
+    }));
+    const imports = staticNamedImports(parsedFiles);
+    const calls = staticCalls(parsedFiles);
+
+    expect(imports.filter(({ imported }) =>
+      imported === "createOperatorTurnInferenceAuthority"
+    )).toEqual([{
+      file: "lib/agent/loop.ts",
+      imported: "createOperatorTurnInferenceAuthority",
+      local: "createOperatorTurnInferenceAuthority",
+      module: "./operator-turn-inference-authority",
+    }]);
+    expect(calls.filter(({ callee }) =>
+      callee === "createOperatorTurnInferenceAuthority"
+    ).map(({ callee, file }) => ({
+      callee,
+      file: file.relative,
+    }))).toEqual([{
+      callee: "createOperatorTurnInferenceAuthority",
+      file: "lib/agent/loop.ts",
+    }]);
+    expect(imports.filter(({ file, imported }) =>
+      file === "lib/agent/tools/research.ts"
+      && (
+        imported === "createServerInferenceAuthority"
+        || imported === "createServerInferenceRuntime"
+      )
+    )).toEqual([]);
+    expect(calls.filter(({ file, callee }) =>
+      file.relative === "lib/agent/tools/research.ts"
+      && (
+        callee === "createServerInferenceAuthority"
+        || callee === "createServerInferenceRuntime"
+      )
+    )).toEqual([]);
+  });
+
   it("keeps every irreversible operator-funded provider call behind the approval dispatcher", async () => {
     const webRoot = new URL("../../", import.meta.url);
     const files = await productionTypeScriptFiles(webRoot);
+    const parsedFiles = await Promise.all(files.map(async (file): Promise<ParsedProductionFile> => {
+      const source = await readFile(file, "utf8");
+      const relative = decodeURIComponent(file.href.slice(webRoot.href.length));
+      return {
+        relative,
+        sourceFile: ts.createSourceFile(
+          relative,
+          source,
+          ts.ScriptTarget.Latest,
+          true,
+          relative.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+        ),
+      };
+    }));
+    const calls = staticCalls(parsedFiles);
+    const imports = staticNamedImports(parsedFiles);
+
+    // The browser-authorized dispatcher is the sole production importer of
+    // the communications facade. The adapter is the sole importer of either
+    // generic provider primitive. This catches aliases as well as unchanged
+    // local binding names.
+    expect(imports.filter(({ imported }) =>
+      imported === "operatorCommunicationDispatch"
+    )).toEqual([{
+      file: "lib/agent/operator-action-dispatch.ts",
+      imported: "operatorCommunicationDispatch",
+      local: "operatorCommunicationDispatch",
+      module: "../communications",
+    }]);
+    expect(imports.filter(({ imported }) =>
+      imported === "createOperatorCommunicationDispatchers"
+    )).toEqual([]);
+    expect(calls.filter(({ callee }) =>
+      callee === "createOperatorCommunicationDispatchers"
+      || callee.endsWith(".createOperatorCommunicationDispatchers")
+    ).map(({ callee, file }) => ({
+      callee,
+      file: file.relative,
+    }))).toEqual([{
+      callee: "createOperatorCommunicationDispatchers",
+      file: "lib/communications/operator-provider-adapters.ts",
+    }]);
+    expect(imports.filter(({ imported }) =>
+      imported === "sendAgentEmail" || imported === "sendSms"
+    )).toEqual([
+      {
+        file: "lib/communications/operator-provider-adapters.ts",
+        imported: "sendAgentEmail",
+        local: "sendAgentEmail",
+        module: "../email",
+      },
+      {
+        file: "lib/communications/operator-provider-adapters.ts",
+        imported: "sendSms",
+        local: "sendSms",
+        module: "../sms",
+      },
+    ]);
+
+    expect(imports.filter(({ imported }) =>
+      imported === "defineCommunicationProviderAdapter"
+      || imported === "dispatchCommunication"
+      || imported === "quoteCommunication"
+    )).toEqual([
+      {
+        file: "lib/communications/operator-provider-adapters.ts",
+        imported: "defineCommunicationProviderAdapter",
+        local: "defineCommunicationProviderAdapter",
+        module: "./provider-adapter",
+      },
+      {
+        file: "lib/communications/operator-provider-adapters.ts",
+        imported: "dispatchCommunication",
+        local: "dispatchCommunication",
+        module: "./provider-adapter",
+      },
+      {
+        file: "lib/communications/operator-provider-adapters.ts",
+        imported: "quoteCommunication",
+        local: "quoteCommunication",
+        module: "./provider-adapter",
+      },
+    ]);
+    const frameworkDispatchCalls = calls.filter(({ callee }) =>
+      callee === "dispatchCommunication"
+      || callee.endsWith(".dispatchCommunication")
+    );
+    expect(frameworkDispatchCalls.map(({ callee, file, node }) => ({
+      callee,
+      file: file.relative,
+      function: enclosingFunctionName(node),
+    }))).toEqual([{
+      callee: "dispatchCommunication",
+      file: "lib/communications/operator-provider-adapters.ts",
+      function: "dispatchWithAdapter",
+    }]);
+    const frameworkDispatchInput = frameworkDispatchCalls[0].node.arguments[0];
+    expect(frameworkDispatchInput
+      && ts.isObjectLiteralExpression(frameworkDispatchInput)).toBe(true);
+    if (!frameworkDispatchInput
+        || !ts.isObjectLiteralExpression(frameworkDispatchInput)) {
+      throw new Error("communication framework dispatch input changed shape");
+    }
+    expect(frameworkDispatchInput.properties.map((property) =>
+      property.name?.getText()
+    ).sort()).toEqual([
+      "adapter",
+      "approvalId",
+      "approvedQuote",
+      "authorityClaimer",
+      "destination",
+      "operation",
+      "payload",
+      "rawConfiguration",
+      "receiptBindingSecret",
+    ]);
+
+    const communicationFacadeCalls = calls.filter(({ callee }) =>
+      callee.endsWith("operatorCommunicationDispatch.email")
+      || callee.endsWith("operatorCommunicationDispatch.sms")
+    );
+    expect(communicationFacadeCalls.map(({ callee, file, node }) => ({
+      callee,
+      file: file.relative,
+      function: enclosingFunctionName(node),
+      browserApprovalGate: isInsideApprovedExecutionCallback(node),
+    }))).toEqual([
+      {
+        callee: "operatorCommunicationDispatch.email",
+        file: "lib/agent/operator-action-dispatch.ts",
+        function: "dispatchEmail",
+        browserApprovalGate: true,
+      },
+      {
+        callee: "operatorCommunicationDispatch.sms",
+        file: "lib/agent/operator-action-dispatch.ts",
+        function: "dispatchSms",
+        browserApprovalGate: true,
+      },
+    ]);
+
+    // Both provider boundaries live only in the Adapter v1 dispatch methods.
+    // A direct primitive call or a second factory importer is a bypass and
+    // fails this census even if a future author updates one expected filename.
+    const adapterBoundaryCalls = calls.filter(({ callee }) =>
+      callee === "dependencies.sendEmail" || callee === "dependencies.sendSms"
+    );
+    expect(adapterBoundaryCalls.map(({ callee, file, node }) => ({
+      callee,
+      file: file.relative,
+      function: enclosingFunctionName(node),
+      method: enclosingMethodName(node),
+    }))).toEqual([
+      {
+        callee: "dependencies.sendEmail",
+        file: "lib/communications/operator-provider-adapters.ts",
+        function: "emailAdapter",
+        method: "dispatch",
+      },
+      {
+        callee: "dependencies.sendSms",
+        file: "lib/communications/operator-provider-adapters.ts",
+        function: "smsAdapter",
+        method: "dispatch",
+      },
+    ]);
+    expect(calls.filter(({ callee }) =>
+      callee === "sendAgentEmail"
+      || callee.endsWith(".sendAgentEmail")
+      || callee === "sendSms"
+      || (callee.endsWith(".sendSms") && callee !== "dependencies.sendSms")
+    )).toEqual([]);
+
+    const adapterModule = parsedFiles.find(({ relative }) =>
+      relative === "lib/communications/operator-provider-adapters.ts"
+    );
+    expect(adapterModule).toBeDefined();
+    const adapterFunctions = new Map(
+      adapterModule!.sourceFile.statements
+        .filter((statement): statement is ts.FunctionDeclaration =>
+          ts.isFunctionDeclaration(statement) && Boolean(statement.name)
+        )
+        .map((statement) => [statement.name!.text, statement.getText()])
+    );
+    expect(adapterFunctions.get("emailAdapter")).toMatch(
+      /contractVersion:\s*"hacc\.communication-adapter\.v1"[\s\S]*adapterId:\s*"hacc\.resend\.operator\.v1"[\s\S]*providerId:\s*"resend"[\s\S]*"email\.send"[\s\S]*dependencies\.sendEmail/
+    );
+    expect(adapterFunctions.get("smsAdapter")).toMatch(
+      /contractVersion:\s*"hacc\.communication-adapter\.v1"[\s\S]*adapterId:\s*"hacc\.twilio-sms\.operator\.v1"[\s\S]*providerId:\s*"twilio"[\s\S]*"sms\.send"[\s\S]*dependencies\.sendSms/
+    );
+
+    // Pin the final SDK/REST egress modules too: Resend's send method may only
+    // exist in email.ts, and Twilio's Messages endpoint may only exist in
+    // sms.ts. The second occurrence in each module is the separate OTP path;
+    // neither primitive is importable by the operator runtime except through
+    // the two Adapter v1 methods proven above.
+    expect(imports.filter(({ module }) => module === "resend")).toEqual([{
+      file: "lib/email.ts",
+      imported: "Resend",
+      local: "Resend",
+      module: "resend",
+    }]);
+    expect(calls.filter(({ callee }) =>
+      callee.endsWith(".emails.send")
+    ).map(({ file }) => file.relative)).toEqual([
+      "lib/email.ts",
+      "lib/email.ts",
+    ]);
+    expect(calls.filter(({ callee, node }) =>
+      callee === "fetch"
+      && node.arguments[0]?.getText().includes("/Messages.json")
+    ).map(({ file }) => file.relative)).toEqual([
+      "lib/sms.ts",
+      "lib/sms.ts",
+    ]);
+    expect(calls.filter(({ callee }) =>
+      callee.endsWith(".messages.create")
+    )).toEqual([]);
+
+    const authorityCalls = calls.filter(({ callee }) =>
+      callee === "executeConfirmedOperatorAction"
+    );
+    expect(authorityCalls).toHaveLength(1);
+    expect(authorityCalls[0].file.relative).toBe(
+      "lib/agent/operator-action-dispatch.ts"
+    );
+    expect(enclosingFunctionName(authorityCalls[0].node)).toBe(
+      "approvedExecution"
+    );
+    const authorityInput = authorityCalls[0].node.arguments[0];
+    expect(authorityInput && ts.isObjectLiteralExpression(authorityInput))
+      .toBe(true);
+    if (!authorityInput || !ts.isObjectLiteralExpression(authorityInput)) {
+      throw new Error("operator approval authority input is no longer an object");
+    }
+    expect(authorityInput.properties.map((property) => property.name?.getText())
+      .sort()).toEqual([
+      "approvalId",
+      "argumentsValue",
+      "capability",
+      "confirmationToken",
+      "ctx",
+      "dispatch",
+      "estimatedMicroUsd",
+      "estimatedUnits",
+      "idempotencyKey",
+    ]);
+
     const callSites = new Map<string, Set<string>>();
     for (const name of [
-      "sendAgentEmail",
-      "sendSms",
       "originateCall",
       "purchaseNumber",
       "launchCampaign",
@@ -309,14 +742,6 @@ describe("operator runtime fail-closed boundary", () => {
       }
     }
 
-    expect([...callSites.get("sendAgentEmail")!].sort()).toEqual([
-      "lib/agent/operator-action-dispatch.ts",
-      "lib/email.ts",
-    ]);
-    expect([...callSites.get("sendSms")!].sort()).toEqual([
-      "lib/agent/operator-action-dispatch.ts",
-      "lib/sms.ts",
-    ]);
     expect([...callSites.get("originateCall")!].sort()).toEqual([
       "lib/agent/operator-action-dispatch.ts",
       "lib/campaigns.ts",

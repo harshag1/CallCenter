@@ -5,8 +5,9 @@ import { NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { getSession } from "@/lib/auth";
 import { q, qOne } from "@/lib/db";
-import { chatJSON, MODELS } from "@/lib/xai";
-import { FlowSchema } from "@/lib/surface-dsl";
+import { createServerInferenceRuntime } from "@/lib/server-inference";
+import { slimInstructions, type AgentFlow } from "@/lib/flow";
+import { buildOnboardingFlow } from "@/lib/onboarding-flow";
 import {
   assertSameOriginBrowserMutation,
   PRIVATE_NO_STORE_HEADERS,
@@ -14,6 +15,7 @@ import {
   readPrivateJsonObject,
 } from "@/lib/private-json-request";
 import { allowsLocalDevelopmentFundedAi } from "@/lib/deployment-funded-ai";
+import { z } from "zod";
 
 export const maxDuration = 120;
 
@@ -22,8 +24,27 @@ type BotSpec = {
   purpose: string;
   voice: "eve" | "ara" | "rex" | "sal" | "leo";
   instructions: string;
-  flow: { nodes: { id: string; label: string; kind: string }[]; edges: { from: string; to: string; label?: string }[] };
+  flow: AgentFlow;
 };
+
+const GeneratedBotSpecSchema = z.object({
+  name: z.string().min(1).max(80),
+  purpose: z.enum(["support", "feedback", "outbound", "scheduling", "sales"]),
+  voice: z.enum(["eve", "ara", "rex", "sal", "leo"]),
+  instructions: z.string().min(1).max(16_000),
+  flow: z.object({
+    topics: z.array(z.object({
+      id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+      label: z.string().min(1).max(96),
+      context: z.string().min(1).max(8_000),
+      steps: z.array(z.object({
+        id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+        label: z.string().min(1).max(96),
+        instructions: z.string().min(1).max(4_000),
+      }).strict()).min(2).max(5),
+    }).strict()).min(1).max(4),
+  }).strict(),
+}).strict();
 
 function json(body: Record<string, unknown>, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: PRIVATE_NO_STORE_HEADERS });
@@ -42,15 +63,57 @@ function localBotSpec(description: string): BotSpec {
       : lower.includes("feedback") ? "feedback"
         : lower.includes("outbound") ? "outbound"
           : "support";
-  const stages = [
-    ["start", "Open the call", "start"],
-    ["understand", "Understand request", "state"],
-    ["verify", "Verify details", "state"],
-    ["decide", "Choose next step", "decision"],
-    ["act", "Use approved tools", "tool"],
-    ["confirm", "Confirm outcome", "state"],
-    ["end", "Close the call", "end"],
-  ];
+  const flow = buildOnboardingFlow({
+    topics: [
+      {
+        id: "primary_goal",
+        label: "Primary request",
+        context:
+          `Handle the configured ${purpose} request: ${normalized.slice(0, 2_000)}. ` +
+          "Keep unverified caller claims separate from facts returned by the gateway.",
+        steps: [
+          {
+            id: "understand",
+            label: "Understand request",
+            instructions:
+              "Ask one question at a time until the desired outcome is explicit. Restate it and get confirmation.",
+          },
+          {
+            id: "verify",
+            label: "Verify details",
+            instructions:
+              "Confirm every name, date, number, destination, and commitment needed for the request. Do not invent missing facts.",
+          },
+          {
+            id: "resolve",
+            label: "Resolve safely",
+            instructions:
+              "Provide the result supported by current context and gateway receipts. If required authority or a capability is absent, use the human handoff.",
+          },
+        ],
+      },
+      {
+        id: "take_message",
+        label: "Take a message",
+        context:
+          "Capture a concise follow-up request when the primary request cannot be completed during the call. Do not promise an unsupported response time.",
+        steps: [
+          {
+            id: "collect",
+            label: "Collect message",
+            instructions:
+              "Collect the caller's name, the reason for follow-up, and a safe contact preference.",
+          },
+          {
+            id: "confirm",
+            label: "Confirm message",
+            instructions:
+              "Repeat the message and contact preference. Correct any mismatch before recording the outcome.",
+          },
+        ],
+      },
+    ],
+  });
   return {
     name,
     purpose,
@@ -64,14 +127,55 @@ function localBotSpec(description: string): BotSpec {
       "Before any consequential action, restate exactly what will happen and obtain the required approval. " +
       "If authority, context, or a tool result is missing, explain the limitation and offer a safe handoff. " +
       "After an action, verify the durable receipt before claiming success. End with a concise recap.",
-    flow: {
-      nodes: stages.map(([id, label, kind]) => ({ id, label, kind })),
-      edges: stages.slice(0, -1).map(([id], index) => ({
-        from: id,
-        to: stages[index + 1]![0],
-      })),
-    },
+    flow,
   };
+}
+
+async function generateBotSpec(description: string, company: string): Promise<BotSpec> {
+  const fallback = localBotSpec(description);
+  if (!allowsLocalDevelopmentFundedAi()) return fallback;
+  try {
+    const inference = createServerInferenceRuntime({
+      purpose: "onboarding",
+      workload: "generation",
+      budget: {
+        maxProviderRequests: 1,
+        maxReservedOutputTokens: 3000,
+        maxInputBytesPerRequest: 128 * 1024,
+        requestTimeoutMs: 60_000,
+      },
+    });
+    const generated = await inference.completeJSON<unknown>(
+      [
+        {
+          role: "system",
+          content: `Design a production voice agent from the user's description. ${company}
+Reply JSON only:
+{"name":"<short bot name>","purpose":"support|feedback|outbound|scheduling|sales","voice":"eve|ara|rex|sal|leo",
+"instructions":"<300-500 word voice-agent persona, goals, factual guardrails, escalation rules, and confirmation discipline>",
+"flow":{"topics":[
+{"id":"<safe_id>","label":"<2-4 words>","context":"<topic facts and boundaries>",
+"steps":[{"id":"<safe_id>","label":"<2-4 words>","instructions":"<exact stage instructions>"}]}
+]}}
+Create 1-4 distinct routing topics. Each topic needs 2-5 ordered stages. Do not name tools or invent integrations. The host compiles this blueprint into Flow v2 and exclusively owns gateway authority, scoped actions, receipts, and persistence.`,
+        },
+        { role: "user", content: description },
+      ],
+      { maxOutputTokens: 3000 },
+    );
+    const candidate = GeneratedBotSpecSchema.parse(generated);
+    return {
+      name: candidate.name,
+      purpose: candidate.purpose,
+      voice: candidate.voice,
+      instructions: candidate.instructions,
+      flow: buildOnboardingFlow(candidate.flow),
+    };
+  } catch {
+    // Model output has no authority. A malformed/missing response becomes the
+    // same deterministic, semantically validated Flow-v2 starter as local mode.
+    return fallback;
+  }
 }
 
 export async function POST(req: Request) {
@@ -134,25 +238,7 @@ export async function POST(req: Request) {
   const company = org?.scrape ? `Company context: ${org.scrape.company} — ${org.scrape.description}` : "";
 
   try {
-    const spec = allowsLocalDevelopmentFundedAi()
-      ? await chatJSON<BotSpec>(
-        [
-          {
-            role: "system",
-            content: `Design a production voice agent from the user's description. ${company}
-Reply JSON only:
-{"name":"<short bot name>","purpose":"support|feedback|outbound|scheduling|sales","voice":"eve|ara|rex|sal|leo",
-"instructions":"<300-500 word system prompt for a phone voice agent: persona, goals, guardrails, escalation rules, and explicit conversation stages. Voice-optimized: short sentences, confirm key details out loud.>",
-"flow":{"nodes":[{"id":"...","label":"<3-4 words>","kind":"start|state|decision|tool|end"}],"edges":[{"from":"...","to":"...","label":"<optional>"}]}}
-The flow must mirror the instructions' stages (6-10 nodes).`,
-          },
-          { role: "user", content: description },
-        ],
-        { model: MODELS.operator, maxTokens: 2000 }
-      )
-      : localBotSpec(description);
-
-    const flow = FlowSchema.safeParse(spec.flow);
+    const spec = await generateBotSpec(description, company);
     const agent = await qOne<{ id: string }>(
       "INSERT INTO agents (org_id, name, purpose) VALUES ($1,$2,$3) RETURNING id",
       [session.orgId, spec.name, spec.purpose]
@@ -162,8 +248,8 @@ The flow must mirror the instructions' stages (6-10 nodes).`,
       `INSERT INTO agent_versions (agent_id, version, instructions, voice, flow, created_by)
        VALUES ($1,1,$2,$3,$4,$5)`,
       [
-        agent.id, spec.instructions, spec.voice,
-        JSON.stringify(flow.success ? flow.data : { nodes: [], edges: [] }),
+        agent.id, slimInstructions(spec.instructions, spec.flow), spec.voice,
+        JSON.stringify(spec.flow),
         `onboarding (${session.email})`,
       ]
     );

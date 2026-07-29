@@ -29,8 +29,12 @@ import type { Lc4DevRepairPlaybackController } from "./lc4-development-repair-pl
 import type { Lc4DevGatewayExecutor } from "./lc4-development-gateway-bridge";
 import {
   LC4_DEV_CALLER_BRANCH_DECISION_ARTIFACT_DOMAIN,
+  LC4_DEV_BRANCH_OPPORTUNITY_ID,
+  LC4_DEV_PRIOR_MUTATION_OUTCOMES,
   assertLc4DevCallerBranchDecision,
+  lc4DevCallerBranchSemanticSubjectId,
   lc4DevBranchedOpportunity,
+  lc4DevPriorMutationOutcomeForBranchedOpportunity,
   type Lc4DevCallerBranchAuthority,
   type Lc4DevCallerBranchAudioBinding,
   type Lc4DevCallerBranchDecision,
@@ -367,6 +371,8 @@ export type {
 
 export type Lc4DevListenerCriterionBinding = Readonly<{
   opportunity_id: string;
+  canonical_opportunity_id: string;
+  branch_outcome: import("./lc4-development-caller-branch").Lc4DevPriorMutationOutcome | null;
   criterion_plan_sha256: string;
 }>;
 
@@ -411,16 +417,39 @@ export function createLc4PinnedListenerSink(input: Readonly<{
     input.evaluator.calibration_sha256,
     input.playback_authority_manifest_sha256,
   ]) requireSha256(digest, "LC4-DEV listener dependency hash");
-  if (input.criteria.length !== input.corpus.opportunities.length
+  const expectedCriterionCount =
+    input.corpus.opportunities.length - 1 + LC4_DEV_PRIOR_MUTATION_OUTCOMES.length;
+  if (input.criteria.length !== expectedCriterionCount
     || new Set(input.criteria.map((item) => item.opportunity_id)).size !== input.criteria.length) {
-    throw new Error("LC4-DEV listener criteria must bind every opportunity exactly once");
+    throw new Error("LC4-DEV listener criteria must bind every fixed opportunity and all five opportunity-42 branches exactly once");
   }
-  input.criteria.forEach((binding, index) => {
-    if (binding.opportunity_id !== input.corpus.opportunities[index]?.id) {
-      throw new Error("LC4-DEV listener criteria order differs from the public corpus");
+  const canonicalBindingIds = new Set(input.criteria.map(
+    (binding) => binding.canonical_opportunity_id,
+  ));
+  if (canonicalBindingIds.size !== input.corpus.opportunities.length
+    || input.corpus.opportunities.some(
+      (opportunity) => !canonicalBindingIds.has(opportunity.id),
+    )) {
+    throw new Error("LC4-DEV listener criteria omit a canonical opportunity");
+  }
+  for (const binding of input.criteria) {
+    const isBranch = binding.canonical_opportunity_id === LC4_DEV_BRANCH_OPPORTUNITY_ID;
+    if (isBranch !== (binding.branch_outcome !== null)
+      || (binding.branch_outcome === null
+        && binding.opportunity_id !== binding.canonical_opportunity_id)
+      || (binding.branch_outcome !== null
+        && binding.opportunity_id
+          !== lc4DevCallerBranchSemanticSubjectId(binding.branch_outcome))) {
+      throw new Error("LC4-DEV listener criterion branch identity is invalid");
     }
     requireSha256(binding.criterion_plan_sha256, "LC4-DEV listener criterion plan");
-  });
+  }
+  if (LC4_DEV_PRIOR_MUTATION_OUTCOMES.some((outcome) =>
+    !input.criteria.some((binding) =>
+      binding.branch_outcome === outcome
+      && binding.opportunity_id === lc4DevCallerBranchSemanticSubjectId(outcome)))) {
+    throw new Error("LC4-DEV listener criteria omit an opportunity-42 branch outcome");
+  }
   const expectedManifest = createLc4PinnedListenerManifestSha256({
     corpus_sha256: input.corpus.artifact_sha256,
     evaluator: input.evaluator,
@@ -449,8 +478,31 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         throw new Error("LC4-DEV native listener evidence cannot bind a HACC response plan");
       }
       const generatedPcm = pcmFromCapture(capture);
-      const criterion = input.criteria[opportunity.index - 1];
-      if (!criterion || criterion.opportunity_id !== opportunity.id) throw new Error("LC4-DEV listener criterion binding is missing");
+      const canonicalOpportunity = input.corpus.opportunities[opportunity.index - 1];
+      if (!canonicalOpportunity || canonicalOpportunity.id !== opportunity.id) {
+        throw new Error("LC4-DEV listener opportunity is outside the canonical horizon");
+      }
+      const branchOutcome = opportunity.id === LC4_DEV_BRANCH_OPPORTUNITY_ID
+        ? lc4DevPriorMutationOutcomeForBranchedOpportunity(
+            canonicalOpportunity,
+            opportunity,
+          )
+        : null;
+      if (branchOutcome === null
+        && canonicalJson(canonicalOpportunity) !== canonicalJson(opportunity)) {
+        throw new Error("LC4-DEV non-branch listener opportunity differs from the public corpus");
+      }
+      const semanticSubjectId = branchOutcome === null
+        ? opportunity.id
+        : lc4DevCallerBranchSemanticSubjectId(branchOutcome);
+      const criteria = input.criteria.filter((binding) =>
+        binding.opportunity_id === semanticSubjectId
+        && binding.canonical_opportunity_id === opportunity.id
+        && binding.branch_outcome === branchOutcome);
+      if (criteria.length !== 1) {
+        throw new Error("LC4-DEV listener criterion binding does not select exactly one semantic subject");
+      }
+      const criterion = criteria[0]!;
       let handoff: Awaited<ReturnType<Lc4ListenerPlaybackAuthority["consume"]>>;
       try {
         handoff = await input.playback_authority.consume({
@@ -481,6 +533,7 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         evaluation.transcript_sha256,
         evaluation.semantic_result_sha256,
         evaluation.signed_invocation_receipt_sha256,
+        evaluation.signed_invocation_artifact_cas_sha256,
       ]) requireSha256(digest, "LC4-DEV listener evaluator receipt");
       requireSha256(handoff.authority_receipt.receipt_sha256, "LC4-DEV headless listener authority receipt");
       if (handoff.status !== "evaluator_consumed_complete_capture"
@@ -498,8 +551,84 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         || evaluation.source_pcm_byte_length !== generatedPcm.byteLength
         || evaluation.evaluator_contract_sha256 !== input.evaluator.evaluator_contract_sha256
         || evaluation.evaluator_build_sha256 !== input.evaluator.evaluator_build_sha256
-        || evaluation.calibration_sha256 !== input.evaluator.calibration_sha256) {
+        || evaluation.calibration_sha256 !== input.evaluator.calibration_sha256
+        || !Number.isSafeInteger(
+          evaluation.signed_invocation_artifact_byte_length,
+        )
+        || evaluation.signed_invocation_artifact_byte_length < 2
+        || handoff.authority_receipt.body
+          .evaluator_signed_invocation_artifact_cas_sha256
+          !== evaluation.signed_invocation_artifact_cas_sha256
+        || handoff.authority_receipt.body
+          .evaluator_signed_invocation_artifact_byte_length
+          !== evaluation.signed_invocation_artifact_byte_length) {
         throw new Error("LC4-DEV evaluator result is not pinned to the exact complete captured PCM and evaluator identity");
+      }
+      const signedInvocationArtifact = await input.cas.get(
+        evaluation.signed_invocation_artifact_cas_sha256,
+      );
+      if (signedInvocationArtifact.byteLength
+          !== evaluation.signed_invocation_artifact_byte_length
+        || sha256Hex(signedInvocationArtifact)
+          !== evaluation.signed_invocation_artifact_cas_sha256) {
+        throw new Error(
+          "LC4-DEV signed ASR invocation artifact is missing, truncated, or hash-invalid",
+        );
+      }
+      const signedInvocationJson = Buffer.from(
+        signedInvocationArtifact,
+      ).toString("utf8");
+      let signedInvocation: Record<string, JsonValue>;
+      try {
+        signedInvocation = objectValue(
+          JSON.parse(signedInvocationJson) as JsonValue,
+          "LC4-DEV signed ASR invocation artifact",
+        );
+      } catch {
+        throw new Error(
+          "LC4-DEV signed ASR invocation artifact is not canonical JSON",
+        );
+      }
+      if (canonicalJson(signedInvocation) !== signedInvocationJson
+        || canonicalJson(Object.keys(signedInvocation).sort())
+          !== canonicalJson(["receipt", "request", "result"])) {
+        throw new Error(
+          "LC4-DEV signed ASR invocation artifact is not the exact canonical projection",
+        );
+      }
+      const invocationRequest = objectValue(
+        signedInvocation.request,
+        "LC4-DEV signed ASR invocation request",
+      );
+      const invocationResult = objectValue(
+        signedInvocation.result,
+        "LC4-DEV signed ASR invocation result",
+      );
+      const invocationReceipt = objectValue(
+        signedInvocation.receipt,
+        "LC4-DEV signed ASR invocation receipt",
+      );
+      if (invocationRequest.asr_contract_sha256
+          !== evaluation.evaluator_contract_sha256
+        || invocationReceipt.asr_contract_sha256
+          !== evaluation.evaluator_contract_sha256
+        || invocationRequest.source_played_audio_sha256
+          !== evaluation.source_pcm_sha256
+        || invocationResult.source_played_audio_sha256
+          !== evaluation.source_pcm_sha256
+        || invocationReceipt.source_played_audio_sha256
+          !== evaluation.source_pcm_sha256
+        || Number(invocationRequest.played_sample_count) * 2
+          !== evaluation.source_pcm_byte_length
+        || sha256Hex(Buffer.from(
+          String(invocationResult.transcript),
+          "utf8",
+        )) !== evaluation.transcript_sha256
+        || invocationReceipt.receipt_sha256
+          !== evaluation.signed_invocation_receipt_sha256) {
+        throw new Error(
+          "LC4-DEV signed ASR invocation artifact differs from its listener evaluation",
+        );
       }
       const pcmReceipt = await input.cas.put(generatedPcm, "audio/pcm");
       const authorityReceiptCas = await input.cas.put(
@@ -527,6 +656,10 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         criterion_plan_sha256: criterion.criterion_plan_sha256,
         response_plan_sha256,
         wire_observation_set_sha256,
+        signed_invocation_artifact_cas_sha256:
+          evaluation.signed_invocation_artifact_cas_sha256,
+        signed_invocation_artifact_byte_length:
+          evaluation.signed_invocation_artifact_byte_length,
         evaluation,
         listener_manifest_sha256: input.listener_manifest_sha256,
       };
@@ -542,6 +675,9 @@ export function createLc4PinnedListenerSink(input: Readonly<{
         repair_projection: evaluation.repair_projection,
         playback_authority_receipt_sha256: handoff.authority_receipt.receipt_sha256,
         listener_evidence: listenerEvidence,
+        assistant_conversation_transcript: String(invocationResult.transcript),
+        assistant_conversation_transcript_sha256: evaluation.transcript_sha256,
+        assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr" as const,
       });
     },
   });

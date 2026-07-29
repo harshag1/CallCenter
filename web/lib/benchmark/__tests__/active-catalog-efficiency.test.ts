@@ -10,9 +10,9 @@ describe("active capability catalog efficiency evidence", () => {
   it("freezes the portable 64-tool semantic result and exact source manifest", () => {
     const report = REPORT;
 
-    expect(report.result_hash).toBe("8e3ec290e3fd2083ead8f8857ebbe41880accdc54fedad8cfd61c0000ae359d1");
+    expect(report.result_hash).toBe("7ec332b0db56908924ceef07151a033d90fa0bf56c2145bdf1f65e8373d65442");
     expect(report.provenance.source_manifest_sha256)
-      .toBe("022a2cb8b94ab6736b14f122b7cda50ae560999c090175cc4882dc2027a2a3fb");
+      .toBe("9dd1fda3382d3566dbd0f93fdbcaa03634c57fc430831e2013362b7fc0b63fba");
     expect(report.provenance.build_manifest_sha256)
       .toBe("d7f59259e57b998806e4e34dd12800a43c250a768d1f4c2856be07ca0156b455");
     expect(report.provenance.toolchain_manifest_sha256)
@@ -68,9 +68,9 @@ describe("active capability catalog efficiency evidence", () => {
       active_business_entry_array_t4_reduction_ppm: { min: 873_734, median: 875_047, max: 875_797 },
       active_full_catalog_json_bytes: { min: 10_956, median: 11_363, max: 11_702 },
       active_full_catalog_t4: { min: 2_739, median: 2_841, max: 2_926 },
-      active_provider_instruction_block_bytes: { min: 11_733, median: 12_140, max: 12_479 },
-      active_provider_instruction_block_t4: { min: 2_934, median: 3_035.5, max: 3_120 },
-      active_provider_instruction_wrapper_bytes: { min: 777, median: 777, max: 777 },
+      active_provider_instruction_block_bytes: { min: 11_848, median: 12_255, max: 12_594 },
+      active_provider_instruction_block_t4: { min: 2_962, median: 3_064, max: 3_149 },
+      active_provider_instruction_wrapper_bytes: { min: 892, median: 892, max: 892 },
     });
     expect(report.progressive_state_census.snapshots.map((snapshot) => snapshot.capability_epoch))
       .toEqual(Array.from({ length: 18 }, (_, index) => index));

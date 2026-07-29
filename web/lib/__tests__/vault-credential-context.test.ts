@@ -33,6 +33,26 @@ describe("context-bound credential encryption", () => {
     expect(decryptCredentialSecret(second, ENV_CONTEXT)).toBe("sk-private");
   });
 
+  it("binds voice-provider roots to the exact org, provider, and generation", () => {
+    const providerContext: CredentialSecretContext = {
+      orgId: ORG_A,
+      sinkKind: "voice_provider",
+      sinkId: "openai",
+      slotId: SLOT_A,
+    };
+    const encrypted = encryptCredentialSecret("tenant-provider-root", providerContext);
+    expect(decryptCredentialSecret(encrypted, providerContext)).toBe("tenant-provider-root");
+    for (const wrongContext of [
+      { ...providerContext, orgId: ORG_B },
+      { ...providerContext, sinkId: "xai" },
+      { ...providerContext, slotId: SLOT_B },
+    ] satisfies CredentialSecretContext[]) {
+      expect(() => decryptCredentialSecret(encrypted, wrongContext)).toThrow(
+        "credential ciphertext authentication failed",
+      );
+    }
+  });
+
   it.each([
     ["organization", { ...ENV_CONTEXT, orgId: ORG_B }],
     ["env name", { ...ENV_CONTEXT, sinkId: "OTHER_API_KEY" }],

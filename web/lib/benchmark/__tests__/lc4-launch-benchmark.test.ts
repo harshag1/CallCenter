@@ -20,22 +20,81 @@ import { canonicalJson, sha256Hex } from "../artifacts";
 import type { Lc4AuthorityObligationResult } from "../lc4-authoritative-obligation-evidence";
 import { runLc4LaunchBenchmarkCli } from "../lc4-launch-benchmark-cli";
 import {
+  assertLc4LaunchBenchmarkArtifact,
   LC4_LAUNCH_BENCHMARK_FILENAMES,
   LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256,
-  publishLc4LaunchBenchmarkPublicPair,
+  publishLc4LaunchBenchmark,
   readLc4LaunchBenchmarkPublicJson,
   readLc4LaunchBenchmarkPublicPair,
   renderLc4LaunchBenchmarkMarkdown,
   scoreLc4LaunchBenchmark,
+  unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly,
   type Lc4LaunchBenchmarkEpisodeInput,
   type Lc4LaunchBenchmarkScoringInput,
 } from "../lc4-launch-benchmark";
 import { LC4_DEV_LISTENER_SEMANTIC_BUNDLE } from "../lc4-development-listener-semantics";
+import {
+  lc4DevCallerBranchSemanticSubjectId,
+  type Lc4DevPriorMutationOutcome,
+} from "../lc4-development-caller-branch";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import { LC4_PROVIDER_PROFILE_MANIFEST } from "../lc4-provider-profiles";
+import {
+  createLc4PublicationTransportProvenance,
+} from "../lc4-publication-transport-provenance";
+import {
+  createLc4PublicationTransportReplay,
+} from "../lc4-publication-transport-replay";
+import {
+  createLc4ProviderExecutionProfile,
+} from "../lc4-production-runner-foundation";
 
 const H = (value: string) => sha256Hex(value);
 const corpus = createLc4PublicDevelopmentCorpus();
 const roots: string[] = [];
+
+function transportReplay() {
+  return createLc4PublicationTransportReplay({
+    run_sha256: H("run"),
+    provider_profile_manifest_sha256:
+      LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    audio_delivery_profile_sha256: H("audio-delivery"),
+    listener_authority_trust_root_sha256:
+      H("listener-authority-trust-root"),
+    canonical_provider_exchange_count: 360,
+    repair_provider_exchange_count: 0,
+    total_response_generation_count: 360,
+    episodes: (["openai", "gemini", "xai"] as const).flatMap((provider) => {
+      const profile = createLc4ProviderExecutionProfile(provider);
+      return (["native", "hacc"] as const).map((arm) => ({
+        episode_id: `${provider}-${arm}`,
+        provider,
+        arm,
+        model: profile.model,
+        transport_purpose: provider === "xai"
+          ? "finite_prerecorded_efficacy" as const
+          : null,
+        transport_mode: "manual_commit" as const,
+        transport_profile_sha256:
+          profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
+        output_audio_lineage_scope: provider === "gemini"
+          ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
+          : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
+        canonical_provider_exchange_count: 60 as const,
+        repair_provider_exchange_count: 0,
+        total_response_generation_count: 60,
+        canonical_exchange_replay_set_sha256:
+          H(`${provider}-${arm}-canonical-exchange-replay-set`),
+        response_generation_replay_set_sha256:
+          H(`${provider}-${arm}-response-generation-replay-set`),
+        listener_authority_replay_set_sha256:
+          H(`${provider}-${arm}-listener-authority-replay-set`),
+        listener_invocation_replay_set_sha256:
+          H(`${provider}-${arm}-listener-invocation-replay-set`),
+      }));
+    }),
+  });
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -85,20 +144,72 @@ function episode(
     authorityPass?: boolean;
     completed?: boolean;
     falseCompletion?: boolean;
+    firstResponseFailureId?: string;
+    branchOutcome?: Lc4DevPriorMutationOutcome;
   }> = {},
 ): Lc4LaunchBenchmarkEpisodeInput {
   const observationCount = options.observationCount ?? 60;
+  const branchOutcome = options.branchOutcome ?? "no_call";
+  const repairedOpportunityId = arm === "hacc" ? "lc4-dev-op-10" : null;
   const observations = corpus.opportunities.slice(0, observationCount).map((opportunity) => {
-    const planned = LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities[opportunity.index - 1]!;
+    const semanticSubjectId = opportunity.id === "lc4-dev-op-42"
+      ? lc4DevCallerBranchSemanticSubjectId(branchOutcome)
+      : opportunity.id;
+    const planned = LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.find(
+      (candidate) => candidate.opportunity_id === semanticSubjectId,
+    )!;
     const applicable = planned.applicability.status === "applicable";
+    const finalTranscript = options.falseCompletion && opportunity.id === "lc4-dev-op-60"
+      ? "Everything is complete and you are all set."
+      : transcript(opportunity.id);
+    const repairPlayed = opportunity.id === repairedOpportunityId;
+    const firstResponseLineage = Object.freeze({
+      provider_exchange_sha256:
+        H(`${provider}-${arm}-${opportunity.id}-first-exchange`),
+      listener_evidence_sha256:
+        H(`${provider}-${arm}-${opportunity.id}-first-listener`),
+      assistant_pcm_sha256:
+        H(`${provider}-${arm}-${opportunity.id}-first-assistant-pcm`),
+    });
+    const firstResponse = Object.freeze({
+      semantic_subject_id: semanticSubjectId,
+      branch_outcome: opportunity.id === "lc4-dev-op-42" ? branchOutcome : null,
+      response_lineage: firstResponseLineage,
+      transcript: finalTranscript,
+      semantic_applicability: applicable ? "applicable" as const : "not_applicable" as const,
+      final_required_criteria_pass: applicable
+        ? opportunity.id !== (options.firstResponseFailureId
+          ?? (repairPlayed ? repairedOpportunityId : options.semanticFailureId))
+        : null,
+      semantic_replay_sha256: H(`${provider}-${arm}-${opportunity.id}-first`),
+    });
+    const repairAssisted = repairPlayed
+      ? Object.freeze({
+          ...firstResponse,
+          response_lineage: Object.freeze({
+            provider_exchange_sha256:
+              H(`${provider}-${arm}-${opportunity.id}-repair-exchange`),
+            listener_evidence_sha256:
+              H(`${provider}-${arm}-${opportunity.id}-repair-listener`),
+            assistant_pcm_sha256:
+              H(`${provider}-${arm}-${opportunity.id}-repair-assistant-pcm`),
+          }),
+          final_required_criteria_pass: applicable
+            ? opportunity.id !== options.semanticFailureId
+            : null,
+          semantic_replay_sha256: H(`${provider}-${arm}-${opportunity.id}-repair`),
+        })
+      : Object.freeze({
+          ...firstResponse,
+          final_required_criteria_pass: applicable
+            ? opportunity.id !== options.semanticFailureId
+            : null,
+        });
     return Object.freeze({
       opportunity_id: opportunity.id,
-      transcript: options.falseCompletion && opportunity.id === "lc4-dev-op-60"
-        ? "Everything is complete and you are all set."
-        : transcript(opportunity.id),
-      semantic_applicability: applicable ? "applicable" as const : "not_applicable" as const,
-      final_required_criteria_pass: applicable ? opportunity.id !== options.semanticFailureId : null,
-      semantic_replay_sha256: H(`${provider}-${arm}-${opportunity.id}`),
+      repair_played: repairPlayed,
+      first_response: firstResponse,
+      repair_assisted: repairAssisted,
     });
   });
   const authorityPass = options.authorityPass ?? true;
@@ -107,10 +218,11 @@ function episode(
     pair_id: provider,
     provider,
     arm,
-    model: `${provider}-realtime`,
+    model: LC4_PROVIDER_PROFILE_MANIFEST.providers[provider].model,
     opened: true,
     completed: options.completed ?? observationCount === 60,
     repair_playbacks: arm === "hacc" ? 1 : 0,
+    total_response_generations: observationCount + (arm === "hacc" ? 1 : 0),
     observations,
     authority: Object.freeze({
       scoreability: authorityPass ? "scorable" as const : "scorable" as const,
@@ -129,9 +241,74 @@ function scoringInput(overrides: Readonly<Record<string, Lc4LaunchBenchmarkEpiso
     source_tree_sha256: H("tree"),
     run_sha256: H("run"),
     report_sha256: H("report"),
+    evidence: Object.freeze({
+      prepare_sha256: H("prepare"),
+      preflight_sha256: H("preflight"),
+      run_ledger_head_sha256: H("run-ledger-head"),
+      run_package_sha256: H("run-package"),
+      budget_lease_sha256: H("budget-lease"),
+      budget_evidence_sha256: H("budget-evidence"),
+      budget_terminal_ledger_head_sha256: H("budget-terminal-head"),
+      budget_ledger_public_key_fingerprint_sha256: H("budget-public-key"),
+      authority_replay_set_sha256: H("authority-replay-set"),
+    }),
+    budget: Object.freeze({
+      maximum_total_micro_usd: 15_000_000,
+      conservative_settled_micro_usd: 12_000_000,
+      active_reservations_micro_usd: 0 as const,
+      reservations_terminal: true as const,
+      reservation_count: 6 as const,
+      budget_replay_verified: true as const,
+    }),
+    transport_provenance: createLc4PublicationTransportProvenance({
+      retained_gate_b_receipt_sha256: H("gate-b-receipt"),
+      xai_finite_manual_gate_d_receipt_sha256: H("gate-d-receipt"),
+      transport_replay: transportReplay(),
+      qualification_replay_sha256: {
+        openai: H("openai-gate-b-replay"),
+        gemini: H("gemini-gate-b-replay"),
+        xai: H("xai-gate-d-replay"),
+      },
+      model_identity_verification: {
+        openai: "provider_verified",
+        gemini: "request_only",
+        xai: "provider_verified",
+      },
+    }),
     episodes: Object.freeze((["openai", "gemini", "xai"] as const).flatMap((provider) =>
       (["native", "hacc"] as const).map((arm) => overrides[`${provider}-${arm}`] ?? episode(provider, arm)))),
   });
+}
+
+function rehashBenchmarkOnly(
+  artifact: ReturnType<typeof scoreLc4LaunchBenchmark>,
+): void {
+  const { benchmark_sha256: _claimed, ...body } = artifact;
+  void _claimed;
+  (artifact as { benchmark_sha256: string }).benchmark_sha256 = sha256Hex(
+    `harshas-amazing-call-center/lc4-launch-benchmark/v6\n${canonicalJson(body)}`,
+  );
+}
+
+function rehashEvidenceRootAndBenchmark(
+  artifact: ReturnType<typeof scoreLc4LaunchBenchmark>,
+): void {
+  const {
+    completed_evidence_root_sha256: _claimed,
+    ...evidence
+  } = artifact.evidence;
+  void _claimed;
+  (artifact.evidence as { completed_evidence_root_sha256: string })
+    .completed_evidence_root_sha256 = sha256Hex(
+      `harshas-amazing-call-center/lc4-launch-completed-evidence-root/v2\n${canonicalJson({
+        execution_id: artifact.execution.execution_id,
+        source_commit: artifact.execution.source_commit,
+        source_tree_sha256: artifact.execution.source_tree_sha256,
+        evidence,
+        budget: artifact.budget,
+      })}`,
+    );
+  rehashBenchmarkOnly(artifact);
 }
 
 describe("LC4 launch benchmark scorer", () => {
@@ -160,6 +337,107 @@ describe("LC4 launch benchmark scorer", () => {
       ?.metrics.strict_episode_outcome.passed).toBe(1);
   });
 
+  it("publishes first-response and repair-assisted estimands with exact generation and lineage accounting", () => {
+    const artifact = scoreLc4LaunchBenchmark(scoringInput());
+    const native = artifact.cells.find((entry) =>
+      entry.provider === "openai" && entry.arm === "native")!;
+    const hacc = artifact.cells.find((entry) =>
+      entry.provider === "openai" && entry.arm === "hacc")!;
+
+    expect(artifact.scoring_contract).toMatchObject({
+      first_response_estimand:
+        "registered audible semantics on the initial response before repair",
+      repair_assisted_estimand:
+        "registered audible semantics on the effective response after the deterministic repair policy",
+      strict_episode_uses: "repair_assisted_outcome",
+      repair_policy:
+        "pre_registered_deterministic_same_opportunity_no_horizon_extension",
+      caller_prompt_parity:
+        "identical_canonical_prompts_before_registered_outcome_dependent_branch_only",
+    });
+    expect(native.adaptive_repair).toMatchObject({
+      branch_outcome: "no_call",
+      repair_playback_count: 0,
+      total_response_generations: 60,
+    });
+    expect(native.adaptive_repair.first_response_semantic_score)
+      .toEqual(native.adaptive_repair.repair_assisted_semantic_score);
+    expect(native.adaptive_repair.first_response_lineage_root_sha256)
+      .toBe(native.adaptive_repair.repair_assisted_lineage_root_sha256);
+
+    expect(hacc.adaptive_repair).toMatchObject({
+      branch_outcome: "no_call",
+      repair_playback_count: 1,
+      total_response_generations: 61,
+      first_response_semantic_score: {
+        passed:
+          hacc.adaptive_repair.repair_assisted_semantic_score.total - 1,
+      },
+      repair_assisted_semantic_score: {
+        passed: hacc.adaptive_repair.repair_assisted_semantic_score.total,
+      },
+    });
+    expect(hacc.adaptive_repair.first_response_lineage_root_sha256)
+      .not.toBe(hacc.adaptive_repair.repair_assisted_lineage_root_sha256);
+    expect(hacc.metrics.positive_semantic_speech_checks)
+      .toEqual(hacc.adaptive_repair.repair_assisted_semantic_score);
+
+    const markdown = renderLc4LaunchBenchmarkMarkdown(artifact);
+    expect(markdown).toContain("First response is scored before");
+    expect(markdown).toContain("provider-exchange, listener-evidence, and assistant-PCM hashes");
+    expect(markdown).toContain("identical only before the registered outcome-dependent branch");
+  });
+
+  it("rejects op42 branch substitution and adaptive repair accounting or lineage mutation", () => {
+    const branchMutation = structuredClone(episode("openai", "native"));
+    const branchObservation = branchMutation.observations.find(
+      (observation) => observation.opportunity_id === "lc4-dev-op-42",
+    )!;
+    for (const phase of [
+      branchObservation.first_response,
+      branchObservation.repair_assisted,
+    ]) {
+      (phase as { branch_outcome: Lc4DevPriorMutationOutcome })
+        .branch_outcome = "settled_success";
+    }
+    expect(() => scoreLc4LaunchBenchmark(scoringInput({
+      "openai-native": branchMutation,
+    }))).toThrow(/branch, or frozen applicability is invalid/u);
+
+    const repairCountMutation = structuredClone(episode("openai", "hacc"));
+    (repairCountMutation as { repair_playbacks: number }).repair_playbacks = 0;
+    (repairCountMutation as { total_response_generations: number })
+      .total_response_generations = 60;
+    expect(() => scoreLc4LaunchBenchmark(scoringInput({
+      "openai-hacc": repairCountMutation,
+    }))).toThrow(/adaptive repair accounting is invalid/u);
+
+    const repairLineageMutation = structuredClone(episode("openai", "hacc"));
+    const repaired = repairLineageMutation.observations.find(
+      (observation) => observation.repair_played,
+    )!;
+    (repaired.repair_assisted.response_lineage as {
+      assistant_pcm_sha256: string;
+    }).assistant_pcm_sha256 =
+      repaired.first_response.response_lineage.assistant_pcm_sha256;
+    expect(() => scoreLc4LaunchBenchmark(scoringInput({
+      "openai-hacc": repairLineageMutation,
+    }))).toThrow(/repair phase identity is invalid/u);
+
+    const publicLineageMutation = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    const haccCell = publicLineageMutation.cells.find((cell) =>
+      cell.provider === "openai" && cell.arm === "hacc")!;
+    (haccCell.adaptive_repair as {
+      repair_assisted_lineage_root_sha256: string;
+    }).repair_assisted_lineage_root_sha256 =
+      haccCell.adaptive_repair.first_response_lineage_root_sha256;
+    rehashBenchmarkOnly(publicLineageMutation);
+    expect(() => assertLc4LaunchBenchmarkArtifact(publicLineageMutation))
+      .toThrow(/complete six-episode evidence horizon/u);
+  });
+
   it("keeps every missing turn from an opened session in the registered denominators", () => {
     const artifact = scoreLc4LaunchBenchmark(scoringInput({
       "openai-native": episode("openai", "native", { observationCount: 59, completed: false }),
@@ -170,7 +448,11 @@ describe("LC4 launch benchmark scorer", () => {
       metrics: { strict_episode_outcome: { passed: 0, total: 1 } },
     });
     expect(cell.metrics.positive_semantic_speech_checks.total)
-      .toBe(LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.filter((entry) => entry.applicability.status === "applicable").length);
+      .toBe(new Set(LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities
+        .filter((entry) => entry.applicability.status === "applicable")
+        .map((entry) => entry.opportunity_id.startsWith("lc4-dev-op-42:")
+          ? "lc4-dev-op-42"
+          : entry.opportunity_id)).size);
     expect(artifact.execution.attrition_opportunities).toBe(1);
     expect(() => renderLc4LaunchBenchmarkMarkdown(artifact)).toThrow(/complete six-episode evidence horizon/u);
   });
@@ -184,7 +466,10 @@ describe("LC4 launch benchmark scorer", () => {
 
     const privacyLeak = structuredClone(episode("openai", "native"));
     const callback = privacyLeak.observations.find((observation) => observation.opportunity_id === "lc4-dev-op-24")!;
-    (callback as { transcript: string }).transcript = "I will call you at 415 555 0184.";
+    (callback.first_response as { transcript: string }).transcript =
+      "I will call you at 415 555 0184.";
+    (callback.repair_assisted as { transcript: string }).transcript =
+      "I will call you at 415 555 0184.";
     const privacyArtifact = scoreLc4LaunchBenchmark(scoringInput({ "openai-native": privacyLeak }));
     const privacyCell = privacyArtifact.cells.find((entry) => entry.provider === "openai" && entry.arm === "native")!;
     expect(privacyCell.metrics.strict_episode_outcome).toMatchObject({ passed: 0, total: 1 });
@@ -195,22 +480,117 @@ describe("LC4 launch benchmark scorer", () => {
     const second = scoreLc4LaunchBenchmark(scoringInput());
     expect(first).toEqual(second);
     expect(first.scoring_contract.score_policy_sha256).toBe(LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256);
-    expect(first.schema_version).toBe(2);
+    expect(first.schema_version).toBe(6);
+    expect(first.budget).toEqual({
+      maximum_total_micro_usd: 15_000_000,
+      conservative_settled_micro_usd: 12_000_000,
+      active_reservations_micro_usd: 0,
+      reservations_terminal: true,
+      reservation_count: 6,
+      budget_replay_verified: true,
+    });
+    expect(first.evidence).toMatchObject({
+      run_sha256: H("run"),
+      report_sha256: H("report"),
+      budget_terminal_ledger_head_sha256: H("budget-terminal-head"),
+      authority_replay_set_sha256: H("authority-replay-set"),
+    });
     expect(first.cells).toHaveLength(6);
+    expect(first.cells.find((cell) =>
+      cell.provider === "xai" && cell.arm === "hacc")).toMatchObject({
+        turn_boundary_control: "client_explicit",
+        wire_turn_boundary:
+          "finite_clip_input_audio_buffer.commit_then_response.create",
+        transport_purpose: "finite_prerecorded_efficacy",
+        model_identity_verification: "provider_verified",
+        qualification_scope: "xai_finite_manual_gate_d_exact_transport",
+        qualification_receipt_sha256: H("gate-d-receipt"),
+      });
+    expect(first.qualification).toMatchObject({
+      xai_finite_manual_transport_qualification: "verified",
+      xai_finite_manual_claim_boundary:
+        "transport_qualification_only_not_efficacy_evidence",
+    });
     expect(first.cells.every((cell) => cell.metrics.strict_episode_outcome.passed === 1)).toBe(true);
     const markdown = renderLc4LaunchBenchmarkMarkdown(first);
     expect(markdown).toContain("Host state cannot earn spoken credit");
     expect(markdown).toContain("360/360 opportunities");
     expect(markdown).toContain("Corrected facts");
+    expect(markdown).toContain("Budget replay: verified, 0 active reservation liability");
+    expect(markdown).toContain("Completed evidence root:");
+    expect(markdown).toContain("| xai | HACC | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | provider_verified | xai_finite_manual_gate_d_exact_transport |");
     expect(JSON.stringify(first))
       .not.toMatch(/listener_observation|MPL-1402|Eli Park|provider_pairs|native_guardrail|authoritative_actions/u);
+  });
+
+  it("binds terminal budget replay and rejects tampered budget authority", () => {
+    const settledCostTamper = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (settledCostTamper.budget as { conservative_settled_micro_usd: number })
+      .conservative_settled_micro_usd += 1;
+    rehashBenchmarkOnly(settledCostTamper);
+    expect(() => assertLc4LaunchBenchmarkArtifact(settledCostTamper))
+      .toThrow(/complete six-episode evidence horizon/u);
+
+    const terminalHeadTamper = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (terminalHeadTamper.evidence as {
+      budget_terminal_ledger_head_sha256: string;
+    }).budget_terminal_ledger_head_sha256 = H("substituted-terminal-head");
+    rehashBenchmarkOnly(terminalHeadTamper);
+    expect(() => assertLc4LaunchBenchmarkArtifact(terminalHeadTamper))
+      .toThrow(/complete six-episode evidence horizon/u);
+
+    // Even a caller who recomputes both public hashes cannot turn an active
+    // reservation into a publishable terminal budget.
+    const activeReservationTamper = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (activeReservationTamper.budget as {
+      active_reservations_micro_usd: number;
+    }).active_reservations_micro_usd = 1;
+    rehashEvidenceRootAndBenchmark(activeReservationTamper);
+    expect(() => assertLc4LaunchBenchmarkArtifact(activeReservationTamper))
+      .toThrow(/complete six-episode evidence horizon/u);
+
+    const directScoringInput = structuredClone(scoringInput());
+    (directScoringInput.budget as {
+      active_reservations_micro_usd: number;
+    }).active_reservations_micro_usd = 1;
+    expect(() => scoreLc4LaunchBenchmark(directScoringInput))
+      .toThrow(/replayed terminal budget with zero active reservations/u);
+  });
+
+  it("rejects caller-built artifacts and a missing evidence root on the release publisher", async () => {
+    const root = await tempRoot();
+    const output = resolve(root, "public");
+    const synthetic = scoreLc4LaunchBenchmark(scoringInput());
+    const gateD = {
+      receipt_path: resolve(root, "missing-gate-d-receipt.json"),
+      invocation_marker_path: resolve(root, "missing-gate-d-marker.json"),
+      plan_trust_root_sha256: H("gate-d-trust-root"),
+    };
+    await expect(publishLc4LaunchBenchmark({
+      artifact: synthetic,
+      output_root: output,
+      xai_finite_manual_gate_d: gateD,
+    } as never)).rejects.toThrow(/evidence root/u);
+    await expect(publishLc4LaunchBenchmark({
+      evidence_root: resolve(root, "missing-evidence-root"),
+      output_root: output,
+      authority_trust_root_sha256: H("listener-authority-trust-root"),
+      xai_finite_manual_gate_d: gateD,
+    })).rejects.toThrow();
+    await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("publishes and re-reads one immutable regular-file pair", async () => {
     const root = await tempRoot();
     const output = resolve(root, "public");
     const artifact = scoreLc4LaunchBenchmark(scoringInput());
-    await publishLc4LaunchBenchmarkPublicPair({
+    await unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({
       artifact,
       output_root: output,
     });
@@ -228,7 +608,7 @@ describe("LC4 launch benchmark scorer", () => {
     })).resolves.toEqual(artifact);
     expect(await readFile(json, "utf8")).toBe(`${canonicalJson(artifact)}\n`);
     expect(await readFile(markdown, "utf8")).toBe(renderLc4LaunchBenchmarkMarkdown(artifact));
-    await expect(publishLc4LaunchBenchmarkPublicPair({
+    await expect(unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({
       artifact,
       output_root: output,
     })).rejects.toThrow(/overwrite is forbidden/u);
@@ -238,7 +618,7 @@ describe("LC4 launch benchmark scorer", () => {
     const root = await tempRoot();
     const output = resolve(root, "public");
     const artifact = scoreLc4LaunchBenchmark(scoringInput());
-    await publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output });
+    await unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({ artifact, output_root: output });
     const json = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
     const markdown = resolve(output, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
 
@@ -276,7 +656,7 @@ describe("LC4 launch benchmark scorer", () => {
     const existingJson = resolve(partial, LC4_LAUNCH_BENCHMARK_FILENAMES.json);
     const missingMarkdown = resolve(partial, LC4_LAUNCH_BENCHMARK_FILENAMES.markdown);
     await writeFile(existingJson, "{}\n");
-    await expect(publishLc4LaunchBenchmarkPublicPair({
+    await expect(unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({
       artifact,
       output_root: partial,
     })).rejects.toThrow(/overwrite is forbidden/u);
@@ -314,8 +694,8 @@ describe("LC4 launch benchmark scorer", () => {
     const output = resolve(root, "public");
     const artifact = scoreLc4LaunchBenchmark(scoringInput());
     const attempts = await Promise.allSettled([
-      publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output }),
-      publishLc4LaunchBenchmarkPublicPair({ artifact, output_root: output }),
+      unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({ artifact, output_root: output }),
+      unsafePublishLc4LaunchBenchmarkPublicPairForTestsOnly({ artifact, output_root: output }),
     ]);
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
@@ -335,7 +715,7 @@ describe("LC4 launch benchmark scorer", () => {
     )).resolves.toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr).toEqual([
-      "LC4 launch benchmark CLI requires exactly: --evidence-root, --output-root",
+      "LC4 launch benchmark CLI requires exactly: --authority-trust-root-sha256, --evidence-root, --gate-d-invocation-marker, --gate-d-receipt, --gate-d-trust-root-sha256, --output-root",
     ]);
   });
 
@@ -346,9 +726,22 @@ describe("LC4 launch benchmark scorer", () => {
       .toThrow(/scorable authority evidence is incomplete/u);
 
     const applicabilityDrift = structuredClone(episode("openai", "native"));
-    const notApplicable = applicabilityDrift.observations.find((observation) => observation.semantic_applicability === "not_applicable")!;
-    (notApplicable as { semantic_applicability: string; final_required_criteria_pass: boolean | null }).semantic_applicability = "applicable";
-    (notApplicable as { semantic_applicability: string; final_required_criteria_pass: boolean | null }).final_required_criteria_pass = true;
+    const notApplicable = applicabilityDrift.observations.find((observation) =>
+      observation.first_response.semantic_applicability
+        === "not_applicable")!;
+    for (const phase of [
+      notApplicable.first_response,
+      notApplicable.repair_assisted,
+    ]) {
+      (phase as {
+        semantic_applicability: string;
+        final_required_criteria_pass: boolean | null;
+      }).semantic_applicability = "applicable";
+      (phase as {
+        semantic_applicability: string;
+        final_required_criteria_pass: boolean | null;
+      }).final_required_criteria_pass = true;
+    }
     expect(() => scoreLc4LaunchBenchmark(scoringInput({ "openai-native": applicabilityDrift })))
       .toThrow(/frozen applicability is invalid/u);
 

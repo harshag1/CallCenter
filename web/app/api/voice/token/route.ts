@@ -6,6 +6,11 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { loadActiveAgent, buildVoiceSession } from "@/lib/voice";
 import { createBrowserRealtimeConnection } from "@/lib/realtime/registry";
+import { resolveVoiceProviderConfig } from "@/lib/realtime/config";
+import { browserSpeechGuardrailConfigForCall } from "@/lib/realtime/browser-speech-guardrail-config.server";
+import {
+  assertOutboundSpeechAsrTenantFundingAvailable,
+} from "@/lib/realtime/outbound-speech-asr-authority.server";
 import { isUuid } from "@/lib/http";
 import { q, qOne } from "@/lib/db";
 import { requirePublicOrigin } from "@/lib/public-origin";
@@ -21,7 +26,9 @@ import {
   PrivateRequestError,
   readPrivateJsonObject,
 } from "@/lib/private-json-request";
-import { allowsLocalDevelopmentFundedAi } from "@/lib/deployment-funded-ai";
+import {
+  resolveBrowserVoiceFundingAuthority,
+} from "@/lib/voice-provider-credentials";
 
 export const dynamic = "force-dynamic";
 
@@ -45,9 +52,6 @@ export async function POST(req: Request) {
   }
   const session = await getSession();
   if (!session) return json({ error: "unauthorized" }, 401);
-  if (!allowsLocalDevelopmentFundedAi()) {
-    return json({ error: "deployment_funded_ai_disabled" }, 503);
-  }
   const { agentId, flowId } = body;
   if (!isUuid(agentId)) return json({ error: "valid agentId required" }, 400);
   const recordingConsent = body.recordingConsent === undefined
@@ -69,6 +73,19 @@ export async function POST(req: Request) {
   }
   const agent = await loadActiveAgent(agentId, session.orgId);
   if (!agent) return json({ error: "agent not found" }, 404);
+  const provider = resolveVoiceProviderConfig(agent.settings, agent.voice).provider;
+  let fundingAuthority: Awaited<ReturnType<typeof resolveBrowserVoiceFundingAuthority>>;
+  try {
+    fundingAuthority = await resolveBrowserVoiceFundingAuthority({
+      orgId: session.orgId,
+      provider,
+    });
+  } catch {
+    return json({ error: "voice_funding_authority_unavailable" }, 503);
+  }
+  if (!fundingAuthority) {
+    return json({ error: "voice_funding_authority_required" }, 503);
+  }
 
   // Optional named flow (outbound test calls): must be org-owned.
   let namedFlowId: string | null = null;
@@ -82,7 +99,10 @@ export async function POST(req: Request) {
   }
 
   const origin = requirePublicOrigin();
-  const voiceSession = await buildVoiceSession(agent, "web", origin, {}, { flowId: namedFlowId });
+  const voiceSession = await buildVoiceSession(agent, "web", origin, {}, {
+    flowId: namedFlowId,
+    browserFundingAuthority: fundingAuthority,
+  });
   const failAllocatedCall = () => q(
     "UPDATE calls SET status = 'failed', ended_at = now() WHERE id = $1",
     [voiceSession.callId],
@@ -143,10 +163,23 @@ export async function POST(req: Request) {
     }
   }
   try {
-    const connection = await createBrowserRealtimeConnection(voiceSession.sessionSpec);
+    const speechGuardrail = browserSpeechGuardrailConfigForCall({
+      settings: agent.settings,
+      provider: voiceSession.sessionSpec.provider,
+      organizationId: session.orgId,
+      callId: voiceSession.callId,
+    });
+    if (speechGuardrail) {
+      await assertOutboundSpeechAsrTenantFundingAvailable(session.orgId);
+    }
+    const connection = await createBrowserRealtimeConnection(
+      voiceSession.sessionSpec,
+      fundingAuthority,
+    );
     return json({
       callId: voiceSession.callId,
       connection,
+      ...(speechGuardrail ? { speechGuardrail } : {}),
       ...(recordingUploadToken ? { recordingUploadToken } : {}),
     });
   } catch {

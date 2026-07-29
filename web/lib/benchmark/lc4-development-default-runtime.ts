@@ -4,6 +4,10 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { canonicalJson, sha256Hex } from "./artifacts";
+import {
+  independentAsrContractSha256,
+  type IndependentAsrContract,
+} from "./audible-evidence";
 import { createBenchmarkKernelAttestationSigner } from "./kernel-attestation";
 import {
   createLc4DevCallerBranchAudioAccessor,
@@ -35,6 +39,10 @@ import {
   createLc4PinnedListenerManifestSha256,
 } from "./lc4-development-live-dependencies";
 import {
+  createLc4DevAsrRunnerTrust,
+  type Lc4DevAsrRunnerTrust,
+} from "./lc4-development-live-runner";
+import {
   type Lc4DevOperatorRuntime,
   type Lc4DevOperatorSigner,
 } from "./lc4-development-operator-cli";
@@ -53,7 +61,7 @@ import {
 
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
-const RUNTIME_CONFIG_DOMAIN = "harshas-amazing-call-center/lc4-dev-default-runtime/v2\n";
+const RUNTIME_CONFIG_DOMAIN = "harshas-amazing-call-center/lc4-dev-default-runtime/v3\n";
 const ASR_TOOLCHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-asr-evaluator-toolchain/v1\n";
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -67,17 +75,18 @@ export type Lc4DevDefaultRuntimeConfig = Readonly<{
 }>;
 
 export type Lc4DevDefaultRuntimeComposition = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   runtime_kind: "lc4-dev-default-operator-runtime";
   audio_manifest_sha256: string;
   repair_manifest_sha256: string;
   calibration_artifact_sha256: string;
   calibration_sha256: string;
+  asr_contract: IndependentAsrContract;
   asr_contract_sha256: string;
   whisper_config_sha256: string;
   asr_evaluator_build_sha256: string;
   asr_evaluator_toolchain_sha256: string;
-  runner_public_key_sha256: string;
+  asr_runner_trust: Lc4DevAsrRunnerTrust;
   criterion_binding_set_sha256: string;
   caller_binding_count: 180;
   repair_binding_count: 72;
@@ -97,16 +106,20 @@ export function createLc4DevelopmentDefaultRuntimeComposition(
     whisper_config_sha256: input.whisper_config_sha256,
     asr_evaluator_build_sha256: input.asr_evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: input.asr_evaluator_toolchain_sha256,
-    runner_public_key_sha256: input.runner_public_key_sha256,
     criterion_binding_set_sha256: input.criterion_binding_set_sha256,
   })) {
     if (!SHA256.test(digest)) throw new Error(`LC4-DEV runtime composition ${label} must be one lowercase SHA-256`);
+  }
+  createLc4DevAsrRunnerTrust(input.asr_runner_trust);
+  if (independentAsrContractSha256(input.asr_contract)
+      !== input.asr_contract_sha256) {
+    throw new Error("LC4-DEV runtime composition ASR contract hash mismatch");
   }
   if (input.caller_binding_count !== 180 || input.repair_binding_count !== 72) {
     throw new Error("LC4-DEV runtime composition requires exactly 180 caller and 72 repair bindings");
   }
   const body = Object.freeze({
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     runtime_kind: "lc4-dev-default-operator-runtime" as const,
     ...input,
   });
@@ -225,6 +238,19 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
     prepareLc4DevelopmentSemanticCalibrationFromArtifact({ artifact, root_dir: calibrationRoot }),
     createRunnerSigner(config.asr_runner_private_key_source, artifact),
   ]);
+  const asrRunnerPublicKey = createPublicKey(
+    artifact.runner_trust.publicKeyPem,
+  );
+  const asrRunnerPublicKeyDer = asrRunnerPublicKey.export({
+    format: "der",
+    type: "spki",
+  });
+  const asrRunnerTrust = createLc4DevAsrRunnerTrust({
+    key_id: asrRunnerSigner.keyId,
+    public_key_spki_base64: asrRunnerPublicKeyDer.toString("base64"),
+    public_key_fingerprint_sha256: asrRunnerSigner.publicKeySha256,
+    signature_algorithm: "Ed25519",
+  });
   const whisper = createLc4DevelopmentLargeV3WhisperRuntime({
     whisper_cli_path: config.whisper_cli_path,
     model_path: config.whisper_model_path,
@@ -248,11 +274,12 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
   const baseRuntimeComposition = {
     calibration_artifact_sha256: artifact.artifact_sha256,
     calibration_sha256: artifact.calibration_sha256,
+    asr_contract: whisper.contract,
     asr_contract_sha256: whisper.contract_sha256,
     whisper_config_sha256: whisper.whisper_config_sha256,
     asr_evaluator_build_sha256: calibration.summary.evaluator_build_sha256,
     asr_evaluator_toolchain_sha256: asrEvaluatorToolchainSha256,
-    runner_public_key_sha256: asrRunnerSigner.publicKeySha256,
+    asr_runner_trust: asrRunnerTrust,
     criterion_binding_set_sha256: sha256Hex(canonicalJson(criteria)),
   };
 
@@ -352,6 +379,9 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         runtime_config_sha256: composition.runtime_config_sha256,
         asr_evaluator_build_sha256: composition.asr_evaluator_build_sha256,
         asr_evaluator_toolchain_sha256: composition.asr_evaluator_toolchain_sha256,
+        asr_contract: composition.asr_contract,
+        asr_contract_sha256: composition.asr_contract_sha256,
+        asr_runner_trust: composition.asr_runner_trust,
       });
     },
     build: async ({
@@ -373,7 +403,12 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         || responseControlPreflight.control_manifest_sha256 !== built.control.manifest_sha256
         || runtimeComposition?.runtime_config_sha256 !== preflight.runtime_config_sha256
         || calibration.summary.evaluator_build_sha256 !== preflight.asr_evaluator_build_sha256
-        || asrEvaluatorToolchainSha256 !== preflight.asr_evaluator_toolchain_sha256) {
+        || asrEvaluatorToolchainSha256 !== preflight.asr_evaluator_toolchain_sha256
+        || whisper.contract_sha256 !== preflight.asr_contract_sha256
+        || canonicalJson(whisper.contract)
+          !== canonicalJson(preflight.asr_contract)
+        || canonicalJson(asrRunnerTrust)
+          !== canonicalJson(preflight.asr_runner_trust)) {
         throw new Error("LC4-DEV default runtime roots differ from signed preflight");
       }
       const casRoot = resolve(evidence_root, "cas");

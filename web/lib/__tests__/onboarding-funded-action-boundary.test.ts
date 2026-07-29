@@ -10,15 +10,22 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../db", () => ({ q: mocks.q, qOne: mocks.qOne }));
-vi.mock("../xai", () => ({
-  MODELS: { fast: "test-fast" },
-  chatJSON: mocks.chatJSON,
-  researchJSON: mocks.researchJSON,
+vi.mock("../server-inference", () => ({
+  createServerInferenceRuntime: () => ({
+    completeJSON: mocks.chatJSON,
+    researchJSON: mocks.researchJSON,
+  }),
 }));
 vi.mock("../favicon", () => ({ resolveFavicon: mocks.resolveFavicon }));
 vi.mock("../telephony", () => ({ purchaseNumber: mocks.purchaseNumber }));
 
 import { runOnboardingPrep } from "../onboarding";
+import { AgentFlowSchema, listStepRefs, validateAgentFlow } from "../flow";
+import {
+  assertFlowToolCatalogClosure,
+  baseBuiltInVoiceActionNames,
+  consequentialBuiltInVoiceActionNames,
+} from "../flow-tool-catalog";
 
 const ORG_ID = "00000000-0000-4000-8000-000000000001";
 const AGENT_ID = "00000000-0000-4000-8000-000000000002";
@@ -55,6 +62,15 @@ function onboardingPatches(): Record<string, unknown>[] {
   return mocks.q.mock.calls
     .filter(([sql]) => String(sql).startsWith("UPDATE orgs SET onboarding"))
     .map(([, params]) => JSON.parse(String((params as unknown[])[1])) as Record<string, unknown>);
+}
+
+function storedFlow() {
+  const insertion = mocks.q.mock.calls.find(([sql]) =>
+    String(sql).includes("INSERT INTO agent_versions")
+  );
+  if (!insertion) throw new Error("agent version was not stored");
+  const params = insertion[1] as unknown[];
+  return AgentFlowSchema.parse(JSON.parse(String(params[3])));
 }
 
 describe("onboarding funded-action boundary", () => {
@@ -95,6 +111,28 @@ describe("onboarding funded-action boundary", () => {
       number_status: "awaiting_operator_provisioning",
     }));
     expect(mocks.q.mock.calls.some(([sql]) => String(sql).includes("phone_number ="))).toBe(false);
+
+    const flow = storedFlow();
+    expect(flow).toMatchObject({
+      schema_version: 2,
+      tool_exposure: "gateway",
+      always_tools: ["contact_support", "end_call"],
+    });
+    expect(listStepRefs(flow).filter((ref) => ref.step.id === "persist_outcome")).toHaveLength(2);
+    expect(listStepRefs(flow).some((ref) =>
+      ref.step.output_bindings?.some((binding) =>
+        binding.output === "note_recorded"
+        && binding.tool === "log_note"
+        && binding.result_path === "ok"
+      )
+    )).toBe(true);
+    expect(validateAgentFlow(flow).diagnostics.filter(({ level }) => level === "error")).toEqual([]);
+    expect(() => assertFlowToolCatalogClosure(
+      flow,
+      baseBuiltInVoiceActionNames(),
+      new Set(),
+      consequentialBuiltInVoiceActionNames()
+    )).not.toThrow();
   });
 
   it("converts a legacy failed retry to awaiting approval without provider I/O", async () => {
@@ -187,6 +225,40 @@ describe("onboarding funded-action boundary", () => {
       agent_id: AGENT_ID,
       flow_ready: true,
       number_status: "awaiting_operator_provisioning",
+    }));
+  });
+
+  it("falls back to a valid Flow-v2 runtime when funded model output is malformed", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("ALLOW_DEV_DEPLOYMENT_FUNDED_AI", "true");
+    vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+    mocks.chatJSON.mockResolvedValue({
+      company: "Example Co",
+      bot_name: "Legacy bot",
+      persona: "A model-authored response with no durable flow.",
+      voice: "eve",
+      topics: [],
+    });
+    mocks.qOne.mockImplementation(async (sql: string) => {
+      if (sql.startsWith("UPDATE orgs")) return { domain: null, onboarding: { started: true } };
+      if (sql.startsWith("SELECT phone_number FROM users")) return { phone_number: null };
+      if (sql.startsWith("INSERT INTO agents")) return { id: AGENT_ID };
+      throw new Error(`unexpected onboarding query: ${sql}`);
+    });
+
+    await runOnboardingPrep(ORG_ID, "builder@example.test");
+
+    expect(mocks.chatJSON).toHaveBeenCalledTimes(1);
+    expect(storedFlow()).toMatchObject({
+      schema_version: 2,
+      tool_exposure: "gateway",
+      nodes: expect.arrayContaining([
+        expect.objectContaining({ id: "general_help", kind: "topic" }),
+      ]),
+    });
+    expect(onboardingPatches()).toContainEqual(expect.objectContaining({
+      agent_id: AGENT_ID,
+      flow_ready: true,
     }));
   });
 });

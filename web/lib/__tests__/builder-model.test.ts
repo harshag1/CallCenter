@@ -5,6 +5,10 @@ import {
   streamBuilderModel,
   type BuilderModelStreamEvent,
 } from "../agent/builder-model";
+import {
+  createOperatorTurnInferenceAuthority,
+  type OperatorTurnInferenceBudget,
+} from "../agent/operator-turn-inference-authority";
 
 const encoder = new TextEncoder();
 
@@ -23,6 +27,12 @@ async function collect(
   const events: BuilderModelStreamEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
+}
+
+function turnAuthority(
+  overrides: Partial<OperatorTurnInferenceBudget> = {},
+) {
+  return createOperatorTurnInferenceAuthority(overrides);
 }
 
 afterEach(() => {
@@ -94,7 +104,7 @@ describe("builder model compatibility stream", () => {
 
       const events = await collect(streamBuilderModel(
         [{ role: "user", content: "Build the flow" }],
-        { model: "pinned-model" },
+        { authority: turnAuthority(), model: "pinned-model" },
         {
           HACC_BUILDER_PROVIDER: provider,
           [keyName]: key,
@@ -133,6 +143,7 @@ describe("builder model compatibility stream", () => {
     const events = await collect(streamBuilderModel(
       [{ role: "user", content: "Show the flow" }],
       {
+        authority: turnAuthority(),
         tools: [{
           type: "function",
           function: {
@@ -168,7 +179,7 @@ describe("builder model compatibility stream", () => {
 
     await expect(collect(streamBuilderModel(
       [{ role: "user", content: "Build" }],
-      {},
+      { authority: turnAuthority() },
       { HACC_BUILDER_PROVIDER: "gemini" },
     ))).rejects.toThrow(
       "GEMINI_API_KEY is required when HACC_BUILDER_PROVIDER=gemini",
@@ -184,11 +195,27 @@ describe("builder model compatibility stream", () => {
 
     await expect(collect(streamBuilderModel(
       [{ role: "user", content: "private prompt" }],
-      {},
+      { authority: turnAuthority() },
       { HACC_BUILDER_PROVIDER: "openai", OPENAI_API_KEY: "test-key" },
     ))).rejects.toThrow(
       "builder model request failed for openai (429) [request safe-request-id]",
     );
+  });
+
+  it("does not reflect a hostile provider request-id header", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "provider-body-secret",
+      {
+        status: 429,
+        headers: { "x-request-id": "request-id caller-correlated-secret" },
+      },
+    )));
+
+    await expect(collect(streamBuilderModel(
+      [{ role: "user", content: "private prompt" }],
+      { authority: turnAuthority() },
+      { HACC_BUILDER_PROVIDER: "openai", OPENAI_API_KEY: "test-key" },
+    ))).rejects.toThrow(/^builder model request failed for openai \(429\)$/);
   });
 
   it("rejects incomplete provider tool calls instead of entering the dispatch loop", async () => {
@@ -199,8 +226,121 @@ describe("builder model compatibility stream", () => {
 
     await expect(collect(streamBuilderModel(
       [{ role: "user", content: "Run something" }],
-      {},
+      { authority: turnAuthority() },
       { HACC_BUILDER_PROVIDER: "gemini", GEMINI_API_KEY: "test-key" },
     ))).rejects.toThrow("builder model returned an incomplete tool call");
+  });
+
+  it.each([
+    ["xai", "XAI_API_KEY"],
+    ["openai", "OPENAI_API_KEY"],
+    ["gemini", "GEMINI_API_KEY"],
+  ] as const)(
+    "enforces the same exact per-turn request ceiling for %s",
+    async (provider, keyName) => {
+      const fetchMock = vi.fn(async (
+        _input: RequestInfo | URL,
+        _init?: RequestInit,
+      ) => {
+        void _input;
+        void _init;
+        return new Response(eventStream([
+          'data: {"choices":[{"delta":{"content":"bounded"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const authority = turnAuthority({
+        maxProviderRequests: 2,
+        maxBuilderRequests: 2,
+        maxResearchRequests: 1,
+        maxReservedOutputTokens: 3_200,
+      });
+      const environment = {
+        HACC_BUILDER_PROVIDER: provider,
+        [keyName]: "fixture-key",
+      };
+
+      await collect(streamBuilderModel(
+        [{ role: "user", content: "first" }],
+        { authority },
+        environment,
+      ));
+      await collect(streamBuilderModel(
+        [{ role: "user", content: "second" }],
+        { authority },
+        environment,
+      ));
+      await expect(collect(streamBuilderModel(
+        [{ role: "user", content: "third" }],
+        { authority },
+        environment,
+      ))).rejects.toThrow("provider-request budget exhausted");
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(authority.budgetSnapshot()).toMatchObject({
+        providerRequestsReserved: 2,
+        providerRequestsRemaining: 0,
+        builderRequestsReserved: 2,
+        builderRequestsRemaining: 0,
+        outputTokensReserved: 3_200,
+        outputTokensRemaining: 0,
+      });
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          max_tokens: 1_600,
+          stream: true,
+        });
+      }
+    },
+  );
+
+  it.each([
+    ["xai", "XAI_API_KEY"],
+    ["openai", "OPENAI_API_KEY"],
+    ["gemini", "GEMINI_API_KEY"],
+  ] as const)(
+    "cancels an in-flight %s builder request with the parent turn",
+    async (provider, keyName) => {
+      const parent = new AbortController();
+      let providerSignal: AbortSignal | undefined;
+      const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        providerSignal = init?.signal ?? undefined;
+        return new Promise<Response>(() => undefined);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const authority = createOperatorTurnInferenceAuthority({}, parent.signal);
+      const request = collect(streamBuilderModel(
+        [{ role: "user", content: "bounded" }],
+        { authority },
+        {
+          HACC_BUILDER_PROVIDER: provider,
+          [keyName]: "fixture-key",
+        },
+      ));
+      const rejection = expect(request).rejects.toThrow(
+        "operator turn inference cancelled",
+      );
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledOnce();
+
+      parent.abort();
+      await rejection;
+      expect(providerSignal?.aborted).toBe(true);
+    },
+  );
+
+  it("enforces response limits in UTF-8 bytes rather than JavaScript code units", async () => {
+    const multibyte = "💥".repeat(140_000);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(eventStream([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: multibyte } }] })}\n\n`,
+      "data: [DONE]\n\n",
+    ]), { status: 200 })));
+
+    await expect(collect(streamBuilderModel(
+      [{ role: "user", content: "bounded" }],
+      { authority: turnAuthority() },
+      { HACC_BUILDER_PROVIDER: "openai", OPENAI_API_KEY: "fixture-key" },
+    ))).rejects.toThrow("builder model response exceeded its bounded output limit");
   });
 });

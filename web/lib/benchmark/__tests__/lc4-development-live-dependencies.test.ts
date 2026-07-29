@@ -58,18 +58,27 @@ import type {
   Lc4DevLiveRunArtifact,
 } from "../lc4-development-live-runner";
 import { createLc4DevLivePrepareArtifact } from "../lc4-development-live-runner";
-import { LC4_PROVIDER_PROFILE_MANIFEST } from "../lc4-provider-profiles";
+import {
+  LC4_PROVIDER_PROFILE_MANIFEST,
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+} from "../lc4-provider-profiles";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
   createBenchmarkKernelAttestationSigner,
 } from "../kernel-attestation";
 import { createLc4CapturedOutput } from "../lc4-listener-evidence";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import { lc4DevelopmentListenerCriterionBindings } from "../lc4-development-listener-semantics";
 import {
   LC4_DEVELOPMENT_TEST_SEED_BYTES,
   createLc4GenericHeldoutGenerator,
   type Lc4GenericScenarioPayload,
 } from "../lc4-heldout-generator";
+import {
+  LC4_TEST_ASR_CONTRACT,
+  LC4_TEST_ASR_CONTRACT_SHA256,
+  createLc4TestAsrRunnerTrust,
+} from "./lc4-test-asr-authority";
 
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const HASH = "a".repeat(64);
@@ -118,6 +127,12 @@ function liveDependencyFactoryFixture(root: string) {
     audio_manifest_sha256: sha256Hex("lc4-dev-factory-contract-audio"),
     audio_bindings: audioBindings,
     corpus,
+    xai_finite_manual_gate_d: {
+      receipt_sha256: sha256Hex("synthetic-gate-d-receipt"),
+      plan_authority_trust_root_sha256: sha256Hex("synthetic-gate-d-authority"),
+      transport_profile_sha256:
+        LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE.transport_profile_sha256,
+    },
   });
   const playbackAuthority = listenerAuthority();
   const evaluator = {
@@ -126,10 +141,7 @@ function liveDependencyFactoryFixture(root: string) {
     calibration_sha256: sha256Hex("lc4-dev-factory-evaluator-calibration"),
     async evaluate() { throw new Error("factory construction must not evaluate provider audio"); },
   } as Lc4PinnedListenerEvaluator;
-  const criteria = corpus.opportunities.map((opportunity) => Object.freeze({
-    opportunity_id: opportunity.id,
-    criterion_plan_sha256: sha256Hex(`factory-criterion:${opportunity.id}`),
-  }));
+  const criteria = lc4DevelopmentListenerCriterionBindings();
   const listenerManifest = createLc4PinnedListenerManifestSha256({
     corpus_sha256: corpus.artifact_sha256,
     evaluator,
@@ -151,6 +163,12 @@ function liveDependencyFactoryFixture(root: string) {
       runtime_config_sha256: sha256Hex("lc4-dev-factory-runtime-config"),
       asr_evaluator_build_sha256: evaluator.evaluator_build_sha256,
       asr_evaluator_toolchain_sha256: sha256Hex("lc4-dev-factory-evaluator-toolchain"),
+      asr_contract: LC4_TEST_ASR_CONTRACT,
+      asr_contract_sha256: LC4_TEST_ASR_CONTRACT_SHA256,
+      asr_runner_trust: createLc4TestAsrRunnerTrust(
+        authority.private_key,
+        "lc4-dev-factory-asr-runner",
+      ),
     },
     signer: authority,
     authorization_nonce_sha256: sha256Hex("lc4-dev-factory-authorization-nonce"),
@@ -166,6 +184,17 @@ function liveDependencyFactoryFixture(root: string) {
     authority_trust_root_sha256: authority.public_key_fingerprint_sha256,
     control_plane_manifest_sha256: controlManifest,
     listener_evidence_manifest_sha256: listenerManifest,
+    runtime_config_sha256:
+      dag.authorization.body.runtime_config_sha256,
+    asr_evaluator_build_sha256:
+      dag.authorization.body.asr_evaluator_build_sha256,
+    asr_evaluator_toolchain_sha256:
+      dag.authorization.body.asr_evaluator_toolchain_sha256,
+    asr_contract: dag.authorization.body.asr_contract,
+    asr_contract_sha256:
+      dag.authorization.body.asr_contract_sha256,
+    asr_runner_trust:
+      dag.authorization.body.asr_runner_trust,
     authorization: dag.authorization,
   } as Lc4DevLivePreflightArtifact;
   const authorityKeys = generateKeyPairSync("ed25519");
@@ -465,7 +494,7 @@ describe("LC4-DEV concrete live dependencies", () => {
     })).toBe("archive.launch_worker@worker.rights-review");
   });
 
-  it("accepts the operator's v2 preflight in the real dependency factory and rejects a v1 operator genesis", async () => {
+  it("accepts the operator's v3 preflight in the real dependency factory and rejects a stale operator genesis", async () => {
     const root = await temporaryDirectory();
     const { dag, options } = liveDependencyFactoryFixture(root);
     const dependencies = await createLc4DevelopmentLiveDependencies(options);
@@ -475,12 +504,12 @@ describe("LC4-DEV concrete live dependencies", () => {
     const { immutable_ledger_genesis_sha256: _excluded, ...authorizationBody } = options.preflight.authorization.body;
     void _excluded;
     const authorizationBinding = sha256Hex(
-      `harshas-amazing-call-center/lc4-dev-authorization-binding/v2\n${canonicalJson(authorizationBody)}`,
+      `harshas-amazing-call-center/lc4-dev-authorization-binding/v3\n${canonicalJson(authorizationBody)}`,
     );
     const legacyGenesis = sha256Hex(
-      `harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n${canonicalJson({
-        schema_version: 2,
-        operator_version: "HACC-LC4-DEV-OPERATOR-v1",
+      `harshas-amazing-call-center/lc4-dev-ledger-genesis/v3\n${canonicalJson({
+        schema_version: 3,
+        operator_version: "HACC-LC4-DEV-OPERATOR-v2",
         execution_id: options.prepare.execution_id,
         prepare_sha256: options.prepare.prepare_sha256,
         authorization_binding_sha256: authorizationBinding,
@@ -711,25 +740,47 @@ describe("LC4-DEV concrete live dependencies", () => {
     const root = await temporaryDirectory();
     const cas = await createLc4ImmutableCas(join(root, "cas"));
     const corpus = createLc4PublicDevelopmentCorpus();
-    const criteria = corpus.opportunities.map((opportunity) => ({
-      opportunity_id: opportunity.id,
-      criterion_plan_sha256: sha256Hex(`criterion:${opportunity.id}`),
-    }));
+    const criteria = lc4DevelopmentListenerCriterionBindings();
     const evaluator: Lc4PinnedListenerEvaluator = {
       evaluator_contract_sha256: "1".repeat(64),
       evaluator_build_sha256: "2".repeat(64),
       calibration_sha256: "3".repeat(64),
       async evaluate({ pcm }) {
         const semanticResultSha256 = "5".repeat(64);
+        const transcript = "verified transcript";
+        const signedInvocationArtifact = Buffer.from(canonicalJson({
+          request: {
+            asr_contract_sha256: "1".repeat(64),
+            played_sample_count: pcm.byteLength / 2,
+            source_played_audio_sha256: sha256Hex(pcm),
+          },
+          result: {
+            source_played_audio_sha256: sha256Hex(pcm),
+            transcript,
+          },
+          receipt: {
+            asr_contract_sha256: "1".repeat(64),
+            source_played_audio_sha256: sha256Hex(pcm),
+            receipt_sha256: "6".repeat(64),
+          },
+        }), "utf8");
+        const retainedInvocation = await cas.put(
+          signedInvocationArtifact,
+          "application/json",
+        );
         return {
           source_pcm_sha256: sha256Hex(pcm),
           source_pcm_byte_length: pcm.byteLength,
           evaluator_contract_sha256: "1".repeat(64),
           evaluator_build_sha256: "2".repeat(64),
           calibration_sha256: "3".repeat(64),
-          transcript_sha256: "4".repeat(64),
+          transcript_sha256: sha256Hex(Buffer.from(transcript, "utf8")),
           semantic_result_sha256: semanticResultSha256,
           signed_invocation_receipt_sha256: "6".repeat(64),
+          signed_invocation_artifact_cas_sha256:
+            retainedInvocation.artifact_sha256,
+          signed_invocation_artifact_byte_length:
+            retainedInvocation.byte_length,
           repair_projection: createLc4DevArmBlindRepairProjection({
             opportunity_id: corpus.opportunities[0]!.id,
             listener_status: "verified",
@@ -787,17 +838,141 @@ describe("LC4-DEV concrete live dependencies", () => {
       wire_observation_set_sha256: "b".repeat(64),
     });
     expect(receipt.listener_evidence_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(receipt).toMatchObject({
+      assistant_conversation_transcript: "verified transcript",
+      assistant_conversation_transcript_sha256: sha256Hex("verified transcript"),
+      assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr",
+    });
     expect(await cas.get(sha256Hex(pcm))).toEqual(pcm);
+    const encodedEvidence = Buffer.from(
+      await cas.get(receipt.listener_evidence_sha256),
+    ).toString("utf8");
+    const evidenceBody = JSON.parse(
+      encodedEvidence.slice(encodedEvidence.indexOf("{")),
+    ) as {
+      signed_invocation_artifact_cas_sha256: string;
+      signed_invocation_artifact_byte_length: number;
+      evaluation: {
+        signed_invocation_artifact_cas_sha256: string;
+        signed_invocation_artifact_byte_length: number;
+      };
+    };
+    expect(evidenceBody.signed_invocation_artifact_cas_sha256)
+      .toBe(evidenceBody.evaluation.signed_invocation_artifact_cas_sha256);
+    expect(evidenceBody.signed_invocation_artifact_byte_length)
+      .toBe(evidenceBody.evaluation.signed_invocation_artifact_byte_length);
+    expect(await cas.get(
+      evidenceBody.signed_invocation_artifact_cas_sha256,
+    )).toHaveLength(evidenceBody.signed_invocation_artifact_byte_length);
+    expect(encodedEvidence).not.toContain("verified transcript");
+  });
+
+  it("rejects a listener evaluation whose signed invocation CAS length is substituted", async () => {
+    const root = await temporaryDirectory();
+    const cas = await createLc4ImmutableCas(join(root, "cas"));
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const criteria = lc4DevelopmentListenerCriterionBindings();
+    const evaluator: Lc4PinnedListenerEvaluator = {
+      evaluator_contract_sha256: "1".repeat(64),
+      evaluator_build_sha256: "2".repeat(64),
+      calibration_sha256: "3".repeat(64),
+      async evaluate({ pcm }) {
+        const transcript = "verified transcript";
+        const invocationBytes = Buffer.from(canonicalJson({
+          request: {
+            asr_contract_sha256: "1".repeat(64),
+            played_sample_count: pcm.byteLength / 2,
+            source_played_audio_sha256: sha256Hex(pcm),
+          },
+          result: {
+            source_played_audio_sha256: sha256Hex(pcm),
+            transcript,
+          },
+          receipt: {
+            asr_contract_sha256: "1".repeat(64),
+            source_played_audio_sha256: sha256Hex(pcm),
+            receipt_sha256: "6".repeat(64),
+          },
+        }), "utf8");
+        const retained = await cas.put(invocationBytes, "application/json");
+        const semanticResultSha256 = "5".repeat(64);
+        return {
+          source_pcm_sha256: sha256Hex(pcm),
+          source_pcm_byte_length: pcm.byteLength,
+          evaluator_contract_sha256: "1".repeat(64),
+          evaluator_build_sha256: "2".repeat(64),
+          calibration_sha256: "3".repeat(64),
+          transcript_sha256: sha256Hex(Buffer.from(transcript, "utf8")),
+          semantic_result_sha256: semanticResultSha256,
+          signed_invocation_receipt_sha256: "6".repeat(64),
+          signed_invocation_artifact_cas_sha256:
+            retained.artifact_sha256,
+          signed_invocation_artifact_byte_length:
+            retained.byte_length + 1,
+          repair_projection: createLc4DevArmBlindRepairProjection({
+            opportunity_id: corpus.opportunities[0]!.id,
+            listener_status: "verified",
+            semantic_result_sha256: semanticResultSha256,
+            semantic_replay_sha256: "7".repeat(64),
+            unmet_blocker_codes: [],
+            final_required_criteria_pass: true,
+          }),
+        };
+      },
+    };
+    const playbackAuthority = listenerAuthority();
+    const sink = createLc4PinnedListenerSink({
+      corpus,
+      listener_manifest_sha256: createLc4PinnedListenerManifestSha256({
+        corpus_sha256: corpus.artifact_sha256,
+        evaluator,
+        criteria,
+        playback_authority_manifest_sha256:
+          playbackAuthority.authority_manifest_sha256,
+      }),
+      criteria,
+      evaluator,
+      playback_authority_manifest_sha256:
+        playbackAuthority.authority_manifest_sha256,
+      playback_authority: playbackAuthority,
+      cas,
+    });
+    const pcm = Uint8Array.from([1, 2, 3, 4]);
+    const capture = createLc4CapturedOutput({
+      runId: "lc4-dev-openai-native",
+      opportunityId: corpus.opportunities[0]!.id,
+      responseId: "response-1",
+      provider: "openai",
+      surface: "server_realtime_pcm",
+      sampleRateHz: 24_000,
+      chunks: [{ chunkId: "chunk-1", pcm }],
+    });
+    await expect(sink.accept({
+      episode: {
+        episode_id: "lc4-dev-openai-native",
+        pair_id: "lc4-dev-openai",
+        pair_position: 1,
+        provider: "openai",
+        arm: "native",
+        model: "test-model",
+        voice: "test-voice",
+        maximum_micro_usd: 1,
+        opportunity_binding_set_sha256: "9".repeat(64),
+      },
+      opportunity: corpus.opportunities[0]!,
+      capture,
+      response_plan_sha256: null,
+      wire_observation_set_sha256: "b".repeat(64),
+    })).rejects.toThrow(
+      "signed ASR invocation artifact is missing, truncated, or hash-invalid",
+    );
   });
 
   it("rejects evaluator evidence produced from bytes other than the complete server-captured PCM", async () => {
     const root = await temporaryDirectory();
     const cas = await createLc4ImmutableCas(join(root, "cas"));
     const corpus = createLc4PublicDevelopmentCorpus();
-    const criteria = corpus.opportunities.map((opportunity) => ({
-      opportunity_id: opportunity.id,
-      criterion_plan_sha256: sha256Hex(`criterion:${opportunity.id}`),
-    }));
+    const criteria = lc4DevelopmentListenerCriterionBindings();
     const evaluator: Lc4PinnedListenerEvaluator = {
       evaluator_contract_sha256: "1".repeat(64),
       evaluator_build_sha256: "2".repeat(64),
@@ -812,6 +987,8 @@ describe("LC4-DEV concrete live dependencies", () => {
           transcript_sha256: "4".repeat(64),
           semantic_result_sha256: "5".repeat(64),
           signed_invocation_receipt_sha256: "6".repeat(64),
+          signed_invocation_artifact_cas_sha256: "8".repeat(64),
+          signed_invocation_artifact_byte_length: 2,
         };
       },
     };

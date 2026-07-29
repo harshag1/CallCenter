@@ -4,7 +4,10 @@ import {
   LC4_MATCHED_PAIR_INVARIANTS,
   LC4_PROVIDER_PRIMARY_SOURCES,
   LC4_PROVIDER_PROFILE_MANIFEST,
+  LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+  LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE,
   assertLc4ProviderProfileManifest,
+  assertLc4XaiTransportProfile,
   createLc4ProviderProfileManifest,
 } from "../lc4-provider-profiles";
 import { LIVE_STS_PROVIDER_SPECS } from "../live-sts-development-experiment";
@@ -35,9 +38,42 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
     const tamperedBody: Record<string, unknown> = { ...tampered };
     delete tamperedBody.manifest_sha256;
     tampered.manifest_sha256 = sha256Hex(
-      `harshas-amazing-call-center/lc4-provider-profile-manifest/v3\n${canonicalJson(tamperedBody)}`,
+      `harshas-amazing-call-center/lc4-provider-profile-manifest/v4\n${canonicalJson(tamperedBody)}`,
     );
-    expect(() => assertLc4ProviderProfileManifest(tampered)).toThrow(/differs from the frozen profile/);
+    expect(() => assertLc4ProviderProfileManifest(tampered)).toThrow(/differs from the runtime pin/);
+  });
+
+  it("hash-binds finite efficacy to manual turns and interactive qualification to server VAD", () => {
+    expect(LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE).toMatchObject({
+      purpose: "finite_prerecorded_efficacy",
+      transport_mode: "manual_commit",
+      turn_detection: { type: null },
+    });
+    expect(LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE).toMatchObject({
+      purpose: "interactive_transport_qualification",
+      transport_mode: "provider_native_server_vad",
+    });
+    expect(() => assertLc4XaiTransportProfile(
+      LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+      "finite_prerecorded_efficacy",
+    )).not.toThrow();
+    expect(() => assertLc4XaiTransportProfile(
+      LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE,
+      "interactive_transport_qualification",
+    )).not.toThrow();
+    expect(() => assertLc4XaiTransportProfile(
+      LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
+      "interactive_transport_qualification",
+    )).toThrow(/purpose differs from the runtime/);
+
+    const malformedParity = mutableCopy(
+      LC4_XAI_INTERACTIVE_QUALIFICATION_TRANSPORT_PROFILE,
+    ) as unknown as Record<string, unknown>;
+    malformedParity.transport_mode = "manual_commit";
+    expect(() => assertLc4XaiTransportProfile(
+      malformedParity,
+      "interactive_transport_qualification",
+    )).toThrow(/hash mismatch/);
   });
 
   it("pins the exact documented versioned models, voices, and asymmetric audio rates", () => {
@@ -57,6 +93,12 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
     expect(LC4_PROVIDER_PROFILE_MANIFEST.providers.xai).toMatchObject({
       input_sample_rate_hz: 24_000,
       output_sample_rate_hz: 24_000,
+      turn_boundary: "finite_clip_input_audio_buffer.commit_then_response.create",
+      turn_detection: { type: null },
+      separately_qualified_interactive_transport: {
+        turn_boundary: "server_vad_speech_stop_auto_commit_auto_response",
+        interpretation: "transport_reliability_only_not_finite_clip_efficacy",
+      },
     });
   });
 

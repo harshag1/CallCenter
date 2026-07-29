@@ -9,7 +9,13 @@ import { pickVariant } from "./experiments";
 import { findCustomerByPhone, phoneDigits } from "./datasets";
 import { resolveVoiceProviderConfig } from "./realtime/config";
 import { buildProviderSessionUpdate } from "./realtime/registry";
-import type { RealtimeAudioFormat, RemoteMcpServer, VoiceSessionSpec } from "./realtime/types";
+import { assertBrowserVoiceSessionAdmission } from "./realtime/browser-session-admission";
+import type {
+  BrowserProviderFundingAuthority,
+  RealtimeAudioFormat,
+  RemoteMcpServer,
+  VoiceSessionSpec,
+} from "./realtime/types";
 import {
   AgentFlowSchema,
 } from "./flow";
@@ -43,6 +49,7 @@ import {
   activeCapabilityCatalogInstructions,
   type ActiveCapabilityCatalog,
 } from "./active-capability-catalog";
+import { durableContextPacketInstructions } from "./live-conversation-route";
 
 export type AgentVersionRow = {
   agent_id: string;
@@ -574,6 +581,7 @@ type CallRow = {
   flow_id: string | null;
   runtime_snapshot: unknown | null;
   runtime_digest: string | null;
+  started_at: Date | string;
 };
 
 /** Honors a stamped experiment variant, or lazily picks one (covers PSTN calls created outside buildVoiceSession). */
@@ -998,17 +1006,31 @@ async function ensureRuntimeSnapshot(
 }
 
 /** Resolves one provider-neutral session spec for an existing call. */
+export function voiceSessionSpecForCall(
+  agent: AgentVersionRow,
+  callId: string,
+  direction: "web",
+  origin: string,
+  browserFundingAuthority: BrowserProviderFundingAuthority,
+): Promise<VoiceSessionSpec>;
+export function voiceSessionSpecForCall(
+  agent: AgentVersionRow,
+  callId: string,
+  direction: "inbound" | "outbound",
+  origin: string,
+): Promise<VoiceSessionSpec>;
 export async function voiceSessionSpecForCall(
   agent: AgentVersionRow,
   callId: string,
   direction: "web" | "inbound" | "outbound",
-  origin: string
+  origin: string,
+  browserFundingAuthority?: BrowserProviderFundingAuthority,
 ): Promise<VoiceSessionSpec> {
   const trustedOrigin = requirePublicOrigin();
   if (origin !== trustedOrigin) throw new Error("voice session origin must match PUBLIC_ORIGIN");
   const call = await qOne<CallRow>(
     `SELECT direction, from_number, to_number, experiment_id, variant, agent_version, flow_id,
-            runtime_snapshot, runtime_digest
+            runtime_snapshot, runtime_digest, started_at
      FROM calls WHERE id = $1`,
     [callId]
   );
@@ -1028,25 +1050,52 @@ export async function voiceSessionSpecForCall(
 
   const toolProxyUrl = `${trustedOrigin}/api/mcp`;
   const provider = resolveVoiceProviderConfig(effective.settings, effective.voice);
+  if (direction === "web") {
+    assertBrowserVoiceSessionAdmission({
+      provider: provider.provider,
+      origin: trustedOrigin,
+      fundingAuthority: browserFundingAuthority,
+    });
+  }
   // Dynamic import avoids a voice.ts <-> mcp.ts module-initialization cycle: mcp.ts verifies
   // signed scope tokens from this module, while this late session step needs its pinned catalog.
-  const activeAuthority = await (async () => {
+  const routeAuthority = await (async () => {
     const runtime = await import("./mcp") as unknown as {
-      activeCapabilityAuthorityFor: (identity: {
+      activeConversationRouteAuthorityFor: (identity: {
         callId: string;
         agentId: string;
         orgId: string;
-      }) => Promise<{ catalog: ActiveCapabilityCatalog }>;
+      }) => Promise<{
+        authority: { catalog: ActiveCapabilityCatalog };
+        flow: {
+          runtimeDigest: string;
+          state: import("./flow-runtime").FlowExecutionState;
+        } | null;
+      }>;
     };
-    if (typeof runtime.activeCapabilityAuthorityFor !== "function") {
-      throw new Error("active capability authority is unavailable");
+    if (typeof runtime.activeConversationRouteAuthorityFor !== "function") {
+      throw new Error("active conversation route authority is unavailable");
     }
-    return runtime.activeCapabilityAuthorityFor({
+    return runtime.activeConversationRouteAuthorityFor({
       callId,
       agentId: agent.agent_id,
       orgId: agent.org_id,
     });
   })();
+  const callStartedAtMs = new Date(call.started_at).getTime();
+  if (!Number.isSafeInteger(callStartedAtMs) || callStartedAtMs < 0) {
+    throw new Error("call start timestamp is invalid");
+  }
+  const liveRoute = await import("./live-conversation-route-postgres");
+  const durableRoute = await liveRoute.preparePostgresLiveConversationRoute({
+    callId,
+    organizationId: agent.org_id,
+    agentId: agent.agent_id,
+    agentVersion: resolvedAgent.version,
+    callStartedAtMs,
+    catalog: routeAuthority.authority.catalog,
+    flow: routeAuthority.flow,
+  });
   const browserRotationRoot = direction === "web"
     ? randomBytes(16).toString("base64url")
     : null;
@@ -1096,19 +1145,13 @@ export async function voiceSessionSpecForCall(
   const callFacts = humanNumber
     ? `CALL FACTS: the number on this call is ${humanNumber} — use it whenever a step needs the caller's phone number; never ask them for it.\n\n`
     : "";
-  if (direction === "web" && provider.provider !== "gemini") {
-    const gateway = new URL(toolProxyUrl);
-    const loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(gateway.hostname.toLowerCase());
-    if (gateway.protocol !== "https:" || loopback) {
-      throw new Error("xAI/OpenAI browser tools require PUBLIC_ORIGIN to be a public HTTPS URL or tunnel");
-    }
-  }
   return {
     ...provider,
     instructions:
       `${callFacts}${callerContext}${effective.instructions}\n\nYou are on a live ${direction} call. Keep responses short and natural for voice. ` +
       `Treat only the current active capability catalog as tool authority; never guess an unavailable action.\n\n` +
-      activeCapabilityCatalogInstructions(activeAuthority.catalog),
+      `${durableContextPacketInstructions(durableRoute.packet)}\n\n` +
+      activeCapabilityCatalogInstructions(routeAuthority.authority.catalog),
     mcpServers,
     toolProxyUrl,
     toolProxyToken: scope,
@@ -1125,10 +1168,10 @@ export async function voiceSessionSpecForCall(
         }
       : {}),
     activeCatalogAuthority: {
-      catalogDigest: activeAuthority.catalog.catalog_digest,
-      capabilityEpoch: activeAuthority.catalog.capability_epoch,
-      runtimeDigest: activeAuthority.catalog.runtime_digest,
-      stateRevision: activeAuthority.catalog.state_revision,
+      catalogDigest: routeAuthority.authority.catalog.catalog_digest,
+      capabilityEpoch: routeAuthority.authority.catalog.capability_epoch,
+      runtimeDigest: routeAuthority.authority.catalog.runtime_digest,
+      stateRevision: routeAuthority.authority.catalog.state_revision,
     },
   };
 }
@@ -1139,21 +1182,59 @@ export async function sessionUpdateForCall(
   callId: string,
   direction: "web" | "inbound" | "outbound",
   origin: string,
-  audio: RealtimeAudioFormat = "pcm"
+  audio: RealtimeAudioFormat = "pcm",
+  browserFundingAuthority?: BrowserProviderFundingAuthority,
 ): Promise<Record<string, unknown>> {
+  const spec = direction === "web"
+    ? await voiceSessionSpecForCall(
+        agent,
+        callId,
+        "web",
+        origin,
+        browserFundingAuthority as BrowserProviderFundingAuthority,
+      )
+    : await voiceSessionSpecForCall(agent, callId, direction, origin);
   return buildProviderSessionUpdate(
-    await voiceSessionSpecForCall(agent, callId, direction, origin),
+    spec,
     audio
   );
 }
 
 /** Creates the call row (experiment variant + optional named flow stamped at insert) and the session.update payload. */
+export function buildVoiceSession(
+  agent: AgentVersionRow,
+  direction: "web",
+  origin: string,
+  numbers: { from?: string; to?: string },
+  opts: {
+    flowId?: string | null;
+    browserFundingAuthority: BrowserProviderFundingAuthority;
+  },
+): Promise<{
+  callId: string;
+  sessionSpec: VoiceSessionSpec;
+  sessionUpdate: Record<string, unknown>;
+}>;
+export function buildVoiceSession(
+  agent: AgentVersionRow,
+  direction: "inbound" | "outbound",
+  origin: string,
+  numbers?: { from?: string; to?: string },
+  opts?: { flowId?: string | null },
+): Promise<{
+  callId: string;
+  sessionSpec: VoiceSessionSpec;
+  sessionUpdate: Record<string, unknown>;
+}>;
 export async function buildVoiceSession(
   agent: AgentVersionRow,
   direction: "web" | "inbound" | "outbound",
   origin: string,
   numbers: { from?: string; to?: string } = {},
-  opts: { flowId?: string | null } = {}
+  opts: {
+    flowId?: string | null;
+    browserFundingAuthority?: BrowserProviderFundingAuthority;
+  } = {}
 ): Promise<{ callId: string; sessionSpec: VoiceSessionSpec; sessionUpdate: Record<string, unknown> }> {
   const pick = await pickVariant(agent.agent_id).catch(() => null);
   const call = await qOne<{ id: string }>(
@@ -1167,7 +1248,15 @@ export async function buildVoiceSession(
   );
   const callId = call!.id;
   try {
-    const sessionSpec = await voiceSessionSpecForCall(agent, callId, direction, origin);
+    const sessionSpec = direction === "web"
+      ? await voiceSessionSpecForCall(
+          agent,
+          callId,
+          "web",
+          origin,
+          opts.browserFundingAuthority as BrowserProviderFundingAuthority,
+        )
+      : await voiceSessionSpecForCall(agent, callId, direction, origin);
     const sessionUpdate = buildProviderSessionUpdate(sessionSpec, "pcm");
     return { callId, sessionSpec, sessionUpdate };
   } catch (error) {

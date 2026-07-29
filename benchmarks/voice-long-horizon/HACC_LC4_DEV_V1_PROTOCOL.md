@@ -31,7 +31,10 @@ binding, provenance, pairing, or root-commitment drift.
 ## Exact workload
 
 The scenario has exactly 60 canonical caller opportunities in three 20-turn
-acts. Every opportunity commits:
+acts. Fifty-nine have one unconditional caller utterance. Opportunity 42 has
+five precommitted outcome-specific caller utterances; the signed result of the
+single earlier transcript mutation selects exactly one. Every opportunity
+commits:
 
 - exact caller text and a domain-separated SHA-256;
 - canonical act, stage, and goal identifiers;
@@ -52,12 +55,22 @@ connection rotations, and two interruption repairs.
 
 The artifact schedules exactly one Native/HACC pair for each of `openai`,
 `gemini`, and `xai`. Both arms of a provider pair bind the same template ID,
-source-corpus root, and caller voice slot. Arm order alternates by provider; it
-does not change scenario content.
+source-corpus root, caller voice slot, and canonical prompts before an
+outcome-dependent branch. Arm order alternates by provider.
 
-Before a live canary, render all 60 opportunity utterances, the four closed-loop
-branch utterances, and all 24 possible CRP-1 repair utterances from the exact
-committed source strings: 88 source masters total. The source format is mono
+This is not a claim of identical audible speech after an arm-specific system
+outcome. If the earlier mutation reaches a different authoritative outcome in
+the two arms, opportunity 42 plays the corresponding pre-rendered branch in
+each arm. The signed branch matrix, not model output, selects among
+`no_call`, `rejected_pre_dispatch`, `committed_after_error`,
+`settled_success`, and `settled_failure`. No branch is rendered or authored
+after provider output.
+
+Before a live canary, render all 60 baseline opportunity utterances, four
+additional closed-loop opportunity-42 branches (five outcome-specific choices
+including the baseline `committed_after_error` source), and all 24 possible
+CRP-1 repair utterances from the exact committed source strings: 88 source
+masters total. The source format is mono
 signed 16-bit little-endian PCM, with each provider rendition fixed to the
 current provider-profile input rate. Bind every source PCM hash and all 180
 canonical, 15 closed-loop branch, and 72 repair logical provider-rendition
@@ -68,10 +81,14 @@ The public audio artifact is `HACC-LC4-DEV-AUDIO-v2` / schema 2. It binds the
 current provider-profile manifest, per-provider execution profiles, the exact
 20 ms realtime delivery profile, the production PCM packetizer contract, and a
 combined source-independent audio-execution contract. Prepare, authorization,
-and preflight retain those commitments. Preflight also signs the exact ASR
-evaluator build, external toolchain, and complete runtime-composition root.
-Any stale or internally rehashed substitution must fail before authorization
-or provider-client construction. An ASR mismatch, missing binding,
+and preflight retain those commitments. Authorization/preflight schema v4 also
+signs the complete independently replayable ASR contract and its digest, the
+ASR evaluator build and external toolchain, and the runner's canonical Ed25519
+SPKI, key ID, and SPKI fingerprint. The executable runtime re-derives the same
+values from the verified calibration artifact and private runner key before it
+can construct a provider client. Any stale, self-asserted, or internally
+rehashed substitution must fail before authorization or provider-client
+construction. An ASR mismatch, missing binding,
 post-outcome re-render, provider-profile drift, packetizer drift, evaluator
 build drift, or evaluator-toolchain drift invalidates the canary.
 
@@ -112,6 +129,46 @@ total. CRP-1 selects the earliest unmet blocker in the frozen precedence order
 and then the next unused repair ordinal for that blocker and stage. The episode
 limit is four repairs; the stage limit is two. Repairs never renumber, replace,
 postpone, or extend the 60 canonical opportunities.
+
+The development result reports two different estimands and never substitutes
+one for the other:
+
+1. **First response** scores the assistant generation produced directly from
+   the selected caller utterance, before CRP-1 playback.
+2. **Repair assisted** scores the effective response after the registered,
+   same-opportunity repair policy has run. With no repair, it equals the first
+   response; with one repair, it is the separately retained repair generation.
+
+Each public cell exposes its selected opportunity-42 branch, repair playback
+count, first-response semantic numerator/denominator, repair-assisted semantic
+numerator/denominator, and total response generations. The accounting identity
+is `60 + repair playbacks`; repairs never create a 61st opportunity.
+
+Opportunity 42 is not `not_applicable`. The frozen listener registry contains
+five distinct semantic subjects, one per branch outcome, and the signed branch
+decision selects exactly one criterion-plan hash before the response is
+evaluated. A response for one outcome cannot earn credit against another.
+Outcome-specific prohibited spoken actions are checked on captured speech.
+Actual non-execution of a prohibited tool action remains a separate
+authoritative obligation; saying “I did not resubmit” is not evidence that no
+resubmission occurred. The exported nine-row prohibited-effect audit maps
+every branch/effect pair (`resubmit`, plus `reconcile` where forbidden) to the
+exact `contains_none` phrases in that branch's calibrated semantic plan. No
+prohibited effect relies on authoritative non-execution as a substitute for
+audible scoring.
+
+The v4 DEV listener evaluator uses the deterministic, provider-free v3
+registered-lexical-adherence scorer. Credit is limited to preregistered
+affirmative forms and the common terminal `Confirmed: <claim>.` contract;
+negation, contractions, questions, uncertainty, stale framing, quoted or
+hypothetical mentions, rejected predicates, and explicit later replacement are
+hard negatives. Dotted fact revisions such as `patron_record.v2` remain one
+lexical assertion. The scorer version/build hash is part of the semantic plan
+and replay authority. The reviewed authored regression matrix covers all 99
+frozen criteria and all five opportunity-42 subjects with 1,089 labeled cases;
+a separately authored 74-case construct challenge is also frozen and now used
+as regression evidence. Perfect replay on either matrix is a source gate, not
+a generalization or provider-efficacy claim.
 
 The final oracle requires all four corrections to govern state, stale values
 to remain non-authoritative, the current eligibility and accessibility worker

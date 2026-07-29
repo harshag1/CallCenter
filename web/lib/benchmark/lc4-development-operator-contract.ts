@@ -2,10 +2,10 @@ import { canonicalJson, sha256Hex } from "./artifacts";
 
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
-const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v2\n";
-const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v2\n";
+const AUTHORIZATION_BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-authorization-binding/v3\n";
+const LEDGER_GENESIS_DOMAIN = "harshas-amazing-call-center/lc4-dev-ledger-genesis/v3\n";
 
-export const LC4_DEV_OPERATOR_VERSION = "HACC-LC4-DEV-OPERATOR-v2" as const;
+export const LC4_DEV_OPERATOR_VERSION = "HACC-LC4-DEV-OPERATOR-v3" as const;
 
 export type Lc4DevLedgerGenesisInput = Readonly<{
   execution_id: string;
@@ -28,7 +28,7 @@ export function lc4DevSharedLedgerGenesisSha256(input: Lc4DevLedgerGenesisInput)
     if (!HASH.test(value)) throw new Error(`LC4-DEV ledger ${label} must be one lowercase SHA-256`);
   }
   return sha256Hex(`${LEDGER_GENESIS_DOMAIN}${canonicalJson({
-    schema_version: 2,
+    schema_version: 3,
     operator_version: LC4_DEV_OPERATOR_VERSION,
     ...input,
   })}`);

@@ -13,6 +13,10 @@ import {
   type PreparedIndependentAsrCalibration,
 } from "./audible-evidence";
 import type { BenchmarkKernelAttestationSigner } from "./kernel-attestation";
+import {
+  LC4_LISTENER_ASSERTION_CONTRACT_SHA256,
+  LC4_LISTENER_ASSERTION_CONTRACT_VERSION,
+} from "./lc4-listener-assertion-contract";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -23,12 +27,16 @@ const PLAYBACK_DOMAIN = "hacc/lc4/listener-playback-receipt/v1\n";
 const SEMANTIC_OPPORTUNITY_DOMAIN = "hacc/lc4/listener-semantic-opportunity/v1\n";
 const SEMANTIC_REGISTRY_DOMAIN = "hacc/lc4/listener-semantic-registry/v1\n";
 const SEMANTIC_REGISTRY_MANIFEST_DOMAIN = "hacc/lc4/listener-semantic-registry-manifest/v1\n";
-const SEMANTIC_PLAN_DOMAIN = "hacc/lc4/listener-semantic-plan/v1\n";
-const SEMANTIC_REPLAY_DOMAIN = "hacc/lc4/listener-semantic-replay/v1\n";
-const RECORD_DOMAIN = "hacc/lc4/listener-evidence-record/v1\n";
-const ARTIFACT_DOMAIN = "hacc/lc4/listener-evidence-artifact/v1\n";
+const SEMANTIC_PLAN_DOMAIN = "hacc/lc4/listener-semantic-plan/v3\n";
+const SEMANTIC_REPLAY_DOMAIN = "hacc/lc4/listener-semantic-replay/v3\n";
+const RECORD_DOMAIN = "hacc/lc4/listener-evidence-record/v3\n";
+const ARTIFACT_DOMAIN = "hacc/lc4/listener-evidence-artifact/v3\n";
+const SEMANTIC_SCORER_BUILD_DOMAIN = "hacc/lc4/listener-semantic-scorer-build/v3\n";
 
-export const LC4_LISTENER_EVIDENCE_VERSION = "lc4-listener-evidence-v1" as const;
+export const LC4_LISTENER_EVIDENCE_VERSION =
+  "lc4-listener-evidence-v3-registered-lexical-adherence" as const;
+export const LC4_LISTENER_SEMANTIC_SCORER_VERSION =
+  "lc4-listener-semantic-scorer-v3-registered-lexical-adherence" as const;
 
 export type Lc4RealtimeProvider = "openai" | "gemini" | "xai";
 
@@ -69,6 +77,48 @@ const SEMANTIC_OPERATORS = new Set<Lc4ListenerSemanticCriterion["operator"]>([
   "contains_none",
   "contains_ordered",
 ]);
+
+/**
+ * This finite policy is intentionally data, not a model grader. Positive
+ * credit is limited to registered assertion forms and a terminal assertion
+ * suffix; prohibited speech uses a separate conservative policy. The build
+ * hash is carried through the frozen plan, every replay, and the publication
+ * artifact so older token-presence/heuristic results cannot be relabelled.
+ */
+const SEMANTIC_SCORER_POLICY = Object.freeze({
+  implementation_revision:
+    "v3.2-registered-assertions-scoped-negation-intent-and-intra-lexical-dot-preservation",
+  normalization:
+    "nfkc-en-us-contraction-expansion-intra-lexical-dot-preservation-v3",
+  metric_name: "registered_lexical_adherence",
+  assertion_contract_version: LC4_LISTENER_ASSERTION_CONTRACT_VERSION,
+  assertion_contract_sha256: LC4_LISTENER_ASSERTION_CONTRACT_SHA256,
+  hard_sentence_boundaries: Object.freeze([".", "!", "?", ";", "newline", "em-dash"]),
+  soft_punctuation: Object.freeze([",", ":"]),
+  positive_credit: Object.freeze({
+    primary_frame: "Confirmed: <one exact preregistered phrase>.",
+    accepted_finite_control_forms:
+      "anchored-current-copular|anchored-correction|first-person-registered-intent|no-doubt|not-wrong|checked-repair",
+    position: "terminal-contiguous-registered-assertion-suffix",
+    quoted_question_conditional_reported_meta: "no_credit",
+    unregistered_trailing_clause: "invalidates_prior_positive_credit",
+    ambiguous: "fail_closed",
+  }),
+  prohibited_speech: Object.freeze({
+    default: "latest_decisive_exact_occurrence_is_violation",
+    safe_exception:
+      "scoped-negation-question-uncertainty-without-promise-or-registered-instruction-quote-example-form",
+    later_retraction: "latest_decisive_mention_controls",
+    ambiguous: "fail_closed_as_violation",
+  }),
+});
+
+export const LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256 = sha256Hex(
+  `${SEMANTIC_SCORER_BUILD_DOMAIN}${canonicalJson({
+    version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+    policy: SEMANTIC_SCORER_POLICY,
+  })}`,
+);
 
 export type Lc4CapturedOutputChunkReceipt = Readonly<{
   schema_version: 1;
@@ -154,6 +204,8 @@ export type Lc4ListenerSemanticPlan = Readonly<{
   schedule_sha256: string;
   registry_sha256: string;
   registry_manifest_sha256: string;
+  semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+  semantic_scorer_build_sha256: string;
   opportunities: readonly Readonly<{
     opportunity_id: string;
     applicability: Lc4ListenerSemanticApplicability;
@@ -190,6 +242,8 @@ export type Lc4FrozenListenerSemanticRegistryManifest = Readonly<{
 
 export type Lc4ListenerSemanticReplay = Readonly<{
   schema_version: 1;
+  semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+  semantic_scorer_build_sha256: string;
   opportunity_id: string;
   listener_evidence_sha256: string | null;
   applicability: Lc4ListenerSemanticApplicability;
@@ -239,6 +293,8 @@ export type Lc4ListenerEvidenceRecord = Readonly<{
 export type Lc4ListenerEvidenceArtifact = Readonly<{
   schema_version: 1;
   evidence_version: typeof LC4_LISTENER_EVIDENCE_VERSION;
+  semantic_scorer_version: typeof LC4_LISTENER_SEMANTIC_SCORER_VERSION;
+  semantic_scorer_build_sha256: string;
   run_id: string;
   template_id: string;
   protocol_sha256: string;
@@ -781,34 +837,430 @@ export function createLc4ListenerSemanticPlan(
     schedule_sha256: registry.schedule_sha256,
     registry_sha256: registry.registry_sha256,
     registry_manifest_sha256: manifest.manifest_sha256,
+    semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+    semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
     opportunities: registry.opportunities,
   });
   return Object.freeze({ ...body, plan_sha256: hash(SEMANTIC_PLAN_DOMAIN, body) });
 }
 
+function expandSemanticContractions(text: string): string {
+  return text.normalize("NFKC")
+    .replaceAll("\u2019", "'")
+    .replace(/\bwon't\b/giu, "will not")
+    .replace(/\bshan't\b/giu, "shall not")
+    .replace(/\bcan't\b/giu, "can not")
+    .replace(/\bcannot\b/giu, "can not")
+    .replace(/\bain't\b/giu, "is not")
+    .replace(/\b(is|are|was|were|do|does|did|has|have|had|could|would|should|must|need|might)n['’]t\b/giu, "$1 not");
+}
+
 function normalize(text: string): readonly string[] {
-  return text.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+/gu) ?? [];
+  return expandSemanticContractions(text)
+    .toLocaleLowerCase("en-US")
+    .match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
-function containsSequence(haystack: readonly string[], needle: readonly string[], start = 0): number {
-  for (let index = start; index <= haystack.length - needle.length; index += 1) {
-    if (needle.every((token, offset) => haystack[index + offset] === token)) return index;
+type SemanticClause = Readonly<{
+  ordinal: number;
+  start: number;
+  terminal: "question" | "statement";
+  tokens: readonly string[];
+}>;
+
+type SemanticDocument = Readonly<{
+  clauses: readonly SemanticClause[];
+  tokens: readonly string[];
+}>;
+
+type SemanticMention = Readonly<{
+  start: number;
+  end: number;
+  clause: number;
+  affirmed: boolean;
+}>;
+
+const POSITIVE_RELATION_WORDS = new Set([
+  "is", "are", "was", "were", "has", "have", "had", "equals",
+  "current", "actual", "correct",
+  "confirmed", "use", "acknowledge",
+]);
+const RETRACTION_SEQUENCES: readonly (readonly string[])[] = Object.freeze([
+  Object.freeze(["i", "withdraw", "that"]),
+  Object.freeze(["forget", "that"]),
+  Object.freeze(["strike", "that"]),
+  Object.freeze(["that", "was", "a", "mistake"]),
+  Object.freeze(["walk", "that", "back"]),
+  Object.freeze(["take", "that", "back"]),
+  Object.freeze(["retract", "that"]),
+  Object.freeze(["retract", "that", "statement"]),
+  Object.freeze(["that", "was", "wrong"]),
+]);
+const REJECTION_SEQUENCES: readonly (readonly string[])[] = Object.freeze([
+  Object.freeze(["does", "not"]),
+  Object.freeze(["can", "not"]),
+  Object.freeze(["should", "not"]),
+  Object.freeze(["has", "not"]),
+  Object.freeze(["have", "not"]),
+  Object.freeze(["had", "not"]),
+  Object.freeze(["no", "longer"]),
+  Object.freeze(["by", "no", "means"]),
+  Object.freeze(["anything", "but"]),
+  Object.freeze(["other", "than"]),
+  Object.freeze(["far", "from"]),
+  Object.freeze(["may", "or", "may", "not"]),
+]);
+const REPORTED_OR_META_SEQUENCES: readonly (readonly string[])[] = Object.freeze([
+  Object.freeze(["caller", "said"]),
+  Object.freeze(["caller", "mentioned"]),
+  Object.freeze(["caller", "repeated"]),
+  Object.freeze(["caller", "asked"]),
+  Object.freeze(["user", "uttered"]),
+  Object.freeze(["user", "told"]),
+  Object.freeze(["according", "to"]),
+  Object.freeze(["transcript", "reads"]),
+  Object.freeze(["transcript", "contains"]),
+  Object.freeze(["answer", "key"]),
+  Object.freeze(["example", "label"]),
+  Object.freeze(["positive", "example"]),
+  Object.freeze(["test", "data"]),
+  Object.freeze(["do", "not", "say"]),
+  Object.freeze(["can", "not", "confirm"]),
+  Object.freeze(["for", "example"]),
+]);
+const CONDITIONAL_OPENERS: readonly (readonly string[])[] = Object.freeze([
+  Object.freeze(["if"]),
+  Object.freeze(["in", "the", "event"]),
+  Object.freeze(["provided", "that"]),
+  Object.freeze(["should"]),
+  Object.freeze(["depending", "on"]),
+  Object.freeze(["i", "wish"]),
+  Object.freeze(["suppose"]),
+  Object.freeze(["unless"]),
+  Object.freeze(["had"]),
+  Object.freeze(["either"]),
+]);
+
+function includesSequence(
+  tokens: readonly string[],
+  sequence: readonly string[],
+): boolean {
+  if (sequence.length === 0 || sequence.length > tokens.length) return false;
+  for (let index = 0; index <= tokens.length - sequence.length; index += 1) {
+    if (sequence.every((token, offset) => tokens[index + offset] === token)) return true;
   }
-  return -1;
+  return false;
 }
 
-function criterionPass(criterion: Lc4ListenerSemanticCriterion, transcript: string): boolean {
-  const tokens = normalize(transcript);
+function beginsWithSequence(
+  tokens: readonly string[],
+  sequence: readonly string[],
+): boolean {
+  return sequence.every((token, index) => tokens[index] === token);
+}
+
+function includesSequenceOutsideSpan(
+  tokens: readonly string[],
+  sequence: readonly string[],
+  spanStart: number,
+  spanEnd: number,
+): boolean {
+  if (sequence.length === 0 || sequence.length > tokens.length) return false;
+  for (let index = 0; index <= tokens.length - sequence.length; index += 1) {
+    if (!sequence.every((token, offset) => tokens[index + offset] === token)) {
+      continue;
+    }
+    if (index < spanStart || index + sequence.length > spanEnd) return true;
+  }
+  return false;
+}
+
+function parseSemanticDocument(text: string): SemanticDocument {
+  const raw = expandSemanticContractions(text)
+    .toLocaleLowerCase("en-US")
+    // Registry phrases intentionally use dotted fact revisions (for example
+    // `patron_record.v2`). A dot between two lexical characters is part of
+    // that identifier, not a sentence boundary. Convert only that scoped dot
+    // to whitespace so the parser and phrase normalizer see the same tokens.
+    .replace(/([\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, "$1 ")
+    .match(/[\p{L}\p{N}]+|[.!?;]|\n+|[—–]+/gu) ?? [];
+  const clauses: SemanticClause[] = [];
+  let values: string[] = [];
+  let globalStart = 0;
+  const flush = (terminal: "question" | "statement") => {
+    if (values.length === 0) return;
+    clauses.push(Object.freeze({
+      ordinal: clauses.length,
+      start: globalStart,
+      terminal,
+      tokens: Object.freeze(values),
+    }));
+    globalStart += values.length;
+    values = [];
+  };
+  for (const item of raw) {
+    if (/^(?:[.!?;]|\n+|[—–]+)$/u.test(item)) {
+      flush(item === "?" ? "question" : "statement");
+    } else {
+      values.push(item);
+    }
+  }
+  flush("statement");
+  return Object.freeze({
+    clauses: Object.freeze(clauses),
+    tokens: Object.freeze(clauses.flatMap((clause) => clause.tokens)),
+  });
+}
+
+function phraseOccurrences(
+  document: SemanticDocument,
+  phrase: readonly string[],
+): readonly Readonly<{
+  start: number;
+  end: number;
+  clause: number;
+  localStart: number;
+  localEnd: number;
+}>[] {
+  if (phrase.length === 0) return Object.freeze([]);
+  const occurrences: Array<Readonly<{
+    start: number;
+    end: number;
+    clause: number;
+    localStart: number;
+    localEnd: number;
+  }>> = [];
+  for (const clause of document.clauses) {
+    for (let index = 0; index <= clause.tokens.length - phrase.length; index += 1) {
+      if (!phrase.every((token, offset) => clause.tokens[index + offset] === token)) continue;
+      occurrences.push(Object.freeze({
+        start: clause.start + index,
+        end: clause.start + index + phrase.length,
+        clause: clause.ordinal,
+        localStart: index,
+        localEnd: index + phrase.length,
+      }));
+    }
+  }
+  return Object.freeze(occurrences);
+}
+
+function hasScopedPositiveRejection(
+  clause: SemanticClause,
+  localStart: number,
+  localEnd: number,
+): boolean {
+  const values = clause.tokens;
+  if (clause.terminal === "question"
+    || values.some((token, index) =>
+      token === "or" && (index < localStart || index >= localEnd))) return true;
+  if (values[localEnd] === "ish") return true;
+  if (REJECTION_SEQUENCES.some((sequence) =>
+    includesSequenceOutsideSpan(
+      values,
+      sequence,
+      localStart,
+      localEnd,
+    ))) return true;
+  if (REPORTED_OR_META_SEQUENCES.some((sequence) => includesSequence(values, sequence))) return true;
+  if ((values.includes("caller") || values.includes("user"))
+    && values.some((token) => ["said", "mentioned", "repeated", "uttered", "told", "asked"].includes(token))) {
+    return true;
+  }
+  if (CONDITIONAL_OPENERS.some((sequence) => beginsWithSequence(values, sequence))) return true;
+  if (values.some((token, index) =>
+    (index < localStart || index >= localEnd)
+    && [
+      "deny", "dispute", "reject", "decline", "never", "unlikely", "hardly",
+      "maybe", "might", "may", "supposedly", "obsolete", "superseded",
+      "incorrect", "invalid",
+    ].includes(token))) return true;
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] !== "not") continue;
+    if (index >= localStart && index < localEnd) continue;
+    if (values[index + 1] === "only" || values[index + 1] === "wrong") continue;
+    const contrastIndex = values.indexOf("but", index + 1);
+    if (index < localStart && contrastIndex >= 0 && contrastIndex < localStart) continue;
+    return true;
+  }
+  const contrastIndex = values.indexOf("but");
+  if (contrastIndex >= 0
+    && localEnd <= contrastIndex
+    && !includesSequence(values.slice(0, localStart), ["not", "only"])) return true;
+  for (let index = 0; index < localStart; index += 1) {
+    if (!["old", "prior", "earlier", "stale"].includes(values[index]!)) continue;
+    if (!values.slice(index + 1, localStart).includes("correction")
+      && !values.slice(index + 1, localStart).includes("correct")) return true;
+  }
+  return false;
+}
+
+function isDirectAffirmation(
+  clause: SemanticClause,
+  phrase: readonly string[],
+  localStart: number,
+  localEnd: number,
+): boolean {
+  const values = clause.tokens;
+  const prefix = values.slice(0, localStart);
+  const suffix = values.slice(localEnd);
+  const firstPersonRegisteredIntent = clause.terminal === "statement"
+    && (prefix.includes("i") || prefix.includes("we"))
+    && prefix.includes("will")
+    && ["check", "verify", "reconcile", "read"].includes(
+      phrase[0] ?? "",
+    );
+  const registeredAssertionFrame = clause.terminal === "statement"
+    && (
+      prefix.length === 1 && prefix[0] === "confirmed"
+      || prefix.length >= 1
+        && prefix.length <= 4
+        && prefix.includes("correction")
+        && prefix.includes("use")
+    )
+    && suffix.every((token) =>
+      ["is", "current", "confirmed", "correct", "active", "authoritative"].includes(token));
+  if (registeredAssertionFrame) return true;
+  if (hasScopedPositiveRejection(clause, localStart, localEnd)) return false;
+  const noDoubt = includesSequence(values, ["no", "doubt"]);
+  const checkedRepair = includesSequence(values, ["after", "checking"]);
+  const notWrong = values[localEnd] === "is"
+    && values[localEnd + 1] === "not"
+    && values[localEnd + 2] === "wrong";
+  if (firstPersonRegisteredIntent || noDoubt || checkedRepair || notWrong) {
+    return true;
+  }
+  if (phrase.length === values.length) return true;
+  return values.some((token) => POSITIVE_RELATION_WORDS.has(token))
+    || includesSequence(values, ["not", "only"]);
+}
+
+function clauseRetractsEarlier(
+  clause: SemanticClause,
+  phrase: readonly string[],
+): boolean {
+  const hasPhrase = phraseOccurrences(
+    Object.freeze({ clauses: Object.freeze([Object.freeze({ ...clause, ordinal: 0, start: 0 })]), tokens: clause.tokens }),
+    phrase,
+  ).length > 0;
+  if (RETRACTION_SEQUENCES.some((sequence) => includesSequence(clause.tokens, sequence))) return true;
+  if (hasPhrase) return false;
+  const correction = clause.tokens.some((token) =>
+    ["correction", "correct", "instead", "rather", "replace", "use"].includes(token));
+  const competingAuthority = clause.tokens.some((token) =>
+    ["current", "actual"].includes(token))
+    && clause.tokens.some((token) => ["is", "are", "equals"].includes(token));
+  const explicitNoReplacement = clause.tokens[0] === "no"
+    && clause.tokens.some((token) => ["is", "are", "equals"].includes(token));
+  const explicitWaitReplacement = clause.tokens.includes("wait")
+    && clause.tokens.some((token) => ["is", "are", "equals"].includes(token));
+  return correction || competingAuthority || explicitNoReplacement || explicitWaitReplacement;
+}
+
+function currentAffirmedMention(
+  document: SemanticDocument,
+  phrase: readonly string[],
+): SemanticMention | null {
+  const occurrences = phraseOccurrences(document, phrase);
+  for (let index = occurrences.length - 1; index >= 0; index -= 1) {
+    const occurrence = occurrences[index]!;
+    const clause = document.clauses[occurrence.clause]!;
+    const affirmed = isDirectAffirmation(
+      clause,
+      phrase,
+      occurrence.localStart,
+      occurrence.localEnd,
+    );
+    if (!affirmed) continue;
+    if (document.clauses.slice(occurrence.clause + 1)
+      .some((later) => clauseRetractsEarlier(later, phrase))) return null;
+    return Object.freeze({
+      start: occurrence.start,
+      end: occurrence.end,
+      clause: occurrence.clause,
+      affirmed: true,
+    });
+  }
+  return null;
+}
+
+function safeProhibitedMention(
+  clause: SemanticClause,
+  localStart: number,
+  localEnd: number,
+): boolean {
+  const values = clause.tokens;
+  const prefix = values.slice(0, localStart);
+  const suffix = values.slice(localEnd);
+  if (clause.terminal === "question") return true;
+  if (["not", "never"].includes(prefix.at(-1) ?? "")) return true;
+  if (prefix.at(-2) === "not" && ["ever", "again"].includes(prefix.at(-1) ?? "")) return true;
+  if (prefix.some((token) => ["maybe", "might", "could", "supposedly"].includes(token))) return true;
+  if (CONDITIONAL_OPENERS.some((sequence) => beginsWithSequence(values, sequence))) return true;
+  if (REPORTED_OR_META_SEQUENCES.some((sequence) => includesSequence(prefix, sequence))) return true;
+  if ([
+    ["forbidden", "promise"],
+    ["forbidden", "example"],
+    ["bad", "agent", "example"],
+    ["never", "claim", "this"],
+  ].some((sequence) => includesSequence(values, sequence))) return true;
+  if (suffix.some((token) => [
+    "incorrect", "wrong", "obsolete", "forbidden", "example", "retracted",
+  ].includes(token))) return true;
+  return false;
+}
+
+function latestProhibitedMentionIsSafe(
+  document: SemanticDocument,
+  phrase: readonly string[],
+): boolean {
+  const occurrences = phraseOccurrences(document, phrase);
+  if (occurrences.length === 0) return true;
+  const latest = occurrences.at(-1)!;
+  const clause = document.clauses[latest.clause]!;
+  if (safeProhibitedMention(clause, latest.localStart, latest.localEnd)) return true;
+  return document.clauses.slice(latest.clause + 1)
+    .some((later) => clauseRetractsEarlier(later, phrase));
+}
+
+function expectedYearCompatible(
+  criterion: Lc4ListenerSemanticCriterion,
+  document: SemanticDocument,
+): boolean {
+  const expectedYears = new Set(criterion.phrases
+    .flatMap((phrase) => normalize(phrase))
+    .filter((token) => /^(?:19|20|21)\d{2}$/u.test(token)));
+  if (expectedYears.size === 0) return true;
+  const observedYears = document.tokens.filter((token) =>
+    /^(?:19|20|21)\d{2}$/u.test(token));
+  return observedYears.length === 0
+    || observedYears.some((year) => expectedYears.has(year));
+}
+
+/**
+ * Provider-free, deterministic semantic criterion scorer. Exact phrase
+ * matching remains preregistered, but a phrase only counts when its latest
+ * decisive mention is affirmative. Local negation, uncertainty, stale-value
+ * framing, questions, rejected predicates, and explicit later replacements
+ * therefore cannot earn memory/alignment credit.
+ */
+export function scoreLc4ListenerSemanticCriterion(
+  criterion: Lc4ListenerSemanticCriterion,
+  transcript: string,
+): boolean {
+  const document = parseSemanticDocument(transcript);
   const phrases = criterion.phrases.map(normalize);
-  const matches = phrases.map((phrase) => containsSequence(tokens, phrase) >= 0);
-  if (criterion.operator === "contains_any") return matches.some(Boolean);
-  if (criterion.operator === "contains_all") return matches.every(Boolean);
-  if (criterion.operator === "contains_none") return matches.every((match) => !match);
+  if (criterion.operator === "contains_none") {
+    return phrases.every((phrase) => latestProhibitedMentionIsSafe(document, phrase));
+  }
+  if (!expectedYearCompatible(criterion, document)) return false;
+  const matches = phrases.map((phrase) => currentAffirmedMention(document, phrase));
+  if (criterion.operator === "contains_any") return matches.some((match) => match !== null);
+  if (criterion.operator === "contains_all") return matches.every((match) => match !== null);
   let cursor = 0;
-  for (const phrase of phrases) {
-    const index = containsSequence(tokens, phrase, cursor);
-    if (index < 0) return false;
-    cursor = index + phrase.length;
+  for (const match of matches) {
+    if (!match || match.start < cursor) return false;
+    cursor = match.end;
   }
   return true;
 }
@@ -818,7 +1270,9 @@ export function replayLc4ListenerSemantics(input: Readonly<{
   opportunityId: string;
   observation: ConditionBlindListenerObservation | null;
 }>): Lc4ListenerSemanticReplay {
-  if (input.plan.plan_sha256 !== hash(SEMANTIC_PLAN_DOMAIN, semanticPlanBody(input.plan))) {
+  if (input.plan.semantic_scorer_version !== LC4_LISTENER_SEMANTIC_SCORER_VERSION
+    || input.plan.semantic_scorer_build_sha256 !== LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256
+    || input.plan.plan_sha256 !== hash(SEMANTIC_PLAN_DOMAIN, semanticPlanBody(input.plan))) {
     throw new Error("LC4 semantic plan hash mismatch");
   }
   const opportunity = input.plan.opportunities.find((candidate) => candidate.opportunity_id === input.opportunityId);
@@ -833,7 +1287,9 @@ export function replayLc4ListenerSemantics(input: Readonly<{
   const applicable = opportunity.applicability.status === "applicable";
   const criteria = opportunity.criteria.map((criterion) => Object.freeze({
     criterion_id: criterion.criterion_id,
-    pass: applicable && verified ? criterionPass(criterion, input.observation!.transcript) : null,
+    pass: applicable && verified
+      ? scoreLc4ListenerSemanticCriterion(criterion, input.observation!.transcript)
+      : null,
   }));
   const byId = new Map(criteria.map((criterion) => [criterion.criterion_id, criterion.pass]));
   const earliestUnmet = opportunity.criteria
@@ -844,6 +1300,8 @@ export function replayLc4ListenerSemantics(input: Readonly<{
   const finalPass = !applicable || !verified ? null : required.every((criterion) => byId.get(criterion.criterion_id) === true);
   const body = Object.freeze({
     schema_version: 1 as const,
+    semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+    semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
     opportunity_id: input.opportunityId,
     listener_evidence_sha256: input.observation?.evidence_sha256 ?? null,
     applicability: opportunity.applicability,
@@ -959,6 +1417,8 @@ export async function createLc4ListenerEvidenceArtifact(input: Readonly<{
   sha(input.scheduleSha256, "LC4 listener schedule hash");
   if (input.semanticPlan.protocol_sha256 !== input.protocolSha256
     || input.semanticPlan.schedule_sha256 !== input.scheduleSha256
+    || input.semanticPlan.semantic_scorer_version !== LC4_LISTENER_SEMANTIC_SCORER_VERSION
+    || input.semanticPlan.semantic_scorer_build_sha256 !== LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256
     || input.semanticPlan.plan_sha256 !== hash(SEMANTIC_PLAN_DOMAIN, semanticPlanBody(input.semanticPlan))) {
     throw new Error("LC4 listener semantic plan binding mismatch");
   }
@@ -1186,6 +1646,8 @@ export async function createLc4ListenerEvidenceArtifact(input: Readonly<{
   const body = Object.freeze({
     schema_version: 1 as const,
     evidence_version: LC4_LISTENER_EVIDENCE_VERSION,
+    semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+    semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
     run_id: runId,
     template_id: input.semanticPlan.template_id,
     protocol_sha256: input.protocolSha256,
@@ -1210,13 +1672,18 @@ export function verifyLc4ListenerEvidenceArtifact(input: Readonly<{
 }>): Readonly<{ valid: boolean; errors: readonly string[] }> {
   const errors: string[] = [];
   const artifact = input.artifact;
-  if (artifact.schema_version !== 1 || artifact.evidence_version !== LC4_LISTENER_EVIDENCE_VERSION) {
+  if (artifact.schema_version !== 1
+    || artifact.evidence_version !== LC4_LISTENER_EVIDENCE_VERSION
+    || artifact.semantic_scorer_version !== LC4_LISTENER_SEMANTIC_SCORER_VERSION
+    || artifact.semantic_scorer_build_sha256 !== LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256) {
     errors.push("LC4 listener artifact schema/version mismatch");
   }
   if (artifact.semantic_plan_sha256 !== input.semanticPlan.plan_sha256
     || artifact.template_id !== input.semanticPlan.template_id
     || artifact.semantic_registry_sha256 !== input.semanticPlan.registry_sha256
     || artifact.semantic_registry_manifest_sha256 !== input.semanticPlan.registry_manifest_sha256
+    || input.semanticPlan.semantic_scorer_version !== LC4_LISTENER_SEMANTIC_SCORER_VERSION
+    || input.semanticPlan.semantic_scorer_build_sha256 !== LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256
     || artifact.protocol_sha256 !== input.semanticPlan.protocol_sha256
     || artifact.schedule_sha256 !== input.semanticPlan.schedule_sha256) {
     errors.push("LC4 listener artifact semantic-plan binding mismatch");

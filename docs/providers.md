@@ -1,13 +1,13 @@
 # Realtime providers
 
-Provider facts and defaults below were checked against official documentation on July 19, 2026. Model IDs remain configurable because realtime catalogs move quickly.
+Provider facts and defaults below were checked against official documentation on July 28, 2026. Model IDs remain configurable because realtime catalogs move quickly.
 
 The repository's adapter and protocol tests are C1 engineering evidence. They do not prove that a provider accepted the release commit. Only a content-addressed C3 canary artifact can support compatibility for its exact provider, model, transport, voice, and date; C3 is not model-quality or framework-superiority evidence.
 
 ## Common setup
 
-1. Copy `web/.env.example` to `web/.env.local` and set the provider's server-side API key.
-2. For a Gemini browser call or local builder/onboarding AI, set `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` only when you accept spending your own key and keep `PUBLIC_ORIGIN` on plain-HTTP loopback.
+1. Copy `web/.env.example` to `web/.env.local`. For OpenAI/xAI browser calls, apply migration `037`, configure `ENV_VAULT_MASTER_KEY`, then store the authenticated tenant's provider root through `POST /api/voice/providers`. Deployment keys remain available only for the explicit loopback development path.
+2. For any local browser call or local builder/onboarding AI, set `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` only when you accept spending your own key and keep `PUBLIC_ORIGIN` on plain-HTTP loopback.
 3. Select the provider on an agent version with `voice_provider`, optionally pin `voice_model`, and put supported tuning only in `provider_settings`.
 4. Start with a browser call. Treat PSTN as a separate deployment: the standalone bridge currently supports only OpenAI/xAI PCMU and remains development/non-production.
 
@@ -16,7 +16,7 @@ Builder/operator chat is provider-neutral and defaults to xAI. Set
 `HACC_BUILDER_MODEL`, and provide the selected provider's server-side API key.
 This deployment setting is independent of an agent's realtime voice provider.
 
-The browser-session, builder, and onboarding-AI routes fail closed in production and at non-loopback origins even if `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` is copied there. xAI/OpenAI browser calls require a non-loopback public HTTPS gateway, so their implemented transports cannot be exercised through the stock deployment-funded web route until you add reviewed tenant BYOK or durable provider-budget authority. The credential-ingest API is for external tool/MCP credentials and must not be described as provider BYOK. Generic `HACC_ENABLE_*_EGRESS` switches do not relax this spend boundary.
+Builder, onboarding-AI, and Gemini browser routes fail closed in production and at non-loopback origins even if `ALLOW_DEV_DEPLOYMENT_FUNDED_AI=true` is copied there. xAI/OpenAI browser calls use the stock organization-scoped BYOK path: the authenticated same-origin setup route encrypts the root under an org/provider/generation-bound vault context, and the token route uses it only to mint a provider ephemeral credential. Every built-in browser adapter requires one explicit funding authority: either that exact provider's tenant root, or a process-local, identity-checked marker minted only after the loopback development checks pass. The origin is bound to the authority kind: local deployment authority requires non-production plain-HTTP loopback, while tenant BYOK requires a canonical non-loopback HTTPS origin or tunnel. Exact loopback mode selects the local authority even when a tenant root is stored, so the tenant root is never used over plaintext HTTP; an issued local marker cannot be moved to a tunnel. Omission, provider substitution, and reconstructed marker objects fail before provider network I/O; no adapter treats `undefined` as permission to read a deployment key. The generic credential-ingest API remains for external tool/MCP credentials, not provider BYOK. Generic `HACC_ENABLE_*_EGRESS` switches do not relax either spend boundary.
 
 ## xAI
 
@@ -33,9 +33,22 @@ Pin a versioned model for production regression control. The `latest` alias is c
 
 ### xAI lifecycle evidence
 
-The LC4 qualification adapter uses xAI's documented provider-native `server_vad` instead of sending a manual initial commit or `response.create`. After the per-turn controls and exact closed tool frontier are acknowledged, it sends the caller PCM unchanged, followed by a separately disclosed bounded zero-PCM delimiter so the streamed transport can expose the configured silence boundary. That delimiter is not caller speech and has its own policy, PCM, chunk, and wire-observation commitments. Replay requires native `speech_stopped`, automatic commit, and automatic response ordering before the tool call, then exactly one explicit post-tool continuation request.
+Finite prerecorded LC4 calls use xAI manual turn mode: the harness sends the caller PCM byte-exactly, commits once, waits for the commit acknowledgement, and requests one response. The separately qualified interactive transport uses xAI's documented provider-native `server_vad` instead of sending an initial manual commit or `response.create`. After the per-turn controls and exact closed tool frontier are acknowledged, it sends caller PCM unchanged, followed by a separately disclosed zero-PCM delimiter paced in 20 ms frames and hard-capped at 2 seconds. A native `speech_stopped` is accepted only after at least the configured 500 ms silence window; delivery stops immediately when that event arrives. Exhausting all 100 frames without a native stop fails immediately as a delimiter-exhaustion error rather than waiting for the generic response timeout. The delimiter is not caller speech and has its own policy, PCM-prefix, chunk, and wire-observation commitments. Interactive replay requires native `speech_stopped`, automatic commit, and automatic response ordering before the tool call, then exactly one explicit post-tool continuation request.
 
 xAI can emit root-response audio before its terminal function-call projection. The benchmark path treats those bytes as response-scoped pre-tool output: they are hash-bound and retained in a quarantine receipt but are suppressed from caller playback (`released_audio_bytes: 0`). Only audio bound to the distinct post-tool continuation can satisfy the playable-output requirement. A missing delimiter, premature stop, reordered lifecycle, malformed PCM projection, or attempted release of quarantined audio invalidates the roundtrip evidence.
+
+These are deliberately separate claim surfaces. Manual commit is the finite
+prerecorded efficacy-cell transport. Server VAD is an interactive-transport
+qualification and does not qualify manual commit. Before any xAI efficacy cell
+can be admitted or published, a fresh one-shot Gate D must prove the exact
+source/profile-bound manual lifecycle and produce a v2 custody package. That
+package retains only bounded sanitized wire hashes, byte counts, and causal
+identities; its terminal-signed manifest binds the external-authority plan,
+authorization, physical one-shot invocation marker, distinct terminal key,
+production-adapter capability, execution replay, source/tree, profiles, and
+budget. Publication reopens both the receipt and the exact private marker.
+Gate D establishes transport compatibility only; it is not an efficacy result
+and cannot support a Native-versus-HACC claim on its own.
 
 ## OpenAI
 
@@ -61,7 +74,7 @@ OpenAI can project one logical function call across multiple progress and termin
 
 Official documentation: [Live API quickstart](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk), [capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities), [ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens), [tool use](https://ai.google.dev/gemini-api/docs/live-api/tools).
 
-Gemini Live and ephemeral tokens are preview APIs. The included Twilio bridge intentionally refuses Gemini calls because Twilio sends 8 kHz μ-law while Gemini consumes PCM. Add a tested transcoding adapter instead of treating incompatible bytes as audio. The supplied Gemini browser path does not imply Gemini PSTN support.
+Gemini Live and ephemeral tokens are preview APIs. This release has no tenant-scoped Gemini BYOK storage or production Gemini browser funding authority: the supplied Gemini browser path is available only through the explicit loopback development opt-in and fails closed elsewhere. The included Twilio bridge intentionally refuses Gemini calls because Twilio sends 8 kHz μ-law while Gemini consumes PCM. Add a tested transcoding adapter instead of treating incompatible bytes as audio. The supplied Gemini browser path does not imply Gemini PSTN support.
 
 ### Gemini lifecycle evidence
 
@@ -104,4 +117,12 @@ For all three providers, API acceptance or a completed terminal alone is insuffi
 
 The opt-in [Realtime Provider Plugin v1 contract](../web/lib/realtime/plugins/README.md) defines immutable provider manifests, transport/media preflight, lazy credential authority, normalized events and tool results, and a synthetic conformance kit. Its telephony declarations distinguish native media, a required transcoding bridge, and unsupported transport, with separate ingress and provider-side media profiles.
 
-The current OpenAI, xAI, and Gemini plugin exports are transitional wrappers over the existing adapters. The stock runtime still uses its static core registry, so a conforming plugin does not automatically appear in the browser, builder, integration catalog, or production runtime. The conformance kit is fixture evidence—not live compatibility, latency, quality, or provider-behavior evidence—and the cooperative plugin contract is not a sandbox for hostile code.
+The current OpenAI, xAI, and Gemini plugin exports are transitional wrappers
+over the existing adapters. The runtime registry accepts validated dynamic
+registrations, but a conforming plugin does not automatically appear in stock
+agent selection, browser consumers, BYOK setup, bootstrap defaults, the builder,
+or the integration catalog. Those application surfaces currently recognize the
+bundled providers and require explicit integration. The conformance kit is
+fixture evidence—not live compatibility, latency, quality, or
+provider-behavior evidence—and the cooperative plugin contract is not a sandbox
+for hostile code.

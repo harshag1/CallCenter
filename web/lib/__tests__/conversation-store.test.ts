@@ -189,6 +189,10 @@ describe("durable conversation store", () => {
 
 describe("033 durable conversation event migration contract", () => {
   const sql = readFileSync(resolve(process.cwd(), "migrations/033_voice_conversation_event_log.sql"), "utf8");
+  const replayIntegritySql = readFileSync(
+    resolve(process.cwd(), "migrations/046_voice_conversation_batch_replay_integrity.sql"),
+    "utf8",
+  );
 
   it("serializes one hash-chain head and atomic batches per conversation", () => {
     expect(sql).toContain("event_head_sequence");
@@ -204,6 +208,27 @@ describe("033 durable conversation event migration contract", () => {
     expect(sql).toContain("voice_conversation_event_mixed_replay");
     expect(sql).toMatch(/IF existing_count <> batch_count THEN/);
     expect(sql).toMatch(/UNIQUE \(conversation_id, idempotency_key\)/);
+  });
+
+  it("upgrades full-batch replay to prove submitted order, continuity, chain, and expected head", () => {
+    expect(replayIntegritySql).toContain("append_voice_conversation_events_v1_internal");
+    expect(replayIntegritySql).toMatch(/first_sequence \+ item_ordinal - 1/);
+    expect(replayIntegritySql).toMatch(
+      /predecessor\.sequence = first_sequence - 1[\s\S]*predecessor\.event_sha256 = expected_head_sha256/,
+    );
+    expect(replayIntegritySql).toMatch(
+      /existing\.previous_event_sha256 IS DISTINCT FROM rolling_hash/,
+    );
+    expect(replayIntegritySql).toMatch(
+      /unsigned_event->>'previousHash' IS DISTINCT FROM rolling_hash/,
+    );
+    expect(replayIntegritySql).toContain("voice_conversation_event_batch_replay_invalid");
+    expect(replayIntegritySql).toMatch(
+      /REVOKE ALL ON FUNCTION\s+public\.append_voice_conversation_events_v1_internal/,
+    );
+    expect(replayIntegritySql).toMatch(
+      /GRANT EXECUTE ON FUNCTION\s+public\.append_voice_conversation_events\(uuid,uuid,text,text,text\)\s+TO hacc_backend/,
+    );
   });
 
   it("bounds and independently digests canonical event and batch bytes", () => {

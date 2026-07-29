@@ -18,7 +18,10 @@ import type {
 } from "./client/types";
 
 const SHA256 = /^[a-f0-9]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+const ASR_RECEIPT_HMAC_DOMAIN = "hacc/browser-outbound-speech-asr-receipt-hmac/v2\n";
+const ASR_RECEIPT_DIGEST_DOMAIN = "hacc/browser-outbound-speech-asr-receipt-digest/v2\n";
 
 export type OutboundSpeechGateAction = "release" | "suppress" | "suppress_and_regenerate";
 
@@ -67,6 +70,8 @@ export const DEFAULT_OUTBOUND_SPEECH_GATE_LIMITS = Object.freeze({
 });
 
 export type IndependentSpeechAsrInput = Readonly<{
+  organizationId: string;
+  callId: string;
   responseId: string;
   provider: ServerRealtimeProvider;
   audio: Pcm16Audio;
@@ -77,7 +82,14 @@ export type IndependentSpeechAsrInput = Readonly<{
 }>;
 
 export type IndependentSpeechAsrReceipt = Readonly<{
+  schemaVersion: 2;
+  authorityId: string;
+  organizationId: string;
+  callId: string;
+  provider: ServerRealtimeProvider;
+  responseId: string;
   text: string;
+  transcriptSha256: string;
   /** Must match the exact concatenated PCM supplied in `IndependentSpeechAsrInput`. */
   audioSha256: string;
   audioBytes: number;
@@ -85,6 +97,11 @@ export type IndependentSpeechAsrReceipt = Readonly<{
   channels: 1;
   complete: true;
   engine: string;
+  model: string;
+  decision: "transcribed";
+  /** HMAC-SHA-256 over the canonical receipt core, verified by the server. */
+  receiptHmacSha256: string;
+  /** Browser-verifiable digest over the canonical core plus its server HMAC. */
   receiptSha256: string;
 }>;
 
@@ -157,6 +174,10 @@ type Timer = ReturnType<typeof setTimeout>;
 
 export type OutboundSpeechGateOptions = Readonly<{
   policy: OutboundSpeechGatePolicy;
+  receiptContext?: Readonly<{
+    organizationId: string;
+    callId: string;
+  }>;
   independentAsr?: IndependentSpeechAsr;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => Timer;
@@ -185,6 +206,7 @@ export function createOutboundSpeechGatePolicy(
 
 export class OutboundSpeechGate {
   private readonly policy: OutboundSpeechGatePolicy;
+  private readonly receiptContext?: OutboundSpeechGateOptions["receiptContext"];
   private readonly independentAsr?: IndependentSpeechAsr;
   private readonly now: () => number;
   private readonly setTimer: (callback: () => void, delayMs: number) => Timer;
@@ -194,6 +216,7 @@ export class OutboundSpeechGate {
 
   constructor(options: OutboundSpeechGateOptions) {
     this.policy = createOutboundSpeechGatePolicy(options.policy);
+    this.receiptContext = options.receiptContext;
     this.independentAsr = options.independentAsr;
     this.now = options.now ?? Date.now;
     this.setTimer = options.setTimer ?? setTimeout;
@@ -443,7 +466,7 @@ export class OutboundSpeechGate {
 
       let asrText: string | null = null;
       if (action === "release" && needsAsr && aggregate && audioSha256) {
-        if (!this.independentAsr) {
+        if (!this.independentAsr || !this.receiptContext) {
           reason = "evidence_unavailable";
           action = this.policy.onEvidenceFailure;
         } else {
@@ -451,6 +474,8 @@ export class OutboundSpeechGate {
           try {
             const receipt = await this.withTimeout(
               this.independentAsr({
+                organizationId: this.receiptContext.organizationId,
+                callId: this.receiptContext.callId,
                 responseId,
                 provider: response.provider,
                 audio: aggregate,
@@ -461,7 +486,17 @@ export class OutboundSpeechGate {
               }),
               this.policy.maxDecisionLatencyMs,
             );
-            if (!validAsrReceipt(receipt, aggregate, audioSha256)) {
+            if (!await validAsrReceipt(receipt, {
+              organizationId: this.receiptContext.organizationId,
+              callId: this.receiptContext.callId,
+              responseId,
+              provider: response.provider,
+              audio: aggregate,
+              audioSha256,
+              audioBytes: response.audioBytes,
+              audioDurationMs: response.audioDurationMs,
+              deadlineAtMs,
+            })) {
               reason = "evidence_mismatch";
               action = this.policy.onEvidenceFailure;
             } else {
@@ -642,23 +677,85 @@ function releaseCopies(chunks: readonly Pcm16Audio[]): readonly Pcm16Audio[] {
   })));
 }
 
-function validAsrReceipt(
+export function independentSpeechAsrReceiptHmacMessage(
+  receipt: Omit<IndependentSpeechAsrReceipt, "receiptHmacSha256" | "receiptSha256">,
+): string {
+  return `${ASR_RECEIPT_HMAC_DOMAIN}${JSON.stringify(canonicalReceiptCore(receipt))}`;
+}
+
+export function independentSpeechAsrReceiptDigestMessage(
+  receipt: Omit<IndependentSpeechAsrReceipt, "receiptSha256">,
+): string {
+  return `${ASR_RECEIPT_DIGEST_DOMAIN}${JSON.stringify({
+    ...canonicalReceiptCore(receipt),
+    receiptHmacSha256: receipt.receiptHmacSha256,
+  })}`;
+}
+
+async function validAsrReceipt(
   receipt: IndependentSpeechAsrReceipt,
-  audio: Pcm16Audio,
-  audioSha256: string,
-): boolean {
-  return Boolean(
+  expected: IndependentSpeechAsrInput,
+): Promise<boolean> {
+  if (!(
     receipt
+    && receipt.schemaVersion === 2
+    && UUID.test(receipt.authorityId)
+    && receipt.organizationId === expected.organizationId
+    && receipt.callId === expected.callId
+    && receipt.provider === expected.provider
+    && receipt.responseId === expected.responseId
     && receipt.complete === true
     && typeof receipt.text === "string"
-    && receipt.audioSha256 === audioSha256
-    && receipt.audioBytes === audio.data.byteLength
-    && receipt.sampleRateHz === audio.sampleRateHz
+    && receipt.text.length <= 32_000
+    && SHA256.test(receipt.transcriptSha256)
+    && receipt.audioSha256 === expected.audioSha256
+    && receipt.audioBytes === expected.audioBytes
+    && receipt.audioBytes === expected.audio.data.byteLength
+    && receipt.sampleRateHz === expected.audio.sampleRateHz
     && receipt.channels === 1
     && typeof receipt.engine === "string"
     && receipt.engine.length > 0
-    && SHA256.test(receipt.receiptSha256),
-  );
+    && receipt.engine.length <= 128
+    && typeof receipt.model === "string"
+    && receipt.model.length > 0
+    && receipt.model.length <= 128
+    && receipt.decision === "transcribed"
+    && SHA256.test(receipt.receiptHmacSha256)
+    && SHA256.test(receipt.receiptSha256)
+  )) return false;
+  try {
+    const [transcriptSha256, receiptSha256] = await Promise.all([
+      sha256Hex(receipt.text),
+      sha256Hex(independentSpeechAsrReceiptDigestMessage(receipt)),
+    ]);
+    return transcriptSha256 === receipt.transcriptSha256
+      && receiptSha256 === receipt.receiptSha256;
+  } catch {
+    return false;
+  }
+}
+
+function canonicalReceiptCore(
+  receipt: Omit<IndependentSpeechAsrReceipt, "receiptHmacSha256" | "receiptSha256">,
+): Omit<IndependentSpeechAsrReceipt, "receiptHmacSha256" | "receiptSha256"> {
+  return {
+    schemaVersion: 2,
+    authorityId: receipt.authorityId,
+    organizationId: receipt.organizationId,
+    callId: receipt.callId,
+    provider: receipt.provider,
+    responseId: receipt.responseId,
+    text: receipt.text,
+    transcriptSha256: receipt.transcriptSha256,
+    audioSha256: receipt.audioSha256,
+    audioBytes: receipt.audioBytes,
+    sampleRateHz: receipt.sampleRateHz,
+    channels: 1,
+    complete: true,
+    engine: receipt.engine,
+    model: receipt.model,
+    decision: "transcribed",
+  };
 }
 
 function normalizeSpeechText(value: string): string {

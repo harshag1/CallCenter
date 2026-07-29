@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   OutboundSpeechGate,
   createOutboundSpeechGatePolicy,
+  independentSpeechAsrReceiptDigestMessage,
   type IndependentSpeechAsr,
   type IndependentSpeechAsrInput,
 } from "./outbound-speech-gate";
 
-const RECEIPT_SHA = "a".repeat(64);
+const ORGANIZATION_ID = "00000000-0000-4000-8000-0000000000a1";
+const CALL_ID = "00000000-0000-4000-8000-0000000000c1";
+const AUTHORITY_ID = "00000000-0000-4000-8000-0000000000d1";
 
 function sha(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -23,17 +26,33 @@ function pcm(values = [1, 0, 2, 0]) {
 }
 
 function asr(text: string, mutate: Partial<Awaited<ReturnType<IndependentSpeechAsr>>> = {}): IndependentSpeechAsr {
-  return async (input: IndependentSpeechAsrInput) => ({
-    text,
-    audioSha256: input.audioSha256,
-    audioBytes: input.audioBytes,
-    sampleRateHz: input.audio.sampleRateHz,
-    channels: 1,
-    complete: true,
-    engine: "fixture-asr",
-    receiptSha256: RECEIPT_SHA,
-    ...mutate,
-  });
+  return async (input: IndependentSpeechAsrInput) => {
+    const core = {
+      schemaVersion: 2 as const,
+      authorityId: AUTHORITY_ID,
+      organizationId: input.organizationId,
+      callId: input.callId,
+      provider: input.provider,
+      responseId: input.responseId,
+      text,
+      transcriptSha256: sha(text),
+      audioSha256: input.audioSha256,
+      audioBytes: input.audioBytes,
+      sampleRateHz: input.audio.sampleRateHz,
+      channels: 1 as const,
+      complete: true as const,
+      engine: "fixture-asr",
+      model: "fixture-model",
+      decision: "transcribed" as const,
+      receiptHmacSha256: "a".repeat(64),
+      ...mutate,
+    };
+    return {
+      ...core,
+      receiptSha256: sha(independentSpeechAsrReceiptDigestMessage(core)),
+      ...(mutate.receiptSha256 ? { receiptSha256: mutate.receiptSha256 } : {}),
+    };
+  };
 }
 
 function gate(input: {
@@ -47,6 +66,10 @@ function gate(input: {
   const secret = "482-991";
   return new OutboundSpeechGate({
     independentAsr: input.asr,
+    receiptContext: {
+      organizationId: ORGANIZATION_ID,
+      callId: CALL_ID,
+    },
     now: input.now,
     policy: createOutboundSpeechGatePolicy({
       maxDecisionLatencyMs: 100,
@@ -131,6 +154,28 @@ describe("OutboundSpeechGate", () => {
     });
   });
 
+  it("rejects cross-call/provider/response and arbitrary transcript receipt substitution", async () => {
+    for (const mutation of [
+      { organizationId: "00000000-0000-4000-8000-0000000000b2" },
+      { callId: "00000000-0000-4000-8000-0000000000c2" },
+      { provider: "gemini" as const },
+      { responseId: "cross-response" },
+      { text: "attacker supplied transcript" },
+      { receiptSha256: "f".repeat(64) },
+    ]) {
+      const instance = gate({
+        asr: asr("I can help", mutation),
+        onEvidenceFailure: "suppress_and_regenerate",
+      });
+      complete(instance);
+      await expect(instance.finalizeResponse("response-1")).resolves.toMatchObject({
+        action: "suppress_and_regenerate",
+        reason: "evidence_mismatch",
+        evidenceCoverage: "none",
+      });
+    }
+  });
+
   it("fails closed on missing evidence and non-completed provider terminals", async () => {
     const missing = gate();
     complete(missing);
@@ -165,6 +210,10 @@ describe("OutboundSpeechGate", () => {
     const never = new Promise<never>(() => undefined);
     const timedOut = new OutboundSpeechGate({
       independentAsr: async () => never,
+      receiptContext: {
+        organizationId: ORGANIZATION_ID,
+        callId: CALL_ID,
+      },
       policy: createOutboundSpeechGatePolicy({ maxDecisionLatencyMs: 10 }),
       setTimer: (callback) => {
         queueMicrotask(callback);

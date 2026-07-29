@@ -63,6 +63,8 @@ function evaluatorFixture(observe?: (pcm: Uint8Array) => void): Lc4PinnedListene
         transcript_sha256: "4".repeat(64),
         semantic_result_sha256: "5".repeat(64),
         signed_invocation_receipt_sha256: "6".repeat(64),
+        signed_invocation_artifact_cas_sha256: "8".repeat(64),
+        signed_invocation_artifact_byte_length: 512,
       });
     },
   });
@@ -96,6 +98,11 @@ describe("LC4-DEV headless listener authority", () => {
     expect(result.captured_pcm_sha256).toBe(sha256Hex(pcm));
     expect(result.evaluator_consumed_pcm_sha256).toBe(sha256Hex(pcm));
     expect(result.authority_receipt.body.evidence_scope).toBe("server_captured_pcm_handed_to_pinned_evaluator");
+    expect(result.authority_receipt.body).toMatchObject({
+      evaluator_signed_invocation_receipt_sha256: "6".repeat(64),
+      evaluator_signed_invocation_artifact_cas_sha256: "8".repeat(64),
+      evaluator_signed_invocation_artifact_byte_length: 512,
+    });
     expect(() => assertLc4HeadlessListenerHandoffReceipt({
       receipt: result.authority_receipt,
       trust,
@@ -133,12 +140,31 @@ describe("LC4-DEV headless listener authority", () => {
           evaluator_contract_sha256: "1".repeat(64), evaluator_build_sha256: "2".repeat(64),
           calibration_sha256: "3".repeat(64), transcript_sha256: "4".repeat(64),
           semantic_result_sha256: "5".repeat(64), signed_invocation_receipt_sha256: "6".repeat(64),
+          signed_invocation_artifact_cas_sha256: "8".repeat(64),
+          signed_invocation_artifact_byte_length: 512,
         };
       },
     };
     await expect(authority.consume({
       capture, pcm, criterion_plan_sha256: "7".repeat(64), evaluator: substitutedEvaluator,
     })).rejects.toThrow("did not attest consumption of the exact complete captured PCM");
+
+    const legacyEvaluator = {
+      ...evaluatorFixture(),
+      async evaluate(evaluationInput: Parameters<Lc4PinnedListenerEvaluator["evaluate"]>[0]) {
+        const current = await evaluatorFixture().evaluate(evaluationInput);
+        const legacy: Record<string, unknown> = { ...current };
+        delete legacy.signed_invocation_artifact_cas_sha256;
+        delete legacy.signed_invocation_artifact_byte_length;
+        return legacy as never;
+      },
+    };
+    await expect(authority.consume({
+      capture,
+      pcm,
+      criterion_plan_sha256: "7".repeat(64),
+      evaluator: legacyEvaluator,
+    })).rejects.toThrow(/signed_invocation_artifact_cas_sha256/u);
 
     const mutatingEvaluator = evaluatorFixture((bytes) => { bytes[0] ^= 0xff; });
     await expect(authority.consume({

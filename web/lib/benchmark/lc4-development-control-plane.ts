@@ -66,6 +66,30 @@ const NATIVE_CONTEXT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-contex
 const WORKER_PLAN_DOMAIN = "harshas-amazing-call-center/lc4-dev-worker-plan/v1\n";
 const CONTROL_VERSION = "lc4-dev-municipal-control-plane-v1" as const;
 
+/**
+ * The natural operator brief is an arm-common, pre-conversation input. It is
+ * intentionally phrased without Flow nodes, corpus opportunity IDs, evaluator
+ * criteria, expected effects, or a host-maintained fact projection. Native
+ * must recover later corrections from the conversation itself.
+ */
+export const LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT = [
+  "You are a municipal-library voice agent helping a fictional patron arrange supervised access to an oral-history recording and request an accessible transcript.",
+  "Keep the two goals distinct, remember what the caller actually says, and treat a later caller correction as replacing the earlier statement.",
+  "Use capability_gateway for tool requests and rely on returned tool results for external-action status.",
+  "Do not expose private contact details, repeat an ambiguous mutation, reserve prematurely, or claim completion without an authoritative returned result.",
+  "Speak naturally and continue until the caller has a clear, evidence-grounded status for both goals.",
+].join(" ");
+
+/**
+ * Native receives the same byte-identical continuation on every response. It
+ * does not summarize the current corpus state or tell the model what the
+ * evaluator expects at the active opportunity.
+ */
+export const LC4_DEV_NATIVE_RAW_CONTINUATION_CONTEXT = [
+  "Continue from the initial task and only the conversation and tool results already present in this provider session.",
+  "Retain corrections from the caller's chronological statements and do not treat an unreturned action result as success.",
+].join(" ");
+
 const STAGES = Object.freeze([
   Object.freeze({ id: "stage.intake", step: "oral_history.intake", end: 10 }),
   Object.freeze({ id: "stage.eligibility", step: "oral_history.eligibility", end: 20 }),
@@ -437,7 +461,7 @@ export type Lc4DevMunicipalControlManifest = Readonly<{
   provider_repair_plan_sha256: Readonly<Record<Provider, string>>;
   durable_worker_plan_sha256: string;
   signer_public_key_sha256: string;
-  native_information_parity: "full_equivalent_policy_and_accumulated_public_state";
+  native_information_parity: "arm_common_task_audio_gateway_world_raw_conversation_only";
   hacc_control: "progressive_host_managed_flow_gateway_toolworld_crp_workers";
   manifest_sha256: string;
 }>;
@@ -824,24 +848,16 @@ function dueStageCompletions(state: EpisodeState, opportunity: Lc4PublicDevOppor
   return next ? [{ action: "archive.complete_stage", arguments: { stage_id: next.id }, opportunity }] : [];
 }
 
-function nativeContext(state: EpisodeState, opportunity: Lc4PublicDevOpportunity): string {
+function nativeContext(): string {
   const body = {
     protocol: CONTROL_VERSION,
     arm: "native",
-    parity_contract: "Full equivalent operator policy, logical tool contracts, repair policy, and accumulated public caller state. No HACC gateway, progressive routing, or state enforcement.",
-    base_condition_prompt: LC4_DEV_MUNICIPAL_CONDITION_SUITE.conditions["raw-full"].initialPrompt,
-    full_flow: LC4_DEV_MUNICIPAL_FLOW,
-    current_public_state: commonProjection(state.common),
-    current_opportunity: {
-      id: opportunity.id,
-      stage_id: opportunity.stage_id,
-      required_listener_semantics: opportunity.expected_oracle.required_listener_semantics,
-      prohibited_effects: opportunity.expected_oracle.prohibited_effects,
-    },
-    worker_plan_sha256: LC4_DEV_DURABLE_WORKER_PLAN_SHA256,
-    repair_plan_sha256: state.repairPlan.plan_sha256,
+    comparator: "raw_provider_long_context",
+    task_context: LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT,
+    continuation_context: LC4_DEV_NATIVE_RAW_CONTINUATION_CONTEXT,
+    memory_source: "provider_conversation_and_returned_tool_results_only",
   };
-  return `<lc4_native_equivalent_context sha256="${hash(NATIVE_CONTEXT_DOMAIN, body)}">\n${canonicalJson(body)}\n</lc4_native_equivalent_context>`;
+  return `<lc4_native_raw_context sha256="${hash(NATIVE_CONTEXT_DOMAIN, body)}">\n${canonicalJson(body)}\n</lc4_native_raw_context>`;
 }
 
 function manifestBody(input: Readonly<{
@@ -869,7 +885,7 @@ function manifestBody(input: Readonly<{
     },
     durable_worker_plan_sha256: LC4_DEV_DURABLE_WORKER_PLAN_SHA256,
     signer_public_key_sha256: input.signer.publicKeySha256,
-    native_information_parity: "full_equivalent_policy_and_accumulated_public_state" as const,
+    native_information_parity: "arm_common_task_audio_gateway_world_raw_conversation_only" as const,
     hacc_control: "progressive_host_managed_flow_gateway_toolworld_crp_workers" as const,
   };
 }
@@ -1001,7 +1017,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       // calls. They remain an evaluation expectation but are not progressively
       // gated or executed until the provider actually dispatches them.
       state.pendingGatewayActions.push(...logicalActions);
-      const instructions = nativeContext(state, opportunity);
+      const instructions = nativeContext();
       responseControl = { kind: "native_context", instructions, instructions_sha256: sha256Hex(instructions) };
       state.nativeTranscriptHead = hash(NATIVE_TRANSCRIPT_DOMAIN, {
         previous_head_sha256: state.nativeTranscriptHead,
@@ -1260,7 +1276,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
             hacc_response_plan: rebound.responsePlan,
           });
         } else {
-          const instructions = nativeContext(state, opportunity);
+          const instructions = nativeContext();
           const responseControl = freeze({
             kind: "native_context" as const,
             instructions,
@@ -1274,12 +1290,11 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           });
           postTransitionResponsePlanSha256 = responseControl.instructions_sha256;
           postTransitionResponseControlSha256 = sha256Hex(canonicalJson(responseControl));
-          providerOutput = valueJson({
-            gateway_result: gatewayResultOnly(providerOutput),
-            authoritative_outcome: authoritativeOutcome,
-            speech_directive: speechDirective,
-            response_control: responseControl,
-          });
+          // Raw Native receives the ordinary leaf-gateway result. The
+          // authoritative receipt and speech directive remain evaluator-side
+          // evidence; injecting either would turn Native into a second
+          // host-managed controller and contaminate the comparator.
+          providerOutput = gatewayResultOnly(providerOutput);
           state.nativeTranscriptHead = hash(NATIVE_TRANSCRIPT_DOMAIN, {
             previous_head_sha256: state.nativeTranscriptHead,
             opportunity_id: opportunity.id,

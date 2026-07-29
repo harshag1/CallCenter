@@ -14,6 +14,12 @@ type WorkerForConversationAdapter = Readonly<{
   conversationId: string;
   authority: unknown;
   input: VoiceWorkerInput;
+}>;
+
+type WorkerResultForConversationAdapter = Readonly<{
+  id: string;
+  conversationId: string;
+  authority: unknown;
   resultSha256?: string | null;
 }>;
 
@@ -54,7 +60,7 @@ export function workerSpawnedConversationPayload(
  * into executable authority or model-visible control state here.
  */
 export function workerResultConversationPayload(
-  worker: WorkerForConversationAdapter,
+  worker: WorkerResultForConversationAdapter,
   message: InboxForConversationAdapter,
 ): Extract<ConversationEventPayload, { type: "worker.result_delivered" }> {
   const authority = VoiceWorkerSpawnAuthoritySchema.parse(worker.authority);
@@ -82,7 +88,10 @@ export function workerResultConversationPayload(
     })),
     advisories: [{
       episodeId: `worker-${worker.id}`,
-      text: result.summary,
+      // The full summary remains in private immutable worker evidence. Kernel
+      // advisories have a stricter 4,096-character contract, so projection
+      // cannot turn a valid 8,192-character result into a poison inbox row.
+      text: result.summary.slice(0, 4_096),
     }],
   };
 }

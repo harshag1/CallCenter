@@ -7,10 +7,10 @@ const mocks = vi.hoisted(() => ({ q: vi.fn(), qOne: vi.fn() }));
 vi.mock("../db", () => ({ q: mocks.q, qOne: mocks.qOne }));
 
 import {
-  GovernedWorkerResultNotApplicableError,
   applyGovernedDurableConversationInboxMessage,
   spawnGovernedDurableVoiceWorker,
   type DurableConversationInboxMessage,
+  type DurableConversationResultInboxMessage,
 } from "../voice-workers/store";
 import {
   prepareVoiceWorkerResult,
@@ -235,6 +235,7 @@ describe("governed worker transition store", () => {
           source_event_sha256: "b".repeat(64), payload: result.result,
           payload_sha256: result.resultSha256, delivery_token: null, delivery_lease_expires_at: null,
           delivery_count: 1, application_id: ids.application, applied_context_version: "1",
+          created_at: "2026-07-21T17:00:00.000Z",
           applied_at: "2026-07-21T17:01:00.000Z", acknowledged_at: "2026-07-21T17:01:00.000Z",
         },
       });
@@ -255,8 +256,15 @@ describe("governed worker transition store", () => {
       workerInput, capabilityManifest: manifest, sourceCallId: ids.call,
     });
     settledWorkerId = spawn.worker.id;
-    const settledWorker = { ...spawn.worker, status: "succeeded" as const, result: result.result, resultSha256: result.resultSha256 };
+    const settledWorker = {
+      ...spawn.worker,
+      status: "succeeded" as const,
+      result: result.result,
+      resultSha256: result.resultSha256,
+      settledAt: "2026-07-21T17:00:00.000Z",
+    };
     const message: DurableConversationInboxMessage = {
+      kind: "result",
       id: ids.message,
       conversationId: ids.conversation,
       workerId: spawn.worker.id,
@@ -268,6 +276,7 @@ describe("governed worker transition store", () => {
       deliveryCount: 1,
       applicationId: null,
       appliedContextVersion: null,
+      createdAt: "2026-07-21T17:00:00.000Z",
       appliedAt: null,
       acknowledgedAt: null,
     };
@@ -360,7 +369,7 @@ describe("governed worker transition store", () => {
     expect(mocks.qOne.mock.calls.filter(([sql]) => String(sql).includes("spawn_governed_voice_worker"))).toHaveLength(0);
   });
 
-  it("leaves a stale result unconsumed so it can be safely redelivered", async () => {
+  it("permanently rejects and acknowledges a stale result instead of reclaiming it forever", async () => {
     let durableLog = validPrefix();
     mocks.qOne.mockImplementation((sql: string, params: unknown[]) => {
       if (sql.includes("read_voice_conversation_head")) return Promise.resolve({
@@ -376,7 +385,42 @@ describe("governed worker transition store", () => {
           worker_job: workerRow(params),
         });
       }
-      throw new Error("result application SQL must not run for a deferred delivery");
+      if (sql.includes("apply_governed_voice_worker_result")) {
+        const unsigned = JSON.parse(String(params[7])) as {
+          eventId: string; occurredAtMs: number;
+          payload: Parameters<typeof appendConversationEvent>[1]["payload"];
+        };
+        durableLog = appendConversationEvent(durableLog, {
+          eventId: unsigned.eventId,
+          occurredAtMs: unsigned.occurredAtMs,
+          payload: unsigned.payload,
+        });
+        return Promise.resolve({
+          conversation_event: eventRow(
+            String(params[7]),
+            String(params[8]),
+            String(params[2]),
+            String(params[6]),
+          ),
+          inbox_message: {
+            id: ids.message,
+            conversation_id: ids.conversation,
+            worker_id: spawn.worker.id,
+            source_event_sha256: "b".repeat(64),
+            payload: result.result,
+            payload_sha256: result.resultSha256,
+            delivery_token: null,
+            delivery_lease_expires_at: null,
+            delivery_count: 1,
+            application_id: ids.application,
+            applied_context_version: "2",
+            created_at: "2026-07-21T17:00:00.000Z",
+            applied_at: "2026-07-21T17:01:00.000Z",
+            acknowledged_at: "2026-07-21T17:01:00.000Z",
+          },
+        });
+      }
+      throw new Error("unexpected worker transition SQL");
     });
     mocks.q.mockImplementation(() => Promise.resolve(logRows(durableLog)));
     const spawn = await spawnGovernedDurableVoiceWorker({
@@ -400,23 +444,34 @@ describe("governed worker transition store", () => {
         authority: { kind: "system_of_record", issuer: "crm", evidenceId: "member-42-v2", issuedAtMs: 2 },
       },
     });
-    const settledWorker = { ...spawn.worker, status: "succeeded" as const, result: result.result, resultSha256: result.resultSha256 };
-    const message: DurableConversationInboxMessage = {
+    const settledWorker = {
+      ...spawn.worker,
+      status: "succeeded" as const,
+      result: result.result,
+      resultSha256: result.resultSha256,
+      settledAt: "2026-07-21T17:00:00.000Z",
+    };
+    const message: DurableConversationResultInboxMessage = {
+      kind: "result",
       id: ids.message, conversationId: ids.conversation, workerId: spawn.worker.id,
       sourceEventSha256: "b".repeat(64), result: result.result, resultSha256: result.resultSha256,
       deliveryToken: ids.delivery, deliveryLeaseExpiresAt: "2026-07-21T18:00:00.000Z",
       deliveryCount: 1, applicationId: null, appliedContextVersion: null,
+      createdAt: "2026-07-21T17:00:00.000Z",
       appliedAt: null, acknowledgedAt: null,
     };
-    const attempt = applyGovernedDurableConversationInboxMessage({
+    const applied = await applyGovernedDurableConversationInboxMessage({
       expectedHead: head(durableLog),
       conversationEvent: { idempotencyKey: "result:deferred", eventId: "worker-result-deferred", occurredAtMs: 1_800_000_000_002 },
       organizationId: ids.organization, deliveryToken: ids.delivery, applicationId: ids.application,
       worker: settledWorker, message,
     });
-    await expect(attempt).rejects.toBeInstanceOf(GovernedWorkerResultNotApplicableError);
-    await expect(attempt).rejects.toMatchObject({ decision: { status: "deferred", reason: expect.stringMatching(/fact changed/) } });
-    expect(mocks.qOne.mock.calls.filter(([sql]) => String(sql).includes("apply_governed_voice_worker_result"))).toHaveLength(0);
+    expect(applied.decision).toMatchObject({
+      status: "rejected",
+      reason: expect.stringMatching(/fact changed/),
+    });
+    expect(applied.message.acknowledgedAt).not.toBeNull();
+    expect(mocks.qOne.mock.calls.filter(([sql]) => String(sql).includes("apply_governed_voice_worker_result"))).toHaveLength(1);
   });
 });
 

@@ -36,6 +36,11 @@ import {
   type Lc4DevBudgetEvidence,
   type Lc4DevRunLease,
 } from "../lc4-development-budget";
+import {
+  LC4_TEST_ASR_CONTRACT,
+  LC4_TEST_ASR_CONTRACT_SHA256,
+  createLc4TestAsrRunnerTrust,
+} from "./lc4-test-asr-authority";
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
@@ -180,6 +185,14 @@ function fixtures() {
     maximum_total_micro_usd: 15_000_000,
     audio_manifest_sha256: "2".repeat(64),
     provider_profile_manifest_sha256: "a".repeat(64),
+    qualification_transport_scope_sha256: "9".repeat(64),
+    qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified",
+    xai_finite_manual_gate_d: {
+      receipt_sha256: sha256Hex("synthetic-gate-d-receipt"),
+      plan_authority_trust_root_sha256:
+        sha256Hex("synthetic-gate-d-plan-authority"),
+      transport_profile_sha256: sha256Hex("synthetic-gate-d-profile"),
+    },
     audio_delivery_profile_sha256: "b".repeat(64),
     audio_packetizer_contract_sha256: "c".repeat(64),
     audio_execution_contract_sha256: "d".repeat(64),
@@ -195,6 +208,12 @@ function fixtures() {
     runtime_config_sha256: "e".repeat(64),
     asr_evaluator_build_sha256: "f".repeat(64),
     asr_evaluator_toolchain_sha256: "0".repeat(64),
+    asr_contract: LC4_TEST_ASR_CONTRACT,
+    asr_contract_sha256: LC4_TEST_ASR_CONTRACT_SHA256,
+    asr_runner_trust: createLc4TestAsrRunnerTrust(
+      authority.private_key,
+      "lc4-dev-operator-test-asr",
+    ),
   };
   const input = {
     prepare,
@@ -476,6 +495,16 @@ describe("LC4-DEV operator custody", () => {
       { ...input, roots: { ...input.roots, listener_evidence_manifest_sha256: "c".repeat(64) } },
       { ...input, roots: { ...input.roots, asr_evaluator_build_sha256: "1".repeat(64) } },
       { ...input, roots: { ...input.roots, asr_evaluator_toolchain_sha256: "2".repeat(64) } },
+      {
+        ...input,
+        roots: {
+          ...input.roots,
+          asr_runner_trust: {
+            ...input.roots.asr_runner_trust,
+            key_id: "lc4-dev-operator-test-asr-rotated",
+          },
+        },
+      },
       { ...input, authorization_nonce_sha256: "d".repeat(64) },
       { ...input, expires_at: "2026-07-22T06:31:00.000Z" },
     ];

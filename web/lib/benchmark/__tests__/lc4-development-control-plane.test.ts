@@ -13,11 +13,11 @@ import {
   type Lc4DevAudioRenderer,
 } from "../lc4-development-audio-materializer";
 import {
-  appendLc4DevNativeGatewayContract,
   renderLc4DevHaccResponsePlan,
 } from "../lc4-development-gateway-bridge";
 import {
   LC4_DEV_DURABLE_WORKER_PLAN_SHA256,
+  LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT,
   LC4_DEV_MUNICIPAL_CONDITION_SUITE,
   LC4_DEV_MUNICIPAL_FLOW,
   LC4_DEV_MUNICIPAL_SCENARIO,
@@ -204,18 +204,20 @@ describe("LC4-DEV municipal executable control plane", () => {
               sha256Hex(reboundPreparation.additionalInstructions),
             );
             if (gateway.authority_projection.post_transition_response_control_sha256 !== null) {
-              const providerOutput = gateway.provider_output as Record<string, unknown>;
-              const responseControl = providerOutput.response_control as Record<string, unknown>;
-              const expectedInstructions = responseControl.kind === "hacc_response_plan"
-                ? renderLc4DevHaccResponsePlan(
+              if (plan.arm === "hacc") {
+                const providerOutput = gateway.provider_output as Record<string, unknown>;
+                const responseControl = providerOutput.response_control as Record<string, unknown>;
+                expect(reboundPreparation.additionalInstructions).toBe(
+                  renderLc4DevHaccResponsePlan(
                     assertHaccResponsePlan(responseControl.plan),
                     "canonical",
-                  )
-                : appendLc4DevNativeGatewayContract(
-                    responseControl.instructions as string,
-                    "canonical",
-                  );
-              expect(reboundPreparation.additionalInstructions).toBe(expectedInstructions);
+                  ),
+                );
+              } else {
+                expect(reboundPreparation.additionalInstructions).toBe(
+                  currentPreparation.additionalInstructions,
+                );
+              }
             }
             currentPreparation = reboundPreparation;
             semanticActionsByArm[arm].push(`${call.semantic_intent}:${call.target_tool}`);
@@ -259,22 +261,18 @@ describe("LC4-DEV municipal executable control plane", () => {
             }
             if (plan.arm === "native" && call.target_tool === "archive.submit_transcript_request") {
               expect(gateway.provider_output).toMatchObject({
-                gateway_result: {
-                  ok: false,
-                  reconciliation: { required: true, source: "host_bound_from_authoritative_mutation_receipt" },
-                },
-                authoritative_outcome: { outcome_classification: "indeterminate_reconciliation_required" },
-                speech_directive: "reconcile_before_any_terminal_claim",
-                response_control: { kind: "native_context" },
+                ok: false,
+                reconciliation: { required: true, source: "host_bound_from_authoritative_mutation_receipt" },
               });
+              expect(gateway.provider_output).not.toHaveProperty("authoritative_outcome");
+              expect(gateway.provider_output).not.toHaveProperty("speech_directive");
+              expect(gateway.provider_output).not.toHaveProperty("response_control");
             }
             if (plan.arm === "native" && call.target_tool === "archive.reconcile_transcript_request") {
               expect(call.target_arguments).toEqual({});
-              expect(gateway.provider_output).toMatchObject({
-                authoritative_outcome: { receipt_status: "succeeded" },
-                speech_directive: "confirm_only_from_authoritative_reconciliation_receipt",
-                response_control: { kind: "native_context" },
-              });
+              expect(gateway.provider_output).not.toHaveProperty("authoritative_outcome");
+              expect(gateway.provider_output).not.toHaveProperty("speech_directive");
+              expect(gateway.provider_output).not.toHaveProperty("response_control");
             }
             gatewayReceipts.push(gateway.authoritative_receipt_sha256);
             gatewayReceiptsByArm[arm].push(gateway.authoritative_receipt_sha256);
@@ -333,9 +331,67 @@ describe("LC4-DEV municipal executable control plane", () => {
     expect(hacc.world.facts).toEqual(native.world.facts);
     expect(new Set(gatewayReceipts).size).toBe(gatewayReceipts.length);
     expect(native.gateway_transcript_sha256).not.toBe(hacc.gateway_transcript_sha256);
-    expect(control.manifest.native_information_parity).toBe("full_equivalent_policy_and_accumulated_public_state");
+    expect(control.manifest.native_information_parity).toBe("arm_common_task_audio_gateway_world_raw_conversation_only");
     expect(control.manifest.manifest_sha256).toMatch(/^[a-f0-9]{64}$/u);
   }, 30_000);
+
+  it("keeps Native raw: no Flow, evaluator labels, answer key, or refreshed current-state projection", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const signer = createBenchmarkKernelAttestationSigner({
+      keyId: "lc4-dev-native-construct-validity-test",
+      privateKeyPem: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    });
+    const control = createLc4DevMunicipalControlPlane({
+      audio_manifest: artifacts.manifest,
+      repair_manifest: artifacts.repairManifest,
+      signer,
+      now: () => new Date("2026-07-21T22:00:00.000Z"),
+    });
+    const corpus = createLc4PublicDevelopmentCorpus();
+    const plan = episode("native");
+    const contexts: string[] = [];
+    const providerContexts: string[] = [];
+    let previous: string | null = null;
+    for (const opportunity of corpus.opportunities.slice(0, 15)) {
+      const receipt = await control.next({
+        episode: plan,
+        opportunity,
+        previous_exchange_sha256: previous,
+      });
+      if (receipt.response_control.kind !== "native_context") throw new Error("expected Native context");
+      contexts.push(receipt.response_control.instructions);
+      providerContexts.push(control.gateway_executor.currentResponsePreparation({
+        episode: plan,
+        opportunity,
+        phase: "canonical",
+      }).additionalInstructions);
+      previous = sha256Hex(`native-construct-validity:${opportunity.id}`);
+    }
+    expect(new Set(contexts).size).toBe(1);
+    expect(new Set(providerContexts).size).toBe(1);
+    for (const providerVisible of [contexts[0]!, providerContexts[0]!]) {
+      expect(providerVisible).toContain(LC4_DEV_ARM_COMMON_NATURAL_TASK_CONTEXT);
+      for (const forbidden of [
+        "full_flow",
+        "current_public_state",
+        "required_listener_semantics",
+        "prohibited_effects",
+        "expected_oracle",
+        "stage.eligibility",
+        "lc4-dev-op-12",
+        "replace patron_record.v1 with patron_record.v2",
+        "MPL-1042",
+        "MPL-1402",
+      ]) {
+        expect(providerVisible, `Native leaked ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+    // The correction is present only in the caller's chronological utterance.
+    // Native must retain it from provider conversation memory rather than a
+    // host projection that tells it which version is current.
+    expect(corpus.opportunities[11]?.canonical_caller_text).toContain("MPL-1402");
+    expect(corpus.opportunities[11]?.canonical_caller_text).toContain("MPL-1042");
+  });
 
   it("keeps running when the model requests reconciliation after omitting the original mutation", async () => {
     const keys = generateKeyPairSync("ed25519");

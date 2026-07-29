@@ -16,6 +16,9 @@ import {
   type PreparedIndependentAsrCalibration,
 } from "../audible-evidence";
 import {
+  LC4_LISTENER_EVIDENCE_VERSION,
+  LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
+  LC4_LISTENER_SEMANTIC_SCORER_VERSION,
   createLc4CapturedOutput,
   createLc4FrozenListenerSemanticRegistry,
   createLc4FrozenListenerSemanticRegistryManifest,
@@ -341,6 +344,9 @@ describe("LC4 listener-heard evidence pipeline", () => {
       unverifiable_opportunity_ids: [],
     });
     expect(artifact).toMatchObject({
+      evidence_version: LC4_LISTENER_EVIDENCE_VERSION,
+      semantic_scorer_version: LC4_LISTENER_SEMANTIC_SCORER_VERSION,
+      semantic_scorer_build_sha256: LC4_LISTENER_SEMANTIC_SCORER_BUILD_SHA256,
       template_id: plan.template_id,
       semantic_registry_sha256: plan.registry_sha256,
       semantic_registry_manifest_sha256: plan.registry_manifest_sha256,
@@ -355,6 +361,15 @@ describe("LC4 listener-heard evidence pipeline", () => {
       asrContract: contract,
       calibrationSha256: independentAsrCalibrationSha256(preparedCalibration.summary),
     })).toEqual({ valid: true, errors: [] });
+    expect(verifyLc4ListenerEvidenceArtifact({
+      artifact: {
+        ...artifact,
+        evidence_version: "lc4-listener-evidence-v1",
+      } as unknown as typeof artifact,
+      semanticPlan: plan,
+      asrContract: contract,
+      calibrationSha256: independentAsrCalibrationSha256(preparedCalibration.summary),
+    }).valid).toBe(false);
   });
 
   it("marks empty frozen criteria explicitly not-applicable instead of vacuously passing", () => {

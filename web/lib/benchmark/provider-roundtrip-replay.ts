@@ -1052,7 +1052,8 @@ export function replayProviderToolRoundtrip(
       }
       if (summary.provider !== "xai") {
         errors.push("summary_input_audio_suffix_provider_invalid");
-      } else if (suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
+      } else if (suffix.completion !== "provider_native_speech_stop"
+        || suffix.policy_sha256 !== LC4_XAI_SERVER_VAD_SILENCE_TAIL_SHA256
         || !isAcceptedXaiServerVadSilenceTail(suffix)) {
         errors.push("summary_input_audio_suffix_completion_invalid");
       }

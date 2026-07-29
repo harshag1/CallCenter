@@ -5,9 +5,12 @@ import {
   createLc4GenericHeldoutGenerator,
 } from "../lc4-heldout-generator";
 import {
+  LC4_PROVIDER_EXECUTION_PROFILE_VERSION,
+  LC4_RUNNER_FOUNDATION_VERSION,
   LC4_RUNNER_PROTOCOL,
   compileLc4ProductionScheduleShape,
   createLc4EpisodeManifest,
+  createLc4ProviderExecutionProfile,
   createLc4QualificationGateReceipt,
   executeLc4ProviderFreeEpisode,
   joinLc4HeldoutTemplatesToSchedule,
@@ -101,7 +104,9 @@ describe("LC4 production runner foundation", () => {
   it("compiles the exact public 24-template, 72-pair, 144-episode schedule shape", () => {
     const schedule = compileLc4ProductionScheduleShape();
     expect(schedule).toMatchObject({
+      schema_version: 2,
       protocol_id: LC4_RUNNER_PROTOCOL,
+      runner_foundation_version: LC4_RUNNER_FOUNDATION_VERSION,
       provider_calls_authorized: false,
       heldout_plaintext_required: false,
       templates: 24,
@@ -112,9 +117,24 @@ describe("LC4 production runner foundation", () => {
       logical_segments_per_episode: 3,
     });
     expect(schedule.pair_shapes).toHaveLength(72);
+    expect(schedule.pair_shapes.every((pair) =>
+      pair.provider_profile.execution_profile_version
+        === LC4_PROVIDER_EXECUTION_PROFILE_VERSION
+    )).toBe(true);
     expect(schedule.episode_shapes).toHaveLength(144);
     expect(new Set(schedule.pair_shapes.map((pair) => pair.template_id))).toHaveLength(24);
     expect(new Set(schedule.pair_shapes.map((pair) => pair.provider))).toEqual(new Set(["openai", "gemini", "xai"]));
+    expect(schedule.pair_shapes.find((pair) => pair.provider === "xai")?.provider_profile)
+      .toMatchObject({
+        transport_mode: "manual_commit",
+        transport_purpose: "finite_prerecorded_efficacy",
+        turn_boundary: "finite_clip_input_audio_buffer.commit_then_response.create",
+      });
+    expect(schedule.pair_shapes.filter((pair) => pair.provider !== "xai").every((pair) => (
+      pair.provider_profile.transport_mode === null
+      && pair.provider_profile.transport_profile_sha256 === null
+      && pair.provider_profile.transport_purpose === null
+    ))).toBe(true);
     expect(schedule.episode_shapes.every((episode) =>
       episode.segments.map((segment) => [segment.opportunity_start, segment.opportunity_end]).join("|") === "1,20|21,40|41,60"
     )).toBe(true);
@@ -124,6 +144,27 @@ describe("LC4 production runner foundation", () => {
       expect(episodes.map((episode) => episode.arm)).toEqual([...pair.arm_order]);
       expect(new Set(episodes.map((episode) => episode.provider_profile.provider_profile_sha256)).size).toBe(1);
     }
+  });
+
+  it("constructs the separate hash-bound xAI interactive qualification profile explicitly", () => {
+    const finite = createLc4ProviderExecutionProfile("xai");
+    const interactive = createLc4ProviderExecutionProfile(
+      "xai",
+      "interactive_transport_qualification",
+    );
+    expect(finite.transport_mode).toBe("manual_commit");
+    expect(interactive).toMatchObject({
+      transport_mode: "provider_native_server_vad",
+      transport_purpose: "interactive_transport_qualification",
+      turn_boundary: "server_vad_speech_stop_auto_commit_auto_response",
+    });
+    expect(interactive.transport_profile_sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(interactive.transport_profile_sha256).not.toBe(
+      finite.transport_profile_sha256,
+    );
+    expect(interactive.provider_profile_sha256).not.toBe(
+      finite.provider_profile_sha256,
+    );
   });
 
   it("joins the generator and power plan through an exact 24-template bijection", () => {
@@ -194,6 +235,26 @@ describe("LC4 production runner foundation", () => {
     expect(Object.isFrozen(value)).toBe(true);
     expect(Object.isFrozen(value.opportunities)).toBe(true);
     expect(value.manifest_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => createLc4EpisodeManifest({
+      schedule: {
+        ...compileLc4ProductionScheduleShape(),
+        schema_version: 1,
+      } as never,
+      run_id: value.run_id,
+      source_commit: value.source_commit,
+      source_tree_sha256: value.source_tree_sha256,
+      preregistration_sha256: value.preregistration_sha256,
+      heldout_commitment_sha256: value.heldout_commitment_sha256,
+      template_commitment_sha256: value.template_commitment_sha256,
+      opportunity_manifest_sha256: value.opportunity_manifest_sha256,
+      caller_fixture_manifest_sha256: value.caller_fixture_manifest_sha256,
+      condition_suite_sha256: value.condition_suite_sha256,
+      parity_manifest_sha256: value.parity_manifest_sha256,
+      generator_schedule_join_sha256: value.generator_schedule_join_sha256,
+      qualification: value.qualification,
+      budget_reservation: value.budget_reservation,
+      opportunities: value.opportunities,
+    })).toThrow("stale foundation schema");
     expect(() => createLc4EpisodeManifest({
       schedule: compileLc4ProductionScheduleShape(),
       run_id: value.run_id,

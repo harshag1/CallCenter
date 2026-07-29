@@ -10,10 +10,11 @@ import {
 import { NextResponse } from "next/server";
 import { verifyScope, type ScopeClaims } from "@/lib/voice";
 import {
-  activeCapabilityAuthorityFor,
+  activeConversationRouteAuthorityFor,
   callActiveCapability,
 } from "@/lib/mcp";
 import {
+  blockedActiveCapabilityCatalog,
   blockedActiveCapabilityCatalogFromExpectation,
   buildActiveCapabilityGatewayEnvelope,
   type ActiveCapabilityCatalog,
@@ -22,6 +23,7 @@ import {
 import { qOne } from "@/lib/db";
 import { PrivateRequestError, readStrictJsonObject } from "@/lib/private-json-request";
 import { resolveVoiceProviderConfig } from "@/lib/realtime/config";
+import { log } from "@/lib/log";
 import {
   MCP_LATEST_PROTOCOL_VERSION,
   MCP_MAX_PROVIDER_TOOL_CALL_ID_BYTES,
@@ -32,6 +34,7 @@ import { MCP_MAX_PERSISTED_MODEL_ARGUMENT_BYTES } from "@/lib/mcp-invocation-sto
 import { mcpGatewaySecret } from "@/lib/high-authority-secrets";
 
 export const maxDuration = 60;
+const L = log("mcp");
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RPC_ID_BYTES = 256;
@@ -240,8 +243,13 @@ export async function POST(req: Request) {
   // capped and structurally valid, so malformed authenticated traffic cannot
   // amplify into database work.
   const providerBinding = scope.aud === "bridge_mcp"
-    ? await qOne<{ settings: Record<string, unknown>; voice: string }>(
-        `SELECT v.settings, v.voice FROM calls c
+    ? await qOne<{
+        settings: Record<string, unknown>;
+        voice: string;
+        agent_version: number;
+        started_at: Date | string;
+      }>(
+        `SELECT v.settings, v.voice, c.agent_version, c.started_at FROM calls c
          JOIN agents a ON a.id = c.agent_id
          JOIN agent_versions v ON v.agent_id = c.agent_id AND v.version = c.agent_version
          JOIN telephony_stream_bindings b ON b.call_id = c.id
@@ -261,8 +269,13 @@ export async function POST(req: Request) {
           scope.providerStreamId,
         ]
       )
-    : await qOne<{ settings: Record<string, unknown>; voice: string }>(
-        `SELECT v.settings, v.voice FROM calls c
+    : await qOne<{
+        settings: Record<string, unknown>;
+        voice: string;
+        agent_version: number;
+        started_at: Date | string;
+      }>(
+        `SELECT v.settings, v.voice, c.agent_version, c.started_at FROM calls c
          JOIN agents a ON a.id = c.agent_id
          JOIN agent_versions v ON v.agent_id = c.agent_id AND v.version = c.agent_version
          WHERE c.id = $1 AND c.agent_id = $2 AND a.org_id = $3
@@ -355,9 +368,18 @@ export async function POST(req: Request) {
         expectedCatalog,
       });
       let currentCatalog: ActiveCapabilityCatalog;
+      let routeAuthority: Awaited<ReturnType<typeof activeConversationRouteAuthorityFor>> | null = null;
+      let realtimeContextPacket: unknown | null = null;
       try {
-        currentCatalog = (await activeCapabilityAuthorityFor(scope)).catalog;
-      } catch {
+        routeAuthority = await activeConversationRouteAuthorityFor(scope);
+        currentCatalog = routeAuthority.authority.catalog;
+      } catch (error) {
+        L.error("post-action capability catalog refresh failed", {
+          orgId: scope.orgId,
+          callId: scope.callId,
+          kind: error instanceof Error ? error.name : "unknown",
+          message: error instanceof Error ? error.message : "non-error rejection",
+        });
         // The action result is already durable at this point. Preserve it while
         // stripping all subsequent authority until a clean reconnect can load
         // the authoritative post-action state. This synthetic blocked catalog
@@ -368,7 +390,47 @@ export async function POST(req: Request) {
           "catalog_refresh_failed"
         );
       }
-      const envelope = buildActiveCapabilityGatewayEnvelope(outcome, currentCatalog);
+      if (routeAuthority) {
+        try {
+          const callStartedAtMs = new Date(providerBinding.started_at).getTime();
+          if (!Number.isSafeInteger(callStartedAtMs) || callStartedAtMs < 0) {
+            throw new Error("call start timestamp is invalid");
+          }
+          const { preparePostgresLiveConversationRoute } =
+            await import("@/lib/live-conversation-route-postgres");
+          const prepared = await preparePostgresLiveConversationRoute({
+            callId: scope.callId,
+            organizationId: scope.orgId,
+            agentId: scope.agentId,
+            agentVersion: providerBinding.agent_version,
+            callStartedAtMs,
+            catalog: currentCatalog,
+            flow: routeAuthority.flow,
+          });
+          realtimeContextPacket = prepared.packet.value;
+        } catch (error) {
+          L.error("post-action durable context packet refresh failed", {
+            orgId: scope.orgId,
+            callId: scope.callId,
+            kind: error instanceof Error ? error.name : "unknown",
+            message: error instanceof Error ? error.message : "non-error rejection",
+          });
+          // Catalog recovery and durable-context projection are separate
+          // authority domains. Keep the exact post-action epoch/revision but
+          // remove every callable tool until reconnect; never regress to the
+          // pre-action expectation merely because packet refresh failed.
+          currentCatalog = blockedActiveCapabilityCatalog(
+            currentCatalog,
+            "context_packet_refresh_failed"
+          );
+        }
+      }
+      const contextualOutcome = realtimeContextPacket === null
+        ? outcome
+        : isRecord(outcome)
+          ? { ...outcome, hacc_realtime_context_packet: realtimeContextPacket }
+          : { value: outcome, hacc_realtime_context_packet: realtimeContextPacket };
+      const envelope = buildActiveCapabilityGatewayEnvelope(contextualOutcome, currentCatalog);
       const isErr = isRecord(envelope.outcome) && "error" in envelope.outcome;
       return rpcResult(rpc.id, {
         content: [{ type: "text", text: JSON.stringify(envelope) }],

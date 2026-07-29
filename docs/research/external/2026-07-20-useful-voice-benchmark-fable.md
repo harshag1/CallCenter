@@ -3,7 +3,7 @@ provider: anthropic-claude-code
 model: fable
 timestamp: "2026-07-20T23:44:01.255455+00:00"
 question: "Design the smallest scientifically useful production-API benchmark that can determine whether Harsha's Amazing Call Center improves real voice-agent usefulness over the same raw realtime models. Be adversarial: identify circular or treatment-contaminated labels, invalid comparators, missing-data mistakes, simulator leakage, provider-transport confounds, and ways a favorable result could be self-serving. Recommend a progressive test ladder under a $1,000 total budget, with exact stop/go gates, minimum task mix, primary and secondary endpoints, and what evidence is sufficient for a public claim. Also state whether the current deterministic caller/world scheduler should be integrated, whether an LLM user simulator is appropriate, and how to keep development from contaminating held-out confirmation."
-context_files: ["/Users/harsha/Desktop/X_Project/docs/research/external/2026-07-20-useful-voice-benchmark-context.md"]
+context_files: ["docs/research/external/2026-07-20-useful-voice-benchmark-context.md"]
 total_cost_usd: 0.553555
 usage: {"cache_creation": {"ephemeral_1h_input_tokens": 6284, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 6284, "cache_read_input_tokens": 0, "inference_geo": "not_available", "input_tokens": 2, "iterations": [{"cache_creation": {"ephemeral_1h_input_tokens": 6284, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 6284, "cache_read_input_tokens": 0, "input_tokens": 2, "output_tokens": 8510, "type": "message"}], "output_tokens": 8510, "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "service_tier": "standard", "speed": "standard"}
 advisory_only: true

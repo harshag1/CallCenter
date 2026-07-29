@@ -421,8 +421,8 @@ function blocker(opportunity: Lc4PublicDevOpportunity): Lc4ListenerSemanticCrite
 function responseTranscript(opportunity: Lc4PublicDevOpportunity): string {
   const required = opportunity.expected_oracle.required_listener_semantics;
   return required.length > 0
-    ? `${required.join(". ")}. Authoritative evidence checked.`
-    : "Authoritative evidence checked.";
+    ? required.map((phrase) => `Confirmed: ${phrase}.`).join(" ")
+    : "Confirmed: authoritative evidence.";
 }
 
 function semanticCriteria(opportunity: Lc4PublicDevOpportunity): readonly Lc4ListenerSemanticCriterion[] {
