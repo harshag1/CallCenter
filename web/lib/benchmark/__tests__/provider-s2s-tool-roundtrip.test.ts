@@ -901,6 +901,16 @@ function withInitialToolChoice(
   });
 }
 
+function advancingRealtimeRuntime() {
+  let now = 0;
+  return Object.freeze({
+    monotonicNowMs: () => now,
+    async sleep(delayMs: number) {
+      now += delayMs;
+    },
+  });
+}
+
 describe("LC4 qualification v3 spoken S2S roundtrip", () => {
   it("materializes one native-rate CAS fixture and keeps the size diagnostic non-gating", async () => {
     const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
@@ -929,7 +939,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         audio,
         audioObject: artifact.provider_renditions[provider],
         profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+        runtime: advancingRealtimeRuntime(),
         timeoutMs: 1_000,
       });
       expect(execution, canonicalJson({ failure: execution.failure_class, operations: execution.operation_order })).toMatchObject({
@@ -989,7 +999,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1031,7 +1041,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "xai", model: "xai-model", client, audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
 
     expect(execution).toMatchObject({ status: "passed", failure_class: "none" });
@@ -1076,7 +1086,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "xai", model: "xai-model", client, audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 60_000,
     });
 
@@ -1113,7 +1123,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         }),
         audio, audioObject: artifact.provider_renditions.xai,
         profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+        runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
       });
       expect(execution).toMatchObject({ status: "failed", failure_class: "audio_delivery_failed" });
       expect(execution.input_audio_evidence).toBeNull();
@@ -1153,7 +1163,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.gemini,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1193,7 +1203,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1237,7 +1247,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1279,7 +1289,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1321,7 +1331,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1359,7 +1369,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1379,7 +1389,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1400,7 +1410,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
 
@@ -1438,7 +1448,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         audio,
         audioObject: artifact.provider_renditions.openai,
         profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+        runtime: advancingRealtimeRuntime(),
         timeoutMs: 1_000,
       });
 
@@ -1471,7 +1481,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
     expect(execution).toMatchObject({
@@ -1499,7 +1509,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
         audio,
         audioObject: artifact.provider_renditions.openai,
         profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-        runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+        runtime: advancingRealtimeRuntime(),
         timeoutMs: 1_000,
       });
       expect(execution).toMatchObject({
@@ -1522,7 +1532,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
     expect(execution.status).toBe("failed");
@@ -1541,7 +1551,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined },
+      runtime: advancingRealtimeRuntime(),
       timeoutMs: 1_000,
     });
     expect(execution).toMatchObject({
@@ -1572,7 +1582,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "xai", model: "xai-model", client, audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("server_vad_control_ack_missing");
   });
@@ -1587,7 +1597,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       client: new RoundtripClient("xai", { rejectServerVadControlAcknowledgement: true }), audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("server_vad_control_ack_missing");
     expect(execution.response_generation_requested).toBe(false);
@@ -1603,7 +1613,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       client: new RoundtripClient("xai", { omitServerVadSpeechStart: true }), audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("server_vad_speech_start_missing");
   });
@@ -1618,7 +1628,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       client: new RoundtripClient("xai", { emitEarlyResponseOnCommit: true }), audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("server_vad_response_before_speech_stop");
   });
@@ -1632,7 +1642,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "xai", model: "xai-model", client: new RoundtripClient("xai"), audio,
       audioObject: artifact.provider_renditions.xai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     const { evidence_sha256: originalEvidenceSha256, ...body } = execution;
     expect(originalEvidenceSha256).toMatch(/^[a-f0-9]{64}$/u);
@@ -1660,7 +1670,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "gemini", model: "gemini-model", client: new RoundtripClient("gemini", { omitDynamicControl: true }), audio,
       audioObject: artifact.provider_renditions.gemini,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.status).toBe("failed");
     expect(execution.failure_class).toBe("dynamic_control_not_wire_observed");
@@ -1675,7 +1685,7 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       provider: "openai", model: "openai-model", client: new RoundtripClient("openai", { omitToolResultEvent: true }), audio,
       audioObject: artifact.provider_renditions.openai,
       profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
-      runtime: { monotonicNowMs: () => 0, sleep: async () => undefined }, timeoutMs: 1_000,
+      runtime: advancingRealtimeRuntime(), timeoutMs: 1_000,
     });
     expect(execution.failure_class).toBe("tool_result_event_missing");
   });

@@ -33,6 +33,8 @@ export type RealtimeAudioDeliveryReceipt = Readonly<{
   }>[];
 }>;
 
+const MAX_EARLY_WAKEUPS_PER_FRAME = 32;
+
 export class RealtimeAudioDeliveryError extends Error {
   readonly code: "aborted" | "clock_invalid" | "pacing_failed" | "append_failed";
   readonly chunks_appended: number;
@@ -158,17 +160,29 @@ export async function deliverRealtimePcm16(input: Readonly<{
     if (index > 0) {
       priorNow = checkedNow(input.runtime, priorNow, chunksAppended, bytesAppended);
       const target = startedAt + index * input.profile.chunkMs;
-      const delayMs = Math.max(0, target - priorNow);
-      try {
-        await input.runtime.sleep(delayMs, input.signal);
-      } catch (error) {
-        if (input.signal.aborted) {
-          throw deliveryError("aborted", "realtime audio delivery was aborted", chunksAppended, bytesAppended, error);
+      let earlyWakeups = 0;
+      while (priorNow < target) {
+        const delayMs = target - priorNow;
+        try {
+          await input.runtime.sleep(delayMs, input.signal);
+        } catch (error) {
+          if (input.signal.aborted) {
+            throw deliveryError("aborted", "realtime audio delivery was aborted", chunksAppended, bytesAppended, error);
+          }
+          throw deliveryError("pacing_failed", "realtime audio delivery pacing failed", chunksAppended, bytesAppended, error);
         }
-        throw deliveryError("pacing_failed", "realtime audio delivery pacing failed", chunksAppended, bytesAppended, error);
-      }
-      if (input.signal.aborted) {
-        throw deliveryError("aborted", "realtime audio delivery was aborted", chunksAppended, bytesAppended);
+        if (input.signal.aborted) {
+          throw deliveryError("aborted", "realtime audio delivery was aborted", chunksAppended, bytesAppended);
+        }
+        priorNow = checkedNow(input.runtime, priorNow, chunksAppended, bytesAppended);
+        if (priorNow < target && ++earlyWakeups >= MAX_EARLY_WAKEUPS_PER_FRAME) {
+          throw deliveryError(
+            "pacing_failed",
+            "realtime audio delivery clock did not reach its absolute frame deadline",
+            chunksAppended,
+            bytesAppended,
+          );
+        }
       }
     }
     const appendStartedAt = checkedNow(input.runtime, priorNow, chunksAppended, bytesAppended);
