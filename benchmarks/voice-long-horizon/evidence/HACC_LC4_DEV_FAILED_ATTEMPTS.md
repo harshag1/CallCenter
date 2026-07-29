@@ -817,3 +817,70 @@ The failed root is immutable and cannot be retried or rescored. Package
 integrity replay passed, but the attempt is not a fully replay-verified
 three-provider qualification. It contributes no Native/HACC result cell,
 comparative score, model-superiority claim, or launch graph.
+
+## 2026-07-29 qualification v3 at `f44aeb9`
+
+**Failed closed. DEV was not authorized and no efficacy score is admissible.**
+
+The source-bound xAI finite-manual Gate D v4 passed:
+
+- source:
+  `f44aeb92637478096a98b7f96449d4ffdc4498aa`;
+- provider sessions/generation phases/gateway roundtrips: **1/2/1**;
+- retries/reconnects/fallbacks: **0/0/0**;
+- conservative settlement/active: **$1.00 / $0.00**;
+- receipt artifact:
+  `736c1e40e73e714a83dfa9ceca8b70d77748e51de4d8a29f89b2d4904d63b700`;
+- receipt file SHA-256:
+  `8e7b08eaa1108417069d664ffee39542d011ac11d09f75e69bb8146b3c758ab5`.
+
+The subsequent qualification opened six provider sessions, three paid, and
+attempted six generation phases and three tool roundtrips with zero retries:
+
+| Provider/model | Result | Caller PCM | Retained boundary |
+|---|---|---:|---|
+| OpenAI `gpt-realtime-2.1` | failed `history_hydration_failed` | 0 bytes | user item accepted; synthetic tool-call item rejected |
+| Gemini `gemini-3.1-flash-live-preview` | passed | 53,506 bytes | full history hydration and spoken gateway roundtrip passed |
+| xAI `grok-voice-think-fast-1.0` | passed | 80,260 bytes | full history hydration and spoken gateway roundtrip passed |
+
+The qualification terminal artifact/body hashes are
+`e57a24e2d93592c8b7e3d6e1f1ca9ac00ae5f9fb9f02f170dfea42a374cecfeb`
+and
+`08cd828e64346dc892bdca6f6e9e808758dd9267bede432f6bc25c05b699a369`.
+Package payload root is
+`242102c45bd3086137f85ebc91af8504a6541a58c3e7a6632ca92cdedf413138`.
+Replay artifact/head are
+`f2c9391352f3abab44fe4c5ae2accdead753d3262075bdedf89cdd61273c6ff9`
+and
+`b2a991270798ec9d7809d92d72aac7ab3d25a4eaa7bd1eb81a84ca92ac14f345`.
+Budget evidence/head are
+`dab0cc2dfaa3c1f4a7de64b05b38ee09b068930421b3c6438cc9ec497cc665d9`
+and
+`18ec75395a8a44cb87349a5112747b23cd8ebbc1a4a7ccb8a67a363d2d3005aa`.
+The ledger conservatively settled **$3.00** with **$0.00 active**.
+
+The OpenAI failure is proved without another provider session. Wire sequence
+4 sent the user item; sequence 5 accepted it; sequence 6 sent the synthetic
+tool call; sequence 7 completed the already-accepted user item; and sequence 8
+returned the provider error. Reconstructing sequence 6 yields:
+
+- exact payload bytes: **270**;
+- exact payload SHA-256:
+  `18317d8fb688c7a92586e049232a1c128268539816d0730ff6e647c14ee11f52`;
+- exact rejected call ID:
+  `hacc_hist_call_0002_001_c283d5f283d5be165bf2089d`;
+- call-ID length: **48**;
+- provider raw code: `string_above_max_length`;
+- exact provider message:
+  `Invalid 'item.call_id': string too long. Expected a string with maximum
+  length 32, but got a string with length 48 instead.`
+
+The reconstructed payload, raw-code commitment, and message commitment match
+the retained evidence exactly. The late `conversation.item.done` was a valid
+lifecycle event, not the cause. The new source shortens deterministic call IDs
+to exactly 32 ASCII bytes and separately regression-tests the observed
+lifecycle ordering.
+
+This root is immutable and cannot be retried or rescored. Its Gemini/xAI passes
+are qualification evidence only. It contributes no Native/HACC result cell,
+comparative score, model-superiority claim, or launch graph.

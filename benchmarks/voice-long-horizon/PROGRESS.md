@@ -1135,3 +1135,38 @@ Provider-free validation is green:
 The failed roots remain immutable and unscored. A new paid sequence is blocked
 until these changes are committed, clean-source public audits pass, and a new
 exact-source ASR receipt is created.
+
+## 2026-07-29 — Second OpenAI 32-character boundary proved from retained wire
+
+The fresh exact-source sequence at `f44aeb9` passed xAI Gate D. Its
+three-provider qualification then passed Gemini and xAI but failed OpenAI
+history hydration before caller audio, so DEV remained blocked and no score or
+graph was produced.
+
+The failure is exactly reconstructed from retained, content-free evidence:
+
+- the first 32-character `item.id` was accepted by
+  `conversation.item.added`;
+- HACC sent the second, synthetic function-call item;
+- OpenAI's later `conversation.item.done` for item one was valid and accepted
+  while item two was pending;
+- the exact item-two frame reconstructs to 270 UTF-8 bytes and SHA-256
+  `18317d8fb688c7a92586e049232a1c128268539816d0730ff6e647c14ee11f52`,
+  matching retained wire evidence;
+- its deterministic `item.call_id` was 48 characters;
+- retained diagnostic commitments resolve exactly to
+  `string_above_max_length` and
+  `Invalid 'item.call_id': string too long. Expected a string with maximum
+  length 32, but got a string with length 48 instead.`
+
+The repair uses
+`call_hacc_<four-digit turn>_<three-digit call>_<13 hex>`, exactly 32 ASCII
+bytes. Turn/call ordinals preserve uniqueness even under a digest collision.
+Runtime checks reject overlong or duplicate synthetic call IDs. Tests cover
+the exact late-`done` ordering and prove unique 32-byte item and call IDs at
+the full 1,024-provider-item boundary.
+
+Focused provider-free validation is **141/141**. The failed qualification root
+is immutable and unscored. The next paid sequence remains blocked until this
+repair, updated ledgers, full validation, public audits, and a fresh
+exact-source ASR receipt are committed together.

@@ -553,3 +553,44 @@ If fully charged, ordinary post-baseline exposure becomes **$68.50**. Including
 the frozen/non-reusable `$15.00` authority solely as a pessimistic liability
 view yields **$83.50**. Both remain below the strict `< $250.00` ceiling. There
 is no retry reserve.
+
+## 2026-07-29 — Source `f44aeb9` gate passed; qualification failed closed
+
+The clean-source sequence at
+`f44aeb92637478096a98b7f96449d4ffdc4498aa` consumed Gate D and
+qualification exactly once:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | failed closed; 6 provider sessions, 3 paid sessions, 6 generation phases, 3 tool-roundtrip attempts, 0 paid retries |
+
+Gemini and xAI passed. OpenAI rejected the second hydrated item before caller
+audio, so the attempt authorizes no DEV cell and produces no score or graph.
+The qualification terminal artifact is
+`e57a24e2d93592c8b7e3d6e1f1ca9ac00ae5f9fb9f02f170dfea42a374cecfeb`;
+budget evidence/head are
+`dab0cc2dfaa3c1f4a7de64b05b38ee09b068930421b3c6438cc9ec497cc665d9`
+and
+`18ec75395a8a44cb87349a5112747b23cd8ebbc1a4a7ccb8a67a363d2d3005aa`.
+The ledger settled **$3.00** with **$0.00 active**.
+
+Current post-baseline conservative exposure is **$53.50**, and LC4
+filesystem-ledger settlements total **$124.50**, with **$0.00 active**. The
+failed root is immutable and cannot be retried.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after provider-free validation:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification passes | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$72.50**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$87.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve, and every provider session remains subject
+to signed authority and pessimistic reservation.

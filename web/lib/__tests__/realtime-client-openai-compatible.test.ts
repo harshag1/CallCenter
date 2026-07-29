@@ -315,7 +315,8 @@ describe("provider-neutral conversation history hydration", () => {
         name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
         arguments: "{\"arguments\":{\"includeExpiry\":true,\"memberId\":\"m_17\"},\"tool_name\":\"membership.lookup\"}",
       });
-      expect(historyFrames[2].item.call_id).toMatch(/^hacc_hist_call_0003_001_[a-f0-9]{24}$/);
+      expect(historyFrames[2].item.call_id).toMatch(/^call_hacc_0003_001_[a-f0-9]{13}$/);
+      expect(Buffer.byteLength(historyFrames[2].item.call_id, "utf8")).toBe(32);
       expect(historyFrames[3].item).toEqual(expect.objectContaining({
         type: "function_call_output",
         call_id: historyFrames[2].item.call_id,
@@ -431,6 +432,14 @@ describe("provider-neutral conversation history hydration", () => {
     expect(itemIds.every((itemId) => Buffer.byteLength(itemId, "utf8") === 32)).toBe(true);
     expect(itemIds[0]).toMatch(/^item_hacc_0001_[a-f0-9]{17}$/);
     expect(itemIds.at(-1)).toMatch(/^item_hacc_1024_[a-f0-9]{17}$/);
+    const callIds = historyFrames
+      .filter((frame) => frame.item.type === "function_call")
+      .map((frame) => String(frame.item.call_id));
+    expect(callIds).toHaveLength(512);
+    expect(new Set(callIds).size).toBe(512);
+    expect(callIds.every((callId) => Buffer.byteLength(callId, "utf8") === 32)).toBe(true);
+    expect(callIds[0]).toMatch(/^call_hacc_0001_001_[a-f0-9]{13}$/);
+    expect(callIds.at(-1)).toMatch(/^call_hacc_0512_001_[a-f0-9]{13}$/);
     expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
   });
 
@@ -529,8 +538,10 @@ describe("provider-neutral conversation history hydration", () => {
         name: "rates.quote",
         arguments: "{\"plan\":\"annual\",\"seats\":3}",
       });
-      expect(frames[0].item.call_id).toMatch(/^hacc_hist_call_0001_001_[a-f0-9]{24}$/);
-      expect(frames[1].item.call_id).toMatch(/^hacc_hist_call_0001_002_[a-f0-9]{24}$/);
+      expect(frames[0].item.call_id).toMatch(/^call_hacc_0001_001_[a-f0-9]{13}$/);
+      expect(frames[1].item.call_id).toMatch(/^call_hacc_0001_002_[a-f0-9]{13}$/);
+      expect(Buffer.byteLength(frames[0].item.call_id, "utf8")).toBe(32);
+      expect(Buffer.byteLength(frames[1].item.call_id, "utf8")).toBe(32);
       expect(frames[2].item).toMatchObject({
         call_id: frames[0].item.call_id,
         output: calls[0].output,
@@ -710,6 +721,73 @@ describe("provider-neutral conversation history hydration", () => {
       item: created.item,
     }));
     await expect(pending).resolves.toMatchObject({ status: "acknowledged" });
+    expect(client.state).toBe("ready");
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("accepts a late item.done for the prior item while the next history item is pending", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([
+      {
+        role: "user",
+        text: "Please check the historical record.",
+        sourceSha256: sourceSha256("late-done-user"),
+      },
+      {
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "records.lookup", arguments: { id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256("late-done-tool"),
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const first = socket.sent.map((value) => JSON.parse(value)).find((event) => (
+      event.type === "conversation.item.create"
+    )) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: first.item,
+    }));
+
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.done",
+      item: first.item,
+    }));
+    let frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )) as Array<{ item: Record<string, unknown> }>;
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: frames[1].item,
+    }));
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(3);
+    });
+    frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )) as Array<{ item: Record<string, unknown> }>;
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: frames[2].item,
+    }));
+    await expect(pending).resolves.toMatchObject({
+      status: "acknowledged",
+      providerItemCount: 3,
+    });
     expect(client.state).toBe("ready");
     expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
   });

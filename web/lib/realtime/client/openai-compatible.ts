@@ -136,6 +136,13 @@ const CONVERSATION_HISTORY_SOURCE_BINDING_DOMAIN =
 const CONVERSATION_HISTORY_ITEM_ID_PREFIX = "item_hacc_";
 const CONVERSATION_HISTORY_ITEM_ID_MAX_BYTES = 32;
 const CONVERSATION_HISTORY_ITEM_ID_SUFFIX_HEX_LENGTH = 17;
+// OpenAI applies the same 32-character ceiling to function-call `call_id`
+// values. Encode both the history-turn and within-batch call ordinals so
+// pairing remains deterministic and collision-free even if digest suffixes
+// collide.
+const CONVERSATION_HISTORY_CALL_ID_PREFIX = "call_hacc_";
+const CONVERSATION_HISTORY_CALL_ID_MAX_BYTES = 32;
+const CONVERSATION_HISTORY_CALL_ID_SUFFIX_HEX_LENGTH = 13;
 const CONVERSATION_HISTORY_ALLOWED_INBOUND_WIRE_TYPES = new Set([
   "conversation.item.added",
   "conversation.item.created",
@@ -2572,15 +2579,18 @@ function snapshotConversationHistory(
       continue;
     }
     const toolBatch = turn as Extract<NormalizedConversationHistoryTurn, { role: "tool_batch" }>;
-    const syntheticCalls = toolBatch.calls.map((call, callIndex) => ({
-      call,
-      syntheticCallId:
-        `hacc_hist_call_${String(historyTurnOrdinal).padStart(4, "0")}_${
+    const syntheticCalls = toolBatch.calls.map((call, callIndex) => {
+      const syntheticCallId =
+        `${CONVERSATION_HISTORY_CALL_ID_PREFIX}${String(historyTurnOrdinal).padStart(4, "0")}_${
           String(callIndex + 1).padStart(3, "0")
         }_${sha256Text(
           `${historySha256}\0${historyTurnOrdinal}\0${callIndex + 1}\0tool`,
-        ).slice(0, 24)}`,
-    }));
+        ).slice(0, CONVERSATION_HISTORY_CALL_ID_SUFFIX_HEX_LENGTH)}`;
+      if (Buffer.byteLength(syntheticCallId, "utf8") > CONVERSATION_HISTORY_CALL_ID_MAX_BYTES) {
+        throw new Error("Conversation history call ID exceeds the OpenAI protocol limit");
+      }
+      return { call, syntheticCallId };
+    });
     for (const { call, syntheticCallId } of syntheticCalls) {
       const callItemId = nextItemId("synthetic_tool_call");
       pushWireItem({
@@ -2620,6 +2630,14 @@ function snapshotConversationHistory(
   }
   if (new Set(wireItems.map((item) => item.itemId)).size !== wireItems.length) {
     throw new Error("Conversation history provider item IDs are not unique");
+  }
+  const syntheticCallIds = wireItems.flatMap((item) => (
+    item.kind === "synthetic_tool_call" && item.syntheticCallId !== undefined
+      ? [item.syntheticCallId]
+      : []
+  ));
+  if (new Set(syntheticCallIds).size !== syntheticCallIds.length) {
+    throw new Error("Conversation history synthetic call IDs are not unique");
   }
   return deepFreeze({
     turnCount: normalized.length,
