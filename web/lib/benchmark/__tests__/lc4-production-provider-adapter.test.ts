@@ -2,7 +2,11 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentFlowSchema } from "../../flow";
 import { createFlowExecutionState, type FlowExecutionState } from "../../flow-runtime";
-import { canonicalJson, sha256Hex } from "../artifacts";
+import {
+  canonicalJson,
+  sha256Hex,
+  type JsonValue as ArtifactJsonValue,
+} from "../artifacts";
 import { compileConditionSuite } from "../condition-compiler";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
@@ -18,6 +22,9 @@ import {
   createLc4HaccRotationStatePacket,
   createLc4NativeConversationReplayPacket,
   projectLc4RotationPacketForReplay,
+  LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN,
+  LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+  LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
   type Lc4NativeConversationTurnInput,
   type Lc4ListenerEvidenceHandoff,
   type Lc4RealtimeEpisodeManifest,
@@ -41,6 +48,7 @@ import {
 import { LC4_DEV_TIMEOUT_CONTRACT } from "../lc4-development-timeout-contract";
 import {
   assertLc4DevGatewayConversationToolBatches,
+  assertLc4ProviderExchangeReplayProjection,
 } from "../lc4-provider-exchange-replay";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
 import {
@@ -122,10 +130,16 @@ function devTestSegment(ordinal: 1 | 2 | 3 | 4 | 5 | 6) {
 
 const HASH = "a".repeat(64);
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
+const SUPPRESSED_OUTPUT_EVIDENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v2\n";
 const GATEWAY_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v2\n";
 const GATEWAY_RECEIPT_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
+const PINNED_LISTENER_EVIDENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
+const CAS_RECEIPT_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
 const COMMIT = "b".repeat(40);
 const ORACLE_SECRET = "ORACLE-PLAINTEXT-MUST-NOT-LEAK";
 const FIXTURE_CONTINUATION_CONTROL =
@@ -825,6 +839,15 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
         this.#geminiInputOpen = true;
       }
       const encoded = Buffer.from(audio.data).toString("base64");
+      const inputEvent = {
+        realtimeInput: {
+          audio: {
+            data: encoded,
+            mimeType: `audio/pcm;rate=${audio.sampleRateHz}`,
+          },
+        },
+      };
+      const serializedInputEvent = JSON.stringify(inputEvent);
       this.wire("realtimeInput.audio", {
         audio: {
           direction: "input",
@@ -841,6 +864,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             },
           }],
         },
+      }, "outbound", {}, {
+        payloadSha256: sha256Hex(serializedInputEvent),
+        payloadBytes: Buffer.byteLength(serializedInputEvent, "utf8"),
       });
     } else {
       this.wire(
@@ -967,7 +993,12 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.events.push(`submit:${String(createResponse)}`);
     this.submittedToolResults.push({ results, createResponse });
     if (this.provider === "gemini") {
-      this.wire("toolResponse", {}, "outbound");
+      this.wire("toolResponse", {}, "outbound", {
+        callIdSha256: realtimeWireIdentitySha256(
+          "call",
+          results[0]!.callId,
+        ),
+      });
       queueMicrotask(() => {
         const responseId = `provider-tool-response-plaintext-${this.#responseOrdinal}`;
         if (this.submittedToolResults.length === 1) {
@@ -1011,7 +1042,15 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
             wireObservation: wireReference(preToolObservation),
           });
-          const toolCallObservation = this.wire("toolCall", {}, "inbound");
+          const toolCallObservation = this.wire(
+            "toolCall",
+            {},
+            "inbound",
+            {
+              callIdSha256:
+                realtimeWireIdentitySha256("call", "call-2"),
+            },
+          );
           this.emit({
             type: "tool.calls",
             provider: this.provider,
@@ -1047,7 +1086,10 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       if (this.#toolRoundtrip && this.#responseOrdinal === 1) {
         const responseId = "provider-tool-response-plaintext";
         const responseStarted = this.provider === "gemini"
-          ? this.wire("toolCall", {}, "inbound")
+          ? this.wire("toolCall", {}, "inbound", {
+              callIdSha256:
+                realtimeWireIdentitySha256("call", "call-1"),
+            })
           : this.wire("response.created", { response_id: responseId }, "inbound");
         this.emit({
           type: "response.started", provider: this.provider, receivedAtMs: 1,
@@ -1303,9 +1345,19 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     projection: Record<string, unknown>,
     direction: "inbound" | "outbound" = "outbound",
     identities: RealtimeWireObservation["identities"] = {},
+    payloadOverride?: Readonly<{
+      payloadSha256: string;
+      payloadBytes: number;
+    }>,
   ) {
     this.#wireSequence += 1;
-    const payloadSha256 = sha256Hex(canonicalJson({ wireType, direction, projection, sequence: this.#wireSequence }));
+    const payloadSha256 = payloadOverride?.payloadSha256
+      ?? sha256Hex(canonicalJson({
+        wireType,
+        direction,
+        projection,
+        sequence: this.#wireSequence,
+      }));
     const previousObservationSha256 = this.#wireHistory.at(-1)?.observationSha256 ?? null;
     const observationSha256 = sha256Hex(canonicalJson({
       provider: this.provider, wireType, direction, sequence: this.#wireSequence,
@@ -1321,7 +1373,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       observedAtMonotonicMs: this.#wireSequence,
       wireType,
       payloadSha256,
-      payloadBytes: 10,
+      payloadBytes: payloadOverride?.payloadBytes ?? 10,
       projectionSha256: sha256Hex(canonicalJson(projection)),
       previousObservationSha256,
       observationSha256,
@@ -2015,6 +2067,44 @@ async function openCallerBranchPreflight(input: Readonly<{
 }
 
 describe("LC4 production realtime adapter bridge", () => {
+  it("rejects metadata-free tool turns from DEV session rotation", () => {
+    const turns = [...publicConversationTurns(10)];
+    turns.splice(1, 0, Object.freeze({
+      turn_id: "placeholder.tool",
+      sequence: 0,
+      speaker: "tool" as const,
+      source: "canonical_gateway_result" as const,
+      tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+      tool_arguments: Object.freeze({
+        tool_name: "membership.lookup",
+        arguments: Object.freeze({ member_id: "PUBLIC-17" }),
+      }),
+      text: canonicalJson({ ok: true }),
+      available_after_opportunity: 1,
+      provenance_receipt_sha256: sha256Hex("metadata-free-tool"),
+      provider_conversation_source: true as const,
+      oracle_derived: false as const,
+      future_derived: false as const,
+      semantic_evaluator_derived: false as const,
+    }));
+    const reindexed = turns.map((turn, index) => Object.freeze({
+      ...turn,
+      turn_id:
+        `conversation.${String(index + 1).padStart(3, "0")}.${turn.speaker}`,
+      sequence: index + 1,
+    }) as Lc4NativeConversationTurnInput);
+    expect(() => createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-metadata-free-tool",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("previous-rotation"),
+      conversation_turns: reindexed,
+    })).toThrow(/omits exact batch metadata/u);
+  });
+
   it("closes a paid session when durable after-open budget acknowledgement hangs", async () => {
     const controller = new AbortController();
     let closeCalls = 0;
@@ -3682,7 +3772,7 @@ describe("LC4 production realtime adapter bridge", () => {
         const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };
         const projectionBody = {
           schema_version: 2 as const,
-          bridge_version: "lc4-dev-gateway-bridge-v4" as const,
+          bridge_version: "lc4-dev-gateway-bridge-v5" as const,
           redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
           episode_id: input.episode_id,
           opportunity_id: input.opportunity_id,
@@ -3721,10 +3811,20 @@ describe("LC4 production realtime adapter bridge", () => {
       },
     });
     const events: string[] = [];
-    const listenerEvidence = await replayEvidenceFixture().retainJson({
+    const evidenceStore = replayEvidenceFixture();
+    const listenerEvidence = await evidenceStore.retainJson({
       kind: "listener_evidence",
       body: Object.freeze({ fixture: "dev-listener-evidence", provider }),
     });
+    const assistantTranscript =
+      "DEV fixture assistant speech from captured PCM.";
+    let geminiReplayListener: Readonly<{
+      projection: JsonValue;
+      reference: Awaited<ReturnType<typeof evidenceStore.retainJson>>;
+      pcm: Uint8Array;
+      listener_manifest_sha256: string;
+      evaluator_build_sha256: string;
+    }> | null = null;
     let fake: FakeRealtimeClient | null = null;
     const bridge = new Lc4RealtimeProviderBridge((provider) => {
       // xAI emits speech-stop, auto-response, and the tool call synchronously
@@ -3744,23 +3844,133 @@ describe("LC4 production realtime adapter bridge", () => {
       }),
       rotation_context: null,
       listener: {
-        async accept() {
+        async accept({
+          capture,
+          response_plan_sha256,
+          wire_observation_set_sha256,
+        }) {
           events.push("listener");
-          return {
-            listener_evidence_sha256: listenerEvidence.evidence_sha256,
-            listener_evidence: listenerEvidence,
-            repair_projection: createLc4DevArmBlindRepairProjection({
+          const repairProjection =
+            createLc4DevArmBlindRepairProjection({
               opportunity_id: corpus.opportunities[0]!.id,
               listener_status: "verified",
               semantic_result_sha256: sha256Hex("dev-semantic-result"),
               semantic_replay_sha256: sha256Hex("dev-semantic-replay"),
               unmet_blocker_codes: [],
               final_required_criteria_pass: true,
-            }),
-            playback_authority_receipt_sha256: sha256Hex("dev-playback-authority"),
-            assistant_conversation_transcript: "DEV fixture assistant speech from captured PCM.",
-            assistant_conversation_transcript_sha256: sha256Hex("DEV fixture assistant speech from captured PCM."),
-            assistant_conversation_transcript_source: "listener_exact_captured_pcm_asr" as const,
+            });
+          if (provider === "gemini") {
+            const pcm = Uint8Array.from(Buffer.concat(
+              capture.chunks.map((chunk) => Buffer.from(chunk.pcm)),
+            ));
+            const pcmSha256 = sha256Hex(pcm);
+            await evidenceStore.retainBytes({
+              kind: "assistant_pcm",
+              bytes: pcm,
+              expected_evidence_sha256: pcmSha256,
+              media_type: "audio/pcm",
+            });
+            const playbackAuthorityReceiptSha256 =
+              sha256Hex("dev-playback-authority");
+            const listenerManifestSha256 =
+              sha256Hex("dev-listener-manifest");
+            const evaluatorBuildSha256 =
+              sha256Hex("dev-evaluator-build");
+            const signedInvocationArtifactSha256 =
+              sha256Hex("dev-signed-invocation-artifact");
+            const listenerProjection = Object.freeze({
+              schema_version: 1,
+              dependency_version: "lc4-dev-live-dependencies-v1",
+              episode_id: episode.episode_id,
+              opportunity_id: corpus.opportunities[0]!.id,
+              provider,
+              capture_receipt_sha256: capture.capture_receipt_sha256,
+              generated_pcm_sha256: pcmSha256,
+              captured_pcm_sha256: pcmSha256,
+              evaluator_consumed_pcm_sha256: pcmSha256,
+              evaluator_consumed_byte_start: 0,
+              evaluator_consumed_byte_end: pcm.byteLength,
+              evaluator_consumed_pcm_cas_receipt_sha256: sha256Hex(
+                `${CAS_RECEIPT_DOMAIN}${canonicalJson({
+                  schema_version: 1,
+                  algorithm: "sha256",
+                  artifact_sha256: pcmSha256,
+                  byte_length: pcm.byteLength,
+                  relative_path: `${pcmSha256.slice(0, 2)}/${pcmSha256}`,
+                  media_type: "audio/pcm",
+                })}`,
+              ),
+              headless_listener_authority_receipt_sha256:
+                playbackAuthorityReceiptSha256,
+              headless_listener_authority_receipt_cas_sha256:
+                sha256Hex("dev-listener-authority-cas"),
+              headless_listener_authority_receipt_cas_receipt_sha256:
+                sha256Hex("dev-listener-authority-cas-receipt"),
+              physical_playback_status: "not_performed_headless",
+              human_audibility_status: "not_measured_not_claimed",
+              criterion_plan_sha256: sha256Hex("dev-listener-criterion"),
+              response_plan_sha256,
+              wire_observation_set_sha256,
+              signed_invocation_artifact_cas_sha256:
+                signedInvocationArtifactSha256,
+              signed_invocation_artifact_byte_length: 512,
+              evaluation: Object.freeze({
+                source_pcm_sha256: pcmSha256,
+                source_pcm_byte_length: pcm.byteLength,
+                evaluator_contract_sha256:
+                  sha256Hex("dev-evaluator-contract"),
+                evaluator_build_sha256: evaluatorBuildSha256,
+                calibration_sha256: sha256Hex("dev-evaluator-calibration"),
+                transcript_sha256: sha256Hex(assistantTranscript),
+                semantic_result_sha256:
+                  repairProjection.semantic_result_sha256,
+                semantic_artifact_cas_sha256:
+                  sha256Hex("dev-semantic-artifact"),
+                signed_invocation_receipt_sha256:
+                  sha256Hex("dev-evaluator-invocation"),
+                signed_invocation_artifact_cas_sha256:
+                  signedInvocationArtifactSha256,
+                signed_invocation_artifact_byte_length: 512,
+                repair_projection: repairProjection,
+              }),
+              listener_manifest_sha256: listenerManifestSha256,
+            });
+            const reference = await evidenceStore.retainJson({
+              kind: "listener_evidence",
+              body: listenerProjection,
+              domain_prefix: PINNED_LISTENER_EVIDENCE_DOMAIN,
+            });
+            geminiReplayListener = Object.freeze({
+              projection: listenerProjection as unknown as JsonValue,
+              reference,
+              pcm,
+              listener_manifest_sha256: listenerManifestSha256,
+              evaluator_build_sha256: evaluatorBuildSha256,
+            });
+            return {
+              listener_evidence_sha256: reference.evidence_sha256,
+              listener_evidence: reference,
+              repair_projection: repairProjection,
+              playback_authority_receipt_sha256:
+                playbackAuthorityReceiptSha256,
+              assistant_conversation_transcript: assistantTranscript,
+              assistant_conversation_transcript_sha256:
+                sha256Hex(assistantTranscript),
+              assistant_conversation_transcript_source:
+                "listener_exact_captured_pcm_asr" as const,
+            };
+          }
+          return {
+            listener_evidence_sha256: listenerEvidence.evidence_sha256,
+            listener_evidence: listenerEvidence,
+            repair_projection: repairProjection,
+            playback_authority_receipt_sha256:
+              sha256Hex("dev-playback-authority"),
+            assistant_conversation_transcript: assistantTranscript,
+            assistant_conversation_transcript_sha256:
+              sha256Hex(assistantTranscript),
+            assistant_conversation_transcript_source:
+              "listener_exact_captured_pcm_asr" as const,
           };
         },
       },
@@ -3788,18 +3998,35 @@ describe("LC4 production realtime adapter bridge", () => {
       generated_pcm_sha256: sha256Hex(new Uint8Array([1, 0, 2, 0])),
     });
     expect(evidence.suppressed_unplayed_output).toMatchObject({
-      policy: "exclude_everything_before_the_final_tool_batch_from_caller_heard_history",
-      tool_dispatch_count: provider === "gemini" ? 2 : 1,
-      response_count: provider === "gemini" ? 2 : 1,
+      schema_version: 2,
+      policy: "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history",
       audio_chunk_count: provider === "gemini" ? 2 : 1,
       audio_byte_length: provider === "gemini" ? 4 : 2,
-      audio_pcm_sha256: sha256Hex(
-        provider === "gemini" ? new Uint8Array([9, 0, 8, 0]) : new Uint8Array([9, 0]),
-      ),
-      transcript_count: provider === "gemini" ? 2 : 1,
-      caller_heard_audio_byte_length: 4,
-      caller_heard_audio_pcm_sha256: sha256Hex(new Uint8Array([1, 0, 2, 0])),
+      listener_admitted_audio_byte_length: 4,
+      listener_admitted_audio_pcm_sha256:
+        sha256Hex(new Uint8Array([1, 0, 2, 0])),
     });
+    const suppressedChunkCommitments =
+      evidence.suppressed_unplayed_output.audio_chunks;
+    expect(suppressedChunkCommitments).toHaveLength(
+      provider === "gemini" ? 2 : 1,
+    );
+    expect(evidence.suppressed_unplayed_output.audio_chunk_sequence_sha256)
+      .toBe(sha256Hex(
+        `${LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN}${canonicalJson({
+          scope: "suppressed_before_listener_admission",
+          format: {
+            encoding: "pcm16",
+            sample_rate_hz: base.episode_shape.provider_profile.output_sample_rate_hz,
+            channels: 1,
+          },
+          chunks: suppressedChunkCommitments.map((chunk, index) => ({
+            ordinal: index + 1,
+            pcm_sha256: chunk.pcm_sha256,
+            byte_length: chunk.byte_length,
+          })),
+        })}`,
+      ));
     expect(evidence.dev_gateway_conversation_tool_batches)
       .toHaveLength(provider === "gemini" ? 2 : 1);
     expect(evidence.replay_projection).toMatchObject({
@@ -3811,9 +4038,17 @@ describe("LC4 production realtime adapter bridge", () => {
       dev_gateway_conversation_tool_batches: readonly unknown[];
       dev_gateway_receipt_set: unknown;
     }>;
+    const gatewayReplayExpected = {
+      episode_id: episode.episode_id,
+      opportunity_id: corpus.opportunities[0]!.id,
+      provider,
+      arm: "hacc" as const,
+      phase: "canonical" as const,
+    };
     expect(() => assertLc4DevGatewayConversationToolBatches(
       retainedProjection.dev_gateway_conversation_tool_batches,
       retainedProjection.dev_gateway_receipt_set,
+      gatewayReplayExpected,
     )).not.toThrow();
     const tamperedProjection = JSON.parse(
       canonicalJson(retainedProjection),
@@ -3828,6 +4063,7 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(() => assertLc4DevGatewayConversationToolBatches(
       tamperedProjection.dev_gateway_conversation_tool_batches,
       tamperedProjection.dev_gateway_receipt_set,
+      gatewayReplayExpected,
     )).toThrow("differs from its retained source");
     const rehashedArgumentSubstitution = JSON.parse(
       canonicalJson(retainedProjection),
@@ -3876,12 +4112,175 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(() => assertLc4DevGatewayConversationToolBatches(
       rehashedArgumentSubstitution.dev_gateway_conversation_tool_batches,
       rehashedArgumentSubstitution.dev_gateway_receipt_set,
+      gatewayReplayExpected,
     )).toThrow("authority call differs from its retained source");
+    const crossEpisodeTransplant = JSON.parse(
+      canonicalJson(retainedProjection),
+    ) as {
+      dev_gateway_conversation_tool_batches: Array<{
+        calls: Array<{ source_sha256: string }>;
+      }>;
+      dev_gateway_receipt_set: {
+        receipts: Array<Record<string, JsonValue>>;
+        authority_projections: Array<Record<string, JsonValue>>;
+        pre_dispatch_rejections: JsonValue[];
+        receipt_set_sha256: string;
+      };
+    };
+    const transplantedAuthority =
+      crossEpisodeTransplant.dev_gateway_receipt_set.authority_projections[0]!;
+    transplantedAuthority.episode_id = "different-episode";
+    const transplantedAuthorityBody = Object.fromEntries(
+      Object.entries(transplantedAuthority)
+        .filter(([key]) => key !== "projection_sha256"),
+    );
+    const transplantedAuthoritySha256 = sha256Hex(
+      `${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(
+        transplantedAuthorityBody,
+      )}`,
+    );
+    transplantedAuthority.projection_sha256 =
+      transplantedAuthoritySha256;
+    const transplantedReceipt =
+      crossEpisodeTransplant.dev_gateway_receipt_set.receipts[0]!;
+    transplantedReceipt.episode_id = "different-episode";
+    transplantedReceipt.authority_projection_sha256 =
+      transplantedAuthoritySha256;
+    const transplantedReceiptBody = Object.fromEntries(
+      Object.entries(transplantedReceipt)
+        .filter(([key]) => key !== "receipt_sha256"),
+    );
+    transplantedReceipt.receipt_sha256 = sha256Hex(
+      `${GATEWAY_RECEIPT_DOMAIN}${canonicalJson(transplantedReceiptBody)}`,
+    );
+    crossEpisodeTransplant.dev_gateway_conversation_tool_batches[0]!
+      .calls[0]!.source_sha256 = transplantedAuthoritySha256;
+    const transplantedSet = crossEpisodeTransplant.dev_gateway_receipt_set;
+    transplantedSet.receipt_set_sha256 = sha256Hex(
+      `${GATEWAY_RECEIPT_SET_DOMAIN}${canonicalJson({
+        receipts: transplantedSet.receipts,
+        authority_projections: transplantedSet.authority_projections,
+        pre_dispatch_rejections: transplantedSet.pre_dispatch_rejections,
+      })}`,
+    );
+    expect(() => assertLc4DevGatewayConversationToolBatches(
+      crossEpisodeTransplant.dev_gateway_conversation_tool_batches,
+      crossEpisodeTransplant.dev_gateway_receipt_set,
+      gatewayReplayExpected,
+    )).toThrow(/differs from its outer exchange/u);
     if (provider === "gemini") {
+      expect(geminiReplayListener).not.toBeNull();
+      const exactListener = geminiReplayListener!;
+      const callerPcm = new Uint8Array([1, 7, 11, 13]);
+      const replayExpectation = {
+        run_id: episode.episode_id,
+        opportunity_id: corpus.opportunities[0]!.id,
+        segment_ordinal: 1 as const,
+        playback_kind: "canonical" as const,
+        caller_pcm_sha256: sha256Hex(callerPcm),
+        caller_pcm_byte_length: callerPcm.byteLength,
+        response_control_kind: "hacc_response_plan" as const,
+        provider_profile: base.episode_shape.provider_profile,
+        input_audio_delivery_profile_sha256:
+          configuration(base).audioDeliveryProfileHash,
+        caller_pcm: callerPcm,
+        listener_consumed_pcm: exactListener.pcm,
+        listener_evidence_projection: exactListener.projection,
+        listener_evidence_reference: exactListener.reference,
+        listener_manifest_sha256:
+          exactListener.listener_manifest_sha256,
+        evaluator_build_sha256: exactListener.evaluator_build_sha256,
+      };
+      const replay = (projection: ArtifactJsonValue) =>
+        assertLc4ProviderExchangeReplayProjection(
+          projection,
+          replayExpectation,
+        );
+      expect(() => replay(evidence.replay_projection)).not.toThrow();
       expect(evidence.gemini_output_attribution).toMatchObject({
+        schema_version: 2,
         output_audio_byte_length: 8,
-        output_audio_pcm_sha256: sha256Hex(new Uint8Array([9, 0, 8, 0, 1, 0, 2, 0])),
       });
+      const outputChunks = evidence.gemini_output_attribution!
+        .server_content_frames.flatMap((frame) => frame.output_audio_chunks);
+      expect(evidence.gemini_output_attribution!
+        .output_audio_chunk_sequence_sha256).toBe(sha256Hex(
+        `${LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN}${canonicalJson({
+          scope: "all_observed_output",
+          format: {
+            encoding: "pcm16",
+            sample_rate_hz: 24_000,
+            channels: 1,
+          },
+          chunks: outputChunks.map((chunk, index) => ({
+            ordinal: index + 1,
+            pcm_sha256: chunk.pcm_sha256,
+            byte_length: chunk.byte_length,
+          })),
+        })}`,
+      ));
+      const rehashedSuppressionLie = JSON.parse(canonicalJson(
+        evidence.replay_projection,
+      )) as Record<string, JsonValue>;
+      const suppression = rehashedSuppressionLie
+        .suppressed_unplayed_output as Record<string, JsonValue>;
+      suppression.audio_chunk_sequence_sha256 =
+        sha256Hex("self-consistent-but-false-suppressed-sequence");
+      const {
+        evidence_sha256: ignoredSuppressionHash,
+        ...suppressionBody
+      } = suppression;
+      expect(ignoredSuppressionHash).toMatch(/^[a-f0-9]{64}$/u);
+      suppression.evidence_sha256 = sha256Hex(
+        `${SUPPRESSED_OUTPUT_EVIDENCE_DOMAIN}${canonicalJson(suppressionBody)}`,
+      );
+      expect(() => replay(
+        rehashedSuppressionLie as unknown as ArtifactJsonValue,
+      )).toThrow(/ordered commitment/u);
+
+      const rehashedAttributionLie = JSON.parse(canonicalJson(
+        evidence.replay_projection,
+      )) as Record<string, JsonValue>;
+      const attribution = rehashedAttributionLie
+        .gemini_output_attribution as Record<string, JsonValue>;
+      attribution.output_audio_chunk_sequence_sha256 =
+        sha256Hex("self-consistent-but-false-full-output-sequence");
+      const {
+        attribution_sha256: ignoredAttributionHash,
+        ...attributionBody
+      } = attribution;
+      expect(ignoredAttributionHash).toMatch(/^[a-f0-9]{64}$/u);
+      attribution.attribution_sha256 = sha256Hex(
+        `${LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN}${canonicalJson(attributionBody)}`,
+      );
+      expect(() => replay(
+        rehashedAttributionLie as unknown as ArtifactJsonValue,
+      )).toThrow(/does not partition/u);
+
+      const rehashedUnknownField = JSON.parse(canonicalJson(
+        evidence.replay_projection,
+      )) as Record<string, JsonValue>;
+      const unknownAttribution = rehashedUnknownField
+        .gemini_output_attribution as Record<string, JsonValue>;
+      unknownAttribution.unregistered_claim = true;
+      const {
+        attribution_sha256: ignoredUnknownHash,
+        ...unknownAttributionBody
+      } = unknownAttribution;
+      expect(ignoredUnknownHash).toMatch(/^[a-f0-9]{64}$/u);
+      unknownAttribution.attribution_sha256 = sha256Hex(
+        `${LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN}${canonicalJson(
+          unknownAttributionBody,
+        )}`,
+      );
+      expect(() => replay(
+        rehashedUnknownField as unknown as ArtifactJsonValue,
+      )).toThrow(/missing or unknown fields/u);
+      expect(evidenceStore.retainedReferences("assistant_pcm"))
+        .toEqual([expect.objectContaining({
+          evidence_sha256: evidence.output_capture.generated_pcm_sha256,
+          byte_length: evidence.output_capture.generated_byte_length,
+        })]);
     }
     if (provider === "xai") {
       expect(evidence.transport_mode).toBe("manual_commit");

@@ -36,9 +36,11 @@ its matching result, and parallel batch order is preserved.
   qualification verifier proves the exact redacted wire projections, zero
   generation/tool/output activity before live input, and the first subsequent
   caller-audio boundary.
-- Only caller-heard assistant output enters portable conversation history.
-  Generated but unplayed pre-tool audio is separately hash-bound as suppressed
-  evidence and cannot silently become remembered speech.
+- Only playback-admitted output, or explicitly labeled headless
+  listener-evaluated output in a benchmark, enters portable conversation
+  history. Pre-tool audio excluded from listener evaluation and reconnect
+  history is committed as an ordered redacted chunk sequence; the framework
+  does not claim that a human heard it or that unretained raw PCM was replayed.
 
 This is the conversation plane, not the authority plane. Durable facts,
 corrections, goals, confirmations, worker state, and capability epochs remain

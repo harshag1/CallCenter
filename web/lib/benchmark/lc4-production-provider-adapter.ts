@@ -171,10 +171,14 @@ const PROVIDER_HISTORY_ACKNOWLEDGEMENT_DOMAIN =
   "harshas-amazing-call-center/lc4-provider-history-hydration-acknowledgement/v1\n";
 const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN_V5 = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v5\n";
 const PROVIDER_EXCHANGE_EVIDENCE_DOMAIN_V6 = "harshas-amazing-call-center/lc4-provider-exchange-evidence/v6\n";
+export const LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-output-chunk-sequence/v1\n";
 const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
-  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v2\n";
 export const LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN =
-  "harshas-amazing-call-center/lc4-gemini-server-content-output-attribution/v1\n";
+  "harshas-amazing-call-center/lc4-gemini-server-content-output-attribution/v2\n";
+export const LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN =
+  "harshas-amazing-call-center/lc4-gemini-output-chunk-sequence/v1\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
 const SEGMENT_FINALIZATION_DOMAIN_V2 = "harshas-amazing-call-center/lc4-provider-session-rotation/v2\n";
 const SEGMENT_FINALIZATION_DOMAIN_V6 = "harshas-amazing-call-center/lc4-provider-session-rotation/v6\n";
@@ -365,6 +369,7 @@ function assertRotationBoundary(
 function validateConversationTurns(
   inputTurns: readonly Lc4NativeConversationTurnInput[],
   availableThroughOpportunity: 10 | 20 | 30 | 40 | 50,
+  requireExactToolBatches: boolean,
 ): readonly Lc4RotationConversationTurn[] {
   if (inputTurns.length < availableThroughOpportunity * 2) {
     throw new Error("LC4 rotation conversation omits an audible caller or assistant turn");
@@ -415,6 +420,14 @@ function validateConversationTurns(
       provenance_receipt_sha256: turn.provenance_receipt_sha256,
     };
     if (turn.speaker === "tool") {
+      if (requireExactToolBatches
+        && (turn.tool_batch_sha256 === undefined
+          || turn.tool_batch_call_ordinal === undefined
+          || turn.tool_batch_call_count === undefined)) {
+        throw new Error(
+          "LC4 DEV rotation provider tool turn omits exact batch metadata",
+        );
+      }
       safeId(turn.tool_name, "LC4 rotation provider tool name");
       const toolArguments = immutableJsonValue(turn.tool_arguments);
       if (toolArguments === null
@@ -470,12 +483,15 @@ function validateConversationTurns(
       throw new Error(`LC4 rotation conversation omits caller/assistant evidence for opportunity ${opportunity}`);
     }
   }
+  const seenToolBatchHashes = new Set<string>();
   for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index]!;
     if (turn.speaker !== "tool" || turn.tool_batch_sha256 === undefined) continue;
-    if (turn.tool_batch_call_ordinal !== 1) {
+    if (turn.tool_batch_call_ordinal !== 1
+      || seenToolBatchHashes.has(turn.tool_batch_sha256)) {
       throw new Error("LC4 rotation provider tool batch does not begin at call ordinal one");
     }
+    seenToolBatchHashes.add(turn.tool_batch_sha256);
     const batch = turns.slice(index, index + turn.tool_batch_call_count!);
     if (batch.length !== turn.tool_batch_call_count
       || batch.some((candidate, callIndex) => (
@@ -483,6 +499,8 @@ function validateConversationTurns(
         || candidate.tool_batch_sha256 !== turn.tool_batch_sha256
         || candidate.tool_batch_call_count !== turn.tool_batch_call_count
         || candidate.tool_batch_call_ordinal !== callIndex + 1
+        || candidate.available_after_opportunity
+          !== turn.available_after_opportunity
       ))) {
       throw new Error("LC4 rotation provider tool batch is not exact and contiguous");
     }
@@ -502,10 +520,14 @@ export function createLc4NativeConversationReplayPacket(input: Readonly<{
 }>): Lc4NativeConversationReplayPacket {
   safeId(input.run_id, "LC4 native continuity run ID");
   const protocolId = input.protocol_id ?? "HACC-LC4-v1";
+  const isDevBoundary = protocolId === "HACC-LC4-DEV-v1";
   assertRotationBoundary(protocolId, input.from_segment_ordinal, input.to_segment_ordinal, input.available_through_opportunity);
   if (!SHA256.test(input.previous_session_rotation_receipt_sha256)) throw new Error("LC4 native continuity rotation receipt is invalid");
-  const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
-  const isDevBoundary = protocolId === "HACC-LC4-DEV-v1";
+  const conversationTurns = validateConversationTurns(
+    input.conversation_turns,
+    input.available_through_opportunity,
+    isDevBoundary,
+  );
   const body = Object.freeze({
     schema_version: isDevBoundary ? 6 as const : 4 as const,
     packet_type: "native_provider_conversation_replay" as const,
@@ -536,12 +558,16 @@ export function createLc4HaccRotationStatePacket(input: Readonly<{
 }>): Lc4HaccRotationStatePacket {
   safeId(input.run_id, "LC4 HACC rotation run ID");
   const protocolId = input.protocol_id ?? "HACC-LC4-v1";
+  const isDevBoundary = protocolId === "HACC-LC4-DEV-v1";
   assertRotationBoundary(protocolId, input.from_segment_ordinal, input.to_segment_ordinal, input.available_through_opportunity);
   for (const digest of [input.previous_session_rotation_receipt_sha256, input.flow_state_sha256, input.response_plan_chain_head_sha256]) {
     if (!SHA256.test(digest)) throw new Error("LC4 HACC rotation hash is invalid");
   }
-  const conversationTurns = validateConversationTurns(input.conversation_turns, input.available_through_opportunity);
-  const isDevBoundary = protocolId === "HACC-LC4-DEV-v1";
+  const conversationTurns = validateConversationTurns(
+    input.conversation_turns,
+    input.available_through_opportunity,
+    isDevBoundary,
+  );
   const body = Object.freeze({
     schema_version: isDevBoundary ? 6 as const : 4 as const,
     packet_type: "hacc_provider_conversation_plus_structured_state" as const,
@@ -1240,7 +1266,7 @@ export type Lc4GeminiIntervalFrameAttribution = Readonly<{
  * do not carry this object and remain explicitly completeness-unverified.
  */
 export type Lc4GeminiOutputAttribution = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   contract: "gemini_server_content_output_audio_attribution";
   completeness: "verified_activity_end_to_terminal";
   observation_scope: "client_observed_wire_frames";
@@ -1260,23 +1286,27 @@ export type Lc4GeminiOutputAttribution = Readonly<{
   server_content_frames: readonly Lc4GeminiServerContentFrameAttribution[];
   output_audio_chunk_count: number;
   output_audio_byte_length: number;
-  output_audio_pcm_sha256: string;
+  output_audio_chunk_sequence_sha256: string;
   attribution_sha256: string;
 }>;
 
+export type Lc4SuppressedOutputAudioChunkCommitment = Readonly<{
+  chunk_index: number;
+  provider_response_id_sha256: string | null;
+  pcm_sha256: string;
+  byte_length: number;
+}>;
+
 export type Lc4SuppressedUnplayedOutputEvidence = Readonly<{
-  schema_version: 1;
-  policy: "exclude_everything_before_the_final_tool_batch_from_caller_heard_history";
-  tool_dispatch_count: number;
-  response_count: number;
+  schema_version: 2;
+  policy: "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history";
+  audio_chunks: readonly Lc4SuppressedOutputAudioChunkCommitment[];
   audio_chunk_count: number;
   audio_byte_length: number;
-  audio_pcm_sha256: string | null;
-  transcript_count: number;
-  transcript_hash_set_sha256: string | null;
-  caller_heard_audio_chunk_count: number;
-  caller_heard_audio_byte_length: number;
-  caller_heard_audio_pcm_sha256: string;
+  audio_chunk_sequence_sha256: string;
+  listener_admitted_audio_chunk_count: number;
+  listener_admitted_audio_byte_length: number;
+  listener_admitted_audio_pcm_sha256: string;
   evidence_sha256: string;
 }>;
 
@@ -1753,6 +1783,30 @@ function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
   return bytes;
 }
 
+function outputChunkSequenceSha256(input: Readonly<{
+  domain: string;
+  scope: "all_observed_output" | "suppressed_before_listener_admission";
+  sample_rate_hz: number;
+  chunks: readonly Readonly<{
+    pcm_sha256: string;
+    byte_length: number;
+  }>[];
+}>): string {
+  return sha256Hex(`${input.domain}${canonicalJson({
+    scope: input.scope,
+    format: {
+      encoding: "pcm16",
+      sample_rate_hz: input.sample_rate_hz,
+      channels: 1,
+    },
+    chunks: input.chunks.map((chunk, index) => ({
+      ordinal: index + 1,
+      pcm_sha256: chunk.pcm_sha256,
+      byte_length: chunk.byte_length,
+    })),
+  })}`);
+}
+
 type Lc4GeminiWireProjectionInput = Readonly<{
   wire_observation_sha256: string;
   redacted_projection: JsonValue;
@@ -2088,7 +2142,7 @@ export function createLc4GeminiOutputAttribution(input: Readonly<{
     throw new Error("LC4 Gemini output attribution aggregate differs from capture");
   }
   const body = Object.freeze({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     contract: "gemini_server_content_output_audio_attribution" as const,
     completeness: "verified_activity_end_to_terminal" as const,
     observation_scope: "client_observed_wire_frames" as const,
@@ -2110,7 +2164,12 @@ export function createLc4GeminiOutputAttribution(input: Readonly<{
     server_content_frames: Object.freeze(frames),
     output_audio_chunk_count: attributedChunks.length,
     output_audio_byte_length: outputAudioByteLength,
-    output_audio_pcm_sha256: input.capture.generated_pcm_sha256,
+    output_audio_chunk_sequence_sha256: outputChunkSequenceSha256({
+      domain: LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+      scope: "all_observed_output",
+      sample_rate_hz: 24_000,
+      chunks: attributedChunks,
+    }),
   });
   return Object.freeze({
     ...body,
@@ -2394,7 +2453,6 @@ export class Lc4RealtimeProviderBridge {
     const outputByResponse = new Map<string, Uint8Array[]>();
     const outputTranscriptByResponse = new Map<string, string>();
     const finalToolAudioBoundaryByResponse = new Map<string, number>();
-    const suppressedTranscriptHashes: string[] = [];
     const responseIdsByOpportunity = new Map<string, string[]>();
     const outputFormatByResponse = new Map<string, Readonly<{ encoding: "pcm16"; sampleRateHz: number; channels: 1 }>>();
     const geminiWireProjections = new Map<string, JsonValue>();
@@ -2402,7 +2460,6 @@ export class Lc4RealtimeProviderBridge {
     const completedByResponse = new Set<string>();
     const waiters = new Map<string, () => void>();
     let currentOpportunity: string | null = null;
-    let toolDispatchCount = 0;
     let activeResponseId: string | null = null;
     let rootResponseId: string | null = null;
     let currentOperationOrder: Lc4ProviderExchangeOperation[] | null = null;
@@ -2495,14 +2552,12 @@ export class Lc4RealtimeProviderBridge {
     const unsubscribeEvent = client.onEvent((event: NormalizedRealtimeEvent) => {
       devGateway?.observe(event);
       if (devGateway && (event.type === "tool.dispatch" || event.type === "tool.calls")) {
-        toolDispatchCount += 1;
         finalToolAudioBoundaryByResponse.set(
           event.responseId,
           outputByResponse.get(event.responseId)?.length ?? 0,
         );
         const transcript = outputTranscriptByResponse.get(event.responseId)?.trim();
         if (transcript) {
-          suppressedTranscriptHashes.push(sha256Hex(transcript));
           outputTranscriptByResponse.delete(event.responseId);
         }
       }
@@ -3012,8 +3067,6 @@ export class Lc4RealtimeProviderBridge {
         outputByResponse.clear();
         outputFormatByResponse.clear();
         finalToolAudioBoundaryByResponse.clear();
-        suppressedTranscriptHashes.length = 0;
-        toolDispatchCount = 0;
         terminalByResponse.clear();
         completedByResponse.clear();
         try {
@@ -3397,48 +3450,47 @@ export class Lc4RealtimeProviderBridge {
             ...responseIds,
             ...outputByResponse.keys(),
           ])];
-          const suppressedChunks = orderedResponseIds.flatMap((responseId) => {
+          const suppressedChunkEntries = orderedResponseIds.flatMap((responseId) => {
             const responseChunks = outputByResponse.get(responseId) ?? [];
             const admittedCount = responseId === activeResponseId
               ? finalToolBoundary
               : responseChunks.length;
-            return responseChunks.slice(0, admittedCount);
+            return responseChunks.slice(0, admittedCount).map((chunk) => ({
+              responseId,
+              chunk,
+            }));
           });
-          const suppressedPcm = concatenate(suppressedChunks);
-          const nonTerminalTranscriptHashes = orderedResponseIds
-            .filter((responseId) => responseId !== activeResponseId)
-            .map((responseId) => outputTranscriptByResponse.get(responseId)?.trim() ?? "")
-            .filter(Boolean)
-            .map((transcript) => sha256Hex(transcript));
-          const allSuppressedTranscriptHashes = [
-            ...suppressedTranscriptHashes,
-            ...nonTerminalTranscriptHashes,
-          ];
-          const suppressedResponseCount = orderedResponseIds.filter((responseId) => {
-            if (responseId !== activeResponseId) {
-              return (outputByResponse.get(responseId)?.length ?? 0) > 0
-                || Boolean(outputTranscriptByResponse.get(responseId)?.trim());
-            }
-            return finalToolBoundary > 0;
-          }).length;
+          const suppressedChunks = suppressedChunkEntries.map(({ chunk }) => chunk);
+          const suppressedAudioChunks = Object.freeze(
+            suppressedChunkEntries.map(({ responseId, chunk }, index) =>
+              Object.freeze({
+                chunk_index: index + 1,
+                provider_response_id_sha256: input.profile.provider === "gemini"
+                  ? null
+                  : realtimeWireIdentitySha256("response", responseId),
+                pcm_sha256: sha256Hex(chunk),
+                byte_length: chunk.byteLength,
+              })),
+          );
           const suppressionBody = Object.freeze({
-            schema_version: 1 as const,
+            schema_version: 2 as const,
             policy:
-              "exclude_everything_before_the_final_tool_batch_from_caller_heard_history" as const,
-            tool_dispatch_count: toolDispatchCount,
-            response_count: suppressedResponseCount,
-            audio_chunk_count: suppressedChunks.length,
-            audio_byte_length: suppressedPcm.byteLength,
-            audio_pcm_sha256: suppressedPcm.byteLength > 0
-              ? sha256Hex(suppressedPcm)
-              : null,
-            transcript_count: allSuppressedTranscriptHashes.length,
-            transcript_hash_set_sha256: allSuppressedTranscriptHashes.length > 0
-              ? sha256Hex(canonicalJson(allSuppressedTranscriptHashes))
-              : null,
-            caller_heard_audio_chunk_count: chunks.length,
-            caller_heard_audio_byte_length: pcm.byteLength,
-            caller_heard_audio_pcm_sha256: sha256Hex(pcm),
+              "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history" as const,
+            audio_chunks: suppressedAudioChunks,
+            audio_chunk_count: suppressedAudioChunks.length,
+            audio_byte_length: suppressedAudioChunks.reduce(
+              (total, chunk) => total + chunk.byte_length,
+              0,
+            ),
+            audio_chunk_sequence_sha256: outputChunkSequenceSha256({
+              domain: LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+              scope: "suppressed_before_listener_admission",
+              sample_rate_hz: input.profile.output_sample_rate_hz,
+              chunks: suppressedAudioChunks,
+            }),
+            listener_admitted_audio_chunk_count: chunks.length,
+            listener_admitted_audio_byte_length: pcm.byteLength,
+            listener_admitted_audio_pcm_sha256: sha256Hex(pcm),
           });
           const suppressedUnplayedOutput = Object.freeze({
             ...suppressionBody,

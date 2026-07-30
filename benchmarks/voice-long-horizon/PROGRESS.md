@@ -1255,12 +1255,14 @@ Changing only the retained projection's version from 4 to 3 made the old
 verifier replay every other contract successfully, proving the exact
 version-split cause.
 
-The repair admits schema v4 and independently verifies its new suppression
-receipt: policy, counts, null/nonnull aggregate rules, receipt domain hash, and
-exact caller-heard chunk count, byte length, and PCM hash must all match the
-listener-consumed output capture. A mutation that rehashes a substituted
-caller-heard aggregate fails closed. The unmodified failed-run artifact now
-replays offline with its original schema v4 and all 1,464,000 captured bytes.
+The then-current repair admitted schema v4 and matched its listener-consumed
+output capture. The later strict v2 suppression contract supersedes that
+legacy admission rule: a nonzero v1 suppression object cannot prove aggregate
+hashes for unretained bytes and is intentionally non-admissible. Fresh
+artifacts instead bind every suppressed chunk to an ordered redacted
+wire-projection commitment and match the listener-admitted chunk count, byte
+length, and PCM hash to the exact evaluator-consumed capture. The immutable
+failed-run artifact remains historical rather than being silently upgraded.
 
 The immutable failed-run report is
 `5f5701cf2b4ee159d694172932f81a852aa1d1e2bb3dad22be45eb77069078c8`.
@@ -1511,3 +1513,60 @@ remain incomplete and unscorable. No completed cell, comparison, or launch
 graph may be reused. This is an outcome-informed development amendment, so a
 new clean commit, exact-source ASR receipt, Gate D, qualification, and all six
 DEV cells are required.
+
+## 2026-07-29 — Gemini schema-v5 retained replay repaired
+
+Source `32655f2142cb7d698b406cf46abcbc10df1b14c4` passed exact-source ASR,
+xAI Gate D, and three-provider qualification. Its one-shot DEV run then
+completed both 60-opportunity OpenAI calls across all twelve planned physical
+sessions. Gemini HACC's first provider exchange and pinned listener evaluation
+also completed, but the local replay verifier rejected the returned schema-v5
+exchange:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **121/120**;
+- provider calls/completed generations: **129/129**;
+- repair playbacks: **8**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+The retained Gemini artifact proves 42 activity-end-to-terminal interval
+frames, 36 exact output chunks, 467,042 assistant PCM bytes, a completed
+terminal, and signed listener evidence. Offline replay found a one-condition
+version-routing omission: the verifier admitted schema v5 but sent only
+schemas v3/v4 through the complete versioned Gemini attribution path. Schema
+v5 fell into the older matcher and rejected valid audio-plus-transcript and
+metadata frames.
+
+The repair includes schema v5 in the versioned attribution path. A subsequent
+adversarial review found that the legacy nested v1 suppression artifact
+self-attested raw aggregate hashes for bytes it did not retain. The strict v2
+contract therefore replaces those claims with replayable ordered chunk
+commitments and verifies complete Gemini output attribution versus the exact
+listener-admitted/evaluator-consumed suffix after suppressed pre-tool output.
+The immutable failed-run artifact remains historical and is intentionally
+non-admissible under v2 when it contains nonzero legacy suppression; it is not
+silently upgraded. The regression fixture includes mixed
+audio/transcript, transcript-only, empty metadata, session-resumption, and
+terminal frames and still rejects a substituted interval preimage. A second
+fake-adapter regression completes two non-empty Gemini gateway batches,
+suppresses the pre-tool PCM, retains exact listener PCM, and passes the full
+replay verifier, including rehashed aggregate-lie and unknown-field attacks.
+OpenAI/xAI suppression is independently bound to ordered inbound wire
+projections. Gateway bridge v5 binds accepted and rejected evidence to the
+outer episode, opportunity, provider, arm, and phase; DEV rotations reject
+metadata-free tool turns, and publication reconstructs the current schema-v2
+batch contract. A provider-free six-session simulation proves rotations at
+10/20/30/40/50, exactly one hydration before audio in sessions 2–6, exact
+Gemini `clientContent` hashes, and receipt chaining. The complete web matrix
+passes **3,307/3,307** executed tests, with **85** explicitly inventoried
+skips; TypeScript passes. The regenerated provider-free gateway firewall
+artifact passes **33/33** deterministic scenarios.
+
+The source-bound run remains immutable, incomplete, unscorable, and unusable
+for a graph. A new clean commit, exact-source ASR receipt, Gate D,
+qualification, and complete six-cell DEV run are required.
+
+- Spend delta: **$11.50** conservative settlement
+- Current post-baseline conservative exposure: **$133.00**
+- Active reservations: **$0.00**

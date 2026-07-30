@@ -29,7 +29,11 @@ import {
 import {
   assertLc4PublicationTransportReplay,
   createLc4PublicationTransportReplay,
+  reconstructLc4PublicationConversationExchange,
 } from "../lc4-publication-transport-replay";
+import {
+  LC4_DEV_GATEWAY_BRIDGE_VERSION,
+} from "../lc4-development-gateway-bridge";
 import {
   createLc4ProviderExecutionProfile,
 } from "../lc4-production-runner-foundation";
@@ -53,6 +57,9 @@ import {
   lc4XaiManualResponseWireIdentitySha256,
   type Lc4SanitizedWireObservation,
 } from "../lc4-xai-manual-turn-causality";
+import {
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
+} from "../../realtime/client/types";
 
 const H = (value: string | Uint8Array) => sha256Hex(value);
 const SOURCE_COMMIT = "a".repeat(40);
@@ -403,6 +410,139 @@ function custody(
 }
 
 describe("LC4 publication transport provenance custody", () => {
+  it("reconstructs current schema-v2 accepted and rejected tool batches", () => {
+    const providerOutput = canonicalJson({ ok: true });
+    const rejectionReceiptSha256 = H("rejection-receipt");
+    const rejectedOutput = canonicalJson({
+      ok: false,
+      code: "capability_request_rejected",
+      reason: "model_arguments_forbidden",
+      retriable: true,
+      executed: false,
+      rejection_receipt_sha256: rejectionReceiptSha256,
+    });
+    const providerResponseSha256 = H("provider-response");
+    const acceptedBatch = {
+      schema_version: 2,
+      bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+      batch_ordinal: 1,
+      provider_response_id_sha256: providerResponseSha256,
+      calls: [
+        {
+          call_ordinal: 1,
+          gateway_tool_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          model_arguments: {
+            tool_name: "archive.complete_stage",
+            arguments: {},
+          },
+          provider_output_canonical_json: providerOutput,
+          source_kind: "authority_projection",
+          source_sha256: H("authority-source"),
+          disposition: "executed",
+          pre_dispatch_rejection_code: null,
+        },
+      ],
+    };
+    const rejectedBatch = {
+      schema_version: 2,
+      bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+      batch_ordinal: 2,
+      provider_response_id_sha256: providerResponseSha256,
+      calls: [
+        {
+          call_ordinal: 1,
+          gateway_tool_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          model_arguments: {
+            tool_name: "archive.complete_stage",
+            arguments: { forbidden: true },
+          },
+          provider_output_canonical_json: rejectedOutput,
+          source_kind: "pre_dispatch_rejection",
+          source_sha256: H("rejection-source"),
+          disposition: "pre_dispatch_rejected",
+          pre_dispatch_rejection_code: "model_arguments_forbidden",
+        },
+      ],
+    };
+    const turns = reconstructLc4PublicationConversationExchange({
+      opportunity_index: 7,
+      caller_text: "Please finish the archive stage.",
+      caller_pcm_sha256: H("caller-pcm"),
+      exchange: {
+        dev_gateway_conversation_tool_batches: [
+          acceptedBatch as never,
+          rejectedBatch as never,
+        ],
+      },
+      listener: {
+        listener_observation: {
+          status: "verified",
+          transcript: "The archive stage is complete.",
+          transcript_sha256: H("The archive stage is complete."),
+        },
+      },
+      assistant_pcm_sha256: H("assistant-pcm"),
+    });
+    expect(turns.map((turn) => turn.speaker)).toEqual([
+      "caller",
+      "tool",
+      "tool",
+      "assistant",
+    ]);
+    expect(turns.slice(1, 3)).toEqual([
+      expect.objectContaining({
+        tool_batch_call_ordinal: 1,
+        tool_batch_call_count: 1,
+        text: providerOutput,
+      }),
+      expect.objectContaining({
+        tool_batch_call_ordinal: 1,
+        tool_batch_call_count: 1,
+        text: rejectedOutput,
+      }),
+    ]);
+    expect((turns[1] as { tool_batch_sha256?: string }).tool_batch_sha256)
+      .not.toBe((turns[2] as { tool_batch_sha256?: string }).tool_batch_sha256);
+    expect(() => reconstructLc4PublicationConversationExchange({
+      opportunity_index: 7,
+      caller_text: "Please finish the archive stage.",
+      caller_pcm_sha256: H("caller-pcm"),
+      exchange: {
+        dev_gateway_conversation_tool_batches: [{
+          ...acceptedBatch,
+          schema_version: 1,
+        } as never],
+      },
+      listener: {
+        listener_observation: {
+          status: "verified",
+          transcript: "The archive stage is complete.",
+          transcript_sha256: H("The archive stage is complete."),
+        },
+      },
+      assistant_pcm_sha256: H("assistant-pcm"),
+    })).toThrow(/incomplete or out of order/u);
+    expect(() => reconstructLc4PublicationConversationExchange({
+      opportunity_index: 7,
+      caller_text: "Please finish the archive stage.",
+      caller_pcm_sha256: H("caller-pcm"),
+      exchange: {
+        dev_gateway_conversation_tool_batches: [{
+          ...acceptedBatch,
+          bridge_version: "lc4-dev-gateway-bridge-stale",
+        } as never],
+      },
+      listener: {
+        listener_observation: {
+          status: "verified",
+          transcript: "The archive stage is complete.",
+          transcript_sha256: H("The archive stage is complete."),
+        },
+      },
+      assistant_pcm_sha256: H("assistant-pcm"),
+    })).toThrow(/incomplete or out of order/u);
+  });
+
   it("replays one signed exact-source Gate D receipt and derives public cells", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "hacc-publication-gate-d-"));
     roots.push(root);

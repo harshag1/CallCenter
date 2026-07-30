@@ -1,6 +1,9 @@
 import { canonicalJson, sha256Hex, type JsonValue } from "./artifacts";
 import {
   createLc4GeminiOutputAttribution,
+  LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN,
+  LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+  LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
   type Lc4GeminiOutputAttribution,
   type Lc4ProviderExchangeOperation,
   type Lc4SanitizedWireObservation,
@@ -49,8 +52,10 @@ const LISTENER_EVIDENCE_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const CAS_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
-const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN_V1 =
   "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN_V2 =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v2\n";
 const LC4_DEV_LIVE_DEPENDENCY_VERSION =
   "lc4-dev-live-dependencies-v1";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -187,6 +192,30 @@ function domainHash(domain: string, value: unknown): string {
   return sha256Hex(`${domain}${canonicalJson(value)}`);
 }
 
+function outputChunkSequenceSha256(input: Readonly<{
+  domain: string;
+  scope: "all_observed_output" | "suppressed_before_listener_admission";
+  sample_rate_hz: number;
+  chunks: readonly Readonly<{
+    pcm_sha256: string;
+    byte_length: number;
+  }>[];
+}>): string {
+  return domainHash(input.domain, {
+    scope: input.scope,
+    format: {
+      encoding: "pcm16",
+      sample_rate_hz: input.sample_rate_hz,
+      channels: 1,
+    },
+    chunks: input.chunks.map((chunk, index) => ({
+      ordinal: index + 1,
+      pcm_sha256: chunk.pcm_sha256,
+      byte_length: chunk.byte_length,
+    })),
+  });
+}
+
 function encodedPcmProjection(input: Readonly<{
   pcm: Uint8Array;
   sampleRateHz: number;
@@ -212,6 +241,34 @@ function encodedPcmProjection(input: Readonly<{
     format: Object.freeze({
       encoding: "pcm16" as const,
       sampleRateHz: input.sampleRateHz,
+      channels: 1 as const,
+    }),
+  });
+}
+
+function encodedPcmCommitmentProjection(input: Readonly<{
+  pcm_sha256: string;
+  byte_length: number;
+  sample_rate_hz: number;
+}>): Readonly<{
+  validCanonicalBase64: true;
+  byteLength: number;
+  sha256: string;
+  encodedBytes: number;
+  format: Readonly<{
+    encoding: "pcm16";
+    sampleRateHz: number;
+    channels: 1;
+  }>;
+}> {
+  return Object.freeze({
+    validCanonicalBase64: true as const,
+    byteLength: input.byte_length,
+    sha256: input.pcm_sha256,
+    encodedBytes: Math.ceil(input.byte_length / 3) * 4,
+    format: Object.freeze({
+      encoding: "pcm16" as const,
+      sampleRateHz: input.sample_rate_hz,
       channels: 1 as const,
     }),
   });
@@ -872,34 +929,133 @@ function assertOutputCapture(input: Readonly<{
 function assertSuppressedUnplayedOutput(
   value: unknown,
   capture: ReplayedOutputCapture,
-): void {
+  profile: Lc4ProviderExecutionProfile,
+): Readonly<{
+  audio_chunks: readonly Readonly<{
+    chunk_index: number;
+    provider_response_id_sha256: string | null;
+    pcm_sha256: string;
+    byte_length: number;
+  }>[];
+  audio_chunk_count: number;
+  audio_byte_length: number;
+  audio_chunk_sequence_sha256: string;
+}> {
   const suppression = record(
     value,
     "LC4 suppressed unplayed output evidence",
   );
+  if (suppression.schema_version === 1) {
+    assertOnlyKeys(suppression, [
+      "schema_version",
+      "policy",
+      "tool_dispatch_count",
+      "response_count",
+      "audio_chunk_count",
+      "audio_byte_length",
+      "audio_pcm_sha256",
+      "transcript_count",
+      "transcript_hash_set_sha256",
+      "caller_heard_audio_chunk_count",
+      "caller_heard_audio_byte_length",
+      "caller_heard_audio_pcm_sha256",
+      "evidence_sha256",
+    ], "LC4 legacy suppressed unplayed output evidence");
+    const {
+      evidence_sha256: claimedEvidence,
+      ...body
+    } = suppression;
+    if (suppression.policy
+        !== "exclude_everything_before_the_final_tool_batch_from_caller_heard_history"
+      || suppression.tool_dispatch_count !== 0
+      || suppression.response_count !== 0
+      || suppression.audio_chunk_count !== 0
+      || suppression.audio_byte_length !== 0
+      || suppression.audio_pcm_sha256 !== null
+      || suppression.transcript_count !== 0
+      || suppression.transcript_hash_set_sha256 !== null
+      || suppression.caller_heard_audio_chunk_count
+        !== capture.chunks.length
+      || suppression.caller_heard_audio_byte_length
+        !== capture.capture.generated_byte_length
+      || suppression.caller_heard_audio_pcm_sha256
+        !== capture.capture.generated_pcm_sha256
+      || claimedEvidence !== domainHash(
+        SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN_V1,
+        body,
+      )) {
+      throw new Error(
+        "LC4 legacy suppression is replayable only when it makes no suppressed-output claim",
+      );
+    }
+    return Object.freeze({
+      audio_chunks: Object.freeze([]),
+      audio_chunk_count: 0,
+      audio_byte_length: 0,
+      audio_chunk_sequence_sha256: outputChunkSequenceSha256({
+        domain: LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+        scope: "suppressed_before_listener_admission",
+        sample_rate_hz: profile.output_sample_rate_hz,
+        chunks: [],
+      }),
+    });
+  }
   assertOnlyKeys(suppression, [
     "schema_version",
     "policy",
-    "tool_dispatch_count",
-    "response_count",
+    "audio_chunks",
     "audio_chunk_count",
     "audio_byte_length",
-    "audio_pcm_sha256",
-    "transcript_count",
-    "transcript_hash_set_sha256",
-    "caller_heard_audio_chunk_count",
-    "caller_heard_audio_byte_length",
-    "caller_heard_audio_pcm_sha256",
+    "audio_chunk_sequence_sha256",
+    "listener_admitted_audio_chunk_count",
+    "listener_admitted_audio_byte_length",
+    "listener_admitted_audio_pcm_sha256",
     "evidence_sha256",
   ], "LC4 suppressed unplayed output evidence");
-  const toolDispatchCount = integer(
-    suppression.tool_dispatch_count,
-    "LC4 suppressed output tool dispatch count",
-  );
-  const responseCount = integer(
-    suppression.response_count,
-    "LC4 suppressed output response count",
-  );
+  if (!Array.isArray(suppression.audio_chunks)
+    || suppression.audio_chunks.length > MAX_RETAINED_WIRE_OBSERVATIONS) {
+    throw new Error(
+      "LC4 suppressed output chunk commitments are invalid or exceed their bound",
+    );
+  }
+  const audioChunks = suppression.audio_chunks.map((candidate, index) => {
+    const chunk = record(
+      candidate,
+      `LC4 suppressed output chunk ${index + 1}`,
+    );
+    assertOnlyKeys(chunk, [
+      "chunk_index",
+      "provider_response_id_sha256",
+      "pcm_sha256",
+      "byte_length",
+    ], `LC4 suppressed output chunk ${index + 1}`);
+    const responseIdSha256 = nullableHash(
+      chunk.provider_response_id_sha256,
+      `LC4 suppressed output chunk ${index + 1} provider response`,
+    );
+    const pcmSha256 = hash(
+      chunk.pcm_sha256,
+      `LC4 suppressed output chunk ${index + 1} PCM`,
+    );
+    const byteLength = integer(
+      chunk.byte_length,
+      `LC4 suppressed output chunk ${index + 1} bytes`,
+      2,
+    );
+    if (chunk.chunk_index !== index + 1
+      || byteLength % 2 !== 0
+      || (profile.provider === "gemini") !== (responseIdSha256 === null)) {
+      throw new Error(
+        "LC4 suppressed output chunk order, format, or provider identity is invalid",
+      );
+    }
+    return Object.freeze({
+      chunk_index: index + 1,
+      provider_response_id_sha256: responseIdSha256,
+      pcm_sha256: pcmSha256,
+      byte_length: byteLength,
+    });
+  });
   const audioChunkCount = integer(
     suppression.audio_chunk_count,
     "LC4 suppressed output audio chunk count",
@@ -908,58 +1064,70 @@ function assertSuppressedUnplayedOutput(
     suppression.audio_byte_length,
     "LC4 suppressed output audio bytes",
   );
-  const transcriptCount = integer(
-    suppression.transcript_count,
-    "LC4 suppressed output transcript count",
-  );
-  const callerHeardChunkCount = integer(
-    suppression.caller_heard_audio_chunk_count,
-    "LC4 caller-heard output chunk count",
+  const listenerAdmittedChunkCount = integer(
+    suppression.listener_admitted_audio_chunk_count,
+    "LC4 listener-admitted output chunk count",
     1,
   );
-  const callerHeardByteLength = integer(
-    suppression.caller_heard_audio_byte_length,
-    "LC4 caller-heard output bytes",
+  const listenerAdmittedByteLength = integer(
+    suppression.listener_admitted_audio_byte_length,
+    "LC4 listener-admitted output bytes",
     2,
   );
-  const audioPcmSha256 = nullableHash(
-    suppression.audio_pcm_sha256,
-    "LC4 suppressed output PCM",
-  );
-  const transcriptHashSetSha256 = nullableHash(
-    suppression.transcript_hash_set_sha256,
-    "LC4 suppressed output transcript set",
+  const audioChunkSequenceSha256 = hash(
+    suppression.audio_chunk_sequence_sha256,
+    "LC4 suppressed output chunk sequence",
   );
   const {
     evidence_sha256: claimedEvidence,
     ...body
   } = suppression;
-  if (suppression.schema_version !== 1
+  if (suppression.schema_version !== 2
     || suppression.policy
-      !== "exclude_everything_before_the_final_tool_batch_from_caller_heard_history"
-    || responseCount > toolDispatchCount
-    || audioByteLength % 2 !== 0
-    || (audioChunkCount === 0) !== (audioByteLength === 0)
-    || (audioChunkCount === 0) !== (audioPcmSha256 === null)
-    || (transcriptCount === 0) !== (transcriptHashSetSha256 === null)
-    || callerHeardChunkCount !== capture.chunks.length
-    || callerHeardByteLength !== capture.capture.generated_byte_length
-    || suppression.caller_heard_audio_pcm_sha256
+      !== "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history"
+    || audioChunkCount !== audioChunks.length
+    || audioByteLength !== audioChunks.reduce(
+      (total, chunk) => total + chunk.byte_length,
+      0,
+    )
+    || audioChunkSequenceSha256 !== outputChunkSequenceSha256({
+      domain: LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+      scope: "suppressed_before_listener_admission",
+      sample_rate_hz: profile.output_sample_rate_hz,
+      chunks: audioChunks,
+    })
+    || listenerAdmittedChunkCount !== capture.chunks.length
+    || listenerAdmittedByteLength !== capture.capture.generated_byte_length
+    || suppression.listener_admitted_audio_pcm_sha256
       !== capture.capture.generated_pcm_sha256
     || claimedEvidence !== domainHash(
-      SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+      SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN_V2,
       body,
     )) {
     throw new Error(
-      "LC4 suppressed output evidence differs from its policy, aggregate, or exact caller-heard capture",
+      "LC4 suppressed output evidence differs from its policy, ordered commitment, or exact listener-admitted capture",
     );
   }
+  return Object.freeze({
+    audio_chunks: Object.freeze(audioChunks),
+    audio_chunk_count: audioChunkCount,
+    audio_byte_length: audioByteLength,
+    audio_chunk_sequence_sha256: audioChunkSequenceSha256,
+  });
 }
 
 function assertExactOpenAiCompatibleOutputWire(input: Readonly<{
   observations: readonly Lc4SanitizedWireObservation[];
   capture: ReplayedOutputCapture;
   profile: Lc4ProviderExecutionProfile;
+  suppression: Readonly<{
+    audio_chunks: readonly Readonly<{
+      chunk_index: number;
+      provider_response_id_sha256: string | null;
+      pcm_sha256: string;
+      byte_length: number;
+    }>[];
+  }>;
 }>): void {
   const audio = input.observations.filter((observation) =>
     observation.direction === "inbound"
@@ -967,6 +1135,29 @@ function assertExactOpenAiCompatibleOutputWire(input: Readonly<{
       || observation.wire_type === "response.output_audio.delta"));
   if (audio.length < 1) {
     throw new Error("LC4 provider output has no inbound PCM wire evidence");
+  }
+  if (audio.length !== input.suppression.audio_chunks.length
+      + input.capture.pcmChunks.length) {
+    throw new Error(
+      "LC4 provider output wire does not exactly partition into suppressed and listener-admitted chunks",
+    );
+  }
+  for (const [index, commitment] of input.suppression.audio_chunks.entries()) {
+    const observation = audio[index]!;
+    if (commitment.provider_response_id_sha256 === null
+      || observation.identity_hashes.responseIdSha256
+        !== commitment.provider_response_id_sha256
+      || observation.projection_sha256 !== realtimeWireProjectionSha256({
+        audio: encodedPcmCommitmentProjection({
+          pcm_sha256: commitment.pcm_sha256,
+          byte_length: commitment.byte_length,
+          sample_rate_hz: input.profile.output_sample_rate_hz,
+        }),
+      })) {
+      throw new Error(
+        "LC4 suppressed output chunk commitment differs from its exact ordered inbound wire projection",
+      );
+    }
   }
   const outputResponseId = identityHash(
     audio.at(-1)!,
@@ -978,6 +1169,33 @@ function assertExactOpenAiCompatibleOutputWire(input: Readonly<{
   if (outputAudio.length !== input.capture.pcmChunks.length) {
     throw new Error(
       "LC4 provider output capture chunk count differs from its identity-matched inbound PCM wire frames",
+    );
+  }
+  if (canonicalJson(outputAudio)
+    !== canonicalJson(audio.slice(input.suppression.audio_chunks.length))) {
+    throw new Error(
+      "LC4 listener-admitted output is not the exact terminal wire-audio suffix",
+    );
+  }
+  const toolCalls = wires(
+    input.observations,
+    "inbound",
+    "response.function_call_arguments.done",
+  );
+  const toolResults = wires(
+    input.observations,
+    "outbound",
+    "conversation.item.create",
+  );
+  const listenerAdmissionStart = outputAudio[0]!;
+  if ((input.suppression.audio_chunks.length > 0
+      && (toolCalls.length < 1 || toolResults.length < 1))
+    || toolCalls.some((observation) =>
+      observation.sequence >= listenerAdmissionStart.sequence)
+    || toolResults.some((observation) =>
+      observation.sequence >= listenerAdmissionStart.sequence)) {
+    throw new Error(
+      "LC4 listener-admitted output does not begin after the final observed tool batch",
     );
   }
   const starts = wires(
@@ -1126,15 +1344,144 @@ function materializeOutputCapture(
   });
 }
 
+function assertGeminiServerContentProjectionShape(
+  value: unknown,
+  label: string,
+): JsonRecord {
+  const projection = record(value, label);
+  const allowedKeys = new Set(["audio", "terminal", "text", "usage"]);
+  if (Object.keys(projection).some((key) => !allowedKeys.has(key))) {
+    throw new Error(`${label} has an unsupported field`);
+  }
+  if (projection.text !== undefined) {
+    if (!Array.isArray(projection.text)
+      || projection.text.length < 1
+      || projection.text.length > 128) {
+      throw new Error(`${label} text evidence is invalid`);
+    }
+    const kinds = new Set([
+      "input_transcript",
+      "output_transcript",
+      "model_text",
+    ]);
+    for (const [index, candidate] of projection.text.entries()) {
+      const textEvidence = record(
+        candidate,
+        `${label} text evidence ${index + 1}`,
+      );
+      assertOnlyKeys(textEvidence, [
+        "kind",
+        "sha256",
+        "byteLength",
+      ], `${label} text evidence ${index + 1}`);
+      if (!kinds.has(String(textEvidence.kind))
+        || !SHA256.test(String(textEvidence.sha256))
+        || !Number.isSafeInteger(textEvidence.byteLength)
+        || (textEvidence.byteLength as number) < 0
+        || (textEvidence.byteLength as number) > 1_000_000) {
+        throw new Error(`${label} text evidence is invalid`);
+      }
+    }
+  }
+  if (projection.usage !== undefined) {
+    const usage = record(projection.usage, `${label} usage evidence`);
+    const allowedUsageKeys = new Set([
+      "inputTextTokens",
+      "inputAudioTokens",
+      "cachedInputTokens",
+      "cachedInputTextTokens",
+      "cachedInputAudioTokens",
+      "outputTextTokens",
+      "outputAudioTokens",
+      "totalInputTokens",
+      "totalOutputTokens",
+      "totalTokens",
+    ]);
+    if (Object.keys(usage).length < 1
+      || Object.keys(usage).some((key) => !allowedUsageKeys.has(key))
+      || Object.values(usage).some((entry) =>
+        !Number.isSafeInteger(entry)
+        || (entry as number) < 0
+        || (entry as number) > 1_000_000_000_000)) {
+      throw new Error(`${label} usage evidence is invalid`);
+    }
+  }
+  if (projection.audio !== undefined) {
+    const audio = record(projection.audio, `${label} audio evidence`);
+    assertOnlyKeys(audio, ["direction", "chunks"], `${label} audio evidence`);
+    if (audio.direction !== "output"
+      || !Array.isArray(audio.chunks)
+      || audio.chunks.length < 1) {
+      throw new Error(`${label} audio evidence is invalid`);
+    }
+    for (const [index, candidate] of audio.chunks.entries()) {
+      const chunk = record(candidate, `${label} audio chunk ${index + 1}`);
+      assertOnlyKeys(chunk, [
+        "validCanonicalBase64",
+        "byteLength",
+        "sha256",
+        "encodedBytes",
+        "format",
+        "mimeTypeRecognized",
+      ], `${label} audio chunk ${index + 1}`);
+      const format = record(
+        chunk.format,
+        `${label} audio chunk ${index + 1} format`,
+      );
+      assertOnlyKeys(format, [
+        "encoding",
+        "sampleRateHz",
+        "channels",
+      ], `${label} audio chunk ${index + 1} format`);
+    }
+  }
+  if (projection.terminal !== undefined) {
+    const terminal = record(projection.terminal, `${label} terminal`);
+    assertOnlyKeys(terminal, ["status"], `${label} terminal`);
+  }
+  return projection;
+}
+
 function assertVersionedGeminiOutputAttribution(input: Readonly<{
   value: JsonValue;
   observations: readonly Lc4SanitizedWireObservation[];
   capture: ReplayedOutputCapture;
+  suppression: Readonly<{
+    audio_chunks: readonly Readonly<{
+      chunk_index: number;
+      provider_response_id_sha256: string | null;
+      pcm_sha256: string;
+      byte_length: number;
+    }>[];
+    audio_chunk_count: number;
+    audio_byte_length: number;
+    audio_chunk_sequence_sha256: string;
+  }>;
 }>): void {
   const attribution = record(
     input.value,
     "LC4 Gemini versioned output attribution",
   );
+  assertOnlyKeys(attribution, [
+    "schema_version",
+    "contract",
+    "completeness",
+    "observation_scope",
+    "activity_end",
+    "terminal",
+    "interval_observation_sha256s",
+    "interval_frames",
+    "server_content_frames",
+    "output_audio_chunk_count",
+    "output_audio_byte_length",
+    "output_audio_chunk_sequence_sha256",
+    "attribution_sha256",
+  ], "LC4 Gemini versioned output attribution");
+  if (attribution.schema_version !== 2) {
+    throw new Error(
+      "LC4 Gemini output attribution must use the independently replayable v2 contract",
+    );
+  }
   if (!Array.isArray(attribution.interval_frames)) {
     throw new Error("LC4 Gemini versioned output attribution interval frames must be an array");
   }
@@ -1144,10 +1491,25 @@ function assertVersionedGeminiOutputAttribution(input: Readonly<{
         candidate,
         `LC4 Gemini versioned output attribution interval frame ${index + 1}`,
       );
+      assertOnlyKeys(frame, [
+        "interval_index",
+        "direction",
+        "wire_type",
+        "wire_observation",
+        "redacted_projection",
+      ], `LC4 Gemini versioned output attribution interval frame ${index + 1}`);
       const wireObservation = record(
         frame.wire_observation,
         `LC4 Gemini versioned output attribution interval frame ${index + 1} wire observation`,
       );
+      assertOnlyKeys(wireObservation, [
+        "connection_epoch",
+        "sequence",
+        "observation_sha256",
+        "payload_sha256",
+        "payload_byte_length",
+        "projection_sha256",
+      ], `LC4 Gemini versioned output attribution interval frame ${index + 1} wire observation`);
       return Object.freeze({
         wire_observation_sha256: hash(
           wireObservation.observation_sha256,
@@ -1157,16 +1519,415 @@ function assertVersionedGeminiOutputAttribution(input: Readonly<{
       });
     },
   );
-  const rebuilt = createLc4GeminiOutputAttribution({
-    observations: input.observations,
-    wire_projections: wireProjections,
-    capture: materializeOutputCapture(input.capture),
-  });
-  if (canonicalJson(rebuilt) !== canonicalJson(
-    attribution as unknown as Lc4GeminiOutputAttribution,
-  )) {
+  if (input.suppression.audio_chunk_count === 0) {
+    const rebuilt = createLc4GeminiOutputAttribution({
+      observations: input.observations,
+      wire_projections: wireProjections,
+      capture: materializeOutputCapture(input.capture),
+    });
+    if (canonicalJson(rebuilt) !== canonicalJson(
+      attribution as unknown as Lc4GeminiOutputAttribution,
+    )) {
+      throw new Error(
+        "LC4 Gemini versioned output attribution differs from exact wire projections and capture",
+      );
+    }
+    return;
+  }
+
+  const activityEnd = exactlyOneWire(
+    input.observations,
+    "outbound",
+    "realtimeInput.activityEnd",
+    "Gemini versioned output attribution",
+  );
+  const intervalObservations = input.observations.filter((observation) =>
+    observation.connection_epoch === activityEnd.connection_epoch
+    && observation.sequence > activityEnd.sequence);
+  if (intervalObservations.length !== wireProjections.length) {
     throw new Error(
-      "LC4 Gemini versioned output attribution differs from exact wire projections and capture",
+      "LC4 Gemini versioned output attribution omits or adds an interval frame",
+    );
+  }
+  const wirePointer = (observation: Lc4SanitizedWireObservation) =>
+    Object.freeze({
+      connection_epoch: observation.connection_epoch,
+      sequence: observation.sequence,
+      observation_sha256: observation.observation_sha256,
+      payload_sha256: observation.payload_sha256,
+      payload_byte_length: observation.payload_bytes,
+      projection_sha256: observation.projection_sha256,
+    });
+  const intervalFrames = attribution.interval_frames;
+  if (!Array.isArray(intervalFrames)
+    || intervalFrames.length !== intervalObservations.length) {
+    throw new Error(
+      "LC4 Gemini versioned output attribution interval frame count is invalid",
+    );
+  }
+  for (const [index, candidate] of intervalFrames.entries()) {
+    const frame = record(
+      candidate,
+      `LC4 Gemini versioned output attribution interval frame ${index + 1}`,
+    );
+    assertOnlyKeys(frame, [
+      "interval_index",
+      "direction",
+      "wire_type",
+      "wire_observation",
+      "redacted_projection",
+    ], `LC4 Gemini versioned output attribution interval frame ${index + 1}`);
+    assertOnlyKeys(
+      record(
+        frame.wire_observation,
+        `LC4 Gemini interval frame ${index + 1} wire observation`,
+      ),
+      [
+        "connection_epoch",
+        "sequence",
+        "observation_sha256",
+        "payload_sha256",
+        "payload_byte_length",
+        "projection_sha256",
+      ],
+      `LC4 Gemini interval frame ${index + 1} wire observation`,
+    );
+    const observation = intervalObservations[index]!;
+    if (frame.interval_index !== index + 1
+      || frame.direction !== observation.direction
+      || frame.wire_type !== observation.wire_type
+      || canonicalJson(frame.wire_observation)
+        !== canonicalJson(wirePointer(observation))
+      || realtimeWireProjectionSha256(record(
+        frame.redacted_projection,
+        `LC4 Gemini interval frame ${index + 1} projection`,
+      )) !== observation.projection_sha256
+      || observation.wire_type === "mixedServerMessage") {
+      throw new Error(
+        "LC4 Gemini versioned output attribution interval differs from exact wire evidence",
+      );
+    }
+    const projection = record(
+      frame.redacted_projection,
+      `LC4 Gemini interval frame ${index + 1} projection`,
+    );
+    if (observation.wire_type === "serverContent") {
+      assertGeminiServerContentProjectionShape(
+        projection,
+        `LC4 Gemini interval frame ${index + 1} serverContent projection`,
+      );
+    }
+    if (observation.wire_type !== "serverContent"
+      && (projection.audio !== undefined || projection.terminal !== undefined)) {
+      throw new Error(
+        "LC4 Gemini versioned output or terminal escaped a serverContent frame",
+      );
+    }
+  }
+
+  const serverObservations = intervalObservations.filter((observation) =>
+    observation.direction === "inbound"
+    && observation.wire_type === "serverContent");
+  if (!Array.isArray(attribution.server_content_frames)
+    || attribution.server_content_frames.length !== serverObservations.length) {
+    throw new Error(
+      "LC4 Gemini versioned output attribution serverContent frame count is invalid",
+    );
+  }
+  const attributedChunks: Array<Readonly<{
+    pcm_sha256: string;
+    byte_length: number;
+    interval_sequence: number;
+  }>> = [];
+  let terminalObservation: Lc4SanitizedWireObservation | null = null;
+  for (const [serverIndex, candidate] of attribution.server_content_frames.entries()) {
+    const frame = record(
+      candidate,
+      `LC4 Gemini versioned serverContent frame ${serverIndex + 1}`,
+    );
+    assertOnlyKeys(frame, [
+      "server_content_index",
+      "interval_index",
+      "wire_observation",
+      "redacted_projection",
+      "output_audio_chunks",
+      "terminal_status",
+    ], `LC4 Gemini versioned serverContent frame ${serverIndex + 1}`);
+    assertOnlyKeys(
+      record(
+        frame.wire_observation,
+        `LC4 Gemini versioned serverContent frame ${serverIndex + 1} wire observation`,
+      ),
+      [
+        "connection_epoch",
+        "sequence",
+        "observation_sha256",
+        "payload_sha256",
+        "payload_byte_length",
+        "projection_sha256",
+      ],
+      `LC4 Gemini versioned serverContent frame ${serverIndex + 1} wire observation`,
+    );
+    const observation = serverObservations[serverIndex]!;
+    const intervalIndex = intervalObservations.findIndex(
+      (entry) => entry.observation_sha256 === observation.observation_sha256,
+    ) + 1;
+    const projection = record(
+      frame.redacted_projection,
+      `LC4 Gemini versioned serverContent frame ${serverIndex + 1} projection`,
+    );
+    if (frame.server_content_index !== serverIndex + 1
+      || frame.interval_index !== intervalIndex
+      || canonicalJson(frame.wire_observation)
+        !== canonicalJson(wirePointer(observation))
+      || canonicalJson(projection)
+        !== canonicalJson(record(
+          intervalFrames[intervalIndex - 1]!.redacted_projection,
+          `LC4 Gemini interval frame ${intervalIndex} projection`,
+        ))) {
+      throw new Error(
+        "LC4 Gemini versioned serverContent attribution differs from its interval frame",
+      );
+    }
+    const projectedAudio = projection.audio === undefined
+      ? null
+      : record(
+          projection.audio,
+          `LC4 Gemini versioned serverContent frame ${serverIndex + 1} audio`,
+        );
+    const projectedChunks = projectedAudio === null
+      ? []
+      : projectedAudio.chunks;
+    if (projectedAudio !== null
+      && (projectedAudio.direction !== "output"
+        || !Array.isArray(projectedChunks))) {
+      throw new Error(
+        "LC4 Gemini versioned serverContent audio projection is invalid",
+      );
+    }
+    if (!Array.isArray(frame.output_audio_chunks)
+      || frame.output_audio_chunks.length
+        !== (Array.isArray(projectedChunks) ? projectedChunks.length : 0)) {
+      throw new Error(
+        "LC4 Gemini versioned output chunk count differs from its frame projection",
+      );
+    }
+    for (const [frameChunkIndex, outputCandidate] of frame.output_audio_chunks.entries()) {
+      const output = record(
+        outputCandidate,
+        `LC4 Gemini versioned output chunk ${attributedChunks.length + 1}`,
+      );
+      assertOnlyKeys(output, [
+        "output_chunk_index",
+        "frame_chunk_index",
+        "pcm_sha256",
+        "byte_length",
+        "mime_type",
+        "format",
+      ], `LC4 Gemini versioned output chunk ${attributedChunks.length + 1}`);
+      const projected = record(
+        (projectedChunks as JsonValue[])[frameChunkIndex],
+        `LC4 Gemini versioned projected output chunk ${attributedChunks.length + 1}`,
+      );
+      assertOnlyKeys(projected, [
+        "validCanonicalBase64",
+        "byteLength",
+        "sha256",
+        "encodedBytes",
+        "format",
+        "mimeTypeRecognized",
+      ], `LC4 Gemini versioned projected output chunk ${attributedChunks.length + 1}`);
+      const projectedFormat = record(
+        projected.format,
+        `LC4 Gemini versioned projected output chunk ${attributedChunks.length + 1} format`,
+      );
+      assertOnlyKeys(projectedFormat, [
+        "encoding",
+        "sampleRateHz",
+        "channels",
+      ], `LC4 Gemini versioned projected output chunk ${attributedChunks.length + 1} format`);
+      const outputFormat = record(
+        output.format,
+        `LC4 Gemini versioned output chunk ${attributedChunks.length + 1} format`,
+      );
+      assertOnlyKeys(outputFormat, [
+        "encoding",
+        "sample_rate_hz",
+        "channels",
+      ], `LC4 Gemini versioned output chunk ${attributedChunks.length + 1} format`);
+      const byteLength = integer(
+        projected.byteLength,
+        `LC4 Gemini versioned output chunk ${attributedChunks.length + 1} bytes`,
+        2,
+      );
+      const pcmSha256 = hash(
+        projected.sha256,
+        `LC4 Gemini versioned output chunk ${attributedChunks.length + 1} PCM`,
+      );
+      if (projected.validCanonicalBase64 !== true
+        || projected.mimeTypeRecognized !== true
+        || projected.encodedBytes !== Math.ceil(byteLength / 3) * 4
+        || projectedFormat.encoding !== "pcm16"
+        || projectedFormat.sampleRateHz !== 24_000
+        || projectedFormat.channels !== 1
+        || output.output_chunk_index !== attributedChunks.length + 1
+        || output.frame_chunk_index !== frameChunkIndex + 1
+        || output.pcm_sha256 !== pcmSha256
+        || output.byte_length !== byteLength
+        || output.mime_type !== "audio/pcm;rate=24000"
+        || outputFormat.encoding !== "pcm16"
+        || outputFormat.sample_rate_hz !== 24_000
+        || outputFormat.channels !== 1) {
+        throw new Error(
+          "LC4 Gemini versioned output chunk differs from its exact redacted wire projection",
+        );
+      }
+      attributedChunks.push(Object.freeze({
+        pcm_sha256: pcmSha256,
+        byte_length: byteLength,
+        interval_sequence: observation.sequence,
+      }));
+    }
+    const terminal = projection.terminal === undefined
+      ? null
+      : record(
+          projection.terminal,
+          `LC4 Gemini versioned serverContent frame ${serverIndex + 1} terminal`,
+        );
+    const terminalStatus = terminal?.status ?? null;
+    if (terminalStatus !== null
+      && terminalStatus !== "completed"
+      && terminalStatus !== "failed"
+      && terminalStatus !== "interrupted") {
+      throw new Error("LC4 Gemini versioned terminal status is invalid");
+    }
+    if (frame.terminal_status !== terminalStatus) {
+      throw new Error(
+        "LC4 Gemini versioned terminal attribution differs from its projection",
+      );
+    }
+    if (terminalStatus !== null) {
+      if (terminalObservation !== null || terminalStatus !== "completed") {
+        throw new Error(
+          "LC4 Gemini versioned attribution requires one completed terminal",
+        );
+      }
+      terminalObservation = observation;
+    }
+  }
+  if (terminalObservation === null
+    || intervalObservations.at(-1)!.observation_sha256
+      !== terminalObservation.observation_sha256) {
+    throw new Error(
+      "LC4 Gemini versioned attribution interval is not terminal-complete",
+    );
+  }
+
+  const suppressedChunks = attributedChunks.slice(
+    0,
+    input.suppression.audio_chunk_count,
+  );
+  const callerHeardChunks = attributedChunks.slice(
+    input.suppression.audio_chunk_count,
+  );
+  const toolCalls = wires(input.observations, "inbound", "toolCall");
+  const toolResults = wires(input.observations, "outbound", "toolResponse");
+  const listenerAdmissionSequence = callerHeardChunks[0]?.interval_sequence;
+  if (suppressedChunks.length !== input.suppression.audio_chunk_count
+    || canonicalJson(suppressedChunks.map((chunk, index) => ({
+      chunk_index: index + 1,
+      provider_response_id_sha256: null,
+      pcm_sha256: chunk.pcm_sha256,
+      byte_length: chunk.byte_length,
+    }))) !== canonicalJson(input.suppression.audio_chunks)
+    || suppressedChunks.reduce(
+      (total, chunk) => total + chunk.byte_length,
+      0,
+    ) !== input.suppression.audio_byte_length
+    || input.suppression.audio_chunk_sequence_sha256
+      !== outputChunkSequenceSha256({
+        domain: LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+        scope: "suppressed_before_listener_admission",
+        sample_rate_hz: 24_000,
+        chunks: suppressedChunks,
+      })
+    || callerHeardChunks.length !== input.capture.chunks.length
+    || callerHeardChunks.some((chunk, index) =>
+      chunk.pcm_sha256 !== input.capture.chunks[index]!.pcm_sha256
+      || chunk.byte_length !== input.capture.chunks[index]!.byte_length)
+    || listenerAdmissionSequence === undefined
+    || (input.suppression.audio_chunk_count > 0
+      && (toolCalls.length < 1 || toolResults.length < 1))
+    || toolCalls.some((observation) =>
+      observation.sequence >= listenerAdmissionSequence)
+    || toolResults.some((observation) =>
+      observation.sequence >= listenerAdmissionSequence)
+    || attributedChunks.length !== attribution.output_audio_chunk_count
+    || attributedChunks.reduce(
+      (total, chunk) => total + chunk.byte_length,
+      0,
+    ) !== attribution.output_audio_byte_length
+    || attribution.output_audio_chunk_sequence_sha256
+      !== outputChunkSequenceSha256({
+        domain: LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+        scope: "all_observed_output",
+        sample_rate_hz: 24_000,
+        chunks: attributedChunks,
+      })) {
+    throw new Error(
+      "LC4 Gemini versioned attribution does not partition into exact suppressed and listener-admitted output",
+    );
+  }
+  const expectedActivityEnd = {
+    connection_epoch: activityEnd.connection_epoch,
+    sequence: activityEnd.sequence,
+    observation_sha256: activityEnd.observation_sha256,
+  };
+  const expectedTerminal = {
+    connection_epoch: terminalObservation.connection_epoch,
+    sequence: terminalObservation.sequence,
+    observation_sha256: terminalObservation.observation_sha256,
+    status: "completed",
+  };
+  const {
+    attribution_sha256: claimedAttribution,
+    ...attributionBody
+  } = attribution;
+  const activityEndProjection = record(
+    attribution.activity_end,
+    "LC4 Gemini versioned activityEnd pointer",
+  );
+  assertOnlyKeys(activityEndProjection, [
+    "connection_epoch",
+    "sequence",
+    "observation_sha256",
+  ], "LC4 Gemini versioned activityEnd pointer");
+  const terminalProjection = record(
+    attribution.terminal,
+    "LC4 Gemini versioned terminal pointer",
+  );
+  assertOnlyKeys(terminalProjection, [
+    "connection_epoch",
+    "sequence",
+    "observation_sha256",
+    "status",
+  ], "LC4 Gemini versioned terminal pointer");
+  if (attribution.contract
+      !== "gemini_server_content_output_audio_attribution"
+    || attribution.completeness !== "verified_activity_end_to_terminal"
+    || attribution.observation_scope !== "client_observed_wire_frames"
+    || canonicalJson(attribution.activity_end)
+      !== canonicalJson(expectedActivityEnd)
+    || canonicalJson(attribution.terminal) !== canonicalJson(expectedTerminal)
+    || canonicalJson(attribution.interval_observation_sha256s)
+      !== canonicalJson(intervalObservations.map(
+        (observation) => observation.observation_sha256,
+      ))
+    || claimedAttribution !== sha256Hex(
+      `${LC4_GEMINI_OUTPUT_ATTRIBUTION_DOMAIN}${canonicalJson(attributionBody)}`,
+    )) {
+    throw new Error(
+      "LC4 Gemini versioned output attribution header or aggregate hash is invalid",
     );
   }
 }
@@ -1622,6 +2383,13 @@ function assertServerVadWireCausality(
 export function assertLc4DevGatewayConversationToolBatches(
   value: unknown,
   receiptSetValue: unknown,
+  expected: Readonly<{
+    episode_id: string;
+    opportunity_id: string;
+    provider: "openai" | "gemini" | "xai";
+    arm: "native" | "hacc";
+    phase: "canonical" | "repair";
+  }>,
 ): void {
   if (!Array.isArray(value)
     || value.length > MAX_DEV_GATEWAY_CONVERSATION_BATCHES) {
@@ -1648,6 +2416,15 @@ export function assertLc4DevGatewayConversationToolBatches(
       candidate,
       "LC4 DEV gateway authority projection",
     );
+    if (authority.episode_id !== expected.episode_id
+      || authority.opportunity_id !== expected.opportunity_id
+      || authority.provider !== expected.provider
+      || authority.arm !== expected.arm
+      || expected.phase !== "canonical") {
+      throw new Error(
+        "LC4 DEV gateway authority projection differs from its outer exchange",
+      );
+    }
     authorities.set(
       hash(
         authority.projection_sha256,
@@ -1659,6 +2436,15 @@ export function assertLc4DevGatewayConversationToolBatches(
   const authorityReceipts = new Map<string, JsonRecord>();
   for (const candidate of receiptValues) {
     const receipt = record(candidate, "LC4 DEV gateway dispatch receipt");
+    if (receipt.episode_id !== expected.episode_id
+      || receipt.opportunity_id !== expected.opportunity_id
+      || receipt.provider !== expected.provider
+      || receipt.arm !== expected.arm
+      || expected.phase !== "canonical") {
+      throw new Error(
+        "LC4 DEV gateway dispatch receipt differs from its outer exchange",
+      );
+    }
     authorityReceipts.set(
       hash(
         receipt.authority_projection_sha256,
@@ -1673,6 +2459,18 @@ export function assertLc4DevGatewayConversationToolBatches(
       candidate,
       "LC4 DEV gateway pre-dispatch rejection",
     );
+    if (rejection.episode_id !== expected.episode_id
+      || rejection.opportunity_id !== expected.opportunity_id
+      || rejection.provider !== expected.provider
+      || rejection.arm !== expected.arm
+      || rejection.phase !== expected.phase
+      || (expected.phase === "repair"
+        && rejection.rejection_code
+          !== "tool_calls_forbidden_during_repair")) {
+      throw new Error(
+        "LC4 DEV gateway rejection differs from its outer exchange",
+      );
+    }
     rejections.set(
       hash(
         rejection.rejection_receipt_sha256,
@@ -1958,16 +2756,36 @@ export function assertLc4ProviderExchangeReplayProjection(
     opportunityId: expected.opportunity_id,
     listenerPcm,
   });
-  if (schemaVersion === 4 || schemaVersion === 5) {
-    assertSuppressedUnplayedOutput(
+  const suppression = schemaVersion === 4 || schemaVersion === 5
+    ? assertSuppressedUnplayedOutput(
       projection.suppressed_unplayed_output,
       outputCapture,
-    );
-  }
+      profile,
+    )
+    : Object.freeze({
+        audio_chunks: Object.freeze([]),
+        audio_chunk_count: 0,
+        audio_byte_length: 0,
+        audio_chunk_sequence_sha256: outputChunkSequenceSha256({
+          domain: LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+          scope: "suppressed_before_listener_admission",
+          sample_rate_hz: profile.output_sample_rate_hz,
+          chunks: [],
+        }),
+      });
   if (schemaVersion === 5) {
     assertLc4DevGatewayConversationToolBatches(
       projection.dev_gateway_conversation_tool_batches,
       projection.dev_gateway_receipt_set,
+      {
+        episode_id: expected.run_id,
+        opportunity_id: expected.opportunity_id,
+        provider: profile.provider,
+        arm: expected.response_control_kind === "hacc_response_plan"
+          ? "hacc"
+          : "native",
+        phase: expected.playback_kind,
+      },
     );
   } else if (Object.hasOwn(
     projection,
@@ -2037,11 +2855,12 @@ export function assertLc4ProviderExchangeReplayProjection(
   let outputAudioLineageScope:
     Lc4ProviderExchangeReplayResult["output_audio_lineage_scope"];
   if (profile.provider === "gemini") {
-    if (schemaVersion === 3 || schemaVersion === 4) {
+    if (schemaVersion === 3 || schemaVersion === 4 || schemaVersion === 5) {
       assertVersionedGeminiOutputAttribution({
         value: projection.gemini_output_attribution,
         observations,
         capture: outputCapture,
+        suppression,
       });
       outputAudioLineageScope =
         "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable";
@@ -2059,6 +2878,7 @@ export function assertLc4ProviderExchangeReplayProjection(
       observations,
       capture: outputCapture,
       profile,
+      suppression,
     });
     outputAudioLineageScope =
       "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact";

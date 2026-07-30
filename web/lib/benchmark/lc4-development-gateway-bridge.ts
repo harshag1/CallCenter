@@ -20,7 +20,7 @@ import {
   PROVIDER_PROVENANCE_META_KEY,
 } from "../realtime/client/types";
 
-export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v4" as const;
+export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v5" as const;
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
@@ -280,6 +280,7 @@ export type Lc4DevGatewayAuthorityProjection = Readonly<{
 export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
+  episode_id: string;
   opportunity_id: string;
   provider: Lc4DevLiveEpisodePlan["provider"];
   arm: Arm;
@@ -321,6 +322,7 @@ export type Lc4DevPreDispatchRejectionCode =
 export type Lc4DevSanitizedGatewayRejection = Readonly<{
   schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
+  episode_id: string;
   opportunity_id: string;
   phase: "canonical" | "repair";
   provider: Lc4DevLiveEpisodePlan["provider"];
@@ -484,6 +486,35 @@ export function assertLc4DevGatewayReceiptSet(
   const authorities = new Map<string, Record<string, JsonValue>>();
   for (const candidate of set.authority_projections) {
     const authority = gatewayRecord(candidate, "LC4-DEV gateway authority projection");
+    assertGatewayKeys(authority, [
+      "schema_version",
+      "bridge_version",
+      "redaction",
+      "episode_id",
+      "opportunity_id",
+      "opportunity_index",
+      "provider",
+      "arm",
+      "semantic_intent",
+      "target_tool",
+      "provider_call_id_sha256",
+      "provider_response_id_sha256",
+      "request_sha256",
+      "provider_provenance_sha256",
+      "model_arguments",
+      "effective_arguments",
+      "provider_output",
+      "authoritative_receipt",
+      "authoritative_tool_world_receipt",
+      "post_transition_response_plan",
+      "post_transition_response_control",
+      "post_transition_response_plan_sha256",
+      "post_transition_response_control_sha256",
+      "authoritative_receipt_sha256",
+      "control_plane_head_sha256",
+      "disposition",
+      "projection_sha256",
+    ], "LC4-DEV gateway authority projection");
     const claimed = String(authority.projection_sha256);
     requireHash(claimed, "LC4-DEV gateway authority projection");
     const body = gatewayBodyWithout(authority, new Set(["projection_sha256"]));
@@ -506,6 +537,30 @@ export function assertLc4DevGatewayReceiptSet(
   let priorReceiptPosition = "";
   for (const candidate of set.receipts) {
     const receipt = gatewayRecord(candidate, "LC4-DEV gateway dispatch receipt");
+    assertGatewayKeys(receipt, [
+      "schema_version",
+      "bridge_version",
+      "episode_id",
+      "opportunity_id",
+      "provider",
+      "arm",
+      "batch_ordinal",
+      "call_ordinal",
+      "semantic_intent",
+      "target_tool",
+      "provider_call_id_sha256",
+      "provider_response_id_sha256",
+      "request_sha256",
+      "provider_provenance_sha256",
+      "provider_output_sha256",
+      "post_transition_response_plan_sha256",
+      "post_transition_response_control_sha256",
+      "authoritative_receipt_sha256",
+      "control_plane_head_sha256",
+      "disposition",
+      "authority_projection_sha256",
+      "receipt_sha256",
+    ], "LC4-DEV gateway dispatch receipt");
     const claimed = String(receipt.receipt_sha256);
     const authoritySha256 = String(receipt.authority_projection_sha256);
     requireHash(claimed, "LC4-DEV gateway dispatch receipt");
@@ -520,6 +575,7 @@ export function assertLc4DevGatewayReceiptSet(
       || sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`) !== claimed
       || position <= priorReceiptPosition
       || !authority
+      || receipt.episode_id !== authority.episode_id
       || receipt.opportunity_id !== authority.opportunity_id
       || receipt.provider !== authority.provider
       || receipt.arm !== authority.arm
@@ -556,6 +612,27 @@ export function assertLc4DevGatewayReceiptSet(
   const rejectionHashes = new Set<string>();
   for (const candidate of set.pre_dispatch_rejections) {
     const rejection = gatewayRecord(candidate, "LC4-DEV gateway rejection receipt");
+    assertGatewayKeys(rejection, [
+      "schema_version",
+      "bridge_version",
+      "episode_id",
+      "opportunity_id",
+      "phase",
+      "provider",
+      "arm",
+      "batch_ordinal",
+      "call_ordinal",
+      "rejection_code",
+      "provider_call_id_sha256",
+      "provider_response_id_sha256",
+      "request_sha256",
+      "provider_provenance_sha256",
+      "model_arguments_sha256",
+      "provider_output_sha256",
+      "executor_invoked",
+      "authority_effect",
+      "rejection_receipt_sha256",
+    ], "LC4-DEV gateway rejection receipt");
     const claimed = String(rejection.rejection_receipt_sha256);
     requireHash(claimed, "LC4-DEV gateway rejection receipt");
     requireHash(String(rejection.model_arguments_sha256), "LC4-DEV gateway rejection model arguments");
@@ -1003,6 +1080,7 @@ export class Lc4DevGatewayTurnCoordinator {
       const rejectionBody = freeze({
         schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+        episode_id: context.episode.episode_id,
         opportunity_id: context.opportunity.id,
         phase: context.phase,
         provider: context.episode.provider,
@@ -1145,6 +1223,7 @@ export class Lc4DevGatewayTurnCoordinator {
       const body = freeze({
         schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
+        episode_id: context.episode.episode_id,
         opportunity_id: context.opportunity.id,
         provider: context.episode.provider,
         arm: context.episode.arm,

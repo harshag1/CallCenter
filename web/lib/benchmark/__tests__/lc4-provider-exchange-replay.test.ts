@@ -14,6 +14,10 @@ import {
   type Lc4ProviderExchangeReplayExpectation,
 } from "../lc4-provider-exchange-replay";
 import {
+  createLc4GeminiOutputAttribution,
+  LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+} from "../lc4-production-provider-adapter";
+import {
   LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
 } from "../lc4-production-provider-contract";
 import {
@@ -37,7 +41,9 @@ const LISTENER_DOMAIN =
 const CAS_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
 const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
-  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v1\n";
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v2\n";
+const GATEWAY_RECEIPT_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 
 type Provider = "openai" | "gemini" | "xai";
 type Wire = Readonly<{
@@ -64,6 +70,18 @@ type WireRole = Readonly<{
 
 function domainHash(domain: string, value: unknown): string {
   return sha256Hex(`${domain}${canonicalJson(value)}`);
+}
+
+function emptySuppressedChunkSequenceSha256(sampleRateHz: number): string {
+  return domainHash(LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN, {
+    scope: "suppressed_before_listener_admission",
+    format: {
+      encoding: "pcm16",
+      sample_rate_hz: sampleRateHz,
+      channels: 1,
+    },
+    chunks: [],
+  });
 }
 
 function pcm(seed: number, byteLength: number): Uint8Array {
@@ -754,19 +772,18 @@ function schemaV4Fixture(provider: "openai" | "xai"): Fixture {
   const capture = source.projection.output_capture as Record<string, unknown>;
   const chunks = capture.chunks as readonly unknown[];
   const body = {
-    schema_version: 1,
+    schema_version: 2,
     policy:
-      "exclude_everything_before_the_final_tool_batch_from_caller_heard_history",
-    tool_dispatch_count: 0,
-    response_count: 0,
+      "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history",
+    audio_chunks: [],
     audio_chunk_count: 0,
     audio_byte_length: 0,
-    audio_pcm_sha256: null,
-    transcript_count: 0,
-    transcript_hash_set_sha256: null,
-    caller_heard_audio_chunk_count: chunks.length,
-    caller_heard_audio_byte_length: capture.generated_byte_length,
-    caller_heard_audio_pcm_sha256: capture.generated_pcm_sha256,
+    audio_chunk_sequence_sha256: emptySuppressedChunkSequenceSha256(
+      source.expectation.provider_profile.output_sample_rate_hz,
+    ),
+    listener_admitted_audio_chunk_count: chunks.length,
+    listener_admitted_audio_byte_length: capture.generated_byte_length,
+    listener_admitted_audio_pcm_sha256: capture.generated_pcm_sha256,
   };
   return {
     ...source,
@@ -779,6 +796,292 @@ function schemaV4Fixture(provider: "openai" | "xai"): Fixture {
         evidence_sha256: domainHash(
           SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
           body,
+        ),
+      },
+    },
+  };
+}
+
+function schemaV4SuppressedOpenAiFixture(): Fixture {
+  const source = schemaV4Fixture("openai");
+  const profile = source.expectation.provider_profile;
+  const wire = source.projection.wire_observations as readonly Wire[];
+  const finalStartIndex = wire.findIndex((observation) =>
+    observation.direction === "inbound"
+    && observation.wire_type === "response.created");
+  const suppressedPcm = pcm(97, 8);
+  const suppressedResponseIdSha256 =
+    sha256Hex("openai-suppressed-response");
+  const callIdSha256 = sha256Hex("openai-suppressed-call");
+  const inserted = wireFor("openai", [
+    {
+      direction: "inbound",
+      wire_type: "response.created",
+      identity_hashes: {
+        responseIdSha256: suppressedResponseIdSha256,
+      },
+    },
+    outputWireRole(
+      suppressedPcm,
+      profile.output_sample_rate_hz,
+      suppressedResponseIdSha256,
+    ),
+    {
+      direction: "inbound",
+      wire_type: "response.function_call_arguments.done",
+      identity_hashes: {
+        responseIdSha256: suppressedResponseIdSha256,
+        callIdSha256,
+      },
+    },
+    {
+      direction: "inbound",
+      wire_type: "response.done",
+      identity_hashes: {
+        responseIdSha256: suppressedResponseIdSha256,
+      },
+    },
+    {
+      direction: "outbound",
+      wire_type: "conversation.item.create",
+      identity_hashes: { callIdSha256 },
+    },
+    { direction: "outbound", wire_type: "response.create" },
+  ]);
+  const updatedWire = rechain([
+    ...wire.slice(0, finalStartIndex),
+    ...inserted,
+    ...wire.slice(finalStartIndex),
+  ]);
+  const audioChunks = [{
+    chunk_index: 1,
+    provider_response_id_sha256: suppressedResponseIdSha256,
+    pcm_sha256: sha256Hex(suppressedPcm),
+    byte_length: suppressedPcm.byteLength,
+  }];
+  const suppressionBody = {
+    schema_version: 2,
+    policy:
+      "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history",
+    audio_chunks: audioChunks,
+    audio_chunk_count: 1,
+    audio_byte_length: suppressedPcm.byteLength,
+    audio_chunk_sequence_sha256: domainHash(
+      LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
+      {
+        scope: "suppressed_before_listener_admission",
+        format: {
+          encoding: "pcm16",
+          sample_rate_hz: profile.output_sample_rate_hz,
+          channels: 1,
+        },
+        chunks: [{
+          ordinal: 1,
+          pcm_sha256: sha256Hex(suppressedPcm),
+          byte_length: suppressedPcm.byteLength,
+        }],
+      },
+    ),
+    listener_admitted_audio_chunk_count:
+      (source.projection.output_capture as Record<string, unknown>).chunks
+        instanceof Array
+        ? ((source.projection.output_capture as Record<string, unknown>)
+            .chunks as unknown[]).length
+        : 0,
+    listener_admitted_audio_byte_length:
+      (source.projection.output_capture as Record<string, unknown>)
+        .generated_byte_length,
+    listener_admitted_audio_pcm_sha256:
+      (source.projection.output_capture as Record<string, unknown>)
+        .generated_pcm_sha256,
+  };
+  let updated = withWire({
+    ...source,
+    projection: {
+      ...source.projection,
+      suppressed_unplayed_output: {
+        ...suppressionBody,
+        evidence_sha256: domainHash(
+          SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+          suppressionBody,
+        ),
+      },
+    },
+  }, updatedWire);
+  updated = withListenerMutation(updated, (listener) => ({
+    ...listener,
+    wire_observation_set_sha256: domainHash(WIRE_SET_DOMAIN, updatedWire),
+  }));
+  return updated;
+}
+
+function schemaV5GeminiFixture(): Fixture {
+  let source = fixture("gemini");
+  const listenerPcm = Uint8Array.from(
+    source.expectation.listener_consumed_pcm,
+  );
+  const outputChunks = [
+    listenerPcm.slice(0, 4),
+    listenerPcm.slice(4),
+  ];
+  const capture = createLc4CapturedOutput({
+    runId: String(source.projection.run_id),
+    opportunityId: String(source.projection.opportunity_id),
+    responseId: "response-gemini-fixture",
+    provider: "gemini",
+    surface: "server_realtime_pcm",
+    sampleRateHz: 24_000,
+    chunks: outputChunks.map((chunk, index) => ({
+      chunkId: `lc4-dev-op-01-chunk-${index + 1}`,
+      pcm: chunk,
+    })),
+  });
+  const profile = source.expectation.provider_profile;
+  const callerPcm = Uint8Array.from(source.expectation.caller_pcm);
+  const callerFrames = frames(callerPcm, profile.input_sample_rate_hz);
+  const transcriptOnlyProjection = {
+    text: [{
+      byteLength: 17,
+      kind: "input_transcript",
+      sha256: sha256Hex("fixture caller text"),
+    }],
+  };
+  const mixedOutputProjection = {
+    audio: {
+      direction: "output",
+      chunks: outputChunks.map((chunk) => ({
+        ...pcmEvidence(chunk, 24_000),
+        mimeTypeRecognized: true,
+      })),
+    },
+    text: [{
+      byteLength: 20,
+      kind: "output_transcript",
+      sha256: sha256Hex("fixture assistant text"),
+    }],
+  };
+  const emptyProjection = {};
+  const terminalProjection = {
+    terminal: { status: "completed" },
+  };
+  const observations = wireFor("gemini", [
+    { direction: "outbound", wire_type: "realtimeInput.activityStart" },
+    ...callerFrames.map((frame) =>
+      inputWireRole("gemini", frame, profile.input_sample_rate_hz)),
+    { direction: "outbound", wire_type: "realtimeInput.activityEnd" },
+    {
+      direction: "inbound",
+      wire_type: "serverContent",
+      projection_sha256:
+        realtimeWireProjectionSha256(transcriptOnlyProjection),
+    },
+    {
+      direction: "inbound",
+      wire_type: "sessionResumptionUpdate",
+      projection_sha256: realtimeWireProjectionSha256(emptyProjection),
+    },
+    {
+      direction: "inbound",
+      wire_type: "serverContent",
+      projection_sha256:
+        realtimeWireProjectionSha256(mixedOutputProjection),
+    },
+    {
+      direction: "inbound",
+      wire_type: "serverContent",
+      projection_sha256: realtimeWireProjectionSha256(emptyProjection),
+    },
+    {
+      direction: "inbound",
+      wire_type: "serverContent",
+      projection_sha256: realtimeWireProjectionSha256(terminalProjection),
+    },
+  ]);
+  const wireSetSha256 = domainHash(WIRE_SET_DOMAIN, observations);
+  source = withListenerMutation(
+    withWire(source, observations),
+    (listener) => ({
+      ...listener,
+      wire_observation_set_sha256: wireSetSha256,
+    }),
+  );
+  const activityEnd = observations.find(
+    (observation) =>
+      observation.direction === "outbound"
+      && observation.wire_type === "realtimeInput.activityEnd",
+  )!;
+  const interval = observations.filter(
+    (observation) =>
+      observation.connection_epoch === activityEnd.connection_epoch
+      && observation.sequence > activityEnd.sequence,
+  );
+  const attribution = createLc4GeminiOutputAttribution({
+    observations: observations as never,
+    wire_projections: [
+      {
+        wire_observation_sha256: interval[0]!.observation_sha256,
+        redacted_projection: transcriptOnlyProjection,
+      },
+      {
+        wire_observation_sha256: interval[1]!.observation_sha256,
+        redacted_projection: emptyProjection,
+      },
+      {
+        wire_observation_sha256: interval[2]!.observation_sha256,
+        redacted_projection: mixedOutputProjection,
+      },
+      {
+        wire_observation_sha256: interval[3]!.observation_sha256,
+        redacted_projection: emptyProjection,
+      },
+      {
+        wire_observation_sha256: interval[4]!.observation_sha256,
+        redacted_projection: terminalProjection,
+      },
+    ],
+    capture,
+  });
+  const captureProjection = source.projection.output_capture as Record<
+    string,
+    unknown
+  >;
+  const captureChunks = captureProjection.chunks as readonly unknown[];
+  const suppressionBody = {
+    schema_version: 2,
+    policy:
+      "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history",
+    audio_chunks: [],
+    audio_chunk_count: 0,
+    audio_byte_length: 0,
+    audio_chunk_sequence_sha256: emptySuppressedChunkSequenceSha256(24_000),
+    listener_admitted_audio_chunk_count: captureChunks.length,
+    listener_admitted_audio_byte_length: captureProjection.generated_byte_length,
+    listener_admitted_audio_pcm_sha256: captureProjection.generated_pcm_sha256,
+  };
+  const gatewayReceiptSetBody = {
+    receipts: [],
+    authority_projections: [],
+    pre_dispatch_rejections: [],
+  };
+  return {
+    ...source,
+    projection: {
+      ...source.projection,
+      schema_version: 5,
+      gemini_output_attribution: attribution,
+      suppressed_unplayed_output: {
+        ...suppressionBody,
+        evidence_sha256: domainHash(
+          SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+          suppressionBody,
+        ),
+      },
+      dev_gateway_conversation_tool_batches: [],
+      dev_gateway_receipt_set: {
+        ...gatewayReceiptSetBody,
+        receipt_set_sha256: domainHash(
+          GATEWAY_RECEIPT_SET_DOMAIN,
+          gatewayReceiptSetBody,
         ),
       },
     },
@@ -798,13 +1101,42 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
   });
 
   it.each(["openai", "xai"] as const)(
-    "replays schema-v4 %s output suppression bound to the caller-heard capture",
+    "replays schema-v4 %s output suppression bound to the listener-admitted capture",
     (provider) => {
       expect(() => replay(schemaV4Fixture(provider))).not.toThrow();
     },
   );
 
-  it("rejects rehashed schema-v4 suppression that changes the caller-heard aggregate", () => {
+  it("replays OpenAI suppressed output as an exact pre-tool wire prefix", () => {
+    expect(() => replay(schemaV4SuppressedOpenAiFixture())).not.toThrow();
+  });
+
+  it("replays schema-v5 Gemini through its complete versioned output attribution", () => {
+    expect(() => replay(schemaV5GeminiFixture())).not.toThrow();
+  });
+
+  it("rejects schema-v5 Gemini when an attributed interval preimage is substituted", () => {
+    const valid = schemaV5GeminiFixture();
+    const attribution = JSON.parse(canonicalJson(
+      valid.projection.gemini_output_attribution,
+    )) as {
+      interval_frames: Array<{
+        redacted_projection: Record<string, unknown>;
+      }>;
+    };
+    attribution.interval_frames[0]!.redacted_projection = {
+      terminal: { status: "completed" },
+    };
+    expect(() => replay({
+      ...valid,
+      projection: {
+        ...valid.projection,
+        gemini_output_attribution: attribution,
+      },
+    })).toThrow();
+  });
+
+  it("rejects rehashed schema-v4 suppression that changes the listener-admitted aggregate", () => {
     const valid = schemaV4Fixture("openai");
     const suppression = valid.projection
       .suppressed_unplayed_output as Record<string, unknown>;
@@ -815,8 +1147,8 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
     expect(claimedEvidence).toMatch(/^[a-f0-9]{64}$/u);
     const mutatedBody = {
       ...body,
-      caller_heard_audio_pcm_sha256:
-        sha256Hex("substituted-caller-heard-output"),
+      listener_admitted_audio_pcm_sha256:
+        sha256Hex("substituted-listener-admitted-output"),
     };
     expect(() => replay({
       ...valid,
@@ -830,7 +1162,7 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
           ),
         },
       },
-    })).toThrow(/exact caller-heard capture/u);
+    })).toThrow(/exact listener-admitted capture/u);
   });
 
   it.each(["openai", "gemini", "xai"] as const)(

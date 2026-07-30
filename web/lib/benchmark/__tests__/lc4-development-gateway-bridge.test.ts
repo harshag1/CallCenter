@@ -112,7 +112,7 @@ function executor(
       const controlPlaneHeadSha256 = sha256Hex(`head:${inputs.length}`);
       const projectionBody = {
         schema_version: 2 as const,
-        bridge_version: "lc4-dev-gateway-bridge-v4" as const,
+        bridge_version: "lc4-dev-gateway-bridge-v5" as const,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: input.episode_id,
         opportunity_id: input.opportunity_id,

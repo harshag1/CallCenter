@@ -1414,3 +1414,93 @@ The failed-run report is
 It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and is unscorable. Nothing from this root may
 populate a comparative score or graph.
+
+## 2026-07-29 DEV terminal at source `32655f2`
+
+**Failed closed after 120/360 completed opportunities. No efficacy score is
+admissible.**
+
+The exact-source ASR receipt, xAI Gate D, and three-provider qualification all
+passed before the one-shot DEV run. Gate D and qualification conservatively
+settled **$1.00** and **$3.00**, respectively, with zero retries and zero
+active liability.
+
+The DEV execution root
+`/private/tmp/hacc-lc4-dev-release-32655f2-20260730T031148Z` retained:
+
+- run/package:
+  `2533e055f4bd1036ec7cbc3fb5daa5691d87399c8f3525aa2cd2b760a22abed3`
+  /
+  `189f4156f678888fa6b8495fbc56f6e958601dc00785be651c18eba5447ef6fe`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **121/120**;
+- provider calls/completed generations: **129/129**;
+- completed repair playbacks: **8**;
+- planned provider sessions opened: **13**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+OpenAI Native and OpenAI HACC each completed 60/60 opportunities across all
+six preregistered ten-opportunity sessions. Gemini HACC's first paid exchange
+also completed at the provider and listener boundaries, but the local retained
+exchange replay failed before the opportunity could finalize.
+
+The exact retained Gemini exchange is schema v5 CAS object
+`2fc0a12f4de00983ce617cf88aef80909086b51d4a3c6d775f851ec6695d11cf`.
+It proves:
+
+- **42** complete post-`activityEnd` interval frames;
+- **36** ordered output PCM chunks;
+- **467,042** assistant PCM bytes, SHA-256
+  `c6283fa330dcf00e5631012dc4874425e2374dce0285ea5b83b2647ba773d8ae`;
+- a completed Gemini terminal frame;
+- signed listener evidence
+  `ab7b0c50ed5e0ff9d89afe3efc08ed3f3e965fde1bb3bf5af67e16822b192da6`;
+  and
+- exact versioned output-attribution hash
+  `d183fb64f1c6f0b24a48d34a21b67fc1eb27b414b08f125726d1dd10ca900ccd`.
+
+Offline replay reproduced the local exception:
+`LC4 Gemini output capture PCM lacks one unique ordered
+activityEnd-to-turnComplete serverContent alignment`. The verifier admitted
+schema v5 and required its versioned attribution, but routed only schemas v3
+and v4 through that verifier. Schema v5 incorrectly fell into the legacy
+exact-wire matcher, which cannot represent legitimate mixed
+audio-plus-transcript and metadata frames.
+
+Primary failure evidence
+`6482fa7c77b6a62b70a257bd07a09cce3d99775cd88a849d880e92adf81b6818`
+records `evidence_retention / evidence_assembly_failed / exchange_evidence`.
+Cleanup evidence
+`007d99ee5fcede7acf7e057170b8d58b6013954576a222786d8af47069eea68c`
+is secondary and cryptographically links the primary. It records
+`cleanup / segment_close_failed / segment_close`; no rotation receipt was
+minted for the unfinalized opportunity.
+
+The repair routes schema v5 through the complete versioned Gemini attribution
+verifier. A later adversarial review showed that the legacy nested v1
+suppression object retained only self-attested raw aggregate hashes for
+suppressed bytes. The strict v2 contract now keeps two evidence scopes
+distinct during tool continuations: ordered complete generated-output
+commitments and the exact listener-admitted/evaluator-consumed suffix after
+suppressed pre-tool output. The exact immutable failed CAS remains historical
+and is deliberately non-admissible under v2 when it contains nonzero legacy
+suppression; no mutation or silent upgrade is allowed. A synthetic schema-v5
+regression covers mixed audio/transcript,
+transcript-only, empty metadata, session-resumption, and terminal frames; a
+substituted interval preimage still fails. A full fake-adapter regression
+passes with two non-empty Gemini gateway batches, suppressed pre-tool PCM,
+retained exact listener PCM, full pinned-listener evidence, and adversarial
+rehashed-lie rejection. OpenAI/xAI suppressed chunks are bound to exact wire
+projections. Gateway bridge v5 outer-binds accepted/rejected evidence and
+publication reconstructs current schema-v2 batches. The complete web matrix
+passes **3,307/3,307** executed tests, with **85** explicitly inventoried
+skips; TypeScript passes. The regenerated gateway firewall passes **33/33**
+provider-free scenarios.
+
+The failed report is
+`be7e5ab97ebf3c2bc3ae150fb3eb6d8ae69b3925224ef6853f7e3f2aadb86fb8`
+(file SHA-256
+`621c3fcaf268f5b282486522466f68ba4fd42d442bbeefcfb36f39dd68595aba`).
+It is incomplete, unscorable, and efficacy-claim ineligible. Nothing from
+this root may populate a comparative score or graph.

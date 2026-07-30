@@ -412,12 +412,15 @@ including batched successful tool results and pre-dispatch rejection results,
 with exact role, order, content, and hash preservation. No v5 partial result or
 score may be published.
 
-## 2026-07-29 — Offline admission gate satisfied; clean-source gate remains
+## 2026-07-29 — Offline hardening green; clean-source gate remains
 
-The provider-neutral history, batched tool replay, caller-heard output, and
-non-generating qualification changes now pass their provider-free regression
-and evidence checks. This work opened **0** provider sessions and spent
-**$0.00** in realtime-provider budget.
+The provider-neutral history, batched tool replay, listener-admitted output,
+publication reconstruction, and non-generating qualification changes now pass
+their provider-free regression and evidence checks. The strict v2 suppression
+contract commits ordered per-chunk hashes instead of claiming custody of
+suppressed raw PCM; gateway evidence is outer-bound to the episode,
+opportunity, provider, arm, and canonical/repair phase. This work opened **0**
+provider sessions and spent **$0.00** in realtime-provider budget.
 
 The authorized maximum remains unchanged and non-additive:
 
@@ -914,4 +917,52 @@ and **$15.00** DEV maximum are unchanged.
 If fully charged, ordinary post-baseline exposure becomes **$140.50**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$155.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.
+
+## 2026-07-29 — Source `32655f2` qualified; DEV terminalized at 120/360
+
+The exact-source ASR receipt, Gate D, and qualification at
+`32655f2142cb7d698b406cf46abcbc10df1b14c4` passed. The one-shot DEV run
+completed both OpenAI cells and the paid Gemini HACC provider/listener exchange
+for opportunity 1 before a local schema-v5 replay-verifier defect failed the
+run closed:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 120/360 opportunities completed, 0 paid retries |
+
+The DEV budget evidence/head are
+`d8b421aacdd68d51f2eb738bd088ca3bf8351a38ee09e5337fce37568331dd98`
+and
+`d595022a0c09f9d118a3d864ba3cddbdb90903708215b9c6ce6b596f904e171d`.
+OpenAI Native, OpenAI HACC, and Gemini HACC settled at **$2.50** each.
+The other reservations were cancelled and active liability ended at
+**$0.00**.
+
+The immutable report is
+`be7e5ab97ebf3c2bc3ae150fb3eb6d8ae69b3925224ef6853f7e3f2aadb86fb8`
+(file SHA-256
+`621c3fcaf268f5b282486522466f68ba4fd42d442bbeefcfb36f39dd68595aba`).
+It is incomplete, unscorable, and ineligible for a comparative claim or
+graph. The failed root is immutable and cannot be retried.
+
+Current post-baseline conservative exposure is **$133.00**, and LC4
+filesystem-ledger settlements total **$204.00**, with **$0.00 active**.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the schema-v5 attribution-routing regression, full offline
+release suite, public audits, and fresh exact-source ASR receipt pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$152.00**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$167.00**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.

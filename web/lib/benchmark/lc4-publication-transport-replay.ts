@@ -44,8 +44,14 @@ import {
 import {
   LC4_DEV_CALLER_BRANCH_SOURCES,
 } from "./lc4-development-caller-branch";
+import {
+  LC4_DEV_GATEWAY_BRIDGE_VERSION,
+} from "./lc4-development-gateway-bridge";
 import type {
   RealtimeConversationHistoryHydrationAcknowledgement,
+} from "../realtime/client/types";
+import {
+  LOCAL_TOOL_PROXY_FUNCTION_NAME,
 } from "../realtime/client/types";
 import {
   replayLc4DevelopmentListenerAuthority,
@@ -419,7 +425,15 @@ function appendReconstructedConversationExchange(input: Readonly<{
       batchValue,
       "LC4 publication retained conversation tool batch",
     );
-    if (batch.schema_version !== 1
+    if (!exactKeys(batch, [
+      "schema_version",
+      "bridge_version",
+      "batch_ordinal",
+      "provider_response_id_sha256",
+      "calls",
+    ])
+      || batch.schema_version !== 2
+      || batch.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
       || batch.batch_ordinal !== batchIndex + 1
       || typeof batch.provider_response_id_sha256 !== "string"
       || !HASH.test(batch.provider_response_id_sha256)
@@ -437,9 +451,18 @@ function appendReconstructedConversationExchange(input: Readonly<{
         callValue,
         "LC4 publication retained conversation tool call",
       );
-      if (call.call_ordinal !== callIndex + 1
-        || typeof call.gateway_tool_name !== "string"
-        || !call.gateway_tool_name
+      if (!exactKeys(call, [
+        "call_ordinal",
+        "gateway_tool_name",
+        "model_arguments",
+        "provider_output_canonical_json",
+        "source_kind",
+        "source_sha256",
+        "disposition",
+        "pre_dispatch_rejection_code",
+      ])
+        || call.call_ordinal !== callIndex + 1
+        || call.gateway_tool_name !== LOCAL_TOOL_PROXY_FUNCTION_NAME
         || call.model_arguments === null
         || typeof call.model_arguments !== "object"
         || Array.isArray(call.model_arguments)
@@ -449,6 +472,12 @@ function appendReconstructedConversationExchange(input: Readonly<{
         ) !== call.provider_output_canonical_json
         || (call.source_kind !== "authority_projection"
           && call.source_kind !== "pre_dispatch_rejection")
+        || (call.source_kind === "authority_projection"
+          && (call.disposition === "pre_dispatch_rejected"
+            || call.pre_dispatch_rejection_code !== null))
+        || (call.source_kind === "pre_dispatch_rejection"
+          && (call.disposition !== "pre_dispatch_rejected"
+            || typeof call.pre_dispatch_rejection_code !== "string"))
         || typeof call.source_sha256 !== "string"
         || !HASH.test(call.source_sha256)) {
         throw new Error(
@@ -487,6 +516,28 @@ function appendReconstructedConversationExchange(input: Readonly<{
     text: transcript,
     provenance_receipt_sha256: input.assistant_pcm_sha256,
   });
+}
+
+/**
+ * Reconstructs the exact provider-visible conversation turns admitted by one
+ * retained exchange. Publication uses the same function across session
+ * rotations; exporting this bounded unit keeps current gateway-batch schemas
+ * directly regression-testable without a paid provider run.
+ */
+export function reconstructLc4PublicationConversationExchange(input: Readonly<{
+  opportunity_index: number;
+  caller_text: string;
+  caller_pcm_sha256: string;
+  exchange: Record<string, JsonValue>;
+  listener: Record<string, JsonValue>;
+  assistant_pcm_sha256: string;
+}>): readonly Lc4RotationConversationTurn[] {
+  const turns: Lc4RotationConversationTurn[] = [];
+  appendReconstructedConversationExchange({
+    turns,
+    ...input,
+  });
+  return Object.freeze([...turns]);
 }
 
 function preflightAsrRunnerTrust(
