@@ -44,13 +44,17 @@ import {
   LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
   LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
   createLc4XaiFiniteManualGateDAuthorization,
+  createLc4XaiFiniteManualGateDFailure,
   createLc4XaiFiniteManualGateDPlan,
   createLc4XaiFiniteManualGateDSigner,
   executeLc4XaiFiniteManualGateD,
   lc4XaiFiniteManualGateDExecutionReplaySha256,
   type Lc4XaiFiniteManualGateDExecutionEvidence,
+  type Lc4XaiFiniteManualGateDAuthorizationArtifact,
+  type Lc4XaiFiniteManualGateDPlanArtifact,
   type Lc4XaiFiniteManualGateDProductionAdapter,
   type Lc4XaiFiniteManualGateDReceipt,
+  type Lc4XaiFiniteManualGateDSigner,
 } from "../lc4-xai.manual-qualification";
 import {
   createLc4XaiManualTurnCausality,
@@ -265,6 +269,9 @@ async function signedReceipt(): Promise<Readonly<{
   receipt: Lc4XaiFiniteManualGateDReceipt;
   trustRoot: string;
   invocationMarkerPath: string;
+  plan: Lc4XaiFiniteManualGateDPlanArtifact;
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+  terminal: Lc4XaiFiniteManualGateDSigner;
 }>> {
   const root = await mkdtemp(resolve(tmpdir(), "hacc-publication-gate-d-run-"));
   roots.push(root);
@@ -323,6 +330,9 @@ async function signedReceipt(): Promise<Readonly<{
     receipt,
     trustRoot: authority.public_key_fingerprint_sha256,
     invocationMarkerPath,
+    plan,
+    authorization,
+    terminal,
   };
 }
 
@@ -652,6 +662,57 @@ describe("LC4 publication transport provenance custody", () => {
       H("substituted-provider-session-replay-set");
     expect(() => assertLc4PublicationTransportProvenance(sessionReplayDrift))
       .toThrow(/incomplete or inconsistent/u);
+  });
+
+  it("rejects a valid terminal-signed Gate D failure as publication admission", async () => {
+    const root = await mkdtemp(resolve(
+      tmpdir(),
+      "hacc-publication-gate-d-failure-",
+    ));
+    roots.push(root);
+    const {
+      receipt,
+      trustRoot,
+      invocationMarkerPath,
+      plan,
+      authorization,
+      terminal,
+    } = await signedReceipt();
+    const failure = createLc4XaiFiniteManualGateDFailure({
+      plan,
+      authorization,
+      invocation_claim: receipt.invocation_claim,
+      terminal_signer: terminal,
+      failed_at: new Date(NOW.getTime() + 2).toISOString(),
+      failure_stage: "provider_execution",
+      failure_class: "provider_transport",
+      failure_detail: {
+        name: "Error",
+        message: "synthetic provider connection failure",
+      },
+      adapter_construction_sha256:
+        receipt.adapter_construction.construction_sha256,
+      candidate_pass_receipt_sha256: null,
+      expected_plan_trust_root_sha256: trustRoot,
+    });
+    const failurePath = resolve(root, "gate-d-failure.json");
+    await writeFile(failurePath, `${canonicalJson(failure)}\n`, {
+      mode: 0o444,
+    });
+    const { prepare, preflight } = custody(receipt, trustRoot);
+    await expect(verifyLc4PublicationTransportProvenance({
+      prepare: prepare as never,
+      preflight: preflight as never,
+      run_sha256: H("publication-run"),
+      authority_trust_root_sha256:
+        H("publication-listener-authority-root"),
+      transport_replay: transportReplay(),
+      gate_d: {
+        receipt_path: failurePath,
+        invocation_marker_path: invocationMarkerPath,
+        plan_trust_root_sha256: trustRoot,
+      },
+    })).rejects.toThrow();
   });
 
   it("rejects an operator-supplied listener authority root that differs from retained custody", async () => {

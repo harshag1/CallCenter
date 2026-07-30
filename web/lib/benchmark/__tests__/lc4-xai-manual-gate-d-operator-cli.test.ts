@@ -1,4 +1,9 @@
-import { generateKeyPairSync } from "node:crypto";
+import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  sign,
+} from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -51,6 +56,10 @@ const SOURCE = Object.freeze({
 });
 const MANUAL_CAUSALITY_DOMAIN =
   "harshas-amazing-call-center/lc4-xai-manual-turn-causality/v1\n";
+const FAILURE_SIGNING_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-failure/v1\n";
+const FAILURE_ARTIFACT_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-failure-artifact/v1\n";
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -64,6 +73,32 @@ afterEach(async () => {
 function pem(): string {
   const { privateKey } = generateKeyPairSync("ed25519");
   return privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+}
+
+async function resignedFailure(
+  terminalPath: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const privateKey = createPrivateKey(await readFile(terminalPath));
+  const publicKey = createPublicKey(privateKey);
+  const publicKeyDer = publicKey.export({ format: "der", type: "spki" });
+  const withoutHash = {
+    body,
+    public_key_spki_base64: publicKeyDer.toString("base64"),
+    public_key_fingerprint_sha256: sha256Hex(publicKeyDer),
+    signature_algorithm: "Ed25519",
+    signature_base64: sign(
+      null,
+      Buffer.from(`${FAILURE_SIGNING_DOMAIN}${canonicalJson(body)}`),
+      privateKey,
+    ).toString("base64"),
+  };
+  return {
+    ...withoutHash,
+    artifact_sha256: sha256Hex(
+      `${FAILURE_ARTIFACT_DOMAIN}${canonicalJson(withoutHash)}`,
+    ),
+  };
 }
 
 function observations(): readonly Lc4SanitizedWireObservation[] {
@@ -357,7 +392,12 @@ describe("LC4 xAI Gate D operator", () => {
     const serializedOutput = output.stdout.join("\n");
     expect(serializedOutput).not.toContain("credential-value-never-log");
     expect(serializedOutput).not.toContain("[1,0,2,0");
-    for (const filename of Object.values(LC4_XAI_GATE_D_OPERATOR_FILES)) {
+    for (const filename of [
+      LC4_XAI_GATE_D_OPERATOR_FILES.plan,
+      LC4_XAI_GATE_D_OPERATOR_FILES.authorization,
+      LC4_XAI_GATE_D_OPERATOR_FILES.invocation,
+      LC4_XAI_GATE_D_OPERATOR_FILES.receipt,
+    ]) {
       expect((await stat(join(value.evidence, filename))).mode & 0o777)
         .toBe(0o400);
     }
@@ -397,11 +437,55 @@ describe("LC4 xAI Gate D operator", () => {
       "--harmless-clip-pcm", value.clip,
       "--terminal-private-key", value.terminal,
       "--trust-root-fingerprint", value.trust,
-    ], output.value, dependencies)).toBe(1);
+    ], output.value, dependencies)).toBe(2);
     expect(firstPaid).toHaveBeenCalledTimes(1);
     expect(output.stderr.at(-1)).toContain("$1 authority is conservatively settled");
     expect(output.stderr.at(-1)).toContain("failure_class=provider_protocol");
     expect(output.stderr.join("\n")).not.toContain("provider plaintext");
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "report",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(2);
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "status",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(0);
+    const records = output.stdout
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toContainEqual(expect.objectContaining({
+      action: "lc4-xai-gate-d-report",
+      status: "failed",
+      verification: "verified",
+      failure_stage: "provider_execution",
+      failure_class: "provider_protocol",
+      retry_permitted: false,
+      conservatively_settled_micro_usd: 1_000_000,
+      active_micro_usd: 0,
+      provider_calls_made_by_report: 0,
+      contains_raw_error_credentials_or_audio: false,
+    }));
+    expect(records.at(-1)).toMatchObject({
+      action: "lc4-xai-gate-d-status",
+      state: "failed",
+      verification: "verified",
+      retry_permitted: false,
+      failure_class: "provider_protocol",
+    });
+    const failurePath = join(
+      value.evidence,
+      LC4_XAI_GATE_D_OPERATOR_FILES.failure,
+    );
+    expect((await stat(failurePath)).mode & 0o777).toBe(0o400);
+    const failure = await readFile(failurePath, "utf8");
+    expect(failure).not.toContain("provider plaintext");
+    expect(failure).not.toContain("credential-value-never-log");
+    expect(failure).not.toContain(value.root);
+    expect(failure).not.toContain("[1,0,2,0");
 
     const secondPaid = vi.fn();
     expect(await runLc4XaiManualGateDOperatorCli([
@@ -417,6 +501,254 @@ describe("LC4 xAI Gate D operator", () => {
     })).toBe(1);
     expect(secondPaid).not.toHaveBeenCalled();
     expect(output.stderr.at(-1)).toContain("cannot be retried");
+  });
+
+  it("rejects independently re-signed semantic tampering in claimed failures", async () => {
+    const value = await fixture();
+    const output = io();
+    const dependencies = baseDependencies(() => fakeAdapter(vi.fn(
+      async () => {
+        throw new Error("provider response identity mismatch");
+      },
+    )));
+    await runLc4XaiManualGateDOperatorCli([
+      "prepare",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--authority-private-key", value.authority,
+    ], output.value, dependencies);
+    await runLc4XaiManualGateDOperatorCli([
+      "authorize",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--authority-private-key", value.authority,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies);
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "run",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(2);
+    const failurePath = join(
+      value.evidence,
+      LC4_XAI_GATE_D_OPERATOR_FILES.failure,
+    );
+    const original = JSON.parse(
+      await readFile(failurePath, "utf8"),
+    ) as { body: Record<string, unknown> };
+    const mutations: Array<(body: Record<string, unknown>) => void> = [
+      (body) => {
+        body.failure_stage = "success_receipt_persistence";
+      },
+      (body) => {
+        body.source_commit = "c".repeat(40);
+      },
+      (body) => {
+        (body.budget as Record<string, unknown>).active_micro_usd = 1;
+      },
+      (body) => {
+        const claim = body.invocation_claim as Record<string, unknown>;
+        claim.marker_inode = Number(claim.marker_inode) + 1;
+      },
+      (body) => {
+        body.candidate_pass_receipt_sha256 = "d".repeat(64);
+      },
+      (body) => {
+        body.raw_error_retained = true;
+      },
+    ];
+    for (const mutate of mutations) {
+      const body = structuredClone(original.body);
+      mutate(body);
+      const artifact = await resignedFailure(value.terminal, body);
+      await chmod(failurePath, 0o600);
+      await writeFile(failurePath, `${canonicalJson(artifact)}\n`);
+      await chmod(failurePath, 0o400);
+      const reportOutput = io();
+      expect(await runLc4XaiManualGateDOperatorCli([
+        "report",
+        "--repository-root", value.repository,
+        "--evidence-root", value.evidence,
+        "--trust-root-fingerprint", value.trust,
+      ], reportOutput.value, dependencies)).toBe(1);
+    }
+    await chmod(failurePath, 0o600);
+    await writeFile(failurePath, Buffer.alloc((256 * 1024) + 1, 0x20));
+    await chmod(failurePath, 0o400);
+    const oversizedOutput = io();
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "report",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], oversizedOutput.value, dependencies)).toBe(1);
+    expect(oversizedOutput.stderr.at(-1)).toContain("invalid size");
+  });
+
+  it("fails closed on a terminal conflict", async () => {
+    const value = await fixture();
+    const output = io();
+    const dependencies = baseDependencies(
+      () => fakeAdapter(vi.fn(async ({ caller_pcm }) => (
+        passingEvidence(caller_pcm)
+      ))),
+    );
+    await runLc4XaiManualGateDOperatorCli([
+      "prepare",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--authority-private-key", value.authority,
+    ], output.value, dependencies);
+    await runLc4XaiManualGateDOperatorCli([
+      "authorize",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--authority-private-key", value.authority,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies);
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "run",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(0);
+    await writeFile(
+      join(value.evidence, LC4_XAI_GATE_D_OPERATOR_FILES.failure),
+      "{}\n",
+      { flag: "wx", mode: 0o400 },
+    );
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "report",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(1);
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "status",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(0);
+    const status = JSON.parse(output.stdout.at(-1)!) as Record<string, unknown>;
+    expect(status).toMatchObject({
+      state: "terminal_conflict",
+      verification: "not_verified",
+      retry_permitted: false,
+    });
+  });
+
+  it("does not terminalize an invocation marker owned by another process", async () => {
+    const value = await fixture();
+    const output = io();
+    const createAdapter = vi.fn();
+    const dependencies = baseDependencies(createAdapter);
+    await runLc4XaiManualGateDOperatorCli([
+      "prepare",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--authority-private-key", value.authority,
+    ], output.value, dependencies);
+    await runLc4XaiManualGateDOperatorCli([
+      "authorize",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--authority-private-key", value.authority,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies);
+    await writeFile(
+      join(value.evidence, LC4_XAI_GATE_D_OPERATOR_FILES.invocation),
+      "{}\n",
+      { flag: "wx", mode: 0o400 },
+    );
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "run",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(1);
+    expect(createAdapter).not.toHaveBeenCalled();
+    await expect(stat(
+      join(value.evidence, LC4_XAI_GATE_D_OPERATOR_FILES.failure),
+    )).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "status",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(0);
+    expect(JSON.parse(output.stdout.at(-1)!)).toMatchObject({
+      state: "claimed_unsealed",
+      verification: "not_verified",
+      retry_permitted: false,
+    });
+  });
+
+  it("reports a failure-file collision as claimed and unsealed", async () => {
+    const value = await fixture();
+    const output = io();
+    const failurePath = join(
+      value.evidence,
+      LC4_XAI_GATE_D_OPERATOR_FILES.failure,
+    );
+    const paid = vi.fn(async () => {
+      await writeFile(failurePath, "{}\n", {
+        flag: "wx",
+        mode: 0o400,
+      });
+      throw new Error("provider connection failed");
+    });
+    const dependencies = baseDependencies(() => fakeAdapter(paid));
+    await runLc4XaiManualGateDOperatorCli([
+      "prepare",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--authority-private-key", value.authority,
+    ], output.value, dependencies);
+    await runLc4XaiManualGateDOperatorCli([
+      "authorize",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--authority-private-key", value.authority,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies);
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "run",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--harmless-clip-pcm", value.clip,
+      "--terminal-private-key", value.terminal,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(1);
+    expect(paid).toHaveBeenCalledTimes(1);
+    expect(output.stderr.at(-1)).toContain(
+      "sanitized_failure_artifact=not_sealed",
+    );
+    expect(await runLc4XaiManualGateDOperatorCli([
+      "status",
+      "--repository-root", value.repository,
+      "--evidence-root", value.evidence,
+      "--trust-root-fingerprint", value.trust,
+    ], output.value, dependencies)).toBe(0);
+    expect(JSON.parse(output.stdout.at(-1)!)).toMatchObject({
+      state: "claimed_unsealed",
+      verification: "not_verified",
+      retry_permitted: false,
+    });
   });
 
   it("rejects credential-like CLI flags and dirty source before paid construction", async () => {

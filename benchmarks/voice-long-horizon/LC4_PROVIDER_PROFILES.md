@@ -192,6 +192,30 @@ settles the separate $1.00 authority. Failure after the marker exists is
 terminal for that evidence root: there is no retry, reconnect, resume, or
 fallback path.
 
+A claimed failure is not a partial passing receipt. The operator writes a
+separate `gate-d-failure.json` only when the process that created the
+invocation marker still owns the in-memory claim. That artifact is signed by
+the authorization-pinned terminal key and binds the full invocation claim,
+marker custody, exact source/profile/transport, a closed failure class, the
+exact lifecycle stage, and `$1.00 reserved / $1.00 conservatively settled /
+$0.00 active`. Its authorization-nonce-salted failure-detail commitment
+retains neither the error preimage nor stack, raw audio, credentials, partial
+wire evidence, provider identifiers, or local paths. A racing process that
+observes an existing marker cannot terminalize another process's claim.
+Provider authentication rejection has its own closed class, separate from
+local preflight, transport, and protocol failures. The serialized failure
+artifact is capped at 256 KiB before parsing.
+
+The CLI state machine is `empty` → `prepared` → `authorized` → either
+`passed`, `failed`, or `claimed_unsealed`; contradictory pass/failure
+terminals are `terminal_conflict`. `run` and `report` return `0` only for a
+passing receipt, `2` for a replay-verified claimed failure, and `1` for a
+refusal, malformed/conflicting root, pre-claim failure, or claimed-but-unsealed
+root. `status` remains provider-free and returns JSON with
+`retry_permitted:false` whenever an invocation, failure, or receipt exists.
+Neither a verified failure nor an unsealed claim can satisfy qualification,
+DEV preflight, publication, or any efficacy claim.
+
 Gate D v4 reflects two live xAI compatibility findings: manual mode can emit
 speech-activity telemetry even though the host still owns commit and response
 creation. Replay admits only a complete, ordered, identity-free telemetry pair

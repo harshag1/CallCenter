@@ -57,6 +57,12 @@ const PACKAGE_MANIFEST_ARTIFACT_DOMAIN =
   "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-package-manifest-artifact/v2\n";
 const RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-receipt/v2\n";
+const FAILURE_SIGNING_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-failure/v1\n";
+const FAILURE_ARTIFACT_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-failure-artifact/v1\n";
+const FAILURE_MESSAGE_DOMAIN =
+  "harshas-amazing-call-center/lc4/provider-xai/finite-manual-gate-d-failure-message/v1\n";
 const PRODUCTION_BINDING_DOMAIN =
   "harshas-amazing-call-center/lc4/provider-xai/finite-manual-production-binding/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
@@ -366,6 +372,78 @@ export type Lc4XaiFiniteManualGateDReceipt = Readonly<{
   claim_boundary: "transport_qualification_only_not_efficacy_evidence";
   receipt_sha256: string;
 }>;
+
+export type Lc4XaiFiniteManualGateDFailureClass =
+  | "preflight_contract"
+  | "provider_authentication"
+  | "provider_transport"
+  | "manual_turn_causality"
+  | "tool_roundtrip_causality"
+  | "audio_output_contract"
+  | "provider_protocol"
+  | "local_custody"
+  | "unknown";
+
+export type Lc4XaiFiniteManualGateDFailureStage =
+  | "adapter_construction"
+  | "provider_execution"
+  | "execution_evidence_validation"
+  | "success_receipt_persistence";
+
+export type Lc4XaiFiniteManualGateDFailureBody = Readonly<{
+  schema_version: 1;
+  artifact_type: "hacc_lc4_xai_gate_d_claimed_failure";
+  gate_version: typeof LC4_XAI_FINITE_MANUAL_GATE_D_VERSION;
+  status: "failed";
+  failed_at: string;
+  plan_artifact_sha256: string;
+  authorization_artifact_sha256: string;
+  source_commit: string;
+  source_tree_sha256: string;
+  provider_profile_manifest_sha256: string;
+  transport_profile_sha256: string;
+  production_adapter_binding_sha256: string;
+  invocation_claim: Lc4XaiFiniteManualGateDInvocationClaim;
+  invocation_claim_sha256: string;
+  invocation_marker_file_sha256: string;
+  terminal_authority_trust_root_sha256: string;
+  adapter_construction_sha256: string | null;
+  candidate_pass_receipt_sha256: string | null;
+  failure_stage: Lc4XaiFiniteManualGateDFailureStage;
+  failure_class: Lc4XaiFiniteManualGateDFailureClass;
+  failure_detail_sha256: string;
+  retries: 0;
+  reconnects: 0;
+  fallbacks: 0;
+  budget: Readonly<{
+    reserved_micro_usd: typeof LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD;
+    conservatively_settled_micro_usd:
+      typeof LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD;
+    active_micro_usd: 0;
+    settlement_basis: "one_shot_authority_consumed_after_invocation_claim";
+  }>;
+  retry_allowed: false;
+  raw_error_retained: false;
+  raw_audio_retained: false;
+  credentials_retained: false;
+  partial_wire_or_execution_evidence_retained: false;
+  efficacy_scored: false;
+  claim_boundary:
+    "failed_transport_qualification_not_admissible_as_gate_d_pass_or_efficacy_evidence";
+}>;
+
+export type Lc4XaiFiniteManualGateDFailureArtifact =
+  SignedArtifact<Lc4XaiFiniteManualGateDFailureBody>;
+
+export class Lc4XaiFiniteManualGateDClaimedFailureError extends Error {
+  readonly failure: Lc4XaiFiniteManualGateDFailureArtifact;
+
+  constructor(failure: Lc4XaiFiniteManualGateDFailureArtifact) {
+    super("Gate D claimed execution sealed a sanitized terminal failure");
+    this.name = "Lc4XaiFiniteManualGateDClaimedFailureError";
+    this.failure = failure;
+  }
+}
 
 /**
  * Narrow paid-capable seam implemented by the production provider adapter.
@@ -680,6 +758,67 @@ const RECEIPT_KEYS = Object.freeze([
   "claim_boundary",
   "receipt_sha256",
 ] as const);
+
+const FAILURE_BODY_KEYS = Object.freeze([
+  "schema_version",
+  "artifact_type",
+  "gate_version",
+  "status",
+  "failed_at",
+  "plan_artifact_sha256",
+  "authorization_artifact_sha256",
+  "source_commit",
+  "source_tree_sha256",
+  "provider_profile_manifest_sha256",
+  "transport_profile_sha256",
+  "production_adapter_binding_sha256",
+  "invocation_claim",
+  "invocation_claim_sha256",
+  "invocation_marker_file_sha256",
+  "terminal_authority_trust_root_sha256",
+  "adapter_construction_sha256",
+  "candidate_pass_receipt_sha256",
+  "failure_stage",
+  "failure_class",
+  "failure_detail_sha256",
+  "retries",
+  "reconnects",
+  "fallbacks",
+  "budget",
+  "retry_allowed",
+  "raw_error_retained",
+  "raw_audio_retained",
+  "credentials_retained",
+  "partial_wire_or_execution_evidence_retained",
+  "efficacy_scored",
+  "claim_boundary",
+] as const);
+
+const FAILURE_BUDGET_KEYS = Object.freeze([
+  "reserved_micro_usd",
+  "conservatively_settled_micro_usd",
+  "active_micro_usd",
+  "settlement_basis",
+] as const);
+
+const FAILURE_CLASSES = new Set<Lc4XaiFiniteManualGateDFailureClass>([
+  "preflight_contract",
+  "provider_authentication",
+  "provider_transport",
+  "manual_turn_causality",
+  "tool_roundtrip_causality",
+  "audio_output_contract",
+  "provider_protocol",
+  "local_custody",
+  "unknown",
+]);
+
+const FAILURE_STAGES = new Set<Lc4XaiFiniteManualGateDFailureStage>([
+  "adapter_construction",
+  "provider_execution",
+  "execution_evidence_validation",
+  "success_receipt_persistence",
+]);
 
 function signingBytes(domain: string, body: unknown): Uint8Array {
   return Buffer.from(`${domain}${canonicalJson(body)}`, "utf8");
@@ -1043,6 +1182,15 @@ function assertAuthorization(input: Readonly<{
       || input.now.getTime() >= Date.parse(body.expires_at))) {
     throw new Error("Gate D authorization is not active");
   }
+}
+
+export function assertLc4XaiFiniteManualGateDAuthorization(input: Readonly<{
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+  plan: Lc4XaiFiniteManualGateDPlanArtifact;
+  expected_plan_trust_root_sha256: string;
+  now?: Date;
+}>): void {
+  assertAuthorization(input);
 }
 
 function executionReplayBody(
@@ -1456,6 +1604,61 @@ export function lc4XaiFiniteManualGateDInvocationMarkerBytes(
   return Buffer.from(`${canonicalJson(markerClaim)}\n`, "utf8");
 }
 
+export function recoverLc4XaiFiniteManualGateDInvocationClaim(input: Readonly<{
+  marker_bytes: Uint8Array;
+  marker_device: number;
+  marker_inode: number;
+  marker_nlink: number;
+  marker_permission_mode: number;
+  plan: Lc4XaiFiniteManualGateDPlanArtifact;
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+}>): Lc4XaiFiniteManualGateDInvocationClaim {
+  const markerBytes = Buffer.from(input.marker_bytes);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(markerBytes),
+    );
+  } catch {
+    throw new Error("Gate D invocation marker must be canonical UTF-8 JSON");
+  }
+  requireExactKeys(
+    parsed,
+    [...INVOCATION_CLAIM_BODY_KEYS, "marker_claim_sha256"],
+    "Gate D invocation marker",
+  );
+  const marker = parsed as Omit<
+    Lc4XaiFiniteManualGateDInvocationClaim,
+    | "marker_file_sha256"
+    | "marker_device"
+    | "marker_inode"
+    | "marker_nlink"
+    | "marker_permission_mode"
+    | "claim_sha256"
+  >;
+  const claimBody = Object.freeze({
+    ...marker,
+    marker_file_sha256: sha256Hex(markerBytes),
+    marker_device: input.marker_device,
+    marker_inode: input.marker_inode,
+    marker_nlink: input.marker_nlink,
+    marker_permission_mode: input.marker_permission_mode,
+  });
+  const claim = Object.freeze({
+    ...claimBody,
+    claim_sha256: sha256Hex(
+      `${INVOCATION_CLAIM_DOMAIN}${canonicalJson(claimBody)}`,
+    ),
+  }) as Lc4XaiFiniteManualGateDInvocationClaim;
+  assertInvocationClaim(claim, input.plan, input.authorization);
+  if (!markerBytes.equals(
+    lc4XaiFiniteManualGateDInvocationMarkerBytes(claim),
+  )) {
+    throw new Error("Gate D invocation marker bytes are not canonical");
+  }
+  return claim;
+}
+
 function assertInvocationClaim(
   claim: Lc4XaiFiniteManualGateDInvocationClaim,
   plan: Lc4XaiFiniteManualGateDPlanArtifact,
@@ -1503,6 +1706,293 @@ function assertInvocationClaim(
     throw new Error("Gate D invocation claim does not bind its authorized plan");
   }
   requireIso(claim.claimed_at, "Gate D invocation claim time");
+}
+
+export function createLc4XaiFiniteManualGateDFailure(input: Readonly<{
+  plan: Lc4XaiFiniteManualGateDPlanArtifact;
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+  invocation_claim: Lc4XaiFiniteManualGateDInvocationClaim;
+  terminal_signer: Lc4XaiFiniteManualGateDSigner;
+  failed_at: string;
+  failure_stage: Lc4XaiFiniteManualGateDFailureStage;
+  failure_class: Lc4XaiFiniteManualGateDFailureClass;
+  failure_detail: Readonly<{
+    name: string;
+    message: string;
+  }>;
+  adapter_construction_sha256: string | null;
+  candidate_pass_receipt_sha256: string | null;
+  expected_plan_trust_root_sha256: string;
+}>): Lc4XaiFiniteManualGateDFailureArtifact {
+  assertLc4XaiFiniteManualGateDPlan(
+    input.plan,
+    input.expected_plan_trust_root_sha256,
+  );
+  assertAuthorization({
+    authorization: input.authorization,
+    plan: input.plan,
+    expected_plan_trust_root_sha256:
+      input.expected_plan_trust_root_sha256,
+  });
+  assertInvocationClaim(
+    input.invocation_claim,
+    input.plan,
+    input.authorization,
+  );
+  if (input.terminal_signer.public_key_fingerprint_sha256
+    !== input.authorization.body.terminal_public_key_fingerprint_sha256) {
+    throw new Error("Gate D failure signer differs from authorization");
+  }
+  if (!FAILURE_CLASSES.has(input.failure_class)) {
+    throw new Error("Gate D failure class is invalid");
+  }
+  if (!FAILURE_STAGES.has(input.failure_stage)) {
+    throw new Error("Gate D failure stage is invalid");
+  }
+  if (input.adapter_construction_sha256 !== null) {
+    requireHash(
+      input.adapter_construction_sha256,
+      "Gate D failed adapter construction",
+    );
+  }
+  if (input.candidate_pass_receipt_sha256 !== null) {
+    requireHash(
+      input.candidate_pass_receipt_sha256,
+      "Gate D candidate pass receipt",
+    );
+  }
+  if ((input.failure_stage === "adapter_construction"
+      && (input.adapter_construction_sha256 !== null
+        || input.candidate_pass_receipt_sha256 !== null))
+    || ((input.failure_stage === "provider_execution"
+        || input.failure_stage === "execution_evidence_validation")
+      && (input.adapter_construction_sha256 === null
+        || input.candidate_pass_receipt_sha256 !== null))
+    || (input.failure_stage === "success_receipt_persistence"
+      && (input.adapter_construction_sha256 === null
+        || input.candidate_pass_receipt_sha256 === null
+        || input.failure_class !== "local_custody"))) {
+    throw new Error("Gate D failure stage bindings are inconsistent");
+  }
+  requireIso(input.failed_at, "Gate D failure time");
+  if (Date.parse(input.failed_at)
+    < Date.parse(input.invocation_claim.claimed_at)) {
+    throw new Error("Gate D failure predates its invocation claim");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    artifact_type: "hacc_lc4_xai_gate_d_claimed_failure" as const,
+    gate_version: LC4_XAI_FINITE_MANUAL_GATE_D_VERSION,
+    status: "failed" as const,
+    failed_at: input.failed_at,
+    plan_artifact_sha256: input.plan.artifact_sha256,
+    authorization_artifact_sha256: input.authorization.artifact_sha256,
+    source_commit: input.plan.body.source_commit,
+    source_tree_sha256: input.plan.body.source_tree_sha256,
+    provider_profile_manifest_sha256:
+      input.plan.body.provider_profile_manifest_sha256,
+    transport_profile_sha256: input.plan.body.transport_profile_sha256,
+    production_adapter_binding_sha256:
+      input.plan.body.production_adapter_binding_sha256,
+    invocation_claim: input.invocation_claim,
+    invocation_claim_sha256: input.invocation_claim.claim_sha256,
+    invocation_marker_file_sha256:
+      input.invocation_claim.marker_file_sha256,
+    terminal_authority_trust_root_sha256:
+      input.terminal_signer.public_key_fingerprint_sha256,
+    adapter_construction_sha256: input.adapter_construction_sha256,
+    candidate_pass_receipt_sha256:
+      input.candidate_pass_receipt_sha256,
+    failure_stage: input.failure_stage,
+    failure_class: input.failure_class,
+    failure_detail_sha256: sha256Hex(
+      `${FAILURE_MESSAGE_DOMAIN}`
+      + `${input.authorization.body.authorization_nonce_sha256}`
+      + canonicalJson(input.failure_detail),
+    ),
+    retries: 0 as const,
+    reconnects: 0 as const,
+    fallbacks: 0 as const,
+    budget: Object.freeze({
+      reserved_micro_usd: LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD,
+      conservatively_settled_micro_usd:
+        LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD,
+      active_micro_usd: 0 as const,
+      settlement_basis:
+        "one_shot_authority_consumed_after_invocation_claim" as const,
+    }),
+    retry_allowed: false as const,
+    raw_error_retained: false as const,
+    raw_audio_retained: false as const,
+    credentials_retained: false as const,
+    partial_wire_or_execution_evidence_retained: false as const,
+    efficacy_scored: false as const,
+    claim_boundary:
+      "failed_transport_qualification_not_admissible_as_gate_d_pass_or_efficacy_evidence" as const,
+  });
+  return signArtifact(
+    body,
+    input.terminal_signer,
+    FAILURE_SIGNING_DOMAIN,
+    FAILURE_ARTIFACT_DOMAIN,
+  );
+}
+
+export function classifyLc4XaiFiniteManualGateDFailure(
+  error: unknown,
+): Lc4XaiFiniteManualGateDFailureClass {
+  const message = error instanceof Error ? error.message : "";
+  if (/credential|authorization|source|caller PCM|terminal signer/iu.test(message)) {
+    if (/invalid|incorrect|expired|revoked|unauthenticated|unauthorized|401|403/iu.test(
+      message,
+    )) {
+      return "provider_authentication";
+    }
+    return "preflight_contract";
+  }
+  if (/API key|authentication|unauthenticated|unauthorized|401|403/iu.test(message)) {
+    return "provider_authentication";
+  }
+  if (/connect|connection|socket|timed out|timeout/iu.test(message)) {
+    return "provider_transport";
+  }
+  if (/commit|manual turn|speech telemetry/iu.test(message)) {
+    return "manual_turn_causality";
+  }
+  if (/tool continuation|tool (?:call|result|roundtrip)|gateway (?:call|result|roundtrip)/iu.test(
+    message,
+  )) {
+    return "tool_roundtrip_causality";
+  }
+  if (/PCM|audio/iu.test(message)) {
+    return "audio_output_contract";
+  }
+  if (/tool|gateway|continuation/iu.test(message)) {
+    return "tool_roundtrip_causality";
+  }
+  if (/wire|response|identity|terminal|provider/iu.test(message)) {
+    return "provider_protocol";
+  }
+  return "unknown";
+}
+
+export function assertLc4XaiFiniteManualGateDFailure(
+  failure: Lc4XaiFiniteManualGateDFailureArtifact,
+  input: Readonly<{
+    plan: Lc4XaiFiniteManualGateDPlanArtifact;
+    authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact;
+    invocation_claim: Lc4XaiFiniteManualGateDInvocationClaim;
+    expected_plan_trust_root_sha256: string;
+    expected_source_commit: string;
+    expected_source_tree_sha256: string;
+    expected_provider_profile_manifest_sha256: string;
+  }>,
+): void {
+  assertLc4XaiFiniteManualGateDPlan(
+    input.plan,
+    input.expected_plan_trust_root_sha256,
+  );
+  assertAuthorization({
+    authorization: input.authorization,
+    plan: input.plan,
+    expected_plan_trust_root_sha256:
+      input.expected_plan_trust_root_sha256,
+  });
+  assertInvocationClaim(
+    input.invocation_claim,
+    input.plan,
+    input.authorization,
+  );
+  verifyArtifact({
+    artifact: failure,
+    expected_fingerprint:
+      input.authorization.body.terminal_public_key_fingerprint_sha256,
+    signing_domain: FAILURE_SIGNING_DOMAIN,
+    artifact_domain: FAILURE_ARTIFACT_DOMAIN,
+    label: "Gate D failure",
+  });
+  requireExactKeys(failure.body, FAILURE_BODY_KEYS, "Gate D failure body");
+  requireExactKeys(
+    failure.body.budget,
+    FAILURE_BUDGET_KEYS,
+    "Gate D failure budget",
+  );
+  const body = failure.body;
+  requireIso(body.failed_at, "Gate D failure time");
+  requireHash(body.failure_detail_sha256, "Gate D failure detail");
+  if (body.adapter_construction_sha256 !== null) {
+    requireHash(
+      body.adapter_construction_sha256,
+      "Gate D failed adapter construction",
+    );
+  }
+  if (body.candidate_pass_receipt_sha256 !== null) {
+    requireHash(
+      body.candidate_pass_receipt_sha256,
+      "Gate D candidate pass receipt",
+    );
+  }
+  if (body.schema_version !== 1
+    || body.artifact_type !== "hacc_lc4_xai_gate_d_claimed_failure"
+    || body.gate_version !== LC4_XAI_FINITE_MANUAL_GATE_D_VERSION
+    || body.status !== "failed"
+    || Date.parse(body.failed_at)
+      < Date.parse(input.invocation_claim.claimed_at)
+    || body.plan_artifact_sha256 !== input.plan.artifact_sha256
+    || body.authorization_artifact_sha256
+      !== input.authorization.artifact_sha256
+    || body.source_commit !== input.expected_source_commit
+    || body.source_commit !== input.plan.body.source_commit
+    || body.source_tree_sha256 !== input.expected_source_tree_sha256
+    || body.source_tree_sha256 !== input.plan.body.source_tree_sha256
+    || body.provider_profile_manifest_sha256
+      !== input.expected_provider_profile_manifest_sha256
+    || body.provider_profile_manifest_sha256
+      !== input.plan.body.provider_profile_manifest_sha256
+    || body.transport_profile_sha256
+      !== input.plan.body.transport_profile_sha256
+    || body.production_adapter_binding_sha256
+      !== input.plan.body.production_adapter_binding_sha256
+    || canonicalJson(body.invocation_claim)
+      !== canonicalJson(input.invocation_claim)
+    || body.invocation_claim_sha256 !== input.invocation_claim.claim_sha256
+    || body.invocation_marker_file_sha256
+      !== input.invocation_claim.marker_file_sha256
+    || body.terminal_authority_trust_root_sha256
+      !== input.authorization.body.terminal_public_key_fingerprint_sha256
+    || !FAILURE_STAGES.has(body.failure_stage)
+    || !FAILURE_CLASSES.has(body.failure_class)
+    || (body.failure_stage === "adapter_construction"
+      && (body.adapter_construction_sha256 !== null
+        || body.candidate_pass_receipt_sha256 !== null))
+    || ((body.failure_stage === "provider_execution"
+        || body.failure_stage === "execution_evidence_validation")
+      && (body.adapter_construction_sha256 === null
+        || body.candidate_pass_receipt_sha256 !== null))
+    || (body.failure_stage === "success_receipt_persistence"
+      && (body.adapter_construction_sha256 === null
+        || body.candidate_pass_receipt_sha256 === null
+        || body.failure_class !== "local_custody"))
+    || body.retries !== 0
+    || body.reconnects !== 0
+    || body.fallbacks !== 0
+    || body.budget.reserved_micro_usd
+      !== LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD
+    || body.budget.conservatively_settled_micro_usd
+      !== LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD
+    || body.budget.active_micro_usd !== 0
+    || body.budget.settlement_basis
+      !== "one_shot_authority_consumed_after_invocation_claim"
+    || body.retry_allowed !== false
+    || body.raw_error_retained !== false
+    || body.raw_audio_retained !== false
+    || body.credentials_retained !== false
+    || body.partial_wire_or_execution_evidence_retained !== false
+    || body.efficacy_scored !== false
+    || body.claim_boundary
+      !== "failed_transport_qualification_not_admissible_as_gate_d_pass_or_efficacy_evidence") {
+    throw new Error("Gate D failure differs from its authorized invocation");
+  }
 }
 
 function createAdapterConstruction(
@@ -1587,7 +2077,12 @@ export async function executeLc4XaiFiniteManualGateD(
     claimed_at: input.now.toISOString(),
   });
   assertInvocationClaim(invocationClaim, input.plan, input.authorization);
-  const productionAdapter = await input.construct_production_adapter();
+  let failureStage: Lc4XaiFiniteManualGateDFailureStage =
+    "adapter_construction";
+  let adapterConstruction:
+    Lc4XaiFiniteManualGateDAdapterConstruction | null = null;
+  try {
+    const productionAdapter = await input.construct_production_adapter();
   if (productionAdapter[LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY] !== true
     || productionAdapter.kind
     !== "lc4-production-provider-adapter/xai-finite-manual-gate-d-v1"
@@ -1597,13 +2092,17 @@ export async function executeLc4XaiFiniteManualGateD(
       "Gate D paid executor is not the exact frozen production provider adapter path",
     );
   }
-  const adapterConstruction = createAdapterConstruction(invocationClaim);
-  assertAdapterConstruction(adapterConstruction, invocationClaim);
+  const verifiedAdapterConstruction =
+    createAdapterConstruction(invocationClaim);
+  assertAdapterConstruction(verifiedAdapterConstruction, invocationClaim);
+  adapterConstruction = verifiedAdapterConstruction;
+  failureStage = "provider_execution";
   const evidence = await productionAdapter.execute({
     caller_pcm: input.caller_pcm,
     plan: input.plan,
     authorization: input.authorization,
   });
+  failureStage = "execution_evidence_validation";
   assertLc4XaiFiniteManualGateDExecutionEvidence({ evidence, plan: input.plan });
   const completedAt = input.completion_clock();
   if (completedAt.getTime() < input.now.getTime()) {
@@ -1731,6 +2230,38 @@ export async function executeLc4XaiFiniteManualGateD(
       LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
   });
   return receipt;
+  } catch (error) {
+    try {
+      const failure = createLc4XaiFiniteManualGateDFailure({
+        plan: input.plan,
+        authorization: input.authorization,
+        invocation_claim: invocationClaim,
+        terminal_signer: input.terminal_signer,
+        failed_at: input.completion_clock().toISOString(),
+        failure_stage: failureStage,
+        failure_class: classifyLc4XaiFiniteManualGateDFailure(error),
+        failure_detail: error instanceof Error
+          ? Object.freeze({ name: error.name, message: error.message })
+          : Object.freeze({
+              name: "NonErrorThrow",
+              message: "non_error_gate_d_failure",
+            }),
+        adapter_construction_sha256:
+          adapterConstruction?.construction_sha256 ?? null,
+        candidate_pass_receipt_sha256: null,
+        expected_plan_trust_root_sha256: planTrust,
+      });
+      throw new Lc4XaiFiniteManualGateDClaimedFailureError(failure);
+    } catch (failureError) {
+      if (failureError
+        instanceof Lc4XaiFiniteManualGateDClaimedFailureError) {
+        throw failureError;
+      }
+      throw new Error(
+        "Gate D claimed execution could not seal sanitized failure evidence",
+      );
+    }
+  }
 }
 
 export function assertLc4XaiFiniteManualGateDReceipt(

@@ -12,8 +12,11 @@ import {
 import {
   LC4_XAI_FINITE_MANUAL_GATE_D_OPERATION_ORDER,
   LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
+  Lc4XaiFiniteManualGateDClaimedFailureError,
   assertLc4XaiFiniteManualGateDExecutionEvidence,
+  assertLc4XaiFiniteManualGateDFailure,
   assertLc4XaiFiniteManualGateDReceipt,
+  classifyLc4XaiFiniteManualGateDFailure,
   createLc4XaiFiniteManualGateDAuthorization,
   createLc4XaiFiniteManualGateDPlan,
   createLc4XaiFiniteManualGateDSigner,
@@ -294,6 +297,18 @@ async function passingReceipt(
 }
 
 describe("LC4 xAI finite-manual Gate D", () => {
+  it("separates provider authentication rejection from local preflight errors", () => {
+    expect(classifyLc4XaiFiniteManualGateDFailure(
+      new Error("Incorrect API key provided"),
+    )).toBe("provider_authentication");
+    expect(classifyLc4XaiFiniteManualGateDFailure(
+      new Error("Gate D credential identity differs from authorization"),
+    )).toBe("preflight_contract");
+    expect(classifyLc4XaiFiniteManualGateDFailure(
+      new Error("tool continuation audio evidence is inconsistent"),
+    )).toBe("tool_roundtrip_causality");
+  });
+
   it("produces a replay-verifiable, redacted, non-efficacy receipt", async () => {
     const { receipt, authority } = await passingReceipt();
     expect(receipt).toMatchObject({
@@ -357,7 +372,7 @@ describe("LC4 xAI finite-manual Gate D", () => {
     const value = fixture();
     const root = await mkdtemp(join(tmpdir(), "hacc-gate-d-missing-"));
     roots.push(root);
-    await expect(executeLc4XaiFiniteManualGateD({
+    const execution = executeLc4XaiFiniteManualGateD({
       plan: value.plan,
       authorization: value.authorization,
       terminal_signer: value.terminal,
@@ -379,7 +394,32 @@ describe("LC4 xAI finite-manual Gate D", () => {
           { initial_assistant_pcm_byte_length: 0 },
         )
       )),
-    })).rejects.toThrow(/non-empty initial and post-tool assistant PCM/u);
+    });
+    const failure = await execution.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(
+      Lc4XaiFiniteManualGateDClaimedFailureError,
+    );
+    const claimed = failure as Lc4XaiFiniteManualGateDClaimedFailureError;
+    expect(claimed.message).not.toContain("PCM");
+    expect(claimed.failure.body).toMatchObject({
+      status: "failed",
+      failure_stage: "execution_evidence_validation",
+      failure_class: "audio_output_contract",
+      raw_error_retained: false,
+      partial_wire_or_execution_evidence_retained: false,
+      retry_allowed: false,
+    });
+    assertLc4XaiFiniteManualGateDFailure(claimed.failure, {
+      plan: value.plan,
+      authorization: value.authorization,
+      invocation_claim: claimed.failure.body.invocation_claim,
+      expected_plan_trust_root_sha256:
+        value.authority.public_key_fingerprint_sha256,
+      expected_source_commit: SOURCE_COMMIT,
+      expected_source_tree_sha256: SOURCE_TREE,
+      expected_provider_profile_manifest_sha256:
+        LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    });
   });
 
   it("refuses a structurally identical but nominally untrusted adapter", async () => {
@@ -394,7 +434,7 @@ describe("LC4 xAI finite-manual Gate D", () => {
         LC4_XAI_FINITE_MANUAL_GATE_D_PRODUCTION_BINDING_SHA256,
       execute: paid,
     } as unknown as Lc4XaiFiniteManualGateDProductionAdapter));
-    await expect(executeLc4XaiFiniteManualGateD({
+    const execution = executeLc4XaiFiniteManualGateD({
       plan: value.plan,
       authorization: value.authorization,
       terminal_signer: value.terminal,
@@ -411,7 +451,20 @@ describe("LC4 xAI finite-manual Gate D", () => {
         value.authority.public_key_fingerprint_sha256,
       invocation_marker_path: marker,
       construct_production_adapter: construct,
-    })).rejects.toThrow(/exact frozen production provider adapter path/u);
+    });
+    const failure = await execution.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(
+      Lc4XaiFiniteManualGateDClaimedFailureError,
+    );
+    const claimed = failure as Lc4XaiFiniteManualGateDClaimedFailureError;
+    expect(claimed.message).not.toContain("provider adapter");
+    expect(claimed.failure.body).toMatchObject({
+      status: "failed",
+      failure_stage: "adapter_construction",
+      failure_class: "provider_protocol",
+      adapter_construction_sha256: null,
+      candidate_pass_receipt_sha256: null,
+    });
     expect(construct).toHaveBeenCalledTimes(1);
     expect(await readFile(marker, "utf8"))
       .toContain("claimed_before_provider_adapter_construction");

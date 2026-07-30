@@ -1570,3 +1570,45 @@ qualification, and complete six-cell DEV run are required.
 - Spend delta: **$11.50** conservative settlement
 - Current post-baseline conservative exposure: **$133.00**
 - Active reservations: **$0.00**
+
+## 2026-07-29 — Claimed Gate D failures became replayable terminal evidence
+
+The clean source `f538fb2c051e317379e2d1bfa3461357f1da34b4` passed the
+exact-source ASR receipt, 3,307-test web matrix, claim gate, production build,
+dependency lock audit, gateway fault replay, and public worktree/history
+secret audits. Its one-shot xAI Gate D then claimed invocation
+`98c4d37a81bbea1d4200a0fd9966bdf80ac74513036b42a17354e73aee4d69ec`
+and stopped without a passing receipt. A bounded credential-entitlement check
+identified the retained xAI-only key as invalid. Qualification and DEV
+remained closed, so this is not model-performance evidence and produces no
+benchmark score or graph. The root is immutable and its `$1.00` authority is
+conservatively settled.
+
+The failure exposed a real operator gap: pre-hardening Gate D preserved the
+private invocation marker but not a replayable terminal failure artifact.
+The remediation keeps the passing Gate D v4 receipt unchanged and adds a
+success-incompatible, terminal-key-signed `gate-d-failure.json`. It binds the
+full invocation claim and physical marker custody, exact source/profile/
+transport, precise lifecycle stage, a closed failure class, a nonce-salted
+detail commitment, and exact `$1 / $1 / $0` budget state without retaining the
+raw error, stack, PCM, credential, partial wire evidence, provider IDs, or
+local paths. Provider authentication rejection is distinct from local
+preflight, transport, and protocol failures, and the serialized failure
+artifact is capped at 256 KiB before parsing.
+
+Only the process that successfully created the marker can seal the failure.
+`run`/`report` use exit code `2` for a verified claimed failure; malformed,
+conflicting, racing, or unsealed roots remain exit code `1`; passing evidence
+alone is exit code `0`. Status distinguishes `failed`, `claimed_unsealed`, and
+`terminal_conflict`, and retry authority is false for every claimed root.
+Provider-free tests cover pass/failure coexistence, racing marker ownership,
+failure-file collision, terminal signature/privacy, and independently
+re-signed semantic mutations. The focused Gate D/publication matrix passes
+**37/37**; the complete web matrix passes **3,313/3,313** executed tests with
+**85** inventoried skips. TypeScript
+and ESLint pass. No provider call was made by the hardening.
+
+- Spend delta: **$1.00** conservative Gate D settlement
+- Current post-baseline conservative exposure: **$134.00**
+- Active reservations: **$0.00**
+- Publication status: **blocked; no score and no graph**

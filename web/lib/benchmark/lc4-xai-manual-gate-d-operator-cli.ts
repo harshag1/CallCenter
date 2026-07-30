@@ -38,14 +38,21 @@ import {
 import {
   LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD,
   LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PCM_BYTES,
+  assertLc4XaiFiniteManualGateDAuthorization,
+  assertLc4XaiFiniteManualGateDFailure,
   assertLc4XaiFiniteManualGateDPlan,
   assertLc4XaiFiniteManualGateDReceipt,
   createLc4XaiFiniteManualGateDAuthorization,
+  createLc4XaiFiniteManualGateDFailure,
   createLc4XaiFiniteManualGateDPlan,
   createLc4XaiFiniteManualGateDSigner,
   executeLc4XaiFiniteManualGateD,
   lc4XaiFiniteManualGateDInvocationMarkerBytes,
+  recoverLc4XaiFiniteManualGateDInvocationClaim,
+  Lc4XaiFiniteManualGateDClaimedFailureError,
   type Lc4XaiFiniteManualGateDAuthorizationArtifact,
+  type Lc4XaiFiniteManualGateDFailureArtifact,
+  type Lc4XaiFiniteManualGateDInvocationClaim,
   type Lc4XaiFiniteManualGateDPlanArtifact,
   type Lc4XaiFiniteManualGateDProductionAdapter,
   type Lc4XaiFiniteManualGateDReceipt,
@@ -54,6 +61,7 @@ import {
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAXIMUM_JSON_BYTES = 16 * 1024 * 1024;
+const MAXIMUM_FAILURE_JSON_BYTES = 256 * 1024;
 const MAXIMUM_PRIVATE_KEY_BYTES = 64 * 1024;
 const MAXIMUM_ENV_BYTES = 1024 * 1024;
 const MAXIMUM_PCM_BYTES = LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_PCM_BYTES;
@@ -65,6 +73,7 @@ export const LC4_XAI_GATE_D_OPERATOR_FILES = Object.freeze({
   plan: "gate-d-plan.json",
   authorization: "gate-d-authorization.json",
   invocation: "gate-d-invocation.json",
+  failure: "gate-d-failure.json",
   receipt: "gate-d-receipt.json",
 } as const);
 
@@ -214,11 +223,15 @@ async function readStableRegularFile(
   }
 }
 
-async function readJson<Value>(path: string, label: string): Promise<Value> {
+async function readJson<Value>(
+  path: string,
+  label: string,
+  maximumBytes = MAXIMUM_JSON_BYTES,
+): Promise<Value> {
   const file = await readStableRegularFile(
     path,
     label,
-    MAXIMUM_JSON_BYTES,
+    maximumBytes,
     false,
   );
   try {
@@ -256,6 +269,30 @@ async function assertInvocationMarkerCustody(
     throw new Error("Gate D invocation marker bytes are not canonical");
   }
 }
+
+async function recoverInvocationClaim(
+  path: string,
+  plan: Lc4XaiFiniteManualGateDPlanArtifact,
+  authorization: Lc4XaiFiniteManualGateDAuthorizationArtifact,
+): Promise<Lc4XaiFiniteManualGateDInvocationClaim> {
+  const marker = await readStableRegularFile(
+    path,
+    "Gate D invocation marker",
+    MAXIMUM_JSON_BYTES,
+    true,
+  );
+  return recoverLc4XaiFiniteManualGateDInvocationClaim({
+    marker_bytes: marker.bytes,
+    marker_device: marker.device,
+    marker_inode: marker.inode,
+    marker_nlink: marker.nlink,
+    marker_permission_mode: marker.permission_mode,
+    plan,
+    authorization,
+  });
+}
+
+class GateDSealedFailureError extends Error {}
 
 async function loadSigner(
   path: string,
@@ -415,36 +452,6 @@ function credentialIdentity(apiKey: string): string {
   return sha256Hex(`${CREDENTIAL_IDENTITY_DOMAIN}${apiKey}`);
 }
 
-function gateDExecutionFailureClass(error: unknown):
-  | "preflight_contract"
-  | "provider_transport"
-  | "manual_turn_causality"
-  | "tool_roundtrip_causality"
-  | "audio_output_contract"
-  | "provider_protocol"
-  | "unknown" {
-  const message = error instanceof Error ? error.message : "";
-  if (/credential|authorization|source|caller PCM|terminal signer/iu.test(message)) {
-    return "preflight_contract";
-  }
-  if (/connect|connection|socket|timed out|timeout/iu.test(message)) {
-    return "provider_transport";
-  }
-  if (/commit|manual turn|speech telemetry/iu.test(message)) {
-    return "manual_turn_causality";
-  }
-  if (/tool|gateway|continuation/iu.test(message)) {
-    return "tool_roundtrip_causality";
-  }
-  if (/PCM|audio/iu.test(message)) {
-    return "audio_output_contract";
-  }
-  if (/wire|response|identity|terminal|provider/iu.test(message)) {
-    return "provider_protocol";
-  }
-  return "unknown";
-}
-
 async function loadXaiCredentialFromEnvironment(): Promise<string> {
   const direct = process.env.XAI_API_KEY;
   const envFilePath = process.env.BENCHMARK_PROVIDER_ENV_FILE;
@@ -489,6 +496,7 @@ function paths(root: string) {
       LC4_XAI_GATE_D_OPERATOR_FILES.authorization,
     ),
     invocation: join(root, LC4_XAI_GATE_D_OPERATOR_FILES.invocation),
+    failure: join(root, LC4_XAI_GATE_D_OPERATOR_FILES.failure),
     receipt: join(root, LC4_XAI_GATE_D_OPERATOR_FILES.receipt),
   });
 }
@@ -682,6 +690,16 @@ async function commandRun(
   if (await exists(output.receipt)) {
     throw new Error("Gate D receipt already exists; run cannot be repeated");
   }
+  if (await exists(output.failure)) {
+    throw new Error(
+      "Gate D failure artifact already exists; run cannot be retried",
+    );
+  }
+  if (await exists(output.invocation)) {
+    throw new Error(
+      "Gate D invocation marker already exists; run cannot be retried",
+    );
+  }
   const source = await dependencies.inspect_source(repositoryRoot);
   const [plan, authorization, terminal, callerPcm, apiKey] =
     await Promise.all([
@@ -718,19 +736,120 @@ async function commandRun(
       construct_production_adapter: () => dependencies.create_adapter(apiKey),
     });
   } catch (error) {
+    if (error instanceof Lc4XaiFiniteManualGateDClaimedFailureError) {
+      const failure = error.failure;
+      try {
+        const invocationClaim = await recoverInvocationClaim(
+          output.invocation,
+          plan,
+          authorization,
+        );
+        assertLc4XaiFiniteManualGateDFailure(failure, {
+          plan,
+          authorization,
+          invocation_claim: invocationClaim,
+          expected_plan_trust_root_sha256: expectedTrust,
+          expected_source_commit: source.source_commit,
+          expected_source_tree_sha256: source.source_tree_sha256,
+          expected_provider_profile_manifest_sha256:
+            LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+        });
+        await reassertEvidenceRoot(root);
+        await writeFresh(
+          output.failure,
+          failure,
+          "Gate D failure artifact",
+        );
+        await reassertEvidenceRoot(root);
+        throw new GateDSealedFailureError(
+          "Gate D one-shot execution failed after invocation was claimed; "
+          + "a terminal-signed sanitized failure artifact was sealed, "
+          + "the $1 authority is conservatively settled, and this evidence root cannot be retried; "
+          + `failure_class=${failure.body.failure_class}; `
+          + `failure_artifact_sha256=${failure.artifact_sha256}`,
+        );
+      } catch (failureError) {
+        if (failureError instanceof GateDSealedFailureError) {
+          throw failureError;
+        }
+        throw new Error(
+          "Gate D one-shot execution failed after invocation was claimed; "
+          + "the $1 authority is conservatively settled and this evidence root cannot be retried; "
+          + "sanitized_failure_artifact=not_sealed",
+        );
+      }
+    }
     if (await exists(output.invocation)) {
       throw new Error(
-        "Gate D one-shot execution did not pass after invocation was claimed; "
-        + "the $1 authority is conservatively settled and this evidence root cannot be retried; "
-        + `failure_class=${gateDExecutionFailureClass(error)}`,
-        { cause: error },
+        "Gate D invocation was claimed but no replayable terminal artifact "
+        + "could be sealed; the $1 authority is conservatively settled and "
+        + "this root cannot be retried",
       );
     }
     throw error;
   }
   await reassertEvidenceRoot(root);
   await assertInvocationMarkerCustody(output.invocation, receipt);
-  await writeFresh(output.receipt, receipt, "Gate D receipt");
+  try {
+    await writeFresh(output.receipt, receipt, "Gate D receipt");
+  } catch (error) {
+    if (await exists(output.receipt)) {
+      throw new Error(
+        "Gate D passing receipt persistence is conflicted; "
+        + "the claimed root cannot be retried or terminalized as failed",
+      );
+    }
+    try {
+      const failure = createLc4XaiFiniteManualGateDFailure({
+        plan,
+        authorization,
+        invocation_claim: receipt.invocation_claim,
+        terminal_signer: terminal,
+        failed_at: io.now().toISOString(),
+        failure_stage: "success_receipt_persistence",
+        failure_class: "local_custody",
+        failure_detail: error instanceof Error
+          ? Object.freeze({ name: error.name, message: error.message })
+          : Object.freeze({
+              name: "NonErrorThrow",
+              message: "non_error_gate_d_failure",
+            }),
+        adapter_construction_sha256:
+          receipt.adapter_construction.construction_sha256,
+        candidate_pass_receipt_sha256: receipt.receipt_sha256,
+        expected_plan_trust_root_sha256: expectedTrust,
+      });
+      assertLc4XaiFiniteManualGateDFailure(failure, {
+        plan,
+        authorization,
+        invocation_claim: receipt.invocation_claim,
+        expected_plan_trust_root_sha256: expectedTrust,
+        expected_source_commit: source.source_commit,
+        expected_source_tree_sha256: source.source_tree_sha256,
+        expected_provider_profile_manifest_sha256:
+          LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      });
+      await writeFresh(
+        output.failure,
+        failure,
+        "Gate D failure artifact",
+      );
+      throw new GateDSealedFailureError(
+        "Gate D passing execution could not persist its receipt; "
+        + "a terminal-signed sanitized local-custody failure was sealed, "
+        + "the $1 authority is conservatively settled, and this evidence root cannot be retried; "
+        + `failure_artifact_sha256=${failure.artifact_sha256}`,
+      );
+    } catch (failureError) {
+      if (failureError instanceof GateDSealedFailureError) {
+        throw failureError;
+      }
+      throw new Error(
+        "Gate D passing receipt and sanitized failure persistence both failed; "
+        + "the claimed root cannot be retried",
+      );
+    }
+  }
   await reassertEvidenceRoot(root);
   io.stdout(canonicalJson({
     action: "lc4-xai-gate-d-passed",
@@ -758,7 +877,7 @@ async function commandReport(
   parsed: Readonly<Record<string, string>>,
   io: Io,
   dependencies: Dependencies,
-): Promise<void> {
+): Promise<"passed" | "failed"> {
   exactFlags(parsed, [
     "--repository-root",
     "--evidence-root",
@@ -776,6 +895,77 @@ async function commandReport(
   const output = paths(root.path);
   const expectedTrust = trustRoot(parsed["--trust-root-fingerprint"]!);
   const source = await dependencies.inspect_source(repositoryRoot);
+  const [hasReceipt, hasFailure] = await Promise.all([
+    exists(output.receipt),
+    exists(output.failure),
+  ]);
+  if (hasReceipt && hasFailure) {
+    throw new Error(
+      "Gate D root contains contradictory passing and failing terminals",
+    );
+  }
+  if (hasFailure) {
+    const [plan, authorization, failure] = await Promise.all([
+      requireCurrentPlan({
+        path: output.plan,
+        trust_root: expectedTrust,
+        source,
+      }),
+      readJson<Lc4XaiFiniteManualGateDAuthorizationArtifact>(
+        output.authorization,
+        "Gate D authorization",
+      ),
+      readJson<Lc4XaiFiniteManualGateDFailureArtifact>(
+        output.failure,
+        "Gate D failure artifact",
+        MAXIMUM_FAILURE_JSON_BYTES,
+      ),
+    ]);
+    assertLc4XaiFiniteManualGateDAuthorization({
+      authorization,
+      plan,
+      expected_plan_trust_root_sha256: expectedTrust,
+    });
+    const invocationClaim = await recoverInvocationClaim(
+      output.invocation,
+      plan,
+      authorization,
+    );
+    assertLc4XaiFiniteManualGateDFailure(failure, {
+      plan,
+      authorization,
+      invocation_claim: invocationClaim,
+      expected_plan_trust_root_sha256: expectedTrust,
+      expected_source_commit: source.source_commit,
+      expected_source_tree_sha256: source.source_tree_sha256,
+      expected_provider_profile_manifest_sha256:
+        LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    });
+    await reassertEvidenceRoot(root);
+    io.stdout(canonicalJson({
+      action: "lc4-xai-gate-d-report",
+      status: "failed",
+      verification: "verified",
+      failure_artifact_sha256: failure.artifact_sha256,
+      source_commit: failure.body.source_commit,
+      failure_stage: failure.body.failure_stage,
+      failure_class: failure.body.failure_class,
+      failure_detail_sha256: failure.body.failure_detail_sha256,
+      retry_permitted: false,
+      reserved_micro_usd: failure.body.budget.reserved_micro_usd,
+      conservatively_settled_micro_usd:
+        failure.body.budget.conservatively_settled_micro_usd,
+      active_micro_usd: failure.body.budget.active_micro_usd,
+      claim_boundary: failure.body.claim_boundary,
+      efficacy_scored: false,
+      provider_calls_made_by_report: 0,
+      contains_raw_error_credentials_or_audio: false,
+    }));
+    return "failed";
+  }
+  if (!hasReceipt) {
+    throw new Error("Gate D root has no passing or failing terminal artifact");
+  }
   const receipt = await readJson<Lc4XaiFiniteManualGateDReceipt>(
     output.receipt,
     "Gate D receipt",
@@ -812,6 +1002,7 @@ async function commandReport(
     provider_calls_made_by_report: 0,
     contains_credentials_or_raw_audio: false,
   }));
+  return "passed";
 }
 
 async function commandStatus(
@@ -846,22 +1037,29 @@ async function commandStatus(
     plan: await exists(output.plan),
     authorization: await exists(output.authorization),
     invocation: await exists(output.invocation),
+    failure: await exists(output.failure),
     receipt: await exists(output.receipt),
   });
   let state:
     | "empty"
     | "prepared"
     | "authorized"
-    | "claimed_without_passing_receipt"
+    | "claimed_unsealed"
+    | "failed"
+    | "terminal_conflict"
     | "passed";
-  if (present.receipt) state = "passed";
-  else if (present.invocation) state = "claimed_without_passing_receipt";
+  if (present.receipt && present.failure) state = "terminal_conflict";
+  else if (present.receipt) state = "passed";
+  else if (present.failure) state = "failed";
+  else if (present.invocation) state = "claimed_unsealed";
   else if (present.authorization) state = "authorized";
   else if (present.plan) state = "prepared";
   else state = "empty";
   let verification: "verified" | "not_applicable" | "not_verified" =
     state === "empty" ? "not_applicable" : "not_verified";
   let receiptSha256: string | null = null;
+  let failureArtifactSha256: string | null = null;
+  let failureClass: string | null = null;
   if (state === "passed" && source) {
     try {
       const receipt = await readJson<Lc4XaiFiniteManualGateDReceipt>(
@@ -880,6 +1078,52 @@ async function commandStatus(
       receiptSha256 = receipt.receipt_sha256;
     } catch {
       verification = "not_verified";
+      state = "claimed_unsealed";
+    }
+  } else if (state === "failed" && source) {
+    try {
+      const [plan, authorization, failure] = await Promise.all([
+        requireCurrentPlan({
+          path: output.plan,
+          trust_root: expectedTrust,
+          source,
+        }),
+        readJson<Lc4XaiFiniteManualGateDAuthorizationArtifact>(
+          output.authorization,
+          "Gate D authorization",
+        ),
+        readJson<Lc4XaiFiniteManualGateDFailureArtifact>(
+          output.failure,
+          "Gate D failure artifact",
+          MAXIMUM_FAILURE_JSON_BYTES,
+        ),
+      ]);
+      assertLc4XaiFiniteManualGateDAuthorization({
+        authorization,
+        plan,
+        expected_plan_trust_root_sha256: expectedTrust,
+      });
+      const invocationClaim = await recoverInvocationClaim(
+        output.invocation,
+        plan,
+        authorization,
+      );
+      assertLc4XaiFiniteManualGateDFailure(failure, {
+        plan,
+        authorization,
+        invocation_claim: invocationClaim,
+        expected_plan_trust_root_sha256: expectedTrust,
+        expected_source_commit: source.source_commit,
+        expected_source_tree_sha256: source.source_tree_sha256,
+        expected_provider_profile_manifest_sha256:
+          LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+      });
+      verification = "verified";
+      failureArtifactSha256 = failure.artifact_sha256;
+      failureClass = failure.body.failure_class;
+    } catch {
+      verification = "not_verified";
+      state = "claimed_unsealed";
     }
   } else if ((state === "prepared" || state === "authorized") && source) {
     try {
@@ -903,8 +1147,11 @@ async function commandStatus(
     source_commit: source?.source_commit ?? null,
     files_present: present,
     receipt_sha256: receiptSha256,
-    retry_permitted: state !== "claimed_without_passing_receipt"
-      && state !== "passed",
+    failure_artifact_sha256: failureArtifactSha256,
+    failure_class: failureClass,
+    retry_permitted: !present.invocation
+      && !present.failure
+      && !present.receipt,
     maximum_total_micro_usd:
       LC4_XAI_FINITE_MANUAL_GATE_D_MAXIMUM_MICRO_USD,
     required_paid_environment: [
@@ -948,7 +1195,8 @@ export async function runLc4XaiManualGateDOperatorCli(
     } else if (command === "run") {
       await commandRun(parsed, io, dependencies);
     } else if (command === "report") {
-      await commandReport(parsed, io, dependencies);
+      const result = await commandReport(parsed, io, dependencies);
+      if (result === "failed") return 2;
     } else {
       throw new Error("usage: lc4-xai-gate-d <status|prepare|authorize|run|report>");
     }
@@ -957,6 +1205,7 @@ export async function runLc4XaiManualGateDOperatorCli(
     io.stderr(error instanceof Error
       ? error.message
       : "Gate D operator refused");
+    if (error instanceof GateDSealedFailureError) return 2;
     return 1;
   }
 }

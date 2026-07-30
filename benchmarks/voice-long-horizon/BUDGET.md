@@ -966,3 +966,38 @@ If fully charged, ordinary post-baseline exposure becomes **$152.00**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$167.00**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.
+
+## 2026-07-29 — Gate D credential refusal at `f538fb2`
+
+The fresh exact-source Gate D root
+`/private/tmp/hacc-lc4-gated-f538fb2-20260730T044150Z` consumed its one-shot
+invocation marker and failed before producing a passing receipt. A separate
+credential-entitlement check returned xAI's `invalid-argument` response for
+the retained xAI-only key, so the failure is operational access evidence, not
+voice-model or harness efficacy evidence. The root is immutable,
+non-admissible, and cannot be retried. Qualification and DEV were not started.
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | claimed without a passing receipt; retained key rejected; no retry |
+| Three-provider qualification | **$0.00** | not authorized |
+| Six-cell DEV | **$0.00** | not prepared or authorized |
+
+Current ordinary post-baseline conservative exposure is therefore
+**$134.00**, filesystem-ledger settlements remain separately reported, and
+active liability is **$0.00**. A new clean source produced by the claimed-
+failure evidence hardening still requires a fresh **$19.00 maximum** sequence:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$153.00**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$168.00**, still below the strict `< $250.00` ceiling.
+A claimed Gate D failure always settles its entire local `$1.00` authority;
+that is conservative authorization accounting, not provider invoice
+reconciliation.

@@ -210,6 +210,14 @@ Publication fails unless all six cells complete all 360 registered
 opportunities, every authority artifact is scoreable, and exact-source xAI
 Gate D replays as transport-only qualification evidence.
 
+Only a verified `gate-d-receipt.json` with `status:"passed"` is admissible.
+The success-incompatible `gate-d-failure.json` is useful operational evidence
+but can never substitute for that receipt, unlock DEV preflight, or enter a
+public result. A claimed-but-unsealed root and any root containing both passing
+and failing terminals also fail publication. This boundary prevents a
+terminal-signed provider error, local custody failure, or conservative budget
+settlement from being misrepresented as transport compatibility.
+
 Gate D is client-observed, operator-signed transport evidence rather than a
 provider attestation. Non-empty PCM capture proves transport bytes, not human
 audibility or completed listener playback, and its `$1.00` settlement is a
