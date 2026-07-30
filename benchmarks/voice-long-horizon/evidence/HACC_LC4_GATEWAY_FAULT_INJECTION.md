@@ -2,8 +2,8 @@
 
 **Mechanism evidence only. This is not provider efficacy, model quality, acoustic quality, or production safety evidence.**
 
-Artifact: `3467973cc6b11d41fecb5de6ad92961caf75076d681a8555a3c7389060d153c7`
-Firewall source: `ab3d2ef634e0947aa719610c6e4818762f75d16d`  
+Artifact: `7737570f5eabc3ed5d2c74df02c67b5d62d9d8463e4edb2bf1751f1aa24d7402`
+Firewall source: `f45febe6f237d993bd9e222ae04cb7af740bbdb5`
 Bridge: `lc4-dev-gateway-bridge-v5`
 
 ## Exact results

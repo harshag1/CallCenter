@@ -30,7 +30,7 @@ const ARTIFACT_DOMAIN =
 const AUTHORITY_PROJECTION_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
 const FIREWALL_SOURCE_COMMIT =
-  "ab3d2ef634e0947aa719610c6e4818762f75d16d";
+  "f45febe6f237d993bd9e222ae04cb7af740bbdb5";
 const HASH = "a".repeat(64);
 const CONTINUATION_CONTROL =
   "<hacc_response_plan>{\"fault_fixture\":\"current_control\"}</hacc_response_plan>";
@@ -839,7 +839,7 @@ export function renderLc4GatewayFaultInjectionMarkdown(
     "**Mechanism evidence only. This is not provider efficacy, model quality, acoustic quality, or production safety evidence.**",
     "",
     `Artifact: \`${artifact.artifact_sha256}\``,
-    `Firewall source: \`${artifact.firewall_source_commit}\`  `,
+    `Firewall source: \`${artifact.firewall_source_commit}\``,
     `Bridge: \`${artifact.firewall_bridge_version}\``,
     "",
     "## Exact results",
