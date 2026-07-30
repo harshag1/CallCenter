@@ -6,12 +6,12 @@
   $250.00 USD**
 - Next declared release sequence: **$19.00 USD maximum** (`$1` fresh-source
   Gate D + `$3` fresh-source qualification + `$15` one-shot six-cell DEV)
-- Post-baseline conservative paid-provider exposure: **$49.50 USD**
-- Post-baseline maximum after the next declared sequence: **$68.50 USD**
+- Post-baseline conservative paid-provider exposure: **$110.00 USD**
+- Post-baseline maximum after the next declared sequence: **$129.00 USD**
 - Ultra-conservative post-baseline maximum including frozen authority:
-  **$83.50 USD**
+  **$144.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$120.50 USD**
+- LC4 conservative filesystem-ledger settlements: **$181.00 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$4.379655 USD**, including the separate
@@ -25,17 +25,18 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-Immutable roots have now conservatively charged **$49.50** after that baseline,
+Immutable roots have now conservatively charged **$110.00** after that baseline,
 with **$0.00** active. Only one new **$19.00** sequence is authorized:
 fresh-source Gate D, qualification, and one-shot six-cell DEV. That would bound
-the ordinary post-baseline total at **$68.50**. Even adding the separate,
+the ordinary post-baseline total at **$129.00**. Even adding the separate,
 frozen, non-reusable **$15.00** authority produces an ultra-conservative
-**$83.50**, still below the user's remaining-work ceiling. The frozen authority
+**$144.00**, still below the user's remaining-work ceiling. The frozen authority
 cannot fund a run and is not a settlement or invoice.
 
 No paid session in the next sequence may open until a new clean source commit,
-fresh source-bound ASR receipt, provider-free history-ID regression tests, and
-whitespace-transcript causal-classification tests all pass.
+fresh source-bound ASR receipt, provider-free timeout/partial-output evidence
+regressions, history-ID regression tests, and whitespace-transcript
+causal-classification tests all pass.
 No other provider session may be scheduled without a new dated authorization
 entry. The prior `$1,000 / $900 / $100 / $270` program ceilings are historical,
 superseded planning authority; they do not authorize current work. Auxiliary
@@ -137,10 +138,10 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 - **Active reservations in terminal ledgers: $0.00; separately quarantined
   nonterminal reservation authority: $15.00 maximum**
 - **Next declared release sequence: $19.00 maximum**
-- **Post-baseline conservative paid-provider exposure: $49.50**
-- **Post-baseline maximum after the next sequence: $68.50**
+- **Post-baseline conservative paid-provider exposure: $110.00**
+- **Post-baseline maximum after the next sequence: $129.00**
 - **Ultra-conservative post-baseline maximum including frozen authority:
-  $83.50**
+  $144.00**
 - **Current remaining-work hard ceiling: strictly less than $250.00**
 - **Post-baseline paid-provider exposure at epoch entry: $0.00**
 
@@ -160,7 +161,7 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $4.379655**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $120.50; these are pessimistic
+- **Cumulative LC4 conservative settlements: $181.00; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
@@ -814,4 +815,51 @@ suite, public audits, and fresh exact-source ASR receipt all pass:
 If fully charged, ordinary post-baseline exposure becomes **$117.50**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$132.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.
+
+## 2026-07-29 — Source `ddc25e1` qualified; DEV terminalized at 131/360
+
+The exact-source Gate D and qualification at
+`ddc25e14afd8656bc17ecaa6d2d1808187fb994a` both passed. The one-shot DEV
+run completed both OpenAI cells and eleven Gemini HACC opportunities:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 131/360 opportunities completed, 0 paid retries |
+
+The DEV budget evidence/head are
+`57f1c9b78ce8b47f9b6ea98dd3e8c4d13e2caf95abd60967d0111f87b9f27f68`
+and
+`e331b83a4d9aad3b9f7f66a5f609627830550d17fb4678ecf67131a28308e632`.
+OpenAI Native, OpenAI HACC, and Gemini HACC settled at **$2.50** each.
+The other reservations were cancelled and active liability ended at
+**$0.00**.
+
+The immutable report is
+`8a17bf085c6dde63bb854f872f3132091e48411ebd2cdbb1df671a8cbf0488e7`
+(file SHA-256
+`e3c8b2422252180dff132ebf52a6f83e20865d6721b52e322649e0a44c431d76`).
+It is incomplete, unscorable, and ineligible for a comparative claim or
+graph. The failed root is immutable and cannot be retried.
+
+Current post-baseline conservative exposure is **$110.00**, and LC4
+filesystem-ledger settlements total **$181.00**, with **$0.00 active**.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the provider-response timing and partial-output failure-evidence
+repairs, regression suite, public audits, and fresh exact-source ASR receipt
+all pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$129.00**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$144.00**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.

@@ -1254,3 +1254,82 @@ The failed-run report is
 It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and is unscorable. Nothing from this root may
 populate a comparative score or graph.
+
+## 2026-07-29 DEV terminal at source `ddc25e1`
+
+**Failed closed after 131/360 completed opportunities. No efficacy score is
+admissible.**
+
+The exact-source release gates passed before the DEV run:
+
+- xAI Gate D receipt/trust:
+  `51a96a2af26ba0c5a4f177f2173d2d55d9ff2ecb2735a2857ce4150e24e5fdd3`
+  /
+  `7a63cb20f26635455b680dd925796644d0f2a2e5e897f4dc3d38fc473d0407e6`;
+- qualification terminal/trust:
+  `a08762941ff39905239f2b9a33d218b1b2c66e4e06075581973d3792ad9a1d64`
+  /
+  `837bdb59cdd7d396bbbd4a1bd3befa67edc8925f37de81d669249db33882345d`;
+- qualification provider sessions/paid sessions/generation phases/tool
+  roundtrips: **6/3/6/3**; and
+- qualification retries/settlement/active: **0 / $3.00 / $0.00**.
+
+The DEV execution root
+`/private/tmp/hacc-lc4-dev-release-20260730T000705Z` retained:
+
+- run/package:
+  `0b25e7d23887f6d7713f1b84d13fbecc59dc4ad326c163d579302ccd6525ab73`
+  /
+  `4899dd37f8900cdaa2cdebb88b7d3cede2c4b16570d932405f822827a94da68c`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **132/131**;
+- generations requested/completed: **140/139**;
+- provider calls/repair playbacks: **139/8**;
+- paid retries: **0**; and
+- DEV settlement/active: **$7.50 / $0.00**.
+
+OpenAI Native and OpenAI HACC each completed 60/60 opportunities, including
+both planned history-rotation boundaries. Gemini HACC completed eleven
+opportunities and failed during opportunity 12. The previous opportunity
+retained **2,052,990** PCM bytes, about **42.77 seconds** at 24 kHz mono
+PCM16, and its provider usage frame reported **1,074 output-audio tokens**.
+Opportunity 12 terminalized **52.6 seconds** after submission, strongly
+matching paced caller input followed by the adapter's old **45-second**
+provider-response fuse.
+
+The primary generic failure evidence
+`0c414fdf36fadea4007df7525f91d7b46cc5b4613a3fa7c247391c99812e372f`
+records `unknown / adapter_failure / pre_send_contract`; cleanup evidence
+`73f7a95d0eca8df91a17a690e7157584e058b886d4bc76716daa56ba7e489826`
+is secondary. Those generic fields are an evidence-path defect, not proof that
+no provider boundary was crossed. The run counters record one requested but
+unterminated generation, while the retained prior response establishes that
+valid Gemini speech had already approached the old timeout.
+
+Code review found the detail-loss mechanism: failure evidence required
+`response_terminal_observed` before `assistant_pcm_captured`, even though
+realtime PCM necessarily streams before the terminal frame. A response that
+started, emitted partial audio, and timed out therefore could not serialize
+its honest detailed receipt; the outer runner retained only the generic
+fallback.
+
+The repair:
+
+- increases the provider-neutral response fuse from **45 to 75 seconds**;
+- moves the emergency opportunity watchdog from **700 to 730 seconds**, still
+  beyond paced input, provider control/commit, response, pinned ASR, and
+  evidence-retention owners;
+- permits partial assistant PCM to be retained after a started generation
+  without fabricating the missing terminal;
+- keeps lifecycle operations unique; and
+- expands the wall-clock lease from two to six hours without changing the
+  fixed **$15** paid ceiling, zero-retry rule, or six-cell design.
+
+Focused failure/adapter/runner/budget validation passes **146/146** tests.
+The failed-run report is
+`8a17bf085c6dde63bb854f872f3132091e48411ebd2cdbb1df671a8cbf0488e7`
+(file SHA-256
+`e3c8b2422252180dff132ebf52a6f83e20865d6721b52e322649e0a44c431d76`).
+It reports `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and is unscorable. Nothing from this root may
+populate a comparative score or graph.

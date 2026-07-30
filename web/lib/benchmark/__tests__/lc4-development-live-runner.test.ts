@@ -163,9 +163,9 @@ describe("LC4-DEV timeout ownership", () => {
     expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBeGreaterThanOrEqual(
       LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS,
     );
-    expect(LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS).toBe(688_000);
-    expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBe(700_000);
-    expect(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms).toBe(45_000);
+    expect(LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS).toBe(718_000);
+    expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBe(730_000);
+    expect(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms).toBe(75_000);
     expect(LC4_DEV_TIMEOUT_CONTRACT.listener_asr_ms).toBe(600_000);
   });
 });

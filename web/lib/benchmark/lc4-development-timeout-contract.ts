@@ -9,10 +9,14 @@ export const LC4_DEV_TIMEOUT_CONTRACT = Object.freeze({
   // Frozen corpus maximum is 7,776.25 ms (the op-42 branch rendition).
   maximum_frozen_paced_input_ms: 8_000,
   maximum_provider_control_or_commit_ack_ms: 5_000,
-  provider_response_ms: 45_000,
+  // A retained Gemini 3.1 Flash Live response emitted 2,052,990 PCM bytes
+  // (42.77 seconds at 24 kHz mono PCM16) before its terminal frame. Leave
+  // enough headroom for a similarly sized response to reach the terminal
+  // without converting valid provider output into a local timeout.
+  provider_response_ms: 75_000,
   listener_asr_ms: 600_000,
   post_inner_timeout_evidence_margin_ms: 30_000,
-  opportunity_emergency_watchdog_ms: 700_000,
+  opportunity_emergency_watchdog_ms: 730_000,
 } as const);
 
 export const LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS =

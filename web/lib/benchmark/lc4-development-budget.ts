@@ -30,7 +30,10 @@ export const LC4_DEV_BUDGET_SEGMENTS = 18 as const;
 export const LC4_DEV_BUDGET_RETRIES = 0 as const;
 export const LC4_DEV_BUDGET_RECONNECTS = 0 as const;
 /** Frozen before paid execution. Covers 25.4 min caller audio plus provider turns, ASR, retention, and cleanup. */
-export const LC4_DEV_MAXIMUM_RUN_DURATION_MS = 7_200_000 as const;
+// Six paced, long-horizon voice episodes can legitimately exceed two hours
+// when a provider produces long spoken responses. This is a wall-clock lease
+// only; it does not increase the fixed $15 spend ceiling or permit retries.
+export const LC4_DEV_MAXIMUM_RUN_DURATION_MS = 21_600_000 as const;
 
 const BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-binding/v1\n";
 const EPISODE_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-episode-set/v1\n";

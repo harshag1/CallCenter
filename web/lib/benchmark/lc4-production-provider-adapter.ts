@@ -2575,9 +2575,15 @@ export class Lc4RealtimeProviderBridge {
           failureOperations.push(operation);
         }
       }
-      if (responseStarted) failureOperations.push("response_generation_started");
-      if (terminalObserved) failureOperations.push("response_terminal_observed");
-      if (outputPcm.byteLength > 0) failureOperations.push("assistant_pcm_captured");
+      if (responseStarted && !failureOperations.includes("response_generation_started")) {
+        failureOperations.push("response_generation_started");
+      }
+      if (terminalObserved && !failureOperations.includes("response_terminal_observed")) {
+        failureOperations.push("response_terminal_observed");
+      }
+      if (outputPcm.byteLength > 0 && !failureOperations.includes("assistant_pcm_captured")) {
+        failureOperations.push("assistant_pcm_captured");
+      }
       if (failureInput.operation_order.includes("listener_evidence_handed_off")) {
         failureOperations.push("listener_evidence_handed_off");
       }

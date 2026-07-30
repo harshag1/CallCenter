@@ -1416,3 +1416,43 @@ receipt.
 - Spend delta: **$11.50** maximum conservative settlement
 - Current post-baseline conservative exposure: **$98.50**
 - Active reservations: **$0.00**
+
+## 2026-07-29 — Long streamed responses receive an honest terminal window
+
+Source `ddc25e14afd8656bc17ecaa6d2d1808187fb994a` passed exact-source Gate D
+and three-provider qualification. Its one-shot DEV root completed both
+60-opportunity OpenAI calls and eleven Gemini HACC opportunities before
+terminalizing during opportunity 12:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **132/131**;
+- generations requested/completed: **140/139**;
+- repair playbacks: **8**;
+- paid retries: **0**;
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+This run crossed the prior Gemini next-turn failure at opportunity 2 and
+sustained ten additional caller/model turns. Opportunity 11 produced
+**2,052,990 PCM bytes**—about **42.77 seconds** of 24 kHz mono PCM16—and
+reported **1,074 output-audio tokens**. Opportunity 12 failed 52.6 seconds
+after submission, strongly matching paced input plus the old 45-second
+provider-response timeout.
+
+The retained detail collapsed to a generic adapter failure because the failure
+schema incorrectly required a response terminal before partial streamed audio
+could be recorded. Realtime audio arrives before the terminal by design. The
+repair now binds partial output to a started generation without inventing a
+terminal, keeps lifecycle operations unique, and raises the provider-neutral
+response fuse to 75 seconds. The emergency watchdog remains outside every
+inner owner at 730 seconds. The run lease is six hours so paced long-form voice
+episodes cannot exhaust a two-hour local wall-clock cap; the **$15** ceiling,
+six cells, and zero-retry policy are unchanged.
+
+Focused failure, adapter, runner, and budget tests pass **146/146**; TypeScript
+and scoped ESLint pass. The failed root remains immutable, incomplete, and
+unscorable. A new clean commit, exact-source ASR receipt, Gate D,
+qualification, and all six DEV cells are required.
+
+- Spend delta: **$11.50** maximum conservative settlement
+- Current post-baseline conservative exposure: **$110.00**
+- Active reservations: **$0.00**

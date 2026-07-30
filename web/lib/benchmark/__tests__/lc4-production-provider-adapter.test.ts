@@ -1459,6 +1459,68 @@ class HangingRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class StartedHangingRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => {
+      const responseId = "started-hanging-response";
+      const responseStarted = this.wire(
+        "response.created",
+        { response_id: responseId },
+        "inbound",
+      );
+      this.emit({
+        type: "response.started",
+        provider: this.provider,
+        receivedAtMs: 1,
+        wireType: responseStarted.wireType,
+        responseId,
+        wireObservation: wireReference(responseStarted),
+      });
+    });
+  }
+}
+
+class PartialAudioHangingRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => {
+      const responseId = "partial-audio-hanging-response";
+      const responseStarted = this.wire(
+        "response.created",
+        { response_id: responseId },
+        "inbound",
+      );
+      this.emit({
+        type: "response.started",
+        provider: this.provider,
+        receivedAtMs: 1,
+        wireType: responseStarted.wireType,
+        responseId,
+        wireObservation: wireReference(responseStarted),
+      });
+      const audio = new Uint8Array([1, 0, 2, 0]);
+      const audioObservation = this.wire(
+        "response.audio.delta",
+        { byte_length: audio.byteLength, pcm_sha256: sha256Hex(audio) },
+        "inbound",
+      );
+      this.emit({
+        type: "output.audio",
+        provider: this.provider,
+        receivedAtMs: 2,
+        wireType: audioObservation.wireType,
+        responseId,
+        audio,
+        format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+        wireObservation: wireReference(audioObservation),
+      });
+    });
+  }
+}
+
 class XaiResponseBeforeAckRealtimeClient extends FakeRealtimeClient {
   override commitInputAudio() {
     super.commitInputAudio();
@@ -2136,6 +2198,71 @@ describe("LC4 production realtime adapter bridge", () => {
         response_terminal_observed: false,
         response_completed: false,
       });
+      await caughtFailure(fixture.session.close());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains a provider timeout after response start without duplicating lifecycle operations", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = await openDevFailureFixture({
+        client: new StartedHangingRealtimeClient("openai", []),
+      });
+      const pending = caughtFailure(fixture.session.exchange({
+        opportunity_id: fixture.opportunity_id,
+        caller_pcm: fixture.caller_pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      }));
+      await vi.advanceTimersByTimeAsync(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms);
+      const error = await pending;
+      expect(error.failure).toMatchObject({
+        failure_stage: "provider_wait",
+        failure_code: "provider_response_timeout",
+        failure_class: "timeout",
+        response_generation_requested: true,
+        response_generation_started: true,
+        response_terminal_observed: false,
+        response_completed: false,
+      });
+      expect(error.failure.operation_order.filter(
+        (operation) => operation === "response_generation_started",
+      )).toHaveLength(1);
+      await caughtFailure(fixture.session.close());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains partial streamed assistant PCM when the provider never sends a terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = await openDevFailureFixture({
+        client: new PartialAudioHangingRealtimeClient("openai", []),
+      });
+      const pending = caughtFailure(fixture.session.exchange({
+        opportunity_id: fixture.opportunity_id,
+        caller_pcm: fixture.caller_pcm,
+        response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+      }));
+      await vi.advanceTimersByTimeAsync(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms);
+      const error = await pending;
+      expect(error.failure).toMatchObject({
+        failure_stage: "provider_wait",
+        failure_code: "provider_response_timeout",
+        failure_class: "timeout",
+        response_generation_requested: true,
+        response_generation_started: true,
+        response_terminal_observed: false,
+        response_completed: false,
+        output_pcm_byte_length: 4,
+        output_pcm_chunk_count: 1,
+      });
+      expect(error.failure.output_pcm_sha256).toBe(
+        sha256Hex(new Uint8Array([1, 0, 2, 0])),
+      );
+      expect(error.failure.operation_order).toContain("assistant_pcm_captured");
       await caughtFailure(fixture.session.close());
     } finally {
       vi.useRealTimers();

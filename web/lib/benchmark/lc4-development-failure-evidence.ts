@@ -318,7 +318,11 @@ export function createLc4DevFailureEvidence(input: Lc4DevFailureEvidenceBody): L
     }
   }
   requireBefore("response_generation_started", "response_terminal_observed");
-  requireBefore("response_terminal_observed", "assistant_pcm_captured");
+  // Realtime PCM is streamed before the terminal frame. A timeout can
+  // therefore retain genuine partial assistant audio without ever observing
+  // a response terminal. Bind that audio to a started generation; do not
+  // require the terminal that the failure is specifically proving absent.
+  requireBefore("response_generation_started", "assistant_pcm_captured");
   requireBefore("assistant_pcm_captured", "listener_evidence_handed_off");
   const booleans = [
     input.response_generation_requested,
