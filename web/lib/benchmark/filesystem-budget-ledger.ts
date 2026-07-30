@@ -40,7 +40,7 @@ const PLAN_CONSUMPTION_DOMAIN = "harshas-amazing-call-center/filesystem-budget-l
 const LC4_QUALIFICATION_V3_PLAN_CONSUMPTION_DOMAIN =
   "harshas-amazing-call-center/filesystem-budget-ledger/lc4-qualification-plan-consumption/v3\n";
 const LC4_DEV_SIX_EPISODE_PLAN_CONSUMPTION_DOMAIN =
-  "harshas-amazing-call-center/filesystem-budget-ledger/lc4-dev-six-episode-plan-consumption/v1\n";
+  "harshas-amazing-call-center/filesystem-budget-ledger/lc4-dev-six-episode-plan-consumption/v3\n";
 const EMPTY_HASH = "0".repeat(64);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
@@ -58,7 +58,7 @@ const LC4_QUALIFICATION_V3_TOOL_ROUNDTRIPS = 3;
 const LC4_QUALIFICATION_V3_RETRIES = 0;
 const LC4_DEV_SIX_EPISODE_MAXIMUM_MICRO_USD = 15_000_000;
 const LC4_DEV_SIX_EPISODE_CELLS = 6;
-const LC4_DEV_SIX_EPISODE_SEGMENTS = 18;
+const LC4_DEV_SIX_EPISODE_SEGMENTS = 36;
 const LC4_DEV_SIX_EPISODE_RETRIES = 0;
 const LC4_DEV_SIX_EPISODE_RECONNECTS = 0;
 const LOCK_MODE = 0o700;

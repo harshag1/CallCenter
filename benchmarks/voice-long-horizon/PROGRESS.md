@@ -1456,3 +1456,58 @@ qualification, and all six DEV cells are required.
 - Spend delta: **$11.50** maximum conservative settlement
 - Current post-baseline conservative exposure: **$110.00**
 - Active reservations: **$0.00**
+
+## 2026-07-29 — Gemini physical-connection lifetime failure isolated
+
+Source `4da599069d846fc84b000fd09e98c09f9ac8287a` cleared the provider-free
+release suite, exact-source ASR receipt, xAI Gate D, and three-provider
+qualification. Its one-shot DEV root completed both 60-opportunity OpenAI
+calls and sixteen Gemini HACC opportunities before opportunity 17 failed:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **137/136**;
+- generations requested/completed: **145/144**;
+- completed repairs: **8**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+Primary evidence
+`29dfb88921a3d2106661d8d76ea3f571a1e39109e81d977961fc11591052f2e6`
+retains the complete **147,244-byte** caller PCM submission and
+**573,630 bytes** of partial assistant PCM across **46 chunks**. The response
+started but never completed. Cleanup evidence
+`d9837631272eede50cfa8fb58688de9adf58e8d0e2e3eb32146c667093318697`
+is secondary.
+
+The timing proves a deterministic local lifecycle boundary. The Gemini socket
+opened at `2026-07-30T01:43:55.651Z`; opportunity 17 failed at
+`2026-07-30T01:53:55.785Z`, **600.134 seconds** later. The production Gemini
+factory configured a ten-minute maximum session duration, and the client
+correctly emitted `session_duration_limit`. This is a transport-schedule
+defect, not model-performance evidence.
+
+The final release repair explicitly preregisters six 10-opportunity physical
+provider sessions for every provider and arm while preserving all 60
+opportunities and the corpus's three semantic acts. Each planned transition
+must remain receipt-chained, losslessly hydrate the exact prior audible/tool
+conversation, count against the 36-session run cap, and use zero retries and
+zero unplanned reconnects. The five preregistered transitions per call are
+planned rotations, not reactive reconnects. The same boundaries in both arms
+prevent the transport repair from becoming an HACC-only treatment.
+
+A proposed four-by-15 schedule was rejected before it could support a result.
+The observed Gemini pace required approximately **8 minutes 51 seconds** for
+15 opportunities, leaving only about **69 seconds** under the local ten-minute
+connection limit for long-response variance, hydration, and transport jitter.
+The six-by-10 schedule is therefore the conservative outcome-informed
+amendment; it changes transport accounting, not the call count, semantic acts,
+or repeated-opportunity estimand.
+
+The immutable failed run/report
+`35bb6b1b916c6207459fb80507a02bfb49e0b850cd5c68e8d372716b1cf119c8`
+/
+`38a3e94ade2a88e27e3a85f3935df6b9e6f89ba05b023bc79174939ab28cdf05`
+remain incomplete and unscorable. No completed cell, comparison, or launch
+graph may be reused. This is an outcome-informed development amendment, so a
+new clean commit, exact-source ASR receipt, Gate D, qualification, and all six
+DEV cells are required.

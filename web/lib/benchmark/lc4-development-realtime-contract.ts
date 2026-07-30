@@ -3,7 +3,11 @@ import type { JsonValue } from "./artifacts";
 import type { Lc4DevReplayArtifactReference } from "./lc4-development-evidence-retention";
 import type { Lc4DevArmBlindRepairProjection } from "./lc4-development-headless-listener-authority";
 import type { Lc4DevRepairDecisionReceipt, Lc4DevRepairPlayback } from "./lc4-development-repair-playback";
-import type { Lc4DevControlReceipt, Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
+import type {
+  Lc4DevControlReceipt,
+  Lc4DevLiveEpisodePlan,
+  Lc4DevProviderSegmentOrdinal,
+} from "./lc4-development-live-runner";
 import type { Lc4PublicDevOpportunity } from "./lc4-public-development-corpus";
 import type { Lc4DevCallerBranchDecision } from "./lc4-development-caller-branch";
 
@@ -65,8 +69,9 @@ export type Lc4DevelopmentRealtimeAdapter = Readonly<{
   maximum_total_micro_usd: number;
   openSegment(input: Readonly<{
     episode: Lc4DevLiveEpisodePlan;
-    segment_ordinal: 1 | 2 | 3;
+    segment_ordinal: Lc4DevProviderSegmentOrdinal;
     previous_rotation_receipt_sha256: string | null;
+    signal?: AbortSignal;
   }>): Promise<Lc4DevelopmentRealtimeSession>;
 }>;
 

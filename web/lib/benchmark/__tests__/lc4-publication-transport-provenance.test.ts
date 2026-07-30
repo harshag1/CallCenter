@@ -27,6 +27,7 @@ import {
   verifyLc4PublicationTransportProvenance,
 } from "../lc4-publication-transport-provenance";
 import {
+  assertLc4PublicationTransportReplay,
   createLc4PublicationTransportReplay,
 } from "../lc4-publication-transport-replay";
 import {
@@ -87,6 +88,9 @@ function transportReplay() {
           ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
           : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
         canonical_provider_exchange_count: 60 as const,
+        provider_session_count: 6 as const,
+        provider_session_replay_set_sha256:
+          H(`${provider}-${arm}-provider-session-replay-set`),
         repair_provider_exchange_count: 0,
         total_response_generation_count: 60,
         canonical_exchange_replay_set_sha256:
@@ -420,10 +424,32 @@ describe("LC4 publication transport provenance custody", () => {
       },
     });
     expect(provenance).toMatchObject({
+      schema_version: 5,
       retained_gate_b_receipt_sha256: H("retained-gate-b"),
       xai_finite_manual_transport_qualification: "verified",
       xai_finite_manual_gate_d_receipt_sha256: receipt.receipt_sha256,
+      opportunity_accounting: {
+        calls: 6,
+        opportunities_per_call: 60,
+        repeated_opportunity_observations: 360,
+        opportunities_are_independent_trials: false,
+      },
+      semantic_accounting: {
+        semantic_acts_per_call: 3,
+        opportunities_per_semantic_act: 20,
+      },
+      transport_accounting: {
+        provider_sessions_per_call: 6,
+        provider_sessions: 36,
+        planned_provider_session_transitions_per_call: 5,
+        planned_provider_session_transitions: 30,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnects: 0,
+      },
+      provider_session_count: 36,
     });
+    expect(provenance.provider_session_replay_set_sha256)
+      .toMatch(/^[a-f0-9]{64}$/u);
     expect(provenance.cells).toHaveLength(6);
     expect(provenance.cells.find((cell) =>
       cell.provider === "gemini" && cell.arm === "native"))
@@ -431,6 +457,14 @@ describe("LC4 publication transport provenance custody", () => {
         transport_purpose: null,
         turn_boundary_control: "client_explicit",
         wire_turn_boundary: "activityStart_audio_activityEnd",
+        semantic_act_count: 3,
+        opportunities_per_semantic_act: 20,
+        provider_session_count: 6,
+        planned_provider_session_transition_count: 5,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnect_count: 0,
+        provider_session_replay_set_sha256:
+          H("gemini-native-provider-session-replay-set"),
         model_identity_verification: "request_only",
         qualification_scope:
           "retained_gate_b_provider_setup_and_spoken_roundtrip",
@@ -451,6 +485,33 @@ describe("LC4 publication transport provenance custody", () => {
         cell.turn_boundary_control === "client_explicit"
         && cell.wire_turn_boundary === profile.turn_boundary)).toBe(true);
     }
+
+    const callsDrift = structuredClone(provenance);
+    (callsDrift.opportunity_accounting as { calls: number }).calls = 24;
+    expect(() => assertLc4PublicationTransportProvenance(callsDrift))
+      .toThrow(/incomplete or inconsistent/u);
+
+    const sessionDrift = structuredClone(provenance);
+    (sessionDrift.transport_accounting as {
+      provider_sessions: number;
+    }).provider_sessions = 30;
+    expect(() => assertLc4PublicationTransportProvenance(sessionDrift))
+      .toThrow(/incomplete or inconsistent/u);
+
+    const cellSessionDrift = structuredClone(provenance);
+    (cellSessionDrift.cells[0] as {
+      provider_session_count: number;
+    }).provider_session_count = 5;
+    expect(() => assertLc4PublicationTransportProvenance(cellSessionDrift))
+      .toThrow(/incomplete or inconsistent/u);
+
+    const sessionReplayDrift = structuredClone(provenance);
+    (sessionReplayDrift.cells[0] as {
+      provider_session_replay_set_sha256: string;
+    }).provider_session_replay_set_sha256 =
+      H("substituted-provider-session-replay-set");
+    expect(() => assertLc4PublicationTransportProvenance(sessionReplayDrift))
+      .toThrow(/incomplete or inconsistent/u);
   });
 
   it("rejects an operator-supplied listener authority root that differs from retained custody", async () => {
@@ -540,6 +601,22 @@ describe("LC4 publication transport provenance custody", () => {
 
   it("rejects a freshly self-hashed alternate profile and per-cell replay substitution", async () => {
     const validReplay = transportReplay();
+    const replaySessionCountDrift = structuredClone(validReplay);
+    (replaySessionCountDrift.episodes[0] as {
+      provider_session_count: number;
+    }).provider_session_count = 5;
+    expect(() =>
+      assertLc4PublicationTransportReplay(replaySessionCountDrift as never))
+      .toThrow(/incomplete, substituted/u);
+
+    const replaySessionRootDrift = structuredClone(validReplay);
+    (replaySessionRootDrift.episodes[0] as {
+      provider_session_replay_set_sha256: string;
+    }).provider_session_replay_set_sha256 =
+      H("substituted-provider-session-replay-set");
+    expect(() =>
+      assertLc4PublicationTransportReplay(replaySessionRootDrift))
+      .toThrow(/incomplete, substituted/u);
     const alternateEpisodes = structuredClone(validReplay.episodes) as Array<{
       transport_profile_sha256: string;
     } & (typeof validReplay.episodes)[number]>;

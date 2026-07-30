@@ -6,9 +6,11 @@ import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
 import {
   LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
 } from "./lc4-development-qualification-v3";
-import type {
-  Lc4DevLivePreflightArtifact,
-  Lc4DevLivePrepareArtifact,
+import {
+  LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+  LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+  type Lc4DevLivePreflightArtifact,
+  type Lc4DevLivePrepareArtifact,
 } from "./lc4-development-live-runner";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
@@ -42,6 +44,8 @@ const LISTENER_INVOCATION_REPLAY_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-listener-invocation-cell-replay-set/v1\n";
 const RESPONSE_GENERATION_REPLAY_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-response-generation-cell-replay-set/v1\n";
+const PROVIDER_SESSION_REPLAY_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-publication-provider-session-cell-replay-set/v1\n";
 
 export const LC4_PUBLICATION_TRANSPORT_PROVIDERS =
   Object.freeze(["openai", "gemini", "xai"] as const);
@@ -52,6 +56,35 @@ export type Lc4PublicationTransportProvider =
   typeof LC4_PUBLICATION_TRANSPORT_PROVIDERS[number];
 export type Lc4PublicationTransportArm =
   typeof LC4_PUBLICATION_TRANSPORT_ARMS[number];
+
+export const LC4_PUBLICATION_OPPORTUNITY_ACCOUNTING = Object.freeze({
+  calls: 6 as const,
+  opportunities_per_call: 60 as const,
+  repeated_opportunity_observations: 360 as const,
+  opportunities_are_independent_trials: false as const,
+});
+
+export const LC4_PUBLICATION_SEMANTIC_ACCOUNTING = Object.freeze({
+  semantic_acts_per_call: 3 as const,
+  opportunities_per_semantic_act: 20 as const,
+});
+
+export const LC4_PUBLICATION_TRANSPORT_ACCOUNTING = Object.freeze({
+  provider_sessions_per_call: LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+  provider_sessions: 36 as const,
+  planned_provider_session_transitions_per_call: 5 as const,
+  planned_provider_session_transitions: 30 as const,
+  opportunities_per_provider_session:
+    LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+  unplanned_reconnects: 0 as const,
+});
+
+export type Lc4PublicationOpportunityAccounting =
+  typeof LC4_PUBLICATION_OPPORTUNITY_ACCOUNTING;
+export type Lc4PublicationSemanticAccounting =
+  typeof LC4_PUBLICATION_SEMANTIC_ACCOUNTING;
+export type Lc4PublicationTransportAccounting =
+  typeof LC4_PUBLICATION_TRANSPORT_ACCOUNTING;
 
 export type Lc4PublicationTransportCell = Readonly<{
   provider: Lc4PublicationTransportProvider;
@@ -66,6 +99,13 @@ export type Lc4PublicationTransportCell = Readonly<{
   transport_profile_sha256: string;
   output_audio_lineage_scope: Lc4PublicationOutputAudioLineageScope;
   canonical_provider_exchange_count: 60;
+  semantic_act_count: 3;
+  opportunities_per_semantic_act: 20;
+  provider_session_count: 6;
+  planned_provider_session_transition_count: 5;
+  opportunities_per_provider_session: 10;
+  unplanned_reconnect_count: 0;
+  provider_session_replay_set_sha256: string;
   repair_provider_exchange_count: number;
   total_response_generation_count: number;
   canonical_exchange_replay_set_sha256: string;
@@ -81,11 +121,16 @@ export type Lc4PublicationTransportCell = Readonly<{
 }>;
 
 export type Lc4PublicationTransportProvenance = Readonly<{
-  schema_version: 3;
+  schema_version: 5;
   provider_profile_manifest_sha256: string;
   development_transport_run_sha256: string;
   development_transport_replay_sha256: string;
+  opportunity_accounting: Lc4PublicationOpportunityAccounting;
+  semantic_accounting: Lc4PublicationSemanticAccounting;
+  transport_accounting: Lc4PublicationTransportAccounting;
   canonical_provider_exchange_count: 360;
+  provider_session_count: 36;
+  provider_session_replay_set_sha256: string;
   repair_provider_exchange_count: number;
   total_response_generation_count: number;
   canonical_exchange_replay_set_sha256: string;
@@ -355,6 +400,27 @@ function responseGenerationReplaySetSha256(
   );
 }
 
+function providerSessionReplaySetSha256(
+  cells: readonly Lc4PublicationTransportCell[],
+): string {
+  return sha256Hex(
+    `${PROVIDER_SESSION_REPLAY_SET_DOMAIN}${canonicalJson(
+      [...cells]
+        .map((cell) => ({
+          provider: cell.provider,
+          arm: cell.arm,
+          provider_session_count: cell.provider_session_count,
+          provider_session_replay_set_sha256:
+            cell.provider_session_replay_set_sha256,
+        }))
+        .sort((left, right) =>
+          `${left.provider}:${left.arm}`.localeCompare(
+            `${right.provider}:${right.arm}`,
+          )),
+    )}`,
+  );
+}
+
 function assertPublishableOutputAudioLineage(input: Readonly<{
   provider: Lc4PublicationTransportProvider;
   scope: string;
@@ -425,6 +491,15 @@ export function createLc4PublicationTransportProvenance(input: Readonly<{
         output_audio_lineage_scope: transport.output_audio_lineage_scope,
         canonical_provider_exchange_count:
           transport.canonical_provider_exchange_count,
+        semantic_act_count: 3 as const,
+        opportunities_per_semantic_act: 20 as const,
+        provider_session_count: LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+        planned_provider_session_transition_count: 5 as const,
+        opportunities_per_provider_session:
+          LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+        unplanned_reconnect_count: 0 as const,
+        provider_session_replay_set_sha256:
+          transport.provider_session_replay_set_sha256,
         repair_provider_exchange_count:
           transport.repair_provider_exchange_count,
         total_response_generation_count:
@@ -450,15 +525,22 @@ export function createLc4PublicationTransportProvenance(input: Readonly<{
       });
     }));
   return freeze({
-    schema_version: 3 as const,
+    schema_version: 5 as const,
     provider_profile_manifest_sha256:
       LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
     development_transport_run_sha256:
       input.transport_replay.run_sha256,
     development_transport_replay_sha256:
       input.transport_replay.replay_sha256,
+    opportunity_accounting: LC4_PUBLICATION_OPPORTUNITY_ACCOUNTING,
+    semantic_accounting: LC4_PUBLICATION_SEMANTIC_ACCOUNTING,
+    transport_accounting: LC4_PUBLICATION_TRANSPORT_ACCOUNTING,
     canonical_provider_exchange_count:
       input.transport_replay.canonical_provider_exchange_count,
+    provider_session_count:
+      input.transport_replay.provider_session_count,
+    provider_session_replay_set_sha256:
+      providerSessionReplaySetSha256(cells),
     repair_provider_exchange_count:
       input.transport_replay.repair_provider_exchange_count,
     total_response_generation_count:
@@ -676,13 +758,18 @@ export function assertLc4PublicationTransportProvenance(
     LC4_PUBLICATION_TRANSPORT_ARMS.map((arm) => `${provider}:${arm}`)).sort();
   const actualKeys = value.cells.map((cell) =>
     `${cell.provider}:${cell.arm}`).sort();
-  if (value.schema_version !== 3
+  if (value.schema_version !== 5
     || !exactKeys(value, [
       "schema_version",
       "provider_profile_manifest_sha256",
       "development_transport_run_sha256",
       "development_transport_replay_sha256",
+      "opportunity_accounting",
+      "semantic_accounting",
+      "transport_accounting",
       "canonical_provider_exchange_count",
+      "provider_session_count",
+      "provider_session_replay_set_sha256",
       "repair_provider_exchange_count",
       "total_response_generation_count",
       "canonical_exchange_replay_set_sha256",
@@ -703,10 +790,38 @@ export function assertLc4PublicationTransportProvenance(
       !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
     || !HASH.test(value.development_transport_run_sha256)
     || !HASH.test(value.development_transport_replay_sha256)
+    || canonicalJson(value.opportunity_accounting)
+      !== canonicalJson(LC4_PUBLICATION_OPPORTUNITY_ACCOUNTING)
+    || canonicalJson(value.semantic_accounting)
+      !== canonicalJson(LC4_PUBLICATION_SEMANTIC_ACCOUNTING)
+    || canonicalJson(value.transport_accounting)
+      !== canonicalJson(LC4_PUBLICATION_TRANSPORT_ACCOUNTING)
+    || value.opportunity_accounting.repeated_opportunity_observations
+      !== value.opportunity_accounting.calls
+        * value.opportunity_accounting.opportunities_per_call
+    || value.semantic_accounting.semantic_acts_per_call
+      * value.semantic_accounting.opportunities_per_semantic_act
+      !== value.opportunity_accounting.opportunities_per_call
+    || value.transport_accounting.provider_sessions
+      !== value.opportunity_accounting.calls
+        * value.transport_accounting.provider_sessions_per_call
+    || value.transport_accounting.planned_provider_session_transitions
+      !== value.opportunity_accounting.calls
+        * value.transport_accounting
+          .planned_provider_session_transitions_per_call
+    || value.transport_accounting.provider_sessions_per_call
+      * value.transport_accounting.opportunities_per_provider_session
+      !== value.opportunity_accounting.opportunities_per_call
     || value.canonical_provider_exchange_count !== 360
     || value.canonical_provider_exchange_count
       !== value.cells.reduce((total, cell) =>
         total + cell.canonical_provider_exchange_count, 0)
+    || value.provider_session_count !== 36
+    || value.provider_session_count
+      !== value.cells.reduce((total, cell) =>
+        total + cell.provider_session_count, 0)
+    || value.provider_session_replay_set_sha256
+      !== providerSessionReplaySetSha256(value.cells)
     || !Number.isSafeInteger(value.repair_provider_exchange_count)
     || value.repair_provider_exchange_count < 0
     || value.repair_provider_exchange_count
@@ -786,6 +901,13 @@ export function assertLc4PublicationTransportProvenance(
         "transport_profile_sha256",
         "output_audio_lineage_scope",
         "canonical_provider_exchange_count",
+        "semantic_act_count",
+        "opportunities_per_semantic_act",
+        "provider_session_count",
+        "planned_provider_session_transition_count",
+        "opportunities_per_provider_session",
+        "unplanned_reconnect_count",
+        "provider_session_replay_set_sha256",
         "repair_provider_exchange_count",
         "total_response_generation_count",
         "canonical_exchange_replay_set_sha256",
@@ -814,6 +936,24 @@ export function assertLc4PublicationTransportProvenance(
           }
         })()
         || cell.canonical_provider_exchange_count !== 60
+        || cell.semantic_act_count
+          !== value.semantic_accounting.semantic_acts_per_call
+        || cell.opportunities_per_semantic_act
+          !== value.semantic_accounting.opportunities_per_semantic_act
+        || cell.semantic_act_count * cell.opportunities_per_semantic_act
+          !== cell.canonical_provider_exchange_count
+        || cell.provider_session_count
+          !== value.transport_accounting.provider_sessions_per_call
+        || cell.planned_provider_session_transition_count
+          !== value.transport_accounting
+            .planned_provider_session_transitions_per_call
+        || cell.opportunities_per_provider_session
+          !== value.transport_accounting.opportunities_per_provider_session
+        || cell.provider_session_count
+          * cell.opportunities_per_provider_session
+          !== cell.canonical_provider_exchange_count
+        || cell.unplanned_reconnect_count !== 0
+        || !HASH.test(cell.provider_session_replay_set_sha256)
         || !Number.isSafeInteger(cell.repair_provider_exchange_count)
         || cell.repair_provider_exchange_count < 0
         || cell.total_response_generation_count

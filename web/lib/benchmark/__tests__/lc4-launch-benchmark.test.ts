@@ -54,6 +54,38 @@ const corpus = createLc4PublicDevelopmentCorpus();
 const roots: string[] = [];
 
 function transportReplay() {
+  const episodes = (["openai", "gemini", "xai"] as const).flatMap((provider) => {
+    const profile = createLc4ProviderExecutionProfile(provider);
+    return (["native", "hacc"] as const).map((arm) => ({
+      episode_id: `${provider}-${arm}`,
+      provider,
+      arm,
+      model: profile.model,
+      transport_purpose: provider === "xai"
+        ? "finite_prerecorded_efficacy" as const
+        : null,
+      transport_mode: "manual_commit" as const,
+      transport_profile_sha256:
+        profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
+      output_audio_lineage_scope: provider === "gemini"
+        ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
+        : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
+      canonical_provider_exchange_count: 60 as const,
+      provider_session_count: 6 as const,
+      provider_session_replay_set_sha256:
+        H(`${provider}-${arm}-provider-session-replay-set`),
+      repair_provider_exchange_count: 0,
+      total_response_generation_count: 60,
+      canonical_exchange_replay_set_sha256:
+        H(`${provider}-${arm}-canonical-exchange-replay-set`),
+      response_generation_replay_set_sha256:
+        H(`${provider}-${arm}-response-generation-replay-set`),
+      listener_authority_replay_set_sha256:
+        H(`${provider}-${arm}-listener-authority-replay-set`),
+      listener_invocation_replay_set_sha256:
+        H(`${provider}-${arm}-listener-invocation-replay-set`),
+    }));
+  });
   return createLc4PublicationTransportReplay({
     run_sha256: H("run"),
     provider_profile_manifest_sha256:
@@ -64,35 +96,7 @@ function transportReplay() {
     canonical_provider_exchange_count: 360,
     repair_provider_exchange_count: 0,
     total_response_generation_count: 360,
-    episodes: (["openai", "gemini", "xai"] as const).flatMap((provider) => {
-      const profile = createLc4ProviderExecutionProfile(provider);
-      return (["native", "hacc"] as const).map((arm) => ({
-        episode_id: `${provider}-${arm}`,
-        provider,
-        arm,
-        model: profile.model,
-        transport_purpose: provider === "xai"
-          ? "finite_prerecorded_efficacy" as const
-          : null,
-        transport_mode: "manual_commit" as const,
-        transport_profile_sha256:
-          profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
-        output_audio_lineage_scope: provider === "gemini"
-          ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
-          : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
-        canonical_provider_exchange_count: 60 as const,
-        repair_provider_exchange_count: 0,
-        total_response_generation_count: 60,
-        canonical_exchange_replay_set_sha256:
-          H(`${provider}-${arm}-canonical-exchange-replay-set`),
-        response_generation_replay_set_sha256:
-          H(`${provider}-${arm}-response-generation-replay-set`),
-        listener_authority_replay_set_sha256:
-          H(`${provider}-${arm}-listener-authority-replay-set`),
-        listener_invocation_replay_set_sha256:
-          H(`${provider}-${arm}-listener-invocation-replay-set`),
-      }));
-    }),
+    episodes,
   });
 }
 
@@ -286,7 +290,7 @@ function rehashBenchmarkOnly(
   const { benchmark_sha256: _claimed, ...body } = artifact;
   void _claimed;
   (artifact as { benchmark_sha256: string }).benchmark_sha256 = sha256Hex(
-    `harshas-amazing-call-center/lc4-launch-benchmark/v7\n${canonicalJson(body)}`,
+    `harshas-amazing-call-center/lc4-launch-benchmark/v9\n${canonicalJson(body)}`,
   );
 }
 
@@ -480,7 +484,17 @@ describe("LC4 launch benchmark scorer", () => {
     const second = scoreLc4LaunchBenchmark(scoringInput());
     expect(first).toEqual(second);
     expect(first.scoring_contract.score_policy_sha256).toBe(LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256);
-    expect(first.schema_version).toBe(7);
+    expect(first.scoring_contract).toMatchObject({
+      all_opened_calls_remain_in_denominator: true,
+      missing_opened_call_opportunities_score_as_failures: true,
+    });
+    expect(first.scoring_contract).not.toHaveProperty(
+      "all_opened_sessions_remain_in_denominator",
+    );
+    expect(first.scoring_contract).not.toHaveProperty(
+      "missing_opened_session_turns_score_as_failures",
+    );
+    expect(first.schema_version).toBe(9);
     expect(first.comparison_design).toEqual({
       registered_native_comparator: {
         public_label: "Registered Native comparator",
@@ -501,6 +515,18 @@ describe("LC4 launch benchmark scorer", () => {
         opportunities_are_independent_trials: false,
         inferential_status:
           "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only",
+      },
+      semantic_accounting: {
+        semantic_acts_per_call: 3,
+        opportunities_per_semantic_act: 20,
+      },
+      transport_accounting: {
+        provider_sessions_per_call: 6,
+        provider_sessions: 36,
+        planned_provider_session_transitions_per_call: 5,
+        planned_provider_session_transitions: 30,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnects: 0,
       },
     });
     expect(first.budget).toEqual({
@@ -524,6 +550,12 @@ describe("LC4 launch benchmark scorer", () => {
         wire_turn_boundary:
           "finite_clip_input_audio_buffer.commit_then_response.create",
         transport_purpose: "finite_prerecorded_efficacy",
+        semantic_act_count: 3,
+        opportunities_per_semantic_act: 20,
+        provider_session_count: 6,
+        planned_provider_session_transition_count: 5,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnect_count: 0,
         model_identity_verification: "provider_verified",
         qualification_scope: "xai_finite_manual_gate_d_exact_transport",
         qualification_receipt_sha256: H("gate-d-receipt"),
@@ -539,6 +571,8 @@ describe("LC4 launch benchmark scorer", () => {
     expect(markdown).toContain("360/360 opportunities");
     expect(markdown).toContain("Registered Native comparator means Native realtime API + common benchmark continuity");
     expect(markdown).toContain("360 opportunities are repeated within 6 calls, not 360 independent trials");
+    expect(markdown).toContain("36 physical provider sessions and 30 planned transitions");
+    expect(markdown).not.toContain("24 calls");
     expect(markdown).not.toContain("Native API versus HACC");
     expect(markdown).toContain("Corrected facts");
     expect(markdown).toContain("Budget replay: verified, 0 active reservation liability");
@@ -568,7 +602,27 @@ describe("LC4 launch benchmark scorer", () => {
     }).opportunities_are_independent_trials = true;
     rehashBenchmarkOnly(independenceDrift);
     expect(() => assertLc4LaunchBenchmarkArtifact(independenceDrift))
-      .toThrow(/complete six-episode evidence horizon/u);
+      .toThrow(/incomplete or inconsistent/u);
+
+    const callsDrift = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (callsDrift.comparison_design.opportunity_accounting as {
+      calls: number;
+    }).calls = 24;
+    rehashBenchmarkOnly(callsDrift);
+    expect(() => assertLc4LaunchBenchmarkArtifact(callsDrift))
+      .toThrow(/incomplete or inconsistent/u);
+
+    const sessionDrift = structuredClone(
+      scoreLc4LaunchBenchmark(scoringInput()),
+    );
+    (sessionDrift.comparison_design.transport_accounting as {
+      provider_sessions: number;
+    }).provider_sessions = 18;
+    rehashBenchmarkOnly(sessionDrift);
+    expect(() => assertLc4LaunchBenchmarkArtifact(sessionDrift))
+      .toThrow(/incomplete or inconsistent/u);
   });
 
   it("binds terminal budget replay and rejects tampered budget authority", () => {

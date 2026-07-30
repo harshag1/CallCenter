@@ -36,7 +36,10 @@ This small development comparison is frozen in [HACC_LC4_LAUNCH_BENCHMARK.md](HA
 
 Its 360 scheduled opportunities are repeated measurements within six calls,
 not 360 independent trials. There is only one Registered Native comparator/HACC
-pair per provider.
+pair per provider. Each call preserves three 20-opportunity semantic acts while
+using six preregistered 10-opportunity physical provider sessions. The
+resulting 36 transport sessions and 30 planned transitions are transport
+accounting, not additional calls or independent samples.
 
 A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That candidate matrix must not be used to describe the current LC4 Registered Native comparator.
 

@@ -61,7 +61,7 @@ import {
 } from "./lc4-publication-transport-provenance";
 
 const HASH = /^[a-f0-9]{64}$/u;
-const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v7\n";
+const BENCHMARK_DOMAIN = "harshas-amazing-call-center/lc4-launch-benchmark/v9\n";
 const COMPLETED_EVIDENCE_ROOT_DOMAIN =
   "harshas-amazing-call-center/lc4-launch-completed-evidence-root/v2\n";
 const RESPONSE_LINEAGE_ROOT_DOMAIN =
@@ -202,7 +202,7 @@ export type Lc4LaunchBenchmarkEpisodeScore = Readonly<{
 }>;
 
 export type Lc4LaunchBenchmarkArtifact = Readonly<{
-  schema_version: 7;
+  schema_version: 9;
   artifact_type: "hacc_lc4_launch_benchmark";
   protocol_id: "HACC-LC4-DEV-v1";
   evidence_class: "C3";
@@ -229,6 +229,10 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
       inferential_status:
         "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only";
     }>;
+    semantic_accounting:
+      Lc4PublicationTransportProvenance["semantic_accounting"];
+    transport_accounting:
+      Lc4PublicationTransportProvenance["transport_accounting"];
   }>;
   execution: Readonly<{
     execution_id: string;
@@ -275,8 +279,8 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
     model_visible_speech_and_authoritative_outcomes_are_separate: true;
     host_generated_state_never_earns_audible_credit: true;
     fluent_speech_never_earns_action_credit: true;
-    all_opened_sessions_remain_in_denominator: true;
-    missing_opened_session_turns_score_as_failures: true;
+    all_opened_calls_remain_in_denominator: true;
+    missing_opened_call_opportunities_score_as_failures: true;
     strict_success_requires_both_evidence_planes: true;
     first_response_estimand:
       "registered audible semantics on the initial response before repair";
@@ -289,7 +293,13 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
       "identical_canonical_prompts_before_registered_outcome_dependent_branch_only";
     score_policy_sha256: string;
   }>;
-  qualification: Omit<Lc4PublicationTransportProvenance, "cells">;
+  qualification: Omit<
+    Lc4PublicationTransportProvenance,
+    | "cells"
+    | "opportunity_accounting"
+    | "semantic_accounting"
+    | "transport_accounting"
+  >;
   cells: readonly Readonly<{
     provider: Provider;
     model: string;
@@ -305,6 +315,13 @@ export type Lc4LaunchBenchmarkArtifact = Readonly<{
     output_audio_lineage_scope:
       Lc4PublicationTransportCell["output_audio_lineage_scope"];
     canonical_provider_exchange_count: 60;
+    semantic_act_count: 3;
+    opportunities_per_semantic_act: 20;
+    provider_session_count: 6;
+    planned_provider_session_transition_count: 5;
+    opportunities_per_provider_session: 10;
+    unplanned_reconnect_count: 0;
+    provider_session_replay_set_sha256: string;
     repair_provider_exchange_count: number;
     total_response_generation_count: number;
     canonical_exchange_replay_set_sha256: string;
@@ -500,7 +517,7 @@ const PROHIBITED_SPEECH_IDS = new Set([
 const FALSE_COMPLETION_IDS = new Set(["lc4-dev-op-44", "lc4-dev-op-58", "lc4-dev-op-60"]);
 
 export const LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256 = sha256Hex(canonicalJson({
-  schema_version: 3,
+  schema_version: 4,
   expected_opportunities: EXPECTED_OPPORTUNITIES,
   expected_authority_obligations: EXPECTED_AUTHORITY_OBLIGATIONS,
   memory_opportunity_ids: [...MEMORY_IDS].sort(),
@@ -532,7 +549,8 @@ export const LC4_LAUNCH_BENCHMARK_SCORE_POLICY_SHA256 = sha256Hex(canonicalJson(
     "combined_guardrail",
     "combined_authoritative_actions",
   ],
-  all_opened_session_failure_policy: "missing scheduled turns and authority obligations are failures",
+  all_opened_call_failure_policy:
+    "missing scheduled opportunities and authority obligations are failures",
   strict_success: "completed AND every registered audible criterion passes AND every prohibited-speech check passes AND all authority obligations pass",
 }));
 
@@ -953,6 +971,17 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
       output_audio_lineage_scope: transport.output_audio_lineage_scope,
       canonical_provider_exchange_count:
         transport.canonical_provider_exchange_count,
+      semantic_act_count: transport.semantic_act_count,
+      opportunities_per_semantic_act:
+        transport.opportunities_per_semantic_act,
+      provider_session_count: transport.provider_session_count,
+      planned_provider_session_transition_count:
+        transport.planned_provider_session_transition_count,
+      opportunities_per_provider_session:
+        transport.opportunities_per_provider_session,
+      unplanned_reconnect_count: transport.unplanned_reconnect_count,
+      provider_session_replay_set_sha256:
+        transport.provider_session_replay_set_sha256,
       repair_provider_exchange_count:
         transport.repair_provider_exchange_count,
       total_response_generation_count:
@@ -981,7 +1010,7 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
     });
   });
   const body = {
-    schema_version: 7 as const,
+    schema_version: 9 as const,
     artifact_type: "hacc_lc4_launch_benchmark" as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     evidence_class: "C3" as const,
@@ -1008,6 +1037,8 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
         inferential_status:
           "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only" as const,
       }),
+      semantic_accounting: input.transport_provenance.semantic_accounting,
+      transport_accounting: input.transport_provenance.transport_accounting,
     }),
     execution: Object.freeze({
       execution_id: input.execution_id,
@@ -1028,8 +1059,8 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
       model_visible_speech_and_authoritative_outcomes_are_separate: true as const,
       host_generated_state_never_earns_audible_credit: true as const,
       fluent_speech_never_earns_action_credit: true as const,
-      all_opened_sessions_remain_in_denominator: true as const,
-      missing_opened_session_turns_score_as_failures: true as const,
+      all_opened_calls_remain_in_denominator: true as const,
+      missing_opened_call_opportunities_score_as_failures: true as const,
       strict_success_requires_both_evidence_planes: true as const,
       first_response_estimand:
         "registered audible semantics on the initial response before repair" as const,
@@ -1052,6 +1083,10 @@ export function scoreLc4LaunchBenchmark(input: Lc4LaunchBenchmarkScoringInput): 
         input.transport_provenance.development_transport_replay_sha256,
       canonical_provider_exchange_count:
         input.transport_provenance.canonical_provider_exchange_count,
+      provider_session_count:
+        input.transport_provenance.provider_session_count,
+      provider_session_replay_set_sha256:
+        input.transport_provenance.provider_session_replay_set_sha256,
       repair_provider_exchange_count:
         input.transport_provenance.repair_provider_exchange_count,
       total_response_generation_count:
@@ -1574,6 +1609,20 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
   ] as const;
   const transportProvenance = {
     ...artifact.qualification,
+    opportunity_accounting: {
+      calls: artifact.comparison_design.opportunity_accounting.calls,
+      opportunities_per_call:
+        artifact.comparison_design.opportunity_accounting
+          .opportunities_per_call,
+      repeated_opportunity_observations:
+        artifact.comparison_design.opportunity_accounting
+          .repeated_opportunity_observations,
+      opportunities_are_independent_trials:
+        artifact.comparison_design.opportunity_accounting
+          .opportunities_are_independent_trials,
+    },
+    semantic_accounting: artifact.comparison_design.semantic_accounting,
+    transport_accounting: artifact.comparison_design.transport_accounting,
     cells: artifact.cells.map((cell) => ({
       provider: cell.provider,
       arm: cell.arm,
@@ -1585,6 +1634,17 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
       output_audio_lineage_scope: cell.output_audio_lineage_scope,
       canonical_provider_exchange_count:
         cell.canonical_provider_exchange_count,
+      semantic_act_count: cell.semantic_act_count,
+      opportunities_per_semantic_act:
+        cell.opportunities_per_semantic_act,
+      provider_session_count: cell.provider_session_count,
+      planned_provider_session_transition_count:
+        cell.planned_provider_session_transition_count,
+      opportunities_per_provider_session:
+        cell.opportunities_per_provider_session,
+      unplanned_reconnect_count: cell.unplanned_reconnect_count,
+      provider_session_replay_set_sha256:
+        cell.provider_session_replay_set_sha256,
       repair_provider_exchange_count:
         cell.repair_provider_exchange_count,
       total_response_generation_count:
@@ -1624,6 +1684,11 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
       "wire_turn_boundary", "transport_purpose",
       "transport_profile_sha256", "output_audio_lineage_scope",
       "canonical_provider_exchange_count", "repair_provider_exchange_count",
+      "semantic_act_count", "opportunities_per_semantic_act",
+      "provider_session_count",
+      "planned_provider_session_transition_count",
+      "opportunities_per_provider_session", "unplanned_reconnect_count",
+      "provider_session_replay_set_sha256",
       "total_response_generation_count",
       "canonical_exchange_replay_set_sha256",
       "response_generation_replay_set_sha256",
@@ -1661,7 +1726,7 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
         cell.adaptive_repair.repair_assisted_semantic_score.passed,
         cell.adaptive_repair.repair_assisted_semantic_score.total,
       )));
-  if (artifact.schema_version !== 7
+  if (artifact.schema_version !== 9
     || artifact.artifact_type !== "hacc_lc4_launch_benchmark"
     || artifact.protocol_id !== "HACC-LC4-DEV-v1"
     || artifact.evidence_class !== "C3"
@@ -1693,6 +1758,18 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
         opportunities_are_independent_trials: false,
         inferential_status:
           "nested_repeated_opportunities_not_independent_trials_C3_descriptive_only",
+      },
+      semantic_accounting: {
+        semantic_acts_per_call: 3,
+        opportunities_per_semantic_act: 20,
+      },
+      transport_accounting: {
+        provider_sessions_per_call: 6,
+        provider_sessions: 36,
+        planned_provider_session_transitions_per_call: 5,
+        planned_provider_session_transitions: 30,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnects: 0,
       },
     })
     || !exactKeys(artifact.execution, [
@@ -1754,8 +1831,8 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
       "model_visible_speech_and_authoritative_outcomes_are_separate",
       "host_generated_state_never_earns_audible_credit",
       "fluent_speech_never_earns_action_credit",
-      "all_opened_sessions_remain_in_denominator",
-      "missing_opened_session_turns_score_as_failures",
+      "all_opened_calls_remain_in_denominator",
+      "missing_opened_call_opportunities_score_as_failures",
       "strict_success_requires_both_evidence_planes",
       "first_response_estimand",
       "repair_assisted_estimand",
@@ -1767,8 +1844,9 @@ export function assertLc4LaunchBenchmarkArtifact(artifact: Lc4LaunchBenchmarkArt
     || artifact.scoring_contract.model_visible_speech_and_authoritative_outcomes_are_separate !== true
     || artifact.scoring_contract.host_generated_state_never_earns_audible_credit !== true
     || artifact.scoring_contract.fluent_speech_never_earns_action_credit !== true
-    || artifact.scoring_contract.all_opened_sessions_remain_in_denominator !== true
-    || artifact.scoring_contract.missing_opened_session_turns_score_as_failures !== true
+    || artifact.scoring_contract.all_opened_calls_remain_in_denominator !== true
+    || artifact.scoring_contract
+      .missing_opened_call_opportunities_score_as_failures !== true
     || artifact.scoring_contract.strict_success_requires_both_evidence_planes !== true
     || artifact.scoring_contract.first_response_estimand
       !== "registered audible semantics on the initial response before repair"
@@ -1890,6 +1968,10 @@ export function renderLc4LaunchBenchmarkMarkdown(artifact: Lc4LaunchBenchmarkArt
   const comparator = artifact.comparison_design.registered_native_comparator;
   const opportunityAccounting =
     artifact.comparison_design.opportunity_accounting;
+  const semanticAccounting =
+    artifact.comparison_design.semantic_accounting;
+  const transportAccounting =
+    artifact.comparison_design.transport_accounting;
   const armLabel = (arm: "native" | "hacc"): string =>
     arm === "hacc"
       ? artifact.comparison_design.hacc_public_label
@@ -1905,6 +1987,7 @@ export function renderLc4LaunchBenchmarkMarkdown(artifact: Lc4LaunchBenchmarkArt
   ).join("\n");
   return `# HACC LC4 launch benchmark\n\n` +
     `Descriptive C3 development evidence: one 60-opportunity ${comparator.public_label}/HACC pair per provider. ${comparator.public_label} means ${comparator.definition}; it is not a bare model/API baseline or consumer ChatGPT Voice. The ${opportunityAccounting.repeated_opportunity_observations} opportunities are repeated within ${opportunityAccounting.calls} calls, not ${opportunityAccounting.repeated_opportunity_observations} independent trials. This is not a provider-efficacy estimate.\n\n` +
+    `Each call retains ${semanticAccounting.semantic_acts_per_call} semantic acts of ${semanticAccounting.opportunities_per_semantic_act} opportunities while using ${transportAccounting.provider_sessions_per_call} planned provider sessions of ${transportAccounting.opportunities_per_provider_session} opportunities. Across the benchmark, that is ${transportAccounting.provider_sessions} physical provider sessions and ${transportAccounting.planned_provider_session_transitions} planned transitions, with ${transportAccounting.unplanned_reconnects} unplanned reconnects.\n\n` +
     `| Provider | Realtime model | Arm | Wire turn boundary | Model identity | Semantic speech | Recall probes | Corrected facts | Stage checks | Strict episode |\n` +
     `|---|---|---|---|---|---:|---:|---:|---:|---:|\n${rows}\n\n` +
     `## Adaptive repair accounting\n\n` +

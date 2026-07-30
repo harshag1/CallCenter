@@ -8,6 +8,7 @@ import { industrialFieldServiceCompilerInput } from "../industrial-field-service
 import {
   Lc4ProviderInputAudioDeliveryError,
   Lc4RealtimeProviderBridge,
+  admitLc4DevOpenedSegment,
   assertLc4RotationConversationParity,
   assertLc4XaiManualTurnCausality,
   assertLc4XaiManualTurnReplayProjection,
@@ -16,6 +17,7 @@ import {
   createLc4DevSessionConfiguration,
   createLc4HaccRotationStatePacket,
   createLc4NativeConversationReplayPacket,
+  projectLc4RotationPacketForReplay,
   type Lc4NativeConversationTurnInput,
   type Lc4ListenerEvidenceHandoff,
   type Lc4RealtimeEpisodeManifest,
@@ -24,13 +26,22 @@ import {
   type Lc4XaiManualTurnCausalityEvidence,
 } from "../lc4-production-provider-adapter";
 import {
+  GEMINI_CAPABILITY_GATEWAY_NAME,
+  projectGeminiInitialHistoryClientContent,
+} from "../../realtime/client/gemini-live";
+import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   type Lc4DevGatewayExecutor,
 } from "../lc4-development-gateway-bridge";
 import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE,
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
   type Lc4DevLiveEpisodePlan,
 } from "../lc4-development-live-runner";
 import { LC4_DEV_TIMEOUT_CONTRACT } from "../lc4-development-timeout-contract";
+import {
+  assertLc4DevGatewayConversationToolBatches,
+} from "../lc4-provider-exchange-replay";
 import { createLc4DevReplayEvidenceStore } from "../lc4-development-evidence-retention";
 import {
   Lc4DevFailureEvidenceError,
@@ -105,8 +116,16 @@ import {
   RealtimeDynamicControlLimitError,
 } from "../../realtime/client/types";
 
+function devTestSegment(ordinal: 1 | 2 | 3 | 4 | 5 | 6) {
+  return LC4_DEV_PROVIDER_SESSION_SCHEDULE[ordinal - 1]!;
+}
+
 const HASH = "a".repeat(64);
-const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
+const GATEWAY_RECEIPT_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v2\n";
+const GATEWAY_RECEIPT_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 const COMMIT = "b".repeat(40);
 const ORACLE_SECRET = "ORACLE-PLAINTEXT-MUST-NOT-LEAK";
 const FIXTURE_CONTINUATION_CONTROL =
@@ -295,7 +314,7 @@ function forgeManifestProviderProfile(
 }
 
 function publicConversationTurns(
-  availableThroughOpportunity: 20 | 40,
+  availableThroughOpportunity: 10 | 20 | 30 | 40 | 50,
 ): readonly Lc4NativeConversationTurnInput[] {
   return Object.freeze(Array.from(
     { length: availableThroughOpportunity },
@@ -514,6 +533,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly #xaiServerVad: boolean;
   readonly #serverVadEmitsSpeechStarted: boolean;
   readonly #corruptHistoryProjection: boolean;
+  readonly #substituteGeminiContentSha256: boolean;
   readonly submittedToolResults: Array<Readonly<{ results: readonly RealtimeToolResult[]; createResponse: boolean | undefined }>> = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
@@ -529,6 +549,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     xaiServerVad = false,
     serverVadEmitsSpeechStarted = true,
     corruptHistoryProjection = false,
+    substituteGeminiContentSha256 = false,
   ) {
     this.provider = provider;
     this.events = events;
@@ -538,6 +559,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.#xaiServerVad = xaiServerVad;
     this.#serverVadEmitsSpeechStarted = serverVadEmitsSpeechStarted;
     this.#corruptHistoryProjection = corruptHistoryProjection;
+    this.#substituteGeminiContentSha256 = substituteGeminiContentSha256;
   }
 
   get serverVadTransportParitySha256() {
@@ -606,6 +628,12 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       (count, turn) => count + ("calls" in turn ? 2 : 1),
       0,
     );
+    const geminiProjection = this.provider === "gemini"
+      ? projectGeminiInitialHistoryClientContent(
+          snapshot,
+          new Set([GEMINI_CAPABILITY_GATEWAY_NAME]),
+        )
+      : null;
     const geminiOutboundObservation = this.provider === "gemini"
       ? wireReference(this.wire("clientContent", {
           initialHistory: {
@@ -621,7 +649,9 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
             providerVisibleHistorySha256: this.#corruptHistoryProjection
               ? "0".repeat(64)
               : historySha256,
-            geminiContentSha256: sha256Hex("fixture-gemini-history-content"),
+            geminiContentSha256: this.#substituteGeminiContentSha256
+              ? sha256Hex("freshly-rehashed-substituted-gemini-client-content")
+              : geminiProjection!.geminiContentSha256,
           },
         }))
       : null;
@@ -1629,6 +1659,7 @@ async function openDevFailureFixture(input: Readonly<{
     | "interactive_transport_qualification";
   arm?: "native" | "hacc";
   assistantListenerTranscript?: string;
+  exactHorizon?: boolean;
 }>) {
   const arm = input.arm ?? "hacc";
   const base = manifest(arm, input.client.provider);
@@ -1661,7 +1692,7 @@ async function openDevFailureFixture(input: Readonly<{
       return Object.freeze({
         ordinal: index + 1,
         opportunity_id: opportunity.id,
-        segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+        segment_ordinal: Math.ceil((index + 1) / 10) as 1 | 2 | 3 | 4 | 5 | 6,
         caller_pcm_sha256: sha256Hex(pcm),
         caller_pcm_byte_length: pcm.byteLength,
         opportunity_contract_sha256: sha256Hex(`failure-contract-${index + 1}`),
@@ -1707,13 +1738,16 @@ async function openDevFailureFixture(input: Readonly<{
   );
   const session = await bridge.openSegment({
     manifest: devManifest,
-    segment: base.episode_shape.segments[0]!,
+    segment: devTestSegment(1),
     profile: providerProfile,
     configuration: Object.freeze({
       ...configuration(base),
       providerTools: Object.freeze([LC4_DEV_SEMANTIC_GATEWAY_FUNCTION]),
     }),
     rotation_context: null,
+    ...(input.exactHorizon
+      ? { exact_horizon_receipt_required: true as const }
+      : {}),
     listener: { accept: input.listener ?? (async () => listenerResult) },
     dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
   });
@@ -1843,7 +1877,7 @@ async function openCallerBranchPreflight(input: Readonly<{
       return Object.freeze({
         ordinal: index + 1,
         opportunity_id: opportunity.id,
-        segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+        segment_ordinal: Math.ceil((index + 1) / 10) as 1 | 2 | 3 | 4 | 5 | 6,
         caller_pcm_sha256: sha256Hex(pcm),
         caller_pcm_byte_length: pcm.byteLength,
         opportunity_contract_sha256: sha256Hex(`branch-contract-${index + 1}`),
@@ -1873,11 +1907,11 @@ async function openCallerBranchPreflight(input: Readonly<{
     },
   });
   const open = (
-    ordinal: 1 | 2 | 3,
+    ordinal: 1 | 2 | 3 | 4 | 5 | 6,
     rotationContext: Lc4RotationContext | null,
   ) => bridge.openSegment({
     manifest: devManifest,
-    segment: base.episode_shape.segments[ordinal - 1]!,
+    segment: devTestSegment(ordinal),
     profile: base.episode_shape.provider_profile,
     configuration: providerConfiguration,
     rotation_context: rotationContext,
@@ -1912,36 +1946,44 @@ async function openCallerBranchPreflight(input: Readonly<{
   });
   const rotation = (
     previousReceipt: string,
-    from: 1 | 2,
+    from: 1 | 2 | 3 | 4 | 5,
   ): Lc4RotationContext => Object.freeze({
     kind: "hacc_structured_state",
     packet: createLc4HaccRotationStatePacket({
+      protocol_id: "HACC-LC4-DEV-v1",
       run_id: episode.episode_id,
       from_segment_ordinal: from,
-      to_segment_ordinal: (from + 1) as 2 | 3,
-      available_through_opportunity: (from * 20) as 20 | 40,
+      to_segment_ordinal: (from + 1) as 2 | 3 | 4 | 5 | 6,
+      available_through_opportunity: (from * 10) as 10 | 20 | 30 | 40 | 50,
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: sha256Hex(`branch-preflight-flow:${input.provider}:${input.outcome}:${from}`),
       response_plan_chain_head_sha256: sha256Hex(`branch-preflight-plan:${input.provider}:${input.outcome}:${from}`),
-      conversation_turns: publicConversationTurns((from * 20) as 20 | 40),
+      conversation_turns: publicConversationTurns((from * 10) as 10 | 20 | 30 | 40 | 50),
     }),
   });
-  const firstSegment = await open(1, null);
-  const firstReceipt = await firstSegment.close();
-  const secondSegment = await open(2, rotation(firstReceipt.rotation_receipt_sha256, 1));
-  const secondReceipt = await secondSegment.close();
-  const session = await open(3, rotation(secondReceipt.rotation_receipt_sha256, 2));
-  const firstOpportunity = corpus.opportunities[40]!;
-  await session.exchange({
-    opportunity_id: firstOpportunity.id,
-    caller_pcm: new Uint8Array([41, 7, 11, 13]),
-    response_control: { kind: "hacc_response_plan", plan: responsePlan() },
-  });
-  await session.finalizeOpportunity!({
-    opportunity_id: firstOpportunity.id,
-    decision_receipt_sha256: sha256Hex(`branch-preflight-op41:${input.provider}:${input.outcome}`),
-    repair_played: false,
-  });
+  let previousReceipt: string | null = null;
+  for (const ordinal of [1, 2, 3, 4] as const) {
+    const completed = await open(
+      ordinal,
+      ordinal === 1 ? null : rotation(previousReceipt!, (ordinal - 1) as 1 | 2 | 3),
+    );
+    previousReceipt = (await completed.close()).rotation_receipt_sha256;
+  }
+  const session = await open(5, rotation(previousReceipt!, 4));
+  for (const opportunity of corpus.opportunities.slice(40, 41)) {
+    await session.exchange({
+      opportunity_id: opportunity.id,
+      caller_pcm: new Uint8Array([opportunity.index, 7, 11, 13]),
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    await session.finalizeOpportunity!({
+      opportunity_id: opportunity.id,
+      decision_receipt_sha256: sha256Hex(
+        `branch-preflight-op${opportunity.index}:${input.provider}:${input.outcome}`,
+      ),
+      repair_played: false,
+    });
+  }
   const decision = callerBranchAuthority.decide({
     episode_id: episode.episode_id,
     provider: input.provider,
@@ -1973,6 +2015,48 @@ async function openCallerBranchPreflight(input: Readonly<{
 }
 
 describe("LC4 production realtime adapter bridge", () => {
+  it("closes a paid session when durable after-open budget acknowledgement hangs", async () => {
+    const controller = new AbortController();
+    let closeCalls = 0;
+    let failureCleanupCalls = 0;
+    let acknowledge:
+      (() => void)
+      | null = null;
+    const admission = admitLc4DevOpenedSegment({
+      signal: controller.signal,
+      session: {
+        async close() {
+          closeCalls += 1;
+          return {
+            session_ordinal: 1,
+            segment_ordinal: 1,
+            rotation_receipt_sha256: HASH,
+            finalization_body: {},
+          };
+        },
+      },
+      acknowledge: () => new Promise<void>((resolve) => {
+        acknowledge = resolve;
+      }),
+      onFailure() {
+        failureCleanupCalls += 1;
+      },
+    });
+
+    controller.abort();
+    await expect(admission).rejects.toThrow(
+      "aborted before durable budget acknowledgement",
+    );
+    expect(closeCalls).toBe(1);
+    expect(failureCleanupCalls).toBe(1);
+    // A late ledger acknowledgement cannot resurrect the closed provider
+    // session or convert the conservative whole-episode reservation.
+    acknowledge!();
+    await Promise.resolve();
+    expect(closeCalls).toBe(1);
+    expect(failureCleanupCalls).toBe(1);
+  });
+
   it("retains sanitized pre-send contract failure evidence without requesting a response", async () => {
     const events: string[] = [];
     const fixture = await openDevFailureFixture({ client: new FakeRealtimeClient("openai", events) });
@@ -2175,7 +2259,107 @@ describe("LC4 production realtime adapter bridge", () => {
       decision_receipt_sha256: sha256Hex("gateway-rejection-no-repair"),
       repair_played: false,
     });
-    await expect(fixture.session.close()).resolves.toHaveProperty("rotation_receipt_sha256");
+    const receipt = await fixture.session.close();
+    expect(receipt.finalization_body).toMatchObject({
+      schema_version: 6,
+      run_id: "lc4-dev-openai-hacc-failure-fixture",
+      protocol_id: "HACC-LC4-DEV-v1",
+      provider_session_schedule_sha256:
+        LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+      session_ordinal: 1,
+      segment_ordinal: 1,
+      opportunity_count: 1,
+      previous_rotation_receipt_sha256: null,
+    });
+  });
+
+  it("refuses a publishable DEV rotation receipt before the exact 10-opportunity horizon", async () => {
+    const fixture = await openDevFailureFixture({
+      client: new FakeRealtimeClient("openai", []),
+      exactHorizon: true,
+    });
+    await fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    });
+    await fixture.session.finalizeOpportunity!({
+      opportunity_id: fixture.opportunity_id,
+      decision_receipt_sha256: sha256Hex("strict-horizon-no-repair"),
+      repair_played: false,
+    });
+    const closeError = await caughtFailure(fixture.session.close());
+    expect(closeError.failure).toMatchObject({
+      failure_stage: "segment_close",
+      failure_code: "segment_close_failed",
+      failure_class: "cleanup",
+    });
+  });
+
+  it("mints a DEV segment receipt only after exactly 10 finalized opportunities", async () => {
+    const fixture = await openDevFailureFixture({
+      client: new FakeRealtimeClient("openai", []),
+      exactHorizon: true,
+      listener: async ({ capture }) => {
+        const transcript = `Captured assistant speech for ${capture.opportunity_id}.`;
+        return {
+          listener_evidence_sha256:
+            sha256Hex(`listener:${capture.opportunity_id}`),
+          listener_evidence: {
+            schema_version: 1,
+            retention_version: "lc4-dev-replay-evidence-v1",
+            kind: "listener_evidence",
+            evidence_sha256: sha256Hex(`listener:${capture.opportunity_id}`),
+            byte_length: 2,
+            content_encoding: "domain-prefixed-canonical-json",
+            domain_prefix: "test/lc4-listener-evidence/v1\n",
+          },
+          repair_projection: createLc4DevArmBlindRepairProjection({
+            opportunity_id: capture.opportunity_id,
+            listener_status: "verified",
+            semantic_result_sha256:
+              sha256Hex(`semantic:${capture.opportunity_id}`),
+            semantic_replay_sha256:
+              sha256Hex(`semantic-replay:${capture.opportunity_id}`),
+            unmet_blocker_codes: [],
+            final_required_criteria_pass: true,
+          }),
+          playback_authority_receipt_sha256:
+            sha256Hex(`playback:${capture.opportunity_id}`),
+          assistant_conversation_transcript: transcript,
+          assistant_conversation_transcript_sha256: sha256Hex(transcript),
+          assistant_conversation_transcript_source:
+            "listener_exact_captured_pcm_asr" as const,
+        };
+      },
+    });
+    const corpus = createLc4PublicDevelopmentCorpus();
+    for (const opportunity of corpus.opportunities.slice(0, 10)) {
+      await fixture.session.exchange({
+        opportunity_id: opportunity.id,
+        caller_pcm: new Uint8Array([opportunity.index, 7, 11, 13]),
+        response_control: {
+          kind: "hacc_response_plan",
+          plan: responsePlan(),
+        },
+      });
+      await fixture.session.finalizeOpportunity!({
+        opportunity_id: opportunity.id,
+        decision_receipt_sha256:
+          sha256Hex(`decision:${opportunity.id}`),
+        repair_played: false,
+      });
+    }
+    const receipt = await fixture.session.close();
+    expect(receipt.finalization_body).toMatchObject({
+      schema_version: 6,
+      session_ordinal: 1,
+      segment_ordinal: 1,
+      opportunity_count: 10,
+      previous_rotation_receipt_sha256: null,
+      rotation_context_packet: null,
+      conversation_history_hydration_wire_observations: [],
+    });
   });
 
   it("retains a true provider timeout after a response request", async () => {
@@ -3481,7 +3665,7 @@ describe("LC4 production realtime adapter bridge", () => {
         return Object.freeze({
           ordinal: index + 1,
           opportunity_id: opportunity.id,
-          segment_ordinal: Math.ceil((index + 1) / 20) as 1 | 2 | 3,
+          segment_ordinal: Math.ceil((index + 1) / 10) as 1 | 2 | 3 | 4 | 5 | 6,
           caller_pcm_sha256: sha256Hex(pcm),
           caller_pcm_byte_length: pcm.byteLength,
           opportunity_contract_sha256: sha256Hex(`dev-contract-${index + 1}`),
@@ -3497,8 +3681,8 @@ describe("LC4 production realtime adapter bridge", () => {
         executed.push(`${input.arm}:${input.target_tool}`);
         const providerOutput = { ok: true as const, receipt: "PUBLIC-RESULT" };
         const projectionBody = {
-          schema_version: 1 as const,
-          bridge_version: "lc4-dev-gateway-bridge-v3" as const,
+          schema_version: 2 as const,
+          bridge_version: "lc4-dev-gateway-bridge-v4" as const,
           redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
           episode_id: input.episode_id,
           opportunity_id: input.opportunity_id,
@@ -3552,7 +3736,7 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     const session = await bridge.openSegment({
       manifest: devManifest,
-      segment: base.episode_shape.segments[0]!,
+      segment: devTestSegment(1),
       profile: base.episode_shape.provider_profile,
       configuration: Object.freeze({
         ...configuration(base),
@@ -3618,8 +3802,81 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     expect(evidence.dev_gateway_conversation_tool_batches)
       .toHaveLength(provider === "gemini" ? 2 : 1);
-    expect(canonicalJson(evidence.replay_projection))
-      .not.toContain("dev_gateway_conversation_tool_batches");
+    expect(evidence.replay_projection).toMatchObject({
+      schema_version: 5,
+      dev_gateway_conversation_tool_batches:
+        evidence.dev_gateway_conversation_tool_batches,
+    });
+    const retainedProjection = evidence.replay_projection as Readonly<{
+      dev_gateway_conversation_tool_batches: readonly unknown[];
+      dev_gateway_receipt_set: unknown;
+    }>;
+    expect(() => assertLc4DevGatewayConversationToolBatches(
+      retainedProjection.dev_gateway_conversation_tool_batches,
+      retainedProjection.dev_gateway_receipt_set,
+    )).not.toThrow();
+    const tamperedProjection = JSON.parse(
+      canonicalJson(retainedProjection),
+    ) as {
+      dev_gateway_conversation_tool_batches: Array<{
+        calls: Array<{ provider_output_canonical_json: string }>;
+      }>;
+      dev_gateway_receipt_set: unknown;
+    };
+    tamperedProjection.dev_gateway_conversation_tool_batches[0]!
+      .calls[0]!.provider_output_canonical_json = "{\"ok\":false}";
+    expect(() => assertLc4DevGatewayConversationToolBatches(
+      tamperedProjection.dev_gateway_conversation_tool_batches,
+      tamperedProjection.dev_gateway_receipt_set,
+    )).toThrow("differs from its retained source");
+    const rehashedArgumentSubstitution = JSON.parse(
+      canonicalJson(retainedProjection),
+    ) as {
+      dev_gateway_conversation_tool_batches: Array<{
+        calls: Array<{ source_sha256: string }>;
+      }>;
+      dev_gateway_receipt_set: {
+        receipts: Array<Record<string, JsonValue>>;
+        authority_projections: Array<Record<string, JsonValue>>;
+        pre_dispatch_rejections: JsonValue[];
+        receipt_set_sha256: string;
+      };
+    };
+    const substitutedAuthority =
+      rehashedArgumentSubstitution.dev_gateway_receipt_set.authority_projections[0]!;
+    substitutedAuthority.model_arguments = { silently_substituted: true };
+    const substitutedAuthorityBody = Object.fromEntries(
+      Object.entries(substitutedAuthority)
+        .filter(([key]) => key !== "projection_sha256"),
+    );
+    const substitutedProjectionSha256 = sha256Hex(
+      `${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(substitutedAuthorityBody)}`,
+    );
+    substitutedAuthority.projection_sha256 = substitutedProjectionSha256;
+    const substitutedReceipt =
+      rehashedArgumentSubstitution.dev_gateway_receipt_set.receipts[0]!;
+    substitutedReceipt.authority_projection_sha256 = substitutedProjectionSha256;
+    const substitutedReceiptBody = Object.fromEntries(
+      Object.entries(substitutedReceipt)
+        .filter(([key]) => key !== "receipt_sha256"),
+    );
+    substitutedReceipt.receipt_sha256 = sha256Hex(
+      `${GATEWAY_RECEIPT_DOMAIN}${canonicalJson(substitutedReceiptBody)}`,
+    );
+    rehashedArgumentSubstitution.dev_gateway_conversation_tool_batches[0]!
+      .calls[0]!.source_sha256 = substitutedProjectionSha256;
+    const substitutedSet = rehashedArgumentSubstitution.dev_gateway_receipt_set;
+    substitutedSet.receipt_set_sha256 = sha256Hex(
+      `${GATEWAY_RECEIPT_SET_DOMAIN}${canonicalJson({
+        receipts: substitutedSet.receipts,
+        authority_projections: substitutedSet.authority_projections,
+        pre_dispatch_rejections: substitutedSet.pre_dispatch_rejections,
+      })}`,
+    );
+    expect(() => assertLc4DevGatewayConversationToolBatches(
+      rehashedArgumentSubstitution.dev_gateway_conversation_tool_batches,
+      rehashedArgumentSubstitution.dev_gateway_receipt_set,
+    )).toThrow("authority call differs from its retained source");
     if (provider === "gemini") {
       expect(evidence.gemini_output_attribution).toMatchObject({
         output_audio_byte_length: 8,
@@ -3770,6 +4027,90 @@ describe("LC4 production realtime adapter bridge", () => {
     }
   });
 
+  it("freezes six 10-opportunity DEV sessions and compiles hydration for sessions two through six", () => {
+    expect(LC4_DEV_PROVIDER_SESSION_SCHEDULE).toEqual([
+      {
+        ordinal: 1,
+        opportunity_start: 1,
+        opportunity_end: 10,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: true,
+      },
+      {
+        ordinal: 2,
+        opportunity_start: 11,
+        opportunity_end: 20,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: true,
+      },
+      {
+        ordinal: 3,
+        opportunity_start: 21,
+        opportunity_end: 30,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: true,
+      },
+      {
+        ordinal: 4,
+        opportunity_start: 31,
+        opportunity_end: 40,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: true,
+      },
+      {
+        ordinal: 5,
+        opportunity_start: 41,
+        opportunity_end: 50,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: true,
+      },
+      {
+        ordinal: 6,
+        opportunity_start: 51,
+        opportunity_end: 60,
+        opportunity_count: 10,
+        provider_session_rotation_required_after: false,
+      },
+    ]);
+    for (const arm of ["native", "hacc"] as const) {
+      const episode = devEpisodeForComparator(arm);
+      for (const segmentOrdinal of [2, 3, 4, 5, 6] as const) {
+        const boundary = ((segmentOrdinal - 1) * 10) as
+          10 | 20 | 30 | 40 | 50;
+        const context = createLc4DevRotationContext({
+          episode,
+          segment_ordinal: segmentOrdinal,
+          previous_rotation_receipt_sha256:
+            sha256Hex(`${arm}:segment:${segmentOrdinal - 1}`),
+          flow_state_sha256: sha256Hex(`${arm}:flow:${segmentOrdinal}`),
+          response_plan_chain_head_sha256:
+            sha256Hex(`${arm}:plan:${segmentOrdinal}`),
+          conversation_turns: publicConversationTurns(boundary),
+        });
+        expect(context.kind).toBe(
+          arm === "native"
+            ? "native_conversation_replay"
+            : "hacc_structured_state",
+        );
+        expect(context.packet).toMatchObject({
+          schema_version: 6,
+          from_segment_ordinal: segmentOrdinal - 1,
+          to_segment_ordinal: segmentOrdinal,
+          available_through_opportunity: boundary,
+          previous_session_rotation_receipt_sha256:
+            sha256Hex(`${arm}:segment:${segmentOrdinal - 1}`),
+        });
+        expect(projectLc4RotationPacketForReplay(context.packet)).toMatchObject({
+          packet_sha256: context.packet.packet_sha256,
+          conversation_replay_sha256:
+            context.packet.conversation_replay_sha256,
+          turn_count: boundary * 2,
+          provider_item_count: boundary * 2,
+        });
+      }
+    }
+  });
+
   it("replays corrections as chronological conversation, never as corpus annotations or evaluator state", () => {
     const corpus = createLc4PublicDevelopmentCorpus();
     const turns: Lc4NativeConversationTurnInput[] = [];
@@ -3807,7 +4148,7 @@ describe("LC4 production realtime adapter bridge", () => {
       append("assistant", `Actual provider transcript for opportunity ${opportunity.index}.`, opportunity.index);
     }
     const common = {
-      segment_ordinal: 2 as const,
+      segment_ordinal: 3 as const,
       previous_rotation_receipt_sha256: "7".repeat(64),
       flow_state_sha256: "8".repeat(64),
       response_plan_chain_head_sha256: "9".repeat(64),
@@ -3824,6 +4165,8 @@ describe("LC4 production realtime adapter bridge", () => {
     if (native.kind !== "native_conversation_replay" || hacc.kind !== "hacc_structured_state") {
       throw new Error("unexpected comparator rotation kinds");
     }
+    expect(native.packet.schema_version).toBe(6);
+    expect(hacc.packet.schema_version).toBe(6);
     expect(native.packet.conversation_replay_sha256).toBe(hacc.packet.conversation_replay_sha256);
     expect(native.packet.conversation_turns).toEqual(hacc.packet.conversation_turns);
     const nativeWire = canonicalJson(native.packet);
@@ -3863,6 +4206,8 @@ describe("LC4 production realtime adapter bridge", () => {
       conversation_turns: publicConversationTurns(20),
     });
     expect(() => assertLc4RotationConversationParity(native, hacc)).not.toThrow();
+    expect(native.schema_version).toBe(4);
+    expect(hacc.schema_version).toBe(4);
     expect(hacc.conversation_turns.map(({ turn_id, sequence, speaker, source, text, transcript_sha256, available_after_opportunity }) => ({
       turn_id,
       sequence,
@@ -4473,6 +4818,48 @@ describe("LC4 production realtime adapter bridge", () => {
       expect(events).not.toContain("create");
     },
   );
+
+  it("rejects a freshly rehashed Gemini wire observation whose native clientContent hash was substituted", async () => {
+    const value = manifest("native", "gemini");
+    const events: string[] = [];
+    let factoryOrdinal = 0;
+    const bridge = new Lc4RealtimeProviderBridge((provider) => {
+      factoryOrdinal += 1;
+      return new FakeRealtimeClient(
+        provider,
+        events,
+        false,
+        "completed",
+        null,
+        false,
+        true,
+        false,
+        factoryOrdinal === 2,
+      );
+    });
+    const first = await bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[0]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: null,
+      listener: { accept() {} },
+    });
+    const firstReceipt = await first.close();
+    await expect(bridge.openSegment({
+      manifest: value,
+      segment: value.episode_shape.segments[1]!,
+      profile: value.episode_shape.provider_profile,
+      configuration: configuration(value),
+      rotation_context: {
+        kind: "native_conversation_replay",
+        packet: nativeRotationPacket(value, firstReceipt.rotation_receipt_sha256, 1),
+      },
+      listener: { accept() {} },
+    })).rejects.toThrow("Gemini history hydration projection differs");
+    expect(events).not.toContain("append");
+    expect(events).not.toContain("create");
+  });
 
   it("requires a valid arm-specific packet on every reopen", async () => {
     const value = manifest("native");

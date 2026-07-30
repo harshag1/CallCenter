@@ -73,6 +73,9 @@ function transportReplay() {
           ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
           : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
         canonical_provider_exchange_count: 60 as const,
+        provider_session_count: 6 as const,
+        provider_session_replay_set_sha256:
+          H(`${provider}-${arm}-provider-session-replay-set`),
         repair_provider_exchange_count: 0,
         total_response_generation_count: 60,
         canonical_exchange_replay_set_sha256:

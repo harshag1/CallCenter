@@ -628,6 +628,14 @@ type CompiledGeminiInitialHistory = Readonly<{
   >[];
 }>;
 
+export type GeminiInitialHistoryClientContentProjection = Readonly<{
+  providerContentTurnCount: number;
+  textPartCount: number;
+  functionCallCount: number;
+  functionResponseCount: number;
+  geminiContentSha256: string;
+}>;
+
 function concreteHistoryField(
   descriptors: Record<string, PropertyDescriptor>,
   key: string,
@@ -948,6 +956,33 @@ function compileGeminiInitialHistory(
     turnCount: snapshots.length,
     providerItemCount: items.length,
     items: Object.freeze(items),
+  });
+}
+
+/**
+ * Rebuilds the exact provider-native `clientContent.turns` payload used by
+ * Gemini history hydration, then exposes only its bounded wire projection.
+ * Replay verifiers use this same compiler so a substituted 64-hex digest
+ * cannot masquerade as proof of the actual provider-visible history.
+ */
+export function projectGeminiInitialHistoryClientContent(
+  turns: readonly RealtimeConversationHistoryTurn[],
+  declaredToolNames: ReadonlySet<string>,
+): GeminiInitialHistoryClientContentProjection {
+  const compiled = compileGeminiInitialHistory(turns, declaredToolNames);
+  const clientContent = compiled.frame.clientContent as Readonly<{
+    turns: readonly Readonly<Record<string, unknown>>[];
+  }>;
+  const providerTurns = clientContent.turns;
+  const parts = providerTurns.flatMap((turn) => (
+    Array.isArray(turn.parts) ? turn.parts : []
+  ));
+  return Object.freeze({
+    providerContentTurnCount: providerTurns.length,
+    textPartCount: parts.filter((part) => isRecord(part) && typeof part.text === "string").length,
+    functionCallCount: parts.filter((part) => isRecord(part) && isRecord(part.functionCall)).length,
+    functionResponseCount: parts.filter((part) => isRecord(part) && isRecord(part.functionResponse)).length,
+    geminiContentSha256: geminiJsonWireEvidence(providerTurns).sha256,
   });
 }
 

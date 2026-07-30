@@ -22,11 +22,12 @@ import type {
   Lc4DevLivePrepareArtifact,
   Lc4DevLiveRunArtifact,
 } from "./lc4-development-live-runner";
+import { LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256 } from "./lc4-development-live-runner";
 
-export const LC4_DEV_BUDGET_VERSION = "HACC-LC4-DEV-BUDGET-v1" as const;
+export const LC4_DEV_BUDGET_VERSION = "HACC-LC4-DEV-BUDGET-v3" as const;
 export const LC4_DEV_BUDGET_MAXIMUM_MICRO_USD = 15_000_000 as const;
 export const LC4_DEV_BUDGET_EPISODES = 6 as const;
-export const LC4_DEV_BUDGET_SEGMENTS = 18 as const;
+export const LC4_DEV_BUDGET_SEGMENTS = 36 as const;
 export const LC4_DEV_BUDGET_RETRIES = 0 as const;
 export const LC4_DEV_BUDGET_RECONNECTS = 0 as const;
 /** Frozen before paid execution. Covers 25.4 min caller audio plus provider turns, ASR, retention, and cleanup. */
@@ -35,12 +36,12 @@ export const LC4_DEV_BUDGET_RECONNECTS = 0 as const;
 // only; it does not increase the fixed $15 spend ceiling or permit retries.
 export const LC4_DEV_MAXIMUM_RUN_DURATION_MS = 21_600_000 as const;
 
-const BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-binding/v1\n";
-const EPISODE_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-episode-set/v1\n";
-const ENVELOPE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-envelope/v1\n";
-const LEASE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-run-lease/v1\n";
-const EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-evidence/v1\n";
-const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-dev-run-package/v1\n";
+const BINDING_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-binding/v3\n";
+const EPISODE_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-episode-set/v3\n";
+const ENVELOPE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-envelope/v3\n";
+const LEASE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-run-lease/v3\n";
+const EVIDENCE_DOMAIN = "harshas-amazing-call-center/lc4-dev-budget-evidence/v3\n";
+const PACKAGE_DOMAIN = "harshas-amazing-call-center/lc4-dev-run-package/v3\n";
 const HASH = /^[a-f0-9]{64}$/u;
 
 export type Lc4DevBudgetBinding = Readonly<{
@@ -69,6 +70,8 @@ export type Lc4DevRunLease = Readonly<{
   source_tree_sha256: string;
   credential_identity_set_sha256: string;
   provider_profile_manifest_sha256: string;
+  provider_session_schedule_sha256:
+    typeof LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256;
   audio_manifest_sha256: string;
   qualification_receipt_sha256: string;
   episode_set_sha256: string;
@@ -165,6 +168,8 @@ export function lc4DevBudgetBindingSha256(binding: Lc4DevBudgetBinding): string 
     source_tree_sha256: binding.prepare.source_tree_sha256,
     credential_identity_set_sha256: binding.preflight.credential_identity_set_sha256,
     provider_profile_manifest_sha256: binding.prepare.provider_profile_manifest_sha256,
+    provider_session_schedule_sha256:
+      binding.prepare.provider_session_schedule_sha256,
     audio_manifest_sha256: binding.prepare.audio_manifest_sha256,
     qualification_receipt_sha256: binding.preflight.qualification.receipt_sha256,
     episode_set_sha256: lc4DevBudgetEpisodeSetSha256(binding.prepare),
@@ -206,7 +211,7 @@ function envelope(bindingSha256: string, episode: Lc4DevLiveEpisodePlan): Budget
     schema_version: 1,
     kind: "hacc_provider_gate1_cost_envelope",
     pricing_snapshot_sha256: sha256Hex(`${ENVELOPE_DOMAIN}provider-pricing-retained-in-exchange-usage\n${episode.provider}\n${episode.model}`),
-    provider_hard_session_caps_sha256: sha256Hex(`${ENVELOPE_DOMAIN}three-segments-sixty-canonical-turns-repair-policy-one-zero-retry-zero-reconnect\n${episode.episode_id}`),
+    provider_hard_session_caps_sha256: sha256Hex(`${ENVELOPE_DOMAIN}six-planned-provider-segments-sixty-canonical-turns-repair-policy-one-zero-retry-zero-reconnect\n${episode.episode_id}`),
     runner_config_sha256: bindingSha256,
     formula_sha256: sha256Hex(`${ENVELOPE_DOMAIN}episode-pessimistic-maximum\n${episode.maximum_micro_usd}`),
     components: Object.freeze([Object.freeze({
@@ -319,6 +324,8 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
     source_tree_sha256: input.binding.prepare.source_tree_sha256,
     credential_identity_set_sha256: input.binding.preflight.credential_identity_set_sha256,
     provider_profile_manifest_sha256: input.binding.prepare.provider_profile_manifest_sha256,
+    provider_session_schedule_sha256:
+      input.binding.prepare.provider_session_schedule_sha256,
     audio_manifest_sha256: input.binding.prepare.audio_manifest_sha256,
     qualification_receipt_sha256: input.binding.preflight.qualification.receipt_sha256,
     episode_set_sha256: episodeSetSha256,
@@ -353,9 +360,14 @@ export function assertLc4DevRunLease(input: Readonly<{
     || input.lease.execution_id !== input.binding.prepare.execution_id
     || input.lease.prepare_sha256 !== input.binding.prepare.prepare_sha256
     || input.lease.preflight_sha256 !== input.binding.preflight.preflight_sha256
+    || input.lease.provider_session_schedule_sha256
+      !== input.binding.prepare.provider_session_schedule_sha256
+    || input.lease.provider_session_schedule_sha256
+      !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
     || input.lease.episode_set_sha256 !== lc4DevBudgetEpisodeSetSha256(input.binding.prepare)
     || input.lease.reservations.length !== LC4_DEV_BUDGET_EPISODES
     || input.lease.maximum_total_micro_usd !== LC4_DEV_BUDGET_MAXIMUM_MICRO_USD
+    || input.lease.maximum_segment_count !== LC4_DEV_BUDGET_SEGMENTS
     || input.lease.maximum_retries !== 0
     || input.lease.maximum_reconnects !== 0
     || Date.parse(input.lease.hard_deadline_at) - Date.parse(input.lease.admitted_at) !== LC4_DEV_MAXIMUM_RUN_DURATION_MS) {
@@ -376,7 +388,9 @@ export class Lc4DevBudgetLifecycle {
   readonly #lease: Lc4DevRunLease;
   readonly #binding: Lc4DevBudgetBinding;
   readonly #now: () => Date;
-  readonly #opened = new Set<string>();
+  readonly #intendedSegments = new Set<string>();
+  readonly #openedSegments = new Set<string>();
+  readonly #nextSegmentByEpisode = new Map<string, number>();
 
   constructor(input: Readonly<{ lease: Lc4DevRunLease; binding: Lc4DevBudgetBinding; now: () => Date }>) {
     assertLc4DevRunLease({ ...input, now: input.now(), admission: true });
@@ -401,31 +415,61 @@ export class Lc4DevBudgetLifecycle {
     }
   }
 
-  async beforeEpisodeSocketOpen(episode: Lc4DevLiveEpisodePlan): Promise<void> {
+  async beforeEpisodeSocketOpen(
+    episode: Lc4DevLiveEpisodePlan,
+    segmentOrdinal: 1 | 2 | 3 | 4 | 5 | 6,
+  ): Promise<void> {
     this.assertWithinHardDeadline();
     const reference = this.#lease.reservations.find((candidate) => candidate.episode_id === episode.episode_id);
     if (!reference || reference.provider !== episode.provider || reference.arm !== episode.arm || reference.model !== episode.model) {
       throw new Error("LC4-DEV attempted an unreserved seventh or mutated episode");
     }
-    if (this.#opened.has(episode.episode_id)) throw new Error("LC4-DEV retry or reconnect authority is zero");
-    await markBudgetConnectionIntent({
-      ledgerPath: this.#lease.ledger_path,
-      operationId: `lc4dev-opening:${episode.episode_id}`,
-      reservationId: reference.reservation_id,
-      now: this.#now,
-    });
-    this.#opened.add(episode.episode_id);
+    const expected = this.#nextSegmentByEpisode.get(episode.episode_id) ?? 1;
+    const segmentKey = `${episode.episode_id}:segment:${segmentOrdinal}`;
+    if (segmentOrdinal !== expected || this.#intendedSegments.has(segmentKey)) {
+      throw new Error("LC4-DEV retry or reconnect authority is zero");
+    }
+    if (this.#intendedSegments.size >= this.#lease.maximum_segment_count) {
+      throw new Error("LC4-DEV planned provider segment authority is exhausted");
+    }
+    if (segmentOrdinal === 1) {
+      await markBudgetConnectionIntent({
+        ledgerPath: this.#lease.ledger_path,
+        operationId: `lc4dev-opening:${episode.episode_id}`,
+        reservationId: reference.reservation_id,
+        now: this.#now,
+      });
+    }
+    this.#intendedSegments.add(segmentKey);
   }
 
-  async afterEpisodeSocketOpen(episode: Lc4DevLiveEpisodePlan): Promise<void> {
+  async afterEpisodeSocketOpen(
+    episode: Lc4DevLiveEpisodePlan,
+    segmentOrdinal: 1 | 2 | 3 | 4 | 5 | 6,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const reference = this.#lease.reservations.find((candidate) => candidate.episode_id === episode.episode_id);
-    if (!reference || !this.#opened.has(episode.episode_id)) throw new Error("LC4-DEV socket opened without consumed reservation authority");
-    await markBudgetSessionOpened({
-      ledgerPath: this.#lease.ledger_path,
-      operationId: `lc4dev-opened:${episode.episode_id}`,
-      reservationId: reference.reservation_id,
-      now: this.#now,
-    });
+    const segmentKey = `${episode.episode_id}:segment:${segmentOrdinal}`;
+    if (!reference
+      || !this.#intendedSegments.has(segmentKey)
+      || this.#openedSegments.has(segmentKey)) {
+      throw new Error("LC4-DEV socket opened without consumed planned-segment authority");
+    }
+    if (segmentOrdinal === 1) {
+      await markBudgetSessionOpened({
+        ledgerPath: this.#lease.ledger_path,
+        operationId: `lc4dev-opened:${episode.episode_id}`,
+        reservationId: reference.reservation_id,
+        now: this.#now,
+      });
+    }
+    if (signal?.aborted) {
+      throw new Error(
+        "LC4-DEV segment admission was aborted after conservative durable budget acknowledgement",
+      );
+    }
+    this.#openedSegments.add(segmentKey);
+    this.#nextSegmentByEpisode.set(episode.episode_id, segmentOrdinal + 1);
   }
 }
 

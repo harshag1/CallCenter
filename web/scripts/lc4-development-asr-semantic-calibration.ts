@@ -19,7 +19,8 @@ import {
 } from "../lib/benchmark/lc4-development-listener-semantics";
 import {
   createLc4DevelopmentSemanticCalibrationReference,
-  LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET,
 } from "../lib/benchmark/lc4-development-asr-semantic-calibration-reference";
 import {
   createLc4DevelopmentLargeV3WhisperRuntime,
@@ -37,10 +38,6 @@ import {
 const executeFile = promisify(execFile);
 const ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic-asr-calibration/v1\n";
 const SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic-asr-calibration-signature/v1\n";
-const ROUTES = Object.freeze([
-  Object.freeze({ route_id: "synthetic-samantha", voice: "Samantha" }),
-  Object.freeze({ route_id: "synthetic-daniel", voice: "Daniel" }),
-]);
 const SAMPLE_WORDS = Object.freeze([
   "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
   "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
@@ -55,15 +52,20 @@ function flag(name: string): string {
 }
 
 function calibrationItems() {
-  return LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS.map((opportunityId) => {
+  return LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET.map((selected) => {
     const opportunity = LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities
-      .find((candidate) => candidate.opportunity_id === opportunityId);
+      .find((candidate) => candidate.opportunity_id === selected.opportunity_id);
     if (!opportunity || opportunity.criteria.length === 0) {
-      throw new Error(`selected LC4-DEV semantic opportunity ${opportunityId} is unavailable`);
+      throw new Error(`selected LC4-DEV semantic opportunity ${selected.opportunity_id} is unavailable`);
+    }
+    if (opportunity.criterion_plan_sha256 !== selected.criterion_plan_sha256) {
+      throw new Error(
+        `selected LC4-DEV semantic opportunity ${selected.opportunity_id} differs from its frozen criterion plan`,
+      );
     }
     return Object.freeze({
-      opportunity_id: opportunityId,
-      criterion_plan_sha256: opportunity.criterion_plan_sha256,
+      opportunity_id: selected.opportunity_id,
+      criterion_plan_sha256: selected.criterion_plan_sha256,
       criteria: opportunity.criteria,
     });
   });
@@ -124,7 +126,7 @@ async function main(): Promise<void> {
   const items = calibrationItems();
   const fixtures: AsrCalibrationSourceFixture[] = [];
   const retained: unknown[] = [];
-  for (const route of ROUTES) {
+  for (const route of LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES) {
     for (const [index, item] of items.entries()) {
       const fixtureId = `lc4-dev-${route.route_id}-${String(index + 1).padStart(2, "0")}`;
       const reference = createLc4DevelopmentSemanticCalibrationReference({
@@ -162,7 +164,6 @@ async function main(): Promise<void> {
         );
       }
       const failedCriteria = item.criteria
-        .filter((criterion) => criterion.required_for_final_scorer)
         .filter((criterion) =>
           !scoreLc4ListenerSemanticCriterion(
             criterion,
@@ -218,7 +219,11 @@ async function main(): Promise<void> {
       protocol_sha256: LC4_DEV_LISTENER_PLAN_SHA256,
       corpus_manifest_sha256: sha256Hex(canonicalJson(items)),
       evaluator_build_sha256: LC4_DEV_LISTENER_EVALUATOR_BUILD_SHA256,
-      expected_route_ids: Object.freeze(ROUTES.map((route) => route.route_id)),
+      expected_route_ids: Object.freeze(
+        LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES.map(
+          (route) => route.route_id,
+        ),
+      ),
       thresholds: Object.freeze({
         min_fixture_coverage_ppm: 1_000_000,
         max_word_error_upper_bound_ppm: 250_000,
@@ -244,7 +249,7 @@ async function main(): Promise<void> {
     tts: Object.freeze({
       executable: "/usr/bin/say",
       executable_sha256: sha256Hex(await readFile("/usr/bin/say")),
-      routes: ROUTES,
+      routes: LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES,
       fixture_count: retained.length,
     }),
     calibration: calibration.summary,

@@ -31,10 +31,14 @@ binding, provenance, pairing, or root-commitment drift.
 ## Exact workload
 
 The scenario has exactly 60 canonical caller opportunities in three 20-turn
-acts. Fifty-nine have one unconditional caller utterance. Opportunity 42 has
-five precommitted outcome-specific caller utterances; the signed result of the
-single earlier transcript mutation selects exactly one. Every opportunity
-commits:
+semantic acts. Transport is an independent axis: every call uses six
+preregistered 10-opportunity physical provider sessions, with receipt-bound
+planned transitions after opportunities 10, 20, 30, 40, and 50. The physical
+boundaries are identical for Registered Native and HACC in every provider
+pair; they do not create additional semantic acts. Fifty-nine opportunities have
+one unconditional caller utterance. Opportunity 42 has five precommitted
+outcome-specific caller utterances; the signed result of the single earlier
+transcript mutation selects exactly one. Every opportunity commits:
 
 - exact caller text and a domain-separated SHA-256;
 - canonical act, stage, and goal identifiers;
@@ -49,7 +53,8 @@ memory probes, 12 checkpoints, four worker launches and four result
 dispositions, two goal suspensions and resumptions, one
 `committed_after_error`, one authoritative reconciliation, two invalidated
 confirmations, four prohibited-action probes, two privacy probes, two
-connection rotations, and two interruption repairs.
+semantic-flow rotations, and two interruption repairs. The five physical
+provider-session transitions are tracked separately.
 
 ## Pairing and provider compatibility
 
@@ -116,13 +121,33 @@ schedule. Six provider/arm-tagged pessimistic reservations must exist before
 execution, and their sum may not exceed **$15.00**. A crash can strand this
 authority; it cannot re-arm it.
 
-The consumed lease authorizes exactly six episodes and 18 preregistered segment
-rotations, with zero paid retries, zero reconnects, and no seventh session. The
-preflight expiry controls admission. A run admitted before expiry may continue
-its exact planned rotations under the consumed lease, but may not admit a new
-run. The provider-independent hard run deadline is **7,200,000 ms (two hours)**;
-the adapter refuses to begin any bounded provider operation that could cross
-that deadline.
+The consumed lease authorizes exactly six calls, six physical provider
+sessions per call, and therefore **36 planned provider-session opens**. The
+five planned transitions per call total **30 transitions**. Paid retries and
+unplanned reconnects remain zero; the lease permits neither a seventh call nor
+a seventh physical session inside any call. Each intent is persisted before
+provider-client construction, and each confirmed open is persisted after
+readiness and history hydration but before caller audio. An intent without a
+confirmed open is an ambiguous possible session and consumes the whole
+episode's pessimistic reservation.
+
+The preflight expiry controls admission. A run admitted before expiry may
+continue its exact planned rotations under the consumed lease, but may not
+admit a new run. The provider-independent hard run deadline is
+**21,600,000 ms (six hours)**; the adapter refuses to begin any bounded
+provider operation that could cross that deadline.
+
+The 6-by-10 transport schedule is an outcome-informed development amendment.
+An earlier incomplete canary reached the local ten-minute Gemini connection
+limit during opportunity 17. A proposed 4-by-15 repair was then rejected
+before it could support any result: observed Gemini pacing took approximately
+8 minutes 51 seconds for 15 opportunities, leaving only about 69 seconds under
+the local ten-minute limit for response-length variance, hydration, and
+transport jitter. The uniform 10-opportunity boundary supplies materially more
+headroom without changing the 60-opportunity call or its three semantic acts.
+The failed attempt remains unscorable and contributes no comparative result.
+The amended source requires fresh qualification and a fresh six-call run; no
+completed cell from an earlier source may be reused.
 
 Every opened or ambiguous-opening episode settles at its full pessimistic
 reservation until provider billing is reconciled. Never-opened reservations

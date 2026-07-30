@@ -28,7 +28,7 @@ import {
 const ARTIFACT_DOMAIN =
   "harshas-amazing-call-center/lc4-gateway-fault-injection/v1\n";
 const AUTHORITY_PROJECTION_DOMAIN =
-  "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+  "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
 const FIREWALL_SOURCE_COMMIT =
   "ab3d2ef634e0947aa719610c6e4818762f75d16d";
 const HASH = "a".repeat(64);
@@ -231,7 +231,7 @@ function createExecutor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExe
         `lc4-gateway-fault-head:${input.provider}:${input.provider_call_id}`,
       );
       const body = {
-        schema_version: 1 as const,
+        schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         redaction:
           "public_dev_authority_no_raw_provider_ids_or_credentials" as const,

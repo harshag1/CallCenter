@@ -90,6 +90,79 @@ describe.runIf(Boolean(LC4_REAL_ASR_INTEGRATION))(
           root_dir: calibrationRoot,
         }),
       ).toMatchObject({ valid: false });
+      const transcriptTampered = JSON.parse(JSON.stringify(artifact)) as {
+        fixtures: Array<{
+          fixture_id: string;
+          result: { transcript: string };
+        }>;
+      };
+      transcriptTampered.fixtures[0]!.result.transcript =
+        "An unrelated transcript with none of the frozen facts.";
+      expect(
+        await verifyLc4DevelopmentSemanticCalibrationArtifact({
+          artifact: transcriptTampered,
+          root_dir: calibrationRoot,
+        }),
+      ).toEqual(expect.objectContaining({
+        valid: false,
+        errors: expect.arrayContaining([
+          expect.stringMatching(
+            new RegExp(
+              `^frozen semantic replay failed:${transcriptTampered.fixtures[0]!.fixture_id}:`,
+              "u",
+            ),
+          ),
+        ]),
+      }));
+      const criterionPlanTampered = JSON.parse(JSON.stringify(artifact)) as {
+        fixtures: Array<{
+          fixture_id: string;
+          criterion_plan_sha256: string;
+        }>;
+      };
+      criterionPlanTampered.fixtures[0]!.criterion_plan_sha256 =
+        "0".repeat(64);
+      expect(
+        await verifyLc4DevelopmentSemanticCalibrationArtifact({
+          artifact: criterionPlanTampered,
+          root_dir: calibrationRoot,
+        }),
+      ).toEqual(expect.objectContaining({
+        valid: false,
+        errors: expect.arrayContaining([
+          `frozen semantic plan mismatch:${criterionPlanTampered.fixtures[0]!.fixture_id}`,
+        ]),
+      }));
+      const inventoryTampered = JSON.parse(JSON.stringify(artifact)) as {
+        tts: {
+          routes: Array<{ route_id: string; voice: string }>;
+        };
+        fixtures: Array<{
+          fixture_id: string;
+          route_id: string;
+          voice: string;
+          opportunity_id: string;
+        }>;
+      };
+      inventoryTampered.fixtures[0]!.fixture_id =
+        inventoryTampered.fixtures[1]!.fixture_id;
+      inventoryTampered.fixtures[0]!.opportunity_id = "lc4-dev-op-03";
+      inventoryTampered.fixtures.at(-1)!.route_id = "synthetic-samantha";
+      inventoryTampered.fixtures.at(-1)!.voice = "Samantha";
+      inventoryTampered.tts.routes[0]!.voice = "Substituted";
+      const inventoryVerification =
+        await verifyLc4DevelopmentSemanticCalibrationArtifact({
+          artifact: inventoryTampered,
+          root_dir: calibrationRoot,
+        });
+      expect(inventoryVerification.valid).toBe(false);
+      expect(inventoryVerification.errors).toEqual(expect.arrayContaining([
+        "calibration routes differ from the two frozen TTS routes",
+        `duplicate calibration fixture ID:${inventoryTampered.fixtures[1]!.fixture_id}`,
+        `calibration route/opportunity substitution:${inventoryTampered.fixtures[0]!.fixture_id}`,
+        `calibration route/opportunity substitution:${inventoryTampered.fixtures.at(-1)!.fixture_id}`,
+        "calibration route/opportunity matrix is incomplete",
+      ]));
       const calibration =
         await prepareLc4DevelopmentSemanticCalibrationFromArtifact({
           artifact,

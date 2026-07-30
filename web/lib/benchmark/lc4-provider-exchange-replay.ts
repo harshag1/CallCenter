@@ -31,6 +31,12 @@ import type { Lc4CapturedOutput } from "./lc4-listener-evidence";
 import {
   assertLc4XaiManualTurnCausality,
 } from "./lc4-xai-manual-turn-causality";
+import {
+  assertLc4DevGatewayReceiptSet,
+  LC4_DEV_GATEWAY_BRIDGE_VERSION,
+  LC4_DEV_PRE_DISPATCH_REJECTION_CODES,
+} from "./lc4-development-gateway-bridge";
+import { LOCAL_TOOL_PROXY_FUNCTION_NAME } from "../realtime/client/types";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const WIRE_SET_DOMAIN = "harshas-amazing-call-center/lc4-wire-observation-set/v1\n";
@@ -75,11 +81,15 @@ const WIRE_IDENTITY_KEYS = new Set([
 // per-exchange set bounded well below the 64 MiB retained-artifact ceiling
 // without rejecting those exact long-form wire lineages.
 const MAX_RETAINED_WIRE_OBSERVATIONS = 8_192;
+const MAX_DEV_GATEWAY_CONVERSATION_BATCHES = 16;
+const MAX_DEV_GATEWAY_CONVERSATION_CALLS_PER_BATCH = 16;
+const MAX_DEV_GATEWAY_CONVERSATION_ARGUMENT_BYTES = 64 * 1024;
+const MAX_DEV_GATEWAY_CONVERSATION_OUTPUT_BYTES = 4_000;
 
 export type Lc4ProviderExchangeReplayExpectation = Readonly<{
   run_id: string;
   opportunity_id: string;
-  segment_ordinal: 1 | 2 | 3;
+  segment_ordinal: 1 | 2 | 3 | 4 | 5 | 6;
   playback_kind: "canonical" | "repair";
   caller_pcm_sha256: string;
   caller_pcm_byte_length: number;
@@ -1609,6 +1619,247 @@ function assertServerVadWireCausality(
   }
 }
 
+export function assertLc4DevGatewayConversationToolBatches(
+  value: unknown,
+  receiptSetValue: unknown,
+): void {
+  if (!Array.isArray(value)
+    || value.length > MAX_DEV_GATEWAY_CONVERSATION_BATCHES) {
+    throw new Error(
+      "LC4 DEV gateway conversation replay batch set is invalid or exceeds its bound",
+    );
+  }
+  assertLc4DevGatewayReceiptSet(receiptSetValue);
+  const receiptSet = record(
+    receiptSetValue,
+    "LC4 DEV gateway receipt set",
+  );
+  const authorityValues = receiptSet.authority_projections;
+  const rejectionValues = receiptSet.pre_dispatch_rejections;
+  const receiptValues = receiptSet.receipts;
+  if (!Array.isArray(authorityValues)
+    || !Array.isArray(rejectionValues)
+    || !Array.isArray(receiptValues)) {
+    throw new Error("LC4 DEV gateway receipt set omits replay sources");
+  }
+  const authorities = new Map<string, JsonRecord>();
+  for (const candidate of authorityValues) {
+    const authority = record(
+      candidate,
+      "LC4 DEV gateway authority projection",
+    );
+    authorities.set(
+      hash(
+        authority.projection_sha256,
+        "LC4 DEV gateway authority projection hash",
+      ),
+      authority,
+    );
+  }
+  const authorityReceipts = new Map<string, JsonRecord>();
+  for (const candidate of receiptValues) {
+    const receipt = record(candidate, "LC4 DEV gateway dispatch receipt");
+    authorityReceipts.set(
+      hash(
+        receipt.authority_projection_sha256,
+        "LC4 DEV gateway dispatch authority projection",
+      ),
+      receipt,
+    );
+  }
+  const rejections = new Map<string, JsonRecord>();
+  for (const candidate of rejectionValues) {
+    const rejection = record(
+      candidate,
+      "LC4 DEV gateway pre-dispatch rejection",
+    );
+    rejections.set(
+      hash(
+        rejection.rejection_receipt_sha256,
+        "LC4 DEV gateway rejection receipt",
+      ),
+      rejection,
+    );
+  }
+  const seenSources = new Set<string>();
+  const observedSourceOrder: string[] = [];
+  for (const [batchIndex, candidate] of value.entries()) {
+    const batch = record(
+      candidate,
+      "LC4 DEV gateway conversation replay batch",
+    );
+    assertOnlyKeys(batch, [
+      "schema_version",
+      "bridge_version",
+      "batch_ordinal",
+      "provider_response_id_sha256",
+      "calls",
+    ], "LC4 DEV gateway conversation replay batch");
+    if (batch.schema_version !== 2
+      || batch.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
+      || integer(
+        batch.batch_ordinal,
+        "LC4 DEV gateway conversation replay batch ordinal",
+        1,
+      ) !== batchIndex + 1
+      || !Array.isArray(batch.calls)
+      || batch.calls.length < 1
+      || batch.calls.length > MAX_DEV_GATEWAY_CONVERSATION_CALLS_PER_BATCH) {
+      throw new Error("LC4 DEV gateway conversation replay batch is invalid");
+    }
+    const providerResponseSha256 = hash(
+      batch.provider_response_id_sha256,
+      "LC4 DEV gateway conversation replay provider response",
+    );
+    for (const [callIndex, callValue] of batch.calls.entries()) {
+      const call = record(
+        callValue,
+        "LC4 DEV gateway conversation replay call",
+      );
+      assertOnlyKeys(call, [
+        "call_ordinal",
+        "gateway_tool_name",
+        "model_arguments",
+        "provider_output_canonical_json",
+        "source_kind",
+        "source_sha256",
+        "disposition",
+        "pre_dispatch_rejection_code",
+      ], "LC4 DEV gateway conversation replay call");
+      if (integer(
+        call.call_ordinal,
+        "LC4 DEV gateway conversation replay call ordinal",
+        1,
+      ) !== callIndex + 1
+        || call.gateway_tool_name !== LOCAL_TOOL_PROXY_FUNCTION_NAME) {
+        throw new Error("LC4 DEV gateway conversation replay call order or name is invalid");
+      }
+      const modelArguments = record(
+        call.model_arguments,
+        "LC4 DEV gateway conversation replay model arguments",
+      );
+      if (Buffer.byteLength(canonicalJson(modelArguments), "utf8")
+        > MAX_DEV_GATEWAY_CONVERSATION_ARGUMENT_BYTES) {
+        throw new Error("LC4 DEV gateway conversation replay model arguments exceed their bound");
+      }
+      const output = string(
+        call.provider_output_canonical_json,
+        "LC4 DEV gateway conversation replay delivered output",
+      );
+      if (!output
+        || Buffer.byteLength(output, "utf8")
+          > MAX_DEV_GATEWAY_CONVERSATION_OUTPUT_BYTES) {
+        throw new Error("LC4 DEV gateway conversation replay delivered output exceeds its bound");
+      }
+      let parsedOutput: JsonValue;
+      try {
+        parsedOutput = JSON.parse(output) as JsonValue;
+      } catch {
+        throw new Error("LC4 DEV gateway conversation replay delivered output is not JSON");
+      }
+      if (canonicalJson(parsedOutput) !== output) {
+        throw new Error("LC4 DEV gateway conversation replay delivered output is not canonical JSON");
+      }
+      const sourceSha256 = hash(
+        call.source_sha256,
+        "LC4 DEV gateway conversation replay source",
+      );
+      if (seenSources.has(sourceSha256)) {
+        throw new Error("LC4 DEV gateway conversation replay source is duplicated");
+      }
+      seenSources.add(sourceSha256);
+      observedSourceOrder.push(sourceSha256);
+      if (call.source_kind === "authority_projection") {
+        const authority = authorities.get(sourceSha256);
+        const receipt = authorityReceipts.get(sourceSha256);
+        const expectedModelArguments = authority
+          ? {
+              tool_name: authority.semantic_intent,
+              arguments: authority.model_arguments,
+            }
+          : null;
+        if (!authority
+          || !receipt
+          || authority.provider_response_id_sha256 !== providerResponseSha256
+          || receipt.batch_ordinal !== batch.batch_ordinal
+          || receipt.call_ordinal !== call.call_ordinal
+          || receipt.provider_response_id_sha256 !== providerResponseSha256
+          || canonicalJson(modelArguments) !== canonicalJson(expectedModelArguments)
+          || canonicalJson(authority.provider_output) !== output
+          || authority.disposition !== call.disposition
+          || call.pre_dispatch_rejection_code !== null) {
+          throw new Error(
+            "LC4 DEV gateway conversation replay authority call differs from its retained source",
+          );
+        }
+      } else if (call.source_kind === "pre_dispatch_rejection") {
+        const rejection = rejections.get(sourceSha256);
+        if (!rejection
+          || rejection.provider_response_id_sha256 !== providerResponseSha256
+          || rejection.batch_ordinal !== batch.batch_ordinal
+          || rejection.call_ordinal !== call.call_ordinal
+          || rejection.model_arguments_sha256
+            !== sha256Hex(canonicalJson(modelArguments))
+          || rejection.provider_output_sha256 !== sha256Hex(output)
+          || call.disposition !== "pre_dispatch_rejected"
+          || !LC4_DEV_PRE_DISPATCH_REJECTION_CODES.includes(
+            call.pre_dispatch_rejection_code as (
+              typeof LC4_DEV_PRE_DISPATCH_REJECTION_CODES[number]
+            ),
+          )
+          || rejection.rejection_code
+            !== call.pre_dispatch_rejection_code) {
+          throw new Error(
+            "LC4 DEV gateway conversation replay rejected call differs from its retained source",
+          );
+        }
+      } else {
+        throw new Error("LC4 DEV gateway conversation replay source kind is invalid");
+      }
+    }
+  }
+  const expectedSources = new Set([
+    ...authorities.keys(),
+    ...rejections.keys(),
+  ]);
+  if (seenSources.size !== expectedSources.size
+    || [...seenSources].some((source) => !expectedSources.has(source))) {
+    throw new Error(
+      "LC4 DEV gateway conversation replay does not exactly cover its retained sources",
+    );
+  }
+  const expectedSourceOrder = [
+    ...receiptValues.map((candidate) => {
+      const receipt = record(candidate, "LC4 DEV gateway dispatch receipt");
+      return {
+        batch: integer(receipt.batch_ordinal, "LC4 DEV receipt batch ordinal", 1),
+        call: integer(receipt.call_ordinal, "LC4 DEV receipt call ordinal", 1),
+        sha256: hash(
+          receipt.authority_projection_sha256,
+          "LC4 DEV receipt authority projection",
+        ),
+      };
+    }),
+    ...rejectionValues.map((candidate) => {
+      const rejection = record(candidate, "LC4 DEV gateway rejection receipt");
+      return {
+        batch: integer(rejection.batch_ordinal, "LC4 DEV rejection batch ordinal", 1),
+        call: integer(rejection.call_ordinal, "LC4 DEV rejection call ordinal", 1),
+        sha256: hash(
+          rejection.rejection_receipt_sha256,
+          "LC4 DEV rejection receipt hash",
+        ),
+      };
+    }),
+  ].sort((left, right) => left.batch - right.batch || left.call - right.call)
+    .map(({ sha256 }) => sha256);
+  if (canonicalJson(observedSourceOrder) !== canonicalJson(expectedSourceOrder)) {
+    throw new Error(
+      "LC4 DEV gateway conversation replay source order differs from its receipts",
+    );
+  }
+}
+
 /**
  * Replays the semantic contract of a CAS-retained provider exchange. A fresh,
  * internally consistent CAS hash cannot make a different transport mode,
@@ -1630,9 +1881,10 @@ export function assertLc4ProviderExchangeReplayProjection(
     projection,
     "gemini_output_attribution",
   );
-  if ((schemaVersion !== 2 && schemaVersion !== 3 && schemaVersion !== 4)
+  if ((schemaVersion !== 2 && schemaVersion !== 3 && schemaVersion !== 4
+      && schemaVersion !== 5)
     || (schemaVersion === 2 && hasGeminiOutputAttribution)
-    || ((schemaVersion === 3 || schemaVersion === 4)
+    || ((schemaVersion === 3 || schemaVersion === 4 || schemaVersion === 5)
       && !hasGeminiOutputAttribution)
     || projection.adapter_version !== LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION
     || projection.run_id !== expected.run_id
@@ -1648,7 +1900,7 @@ export function assertLc4ProviderExchangeReplayProjection(
     || projection.response_control_kind !== expected.response_control_kind) {
     throw new Error("LC4 provider exchange replay differs from its episode, opportunity, PCM, or arm");
   }
-  if (schemaVersion === 3 || schemaVersion === 4) {
+  if (schemaVersion === 3 || schemaVersion === 4 || schemaVersion === 5) {
     if (profile.provider === "gemini") {
       record(
         projection.gemini_output_attribution,
@@ -1706,10 +1958,23 @@ export function assertLc4ProviderExchangeReplayProjection(
     opportunityId: expected.opportunity_id,
     listenerPcm,
   });
-  if (schemaVersion === 4) {
+  if (schemaVersion === 4 || schemaVersion === 5) {
     assertSuppressedUnplayedOutput(
       projection.suppressed_unplayed_output,
       outputCapture,
+    );
+  }
+  if (schemaVersion === 5) {
+    assertLc4DevGatewayConversationToolBatches(
+      projection.dev_gateway_conversation_tool_batches,
+      projection.dev_gateway_receipt_set,
+    );
+  } else if (Object.hasOwn(
+    projection,
+    "dev_gateway_conversation_tool_batches",
+  )) {
+    throw new Error(
+      "LC4 pre-v5 provider exchange cannot contain retained DEV gateway conversation replay",
     );
   }
 

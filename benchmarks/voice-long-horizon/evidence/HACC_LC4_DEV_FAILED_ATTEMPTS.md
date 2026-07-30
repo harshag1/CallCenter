@@ -1333,3 +1333,84 @@ The failed-run report is
 It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and is unscorable. Nothing from this root may
 populate a comparative score or graph.
+
+## 2026-07-29 DEV terminal at source `4da5990`
+
+**Failed closed after 136/360 completed opportunities. No efficacy score is
+admissible.**
+
+The exact-source release gates passed before the DEV run:
+
+- xAI Gate D receipt/trust:
+  `9414764979fddd33a9ce01d4b4323240e1f4d0ce1f4eb5bd1327b380d1a5ccf3`
+  /
+  `ff30e1e51296f7ea2ad38d6d181fd7b4f875f5124a5bc5fdb47aa7c4a5643d62`;
+- qualification terminal/trust:
+  `590d335a0dc8ec84cc117106b5941da427c4970b0220beae2f65a2dbe58b08f3`
+  /
+  `558774a6ed1b39990615f4be68a835264d88d1a6af4e40a7efa5dcc9c8053b7d`;
+- qualification passed all three pinned providers with 3/3 replay
+  verification; and
+- qualification retries/settlement/active: **0 / $3.00 / $0.00**.
+
+The DEV execution root
+`/private/tmp/hacc-lc4-dev-release-4da5990-20260730T011258Z` retained:
+
+- run/package:
+  `35bb6b1b916c6207459fb80507a02bfb49e0b850cd5c68e8d372716b1cf119c8`
+  /
+  `21aeba3cdcf27b5cd0dde9e393dc5d362f95737d771984c8a35dea07665aaa69`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **137/136**;
+- generations requested/completed: **145/144**;
+- repair playbacks: **8**;
+- paid retries: **0**; and
+- DEV settlement/active: **$7.50 / $0.00**.
+
+OpenAI Native and OpenAI HACC each completed 60/60 opportunities. Gemini HACC
+completed sixteen opportunities and failed during opportunity 17. Primary
+failure evidence
+`29dfb88921a3d2106661d8d76ea3f571a1e39109e81d977961fc11591052f2e6`
+records:
+
+- `provider_external / provider_fatal / provider_wait`;
+- caller PCM: **147,244 bytes**;
+- partial assistant PCM: **573,630 bytes** across **46 chunks**;
+- response requested and started: **true**;
+- response completed: **false**; and
+- zero paid retries.
+
+Cleanup evidence
+`d9837631272eede50cfa8fb58688de9adf58e8d0e2e3eb32146c667093318697`
+is secondary.
+
+The Gemini physical connection opened at `2026-07-30T01:43:55.651Z` and the
+fatal was retained at `2026-07-30T01:53:55.785Z`, exactly **600.134 seconds**
+later. The production factory configured a ten-minute session maximum, so the
+client emitted `session_duration_limit` during a valid in-flight response.
+This is deterministic local transport-lifetime evidence, not a model result.
+
+The final repair preregisters six 10-opportunity physical sessions per episode
+for all providers and arms, with the same boundaries in Native and HACC. It
+preserves the three semantic acts and all 60 opportunities, losslessly
+hydrates prior conversation at each planned transition, receipt-chains all six
+sessions, enforces a 36-session aggregate cap, and keeps paid retries and
+unplanned reconnects at zero. Its five transitions per call are preregistered
+rotations rather than reactive reconnects.
+
+An intermediate four-by-15 proposal was rejected before it could support a
+comparative result. At the observed Gemini pace, 15 opportunities required
+approximately **8 minutes 51 seconds**, leaving only about **69 seconds** under
+the local ten-minute maximum for a long response, hydration, and transport
+jitter. Moving to uniform 10-opportunity sessions is therefore an
+outcome-informed transport amendment. It does not change the six calls, three
+20-opportunity semantic acts per call, 360 repeated opportunities, zero-retry
+policy, or C3 claim boundary.
+
+The failed-run report is
+`38a3e94ade2a88e27e3a85f3935df6b9e6f89ba05b023bc79174939ab28cdf05`
+(file SHA-256
+`ce8d5d0f5f556a29dfdd633e368b1db168233efce59fdc1d1af3de8f18a3f922`).
+It reports `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and is unscorable. Nothing from this root may
+populate a comparative score or graph.

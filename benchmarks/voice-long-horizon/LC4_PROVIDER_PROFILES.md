@@ -54,7 +54,12 @@ differences.
 - Temperature and reasoning controls are omitted for all matched arms. That is
   arm parity, not cross-provider equivalence: provider defaults may differ.
 - Planned connection refreshes use the same conversation-replay compiler in
-  both arms. It accepts only chronological caller TTS source text,
+  both arms. The LC4 development canary freezes physical provider-session
+  boundaries after opportunities 10, 20, 30, 40, and 50 for Registered Native
+  and HACC alike: six 10-opportunity sessions per 60-opportunity call. These are
+  preregistered, receipt-bound rotations, not reactive reconnects or a claim
+  that provider-native session resumption was used. The compiler accepts only
+  chronological caller TTS source text,
   assistant transcripts already derived from the exact captured output PCM by
   the signed listener evaluator, and provider-visible tool results. This reuses
   the scored audio path and does not enable an extra provider transcription

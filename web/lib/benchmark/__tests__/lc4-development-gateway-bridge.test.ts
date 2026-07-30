@@ -8,6 +8,7 @@ import {
   LC4_DEV_INTENT_ACTION_MAP,
   LC4_DEV_SEMANTIC_INTENTS,
   Lc4DevGatewayTurnCoordinator,
+  assertLc4DevGatewayReceiptSet,
   lc4DevSemanticIntentsForActions,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
@@ -28,7 +29,8 @@ import {
 const HASH = "a".repeat(64);
 const CONTINUATION_CONTROL = "<hacc_response_plan>{\"revision\":19}</hacc_response_plan>";
 const CONTINUATION_CONTROL_SHA256 = sha256Hex(CONTINUATION_CONTROL);
-const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
+const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 const opportunity = createLc4PublicDevelopmentCorpus().opportunities[0]!;
 
 function episode(provider: "openai" | "gemini" | "xai", arm: "native" | "hacc"): Lc4DevLiveEpisodePlan {
@@ -109,8 +111,8 @@ function executor(
       const authoritativeReceiptSha256 = sha256Hex(`authority:${inputs.length}`);
       const controlPlaneHeadSha256 = sha256Hex(`head:${inputs.length}`);
       const projectionBody = {
-        schema_version: 1 as const,
-        bridge_version: "lc4-dev-gateway-bridge-v3" as const,
+        schema_version: 2 as const,
+        bridge_version: "lc4-dev-gateway-bridge-v4" as const,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: input.episode_id,
         opportunity_id: input.opportunity_id,
@@ -582,6 +584,30 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       "receipts",
     ]);
     expect(canonicalJson(finished.receipt_set)).not.toContain("conversation_tool_batches");
+    expect(() => assertLc4DevGatewayReceiptSet(finished.receipt_set)).not.toThrow();
+    expect(finished.receipt_set.pre_dispatch_rejections.map((rejection, index) => (
+      rejection.model_arguments_sha256
+        === sha256Hex(canonicalJson(
+          finished.conversation_tool_batches[1]!.calls[index]!.model_arguments,
+        ))
+    ))).toEqual([true, true]);
+
+    const reordered = JSON.parse(canonicalJson(finished.receipt_set)) as {
+      receipts: JsonValue[];
+      authority_projections: JsonValue[];
+      pre_dispatch_rejections: JsonValue[];
+      receipt_set_sha256: string;
+    };
+    reordered.pre_dispatch_rejections.reverse();
+    reordered.receipt_set_sha256 = sha256Hex(
+      `${RECEIPT_SET_DOMAIN}${canonicalJson({
+        receipts: reordered.receipts,
+        authority_projections: reordered.authority_projections,
+        pre_dispatch_rejections: reordered.pre_dispatch_rejections,
+      })}`,
+    );
+    expect(() => assertLc4DevGatewayReceiptSet(reordered))
+      .toThrow("rejection receipt hash, version, or order is invalid");
   });
 
   it("rejects a 64 KiB + 1 model-argument record before execution or provider delivery", async () => {

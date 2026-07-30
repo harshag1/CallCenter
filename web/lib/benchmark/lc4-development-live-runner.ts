@@ -38,6 +38,7 @@ import {
 import type {
   Lc4DevExchangeEvidence,
   Lc4DevelopmentRealtimeAdapter,
+  Lc4DevelopmentRealtimeSession,
 } from "./lc4-development-realtime-contract";
 import type {
   Lc4DevRepairPlayback,
@@ -71,9 +72,11 @@ export type {
   Lc4DevelopmentRealtimeSession,
 } from "./lc4-development-realtime-contract";
 
-export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v3" as const;
+export const LC4_DEV_LIVE_RUNNER_VERSION = "HACC-LC4-DEV-LIVE-RUNNER-v5" as const;
 export const LC4_DEV_LIVE_EPISODES = 6 as const;
 export const LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE = 60 as const;
+export const LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE = 6 as const;
+export const LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT = 10 as const;
 export const LC4_DEV_LIVE_TOTAL_OPPORTUNITIES = 360 as const;
 export const LC4_DEV_LIVE_HARD_CEILING_MICRO_USD = 15_000_000 as const;
 export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
@@ -88,14 +91,34 @@ export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
 });
 
 const HASH = /^[a-f0-9]{64}$/u;
+const PROVIDER_SESSION_SCHEDULE_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-provider-session-schedule/v2\n";
+
+export const LC4_DEV_PROVIDER_SESSION_SCHEDULE = Object.freeze(
+  ([1, 2, 3, 4, 5, 6] as const).map((ordinal) => Object.freeze({
+    ordinal,
+    opportunity_start:
+      (ordinal - 1) * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT + 1,
+    opportunity_end:
+      ordinal * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+    opportunity_count: LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+    provider_session_rotation_required_after:
+      ordinal < LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+  })),
+);
+export const LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256 = sha256Hex(
+  `${PROVIDER_SESSION_SCHEDULE_DOMAIN}${canonicalJson(
+    LC4_DEV_PROVIDER_SESSION_SCHEDULE,
+  )}`,
+);
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
-const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v3\n";
+const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v5\n";
 const PREFLIGHT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-preflight/v4\n";
 const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization/v4\n";
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v4\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
-const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
+const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v3\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
 const REPAIR_DECISION_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-decision-receipt/v1\n";
 const REPAIR_PLAYBACK_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-playback-receipt/v1\n";
@@ -227,7 +250,7 @@ export type Lc4DevXaiFiniteManualQualificationBinding = Readonly<{
 }>;
 
 export type Lc4DevLivePrepareArtifact = Readonly<{
-  schema_version: 3;
+  schema_version: 5;
   runner_version: typeof LC4_DEV_LIVE_RUNNER_VERSION;
   protocol_id: "HACC-LC4-DEV-v1";
   execution_id: string;
@@ -236,6 +259,8 @@ export type Lc4DevLivePrepareArtifact = Readonly<{
   source_tree_sha256: string;
   corpus_sha256: string;
   provider_profile_manifest_sha256: string;
+  provider_session_schedule_sha256:
+    typeof LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256;
   qualification_transport_scope_sha256: string;
   qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified";
   xai_finite_manual_transport_qualification:
@@ -344,7 +369,7 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     throw new Error("LC4-DEV episode reservations exceed the execution ceiling");
   }
   const body = {
-    schema_version: 3 as const,
+    schema_version: 5 as const,
     runner_version: LC4_DEV_LIVE_RUNNER_VERSION,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     execution_id: input.execution_id,
@@ -353,6 +378,8 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
     source_tree_sha256: input.source_tree_sha256,
     corpus_sha256: corpus.artifact_sha256,
     provider_profile_manifest_sha256: LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
+    provider_session_schedule_sha256:
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
     qualification_transport_scope_sha256: LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
     qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified" as const,
     xai_finite_manual_transport_qualification:
@@ -739,6 +766,12 @@ export function assertLc4DevLivePrepareArtifact(value: Lc4DevLivePrepareArtifact
   if (value.protocol_id !== "HACC-LC4-DEV-v1" || value.episodes.length !== 6 || value.audio_bindings.length !== 180) {
     throw new Error("LC4-DEV prepare artifact shape drifted");
   }
+  if (
+    value.provider_session_schedule_sha256
+      !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
+  ) {
+    throw new Error("LC4-DEV prepare artifact provider-session schedule drifted");
+  }
   if (value.maximum_total_micro_usd > LC4_DEV_LIVE_HARD_CEILING_MICRO_USD) throw new Error("LC4-DEV prepare artifact exceeds $15");
   const rebuilt = createLc4DevLivePrepareArtifact({
     execution_id: value.execution_id,
@@ -802,6 +835,8 @@ export type Lc4DevResponseControl =
   | Readonly<{ kind: "native_context"; instructions: string; instructions_sha256: string }>
   | Readonly<{ kind: "hacc_response_plan"; plan: HaccResponsePlan }>;
 
+export type Lc4DevProviderSegmentOrdinal = 1 | 2 | 3 | 4 | 5 | 6;
+
 export type Lc4DevControlReceipt = Readonly<{
   response_control: Lc4DevResponseControl;
   flow_state_sha256: string;
@@ -816,7 +851,7 @@ export type Lc4DevControlReceipt = Readonly<{
 export type Lc4DevImmutableLedgerEvent = Readonly<{
   sequence: number;
   observed_at: string;
-  event_type: "episode_opened" | "caller_branch_selected" | "audio_submitted" | "opportunity_failed" | "segment_failed" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal";
+  event_type: "episode_opened" | "segment_open_intent" | "segment_opened" | "caller_branch_selected" | "audio_submitted" | "opportunity_failed" | "segment_failed" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal";
   episode_id: string;
   opportunity_id: string | null;
   payload_sha256: string;
@@ -827,7 +862,7 @@ export type Lc4DevImmutableLedgerEvent = Readonly<{
 }>;
 
 export type Lc4DevLiveRunArtifact = Readonly<{
-  schema_version: 1;
+  schema_version: 3;
   execution_id: string;
   prepare_sha256: string;
   preflight_sha256: string;
@@ -836,6 +871,8 @@ export type Lc4DevLiveRunArtifact = Readonly<{
   status: "completed" | "failed";
   episodes_started: number;
   episodes_completed: number;
+  provider_segment_intent_count: number;
+  provider_segment_opened_count: number;
   opportunities_submitted: number;
   opportunities_completed: number;
   response_generations_requested: number;
@@ -907,6 +944,39 @@ async function bounded<T>(label: string, durationMs: number, operation: () => Pr
       operation(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`timeout:${label}`)), durationMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Segment setup owns a potentially paid provider socket. Revoking the setup
+ * deadline aborts adapters that support cancellation and also installs a
+ * late-owner cleanup for test doubles or provider SDKs that resolve after the
+ * deadline. A timed-out setup can therefore never leak or admit a session.
+ */
+async function boundedSegmentOpen(
+  durationMs: number,
+  operation: (signal: AbortSignal) => Promise<Lc4DevelopmentRealtimeSession>,
+): Promise<Lc4DevelopmentRealtimeSession> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const operationPromise = operation(controller.signal);
+  void operationPromise.then(async (session) => {
+    if (timedOut) await session.close().catch(() => undefined);
+  }).catch(() => undefined);
+  try {
+    return await Promise.race([
+      operationPromise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error("timeout:segment-open"));
+        }, durationMs);
       }),
     ]);
   } finally {
@@ -1070,6 +1140,8 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   const ledger: Lc4DevImmutableLedgerEvent[] = [];
   let episodesStarted = 0;
   let episodesCompleted = 0;
+  let providerSegmentIntents = 0;
+  let providerSegmentsOpened = 0;
   let opportunitiesSubmitted = 0;
   let opportunitiesCompleted = 0;
   let retainedCaller = 0;
@@ -1117,7 +1189,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     expected: Readonly<{
       episode: Lc4DevLiveEpisodePlan;
       opportunity_id: string;
-      segment_ordinal: 1 | 2 | 3;
+      segment_ordinal: Lc4DevProviderSegmentOrdinal;
       playback_kind: "canonical" | "repair";
       caller_pcm_sha256: string;
       caller_pcm_byte_length: number;
@@ -1306,14 +1378,26 @@ export async function executeLc4DevLiveRun(input: Readonly<{
       const episodeRepairStart = repairPlaybacks;
       episodesStarted += 1;
       await append("episode_opened", episode.episode_id, null, { provider: episode.provider, arm: episode.arm, model: episode.model });
-      for (const segmentOrdinal of [1, 2, 3] as const) {
+      for (const segmentOrdinal of [1, 2, 3, 4, 5, 6] as const) {
         failureClass = "transport";
         let session;
+        await append("segment_open_intent", episode.episode_id, null, {
+          segment_ordinal: segmentOrdinal,
+          opportunity_start:
+            (segmentOrdinal - 1) * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT + 1,
+          opportunity_end:
+            segmentOrdinal * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+          previous_rotation_receipt_sha256: previousRotationReceipt,
+          planned_provider_session: true,
+          retry_or_reconnect: false,
+        });
+        providerSegmentIntents += 1;
         try {
-          session = await bounded("segment-open", LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, () => input.dependencies.adapter.openSegment({
+          session = await boundedSegmentOpen(LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, (signal) => input.dependencies.adapter.openSegment({
             episode,
             segment_ordinal: segmentOrdinal,
             previous_rotation_receipt_sha256: previousRotationReceipt,
+            signal,
           }));
         } catch (error) {
           const classified = segmentOpenFailureFromUnknown({ error, episode });
@@ -1340,8 +1424,24 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         }
         let segmentBodyFailed = false;
         try {
-          const start = (segmentOrdinal - 1) * 20;
-          for (let offset = 0; offset < 20; offset += 1) {
+          await append("segment_opened", episode.episode_id, null, {
+            segment_ordinal: segmentOrdinal,
+            opportunity_start:
+              (segmentOrdinal - 1) * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT + 1,
+            opportunity_end:
+              segmentOrdinal * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+            previous_rotation_receipt_sha256: previousRotationReceipt,
+            planned_provider_session: true,
+            retry_or_reconnect: false,
+          });
+          providerSegmentsOpened += 1;
+          const start =
+            (segmentOrdinal - 1) * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT;
+          for (
+            let offset = 0;
+            offset < LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT;
+            offset += 1
+          ) {
             const canonicalOpportunity = corpus.opportunities[start + offset]!;
             lastOpportunityId = canonicalOpportunity.id;
             const binding = providerBindings[start + offset]!;
@@ -1830,9 +1930,11 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   const completedAt = input.dependencies.now().toISOString();
   const completed = episodesCompleted === 6
     && opportunitiesCompleted === 360
-    && episodeFinalizations === 6;
+    && episodeFinalizations === 6
+    && providerSegmentIntents === 36
+    && providerSegmentsOpened === 36;
   const body = {
-    schema_version: 1 as const,
+    schema_version: 3 as const,
     execution_id: input.prepare.execution_id,
     prepare_sha256: input.prepare.prepare_sha256,
     preflight_sha256: input.preflight.preflight_sha256,
@@ -1841,6 +1943,8 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     status: completed ? "completed" as const : "failed" as const,
     episodes_started: episodesStarted,
     episodes_completed: episodesCompleted,
+    provider_segment_intent_count: providerSegmentIntents,
+    provider_segment_opened_count: providerSegmentsOpened,
     opportunities_submitted: opportunitiesSubmitted,
     opportunities_completed: opportunitiesCompleted,
     response_generations_requested: responseGenerationsRequested,
@@ -1872,6 +1976,7 @@ export type Lc4DevLiveReportArtifact = Readonly<{
   completed: boolean;
   exact_six_episode_horizon: boolean;
   exact_opportunity_horizon: boolean;
+  exact_provider_session_horizon: boolean;
   exact_playback_accounting: boolean;
   evidence_complete: boolean;
   execution_evidence_complete: boolean;
@@ -1943,11 +2048,34 @@ export function createLc4DevLiveReportArtifact(
     || !HASH.test(budget.budget_terminal_ledger_head_sha256))) {
     throw new Error("LC4-DEV budget report summary is invalid or was not independently replayed");
   }
+  const segmentIntentEvents = run.ledger.filter(
+    (event) => event.event_type === "segment_open_intent",
+  ).length;
+  const segmentOpenedEvents = run.ledger.filter(
+    (event) => event.event_type === "segment_opened",
+  ).length;
+  const segmentPrefixValid =
+    Number.isSafeInteger(run.provider_segment_intent_count)
+    && Number.isSafeInteger(run.provider_segment_opened_count)
+    && run.provider_segment_intent_count === segmentIntentEvents
+    && run.provider_segment_opened_count === segmentOpenedEvents
+    && run.provider_segment_opened_count <= run.provider_segment_intent_count
+    && run.provider_segment_intent_count <=
+      LC4_DEV_LIVE_EPISODES * LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE;
+  if (!segmentPrefixValid) {
+    throw new Error("LC4-DEV provider-session ledger is not an exact authorized prefix");
+  }
+  const exactProviderSessionHorizon =
+    run.provider_segment_intent_count
+      === LC4_DEV_LIVE_EPISODES * LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE
+    && run.provider_segment_opened_count
+      === LC4_DEV_LIVE_EPISODES * LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE;
   const executionEvidenceComplete = run.retained_caller_audio === 360 + run.repair_playbacks
     && run.retained_assistant_audio === 360 + run.repair_playbacks
     && run.listener_evidence_count === 360 + run.repair_playbacks
     && run.mechanism_receipt_count === 360
     && run.episode_finalization_count === 6
+    && exactProviderSessionHorizon
     && run.replay_evidence_reference_count >= run.ledger.length;
   const authorityScorable = authority.status === "scorable"
     && authority.evaluated === 6
@@ -1957,7 +2085,8 @@ export function createLc4DevLiveReportArtifact(
   const executionComplete = run.status === "completed"
     && run.episodes_completed === 6
     && run.opportunities_completed === 360
-    && run.episode_finalization_count === 6;
+    && run.episode_finalization_count === 6
+    && exactProviderSessionHorizon;
   const budgetComplete = budget !== null && budget.budget_replay_verified;
   const taskResultsAvailable = authorityScorable && executionComplete && budgetComplete;
   const body = {
@@ -1967,6 +2096,7 @@ export function createLc4DevLiveReportArtifact(
     completed: run.status === "completed",
     exact_six_episode_horizon: run.episodes_completed === 6,
     exact_opportunity_horizon: run.opportunities_completed === 360,
+    exact_provider_session_horizon: exactProviderSessionHorizon,
     exact_playback_accounting: run.total_response_generations === 360 + run.repair_playbacks
       && run.response_generations_completed === run.total_response_generations
       && run.response_generations_requested === run.total_response_generations

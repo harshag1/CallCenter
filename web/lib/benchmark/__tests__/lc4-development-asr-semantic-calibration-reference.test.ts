@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   createLc4DevelopmentSemanticCalibrationReference,
   lc4DevelopmentSpeechFriendlyPhrase,
-  LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET,
 } from "../lc4-development-asr-semantic-calibration-reference";
 import {
   LC4_DEV_LISTENER_SEMANTIC_BUNDLE,
@@ -25,34 +26,58 @@ describe("LC4-DEV semantic ASR calibration references", () => {
     expect(lc4DevelopmentSpeechFriendlyPhrase(["MPL-1402"])).toBe("MPL-1402");
   });
 
-  it("makes every required selected criterion pass the frozen scorer", () => {
-    for (const opportunityId of LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS) {
+  it("freezes exactly 24 unique opportunities with their exact criterion plans across two routes", () => {
+    expect(LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET).toHaveLength(24);
+    expect(new Set(
+      LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET.map(
+        (selected) => selected.opportunity_id,
+      ),
+    ).size).toBe(24);
+    expect(LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES).toEqual([
+      { route_id: "synthetic-samantha", voice: "Samantha" },
+      { route_id: "synthetic-daniel", voice: "Daniel" },
+    ]);
+    for (const selected of LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET) {
       const opportunity =
         LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.find(
-          (candidate) => candidate.opportunity_id === opportunityId,
+          (candidate) =>
+            candidate.opportunity_id === selected.opportunity_id,
+        );
+      expect(opportunity).toBeDefined();
+      expect(
+        opportunity!.criterion_plan_sha256,
+        selected.opportunity_id,
+      ).toBe(selected.criterion_plan_sha256);
+    }
+  });
+
+  it("makes every selected criterion pass the frozen scorer", () => {
+    for (const selected of LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET) {
+      const opportunity =
+        LC4_DEV_LISTENER_SEMANTIC_BUNDLE.plan.opportunities.find(
+          (candidate) =>
+            candidate.opportunity_id === selected.opportunity_id,
         );
       expect(opportunity).toBeDefined();
       const reference =
         createLc4DevelopmentSemanticCalibrationReference({
-          marker: opportunityId,
+          marker: selected.opportunity_id,
           criteria: opportunity!.criteria,
         });
-      for (const criterion of opportunity!.criteria.filter(
-        (candidate) => candidate.required_for_final_scorer,
-      )) {
+      for (const criterion of opportunity!.criteria) {
         expect(
           scoreLc4ListenerSemanticCriterion(
             criterion,
             reference.reference_transcript,
           ),
-          `${opportunityId}:${criterion.criterion_id}`,
+          `${selected.opportunity_id}:${criterion.criterion_id}`,
         ).toBe(true);
         expect(
           scoreLc4ListenerSemanticCriterion(
             criterion,
             reference.reference_transcript.replace(/[.!?]/gu, ""),
           ),
-          `${opportunityId}:${criterion.criterion_id}:punctuation-free`,
+          `${selected.opportunity_id}:${criterion.criterion_id}:punctuation-free`,
         ).toBe(true);
       }
     }

@@ -20,7 +20,7 @@ import {
   PROVIDER_PROVENANCE_META_KEY,
 } from "../realtime/client/types";
 
-export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v3" as const;
+export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v4" as const;
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
@@ -29,10 +29,10 @@ const MAX_TOOL_CALLS_PER_BATCH = 16;
 const MAX_PROVIDER_RESULT_BYTES = 4_000;
 export const LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES = 64 * 1_024;
 export const LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES = 256 * 1_024;
-const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v1\n";
-const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v1\n";
-const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v2\n";
-const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v2\n";
+const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v2\n";
+const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
+const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
 
 export const LC4_DEV_SEMANTIC_INTENTS = Object.freeze([
   "launch_async_worker",
@@ -247,7 +247,7 @@ export type Lc4DevGatewayExecutor = Readonly<{
  * absent from the provider-visible tool result.
  */
 export type Lc4DevGatewayAuthorityProjection = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
   redaction: "public_dev_authority_no_raw_provider_ids_or_credentials";
   episode_id: string;
@@ -278,7 +278,7 @@ export type Lc4DevGatewayAuthorityProjection = Readonly<{
 
 /** Content-free evidence: arguments, results, prompts, transcripts, and IDs are hashes only. */
 export type Lc4DevSanitizedGatewayReceipt = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
   opportunity_id: string;
   provider: Lc4DevLiveEpisodePlan["provider"];
@@ -297,6 +297,7 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   authoritative_receipt_sha256: string;
   control_plane_head_sha256: string;
   disposition: "executed" | "replayed" | "deduplicated" | "verified" | "rejected";
+  authority_projection_sha256: string;
   receipt_sha256: string;
 }>;
 
@@ -318,7 +319,7 @@ export type Lc4DevPreDispatchRejectionCode =
  * ToolWorld transition.
  */
 export type Lc4DevSanitizedGatewayRejection = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
   opportunity_id: string;
   phase: "canonical" | "repair";
@@ -331,6 +332,7 @@ export type Lc4DevSanitizedGatewayRejection = Readonly<{
   provider_response_id_sha256: string;
   request_sha256: string;
   provider_provenance_sha256: string;
+  model_arguments_sha256: string;
   provider_output_sha256: string;
   executor_invoked: false;
   authority_effect: "none";
@@ -345,12 +347,13 @@ export type Lc4DevGatewayReceiptSet = Readonly<{
 }>;
 
 /**
- * Ephemeral, provider-visible tool history captured at the delivery boundary.
+ * Provider-visible tool history captured at the delivery boundary.
  *
  * This deliberately preserves provider batch boundaries: history hydration
  * must recreate every function call in a batch before recreating any result
- * from that batch. It is returned only by the opt-in coordinator API and is
- * never incorporated into the public receipt set or its committed hash.
+ * from that batch. The coordinator keeps it separate from the compact receipt
+ * set; the versioned DEV provider-exchange artifact incorporates the bounded
+ * snapshot into its own committed replay hash.
  */
 export type Lc4DevGatewayConversationToolCall = Readonly<{
   call_ordinal: number;
@@ -366,7 +369,7 @@ export type Lc4DevGatewayConversationToolCall = Readonly<{
 }>;
 
 export type Lc4DevGatewayConversationToolBatch = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   bridge_version: typeof LC4_DEV_GATEWAY_BRIDGE_VERSION;
   batch_ordinal: number;
   provider_response_id_sha256: string;
@@ -418,6 +421,198 @@ function freeze<T>(value: T): T {
 
 function requireHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
+}
+
+function gatewayRecord(value: unknown, label: string): Record<string, JsonValue> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, JsonValue>;
+}
+
+function assertGatewayKeys(
+  value: Record<string, JsonValue>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (actual.length !== required.length
+    || actual.some((key, index) => key !== required[index])) {
+    throw new Error(`${label} has an invalid schema`);
+  }
+}
+
+function gatewayOrdinal(value: JsonValue, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value as number;
+}
+
+function gatewayBodyWithout(
+  value: Record<string, JsonValue>,
+  excluded: ReadonlySet<string>,
+): Record<string, JsonValue> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => !excluded.has(key)),
+  );
+}
+
+/**
+ * Independently recomputes every nested receipt digest and then closes the
+ * cross-record lineage. This is the canonical admission gate used both at the
+ * source boundary and by retained provider-exchange replay.
+ */
+export function assertLc4DevGatewayReceiptSet(
+  value: unknown,
+): asserts value is Lc4DevGatewayReceiptSet {
+  const set = gatewayRecord(value, "LC4-DEV gateway receipt set");
+  assertGatewayKeys(set, [
+    "receipts",
+    "authority_projections",
+    "pre_dispatch_rejections",
+    "receipt_set_sha256",
+  ], "LC4-DEV gateway receipt set");
+  if (!Array.isArray(set.receipts)
+    || !Array.isArray(set.authority_projections)
+    || !Array.isArray(set.pre_dispatch_rejections)) {
+    throw new Error("LC4-DEV gateway receipt set arrays are invalid");
+  }
+  requireHash(String(set.receipt_set_sha256), "LC4-DEV gateway receipt set");
+
+  const authorities = new Map<string, Record<string, JsonValue>>();
+  for (const candidate of set.authority_projections) {
+    const authority = gatewayRecord(candidate, "LC4-DEV gateway authority projection");
+    const claimed = String(authority.projection_sha256);
+    requireHash(claimed, "LC4-DEV gateway authority projection");
+    const body = gatewayBodyWithout(authority, new Set(["projection_sha256"]));
+    if (authority.schema_version !== 2
+      || authority.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
+      || sha256Hex(`${AUTHORITY_PROJECTION_DOMAIN}${canonicalJson(body)}`) !== claimed
+      || authorities.has(claimed)) {
+      throw new Error("LC4-DEV gateway authority projection hash or version is invalid");
+    }
+    authorities.set(claimed, authority);
+  }
+
+  const authorityReceiptCounts = new Map<string, number>();
+  const orderedSources: Array<Readonly<{
+    batch: number;
+    call: number;
+    kind: "authority_projection" | "pre_dispatch_rejection";
+    sha256: string;
+  }>> = [];
+  let priorReceiptPosition = "";
+  for (const candidate of set.receipts) {
+    const receipt = gatewayRecord(candidate, "LC4-DEV gateway dispatch receipt");
+    const claimed = String(receipt.receipt_sha256);
+    const authoritySha256 = String(receipt.authority_projection_sha256);
+    requireHash(claimed, "LC4-DEV gateway dispatch receipt");
+    requireHash(authoritySha256, "LC4-DEV gateway dispatch authority projection");
+    const body = gatewayBodyWithout(receipt, new Set(["receipt_sha256"]));
+    const batch = gatewayOrdinal(receipt.batch_ordinal, "LC4-DEV gateway receipt batch ordinal");
+    const call = gatewayOrdinal(receipt.call_ordinal, "LC4-DEV gateway receipt call ordinal");
+    const position = `${String(batch).padStart(8, "0")}:${String(call).padStart(8, "0")}`;
+    const authority = authorities.get(authoritySha256);
+    if (receipt.schema_version !== 2
+      || receipt.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
+      || sha256Hex(`${RECEIPT_DOMAIN}${canonicalJson(body)}`) !== claimed
+      || position <= priorReceiptPosition
+      || !authority
+      || receipt.opportunity_id !== authority.opportunity_id
+      || receipt.provider !== authority.provider
+      || receipt.arm !== authority.arm
+      || receipt.semantic_intent !== authority.semantic_intent
+      || receipt.target_tool !== authority.target_tool
+      || receipt.provider_call_id_sha256 !== authority.provider_call_id_sha256
+      || receipt.provider_response_id_sha256 !== authority.provider_response_id_sha256
+      || receipt.request_sha256 !== authority.request_sha256
+      || receipt.provider_provenance_sha256 !== authority.provider_provenance_sha256
+      || receipt.provider_output_sha256 !== sha256Hex(canonicalJson(authority.provider_output))
+      || receipt.post_transition_response_plan_sha256
+        !== authority.post_transition_response_plan_sha256
+      || receipt.post_transition_response_control_sha256
+        !== authority.post_transition_response_control_sha256
+      || receipt.authoritative_receipt_sha256 !== authority.authoritative_receipt_sha256
+      || receipt.control_plane_head_sha256 !== authority.control_plane_head_sha256
+      || receipt.disposition !== authority.disposition) {
+      throw new Error("LC4-DEV gateway dispatch receipt lineage is invalid");
+    }
+    priorReceiptPosition = position;
+    authorityReceiptCounts.set(
+      authoritySha256,
+      (authorityReceiptCounts.get(authoritySha256) ?? 0) + 1,
+    );
+    orderedSources.push({
+      batch,
+      call,
+      kind: "authority_projection",
+      sha256: authoritySha256,
+    });
+  }
+
+  let priorRejectionPosition = "";
+  const rejectionHashes = new Set<string>();
+  for (const candidate of set.pre_dispatch_rejections) {
+    const rejection = gatewayRecord(candidate, "LC4-DEV gateway rejection receipt");
+    const claimed = String(rejection.rejection_receipt_sha256);
+    requireHash(claimed, "LC4-DEV gateway rejection receipt");
+    requireHash(String(rejection.model_arguments_sha256), "LC4-DEV gateway rejection model arguments");
+    requireHash(String(rejection.provider_output_sha256), "LC4-DEV gateway rejection provider output");
+    const sourceBody = gatewayBodyWithout(
+      rejection,
+      new Set(["rejection_receipt_sha256", "provider_output_sha256"]),
+    );
+    const batch = gatewayOrdinal(rejection.batch_ordinal, "LC4-DEV gateway rejection batch ordinal");
+    const call = gatewayOrdinal(rejection.call_ordinal, "LC4-DEV gateway rejection call ordinal");
+    const position = `${String(batch).padStart(8, "0")}:${String(call).padStart(8, "0")}`;
+    const expectedProviderOutput = {
+      ok: false,
+      code: "capability_request_rejected",
+      reason: rejection.rejection_code,
+      retriable: true,
+      executed: false,
+      rejection_receipt_sha256: claimed,
+    };
+    if (rejection.schema_version !== 2
+      || rejection.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
+      || sha256Hex(`${REJECTION_RECEIPT_DOMAIN}${canonicalJson(sourceBody)}`) !== claimed
+      || sha256Hex(canonicalJson(expectedProviderOutput))
+        !== rejection.provider_output_sha256
+      || position <= priorRejectionPosition
+      || rejectionHashes.has(claimed)) {
+      throw new Error("LC4-DEV gateway rejection receipt hash, version, or order is invalid");
+    }
+    priorRejectionPosition = position;
+    rejectionHashes.add(claimed);
+    orderedSources.push({
+      batch,
+      call,
+      kind: "pre_dispatch_rejection",
+      sha256: claimed,
+    });
+  }
+  if (authorities.size !== authorityReceiptCounts.size
+    || [...authorityReceiptCounts.values()].some((count) => count !== 1)) {
+    throw new Error("LC4-DEV gateway authority projections do not map one-to-one to receipts");
+  }
+  orderedSources.sort((left, right) => left.batch - right.batch || left.call - right.call);
+  for (let index = 1; index < orderedSources.length; index += 1) {
+    const prior = orderedSources[index - 1]!;
+    const current = orderedSources[index]!;
+    if (prior.batch === current.batch && prior.call === current.call) {
+      throw new Error("LC4-DEV gateway receipt source position is duplicated");
+    }
+  }
+  const expectedSetHash = sha256Hex(`${RECEIPT_SET_DOMAIN}${canonicalJson({
+    receipts: set.receipts,
+    authority_projections: set.authority_projections,
+    pre_dispatch_rejections: set.pre_dispatch_rejections,
+  })}`);
+  if (set.receipt_set_sha256 !== expectedSetHash) {
+    throw new Error("LC4-DEV gateway receipt set digest is invalid");
+  }
 }
 
 function assertResponsePreparation(
@@ -778,6 +973,7 @@ export class Lc4DevGatewayTurnCoordinator {
       pre_dispatch_rejections: preDispatchRejections,
       receipt_set_sha256: receiptSetSha256,
     });
+    assertLc4DevGatewayReceiptSet(receiptSet);
     this.#context = null;
     this.#batchOrdinal = 0;
     this.#rejectedBatchCount = 0;
@@ -805,7 +1001,7 @@ export class Lc4DevGatewayTurnCoordinator {
     const conversationCalls: Lc4DevGatewayConversationToolCall[] = [];
     for (const [index, call] of calls.entries()) {
       const rejectionBody = freeze({
-        schema_version: 1 as const,
+        schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         opportunity_id: context.opportunity.id,
         phase: context.phase,
@@ -818,6 +1014,7 @@ export class Lc4DevGatewayTurnCoordinator {
         provider_response_id_sha256: sha256Hex(call.candidate.response_id),
         request_sha256: call.candidate.request_sha256,
         provider_provenance_sha256: call.candidate.provider_provenance_sha256,
+        model_arguments_sha256: sha256Hex(canonicalJson(call.candidate.semantic_input)),
         executor_invoked: false as const,
         authority_effect: "none" as const,
       });
@@ -850,7 +1047,7 @@ export class Lc4DevGatewayTurnCoordinator {
       }));
     }
     this.#deliverToolContinuation(context, results, freeze({
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
       batch_ordinal: batchOrdinal,
       provider_response_id_sha256: sha256Hex(calls[0]!.candidate.response_id),
@@ -946,7 +1143,7 @@ export class Lc4DevGatewayTurnCoordinator {
       const providerOutput = providerOutputSnapshot(outcome.provider_output);
       results.push({ callId: call.call_id, output: providerOutput });
       const body = freeze({
-        schema_version: 1 as const,
+        schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         opportunity_id: context.opportunity.id,
         provider: context.episode.provider,
@@ -965,6 +1162,7 @@ export class Lc4DevGatewayTurnCoordinator {
         authoritative_receipt_sha256: outcome.authoritative_receipt_sha256,
         control_plane_head_sha256: outcome.control_plane_head_sha256,
         disposition: outcome.disposition,
+        authority_projection_sha256: outcome.authority_projection.projection_sha256,
       });
       this.#receipts.push(freeze({
         ...body,
@@ -987,7 +1185,7 @@ export class Lc4DevGatewayTurnCoordinator {
     // implicit generation disabled, then requests exactly one continuation.
     if (this.#fatal) throw this.#fatal;
     this.#deliverToolContinuation(context, results, freeze({
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
       batch_ordinal: batchOrdinal,
       provider_response_id_sha256: sha256Hex(calls[0]!.response_id),

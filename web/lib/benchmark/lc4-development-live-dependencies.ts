@@ -923,8 +923,8 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     ledger_head_before_terminal_sha256,
     segment_finalizations,
   }) => {
-    if (completed_opportunities !== 60 || segment_finalizations.length !== 3) {
-      throw new Error("LC4-DEV episode finalization requires 60 opportunities and three retained segments");
+    if (completed_opportunities !== 60 || segment_finalizations.length !== 6) {
+      throw new Error("LC4-DEV episode finalization requires 60 opportunities and six retained provider segments");
     }
     requireSha256(ledger_head_before_terminal_sha256, "LC4-DEV pre-terminal ledger head");
     for (const segment of segment_finalizations) await replayEvidence.assertResolvable(segment);

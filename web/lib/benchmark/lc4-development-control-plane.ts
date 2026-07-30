@@ -60,7 +60,7 @@ import { createToolWorld, executeTool, type ToolWorldState } from "./tool-world"
 const CONTROL_MANIFEST_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-manifest/v1\n";
 const CONTROL_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n";
 const GATEWAY_EXECUTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-gateway-execution/v1\n";
-const GATEWAY_AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v1\n";
+const GATEWAY_AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
 const CONTINUITY_DOMAIN = "harshas-amazing-call-center/lc4-dev-arm-common-continuity/v1\n";
 const NATIVE_TRANSCRIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-control-transcript/v1\n";
 const NATIVE_CONTEXT_DOMAIN = "harshas-amazing-call-center/lc4-dev-native-context/v1\n";
@@ -1337,7 +1337,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         });
       }
       const authorityProjectionBody = {
-        schema_version: 1 as const,
+        schema_version: 2 as const,
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         redaction: "public_dev_authority_no_raw_provider_ids_or_credentials" as const,
         episode_id: state.episode.episode_id,

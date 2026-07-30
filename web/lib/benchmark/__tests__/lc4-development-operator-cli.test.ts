@@ -44,11 +44,55 @@ import {
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
-const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v1\n";
+const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v3\n";
 
 function reportRun(completed = true): Lc4DevLiveRunArtifact {
+  const providerSegmentLedger = completed
+    ? Object.freeze(Array.from({ length: 36 }, (_, index) => {
+        const segmentOrdinal = index % 6 + 1;
+        const episodeOrdinal = Math.floor(index / 6) + 1;
+        const common = {
+          episode_id: `lc4-dev-episode-${episodeOrdinal}`,
+          opportunity_id: null,
+          payload_sha256: sha256Hex(`segment-payload-${index + 1}`),
+          payload_evidence: {
+            schema_version: 1 as const,
+            retention_version: "lc4-dev-replay-evidence-v1" as const,
+            kind: "ledger_payload" as const,
+            evidence_sha256: sha256Hex(`segment-payload-${index + 1}`),
+            byte_length: 1,
+            content_encoding: "domain-prefixed-canonical-json" as const,
+            domain_prefix:
+              "harshas-amazing-call-center/lc4-dev-live-ledger-payload/v1\n",
+          },
+          evidence_references: Object.freeze([]),
+        };
+        return [
+          Object.freeze({
+            sequence: index * 2 + 1,
+            observed_at: "2026-07-22T06:00:00.000Z",
+            event_type: "segment_open_intent" as const,
+            ...common,
+            previous_event_sha256: index === 0
+              ? null
+              : sha256Hex(`segment-event-${index * 2}`),
+            event_sha256: sha256Hex(`segment-event-${index * 2 + 1}`),
+            segment_ordinal: segmentOrdinal,
+          }),
+          Object.freeze({
+            sequence: index * 2 + 2,
+            observed_at: "2026-07-22T06:00:00.001Z",
+            event_type: "segment_opened" as const,
+            ...common,
+            previous_event_sha256: sha256Hex(`segment-event-${index * 2 + 1}`),
+            event_sha256: sha256Hex(`segment-event-${index * 2 + 2}`),
+            segment_ordinal: segmentOrdinal,
+          }),
+        ];
+      }).flat())
+    : Object.freeze([]);
   const body = {
-    schema_version: 1 as const,
+    schema_version: 3 as const,
     execution_id: "lc4-dev-operator-test",
     prepare_sha256: "1".repeat(64),
     preflight_sha256: "2".repeat(64),
@@ -57,6 +101,8 @@ function reportRun(completed = true): Lc4DevLiveRunArtifact {
     status: completed ? "completed" as const : "failed" as const,
     episodes_started: completed ? 6 : 3,
     episodes_completed: completed ? 6 : 2,
+    provider_segment_intent_count: completed ? 36 : 0,
+    provider_segment_opened_count: completed ? 36 : 0,
     opportunities_submitted: completed ? 360 : 120,
     opportunities_completed: completed ? 360 : 119,
     response_generations_requested: completed ? 360 : 120,
@@ -75,8 +121,8 @@ function reportRun(completed = true): Lc4DevLiveRunArtifact {
     replay_evidence_reference_count: completed ? 1_000 : 300,
     failure_class: completed ? null : "evidence" as const,
     failure_message_sha256: completed ? null : sha256Hex("incomplete"),
-    ledger: Object.freeze([]),
-    ledger_head_sha256: null,
+    ledger: providerSegmentLedger,
+    ledger_head_sha256: completed ? providerSegmentLedger.at(-1)!.event_sha256 : null,
   };
   return Object.freeze({ ...body, run_sha256: sha256Hex(`${RUN_DOMAIN}${canonicalJson(body)}`) });
 }
@@ -84,7 +130,7 @@ function reportRun(completed = true): Lc4DevLiveRunArtifact {
 function terminalBudgetEvidence(run: Lc4DevLiveRunArtifact): Lc4DevBudgetEvidence {
   return {
     schema_version: 1,
-    budget_version: "HACC-LC4-DEV-BUDGET-v1",
+    budget_version: "HACC-LC4-DEV-BUDGET-v3",
     execution_id: run.execution_id,
     lease_sha256: sha256Hex("operator-test-budget-lease"),
     ledger_id: "operator-test-ledger",

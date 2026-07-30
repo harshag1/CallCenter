@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { sha256Hex } from "../artifacts";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import {
   LC4_DEV_BUDGET_MAXIMUM_MICRO_USD,
   LC4_DEV_MAXIMUM_RUN_DURATION_MS,
@@ -16,7 +16,10 @@ import {
   reserveLc4DevRunBudget,
   type Lc4DevBudgetBinding,
 } from "../lc4-development-budget";
-import type { Lc4DevLiveRunArtifact } from "../lc4-development-live-runner";
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  type Lc4DevLiveRunArtifact,
+} from "../lc4-development-live-runner";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -41,6 +44,8 @@ function binding(expiresAt = "2026-07-23T01:00:00.000Z"): Lc4DevBudgetBinding {
       source_commit: "b".repeat(40),
       source_tree_sha256: "c".repeat(64),
       provider_profile_manifest_sha256: "d".repeat(64),
+      provider_session_schedule_sha256:
+        LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
       audio_manifest_sha256: "e".repeat(64),
       maximum_total_micro_usd: LC4_DEV_BUDGET_MAXIMUM_MICRO_USD,
       episodes,
@@ -61,7 +66,7 @@ function binding(expiresAt = "2026-07-23T01:00:00.000Z"): Lc4DevBudgetBinding {
 
 function runFixture(bindingValue: Lc4DevBudgetBinding, status: "completed" | "failed" = "failed"): Lc4DevLiveRunArtifact {
   const body = {
-    schema_version: 1 as const,
+    schema_version: 3 as const,
     execution_id: bindingValue.prepare.execution_id,
     prepare_sha256: bindingValue.prepare.prepare_sha256,
     preflight_sha256: bindingValue.preflight.preflight_sha256,
@@ -70,6 +75,8 @@ function runFixture(bindingValue: Lc4DevBudgetBinding, status: "completed" | "fa
     status,
     episodes_started: 1,
     episodes_completed: status === "completed" ? 6 : 0,
+    provider_segment_intent_count: 1,
+    provider_segment_opened_count: 0,
     opportunities_submitted: 1,
     opportunities_completed: status === "completed" ? 360 : 0,
     response_generations_requested: 1,
@@ -91,9 +98,9 @@ function runFixture(bindingValue: Lc4DevBudgetBinding, status: "completed" | "fa
     ledger: [{
       sequence: 1,
       observed_at: "2026-07-22T23:00:02.000Z",
-      event_type: status === "failed" ? "opportunity_failed" as const : "opportunity_completed" as const,
+      event_type: "segment_open_intent" as const,
       episode_id: bindingValue.prepare.episodes[0]!.episode_id,
-      opportunity_id: "lc4-dev-op-01",
+      opportunity_id: null,
       payload_sha256: sha256Hex("payload"),
       payload_evidence: { kind: "ledger_payload" as const, evidence_sha256: sha256Hex("payload"), byte_length: 2 },
       evidence_references: [],
@@ -119,7 +126,38 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     expect(lease.reservations.reduce((sum, item) => sum + item.maximum_micro_usd, 0)).toBeLessThanOrEqual(15_000_000);
     expect(lease.maximum_retries).toBe(0);
     expect(lease.maximum_reconnects).toBe(0);
+    expect(lease.maximum_segment_count).toBe(36);
+    expect(lease.provider_session_schedule_sha256).toBe(
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+    );
     expect(() => assertLc4DevRunLease({ lease, binding: bindingValue, now: now(), admission: true })).not.toThrow();
+
+    const resignLease = (
+      candidate: Omit<typeof lease, "lease_sha256">,
+    ): typeof lease => ({
+      ...candidate,
+      lease_sha256: sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-budget-run-lease/v3\n${canonicalJson(candidate)}`,
+      ),
+    }) as typeof lease;
+    const { lease_sha256: _claimed, ...leaseBody } = lease;
+    void _claimed;
+    expect(() => assertLc4DevRunLease({
+      lease: resignLease({
+        ...leaseBody,
+        maximum_segment_count: 35,
+      } as unknown as Omit<typeof lease, "lease_sha256">),
+      binding: bindingValue,
+      now: now(),
+    })).toThrow("exact plan or hard controls");
+    expect(() => assertLc4DevRunLease({
+      lease: resignLease({
+        ...leaseBody,
+        provider_session_schedule_sha256: "0".repeat(64),
+      } as Omit<typeof lease, "lease_sha256">),
+      binding: bindingValue,
+      now: now(),
+    })).toThrow("exact plan or hard controls");
 
     await expect(reserveLc4DevRunBudget({ root, binding: bindingValue, now })).rejects.toMatchObject({ code: "EEXIST" });
   });
@@ -135,13 +173,37 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     lifecycle.assertProviderConstructionAuthorized();
 
     clock = new Date("2026-07-22T23:00:31.000Z");
-    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!);
-    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!);
-    await expect(lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!)).rejects.toThrow("retry or reconnect authority is zero");
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 1);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 1);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 2);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 2);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 3);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 3);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 4);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 4);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 5);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 5);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 6);
+    await lifecycle.afterEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 6);
+    await expect(lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 6)).rejects.toThrow("retry or reconnect authority is zero");
+    await expect(lifecycle.beforeEpisodeSocketOpen(
+      bindingValue.prepare.episodes[1]!,
+      3,
+    )).rejects.toThrow("retry or reconnect authority is zero");
+    await expect(lifecycle.beforeEpisodeSocketOpen(
+      bindingValue.prepare.episodes[1]!,
+      7 as unknown as 6,
+    )).rejects.toThrow("retry or reconnect authority is zero");
+    for (const episode of bindingValue.prepare.episodes.slice(1)) {
+      for (const ordinal of [1, 2, 3, 4, 5, 6] as const) {
+        await lifecycle.beforeEpisodeSocketOpen(episode, ordinal);
+        await lifecycle.afterEpisodeSocketOpen(episode, ordinal);
+      }
+    }
     await expect(lifecycle.beforeEpisodeSocketOpen({
       ...bindingValue.prepare.episodes[1]!,
       episode_id: "lc4-dev-seventh-cell",
-    })).rejects.toThrow("unreserved seventh");
+    }, 1)).rejects.toThrow("unreserved seventh");
     expect(() => lifecycle.assertProviderConstructionAuthorized()).toThrow("after preflight expiry");
   });
 
@@ -174,7 +236,7 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     const now = () => new Date("2026-07-22T23:00:00.000Z");
     const lease = await reserveLc4DevRunBudget({ root, binding: bindingValue, now });
     const lifecycle = new Lc4DevBudgetLifecycle({ lease, binding: bindingValue, now });
-    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 1);
     // Simulate timeout before provider-open acknowledgement: "opening" is
     // charged at the full pessimistic maximum, never treated as free.
     const run = runFixture(bindingValue);
@@ -199,6 +261,37 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     expect(() => assertLc4DevRunLease({ lease: badLease, binding: bindingValue, now: now() })).toThrow("lease hash mismatch");
   });
 
+  it("retains conservative durable opened liability without late in-memory admission after abort", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lc4-dev-budget-"));
+    roots.push(root);
+    const bindingValue = binding();
+    const now = () => new Date("2026-07-22T23:00:00.000Z");
+    const lease = await reserveLc4DevRunBudget({
+      root,
+      binding: bindingValue,
+      now,
+    });
+    const lifecycle = new Lc4DevBudgetLifecycle({
+      lease,
+      binding: bindingValue,
+      now,
+    });
+    const episode = bindingValue.prepare.episodes[0]!;
+    await lifecycle.beforeEpisodeSocketOpen(episode, 1);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(lifecycle.afterEpisodeSocketOpen(
+      episode,
+      1,
+      controller.signal,
+    )).rejects.toThrow("aborted after conservative durable budget acknowledgement");
+    expect(await readFile(lease.ledger_path, "utf8"))
+      .toContain("\"event_type\":\"reservation.opened\"");
+    // In-memory admission did not advance to segment two.
+    await expect(lifecycle.beforeEpisodeSocketOpen(episode, 2))
+      .rejects.toThrow("retry or reconnect authority is zero");
+  });
+
   it("fails independent replay if the signed ledger bytes are tampered", async () => {
     const root = await mkdtemp(join(tmpdir(), "lc4-dev-budget-"));
     roots.push(root);
@@ -206,7 +299,7 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     const now = () => new Date("2026-07-22T23:00:00.000Z");
     const lease = await reserveLc4DevRunBudget({ root, binding: bindingValue, now });
     const lifecycle = new Lc4DevBudgetLifecycle({ lease, binding: bindingValue, now });
-    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!);
+    await lifecycle.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 1);
     const run = runFixture(bindingValue);
     const evidence = await finalizeLc4DevRunBudget({ lease, binding: bindingValue, run, now });
     const bytes = await readFile(lease.ledger_path, "utf8");

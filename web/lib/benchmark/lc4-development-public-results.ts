@@ -45,7 +45,7 @@ import {
 const HASH = /^[a-f0-9]{64}$/u;
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES = 1024 * 1024;
-const PUBLIC_RESULT_DOMAIN = "harshas-amazing-call-center/lc4-dev-public-result/v4\n";
+const PUBLIC_RESULT_DOMAIN = "harshas-amazing-call-center/lc4-dev-public-result/v6\n";
 
 export const LC4_DEV_PUBLIC_RESULT_FILENAMES = Object.freeze({
   json: "HACC_LC4_DEV_PUBLIC_RESULT.json",
@@ -53,7 +53,7 @@ export const LC4_DEV_PUBLIC_RESULT_FILENAMES = Object.freeze({
 });
 
 export type Lc4DevPublicResultArtifact = Readonly<{
-  schema_version: 4;
+  schema_version: 6;
   artifact_type: "hacc_lc4_dev_public_result";
   protocol_id: "HACC-LC4-DEV-v1";
   evidence_class: "C3";
@@ -87,9 +87,21 @@ export type Lc4DevPublicResultArtifact = Readonly<{
     }>[];
     matched_provider_pairs: 3;
     no_retry_after_paid_open: true;
+    opportunity_accounting:
+      Lc4PublicationTransportProvenance["opportunity_accounting"];
+    semantic_accounting:
+      Lc4PublicationTransportProvenance["semantic_accounting"];
+    transport_accounting:
+      Lc4PublicationTransportProvenance["transport_accounting"];
     cells: Lc4PublicationTransportProvenance["cells"];
   }>;
-  qualification: Omit<Lc4PublicationTransportProvenance, "cells">;
+  qualification: Omit<
+    Lc4PublicationTransportProvenance,
+    | "cells"
+    | "opportunity_accounting"
+    | "semantic_accounting"
+    | "transport_accounting"
+  >;
   evaluation: Readonly<{
     task_results_available: boolean;
     evidence_complete: boolean;
@@ -422,6 +434,8 @@ export function createLc4DevPublicResultArtifact(
       !== evidence.transport_replay.replay_sha256
     || transportProvenance.canonical_provider_exchange_count
       !== evidence.transport_replay.canonical_provider_exchange_count
+    || transportProvenance.provider_session_count
+      !== evidence.transport_replay.provider_session_count
     || transportProvenance.repair_provider_exchange_count
       !== evidence.transport_replay.repair_provider_exchange_count
     || transportProvenance.total_response_generation_count
@@ -491,7 +505,7 @@ export function createLc4DevPublicResultArtifact(
     });
   });
   const body = {
-    schema_version: 4 as const,
+    schema_version: 6 as const,
     artifact_type: "hacc_lc4_dev_public_result" as const,
     protocol_id: "HACC-LC4-DEV-v1" as const,
     evidence_class: "C3" as const,
@@ -520,6 +534,9 @@ export function createLc4DevPublicResultArtifact(
       providers: Object.freeze(byProvider),
       matched_provider_pairs: 3 as const,
       no_retry_after_paid_open: true as const,
+      opportunity_accounting: transportProvenance.opportunity_accounting,
+      semantic_accounting: transportProvenance.semantic_accounting,
+      transport_accounting: transportProvenance.transport_accounting,
       cells: transportProvenance.cells,
     }),
     qualification: Object.freeze({
@@ -532,6 +549,10 @@ export function createLc4DevPublicResultArtifact(
         transportProvenance.development_transport_replay_sha256,
       canonical_provider_exchange_count:
         transportProvenance.canonical_provider_exchange_count,
+      provider_session_count:
+        transportProvenance.provider_session_count,
+      provider_session_replay_set_sha256:
+        transportProvenance.provider_session_replay_set_sha256,
       repair_provider_exchange_count:
         transportProvenance.repair_provider_exchange_count,
       total_response_generation_count:
@@ -629,6 +650,7 @@ export function renderLc4DevPublicResultMarkdown(result: Lc4DevPublicResultArtif
     `| Evidence complete | ${result.evaluation.evidence_complete} |\n` +
     `| Paid retries | ${result.execution.paid_retry_count} |\n` +
     `| Conservative ledger liability | $${(result.budget.conservative_settled_micro_usd / 1_000_000).toFixed(6)} |\n\n` +
+    `Each call contains ${result.design.semantic_accounting.semantic_acts_per_call} semantic acts of ${result.design.semantic_accounting.opportunities_per_semantic_act} opportunities and ${result.design.transport_accounting.provider_sessions_per_call} planned provider sessions of ${result.design.transport_accounting.opportunities_per_provider_session} opportunities. Across six calls, that is ${result.design.transport_accounting.provider_sessions} physical provider sessions and ${result.design.transport_accounting.planned_provider_session_transitions} planned transitions, with ${result.design.transport_accounting.unplanned_reconnects} unplanned reconnects.\n\n` +
     `## Matched development design\n\n` +
     `| Provider | Realtime model | Arms | Opportunities |\n|---|---|---|---:|\n${providers}\n\n` +
     `## Transport and qualification provenance\n\n` +
@@ -683,6 +705,9 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
   }
   const transportProvenance = {
     ...result.qualification,
+    opportunity_accounting: result.design.opportunity_accounting,
+    semantic_accounting: result.design.semantic_accounting,
+    transport_accounting: result.design.transport_accounting,
     cells: result.design.cells,
   } as Lc4PublicationTransportProvenance;
   assertLc4PublicationTransportProvenance(transportProvenance);
@@ -700,7 +725,7 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
     "authority_replay_set_sha256",
     "report_sha256",
   ] as const;
-  if (result.schema_version !== 4
+  if (result.schema_version !== 6
     || result.artifact_type !== "hacc_lc4_dev_public_result"
     || result.protocol_id !== "HACC-LC4-DEV-v1"
     || result.evidence_class !== "C3"
@@ -753,6 +778,9 @@ export function assertLc4DevPublicResultArtifact(result: Lc4DevPublicResultArtif
       "providers",
       "matched_provider_pairs",
       "no_retry_after_paid_open",
+      "opportunity_accounting",
+      "semantic_accounting",
+      "transport_accounting",
       "cells",
     ])
     || result.design.providers.length !== 3

@@ -31,6 +31,45 @@ import {
 const H = (value: string) => sha256Hex(value);
 
 function transportReplay(runSha256 = H("run")) {
+  const episodes = (["openai", "gemini", "xai"] as const).flatMap((provider) => {
+    const profile = createLc4ProviderExecutionProfile(provider);
+    return (["native", "hacc"] as const).map((arm) => ({
+      ...(() => {
+        const repairCount = arm === "hacc"
+          ? provider === "xai" ? 2 : 1
+          : 0;
+        return {
+          repair_provider_exchange_count: repairCount,
+          total_response_generation_count: 60 + repairCount,
+        };
+      })(),
+      episode_id: `${provider}-${arm}`,
+      provider,
+      arm,
+      model: profile.model,
+      transport_purpose: provider === "xai"
+        ? "finite_prerecorded_efficacy" as const
+        : null,
+      transport_mode: "manual_commit" as const,
+      transport_profile_sha256:
+        profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
+      output_audio_lineage_scope: provider === "gemini"
+        ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
+        : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
+      canonical_provider_exchange_count: 60 as const,
+      provider_session_count: 6 as const,
+      provider_session_replay_set_sha256:
+        H(`${provider}-${arm}-provider-session-replay-set`),
+      canonical_exchange_replay_set_sha256:
+        H(`${provider}-${arm}-canonical-exchange-replay-set`),
+      response_generation_replay_set_sha256:
+        H(`${provider}-${arm}-response-generation-replay-set`),
+      listener_authority_replay_set_sha256:
+        H(`${provider}-${arm}-listener-authority-replay-set`),
+      listener_invocation_replay_set_sha256:
+        H(`${provider}-${arm}-listener-invocation-replay-set`),
+    }));
+  });
   return createLc4PublicationTransportReplay({
     run_sha256: runSha256,
     provider_profile_manifest_sha256:
@@ -40,42 +79,7 @@ function transportReplay(runSha256 = H("run")) {
     canonical_provider_exchange_count: 360,
     repair_provider_exchange_count: 4,
     total_response_generation_count: 364,
-    episodes: (["openai", "gemini", "xai"] as const).flatMap((provider) => {
-      const profile = createLc4ProviderExecutionProfile(provider);
-      return (["native", "hacc"] as const).map((arm) => ({
-        ...(() => {
-          const repairCount = arm === "hacc"
-            ? provider === "xai" ? 2 : 1
-            : 0;
-          return {
-            repair_provider_exchange_count: repairCount,
-            total_response_generation_count: 60 + repairCount,
-          };
-        })(),
-        episode_id: `${provider}-${arm}`,
-        provider,
-        arm,
-        model: profile.model,
-        transport_purpose: provider === "xai"
-          ? "finite_prerecorded_efficacy" as const
-          : null,
-        transport_mode: "manual_commit" as const,
-        transport_profile_sha256:
-          profile.transport_profile_sha256 ?? profile.provider_profile_sha256,
-        output_audio_lineage_scope: provider === "gemini"
-          ? "client_observed_interval_wire_projection_capture_cas_evaluator_exact_complete_frame_attribution_provider_response_id_unavailable" as const
-          : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact" as const,
-        canonical_provider_exchange_count: 60 as const,
-        canonical_exchange_replay_set_sha256:
-          H(`${provider}-${arm}-canonical-exchange-replay-set`),
-        response_generation_replay_set_sha256:
-          H(`${provider}-${arm}-response-generation-replay-set`),
-        listener_authority_replay_set_sha256:
-          H(`${provider}-${arm}-listener-authority-replay-set`),
-        listener_invocation_replay_set_sha256:
-          H(`${provider}-${arm}-listener-invocation-replay-set`),
-      }));
-    }),
+    episodes,
   });
 }
 
@@ -175,12 +179,32 @@ describe("LC4-DEV public results", () => {
     const second = createLc4DevPublicResultArtifact(verifiedEvidence(), transportProvenance());
     expect(canonicalJson(first)).toBe(canonicalJson(second));
     expect(first).toMatchObject({
-      schema_version: 4,
+      schema_version: 6,
       evidence_class: "C3",
       study_role: "development_mechanism_evidence_only",
       efficacy_claim_eligible: false,
       confirmatory_reuse_permitted: false,
       execution: { episodes_completed: 6, opportunities_completed: 360, paid_retry_count: 0 },
+      design: {
+        opportunity_accounting: {
+          calls: 6,
+          opportunities_per_call: 60,
+          repeated_opportunity_observations: 360,
+          opportunities_are_independent_trials: false,
+        },
+        semantic_accounting: {
+          semantic_acts_per_call: 3,
+          opportunities_per_semantic_act: 20,
+        },
+        transport_accounting: {
+          provider_sessions_per_call: 6,
+          provider_sessions: 36,
+          planned_provider_session_transitions_per_call: 5,
+          planned_provider_session_transitions: 30,
+          opportunities_per_provider_session: 10,
+          unplanned_reconnects: 0,
+        },
+      },
       qualification: {
         xai_finite_manual_transport_qualification: "verified",
         xai_finite_manual_claim_boundary:
@@ -206,6 +230,12 @@ describe("LC4-DEV public results", () => {
         wire_turn_boundary:
           "finite_clip_input_audio_buffer.commit_then_response.create",
         transport_purpose: "finite_prerecorded_efficacy",
+        semantic_act_count: 3,
+        opportunities_per_semantic_act: 20,
+        provider_session_count: 6,
+        planned_provider_session_transition_count: 5,
+        opportunities_per_provider_session: 10,
+        unplanned_reconnect_count: 0,
         model_identity_verification: "provider_verified",
         qualification_scope: "xai_finite_manual_gate_d_exact_transport",
         qualification_receipt_sha256: H("gate-d-receipt"),
@@ -224,6 +254,8 @@ describe("LC4-DEV public results", () => {
     expect(markdown).toContain("Registered Native comparator means Native realtime API + common benchmark continuity");
     expect(markdown).toContain("does not authorize a HACC superiority claim");
     expect(markdown).toContain("360 opportunities are repeated within six calls, not 360 independent trials");
+    expect(markdown).toContain("36 physical provider sessions and 30 planned transitions");
+    expect(markdown).not.toContain("36 calls");
     expect(markdown).toContain("| xai | grok-voice-think-fast-1.0 | Registered Native comparator | finite_prerecorded_efficacy | client_explicit | finite_clip_input_audio_buffer.commit_then_response.create | client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact | provider_verified | xai_finite_manual_gate_d_exact_transport |");
     expect(markdown).toContain("transport qualification only");
     expect(markdown).toContain(
@@ -240,7 +272,7 @@ describe("LC4-DEV public results", () => {
     const { public_result_sha256: _oldHash, ...extraBody } = extraClaim;
     void _oldHash;
     extraClaim.public_result_sha256 = sha256Hex(
-      `harshas-amazing-call-center/lc4-dev-public-result/v4\n${canonicalJson(extraBody)}`,
+      `harshas-amazing-call-center/lc4-dev-public-result/v6\n${canonicalJson(extraBody)}`,
     );
     expect(() => assertLc4DevPublicResultArtifact(extraClaim as never))
       .toThrow(/claim boundary or frozen design drifted/u);
@@ -254,10 +286,40 @@ describe("LC4-DEV public results", () => {
     void oldSummaryHash;
     (summaryModelDrift as { public_result_sha256: string })
       .public_result_sha256 = sha256Hex(
-        `harshas-amazing-call-center/lc4-dev-public-result/v4\n${canonicalJson(summaryDriftBody)}`,
+        `harshas-amazing-call-center/lc4-dev-public-result/v6\n${canonicalJson(summaryDriftBody)}`,
       );
     expect(() => assertLc4DevPublicResultArtifact(summaryModelDrift))
       .toThrow(/claim boundary or frozen design drifted/u);
+
+    const callsDrift = structuredClone(valid);
+    (callsDrift.design.opportunity_accounting as { calls: number }).calls = 24;
+    const {
+      public_result_sha256: oldCallsHash,
+      ...callsDriftBody
+    } = callsDrift;
+    void oldCallsHash;
+    (callsDrift as { public_result_sha256: string }).public_result_sha256 =
+      sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-public-result/v6\n${canonicalJson(callsDriftBody)}`,
+      );
+    expect(() => assertLc4DevPublicResultArtifact(callsDrift))
+      .toThrow(/incomplete or inconsistent/u);
+
+    const sessionDrift = structuredClone(valid);
+    (sessionDrift.design.transport_accounting as {
+      provider_sessions: number;
+    }).provider_sessions = 18;
+    const {
+      public_result_sha256: oldSessionHash,
+      ...sessionDriftBody
+    } = sessionDrift;
+    void oldSessionHash;
+    (sessionDrift as { public_result_sha256: string }).public_result_sha256 =
+      sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-public-result/v6\n${canonicalJson(sessionDriftBody)}`,
+      );
+    expect(() => assertLc4DevPublicResultArtifact(sessionDrift))
+      .toThrow(/incomplete or inconsistent/u);
 
     const missingPair = structuredClone(verifiedEvidence());
     (missingPair.prepare.episodes as unknown[]).pop();

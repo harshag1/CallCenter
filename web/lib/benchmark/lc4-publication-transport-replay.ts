@@ -11,6 +11,9 @@ import {
   type Lc4ImmutableCas,
 } from "./lc4-development-live-dependencies";
 import {
+  LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE,
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   type Lc4DevLiveEpisodePlan,
@@ -28,6 +31,23 @@ import {
   createLc4ProviderExecutionProfile,
 } from "./lc4-production-runner-foundation";
 import {
+  projectLc4RotationPacketForReplay,
+  validateConversationHistoryHydrationAcknowledgement,
+  type Lc4HaccRotationStatePacket,
+  type Lc4NativeConversationReplayPacket,
+  type Lc4RotationConversationTurn,
+  type Lc4SanitizedWireObservation,
+} from "./lc4-production-provider-adapter";
+import {
+  LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
+} from "./lc4-production-provider-contract";
+import {
+  LC4_DEV_CALLER_BRANCH_SOURCES,
+} from "./lc4-development-caller-branch";
+import type {
+  RealtimeConversationHistoryHydrationAcknowledgement,
+} from "../realtime/client/types";
+import {
   replayLc4DevelopmentListenerAuthority,
 } from "./lc4-development-listener-authority-replay";
 import {
@@ -40,15 +60,23 @@ import {
 
 const HASH = /^[a-f0-9]{64}$/u;
 const REPLAY_DOMAIN =
-  "harshas-amazing-call-center/lc4-publication-transport-replay/v2\n";
+  "harshas-amazing-call-center/lc4-publication-transport-replay/v3\n";
 const EPISODE_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-transport-episode-set/v2\n";
+const PROVIDER_SESSION_REPLAY_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-publication-provider-session-replay-set/v1\n";
+const PROVIDER_SESSION_REPLAY_AGGREGATE_DOMAIN =
+  "harshas-amazing-call-center/lc4-publication-provider-session-replay-aggregate/v1\n";
 const RESPONSE_GENERATION_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-response-generation-set/v1\n";
 const LISTENER_AUTHORITY_REPLAY_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-listener-authority-replay-set/v1\n";
 const LISTENER_INVOCATION_REPLAY_SET_DOMAIN =
   "harshas-amazing-call-center/lc4-publication-listener-invocation-replay-set/v1\n";
+const PROVIDER_HISTORY_ACKNOWLEDGEMENT_DOMAIN =
+  "harshas-amazing-call-center/lc4-provider-history-hydration-acknowledgement/v1\n";
+const ROTATION_TOOL_BATCH_DOMAIN =
+  "harshas-amazing-call-center/lc4-rotation-tool-batch/v1\n";
 
 export type Lc4PublicationOutputAudioLineageScope =
   | "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact"
@@ -65,6 +93,8 @@ export type Lc4PublicationEpisodeTransportReplay = Readonly<{
   transport_profile_sha256: string;
   output_audio_lineage_scope: Lc4PublicationOutputAudioLineageScope;
   canonical_provider_exchange_count: 60;
+  provider_session_count: 6;
+  provider_session_replay_set_sha256: string;
   repair_provider_exchange_count: number;
   total_response_generation_count: number;
   canonical_exchange_replay_set_sha256: string;
@@ -74,12 +104,14 @@ export type Lc4PublicationEpisodeTransportReplay = Readonly<{
 }>;
 
 export type Lc4PublicationTransportReplay = Readonly<{
-  schema_version: 2;
+  schema_version: 3;
   run_sha256: string;
   provider_profile_manifest_sha256: string;
   audio_delivery_profile_sha256: string;
   listener_authority_trust_root_sha256: string;
   canonical_provider_exchange_count: 360;
+  provider_session_count: 36;
+  provider_session_replay_set_sha256: string;
   repair_provider_exchange_count: number;
   total_response_generation_count: number;
   episodes: readonly Lc4PublicationEpisodeTransportReplay[];
@@ -102,6 +134,33 @@ type EpisodeReplayEntry = Readonly<{
   playback_receipt_sha256: string | null;
 }>;
 
+type ProviderSessionReplayEntry = Readonly<{
+  segment_ordinal: number;
+  opportunity_start: number;
+  opportunity_end: number;
+  opportunity_count: number;
+  intent_sequence: number;
+  intent_payload_sha256: string;
+  opened_sequence: number;
+  opened_payload_sha256: string;
+  closed_before_sequence: number;
+  session_ordinal: number;
+  rotation_receipt_sha256: string;
+  previous_rotation_receipt_sha256: string | null;
+  rotation_context_kind:
+    | "none"
+    | "native_conversation_replay"
+    | "hacc_structured_state";
+  rotation_context_sha256: string | null;
+  rotation_conversation_replay_sha256: string | null;
+  history_hydration_status: string | null;
+  history_hydration_acknowledgement_sha256: string | null;
+  history_provider_visible_sha256: string | null;
+  history_source_binding_sha256: string | null;
+  history_hydration_turn_count: number;
+  history_hydration_provider_item_count: number;
+}>;
+
 function freeze<T>(value: T): T {
   return immutableJson(value) as unknown as T;
 }
@@ -115,6 +174,319 @@ function objectValue(value: JsonValue, label: string): Record<string, JsonValue>
 
 function requireHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
+}
+
+function exactKeys(
+  value: object,
+  expected: readonly string[],
+): boolean {
+  return canonicalJson(Object.keys(value).sort())
+    === canonicalJson([...expected].sort());
+}
+
+function providerSessionReplayAggregateSha256(
+  episodes: readonly Lc4PublicationEpisodeTransportReplay[],
+): string {
+  return sha256Hex(
+    `${PROVIDER_SESSION_REPLAY_AGGREGATE_DOMAIN}${canonicalJson(
+      episodes.map((episode) => ({
+        episode_id: episode.episode_id,
+        provider: episode.provider,
+        arm: episode.arm,
+        provider_session_count: episode.provider_session_count,
+        provider_session_replay_set_sha256:
+          episode.provider_session_replay_set_sha256,
+      })),
+    )}`,
+  );
+}
+
+function assertHydrationItemsMatchProviderHistory(input: Readonly<{
+  provider: Lc4PublicationEpisodeTransportReplay["provider"];
+  items: readonly JsonValue[];
+  provider_history: ReturnType<
+    typeof projectLc4RotationPacketForReplay
+  >["provider_history"];
+}>): void {
+  type ExpectedHydrationItem = Readonly<{
+    history_turn_ordinal: number;
+    kind:
+      | "user_message"
+      | "assistant_message"
+      | "synthetic_tool_call"
+      | "synthetic_tool_output";
+    source_sha256: string;
+    pair_ordinal: number | null;
+  }>;
+  const expected: ExpectedHydrationItem[] = [];
+  input.provider_history.forEach((turn, turnIndex) => {
+    if ("text" in turn) {
+      expected.push({
+        history_turn_ordinal: turnIndex + 1,
+        kind: turn.role === "user"
+          ? "user_message"
+          : "assistant_message",
+        source_sha256: turn.sourceSha256,
+        pair_ordinal: null,
+      });
+      return;
+    }
+    const calls = turn.role === "tool" ? [turn] : turn.calls;
+    expected.push(
+      ...calls.map((call, callIndex): ExpectedHydrationItem => ({
+        history_turn_ordinal: turnIndex + 1,
+        kind: "synthetic_tool_call",
+        source_sha256: call.sourceSha256,
+        pair_ordinal: callIndex + 1,
+      })),
+      ...calls.map((call, callIndex): ExpectedHydrationItem => ({
+        history_turn_ordinal: turnIndex + 1,
+        kind: "synthetic_tool_output",
+        source_sha256: call.sourceSha256,
+        pair_ordinal: callIndex + 1,
+      })),
+    );
+  });
+  if (input.items.length !== expected.length) {
+    throw new Error(
+      "LC4 publication provider-session hydration item count differs from retained provider history",
+    );
+  }
+  const syntheticPairIds = new Map<string, string>();
+  let previousOutboundSequence = 0;
+  let previousInboundSequence = 0;
+  let geminiOutboundObservationSha256: string | null = null;
+  for (const [index, expectedItem] of expected.entries()) {
+    const item = objectValue(
+      input.items[index]!,
+      "LC4 publication provider-session hydration item",
+    );
+    const outbound = objectValue(
+      item.outboundObservation as JsonValue,
+      "LC4 publication provider-session outbound hydration attribution",
+    );
+    const inbound = item.inboundObservation === undefined
+      ? null
+      : objectValue(
+          item.inboundObservation as JsonValue,
+          "LC4 publication provider-session inbound hydration attribution",
+        );
+    const syntheticCallId = item.syntheticCallIdSha256;
+    if (item.historyTurnOrdinal !== expectedItem.history_turn_ordinal
+      || item.providerItemOrdinal !== index + 1
+      || item.kind !== expectedItem.kind
+      || item.sourceSha256 !== expectedItem.source_sha256
+      || outbound.availability !== "observed"
+      || outbound.connectionEpoch !== 1
+      || !Number.isSafeInteger(outbound.sequence)
+      || Number(outbound.sequence) < 1
+      || typeof outbound.observationSha256 !== "string"
+      || !HASH.test(outbound.observationSha256)) {
+      throw new Error(
+        "LC4 publication provider-session hydration item differs from exact retained provider history order or source",
+      );
+    }
+    if (expectedItem.pair_ordinal === null) {
+      if (syntheticCallId !== undefined
+        || item.providerContentOmission !== undefined) {
+        throw new Error(
+          "LC4 publication provider-session message hydration fabricates tool identity or omission",
+        );
+      }
+    } else {
+      if (typeof syntheticCallId !== "string"
+        || !HASH.test(syntheticCallId)) {
+        throw new Error(
+          "LC4 publication provider-session tool hydration lacks a synthetic call binding",
+        );
+      }
+      const pairKey =
+        `${expectedItem.history_turn_ordinal}:${expectedItem.pair_ordinal}`;
+      const prior = syntheticPairIds.get(pairKey);
+      if (prior !== undefined && prior !== syntheticCallId) {
+        throw new Error(
+          "LC4 publication provider-session tool call/output hydration pair differs",
+        );
+      }
+      syntheticPairIds.set(pairKey, syntheticCallId);
+      if (item.providerContentOmission !== undefined) {
+        const omission = objectValue(
+          item.providerContentOmission as JsonValue,
+          "LC4 publication provider-session hydration omission",
+        );
+        if (input.provider !== "xai"
+          || expectedItem.kind !== "synthetic_tool_call"
+          || !exactKeys(omission, ["field", "observedShape"])
+          || omission.field !== "arguments"
+          || omission.observedShape !== "empty_string") {
+          throw new Error(
+            "LC4 publication provider-session hydration content omission is not the exact admitted xAI exception",
+          );
+        }
+      }
+    }
+    if (input.provider === "gemini") {
+      if (inbound !== null
+        || (geminiOutboundObservationSha256 !== null
+          && outbound.observationSha256
+            !== geminiOutboundObservationSha256)) {
+        throw new Error(
+          "LC4 publication Gemini hydration invents item acknowledgement or more than one outbound history frame",
+        );
+      }
+      geminiOutboundObservationSha256 =
+        String(outbound.observationSha256);
+    } else {
+      if (inbound === null
+        || inbound.availability !== "observed"
+        || inbound.connectionEpoch !== 1
+        || !Number.isSafeInteger(inbound.sequence)
+        || Number(inbound.sequence) <= Number(outbound.sequence)
+        || typeof inbound.observationSha256 !== "string"
+        || !HASH.test(inbound.observationSha256)
+        || Number(outbound.sequence) <= previousOutboundSequence
+        || Number(inbound.sequence) <= previousInboundSequence) {
+        throw new Error(
+          "LC4 publication provider-session hydration acknowledgement lineage is incomplete or out of order",
+        );
+      }
+      previousOutboundSequence = Number(outbound.sequence);
+      previousInboundSequence = Number(inbound.sequence);
+    }
+  }
+}
+
+function appendReconstructedConversationExchange(input: Readonly<{
+  turns: Lc4RotationConversationTurn[];
+  opportunity_index: number;
+  caller_text: string;
+  caller_pcm_sha256: string;
+  exchange: Record<string, JsonValue>;
+  listener: Record<string, JsonValue>;
+  assistant_pcm_sha256: string;
+}>): void {
+  type ReconstructedTurnInput =
+    | Readonly<{
+        speaker: "caller";
+        source: "caller_tts_source_bound_to_pcm";
+        text: string;
+        provenance_receipt_sha256: string;
+      }>
+    | Readonly<{
+        speaker: "assistant";
+        source: "listener_exact_captured_pcm_asr";
+        text: string;
+        provenance_receipt_sha256: string;
+      }>
+    | Readonly<{
+        speaker: "tool";
+        source: "canonical_gateway_result";
+        tool_name: string;
+        tool_arguments: Readonly<Record<string, JsonValue>>;
+        text: string;
+        provenance_receipt_sha256: string;
+        tool_batch_sha256: string;
+        tool_batch_call_ordinal: number;
+        tool_batch_call_count: number;
+      }>;
+  const append = (
+    turn: ReconstructedTurnInput,
+  ) => {
+    const sequence = input.turns.length + 1;
+    input.turns.push(Object.freeze({
+      turn_id:
+        `conversation.${String(sequence).padStart(3, "0")}.${turn.speaker}`,
+      sequence,
+      ...turn,
+      transcript_sha256: sha256Hex(turn.text),
+      available_after_opportunity: input.opportunity_index,
+    }) as Lc4RotationConversationTurn);
+  };
+  append({
+    speaker: "caller",
+    source: "caller_tts_source_bound_to_pcm",
+    text: input.caller_text,
+    provenance_receipt_sha256: input.caller_pcm_sha256,
+  });
+  const batches = input.exchange.dev_gateway_conversation_tool_batches;
+  if (!Array.isArray(batches)) {
+    throw new Error(
+      "LC4 publication provider exchange lacks retained conversation tool batches",
+    );
+  }
+  for (const [batchIndex, batchValue] of batches.entries()) {
+    const batch = objectValue(
+      batchValue,
+      "LC4 publication retained conversation tool batch",
+    );
+    if (batch.schema_version !== 1
+      || batch.batch_ordinal !== batchIndex + 1
+      || typeof batch.provider_response_id_sha256 !== "string"
+      || !HASH.test(batch.provider_response_id_sha256)
+      || !Array.isArray(batch.calls)
+      || batch.calls.length < 1) {
+      throw new Error(
+        "LC4 publication retained conversation tool batch is incomplete or out of order",
+      );
+    }
+    const batchSha256 = sha256Hex(
+      `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch)}`,
+    );
+    for (const [callIndex, callValue] of batch.calls.entries()) {
+      const call = objectValue(
+        callValue,
+        "LC4 publication retained conversation tool call",
+      );
+      if (call.call_ordinal !== callIndex + 1
+        || typeof call.gateway_tool_name !== "string"
+        || !call.gateway_tool_name
+        || call.model_arguments === null
+        || typeof call.model_arguments !== "object"
+        || Array.isArray(call.model_arguments)
+        || typeof call.provider_output_canonical_json !== "string"
+        || canonicalJson(
+          JSON.parse(call.provider_output_canonical_json),
+        ) !== call.provider_output_canonical_json
+        || (call.source_kind !== "authority_projection"
+          && call.source_kind !== "pre_dispatch_rejection")
+        || typeof call.source_sha256 !== "string"
+        || !HASH.test(call.source_sha256)) {
+        throw new Error(
+          "LC4 publication retained conversation tool call is not exact canonical provider-visible history",
+        );
+      }
+      append({
+        speaker: "tool",
+        source: "canonical_gateway_result",
+        tool_name: call.gateway_tool_name,
+        tool_arguments:
+          call.model_arguments as Readonly<Record<string, JsonValue>>,
+        text: call.provider_output_canonical_json,
+        provenance_receipt_sha256: call.source_sha256,
+        tool_batch_sha256: batchSha256,
+        tool_batch_call_ordinal: callIndex + 1,
+        tool_batch_call_count: batch.calls.length,
+      });
+    }
+  }
+  const listenerObservation = objectValue(
+    input.listener.listener_observation as JsonValue,
+    "LC4 publication exact listener observation",
+  );
+  const transcript = String(listenerObservation.transcript);
+  if (listenerObservation.status !== "verified"
+    || !transcript
+    || listenerObservation.transcript_sha256 !== sha256Hex(transcript)) {
+    throw new Error(
+      "LC4 publication provider conversation assistant turn lacks its exact listener transcript",
+    );
+  }
+  append({
+    speaker: "assistant",
+    source: "listener_exact_captured_pcm_asr",
+    text: transcript,
+    provenance_receipt_sha256: input.assistant_pcm_sha256,
+  });
 }
 
 function preflightAsrRunnerTrust(
@@ -189,12 +561,416 @@ function outputAudioLineageScope(
     : "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact";
 }
 
+async function replayProviderSessionChain(input: Readonly<{
+  episode: Lc4DevLiveEpisodePlan;
+  run: Lc4DevLiveRunArtifact;
+  evidence: ReturnType<typeof createLc4DevReplayEvidenceStore>;
+}>): Promise<Readonly<{
+  provider_session_count: 6;
+  provider_session_replay_set_sha256: string;
+  entries: readonly ProviderSessionReplayEntry[];
+  packets: readonly (
+    | Lc4NativeConversationReplayPacket
+    | Lc4HaccRotationStatePacket
+    | null
+  )[];
+}>> {
+  const episodeEvents = input.run.ledger.filter(
+    (event) => event.episode_id === input.episode.episode_id,
+  );
+  const intents = episodeEvents.filter(
+    (event) => event.event_type === "segment_open_intent",
+  );
+  const opened = episodeEvents.filter(
+    (event) => event.event_type === "segment_opened",
+  );
+  const terminals = episodeEvents.filter(
+    (event) => event.event_type === "episode_terminal",
+  );
+  const failures = episodeEvents.filter(
+    (event) => event.event_type === "segment_failed",
+  );
+  if (
+    intents.length !== LC4_DEV_PROVIDER_SESSION_SCHEDULE.length
+    || opened.length !== LC4_DEV_PROVIDER_SESSION_SCHEDULE.length
+    || terminals.length !== 1
+    || failures.length !== 0
+  ) {
+    throw new Error(
+      `LC4 publication ${input.episode.episode_id} requires an exact planned provider-session lifecycle without failed or replacement sessions`,
+    );
+  }
+  const finalizations = terminals[0]!.evidence_references.filter(
+    (reference) => reference.kind === "segment_finalization",
+  );
+  if (finalizations.length !== LC4_DEV_PROVIDER_SESSION_SCHEDULE.length) {
+    throw new Error(
+      "LC4 publication provider-session finalization set is incomplete",
+    );
+  }
+  let previousRotationReceiptSha256: string | null = null;
+  let previousOpenedSequence = 0;
+  let previousSessionOrdinal = 0;
+  const entries: ProviderSessionReplayEntry[] = [];
+  const packets: Array<
+    | Lc4NativeConversationReplayPacket
+    | Lc4HaccRotationStatePacket
+    | null
+  > = [];
+  for (const [index, schedule] of
+    LC4_DEV_PROVIDER_SESSION_SCHEDULE.entries()) {
+    const intent = intents[index]!;
+    const open = opened[index]!;
+    const closedBeforeSequence = intents[index + 1]?.sequence
+      ?? terminals[0]!.sequence;
+    const finalizationReference = finalizations[index]!;
+    if (
+      intent.sequence <= previousOpenedSequence
+      || open.sequence <= intent.sequence
+      || closedBeforeSequence <= open.sequence
+      || finalizationReference.domain_prefix
+        !== "harshas-amazing-call-center/lc4-provider-session-rotation/v6\n"
+    ) {
+      throw new Error(
+        "LC4 publication provider-session intent/open/finalization ordering is invalid",
+      );
+    }
+    const [intentPayload, openPayload, finalizationBody] = await Promise.all([
+      input.evidence.resolveJson(intent.payload_evidence),
+      input.evidence.resolveJson(open.payload_evidence),
+      input.evidence.resolveJson(finalizationReference),
+    ]);
+    const expectedLifecyclePayload = {
+      segment_ordinal: schedule.ordinal,
+      opportunity_start: schedule.opportunity_start,
+      opportunity_end: schedule.opportunity_end,
+      previous_rotation_receipt_sha256: previousRotationReceiptSha256,
+      planned_provider_session: true,
+      retry_or_reconnect: false,
+    };
+    if (
+      canonicalJson(intentPayload) !== canonicalJson(expectedLifecyclePayload)
+      || canonicalJson(openPayload) !== canonicalJson(expectedLifecyclePayload)
+    ) {
+      throw new Error(
+        "LC4 publication provider-session lifecycle differs from its prepared schedule or receipt chain",
+      );
+    }
+    const finalization = objectValue(
+      finalizationBody,
+      "LC4 publication provider-session finalization",
+    );
+    if (
+      !exactKeys(finalization, [
+        "schema_version",
+        "run_id",
+        "protocol_id",
+        "provider_session_schedule_sha256",
+        "rotation_context_packet",
+        "conversation_history_hydration_wire_observations",
+        "adapter_version",
+        "session_ordinal",
+        "segment_ordinal",
+        "opportunity_count",
+        "provider",
+        "model",
+        "opened_wire_index",
+        "terminal_wire_observation_sha256",
+        "previous_rotation_receipt_sha256",
+        "rotation_context_kind",
+        "rotation_context_sha256",
+        "rotation_conversation_replay_sha256",
+        "conversation_history_hydration",
+      ])
+      || finalization.schema_version !== 6
+      || finalization.run_id !== input.episode.episode_id
+      || finalization.protocol_id !== "HACC-LC4-DEV-v1"
+      || finalization.adapter_version
+        !== LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION
+      || finalization.provider_session_schedule_sha256
+        !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
+      || finalization.segment_ordinal !== schedule.ordinal
+      || finalization.opportunity_count !== schedule.opportunity_count
+      || finalization.provider !== input.episode.provider
+      || finalization.model !== input.episode.model
+      || finalization.previous_rotation_receipt_sha256
+        !== previousRotationReceiptSha256
+      || !Number.isSafeInteger(finalization.opened_wire_index)
+      || Number(finalization.opened_wire_index) < 1
+      || typeof finalization.terminal_wire_observation_sha256 !== "string"
+      || !HASH.test(finalization.terminal_wire_observation_sha256)
+    ) {
+      throw new Error(
+        "LC4 publication provider-session finalization is substituted or not schedule-bound",
+      );
+    }
+    const sessionOrdinal = Number(finalization.session_ordinal);
+    if (!Number.isSafeInteger(sessionOrdinal)
+      || sessionOrdinal !== schedule.ordinal
+      || sessionOrdinal <= previousSessionOrdinal) {
+      throw new Error(
+        "LC4 publication provider-session finalization session ordinal is not monotonic",
+      );
+    }
+    const expectedRotationContextKind = index === 0
+      ? "none" as const
+      : input.episode.arm === "native"
+        ? "native_conversation_replay" as const
+        : "hacc_structured_state" as const;
+    const rotationContextSha256 = finalization.rotation_context_sha256;
+    const rotationConversationReplaySha256 =
+      finalization.rotation_conversation_replay_sha256;
+    const hydration = finalization.conversation_history_hydration;
+    let hydrationStatus: string | null = null;
+    let hydrationAcknowledgementSha256: string | null = null;
+    let historyProviderVisibleSha256: string | null = null;
+    let historySourceBindingSha256: string | null = null;
+    let hydrationTurnCount = 0;
+    let hydrationProviderItemCount = 0;
+    let retainedRotationPacket:
+      | Lc4NativeConversationReplayPacket
+      | Lc4HaccRotationStatePacket
+      | null = null;
+    if (index === 0) {
+      if (finalization.rotation_context_kind !== "none"
+        || rotationContextSha256 !== null
+        || rotationConversationReplaySha256 !== null
+        || finalization.rotation_context_packet !== null
+        || !Array.isArray(
+          finalization.conversation_history_hydration_wire_observations,
+        )
+        || finalization
+          .conversation_history_hydration_wire_observations.length !== 0
+        || hydration !== null) {
+        throw new Error(
+          "LC4 publication initial provider session fabricates rotation or history hydration",
+        );
+      }
+    } else {
+      const packetBody = objectValue(
+        finalization.rotation_context_packet as JsonValue,
+        "LC4 publication retained provider-session rotation packet",
+      );
+      const expectedPacketType = input.episode.arm === "native"
+        ? "native_provider_conversation_replay"
+        : "hacc_provider_conversation_plus_structured_state";
+      if (packetBody.packet_type !== expectedPacketType
+        || packetBody.schema_version !== 6
+        || packetBody.run_id !== input.episode.episode_id
+        || packetBody.from_segment_ordinal !== schedule.ordinal - 1
+        || packetBody.to_segment_ordinal !== schedule.ordinal
+        || packetBody.available_through_opportunity
+          !== schedule.opportunity_start - 1
+        || packetBody.previous_session_rotation_receipt_sha256
+          !== previousRotationReceiptSha256) {
+        throw new Error(
+          "LC4 publication retained provider-session rotation packet differs from its arm, boundary, or receipt chain",
+        );
+      }
+      const rotationProjection = projectLc4RotationPacketForReplay(
+        packetBody as unknown as
+          | Lc4NativeConversationReplayPacket
+          | Lc4HaccRotationStatePacket,
+      );
+      retainedRotationPacket = packetBody as unknown as
+        | Lc4NativeConversationReplayPacket
+        | Lc4HaccRotationStatePacket;
+      if (finalization.rotation_context_kind !== expectedRotationContextKind
+        || typeof rotationContextSha256 !== "string"
+        || !HASH.test(rotationContextSha256)
+        || typeof rotationConversationReplaySha256 !== "string"
+        || !HASH.test(rotationConversationReplaySha256)
+        || rotationProjection.packet_sha256 !== rotationContextSha256
+        || rotationProjection.conversation_replay_sha256
+          !== rotationConversationReplaySha256) {
+        throw new Error(
+          "LC4 publication reopened provider session is not bound to its arm-correct rotation context",
+        );
+      }
+      const hydrationBody = objectValue(
+        hydration as JsonValue,
+        "LC4 publication provider-session history hydration",
+      );
+      hydrationStatus = String(hydrationBody.status);
+      hydrationAcknowledgementSha256 = String(
+        hydrationBody.acknowledgement_sha256,
+      );
+      hydrationTurnCount = Number(hydrationBody.turn_count);
+      hydrationProviderItemCount = Number(
+        hydrationBody.provider_item_count,
+      );
+      historyProviderVisibleSha256 = String(
+        hydrationBody.provider_visible_history_sha256,
+      );
+      historySourceBindingSha256 = String(
+        hydrationBody.source_binding_sha256,
+      );
+      const allowedStatus = input.episode.provider === "gemini"
+        ? hydrationStatus === "sent_unacknowledged_by_provider_protocol"
+        : hydrationStatus === "acknowledged"
+          || (input.episode.provider === "xai"
+            && hydrationStatus
+              === "identity_acknowledged_content_unverifiable");
+      if (!exactKeys(hydrationBody, [
+        "schema_version",
+        "provider",
+        "connection_epoch",
+        "status",
+        "turn_count",
+        "provider_item_count",
+        "provider_visible_history_sha256",
+        "source_binding_sha256",
+        "acknowledgement_sha256",
+        "items",
+      ])
+        || hydrationBody.schema_version !== 1
+        || hydrationBody.provider !== input.episode.provider
+        || !Number.isSafeInteger(hydrationBody.connection_epoch)
+        || Number(hydrationBody.connection_epoch) !== 1
+        || !allowedStatus
+        || !Number.isSafeInteger(hydrationTurnCount)
+        || hydrationTurnCount !== rotationProjection.turn_count
+        || !Number.isSafeInteger(hydrationProviderItemCount)
+        || hydrationProviderItemCount
+          !== rotationProjection.provider_item_count
+        || historyProviderVisibleSha256
+          !== rotationProjection.provider_visible_history_sha256
+        || historySourceBindingSha256
+          !== rotationProjection.source_binding_sha256
+        || hydrationAcknowledgementSha256 === null
+        || !HASH.test(hydrationAcknowledgementSha256)
+        || !Array.isArray(hydrationBody.items)
+        || hydrationBody.items.length !== hydrationProviderItemCount) {
+        throw new Error(
+          "LC4 publication reopened provider session lacks complete provider-native history hydration evidence",
+        );
+      }
+      assertHydrationItemsMatchProviderHistory({
+        provider: input.episode.provider,
+        items: hydrationBody.items,
+        provider_history: rotationProjection.provider_history,
+      });
+      const acknowledgementBody = {
+        schemaVersion: 1,
+        provider: input.episode.provider,
+        connectionEpoch: 1,
+        status: hydrationStatus,
+        turnCount: hydrationTurnCount,
+        providerItemCount: hydrationProviderItemCount,
+        historySha256: historyProviderVisibleSha256,
+        sourceBindingSha256: historySourceBindingSha256,
+        items: hydrationBody.items,
+      };
+      if (hydrationAcknowledgementSha256 !== sha256Hex(
+        `${PROVIDER_HISTORY_ACKNOWLEDGEMENT_DOMAIN}${canonicalJson(
+          acknowledgementBody,
+        )}`,
+      )) {
+        throw new Error(
+          "LC4 publication provider-session hydration acknowledgement commitment is invalid",
+        );
+      }
+      if (!Array.isArray(
+        finalization.conversation_history_hydration_wire_observations,
+      ) || finalization
+        .conversation_history_hydration_wire_observations.length < 1) {
+        throw new Error(
+          "LC4 publication provider-session hydration lacks retained setup wire observations",
+        );
+      }
+      const replayedHydration =
+        validateConversationHistoryHydrationAcknowledgement({
+          receipt: acknowledgementBody as
+            RealtimeConversationHistoryHydrationAcknowledgement,
+          provider: input.episode.provider,
+          turns: rotationProjection.provider_history,
+          expected_history_sha256:
+            rotationProjection.provider_visible_history_sha256,
+          wire_observations: finalization
+            .conversation_history_hydration_wire_observations as unknown as
+              readonly Lc4SanitizedWireObservation[],
+        });
+      if (canonicalJson(replayedHydration)
+        !== canonicalJson(hydrationBody)) {
+        throw new Error(
+          "LC4 publication retained provider-session hydration differs from independent wire replay",
+        );
+      }
+    }
+    entries.push(Object.freeze({
+      segment_ordinal: schedule.ordinal,
+      opportunity_start: schedule.opportunity_start,
+      opportunity_end: schedule.opportunity_end,
+      opportunity_count: schedule.opportunity_count,
+      intent_sequence: intent.sequence,
+      intent_payload_sha256: intent.payload_evidence.evidence_sha256,
+      opened_sequence: open.sequence,
+      opened_payload_sha256: open.payload_evidence.evidence_sha256,
+      closed_before_sequence: closedBeforeSequence,
+      session_ordinal: sessionOrdinal,
+      rotation_receipt_sha256: finalizationReference.evidence_sha256,
+      previous_rotation_receipt_sha256:
+        previousRotationReceiptSha256,
+      rotation_context_kind: expectedRotationContextKind,
+      rotation_context_sha256: index === 0
+        ? null
+        : String(rotationContextSha256),
+      rotation_conversation_replay_sha256: index === 0
+        ? null
+        : String(rotationConversationReplaySha256),
+      history_hydration_status: hydrationStatus,
+      history_hydration_acknowledgement_sha256:
+        hydrationAcknowledgementSha256,
+      history_provider_visible_sha256:
+        historyProviderVisibleSha256,
+      history_source_binding_sha256:
+        historySourceBindingSha256,
+      history_hydration_turn_count: hydrationTurnCount,
+      history_hydration_provider_item_count:
+        hydrationProviderItemCount,
+    }));
+    packets.push(retainedRotationPacket);
+    previousRotationReceiptSha256 =
+      finalizationReference.evidence_sha256;
+    previousOpenedSequence = open.sequence;
+    previousSessionOrdinal = sessionOrdinal;
+  }
+  return freeze({
+    provider_session_count:
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE.length as 6,
+    provider_session_replay_set_sha256: sha256Hex(
+      `${PROVIDER_SESSION_REPLAY_SET_DOMAIN}${canonicalJson({
+        episode_id: input.episode.episode_id,
+        provider: input.episode.provider,
+        arm: input.episode.arm,
+        provider_session_schedule_sha256:
+          LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+        entries,
+      })}`,
+    ),
+    entries: Object.freeze([...entries]),
+    packets: Object.freeze([...packets]),
+  });
+}
+
 export function createLc4PublicationTransportReplay(
-  input: Omit<Lc4PublicationTransportReplay, "schema_version" | "replay_sha256">,
+  input: Omit<
+    Lc4PublicationTransportReplay,
+    | "schema_version"
+    | "provider_session_count"
+    | "provider_session_replay_set_sha256"
+    | "replay_sha256"
+  >,
 ): Lc4PublicationTransportReplay {
   const body = freeze({
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     ...input,
+    provider_session_count: input.episodes.reduce<number>(
+      (total, episode) => total + episode.provider_session_count,
+      0,
+    ) as 36,
+    provider_session_replay_set_sha256:
+      providerSessionReplayAggregateSha256(input.episodes),
   });
   const replay = freeze({
     ...body,
@@ -215,7 +991,21 @@ export function assertLc4PublicationTransportReplay(
   const actualKeys = value.episodes
     .map((episode) => `${episode.provider}:${episode.arm}`)
     .sort();
-  if (value.schema_version !== 2
+  if (value.schema_version !== 3
+    || !exactKeys(value, [
+      "schema_version",
+      "run_sha256",
+      "provider_profile_manifest_sha256",
+      "audio_delivery_profile_sha256",
+      "listener_authority_trust_root_sha256",
+      "canonical_provider_exchange_count",
+      "provider_session_count",
+      "provider_session_replay_set_sha256",
+      "repair_provider_exchange_count",
+      "total_response_generation_count",
+      "episodes",
+      "replay_sha256",
+    ])
     || !HASH.test(claimed)
     || claimed !== sha256Hex(`${REPLAY_DOMAIN}${canonicalJson(body)}`)
     || !HASH.test(value.run_sha256)
@@ -223,6 +1013,13 @@ export function assertLc4PublicationTransportReplay(
     || !HASH.test(value.audio_delivery_profile_sha256)
     || !HASH.test(value.listener_authority_trust_root_sha256)
     || value.canonical_provider_exchange_count !== 360
+    || value.provider_session_count !== 36
+    || value.provider_session_count
+      !== value.episodes.reduce((total, episode) =>
+        total + episode.provider_session_count, 0)
+    || !HASH.test(value.provider_session_replay_set_sha256)
+    || value.provider_session_replay_set_sha256
+      !== providerSessionReplayAggregateSha256(value.episodes)
     || !Number.isSafeInteger(value.repair_provider_exchange_count)
     || value.repair_provider_exchange_count < 0
     || value.total_response_generation_count
@@ -232,7 +1029,26 @@ export function assertLc4PublicationTransportReplay(
     || canonicalJson(actualKeys) !== canonicalJson(expectedKeys)
     || value.episodes.some((episode) => {
       const expected = expectedTransport(episode.provider);
-      return episode.model !== expected.model
+      return !exactKeys(episode, [
+        "episode_id",
+        "provider",
+        "arm",
+        "model",
+        "transport_purpose",
+        "transport_mode",
+        "transport_profile_sha256",
+        "output_audio_lineage_scope",
+        "canonical_provider_exchange_count",
+        "provider_session_count",
+        "provider_session_replay_set_sha256",
+        "repair_provider_exchange_count",
+        "total_response_generation_count",
+        "canonical_exchange_replay_set_sha256",
+        "response_generation_replay_set_sha256",
+        "listener_authority_replay_set_sha256",
+        "listener_invocation_replay_set_sha256",
+      ])
+        || episode.model !== expected.model
         || episode.transport_purpose !== expected.transport_purpose
         || episode.transport_mode !== expected.transport_mode
         || episode.transport_profile_sha256
@@ -240,6 +1056,8 @@ export function assertLc4PublicationTransportReplay(
         || episode.output_audio_lineage_scope
           !== outputAudioLineageScope(episode.provider)
         || episode.canonical_provider_exchange_count !== 60
+        || episode.provider_session_count !== 6
+        || !HASH.test(episode.provider_session_replay_set_sha256)
         || !Number.isSafeInteger(episode.repair_provider_exchange_count)
         || episode.repair_provider_exchange_count < 0
         || episode.total_response_generation_count
@@ -286,6 +1104,31 @@ function referenceForCanonicalListener(input: Readonly<{
   return matches[0]!;
 }
 
+function assertExchangeProviderSessionBinding(input: Readonly<{
+  exchange: Record<string, JsonValue>;
+  session: ProviderSessionReplayEntry;
+}>): void {
+  if (input.exchange.segment_ordinal !== input.session.segment_ordinal
+    || input.exchange.rotation_context_kind
+      !== input.session.rotation_context_kind
+    || input.exchange.rotation_context_sha256
+      !== input.session.rotation_context_sha256
+    || input.exchange.rotation_conversation_replay_sha256
+      !== input.session.rotation_conversation_replay_sha256
+    || !Array.isArray(input.exchange.wire_observations)
+    || input.exchange.wire_observations.length < 1
+    || input.exchange.wire_observations.some((candidate) => {
+      if (candidate === null
+        || typeof candidate !== "object"
+        || Array.isArray(candidate)) return true;
+      return candidate.connection_epoch !== 1;
+    })) {
+    throw new Error(
+      "LC4 publication provider exchange differs from its retained provider-session rotation and connection epoch",
+    );
+  }
+}
+
 async function replayEpisode(input: Readonly<{
   episode: Lc4DevLiveEpisodePlan;
   prepare: Lc4DevLivePrepareArtifact;
@@ -296,6 +1139,7 @@ async function replayEpisode(input: Readonly<{
   expected_authority_trust_root_sha256: string;
   asr_runner_trust: BenchmarkKernelAttestationTrust;
 }>): Promise<Lc4PublicationEpisodeTransportReplay> {
+  const providerSessionReplay = await replayProviderSessionChain(input);
   const corpus = createLc4PublicDevelopmentCorpus();
   const opportunityById = new Map(corpus.opportunities.map((opportunity) => [
     opportunity.id,
@@ -315,6 +1159,7 @@ async function replayEpisode(input: Readonly<{
   const profile = createLc4ProviderExecutionProfile(input.episode.provider);
   const expected = expectedTransport(input.episode.provider);
   const entries: EpisodeReplayEntry[] = [];
+  const reconstructedConversationTurns: Lc4RotationConversationTurn[] = [];
   for (const event of events) {
     if (event.opportunity_id === null) {
       throw new Error("LC4 publication transport replay found an anonymous completed opportunity");
@@ -347,18 +1192,57 @@ async function replayEpisode(input: Readonly<{
       event,
       evidenceSha256: providerExchangeSha256,
     });
+    const callerPcmSha256 = String(payload.caller_pcm_sha256);
+    requireHash(
+      callerPcmSha256,
+      "LC4 publication completed-opportunity caller PCM",
+    );
+    const callerReferences = event.evidence_references.filter((candidate) =>
+      candidate.kind === "caller_pcm"
+      && candidate.evidence_sha256 === callerPcmSha256);
+    if (callerReferences.length !== 1) {
+      throw new Error(
+        "LC4 publication completed opportunity lacks one exact caller PCM edge",
+      );
+    }
+    const callerReference = callerReferences[0]!;
     const projection = await input.evidence.resolveJson(reference);
     const exchange = objectValue(
       projection,
       "LC4 publication provider exchange replay",
     );
+    const segmentOrdinal = Math.ceil(
+      opportunity.index / LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
+    ) as 1 | 2 | 3 | 4 | 5 | 6;
+    const providerSession =
+      providerSessionReplay.entries[segmentOrdinal - 1];
+    if (!providerSession) {
+      throw new Error(
+        "LC4 publication provider exchange lacks its scheduled provider session",
+      );
+    }
+    assertExchangeProviderSessionBinding({
+      exchange,
+      session: providerSession,
+    });
+    if (event.sequence <= providerSession.opened_sequence
+      || event.sequence >= providerSession.closed_before_sequence) {
+      throw new Error(
+        "LC4 publication completed opportunity is outside its scheduled provider-session ledger interval",
+      );
+    }
     const outputCapture = objectValue(
       exchange.output_capture,
       "LC4 publication provider output capture",
     );
     const outputPcmSha256 = String(outputCapture.generated_pcm_sha256);
     requireHash(outputPcmSha256, "LC4 publication output PCM");
-    const callerPcm = await input.cas.get(binding.pcm_sha256);
+    const callerPcm = await input.cas.get(callerPcmSha256);
+    if (callerReference.byte_length !== callerPcm.byteLength) {
+      throw new Error(
+        "LC4 publication retained caller PCM length differs from its ledger edge",
+      );
+    }
     const listenerPcm = await input.cas.get(outputPcmSha256);
     const listenerEvidenceSha256 =
       String(payload.canonical_listener_evidence_sha256);
@@ -375,10 +1259,10 @@ async function replayEpisode(input: Readonly<{
     const providerReplay = assertLc4ProviderExchangeReplayProjection(projection, {
       run_id: input.episode.episode_id,
       opportunity_id: opportunity.id,
-      segment_ordinal: Math.ceil(opportunity.index / 20) as 1 | 2 | 3,
+      segment_ordinal: segmentOrdinal,
       playback_kind: "canonical",
-      caller_pcm_sha256: binding.pcm_sha256,
-      caller_pcm_byte_length: binding.pcm_byte_length,
+      caller_pcm_sha256: callerPcmSha256,
+      caller_pcm_byte_length: callerPcm.byteLength,
       response_control_kind: input.episode.arm === "hacc"
         ? "hacc_response_plan"
         : "native_context",
@@ -402,6 +1286,43 @@ async function replayEpisode(input: Readonly<{
       listener.evaluation as JsonValue,
       "LC4 publication retained listener evaluation",
     );
+    let callerText = opportunity.canonical_caller_text;
+    if (exchange.caller_branch_authority !== null) {
+      const branch = objectValue(
+        exchange.caller_branch_authority as JsonValue,
+        "LC4 publication caller branch authority",
+      );
+      const source = LC4_DEV_CALLER_BRANCH_SOURCES.find((candidate) =>
+        candidate.source_id === branch.source_id
+        && candidate.prior_outcome === branch.prior_outcome);
+      if (!source
+        || source.canonical_caller_text_sha256
+          !== branch.source_text_sha256
+        || branch.decision_sha256
+          !== payload.caller_branch_decision_sha256
+        || branch.decision_evidence_sha256
+          !== payload.caller_branch_decision_sha256) {
+        throw new Error(
+          "LC4 publication caller branch text differs from its retained signed source",
+        );
+      }
+      callerText = source.canonical_caller_text;
+    } else if (payload.caller_branch_decision_sha256 !== null
+      || callerPcmSha256 !== binding.pcm_sha256
+      || callerPcm.byteLength !== binding.pcm_byte_length) {
+      throw new Error(
+        "LC4 publication non-branch caller PCM differs from its prepared audio binding",
+      );
+    }
+    appendReconstructedConversationExchange({
+      turns: reconstructedConversationTurns,
+      opportunity_index: opportunity.index,
+      caller_text: callerText,
+      caller_pcm_sha256: callerPcmSha256,
+      exchange,
+      listener,
+      assistant_pcm_sha256: outputPcmSha256,
+    });
     const listenerAuthorityReplay =
       await replayLc4DevelopmentListenerAuthority({
         cas: input.cas,
@@ -701,6 +1622,10 @@ async function replayEpisode(input: Readonly<{
         repairProjection,
         "LC4 publication repair provider exchange",
       );
+      assertExchangeProviderSessionBinding({
+        exchange: repairExchange,
+        session: providerSession,
+      });
       const repairOutputCapture = objectValue(
         repairExchange.output_capture,
         "LC4 publication repair output capture",
@@ -724,7 +1649,7 @@ async function replayEpisode(input: Readonly<{
         assertLc4ProviderExchangeReplayProjection(repairProjection, {
           run_id: input.episode.episode_id,
           opportunity_id: opportunity.id,
-          segment_ordinal: Math.ceil(opportunity.index / 20) as 1 | 2 | 3,
+          segment_ordinal: segmentOrdinal,
           playback_kind: "repair",
           caller_pcm_sha256: repairCallerPcmSha256,
           caller_pcm_byte_length: repairCallerPcm.byteLength,
@@ -751,6 +1676,28 @@ async function replayEpisode(input: Readonly<{
         repairListener.evaluation as JsonValue,
         "LC4 publication retained repair listener evaluation",
       );
+      const selection = objectValue(
+        repairDecision.selection as JsonValue,
+        "LC4 publication repair decision selection",
+      );
+      const repairSource = corpus.repair_policy.library.find((candidate) =>
+        candidate.id === selection.repair_pcm_id);
+      if (!repairSource
+        || selection.pcm_sha256 !== repairCallerPcmSha256
+        || selection.pcm_byte_length !== repairCallerPcm.byteLength) {
+        throw new Error(
+          "LC4 publication repair caller text differs from its frozen repair library",
+        );
+      }
+      appendReconstructedConversationExchange({
+        turns: reconstructedConversationTurns,
+        opportunity_index: opportunity.index,
+        caller_text: repairSource.canonical_caller_text,
+        caller_pcm_sha256: repairCallerPcmSha256,
+        exchange: repairExchange,
+        listener: repairListener,
+        assistant_pcm_sha256: repairOutputPcmSha256,
+      });
       const repairAuthorityReplay =
         await replayLc4DevelopmentListenerAuthority({
           cas: input.cas,
@@ -858,6 +1805,30 @@ async function replayEpisode(input: Readonly<{
     entry.playback_kind === "canonical");
   const repairEntries = entries.filter((entry) =>
     entry.playback_kind === "repair");
+  for (const [index, packet] of providerSessionReplay.packets.entries()) {
+    if (index === 0) {
+      if (packet !== null) {
+        throw new Error(
+          "LC4 publication initial provider session has a rotation packet",
+        );
+      }
+      continue;
+    }
+    if (packet === null) {
+      throw new Error(
+        "LC4 publication reopened provider session lacks its retained rotation packet",
+      );
+    }
+    const expectedTurns = reconstructedConversationTurns.filter((turn) =>
+      turn.available_after_opportunity
+        <= LC4_DEV_PROVIDER_SESSION_SCHEDULE[index]!.opportunity_start - 1);
+    if (canonicalJson(packet.conversation_turns)
+      !== canonicalJson(expectedTurns)) {
+      throw new Error(
+        "LC4 publication retained rotation packet conversation differs from exact prior caller, tool, and assistant evidence",
+      );
+    }
+  }
   if (canonicalEntries.some((entry, index) =>
     entry.opportunity_index !== index + 1)
     || canonicalEntries.length !== 60
@@ -880,6 +1851,10 @@ async function replayEpisode(input: Readonly<{
     output_audio_lineage_scope:
       outputAudioLineageScope(input.episode.provider),
     canonical_provider_exchange_count: 60 as const,
+    provider_session_count:
+      providerSessionReplay.provider_session_count,
+    provider_session_replay_set_sha256:
+      providerSessionReplay.provider_session_replay_set_sha256,
     repair_provider_exchange_count: repairEntries.length,
     total_response_generation_count: entries.length,
     canonical_exchange_replay_set_sha256: sha256Hex(
@@ -916,6 +1891,7 @@ async function replayEpisode(input: Readonly<{
         })),
       )}`,
     ),
+    entries: Object.freeze([...entries]),
   });
 }
 

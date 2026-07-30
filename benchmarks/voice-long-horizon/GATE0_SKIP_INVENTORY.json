@@ -4,7 +4,7 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "e0c7c242541e9b0150dc73ce4e0ecc4a435beda05f3c2112ffe9779b26c67629",
+    "source_manifest_sha256": "886825e3114d5c0ff014e1fa49048587c6472a52bad2be15b2a3c2aa06924932",
     "source_manifest_file_count": 330,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
@@ -233,7 +233,7 @@
     },
     {
       "path": "web/lib/benchmark/__tests__/lc4-development-whisper-runtime.integration.test.ts",
-      "content_sha256": "68ea3bf304499393ec90bbf790f87b377d45ebc986153b4008f481cd017d8248",
+      "content_sha256": "8f0f21d786b50a39e770a4a9df4443260e682dc077e8aad8f0d1e485ed15d083",
       "test_count": 2,
       "condition": "LC4_REAL_ASR_INTEGRATION is absent",
       "reason_category": "missing_local_asr_integration_environment",

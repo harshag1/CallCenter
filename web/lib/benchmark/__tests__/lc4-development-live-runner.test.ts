@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import {
   INDEPENDENT_ASR_RESULT_SCHEMA_SHA256,
@@ -646,7 +646,7 @@ function providerExchangeProjection(
     schema_version: 2,
     adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
     run_id: extra.episode_id,
-    segment_ordinal: Math.ceil(opportunityOrdinal / 20),
+    segment_ordinal: Math.ceil(opportunityOrdinal / 10),
     playback_kind: playbackKind,
     response_control_kind: extra.arm === "hacc" ? "hacc_response_plan" : "native_context",
     response_plan_sha256: responsePlanSha256,
@@ -1901,11 +1901,11 @@ describe("LC4-DEV live runner", () => {
     expect(prepare.maximum_total_micro_usd).toBe(15_000_000);
     expect(prepare.episodes.reduce((sum, episode) => sum + episode.maximum_micro_usd, 0)).toBeLessThanOrEqual(15_000_000);
     expect(prepare.evidence_boundary.efficacy_claim_eligible).toBe(false);
-    expect(prepare.schema_version).toBe(3);
+    expect(prepare.schema_version).toBe(5);
     const stale = JSON.parse(canonicalJson(prepare));
     stale.audio_execution_contract_sha256 = "0".repeat(64);
     const staleBody = Object.fromEntries(Object.entries(stale).filter(([key]) => key !== "prepare_sha256"));
-    stale.prepare_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-live-prepare/v3\n${canonicalJson(staleBody)}`);
+    stale.prepare_sha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-live-prepare/v5\n${canonicalJson(staleBody)}`);
     expect(() => assertLc4DevLivePrepareArtifact(stale)).toThrow("not canonical or internally consistent");
     const staleSchema = JSON.parse(canonicalJson(prepare));
     staleSchema.schema_version = 2;
@@ -1913,7 +1913,7 @@ describe("LC4-DEV live runner", () => {
       Object.entries(staleSchema).filter(([key]) => key !== "prepare_sha256"),
     );
     staleSchema.prepare_sha256 = sha256Hex(
-      `harshas-amazing-call-center/lc4-dev-live-prepare/v3\n${canonicalJson(staleSchemaBody)}`,
+      `harshas-amazing-call-center/lc4-dev-live-prepare/v5\n${canonicalJson(staleSchemaBody)}`,
     );
     expect(() => assertLc4DevLivePrepareArtifact(staleSchema))
       .toThrow("not canonical or internally consistent");
@@ -2103,9 +2103,10 @@ describe("LC4-DEV live runner", () => {
     });
     expect(run.ledger.map((event) => event.event_type)).toEqual([
       "episode_opened",
+      "segment_open_intent",
       "segment_failed",
     ]);
-    const segmentFailed = run.ledger[1]!;
+    const segmentFailed = run.ledger[2]!;
     const segmentFailurePayload =
       await evidence.resolveJson(segmentFailed.payload_evidence);
     expect(segmentFailurePayload).toMatchObject({
@@ -2140,9 +2141,112 @@ describe("LC4-DEV live runner", () => {
     });
     expect(canonicalJson(failureEvidence)).not.toContain(compileFailureMessage);
     await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
-      event_count: 2,
+      event_count: 3,
       ledger_head_sha256: run.ledger_head_sha256,
     });
+  });
+
+  it("revokes a timed-out segment open and closes a session that resolves late", async () => {
+    vi.useFakeTimers();
+    try {
+      const { pcm, prepare, preflight } = await fixtures();
+      const evidence = memoryEvidence();
+      let resolveLate:
+        ((session: Awaited<ReturnType<Lc4DevelopmentRealtimeAdapter["openSegment"]>>) => void)
+        | null = null;
+      let setupSignal: AbortSignal | null = null;
+      let closeCalls = 0;
+      let exchangeCalls = 0;
+      const pendingRun = executeLc4DevLiveRun({
+        prepare,
+        preflight,
+        dependencies: {
+          adapter: {
+            kind: "lc4-development-realtime-v1",
+            factory_id: "lc4-production-provider-adapter/dev-authorized-v1",
+            preflight_sha256: preflight.preflight_sha256,
+            maximum_total_micro_usd: prepare.maximum_total_micro_usd,
+            openSegment: ({ signal }) => {
+              setupSignal = signal ?? null;
+              return new Promise((resolve) => {
+                resolveLate = resolve;
+              });
+            },
+          },
+          ...retainedDependencies({
+            evidence,
+            pcm,
+            repair: noRepairDependencies(),
+          }),
+          ledger: { async append() {} },
+          now: () => new Date(NOW),
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(LC4_DEV_LIVE_TIMEOUTS.segment_open_ms);
+      const run = await pendingRun;
+      expect((setupSignal as AbortSignal | null)?.aborted).toBe(true);
+      expect(run).toMatchObject({
+        status: "failed",
+        opportunities_submitted: 0,
+        opportunities_completed: 0,
+        provider_calls_started: 0,
+        paid_retry_count: 0,
+        maximum_total_micro_usd: 15_000_000,
+        failure_class: "timeout",
+        failure_message_sha256: sha256Hex("timeout:segment-open"),
+      });
+      expect(run.ledger.map((event) => event.event_type)).toEqual([
+        "episode_opened",
+        "segment_open_intent",
+        "segment_failed",
+      ]);
+      const failurePayload = await evidence.resolveJson(
+        run.ledger[2]!.payload_evidence,
+      );
+      expect(failurePayload).toMatchObject({
+        segment_ordinal: 1,
+        failure_stage: "provider_wait",
+        failure_code: "provider_response_timeout",
+        failure_class: "timeout",
+        provider_boundary_crossed: null,
+        response_generation_requested: false,
+        response_generation_started: false,
+        response_completed: false,
+      });
+
+      resolveLate!({
+        async exchangeCanonical() {
+          exchangeCalls += 1;
+          throw new Error("late session cannot exchange");
+        },
+        async exchangeRepair() {
+          exchangeCalls += 1;
+          throw new Error("late session cannot repair");
+        },
+        async finalizeOpportunity() {
+          throw new Error("late session cannot finalize");
+        },
+        async close() {
+          closeCalls += 1;
+          const retained = await testJsonEvidence(
+            evidence,
+            "segment_finalization",
+            { fixture: "late-segment-open-cleanup" },
+          );
+          return {
+            rotation_receipt_sha256: retained.evidence_sha256,
+            segment_finalization: retained,
+          };
+        },
+      });
+      await vi.runAllTicks();
+      await Promise.resolve();
+      expect(closeCalls).toBe(1);
+      expect(exchangeCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("executes the exact closed loop and emits an immutable evidence-complete report", async () => {
@@ -2216,7 +2320,7 @@ describe("LC4-DEV live runner", () => {
         now: () => new Date(NOW),
       },
     });
-    expect(opens).toBe(18);
+    expect(opens).toBe(36);
     expect(exchanges).toBe(360);
     expect(run.status).toBe("completed");
     expect(run.opportunities_completed).toBe(360);
@@ -2229,7 +2333,7 @@ describe("LC4-DEV live runner", () => {
     expect(run.repair_playbacks).toBe(0);
     expect(run.episode_finalization_count).toBe(6);
     expect(run.replay_evidence_reference_count).toBeGreaterThan(run.ledger.length);
-    expect(run.ledger).toHaveLength(1_098); // 6 opened + 6 op42 branches + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
+    expect(run.ledger).toHaveLength(1_170); // 6 episode opens + 36 intents + 36 opens + 6 op42 branches + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")).toHaveLength(6);
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")
       .every((event) => event.payload_sha256.length === 64)).toBe(true);
@@ -2253,19 +2357,37 @@ describe("LC4-DEV live runner", () => {
     )).toHaveLength(1);
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
     await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
-      event_count: 1_098,
+      event_count: 1_170,
       ledger_head_sha256: run.ledger_head_sha256,
     });
     expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({
       completed: true,
       exact_six_episode_horizon: true,
       exact_opportunity_horizon: true,
+      exact_provider_session_horizon: true,
       exact_playback_accounting: true,
       evidence_complete: true,
       task_results_available: true,
       authority_evaluated: 6,
       efficacy_claim_eligible: false,
     });
+    const { run_sha256: _claimed, ...runBody } = run;
+    void _claimed;
+    const tamperedBody = {
+      ...runBody,
+      provider_segment_opened_count: 35,
+    };
+    const tamperedRun = {
+      ...tamperedBody,
+      run_sha256: sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-live-run/v3\n${canonicalJson(tamperedBody)}`,
+      ),
+    } as typeof run;
+    expect(() => createLc4DevLiveReportArtifact(
+      tamperedRun,
+      COMPLETE_AUTHORITY,
+      COMPLETE_RUN_BUDGET,
+    )).toThrow("not an exact authorized prefix");
   });
 
   it("inserts one real same-opportunity repair without consuming the next canonical ordinal", async () => {
@@ -2302,7 +2424,7 @@ describe("LC4-DEV live runner", () => {
         preflight_sha256: preflight.preflight_sha256,
         maximum_total_micro_usd: prepare.maximum_total_micro_usd,
         async openSegment({ episode, segment_ordinal }) {
-          let expectedCanonicalOrdinal = ((segment_ordinal - 1) * 20) + 1;
+          let expectedCanonicalOrdinal = ((segment_ordinal - 1) * 10) + 1;
           let pending: Readonly<{ opportunity_id: string; repair_played: boolean }> | null = null;
           return {
             async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
@@ -2403,7 +2525,7 @@ describe("LC4-DEV live runner", () => {
             },
             async close() {
               expect(pending).toBeNull();
-              expect(expectedCanonicalOrdinal).toBe((segment_ordinal * 20) + 1);
+              expect(expectedCanonicalOrdinal).toBe((segment_ordinal * 10) + 1);
               const retained = await testJsonEvidence(evidence, "segment_finalization", { episode_id: episode.episode_id, segment_ordinal });
               return { rotation_receipt_sha256: retained.evidence_sha256, segment_finalization: retained };
             },
@@ -2529,9 +2651,9 @@ describe("LC4-DEV live runner", () => {
       expect(repairPlaybackReference?.evidence_sha256).toBe(
         String(repairPayload.playback_receipt_sha256),
       );
-      expect(run.ledger).toHaveLength(1_100);
+      expect(run.ledger).toHaveLength(1_172);
       await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
-        event_count: 1_100,
+        event_count: 1_172,
         ledger_head_sha256: run.ledger_head_sha256,
       });
       expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({

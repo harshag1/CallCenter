@@ -19,7 +19,8 @@ import { benchmarkKernelAttestationPublicKeyFingerprint } from "./kernel-attesta
 import { LC4_DEV_LISTENER_PLAN_SHA256 } from "./lc4-development-listener-semantics";
 import { LC4_DEV_LISTENER_SEMANTIC_BUNDLE } from "./lc4-development-listener-semantics";
 import {
-  LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES,
+  LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET,
 } from "./lc4-development-asr-semantic-calibration-reference";
 import {
   scoreLc4ListenerSemanticCriterion,
@@ -36,6 +37,10 @@ const SIGNATURE_DOMAIN = "harshas-amazing-call-center/lc4-dev-semantic-asr-calib
 const INVOCATION_DOMAIN = "hacc/independent-asr-invocation/v2\n";
 const INVOCATION_SIGNATURE_DOMAIN = "hacc/independent-asr-invocation-signature/v2\n";
 const RESULT_DOMAIN = "hacc/independent-asr-result/v2\n";
+const EXPECTED_SELECTED_OPPORTUNITY_COUNT = 24;
+const EXPECTED_ROUTE_COUNT = 2;
+const EXPECTED_FIXTURE_COUNT =
+  EXPECTED_SELECTED_OPPORTUNITY_COUNT * EXPECTED_ROUTE_COUNT;
 
 type RetainedFixture = Readonly<{
   fixture_id: string;
@@ -136,23 +141,62 @@ export async function verifyLc4DevelopmentSemanticCalibrationArtifact(input: Rea
     if (!verifySignature(null, Buffer.from(`${SIGNATURE_DOMAIN}${computed}`, "utf8"), publicKey, Buffer.from(artifact.signature.signature_base64, "base64"))) {
       errors.push("artifact signature verification failed");
     }
-    if (!Array.isArray(artifact.fixtures) || artifact.fixtures.length !== 48 || artifact.tts.fixture_count !== 48) {
+    if (LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET.length
+      !== EXPECTED_SELECTED_OPPORTUNITY_COUNT) {
+      errors.push("frozen calibration opportunity selection must contain exactly 24 opportunities");
+    }
+    if (LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES.length
+      !== EXPECTED_ROUTE_COUNT
+      || canonicalJson(artifact.tts.routes)
+        !== canonicalJson(LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES)) {
+      errors.push("calibration routes differ from the two frozen TTS routes");
+    }
+    if (!Array.isArray(artifact.fixtures)
+      || artifact.fixtures.length !== EXPECTED_FIXTURE_COUNT
+      || artifact.tts.fixture_count !== EXPECTED_FIXTURE_COUNT) {
       errors.push("calibration fixture inventory must contain exactly 48 fixtures");
     }
+    const selectedByOpportunityId = new Map<
+      string,
+      (typeof LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET)[number]
+    >(
+      LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET.map(
+        (selected) => [selected.opportunity_id, selected] as const,
+      ),
+    );
+    if (selectedByOpportunityId.size !== EXPECTED_SELECTED_OPPORTUNITY_COUNT) {
+      errors.push("frozen calibration opportunity selection contains duplicate IDs");
+    }
+    const routeById = new Map<
+      string,
+      (typeof LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES)[number]
+    >(
+      LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES.map(
+        (route) => [route.route_id, route] as const,
+      ),
+    );
     const expectedMatrix = new Set(
-      ["synthetic-samantha", "synthetic-daniel"].flatMap((routeId) =>
-        LC4_DEV_SEMANTIC_ASR_CALIBRATION_OPPORTUNITY_IDS.map(
-          (opportunityId) => `${routeId}\0${opportunityId}`,
+      LC4_DEV_SEMANTIC_ASR_CALIBRATION_ROUTES.flatMap((route) =>
+        LC4_DEV_SEMANTIC_ASR_CALIBRATION_SELECTED_SET.map(
+          (selected) => `${route.route_id}\0${selected.opportunity_id}`,
         )),
     );
     const observedMatrix = new Set<string>();
     const observedFixtureIds = new Set<string>();
     const root = resolve(input.root_dir);
     for (const fixture of artifact.fixtures ?? []) {
-      if (observedFixtureIds.has(fixture.fixture_id)) {
+      if (typeof fixture.fixture_id !== "string"
+        || !/^[A-Za-z0-9._-]+$/u.test(fixture.fixture_id)) {
+        errors.push("calibration fixture ID is invalid");
+      } else if (observedFixtureIds.has(fixture.fixture_id)) {
         errors.push(`duplicate calibration fixture ID:${fixture.fixture_id}`);
       }
       observedFixtureIds.add(fixture.fixture_id);
+      const route = routeById.get(fixture.route_id);
+      if (!route || fixture.voice !== route.voice) {
+        errors.push(`frozen calibration route mismatch:${fixture.fixture_id}`);
+      }
+      const selected = selectedByOpportunityId.get(fixture.opportunity_id);
       const matrixKey = `${fixture.route_id}\0${fixture.opportunity_id}`;
       if (!expectedMatrix.has(matrixKey) || observedMatrix.has(matrixKey)) {
         errors.push(`calibration route/opportunity substitution:${fixture.fixture_id}`);
@@ -163,9 +207,11 @@ export async function verifyLc4DevelopmentSemanticCalibrationArtifact(input: Rea
           (candidate) =>
             candidate.opportunity_id === fixture.opportunity_id,
         );
-      if (!opportunity
-        || opportunity.criterion_plan_sha256 !==
-          fixture.criterion_plan_sha256) {
+      if (!selected
+        || !opportunity
+        || selected.criterion_plan_sha256 !== fixture.criterion_plan_sha256
+        || opportunity.criterion_plan_sha256
+          !== selected.criterion_plan_sha256) {
         errors.push(`frozen semantic plan mismatch:${fixture.fixture_id}`);
       }
       if (typeof fixture.synthesis_prompt !== "string"
@@ -176,9 +222,7 @@ export async function verifyLc4DevelopmentSemanticCalibrationArtifact(input: Rea
       if (fixture.result.status !== "completed") {
         errors.push(`ASR did not complete:${fixture.fixture_id}`);
       } else if (opportunity) {
-        for (const criterion of opportunity.criteria.filter(
-          (candidate) => candidate.required_for_final_scorer,
-        )) {
+        for (const criterion of opportunity.criteria) {
           if (!scoreLc4ListenerSemanticCriterion(
             criterion,
             fixture.result.transcript,

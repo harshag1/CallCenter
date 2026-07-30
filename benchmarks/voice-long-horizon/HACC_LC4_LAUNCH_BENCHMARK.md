@@ -12,9 +12,11 @@ behind HACC?
 Throughout this benchmark, **Registered Native comparator** means **Native
 realtime API + common benchmark continuity**: the provider's realtime API
 receives the same benchmark-managed chronological caller, assistant, and
-provider-visible tool-result history used to preserve the call across planned
-connection refreshes. It is not a bare or context-free model/API baseline, and
-it is not consumer ChatGPT Voice.
+provider-visible tool-result history used to preserve the call across five
+planned physical connection transitions. Each 60-opportunity call has three
+20-opportunity semantic acts and six 10-opportunity physical provider
+sessions. It is not a bare or context-free model/API baseline, and it is not
+consumer ChatGPT Voice.
 
 The six frozen cells are:
 
@@ -135,14 +137,14 @@ an arm-specific outcome.
 
 ## Attrition and denominators
 
-Once an episode session opens, it remains in the denominator. Every missing
+Once a call/episode opens, it remains in the denominator. Every missing
 scheduled opportunity is a failure, not missing-at-random data. An incomplete
 or unscorable episode cannot achieve strict success. The public publisher is
-stricter: it refuses output unless all six sessions opened and completed, all
-360 first-response listener observations and every selected repair-assisted
-listener observation replay, every authority artifact is
-scorable, the budget ledger is terminal, and the complete evidence root
-reproduces.
+stricter: it refuses output unless all six calls and all 24 preregistered
+physical provider sessions opened and completed, all 360 first-response
+listener observations and every selected repair-assisted listener observation
+replay, every authority artifact is scorable, the budget ledger is terminal,
+and the complete evidence root reproduces.
 
 The 360 opportunities are repeated measurements nested within six calls, not
 360 independent trials. The development call—one arm in one provider pair—is

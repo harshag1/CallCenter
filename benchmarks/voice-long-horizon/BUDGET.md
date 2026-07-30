@@ -863,3 +863,55 @@ If fully charged, ordinary post-baseline exposure becomes **$129.00**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$144.00**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.
+
+## 2026-07-29 — Source `4da5990` qualified; DEV terminalized at 136/360
+
+The exact-source Gate D and qualification at
+`4da599069d846fc84b000fd09e98c09f9ac8287a` passed. The one-shot DEV run
+completed both OpenAI cells and reached Gemini HACC opportunity 17:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 136/360 opportunities completed, 0 paid retries |
+
+The DEV budget evidence/head are
+`065d9bb26e97e5c6aec6f7e7727c08a6fa1cc87a223490fb40267fa5986683cb`
+and
+`0311a06f386ef559423f7334ec7d3f9ebc8ff18983874d96940b8c80300a92da`.
+OpenAI Native, OpenAI HACC, and Gemini HACC settled at **$2.50** each.
+The other reservations were cancelled and active liability ended at
+**$0.00**.
+
+The immutable report is
+`38a3e94ade2a88e27e3a85f3935df6b9e6f89ba05b023bc79174939ab28cdf05`
+(file SHA-256
+`ce8d5d0f5f556a29dfdd633e368b1db168233efce59fdc1d1af3de8f18a3f922`).
+It is incomplete, unscorable, and ineligible for a comparative claim or
+graph. The failed root is immutable and cannot be retried.
+
+Current post-baseline conservative exposure is **$121.50**, and LC4
+filesystem-ledger settlements total **$192.50**, with **$0.00 active**.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the explicit six-session transport-schedule amendment, its
+regression suite, public audits, and a fresh exact-source ASR receipt pass:
+
+The intermediate four-by-15 proposal was rejected before paid reuse because
+the observed Gemini pace left only about 69 seconds of headroom beneath the
+local ten-minute connection limit. The final six-by-10 schedule changes only
+the preregistered transport-session accounting; the six financial reservations
+and **$15.00** DEV maximum are unchanged.
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$140.50**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$155.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.
