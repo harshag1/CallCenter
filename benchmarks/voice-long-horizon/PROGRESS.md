@@ -1390,3 +1390,29 @@ remain incomplete and unscorable. No completed cell, comparison, or launch
 graph may be reused from that root. A new clean commit, public audits,
 exact-source ASR receipt, Gate D, qualification, and all six DEV cells are
 required.
+
+## 2026-07-29 — Gemini next-turn streaming transition repaired
+
+The exact-source Gate D and three-provider qualification passed at `1dbcb68`.
+The one-shot DEV run then completed both 60-opportunity OpenAI calls before
+failing closed at Gemini HACC opportunity 2. It retained 121/360 completed
+opportunities, 129 provider calls, eight repair playbacks, zero paid retries,
+and zero active budget liability. The run is incomplete and contributes no
+efficacy score or graph.
+
+Failure evidence proves that Gemini accepted only three paced PCM chunks for
+opportunity 2 before a `serverContent` frame made the client fail audio
+delivery. The completed-response metadata guard had not accounted for the
+expected interval in which the next input turn is open but its `activityEnd`
+generation trigger is not yet armed.
+
+The repaired transition permits exactly that `+1` open-input state while
+keeping untriggered model output, PCM, tools, conflicting terminal state, and
+wider turn gaps fail-closed. The exact regression, focused integration tests,
+and complete sequential test/lint/typecheck gate pass. A new paid sequence
+remains blocked on a clean commit, public audits, and a fresh exact-source ASR
+receipt.
+
+- Spend delta: **$11.50** maximum conservative settlement
+- Current post-baseline conservative exposure: **$98.50**
+- Active reservations: **$0.00**

@@ -2530,10 +2530,23 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       const lateRejected = lateReason === "RESPONSE_REJECTED"
         || lateReason === "MALFORMED_FUNCTION_CALL"
         || Boolean(lateReason?.includes("PROHIBITED"));
+      // Audio for the next caller turn is paced before activityEnd arms its
+      // generation trigger. During that interval Gemini may already stream
+      // input transcription while the completed response remains the only
+      // terminal response identity. Preserve that narrow +1 input-turn
+      // transition without treating it as a second response or accepting a
+      // provider generation before the new client trigger.
+      const terminalInputTurnStillCurrent = terminal !== null && (
+        terminal.inputTurn === this.inputTurn
+        || (
+          this.inputOpen
+          && this.inputTurn === terminal.inputTurn + 1
+        )
+      );
       const terminalConflict = terminal === null
         || terminal.responseId !== this.currentResponseId
         || terminal.connectionEpoch !== this.connectionEpoch
-        || terminal.inputTurn !== this.inputTurn
+        || !terminalInputTurnStillCurrent
         || (content.interrupted === true && terminal.status !== "interrupted")
         || (content.generationComplete === true && terminal.status === "interrupted")
         || (lateRejected && terminal.status !== "failed")

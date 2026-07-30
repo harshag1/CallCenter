@@ -1166,3 +1166,91 @@ The failed-run report is
 It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and `efficacy_claim_eligible: false`.
 Nothing from this root may populate a comparative score or graph.
+
+## 2026-07-29 DEV terminal at source `1dbcb68`
+
+**Failed closed after 121/360 completed opportunities. No efficacy score is
+admissible.**
+
+The exact-source release gates passed before the DEV run:
+
+- xAI Gate D receipt/trust:
+  `6cea733b0d3df68241b2b10610622c572581463c361c09283d11806a8c1b2a0c`
+  /
+  `f15226074a6ff3bac7192a8b42e5e0b37baa3adc972e3e27020dafcf389e805f`;
+- qualification terminal artifact/body:
+  `c33e6105ab24041d33abcdab80567be4d4c9dc0887e3df582a1e1ee62de90ba0`
+  /
+  `5ed35af8f50bdeb83d60ebc5f26e7bedc2ffa486c5d5420622d6b12962491aa9`;
+- qualification trust:
+  `d1db65770589c70b86ce54068394dc3d93146a730d79a500b7a7385fce7e11f9`;
+- qualification provider sessions/paid sessions/generation phases/tool
+  roundtrips: **6/3/6/3**; and
+- qualification retries/settlement/active: **0 / $3.00 / $0.00**.
+
+The DEV execution root
+`/private/tmp/hacc-lc4-dev-release-20260729T232239Z` retained:
+
+- run/package:
+  `15c909b82d55903009f8a761c06053d904d54d251e30ba20f45f9b3bab3cb193`
+  /
+  `495a24391afa5a9192eea49cc27d09c9e79a6bbf8d88685edf3125129d9a0605`;
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **122/121**;
+- generations requested/completed: **130/129**;
+- provider calls/repair playbacks: **129/8**;
+- paid retries: **0**; and
+- DEV settlement/active: **$7.50 / $0.00**.
+
+OpenAI Native and OpenAI HACC each completed 60/60 opportunities, including
+both planned history-rotation boundaries. Gemini HACC completed opportunity 1
+and failed while streaming opportunity 2's caller audio. Those partial cells
+remain trapped inside the failed source-bound run and cannot be mixed with any
+later rerun.
+
+Primary failure evidence
+`7148c7d1f0d4b0793b68553198985975f52f35e77853a77fe1851f0b9f974614`
+records:
+
+- `audio_delivery / audio_delivery_failed / audio_append`;
+- caller PCM: **170,334 bytes**, SHA-256
+  `d8bec01869f6ccc26c5d6ccbce8539280df9773d012d975bf093fcb337eec590`;
+- only **3/267** chunks and **1,920/170,334** bytes appended;
+- no response preparation, commit, request, start, terminal, or output audio;
+- final wire observation
+  `7ef093d076d736ea59f34b3c9b5d30749f0b439893aeb925a74bce13ad6fe55b`;
+  and
+- final wire type commitment
+  `2ef871697891e67d2f02f30ee665f9a0670a06eebe922df0bf65678f108c4a2d`,
+  which resolves to `serverContent`.
+
+Cleanup evidence
+`63bf7ccae6500538423b7fb8754e193cc727e717af9062cd09ba2f4a0b73ddfb`
+is secondary. The failure occurred before Gemini opportunity 2 could trigger
+generation, so it is not a model-performance result.
+
+The client-state regression is deterministic: after opportunity 1 completed,
+`startActivity()` advanced the input turn while paced caller audio was still
+being appended, but `activityEnd` had not yet armed opportunity 2's generation
+trigger. The post-terminal metadata guard required the completed response's
+input-turn number to equal the now-current input turn. A legitimate
+`serverContent` frame during that narrow streaming interval therefore poisoned
+the socket as conflicting metadata.
+
+The repair admits only the completed terminal turn or exactly its successor
+while that successor's input activity is open. It still rejects untriggered
+model content or PCM, contradictory terminal status, post-terminal tools, and
+all wider turn gaps. The exact regression completes response 1, begins paced
+audio for response 2, receives input transcription before `activityEnd`,
+appends more audio, then proves response 2 requires and receives its own
+terminal. Focused Gemini tests pass **59/59**, the adapter/runner integration
+set passes **158/158**, and the complete sequential suite passes **3,291**
+tests across **301** files with **85** source-inventoried skips.
+
+The failed-run report is
+`cbac33ef74c7e276b01f49b87aa17a0b9b6a6e26185c7b6ab26a84a7cdf96e2f`
+(file SHA-256
+`43be67428fd6bacc595ed074b377bd3da721e95f841d86e64ba758c39046b92a`).
+It reports `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and is unscorable. Nothing from this root may
+populate a comparative score or graph.

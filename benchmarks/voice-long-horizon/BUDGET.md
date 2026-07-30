@@ -769,3 +769,49 @@ If fully charged, ordinary post-baseline exposure becomes **$106.00**.
 Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
 liability view yields **$121.00**. Both remain below the strict `< $250.00`
 ceiling. There is no retry reserve.
+
+## 2026-07-29 — Source `1dbcb68` qualified; DEV terminalized at 121/360
+
+The exact-source Gate D and qualification at
+`1dbcb68c8d908d1796cd3bc67e154e28e0df7fef` passed. The one-shot DEV run
+completed both OpenAI cells and reached Gemini HACC opportunity 2:
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; 1 provider session, 2 generation phases, 1 gateway roundtrip, 0 retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; OpenAI, Gemini, and xAI each completed history hydration and the spoken gateway roundtrip; 3/3 replay verified |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 121/360 opportunities completed, 0 paid retries |
+
+The DEV budget evidence/head are
+`af8d8f1969ce0ec0ea1289b0dcd713ef8a1f3bf30dc1d23c744d019666dc9715`
+and
+`674d7a9a8f4533726dd54ab5dab53d1e454cceb006d1daed97f78539f191393a`.
+OpenAI Native, OpenAI HACC, and Gemini HACC settled at **$2.50** each.
+The other reservations were cancelled and active liability ended at
+**$0.00**.
+
+The immutable report is
+`cbac33ef74c7e276b01f49b87aa17a0b9b6a6e26185c7b6ab26a84a7cdf96e2f`
+(file SHA-256
+`43be67428fd6bacc595ed074b377bd3da721e95f841d86e64ba758c39046b92a`).
+It is incomplete, unscorable, and ineligible for a comparative claim or
+graph. The failed root is immutable and cannot be retried.
+
+Current post-baseline conservative exposure is **$98.50**, and LC4
+filesystem-ledger settlements total **$169.50**, with **$0.00 active**.
+
+One further **$19.00 maximum** sequence is preregistered only for a new clean
+source after the next-turn Gemini streaming transition repair, regression
+suite, public audits, and fresh exact-source ASR receipt all pass:
+
+| New clean-source gate | Maximum |
+|---|---:|
+| xAI finite-manual Gate D | $1.00 |
+| Three-provider qualification | $3.00 |
+| One-shot six-cell DEV, only after qualification and strict DEV preflight pass | $15.00 |
+| **Total** | **$19.00** |
+
+If fully charged, ordinary post-baseline exposure becomes **$117.50**.
+Including the frozen/non-reusable `$15.00` authority solely as a pessimistic
+liability view yields **$132.50**. Both remain below the strict `< $250.00`
+ceiling. There is no retry reserve.

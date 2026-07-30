@@ -1674,6 +1674,50 @@ describe("GeminiLiveClient", () => {
     )).toBe(false);
   });
 
+  it("accepts next-turn input transcription while audio is paced after a completed response", async () => {
+    const test = harness();
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      serverContent: {
+        inputTranscription: { text: "first caller", finished: true },
+        outputTranscription: { text: "first response", finished: true },
+        turnComplete: true,
+      },
+    });
+    await settle();
+
+    test.client.startActivity();
+    test.client.appendInputAudio(inputAudio(2, 0));
+    test.socket.receive({
+      serverContent: {
+        inputTranscription: { text: "second caller", finished: true },
+        waitingForInput: true,
+      },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("ready");
+    expect(test.events.some(
+      (event) => event.type === "error" && event.fatal,
+    )).toBe(false);
+    expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(1);
+    expect(() => test.client.appendInputAudio(inputAudio(3, 0))).not.toThrow();
+
+    test.client.endActivity();
+    test.socket.receive({
+      serverContent: {
+        modelTurn: { parts: [{ text: "second response" }] },
+        turnComplete: true,
+      },
+    });
+    await settle();
+
+    expect(test.client.state).toBe("ready");
+    expect(test.events.filter((event) => event.type === "response.started")).toHaveLength(2);
+    expect(test.events.filter((event) => event.type === "response.completed")).toHaveLength(2);
+  });
+
   it("fails closed on Gemini PCM delivered after the response terminal", async () => {
     const test = harness();
     await connectReady(test);
