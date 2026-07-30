@@ -10,8 +10,8 @@ At the final opportunity, the benchmark compared:
 - the most-recent whole transcript turns that fit the identical UTF-8 byte budget; and
 - unbounded full history as a size/recall reference.
 
-Generator: `web/scripts/conversation-kernel-retention.ts`  
-Seed: `1212236611`  
+Generator: `web/scripts/conversation-kernel-retention.ts`\
+Seed: `1212236611`\
 Raw result: `CONTEXT_KERNEL_RETENTION_V1.json`
 
 ## Result

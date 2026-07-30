@@ -1,6 +1,7 @@
 # HACC-LC4 output-voice calibration development record
 
-Date: 2026-07-21  
+Date: 2026-07-21
+
 Status: **evaluator calibration evidence; not HACC efficacy evidence**
 
 This record retains the complete development trail used to make audible-semantic
@@ -27,7 +28,7 @@ post-hoc transcript edits.
 
 ### Batch 1: isolated fragments
 
-Manifest: `f2cbc1f8816c2bca1d39e3f3b6c5ae51712b0c8608387080007484d83deec132`  
+Manifest: `f2cbc1f8816c2bca1d39e3f3b6c5ae51712b0c8608387080007484d83deec132`\
 Capture verification: `94ee7f89bf384864a895b526331f0d3a0af737383c68511af94b0554f71deb63`
 
 The pinned `small.en` ASR produced 3/18 critical-slot false negatives at 4.17%
@@ -37,7 +38,7 @@ WER. A larger `medium.en-q5_0` model reduced this to 2/18; a pinned
 
 ### Batch 2: natural sentence context
 
-Manifest: `fab810de291f46826a96489b90931fe5cd75bca3574ca8889dfd6cc217c49fb7`  
+Manifest: `fab810de291f46826a96489b90931fe5cd75bca3574ca8889dfd6cc217c49fb7`\
 Capture verification: `213459e00aadbe2c3e4abf8b2845a3baed1397fa682afbbdf009bf94cd0e978b`
 
 One provider-neutral sentence wrapper was applied by slot kind: `The exact
@@ -52,7 +53,7 @@ every provider (for example, `C H E M` and `H Y D`). This is a single
 provider-neutral rule for machine-critical identifiers, not a provider-specific
 exception.
 
-Manifest: `63310807b42ee1ab7fdf11e4bffa084f040677f1e3d4bbefb623fade7d926d0e`  
+Manifest: `63310807b42ee1ab7fdf11e4bffa084f040677f1e3d4bbefb623fade7d926d0e`\
 Capture verification: `3d6f1b6490aeb30bbd621a7bdb7f4e041a9cc873899ea44c3224c59c9ddaf9ac`
 
 The preregistered small ASR still produced one OpenAI `parts`/`carts` false
@@ -82,4 +83,3 @@ The larger ASR model was selected during evaluator development after the
 smaller pinned model exposed critical false negatives. This choice is therefore
 not confirmatory. The exact passing toolchain and spoken-form rules must be
 frozen before any held-out Native-versus-HACC call is opened.
-

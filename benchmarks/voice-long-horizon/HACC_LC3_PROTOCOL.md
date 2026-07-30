@@ -120,4 +120,3 @@ The graph may say only what the completed evidence supports. With three independ
 ## Spend boundary
 
 The run plan may reserve at most `$5.00` per episode and `$270.00` across the frozen schedule. The user's absolute experiment authorization remains `$1,000.00`; this protocol does not authorize the rest. A durable aggregate ledger, crash retention, and provider-cost reconciliation are required before the first paid socket.
-
