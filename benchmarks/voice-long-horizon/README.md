@@ -2,9 +2,9 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. It compares the same model against itself: the raw agent receives the entire workflow and action catalog up front, while the harness progressively discloses the current objective and routes actions through durable, runtime-enforced state.
+This research program tests whether Harsha's Amazing Call Center makes realtime speech-to-speech agents more reliable over long, tool-driven conversations. The current LC4 development comparison holds the provider/model, natural task, caller audio, chronological conversation and tool-result history, transport, and limits constant. Its **Registered Native comparator** is **Native realtime API + common benchmark continuity**: it receives that ordinary provider-session history without HACC's host state projection. HACC receives the same caller turns plus scoped Flow packets and tools backed by durable, runtime-enforced state. This comparator is not a bare/context-free model API and is not consumer ChatGPT Voice.
 
-**Current status: draft protocol and infrastructure work, with $0.00 in paid voice-provider session spend. No superiority result exists yet.** Five separately tracked unverified architecture/security reviews cost **$3.312551** in total; they are advisory input, not benchmark sessions or an evidence class. A public performance claim will be made only if confirmatory, paired true-audio trials support it. Null or mixed results will be published as such.
+**Current status: the latest completed paid comparative dataset is HACC-LC3-v6: 18 production-API episodes and nine matched pairs. Native and HACC both scored 0/9 for mission completion and strict alignment, so no superiority result exists.** Only 8/18 episodes reached all 20 turns (Native 5/9, HACC 3/9). Independent red-teaming found evaluator, output-voice calibration, playback, and provenance defects; the immutable scores remain retained, but the batch is not publication-quality efficacy evidence. Later paid LC4 qualification and development attempts produced transport/mechanism evidence but failed or were quarantined before a complete publishable comparison. See [RESULTS.md](RESULTS.md) and the [LC4 failed-attempt record](evidence/HACC_LC4_DEV_FAILED_ATTEMPTS.md).
 
 The benchmark is designed to answer six questions:
 
@@ -27,12 +27,21 @@ The conjunctive `strict_success` product endpoint remains useful, but some of it
 
 ## Conditions
 
-The candidate headline comparison, which is not yet frozen, is:
+The current release benchmark is the six-cell LC4 development comparison:
 
-- `raw-full`: one complete workflow prompt and the full logical action catalog are exposed from turn one behind the same native capability-gateway schema used by every arm. Actions retain normal schema and business validation, but receive no framework flow grants, state machine, or exactly-once layer.
-- `full-harness`: the model starts with a stable capability gateway. Context and logical capabilities—including always-available actions—are disclosed for the current state, and every consequential transition or action passes through durable Flow v2 enforcement.
+- `native` (**Registered Native comparator**): the provider-equivalent realtime API receives the frozen natural task plus common benchmark continuity—the caller turns and chronological prior assistant/tool-result history. It receives no Flow graph, evaluator rubric, host-selected current fact, or HACC state projection.
+- `hacc`: the same provider/model and caller turns receive scoped Flow packets and tools backed by HACC's durable state, capability, receipt, and repair boundaries.
 
-The causal matrix adds `progressive-only` and `state-only` arms to distinguish disclosure effects from runtime enforcement. `raw-memory` is a stronger raw baseline with generic durable memory, and `oracle-route` is a diagnostic ceiling rather than a headline condition. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md).
+This small development comparison is frozen in [HACC_LC4_LAUNCH_BENCHMARK.md](HACC_LC4_LAUNCH_BENCHMARK.md). It is descriptive mechanism evidence, not a provider-efficacy estimate.
+
+Its 360 scheduled opportunities are repeated measurements within six calls,
+not 360 independent trials. There is only one Registered Native comparator/HACC
+pair per provider. Each call preserves three 20-opportunity semantic acts while
+using six preregistered 10-opportunity physical provider sessions. The
+resulting 36 transport sessions and 30 planned transitions are transport
+accounting, not additional calls or independent samples.
+
+A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That candidate matrix must not be used to describe the current LC4 Registered Native comparator.
 
 All paired conditions use the same provider model, voice, frozen caller PCM fixture library, condition-blind caller policy and seed, hidden world, business facts, leaf tool implementations and responses, limits, and failure schedule. When both arms select the same caller utterance, they receive identical bytes; a closed-loop caller may select a different next utterance after observable outcomes diverge. The intervention is the orchestration method, not extra information.
 
@@ -42,7 +51,7 @@ Progressive tool disclosure, graph-based voice flows, external state, checkpoint
 
 The research contribution under test is narrower:
 
-- a provider-controlled raw-versus-harness causal evaluation over the same realtime STS models and caller audio;
+- a provider-controlled Registered Native comparator-versus-harness causal evaluation over the same realtime STS models and caller audio;
 - revision-bound capability leases plus transactional voice actions (`propose -> validate -> authorize -> execute once -> verify -> commit`);
 - separate measurement of model attempts, runtime blocks, executed effects, and verified commits;
 - a Conversation Integrity Curve and Reliable Horizon for locating where reliability decays;
@@ -59,23 +68,31 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - A plan-pinned Ed25519 kernel attestation binds an artifact to its run, condition, source/build hashes, final heads, and signing identity. Because the signer currently runs in-process, that signature proves provenance and detects mutation/substitution; it does **not** prove that the kernel described itself honestly. Replayable ToolWorld/event/receipt claims get their truth from independent deterministic replay against the frozen source. Private Flow claims remain tied to the pinned implementation and must not be described as independently observed. Provider settings that are not acknowledged stay labeled `unverifiable`.
 - Missing, invalid, or non-replayable final evidence is preserved and fails the strict endpoint. A kernel crash or absent attestation is never silently excluded.
 - Results include sample counts, paired effect sizes, uncertainty intervals, and per-provider breakdowns. No claim is made from a showcase run or a selectively retained subset.
-- Costs are controlled by [BUDGET.md](BUDGET.md). New sessions stop being scheduled at $900, leaving a $100 hard-ceiling reserve.
+- Costs are controlled by [BUDGET.md](BUDGET.md). The current release sequence
+  is capped at `$19` and the remaining-work epoch must stay strictly below
+  `$250`, including active reservations.
 
-## Reproduce the current zero-provider-spend evidence
+## Reproduce the deterministic engineering evidence
 
 From `web/`, these commands verify the checked-in numerical claims and regenerate the two principal deterministic engineering artifacts under the ignored `.local/` directory:
 
 ```bash
 npm run benchmark:claims:verify
+npm run benchmark:context-kernel -- --schedules 1000 --seed 1212236611
 npm run benchmark:mission-runtime -- --trials 1000 --seed-start 1 --out ../benchmarks/voice-long-horizon/.local/mission-runtime-local.json
 npm run benchmark:active-catalog -- --out ../benchmarks/voice-long-horizon/.local/active-catalog-local.json
 ```
 
-They do not load provider credentials, open realtime sessions, or create C3–C5 evidence. The default `npm run check` also does not execute the 18 conditional PostgreSQL suites unless their four integration database environments are supplied; see the root [verification instructions](../../README.md#verification).
+They do not load provider credentials, open realtime sessions, or create C3–C5
+evidence. The default `npm run check` also does not execute the
+environment-qualified PostgreSQL suites; their exact source-bound inventory is
+recorded in `GATE0_SKIP_INVENTORY.json`. See the root
+[verification instructions](../../README.md#verification).
 
 ## Research documents
 
 - [PROTOCOL.md](PROTOCOL.md): scenarios, conditions, endpoints, metrics, and analysis plan
+- [VMR_180_PROTOCOL.md](VMR_180_PROTOCOL.md): prospective three-session, 180-opportunity protocol for corrections, async work, reconnects, and guarded effects; no effectiveness data yet
 - [PREREGISTRATION.md](PREREGISTRATION.md): fields that must be frozen before confirmatory runs
 - [PROVIDERS.md](PROVIDERS.md): July 2026 model, protocol, session, and pricing constraints
 - [PRIOR_ART.md](PRIOR_ART.md): closest systems, benchmarks, and exact claim boundaries
@@ -83,11 +100,14 @@ They do not load provider credentials, open realtime sessions, or create C3–C5
 - [BUDGET.md](BUDGET.md): fail-closed spend gates and live ledger
 - [PROGRESS.md](PROGRESS.md): dated implementation and experiment log
 - [DEVIATIONS.md](DEVIATIONS.md): post-freeze changes and reserve-use record
-- [RESULTS.md](RESULTS.md): artifact-derived outcomes; currently records that no results exist
+- [RESULTS.md](RESULTS.md): exploratory live outcome and exact claim boundary
+- [HACC-LC4 output-voice calibration](evidence/HACC_LC4_OUTPUT_VOICE_CALIBRATION.md): 54 retained production calibration utterances across three development batches; the final independently pinned ASR gate passed 18/18 fixtures with 0/144 word errors, but this is evaluator evidence rather than Registered Native comparator/HACC efficacy evidence
+- [LIVE_STS_DEVELOPMENT_RESULT.json](LIVE_STS_DEVELOPMENT_RESULT.json): public machine-readable summary of the 32-session development batch
 - [MISSION_RUNTIME_SENSITIVITY.md](MISSION_RUNTIME_SENSITIVITY.md): $0 seeded evidence for the experimental multi-goal/obligation kernel, explicitly not a model result
 - [ACTIVE_CATALOG_EFFICIENCY.md](ACTIVE_CATALOG_EFFICIENCY.md): reproducible 64-tool production serialization, frozen no-retry catalog exposure, compiler containment, and private-authority non-disclosure evidence; C1 only, not a model result
 - [DECISION_EVIDENCE.md](DECISION_EVIDENCE.md): claim-by-claim evidence level and the next numerical gate for every retained framework decision
 - [KERNEL_TRANSCRIPT_REPLAY.md](KERNEL_TRANSCRIPT_REPLAY.md): reproducible $0 signed public-transcript and durable-memory replay sensitivity
+- [CONTEXT_KERNEL_RETENTION_V1.md](CONTEXT_KERNEL_RETENTION_V1.md): 1,000-schedule fixed-byte context-substrate retention result and explicit non-model claim boundary
 - [External Fable claim-architecture review](../../docs/research/external/2026-07-16-benchmark-claim-architecture-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable database-tenancy review](../../docs/research/external/2026-07-16-database-tenancy-fable.md): paid, unverified peer-review input; not repository or benchmark evidence
 - [External Fable campaign-authority review](../../docs/research/external/2026-07-16-campaign-scheduler-authority-fable.md): paid, unverified peer-review input; not repository or benchmark evidence

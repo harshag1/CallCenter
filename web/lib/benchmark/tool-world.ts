@@ -13,7 +13,6 @@ import {
   type Predicate,
   type PrerequisiteEvidence,
   type ToolDefinition,
-  type ToolInvocation,
   type ValueSource,
   type VisibleToolResult,
   type WorldAssertion,
@@ -59,7 +58,7 @@ export type AssertionEvaluation = {
   expected?: JsonValue;
 };
 
-type EvaluationContext = {
+export type ToolWorldPredicateContext = {
   world: Record<string, JsonValue>;
   arguments: Record<string, JsonValue>;
   runtime: Record<string, JsonValue>;
@@ -286,20 +285,76 @@ function setResultValueAtPath(root: Record<string, JsonValue>, path: string, val
   }
 }
 
-function resolveValue(source: ValueSource, context: EvaluationContext): ResolvedJson {
+function resolveValue(source: ValueSource, context: ToolWorldPredicateContext): ResolvedJson {
   if ("literal" in source) return { present: true, value: source.literal };
   return lookupValueAtPath(context[source.source], source.path);
+}
+
+/**
+ * Project only directly proven spoken aliases onto scenario-owned canonical
+ * facts. Raw model arguments remain untouched in receipts and predicate
+ * evidence; the projection is used only for semantic identity and authoritative
+ * effect/result materialization. Genuinely different content never projects.
+ */
+function canonicalArgumentProjection(
+  tool: ToolDefinition,
+  admissionContext: ToolWorldPredicateContext
+): Record<string, JsonValue> {
+  const canonicalByPath = new Map<string, Map<string, JsonValue>>();
+  for (const predicate of tool.prerequisites) {
+    if (!predicate.right || !["identifier_equals", "alias_equals"].includes(predicate.operator)) continue;
+    if (!("source" in predicate.left) || predicate.left.source !== "arguments") continue;
+    if ("source" in predicate.right && predicate.right.source !== "world") continue;
+    if (!evaluateToolWorldPredicate(predicate, admissionContext).passed) continue;
+    const canonical = resolveValue(predicate.right, admissionContext);
+    if (!canonical.present) continue;
+    const values = canonicalByPath.get(predicate.left.path) ?? new Map<string, JsonValue>();
+    values.set(canonicalJson(canonical.value), canonical.value);
+    canonicalByPath.set(predicate.left.path, values);
+  }
+
+  const projected = structuredClone(admissionContext.arguments);
+  for (const [path, distinct] of canonicalByPath) {
+    if (distinct.size !== 1) {
+      throw new ToolWorldDefinitionError(
+        `tool "${tool.name}" argument "${path}" resolves to conflicting canonical facts`
+      );
+    }
+    setResultValueAtPath(projected, path, structuredClone(distinct.values().next().value as JsonValue));
+  }
+  return projected;
 }
 
 function deepEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function canonicalSpokenIdentifier(value: JsonValue | undefined): string | null {
+  if (typeof value !== "string" || !/^[A-Za-z0-9 ._-]+$/.test(value)) return null;
+  const canonical = value.toUpperCase().replace(/[ ._-]+/g, "");
+  return canonical.length > 0 ? canonical : null;
+}
+
+function canonicalSpokenAlias(value: JsonValue | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const canonical = value.normalize("NFKC").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+  return canonical.length > 0 ? canonical : null;
+}
+
 function ownRecordValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
-function evaluatePredicate(predicate: Predicate, context: EvaluationContext): PrerequisiteEvidence {
+/**
+ * The single ToolWorld predicate evaluator. Admission, replay, assertions, and
+ * host-side action readiness must all call this function so the frontier can
+ * never drift into a weaker shadow implementation.
+ */
+export function evaluateToolWorldPredicate(
+  predicate: Predicate,
+  context: ToolWorldPredicateContext
+): PrerequisiteEvidence {
   const left = resolveValue(predicate.left, context);
   const right = predicate.right ? resolveValue(predicate.right, context) : undefined;
   let passed = false;
@@ -307,6 +362,24 @@ function evaluatePredicate(predicate: Predicate, context: EvaluationContext): Pr
     case "equals":
       passed = left.present && right?.present === true && deepEqual(left.value, right.value);
       break;
+    case "identifier_equals": {
+      if (left.present && right?.present === true) {
+        const leftIdentifier = canonicalSpokenIdentifier(left.value);
+        const rightIdentifier = canonicalSpokenIdentifier(right.value);
+        passed = leftIdentifier !== null && rightIdentifier !== null
+          && leftIdentifier === rightIdentifier;
+      }
+      break;
+    }
+    case "alias_equals": {
+      if (left.present && right?.present === true) {
+        const actual = canonicalSpokenAlias(left.value);
+        const accepted = [right.value, ...(predicate.aliases ?? [])]
+          .map((value) => canonicalSpokenAlias(value));
+        passed = actual !== null && accepted.includes(actual);
+      }
+      break;
+    }
     case "not_equals":
       passed = left.present && right?.present === true && !deepEqual(left.value, right.value);
       break;
@@ -686,16 +759,7 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       const runtime = admissionRuntime(admission, receipt);
       const argumentIssues = validateArguments(tool, receipt.arguments);
       const recomputedSemanticKey = argumentIssues.length === 0
-        ? semanticKey(tool, {
-          invocation_id: receipt.invocation_id,
-          tool: receipt.tool,
-          arguments: receipt.arguments,
-          turn: receipt.turn,
-          ...(receipt.idempotency_key ? { idempotency_key: receipt.idempotency_key } : {}),
-          ...(receipt.semantic_opportunity_id
-            ? { semantic_opportunity_id: receipt.semantic_opportunity_id }
-            : {}),
-        }, { world: replayedFacts, arguments: receipt.arguments, runtime })
+        ? semanticKey(tool, { world: replayedFacts, arguments: receipt.arguments, runtime })
         : undefined;
       if (
         argumentIssues.length > 0
@@ -704,14 +768,14 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       ) {
         throw new ToolWorldDefinitionError(`admission "${admission.admission_id}" has invalid arguments or semantic identity`);
       }
-      const computedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+      const computedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
         world: replayedFacts,
         arguments: receipt.arguments,
         runtime,
       }));
       const expectedFaultOrdinals: Record<string, number> = {};
       for (const fault of tool.faults) {
-        if (!fault.when.every((predicate) => evaluatePredicate(predicate, {
+        if (!fault.when.every((predicate) => evaluateToolWorldPredicate(predicate, {
           world: replayedFacts,
           arguments: receipt.arguments,
           runtime,
@@ -784,11 +848,17 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       if (effect.duplicate_of_effect_id !== expectedPriorEffectId) {
         throw new ToolWorldDefinitionError(`effect "${effect.effect_id}" has forged or missing duplicate lineage`);
       }
-      const context: EvaluationContext = {
+      const context: ToolWorldPredicateContext = {
         world: replayedFacts,
         arguments: receipt.arguments,
         runtime: admissionRuntime(admission, receipt),
       };
+      const admittedFacts = admissionFacts.get(admission.admission_id);
+      if (!admittedFacts) {
+        throw new ToolWorldDefinitionError(`effect "${effect.effect_id}" has no admission fact snapshot`);
+      }
+      const admissionContext: ToolWorldPredicateContext = { ...context, world: admittedFacts };
+      context.arguments = canonicalArgumentProjection(tool, admissionContext);
       const before = lookupValueAtPath(replayedFacts, effect.path);
       const resolved = resolveValue(effectSpec.value, context);
       if (
@@ -972,15 +1042,10 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
         };
         const expectedSemanticKey = argumentIssues.length === 0
           ? semanticKey(tool, {
-            invocation_id: receipt.invocation_id,
-            tool: receipt.tool,
+            world: replayedFacts,
             arguments: receipt.arguments,
-            turn: receipt.turn,
-            ...(receipt.idempotency_key ? { idempotency_key: receipt.idempotency_key } : {}),
-            ...(receipt.semantic_opportunity_id
-              ? { semantic_opportunity_id: receipt.semantic_opportunity_id }
-              : {}),
-          }, { world: replayedFacts, arguments: receipt.arguments, runtime: rejectionRuntime })
+            runtime: rejectionRuntime,
+          })
           : `invalid:${tool.name}:${canonicalJson(receipt.arguments)}`;
         let expectedVisible: VisibleToolResult | undefined;
         let expectedEvidence: PrerequisiteEvidence[] = [];
@@ -989,7 +1054,7 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
         } else if (argumentIssues.length > 0) {
           expectedVisible = errorResult("invalid_arguments", argumentIssues.join("; "));
         } else {
-          expectedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+          expectedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
             world: replayedFacts,
             arguments: receipt.arguments,
             runtime: rejectionRuntime,
@@ -1034,10 +1099,20 @@ export function parseBoundToolWorldState(scenarioInput: unknown, input: unknown)
       }
 
       if (receipt.status === "succeeded" || receipt.status === "committed_after_error") {
+        const admittedFacts = admission ? admissionFacts.get(admission.admission_id) : undefined;
+        if (!admission || !admittedFacts) {
+          throw new ToolWorldDefinitionError(`receipt "${receipt.receipt_id}" has no admission fact snapshot`);
+        }
+        const runtime = admissionRuntime(admission, receipt);
+        const rawAdmissionContext: ToolWorldPredicateContext = {
+          world: admittedFacts,
+          arguments: receipt.arguments,
+          runtime,
+        };
         const expectedResult = materializeResult(tool, {
           world: replayedFacts,
-          arguments: receipt.arguments,
-          runtime: admissionRuntime(admission!, receipt),
+          arguments: canonicalArgumentProjection(tool, rawAdmissionContext),
+          runtime,
         });
         if (!deepEqual(expectedResult, receipt.authoritative_result)) {
           throw new ToolWorldDefinitionError(`receipt "${receipt.receipt_id}" authoritative result differs from bound world state`);
@@ -1187,10 +1262,12 @@ function validateArguments(tool: ToolDefinition, args: Record<string, JsonValue>
   return issues;
 }
 
-function semanticKey(tool: ToolDefinition, invocation: ToolInvocation, context: EvaluationContext): string {
+function semanticKey(tool: ToolDefinition, context: ToolWorldPredicateContext): string {
+  const canonicalArguments = canonicalArgumentProjection(tool, context);
+  const canonicalContext: ToolWorldPredicateContext = { ...context, arguments: canonicalArguments };
   const resolved = tool.semantic_key.length > 0
-    ? tool.semantic_key.map((source) => resolveValue(source, context))
-    : [{ present: true as const, value: invocation.arguments }];
+    ? tool.semantic_key.map((source) => resolveValue(source, canonicalContext))
+    : [{ present: true as const, value: canonicalArguments }];
   const missingIndex = resolved.findIndex((value) => !value.present);
   if (missingIndex >= 0) {
     throw new ToolWorldDefinitionError(
@@ -1205,7 +1282,7 @@ function errorResult(code: string, message: string, retriable = false): VisibleT
   return { ok: false, error: { code, message, retriable } };
 }
 
-function materializeResult(tool: ToolDefinition, context: EvaluationContext): JsonValue {
+function materializeResult(tool: ToolDefinition, context: ToolWorldPredicateContext): JsonValue {
   const result: Record<string, JsonValue> = {};
   for (const field of tool.result.fields) {
     const value = resolveValue(field.value, context);
@@ -1381,12 +1458,12 @@ export function executeTool(
     ...(invocation.idempotency_key ? { idempotency_key: invocation.idempotency_key } : {}),
     ...(invocation.semantic_opportunity_id ? { semantic_opportunity_id: invocation.semantic_opportunity_id } : {}),
   };
-  const preliminaryContext: EvaluationContext = {
+  const preliminaryContext: ToolWorldPredicateContext = {
     world: state.facts,
     arguments: invocation.arguments,
     runtime: preliminaryRuntime,
   };
-  const key = semanticKey(tool, invocation, preliminaryContext);
+  const key = semanticKey(tool, preliminaryContext);
 
   // Reconcile a previously committed semantic intent before looking at mutable current prerequisites.
   const priorReceipt = tool.kind === "mutation"
@@ -1447,9 +1524,9 @@ export function executeTool(
     ...(invocation.idempotency_key ? { idempotency_key: invocation.idempotency_key } : {}),
     ...(invocation.semantic_opportunity_id ? { semantic_opportunity_id: invocation.semantic_opportunity_id } : {}),
   };
-  const context: EvaluationContext = { world: state.facts, arguments: invocation.arguments, runtime };
+  const context: ToolWorldPredicateContext = { world: state.facts, arguments: invocation.arguments, runtime };
 
-  const evidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, context));
+  const evidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, context));
   for (const item of evidence) {
     appendEvent(state, scenario, invocation.turn, {
       type: "tool.prerequisite_evaluated",
@@ -1478,7 +1555,7 @@ export function executeTool(
   }
 
   const faultMatchOrdinals = Object.fromEntries(tool.faults
-    .filter((candidate) => candidate.when.every((predicate) => evaluatePredicate(predicate, context).passed))
+    .filter((candidate) => candidate.when.every((predicate) => evaluateToolWorldPredicate(predicate, context).passed))
     .map((candidate) => [
       candidate.id,
       state.admissions.filter((prior) =>
@@ -1556,7 +1633,11 @@ export function executeTool(
   }
 
   const nextFacts = structuredClone(state.facts);
-  const effectContext: EvaluationContext = { ...context, world: nextFacts };
+  const effectContext: ToolWorldPredicateContext = {
+    ...context,
+    world: nextFacts,
+    arguments: canonicalArgumentProjection(tool, context),
+  };
   const stagedEffects: Array<Omit<WorldEffect, "event_sequence">> = [];
   for (const [index, effectSpec] of tool.effects.entries()) {
     const before = lookupValueAtPath(nextFacts, effectSpec.path);
@@ -1772,7 +1853,7 @@ function auditCommittedPrerequisites(
       violations.push(`${receipt.receipt_id}: admission world hash does not match replayed authoritative state`);
       continue;
     }
-    const computedEvidence = tool.prerequisites.map((predicate) => evaluatePredicate(predicate, {
+    const computedEvidence = tool.prerequisites.map((predicate) => evaluateToolWorldPredicate(predicate, {
       world: replay.facts!,
       arguments: receipt.arguments,
       runtime: admissionRuntime(admission, receipt),
@@ -1815,7 +1896,7 @@ function evaluateBoundWorldAssertion(
   let actual: JsonValue = null;
   let expected: JsonValue | undefined;
   if (assertion.kind === "fact") {
-    const evidence = evaluatePredicate(assertion.predicate, { world: state.facts, arguments: {}, runtime: {} });
+    const evidence = evaluateToolWorldPredicate(assertion.predicate, { world: state.facts, arguments: {}, runtime: {} });
     passed = evidence.passed;
     actual = {
       present: evidence.actual_present,

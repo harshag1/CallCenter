@@ -6,6 +6,7 @@ import type {
   VoiceProviderId,
   VoiceSessionSpec,
 } from "../types";
+import { authorizeLocalDeploymentBrowserFunding } from "../browser-funding-authority";
 import type {
   RealtimeProviderEventNormalizer,
   RealtimeProviderManifest,
@@ -150,8 +151,16 @@ export function wrapLegacyRealtimeProviderAdapter(
       ? {
           browser: {
             async create(request) {
+              const fundingAuthority =
+                authorizeLocalDeploymentBrowserFunding(adapter.id);
+              if (!fundingAuthority) {
+                throw new Error(
+                  `legacy ${adapter.id} browser adapter requires authenticated tenant BYOK through the primary voice route or authorized loopback development funding`,
+                );
+              }
               const handle = await adapter.createBrowserConnection(
                 legacySession(adapter.id, request.session),
+                fundingAuthority,
               );
               return wrapConnection(
                 "browser",

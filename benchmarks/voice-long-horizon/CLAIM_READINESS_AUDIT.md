@@ -320,9 +320,21 @@ All items are required:
 
 **Current Gate 1 decision: NO-GO until the packet records every item as passing at one commit.**
 
-The no-database test environment currently conditionally skips **18 integration suites containing 54 tests**. They are not silently counted as Gate 0 passes. The machine-readable [Gate 0 skip inventory](GATE0_SKIP_INVENTORY.json), rather than a duplicated prose table, is the source of truth for the exact paths, test counts, conditions, and `must_run` dispositions.
+The default environment currently leaves **21 conditional suites containing 59
+tests** pending. Nineteen PostgreSQL suites/56 tests are `must_run` in public CI
+and the disposable-database Gate 0 proof. Two real-ASR suites/three tests are
+explicitly `environment_qualified_release_receipt`: they require pinned binaries,
+model weights, retained PCM, calibration assets, and a source-scoped
+[real-ASR environment receipt](ASR_ENVIRONMENT_QUALIFICATION.md) before LC4
+results may be published. Neither class is silently counted as a pass. The
+machine-readable [Gate 0 skip inventory](GATE0_SKIP_INVENTORY.json) is the
+source of truth for exact paths, counts, conditions, and dispositions.
 
-Gate 0 requires a recorded database-backed run of all 18 suites/54 tests, or an explicit source-commit-scoped exclusion rationale showing why a suite cannot affect the transport packet. The benchmark/provider focused suites use no explicit `skip`/`todo`, but that does not convert these conditional database skips into coverage.
+Gate 0 requires a recorded database-backed run of all 19 suites/56 tests, or an
+explicit source-commit-scoped exclusion rationale showing why a suite cannot
+affect the transport packet. LC4 publication additionally requires the separate
+two-suite/three-test real-ASR receipt; a green hosted CI run cannot substitute
+for it.
 
 The tracked inventory binds its exact policy and enumerated test-source bytes with a canonical source-manifest SHA-256 recorded inside that machine-readable file; this audit deliberately does not duplicate the mutable digest. The inventory also does not embed `source_commit == HEAD`: a tracked file cannot self-reference the commit that contains itself. The external Gate 0 proof packet must bind the actual clean commit/tree, the inventory file SHA-256, the inventory's source-manifest hash, and the test-run result.
 
@@ -376,7 +388,7 @@ Gate 1 should answer only: “Can this adapter complete one bounded real audio/t
   | Provider | Required readiness/identity proof | Frozen PCM proof | Gate 1 interpretation |
   |---|---|---|---|
   | OpenAI | Bound outbound `session.update`; provider `session.updated` projection, plus `session.created` only where used for model identity; complete requested field status inventory; `strictParityVerified=true`; `paidBenchmarkReady=true` | mono PCM16 24 kHz input and nonzero mono PCM16 24 kHz output, with ordered chunk and concatenated hashes | Exact acknowledged transport compatibility only |
-  | xAI | URL/request model bound to provider `session.created`; exact effective `session.updated` projection including voice, instructions, tools, tool choice, manual turn detection, and audio; resumption remains disabled/not requested and unsolicited activation fails; `strictParityVerified=true`; `paidBenchmarkReady=true` | mono PCM16 24 kHz input and nonzero mono PCM16 24 kHz output, with ordered chunk and concatenated hashes | Exact acknowledged transport compatibility only |
+  | xAI | URL/request model bound to provider `session.created`; frozen server-VAD request plus per-turn instructions/exact tool frontier sent by `session.update` before audio; `session.updated` is an ordering barrier, while exact outbound control/frontier is hash-bound and provider field echo is retained separately and may be unverifiable; resumption remains disabled/not requested | mono PCM16 24 kHz input and nonzero mono PCM16 24 kHz output; ordered `speech_started → speech_stopped → committed → response.created`; no manual commit or initial `response.create`; exact tool result followed by one continuation | Hash-bound outbound transport, acknowledged ordering barrier, and provider-native server-VAD lifecycle compatibility only |
   | Gemini | Exact empty `setupComplete` readiness event bound to the sent setup-frame/function-declaration hashes; `fieldEchoAvailable=false`; every requested configuration field remains `unverifiable`; `strictParityVerified=false`; `paidBenchmarkReady=false` | mono PCM16 16 kHz input and nonzero mono PCM16 24 kHz output, with ordered chunk and concatenated hashes | Request-bound transport only; no configuration parity or effectiveness eligibility |
 
   Every profile also requires exactly one complete provider-native gateway call/result exchange mapped to one normalized call identity, one kernel invocation, and one harmless read-only receipt; provider usage evidence or the provider-specific frozen absence rule; one raw and normalized terminal response; and a settled reservation. A generic normalized readiness Boolean is insufficient.
@@ -457,3 +469,51 @@ At this audit point:
 - provider spend remains $0.00 and C4/C5 eligible run count remains zero.
 
 Passing tests establish the properties those tests exercise. They do not waive any unchecked Gate 0, C4, or C5 requirement above.
+
+## 2026-07-28 addendum — qualification passed; effectiveness run remains ineligible
+
+This dated entry supersedes the audit header's historical “zero paid sessions”
+status, but it does not change the effectiveness verdict.
+
+At source commit `021c70e68e3edcf32172a3d89bf8611b5b011001`, qualification
+v3 passed the pinned OpenAI `gpt-realtime-2.1`, Gemini
+`gemini-3.1-flash-live-preview`, and xAI
+`grok-voice-think-fast-1.0` paths with three paid sessions, six provider
+connections, three spoken gateway round trips, and zero retries. The signed
+terminal artifact is
+`0d1d18a1aaa9df9d3322151a592e3e2c9cf3fce51bd2c3034f5870db90f28295`;
+the replay artifact and chain head are
+`7bd1cc0dc62f91c3822f593a986485cd5bb4354de4af9f022a0a0609fbe5162d`
+and `562937e27efdbd295cdcab5743ccfdc1dbed068415d69cb3da3d9259002e970f`.
+This supports narrowly scoped paid transport/qualification compatibility, not
+memory, task-completion, drift, guardrail, or superiority claims.
+
+The subsequent HACC-LC4-DEV comparison failed closed during Gemini HACC
+opportunity 2. It started three of six episodes, completed two, and completed
+121 of 122 submitted opportunities before a harness-side
+`audio_delivery_failed` at `response_prepare`. The retained failure artifact is
+`a6271cf4bf164e9ce0945df1bd80ccf6856ce011a8d0d32ea7efab1f1e87f437`.
+Independent recomputation showed that the frozen plan was exactly 4,096 bytes
+before the required 43-byte response-plan envelope, yielding 4,139 bytes
+against the Gemini client's 4,096-byte default bound.
+
+The root at
+`/private/tmp/hacc-lc4-dev-evidence-021c70e-20260728T180121Z` is currently
+retained and was successfully reopened by the evidence-root verifier. The
+verifier reproduced the budget, run package, ledger, and report, but the report
+correctly remains `completed: false`, `efficacy_claim_eligible: false`,
+`exact_six_episode_horizon: false`, `task_results_available: false`, and
+`authority_scoreability: unscorable_missing_authority_evidence`. It records
+four invalid/missing episode authority packets because the complete six-episode
+horizon does not exist.
+
+Therefore:
+
+- no result from the two completed episodes may be published as a partial
+  Native/HACC score;
+- no provider bar, pooled rate, confidence interval, or launch graph may use
+  this attempt;
+- the root is replayable failure/mechanism evidence only and still needs
+  durable release storage before `/private/tmp` cleanup; and
+- C4 and C5 remain **NO-GO**, as do all claims that HACC improves memory,
+  long-call alignment, guardrails, task completion, or model behavior.

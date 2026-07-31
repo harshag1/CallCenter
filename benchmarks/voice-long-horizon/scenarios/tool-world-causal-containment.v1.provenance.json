@@ -10,9 +10,9 @@
     "result_hash": "f1969525a34e2144aa7487ba6e639aaab9e38f1149733d05817dfe42657fceab"
   },
   "tracked_base": {
-    "commit_oid": "a78630e83371b595e56bd8601ecced50b106c5e2",
-    "tree_oid": "bbfd17d5d8d8937eb626d4e81e337ca27747a8d9",
-    "capture_worktree_dirty": true,
+    "commit_oid": "22f3f5c9e4eb1712b65fd8046d24c42e1a2c31cd",
+    "tree_oid": "40f8575f61dbb62767e4a2a7db456cecf9c3a03e",
+    "capture_worktree_dirty": false,
     "claim": "tracked base before the selected worktree bytes; not a clean-build claim"
   },
   "binding_scope": {
@@ -25,32 +25,34 @@
       "path": "web/lib/benchmark/tool-world-causal-containment.ts",
       "byte_length": 20429,
       "sha256": "8564f3708014fd5b87170b03b575b597dc569c8dd2eff4cbda312c8031242ee3",
-      "relation_to_tracked_base": "untracked-at-base"
+      "relation_to_tracked_base": "matches-base",
+      "base_blob_oid": "1b6a7382ef5308b1e8901d9d885d948c024448a0",
+      "base_content_sha256": "8564f3708014fd5b87170b03b575b597dc569c8dd2eff4cbda312c8031242ee3"
     },
     {
       "path": "web/lib/benchmark/tool-world.ts",
-      "byte_length": 88331,
-      "sha256": "470514ea4566b33277bb0d31c493327a9cc042d71556b93f6508a3c9d1081c0b",
-      "relation_to_tracked_base": "modified-from-base",
-      "base_blob_oid": "7ce29c44e2212660744c49f6ca5cb80fed78f15d",
-      "base_content_sha256": "81e2812c72e2e2a57b17016bcbc9c7c95aac44d0f873521b48d68057ba5ee7e1"
+      "byte_length": 91989,
+      "sha256": "631912476a16429f5abadf023be374ec7a538c0bc7992261150dbd4157545172",
+      "relation_to_tracked_base": "matches-base",
+      "base_blob_oid": "c7ea91da3a66e0599bec79d360f9990592a1db67",
+      "base_content_sha256": "631912476a16429f5abadf023be374ec7a538c0bc7992261150dbd4157545172"
     },
     {
       "path": "web/lib/benchmark/world-events.ts",
       "byte_length": 4240,
       "sha256": "2d05fd2295e91f70ca6c95824daa7030c256a4f0a21d118917309d2b60ab82f4",
-      "relation_to_tracked_base": "modified-from-base",
-      "base_blob_oid": "60bf325e5e8725ac63bcdbf7c134325e1c442c80",
-      "base_content_sha256": "2f987e6213120fb07ebb9727eee04895fbab93786e55a962778fc5bd5d2edd61"
+      "relation_to_tracked_base": "matches-base",
+      "base_blob_oid": "f9e0396f46102d195e7073bd34da4b3189ad9b39",
+      "base_content_sha256": "2d05fd2295e91f70ca6c95824daa7030c256a4f0a21d118917309d2b60ab82f4"
     },
     {
       "path": "web/lib/benchmark/scenario-schema.ts",
-      "byte_length": 37024,
-      "sha256": "e632b2a865ffc6668da11c6f1973fae80592b69916d1bbd1db77c7ac0708d913",
-      "relation_to_tracked_base": "modified-from-base",
-      "base_blob_oid": "ec7bd8c01fdd4cbd8d02a86c900d34c32524e2c5",
-      "base_content_sha256": "4842b3d50ec9547a7feb810681da462bc56be3ec7f9bce393bfd2872f3e4de86"
+      "byte_length": 37551,
+      "sha256": "10362dbbaf3a1c871664b7dbd39de3eeb8ea0fee89ff8babc4c27ae2129e6abd",
+      "relation_to_tracked_base": "matches-base",
+      "base_blob_oid": "b5062bec7ea14d08ee6b971a8249206e097bab32",
+      "base_content_sha256": "10362dbbaf3a1c871664b7dbd39de3eeb8ea0fee89ff8babc4c27ae2129e6abd"
     }
   ],
-  "binding_sha256": "9115824a6c63e9d143f7f0b989ba06eefa3f435ac83ba9e614887614e781ca0b"
+  "binding_sha256": "bc9e9a78fed8e4ebe02629bc00f5cd7518d902a1c65f510673d763ca6f7b450f"
 }

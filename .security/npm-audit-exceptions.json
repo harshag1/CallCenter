@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "kind": "hacc_locked_npm_audit_exceptions",
+  "package": {
+    "name": "web",
+    "lockfile_version": 3,
+    "node_engine": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "audit_policy": {
+    "production_scope": "no_advisories",
+    "development_scope": "exact_reviewed_graph_only"
+  },
+  "exceptions": [
+    {
+      "id": "eslint-brace-expansion-ghsa-mh99-v99m-4gvg",
+      "expires_on": "2026-08-15",
+      "reason": "The vulnerable brace-expansion nodes are reachable only through ESLint and eslint-config-next development tooling. They are not installed in the production dependency audit, are not imported by the application or bridge, and process only trusted repository lint inputs. No compatible upstream release currently removes every affected node. This short-lived exception must be removed or explicitly re-reviewed when upstream packages publish a compatible fix.",
+      "scope": "development_only",
+      "advisory": {
+        "source": 1124334,
+        "name": "brace-expansion",
+        "dependency": "brace-expansion",
+        "title": "brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash",
+        "url": "https://github.com/advisories/GHSA-mh99-v99m-4gvg",
+        "severity": "high",
+        "cwe": [
+          "CWE-400",
+          "CWE-770"
+        ],
+        "cvss": {
+          "score": 7.5,
+          "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        },
+        "vulnerable_range": "<=5.0.7"
+      },
+      "affected_package": {
+        "name": "brace-expansion",
+        "vulnerable_range": "<=5.0.7"
+      },
+      "direct_dev_dependency_constraints": {
+        "eslint": "^9",
+        "eslint-config-next": "16.2.12"
+      },
+      "dependency_node_constraints": [
+        {
+          "path": "node_modules/@eslint/config-array",
+          "version": "0.21.2"
+        },
+        {
+          "path": "node_modules/@eslint/config-array/node_modules/brace-expansion",
+          "version": "1.1.16"
+        },
+        {
+          "path": "node_modules/@eslint/config-array/node_modules/minimatch",
+          "version": "3.1.5"
+        },
+        {
+          "path": "node_modules/@eslint/eslintrc",
+          "version": "3.3.6"
+        },
+        {
+          "path": "node_modules/@eslint/eslintrc/node_modules/brace-expansion",
+          "version": "1.1.16"
+        },
+        {
+          "path": "node_modules/@eslint/eslintrc/node_modules/minimatch",
+          "version": "3.1.5"
+        },
+        {
+          "path": "node_modules/eslint",
+          "version": "9.39.5"
+        },
+        {
+          "path": "node_modules/eslint-config-next",
+          "version": "16.2.12"
+        },
+        {
+          "path": "node_modules/eslint-config-next/node_modules/brace-expansion",
+          "version": "1.1.16"
+        },
+        {
+          "path": "node_modules/eslint-config-next/node_modules/eslint-plugin-import",
+          "version": "2.32.0"
+        },
+        {
+          "path": "node_modules/eslint-config-next/node_modules/eslint-plugin-jsx-a11y",
+          "version": "6.10.2"
+        },
+        {
+          "path": "node_modules/eslint-config-next/node_modules/eslint-plugin-react",
+          "version": "7.37.5"
+        },
+        {
+          "path": "node_modules/eslint-config-next/node_modules/minimatch",
+          "version": "3.1.5"
+        },
+        {
+          "path": "node_modules/eslint/node_modules/brace-expansion",
+          "version": "1.1.16"
+        },
+        {
+          "path": "node_modules/eslint/node_modules/minimatch",
+          "version": "3.1.5"
+        }
+      ],
+      "expected_vulnerability_graph": [
+        {
+          "name": "@eslint/config-array",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": "<=0.22.0",
+          "via": [
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [
+            "eslint"
+          ],
+          "nodes": [
+            "node_modules/@eslint/config-array"
+          ]
+        },
+        {
+          "name": "@eslint/eslintrc",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": "0.0.1 || >=0.1.1",
+          "via": [
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [
+            "eslint"
+          ],
+          "nodes": [
+            "node_modules/@eslint/eslintrc"
+          ]
+        },
+        {
+          "name": "brace-expansion",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": "<=5.0.7",
+          "via": [
+            {
+              "kind": "advisory",
+              "source": 1124334,
+              "name": "brace-expansion",
+              "dependency": "brace-expansion",
+              "title": "brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash",
+              "url": "https://github.com/advisories/GHSA-mh99-v99m-4gvg",
+              "severity": "high",
+              "cwe": [
+                "CWE-400",
+                "CWE-770"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "vulnerable_range": "<=5.0.7"
+            }
+          ],
+          "effects": [
+            "minimatch"
+          ],
+          "nodes": [
+            "node_modules/@eslint/config-array/node_modules/brace-expansion",
+            "node_modules/@eslint/eslintrc/node_modules/brace-expansion",
+            "node_modules/eslint-config-next/node_modules/brace-expansion",
+            "node_modules/eslint/node_modules/brace-expansion"
+          ]
+        },
+        {
+          "name": "eslint",
+          "severity": "high",
+          "is_direct": true,
+          "vulnerable_range": "0.12.0 - 2.0.0-rc.1 || 4.1.0 - 10.0.0-rc.2",
+          "via": [
+            {
+              "kind": "package",
+              "name": "@eslint/config-array"
+            },
+            {
+              "kind": "package",
+              "name": "@eslint/eslintrc"
+            },
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [],
+          "nodes": [
+            "node_modules/eslint"
+          ]
+        },
+        {
+          "name": "eslint-config-next",
+          "severity": "high",
+          "is_direct": true,
+          "vulnerable_range": ">=10.2.1-canary.2",
+          "via": [
+            {
+              "kind": "package",
+              "name": "eslint-plugin-import"
+            },
+            {
+              "kind": "package",
+              "name": "eslint-plugin-jsx-a11y"
+            },
+            {
+              "kind": "package",
+              "name": "eslint-plugin-react"
+            }
+          ],
+          "effects": [],
+          "nodes": [
+            "node_modules/eslint-config-next"
+          ]
+        },
+        {
+          "name": "eslint-plugin-import",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": ">=1.15.0",
+          "via": [
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [
+            "eslint-config-next"
+          ],
+          "nodes": [
+            "node_modules/eslint-config-next/node_modules/eslint-plugin-import"
+          ]
+        },
+        {
+          "name": "eslint-plugin-jsx-a11y",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": ">=6.5.0",
+          "via": [
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [
+            "eslint-config-next"
+          ],
+          "nodes": [
+            "node_modules/eslint-config-next/node_modules/eslint-plugin-jsx-a11y"
+          ]
+        },
+        {
+          "name": "eslint-plugin-react",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": ">=7.23.0",
+          "via": [
+            {
+              "kind": "package",
+              "name": "minimatch"
+            }
+          ],
+          "effects": [
+            "eslint-config-next"
+          ],
+          "nodes": [
+            "node_modules/eslint-config-next/node_modules/eslint-plugin-react"
+          ]
+        },
+        {
+          "name": "minimatch",
+          "severity": "high",
+          "is_direct": false,
+          "vulnerable_range": "2.0.0 - 10.0.2",
+          "via": [
+            {
+              "kind": "package",
+              "name": "brace-expansion"
+            }
+          ],
+          "effects": [
+            "@eslint/config-array",
+            "@eslint/eslintrc",
+            "eslint",
+            "eslint-plugin-import",
+            "eslint-plugin-jsx-a11y",
+            "eslint-plugin-react"
+          ],
+          "nodes": [
+            "node_modules/@eslint/config-array/node_modules/minimatch",
+            "node_modules/@eslint/eslintrc/node_modules/minimatch",
+            "node_modules/eslint-config-next/node_modules/minimatch",
+            "node_modules/eslint/node_modules/minimatch"
+          ]
+        }
+      ]
+    }
+  ]
+}

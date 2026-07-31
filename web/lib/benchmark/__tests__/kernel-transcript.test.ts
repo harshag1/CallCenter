@@ -366,6 +366,18 @@ describe("gateway-kernel replay transcript", () => {
     expect(rejected.valid).toBe(false);
     expect(rejected.authenticity).toBe("signed_attestation_verified");
     expect(rejected.errors).toContain("signed public transcript reference mismatch");
+
+    const effectiveSubstitution = structuredClone(parseKernelTranscript(encoded)) as Mutable<PublicKernelTranscript>;
+    const effectivePayload = effectiveSubstitution.entries[1].payload as Record<string, unknown>;
+    const effectiveInput = effectivePayload.input as Record<string, unknown>;
+    effectiveInput.effective_arguments_hmac_sha256 = "f".repeat(64);
+    const effectiveRejected = verifyKernelTranscript({
+      transcript: rechainPublic(effectiveSubstitution as PublicKernelTranscript),
+      finalAttestation: attestation,
+      attestationExpectation,
+    });
+    expect(effectiveRejected.valid).toBe(false);
+    expect(effectiveRejected.errors).toContain("signed public transcript reference mismatch");
   });
 
   it("commits capability grants and sensitive values without publishing their preimages", () => {

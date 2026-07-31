@@ -222,9 +222,12 @@ export function analyzeIndustrialOfflineFaultRun(input: Readonly<{
         : code("r01-premature-close") === "prerequisite_failed",
       approval_precommit_failure_observed: code(harness ? "h15-approval-busy" : "r07-approval-busy") === "approval_service_busy",
       approval_retry_succeeded: ok(harness ? "h16-approval-retry" : "r08-approval-retry"),
-      close_timeout_after_commit_observed: code(harness ? "h23-close-timeout" : "r11-close-timeout") === "transport_timeout",
+      close_timeout_after_commit_observed: harness
+        ? ["transport_timeout", "action_indeterminate"].includes(String(code("h23-close-timeout")))
+        : code("r11-close-timeout") === "transport_timeout",
       close_retry_contained: harness
-        ? disposition("h24-close-retry") === "replayed" || code("h24-close-retry") === "action_limit_exceeded"
+        ? disposition("h24-close-retry") === "replayed"
+          || ["action_limit_exceeded", "action_indeterminate"].includes(String(code("h24-close-retry")))
         : closeCount === 1,
       authoritative_status_reconciled: ok(harness ? "h25-status" : "r13-status"),
       dispatch_notified_once: notificationCount === 1,

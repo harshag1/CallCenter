@@ -6,15 +6,15 @@ Artifact hashes below are lowercase SHA-256 of canonical JSON (`sha256Hex(canoni
 
 | Family | Turns | Tools | Oracle calls | Receipts / effects / events | Scenario artifact SHA-256 | Compiled-suite artifact SHA-256 |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| Travel disruption | 32 | 13 | 15 | 15 / 34 / 184 | `8414b7dae384be786c8e898077dd3e6c53ada08f1003e04aa1ae87527f393481` | `0bad84d3775c5324e9aa5ddbe6aee696d630c2900cdbf67edbbddc677834f75f` |
-| Travel disruption | 64 | 13 | 15 | 15 / 34 / 184 | `3ffadfae67fb54e3c4c53f4871db2204572451ba4b1c670d87d82e9a53e01ddf` | `64b79aa8ba7fd127699c274eea573e9d6fbb3acae6ac0d74d56595a428e3eff3` |
-| Travel disruption | 120 | 13 | 15 | 15 / 34 / 184 | `c4b893e39f431a4fc6438fec392eeca5c98ce82941f82c8a7fabc969aea932dd` | `341bfdc6e271da4093ae0faf515b531ecc0c22c1a1b65a7e76efb69335fe39ea` |
-| Home-health coordination | 32 | 17 | 18 | 18 / 33 / 200 | `ae1cfab74806def68f2ceb86fd83230c9bf07af9429eceed54376a90379d1e3c` | `6e4dd54281ab21e00130259195690c609813e35ae77255a00ad3d1157cbb89c1` |
-| Home-health coordination | 64 | 17 | 18 | 18 / 33 / 200 | `2ca3ac087464b6cde0d2b9dd91ce8538faa7e683b9d4ebf4a579f7033386ff94` | `0a0365d94224cfa1787e2ad9b2b89fb7f080e46c4fe1536f7a7ea36c8f56b41a` |
-| Home-health coordination | 120 | 17 | 18 | 18 / 33 / 200 | `066c6d6d9c003afeca447a81839a179ddb1076b0a0b37961e175d3ebc9a08b54` | `e34770c68fba411f0bd8c3d061b5d328b62d24d256f21b5e437a1cb726849148` |
-| Field-service escalation | 32 | 15 | 16 | 16 / 37 / 200 | `ab8ca22b99ca362139465bb780feb4a8e65f8b083ae58211a74f99b6fe36b2ce` | `aa3aa01a4149e1bd0fd3144e65d3ba4bda4d56c586f89cb46a34275f303bfce5` |
-| Field-service escalation | 64 | 15 | 16 | 16 / 37 / 200 | `90ad4ccef3423540b40f0629b951f932c386d46509108891f114f907ebdd0710` | `901f3fff72619cdcf90edb87680273ddcb933ba234126b40560fa6982d4c6567` |
-| Field-service escalation | 120 | 15 | 16 | 16 / 37 / 200 | `86736a39e5146dfd41a4eb477a937b81c0fc35c4e2fe399aa6b72d4b412c122d` | `e32bbd51bccd055fbd373cbefeaba7a3aecc623c46263b72107434ad0fa48300` |
+| Travel disruption | 32 | 13 | 15 | 15 / 34 / 184 | `8414b7dae384be786c8e898077dd3e6c53ada08f1003e04aa1ae87527f393481` | `807ae8b1f72cfe414691b7454f9e051943f1858995f29ee4a9c9690eaee96636` |
+| Travel disruption | 64 | 13 | 15 | 15 / 34 / 184 | `3ffadfae67fb54e3c4c53f4871db2204572451ba4b1c670d87d82e9a53e01ddf` | `5f8745d5be10e1a0d76c06a04413ce5e343de67669a1ef07887f8b51744d5174` |
+| Travel disruption | 120 | 13 | 15 | 15 / 34 / 184 | `c4b893e39f431a4fc6438fec392eeca5c98ce82941f82c8a7fabc969aea932dd` | `ade158fb0e793f45bf2a5bbb9c4dbee566fe6a6045c3289f65642a5419d7cea3` |
+| Home-health coordination | 32 | 17 | 18 | 18 / 33 / 200 | `ae1cfab74806def68f2ceb86fd83230c9bf07af9429eceed54376a90379d1e3c` | `7055ed006a6f5740c641d054905b1fb6eb53468715d6afd67afd2579a2d9d7cf` |
+| Home-health coordination | 64 | 17 | 18 | 18 / 33 / 200 | `2ca3ac087464b6cde0d2b9dd91ce8538faa7e683b9d4ebf4a579f7033386ff94` | `c3301f99f6ef21b10b0a9c525034dd23104141db57692048af9eff585a7f0165` |
+| Home-health coordination | 120 | 17 | 18 | 18 / 33 / 200 | `066c6d6d9c003afeca447a81839a179ddb1076b0a0b37961e175d3ebc9a08b54` | `936b97df410dd378d0ba5f68922a53d1fbb4e0e74af59f6754ccda5d63febc9f` |
+| Field-service escalation | 32 | 15 | 16 | 16 / 37 / 200 | `ab8ca22b99ca362139465bb780feb4a8e65f8b083ae58211a74f99b6fe36b2ce` | `410d0ec334a5de4059da2d7d47ca76dca5dfb9055a30c6a262ef57c3f85317ca` |
+| Field-service escalation | 64 | 15 | 16 | 16 / 37 / 200 | `90ad4ccef3423540b40f0629b951f932c386d46509108891f114f907ebdd0710` | `a86c87240c67821f6130d762577e78ba0b56c9688d0dec809d64807026303090` |
+| Field-service escalation | 120 | 15 | 16 | 16 / 37 / 200 | `86736a39e5146dfd41a4eb477a937b81c0fc35c4e2fe399aa6b72d4b412c122d` | `78afe6e1b60ec641dfa18b296f3501c6c5e29d43b65cac6e1b8de57f6e276a42` |
 
 Semantic leaf-tool hashes are intentionally stable across 32/64/120 within each family:
 
@@ -36,6 +36,6 @@ Confirmatory realism gates require unique-utterance ratio ≥ 0.80 and 64-turn d
 | Field-service escalation | 64 | 64 | 1.0000 | 64 | 1.0000 | development-provider-eligible | fail |
 | Field-service escalation | 120 | 120 | 1.0000 | 24 | 0.2000 | offline-stress-only | fail |
 
-The generator replayed 147 oracle calls into 147 receipts, 312 authoritative effects, and 1752 bound events across all nine fixtures. Every expected receipt status matched; every oracle reached `task_success=true` with zero failed declared assertions; and every six-arm parity audit passed. This proves only that the synthetic fixtures have coherent safe paths. It says nothing about model or harness performance.
+The generator replayed 147 oracle calls into 147 receipts, 312 authoritative effects, and 1752 bound events across all nine fixtures. Every expected receipt status matched; every oracle reached `task_success=true` with zero failed declared assertions; and every seven-arm parity audit passed. This proves only that the synthetic fixtures have coherent safe paths. It says nothing about model or harness performance.
 
 The 32- and 64-turn variants are development fixtures and still require actual ordered frozen PCM bytes plus a session-feasibility envelope before provider execution; the authorization helper derives the audio binding and duration instead of accepting claims. The current 120-turn variants are classified `offline-stress-only`: they remain useful for deterministic local retention testing, but their uniqueness/overlap realism gate is red and `authorizeLongHorizonTemplateRun` refuses provider or confirmatory scheduling. A newly versioned, frozen scenario set is required before any C4/C5 claim.

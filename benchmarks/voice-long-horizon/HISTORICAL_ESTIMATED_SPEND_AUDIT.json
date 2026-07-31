@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "asOf": "2026-07-21T19:10:00Z",
+  "evidenceClass": "local-retained-run-estimates-not-invoice-reconciliation",
+  "sourceGlob": "benchmarks/voice-long-horizon/.local/usefulness-live-canary-v*/runs/*.complete/summary.json",
+  "runs": [
+    { "experiment": "usefulness-live-canary-v1", "retainedSummaries": 18, "estimatedCostUsd": 0.273028 },
+    { "experiment": "usefulness-live-canary-v2", "retainedSummaries": 1, "estimatedCostUsd": 0.000000 },
+    { "experiment": "usefulness-live-canary-v3", "retainedSummaries": 1, "estimatedCostUsd": 0.012743 },
+    { "experiment": "usefulness-live-canary-v4", "retainedSummaries": 2, "estimatedCostUsd": 0.433542 },
+    { "experiment": "usefulness-live-canary-v5", "retainedSummaries": 1, "estimatedCostUsd": 0.201755 },
+    { "experiment": "usefulness-live-canary-v6", "retainedSummaries": 1, "estimatedCostUsd": 0.237104 },
+    { "experiment": "usefulness-live-canary-v7", "retainedSummaries": 18, "estimatedCostUsd": 0.898069 },
+    { "experiment": "usefulness-live-canary-v8", "retainedSummaries": 1, "estimatedCostUsd": 0.000000 },
+    { "experiment": "usefulness-live-canary-v9", "retainedSummaries": 1, "estimatedCostUsd": 0.036942 },
+    { "experiment": "usefulness-live-canary-v10", "retainedSummaries": 1, "estimatedCostUsd": 0.045864 },
+    { "experiment": "usefulness-live-canary-v11", "retainedSummaries": 18, "estimatedCostUsd": 1.045248 },
+    { "experiment": "usefulness-live-canary-v12", "retainedSummaries": 18, "estimatedCostUsd": 1.517937 },
+    { "experiment": "usefulness-live-canary-v13", "retainedSummaries": 4, "estimatedCostUsd": 0.531891 },
+    { "experiment": "usefulness-live-canary-v14", "retainedSummaries": 18, "estimatedCostUsd": 1.644610 }
+  ],
+  "retainedSummaries": 103,
+  "estimatedProviderCostUsd": 6.878733,
+  "providerBilledCostUsd": null,
+  "reconciliationStatus": "unreconciled",
+  "claimBoundary": "This is the sum of runner estimates retained in local summary artifacts. It is not a provider invoice or proof of billed spend."
+}

@@ -122,7 +122,7 @@ describe("pilot-v2 development suite", () => {
     }
   });
 
-  it("compiles and parity-audits all six frozen conditions for every template", () => {
+  it("compiles and parity-audits all seven frozen conditions for every template", () => {
     let compiledConditionCount = 0;
     for (const template of PILOT_V2_DEVELOPMENT_SUITE) {
       const suite = compileConditionSuite(template.compilerInput);
@@ -130,7 +130,7 @@ describe("pilot-v2 development suite", () => {
       expect(trust).toBeDefined();
       expect(auditConditionParity(suite), template.family).toMatchObject({ valid: true, issues: [] });
       expect(Object.keys(suite.conditions).sort()).toEqual([...BENCHMARK_CONDITION_IDS].sort());
-      expect(Object.values(suite.conditions)).toHaveLength(6);
+      expect(Object.values(suite.conditions)).toHaveLength(7);
       compiledConditionCount += Object.values(suite.conditions).length;
 
       for (const conditionId of BENCHMARK_CONDITION_IDS) {
@@ -152,7 +152,7 @@ describe("pilot-v2 development suite", () => {
         conditionSuiteHash: suite.suiteHash,
       });
     }
-    expect(compiledConditionCount).toBe(18);
+    expect(compiledConditionCount).toBe(21);
     expect(PILOT_V2_EXECUTION_MANIFEST_SHA256).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -203,7 +203,7 @@ describe("pilot-v2 development suite", () => {
         }
       }
     }
-    expect(leakChecks).toBe(162);
+    expect(leakChecks).toBe(189);
   });
 
   it("has zero normalized caller-turn reuse internally or against the development corpus", () => {

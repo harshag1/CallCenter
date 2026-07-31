@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   purchaseNumber: vi.fn(),
   q: vi.fn(),
   qOne: vi.fn(),
+  dispatchOperatorEmail: vi.fn(),
+  dispatchOperatorSms: vi.fn(),
   sendAgentEmail: vi.fn(),
   sendSms: vi.fn(),
   trace: [] as string[],
@@ -20,6 +22,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../db", () => ({ q: mocks.q, qOne: mocks.qOne }));
 vi.mock("../email", () => ({ sendAgentEmail: mocks.sendAgentEmail }));
 vi.mock("../sms", () => ({ sendSms: mocks.sendSms }));
+vi.mock("../communications", () => ({
+  operatorCommunicationDispatch: {
+    email: mocks.dispatchOperatorEmail,
+    sms: mocks.dispatchOperatorSms,
+  },
+}));
 vi.mock("../telephony", () => ({
   originateCall: mocks.originateCall,
   purchaseNumber: mocks.purchaseNumber,
@@ -142,6 +150,8 @@ function scheduleArguments(overrides: Record<string, Json> = {}): Record<string,
 }
 
 function expectNoProviderCalls(): void {
+  expect(mocks.dispatchOperatorEmail).not.toHaveBeenCalled();
+  expect(mocks.dispatchOperatorSms).not.toHaveBeenCalled();
   expect(mocks.sendAgentEmail).not.toHaveBeenCalled();
   expect(mocks.sendSms).not.toHaveBeenCalled();
   expect(mocks.originateCall).not.toHaveBeenCalled();
@@ -214,6 +224,20 @@ describe("approved operator action dispatcher", () => {
     });
     mocks.sendSms.mockImplementation(async () => {
       mocks.trace.push("sms_provider");
+    });
+    mocks.dispatchOperatorEmail.mockImplementation(async () => {
+      mocks.trace.push("email_provider");
+      return {
+        status: "accepted",
+        providerMessageId: "resend-message-opaque",
+      };
+    });
+    mocks.dispatchOperatorSms.mockImplementation(async () => {
+      mocks.trace.push("sms_provider");
+      return {
+        status: "accepted",
+        providerMessageId: `SM${"d".repeat(32)}`,
+      };
     });
     mocks.originateCall.mockImplementation(async () => {
       mocks.trace.push("call_provider");
@@ -291,18 +315,29 @@ describe("approved operator action dispatcher", () => {
       estimatedUnits: 1,
       estimatedMicroUsd: 2_000,
     }));
-    expect(mocks.sendAgentEmail).toHaveBeenCalledExactlyOnceWith({
+    expect(mocks.dispatchOperatorEmail).toHaveBeenCalledExactlyOnceWith({
       to: "member@example.test",
       subject: "Membership renewal",
       message: "Your renewal is ready.",
       brand: "Harsha's Amazing Call Center",
-      idempotencyKey: EXECUTION_ID,
+      context: {
+        approvalId: APPROVAL_ID,
+        executionId: EXECUTION_ID,
+        expectedQuote: costQuote,
+      },
     });
     expect(mocks.trace).toEqual(["authority_reserved", "email_provider"]);
     expect(outcome).toEqual({
       ok: true,
       replayed: false,
-      value: { accepted: true, to: "member@example.test" },
+      value: {
+        accepted: true,
+        to: "member@example.test",
+        communication_receipt: {
+          status: "accepted",
+          providerMessageId: "resend-message-opaque",
+        },
+      },
     });
   });
 
@@ -320,8 +355,69 @@ describe("approved operator action dispatcher", () => {
     );
 
     expect(mocks.executeConfirmedOperatorAction).not.toHaveBeenCalled();
-    expect(mocks.sendSms).not.toHaveBeenCalled();
+    expect(mocks.dispatchOperatorSms).not.toHaveBeenCalled();
     expect(mocks.q).not.toHaveBeenCalled();
+  });
+
+  it("preserves the private Twilio adapter receipt while keeping the public fields stable", async () => {
+    const costQuote = createSmsCostQuote({
+      destinationE164: "+14155550123",
+      segmentCount: 1,
+    });
+    const action = approved("send_sms", {
+      cost_quote: costQuote as unknown as Json,
+      message: "Renewal ready",
+      segments: 1,
+      to: "+14155550123",
+    }, { units: 1, microUsd: costQuote.reservationMicroUsd });
+
+    const outcome = await dispatchApprovedOperatorAction(action);
+
+    expect(mocks.dispatchOperatorSms).toHaveBeenCalledExactlyOnceWith({
+      to: "+14155550123",
+      message: "Renewal ready",
+      segments: 1,
+      context: {
+        approvalId: APPROVAL_ID,
+        executionId: EXECUTION_ID,
+        expectedQuote: costQuote,
+      },
+    });
+    expect(outcome).toEqual({
+      ok: true,
+      replayed: false,
+      value: {
+        accepted: true,
+        to: "+14155550123",
+        segments: 1,
+        communication_receipt: {
+          status: "accepted",
+          providerMessageId: `SM${"d".repeat(32)}`,
+        },
+      },
+    });
+  });
+
+  it("converts an ambiguous adapter receipt to the existing do-not-retry settlement", async () => {
+    mocks.dispatchOperatorEmail.mockResolvedValueOnce({
+      status: "indeterminate",
+      code: "provider_outcome_unknown",
+    });
+    const costQuote = createEmailCostQuote({ recipient: "member@example.test" });
+
+    const outcome = await dispatchApprovedOperatorAction(approved("send_email", {
+      brand: null,
+      cost_quote: costQuote as unknown as Json,
+      message: "Renewal ready",
+      subject: "Renewal",
+      to: "member@example.test",
+    }, { microUsd: costQuote.reservationMicroUsd }));
+
+    expect(outcome).toEqual({
+      ok: false,
+      code: "provider_outcome_indeterminate_do_not_retry",
+    });
+    expect(mocks.dispatchOperatorEmail).toHaveBeenCalledOnce();
   });
 
   it("materializes an exact runtime authority manifest and claims it before an immediate call", async () => {

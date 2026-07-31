@@ -3,14 +3,16 @@ import {
   deriveFlowActionInvocationId,
   enterFlowStep,
   flowCapabilityScope,
-  flowStateSummary,
   markFlowActionDispatchStarted,
   reserveFlowAction,
+  resolveFlowBoundArguments,
+  rotateFlowCapabilityEpoch,
   selectFlowTopic,
   settleFlowAction,
   completeFlowStep,
   createFlowExecutionState,
   type FlowExecutionState,
+  type FlowBoundArgumentEvidence,
   type RuntimeError,
 } from "../flow-runtime";
 import {
@@ -43,6 +45,7 @@ import {
   type BenchmarkKernelFinalAttestation,
 } from "./kernel-attestation";
 import {
+  appendKernelTranscriptCallerTurn,
   appendKernelTranscriptInvocation,
   assertKernelTranscriptDurableMemoryState,
   assertKernelTranscriptContainsNoRawGrants,
@@ -55,6 +58,18 @@ import {
   type KernelTranscriptReference,
   type PublicKernelTranscript,
 } from "./kernel-transcript";
+import {
+  computeAdmissibilityFrontier,
+  type AdmissibilityFrontierEvidence,
+} from "./admissibility-frontier";
+import {
+  designatedReconciliationActionsForReceipt,
+  projectQuarantinedFlowState,
+  quarantineCommittedAfterError,
+  releaseAmbiguityQuarantine,
+  resolveAmbiguityInvocationArguments,
+  type AmbiguityQuarantine,
+} from "./ambiguity-quarantine";
 import { JsonValueSchema, type BenchmarkScenario, type JsonValue } from "./scenario-schema";
 import type {
   BenchmarkGatewayInvocation,
@@ -68,6 +83,21 @@ import {
   type ToolExecution,
   type ToolWorldState,
 } from "./tool-world";
+import {
+  advanceHaccSpeechGuardrailState,
+  createInitialHaccSpeechGuardrailState,
+  createHaccSpeechGuardrailPacket,
+  haccSpeechGuardrailEvidenceSha256,
+  HACC_SPEECH_GUARDRAIL_PACKET_KEY,
+  type HaccSpeechGuardrailEvidenceKind,
+  type HaccSpeechGuardrailPacket,
+  type HaccSpeechGuardrailState,
+} from "./speech-guardrail-packet";
+import {
+  createHaccResponsePlan,
+  HACC_RESPONSE_PLAN_KEY,
+  type HaccResponsePlan,
+} from "./response-plan";
 
 const FLOW_CONTROL_ACTIONS = new Set([
   "flow.select_topic",
@@ -105,6 +135,12 @@ export type BenchmarkGatewayKernelOptions = Readonly<{
   transcriptLimits?: KernelTranscriptLimits;
   /** Must cover the declared session cap; defaults to the one-hour signer maximum. */
   leaseTtlSeconds?: number;
+  /**
+   * @deprecated Transition ownership is an attested condition property. This
+   * compatibility input is ignored and may be removed after older runners
+   * stop supplying it.
+   */
+  autoAdvanceLinearFlow?: boolean;
   clock?: Clock;
 }>;
 
@@ -119,6 +155,13 @@ type LooseState = {
   outputs: Record<string, JsonValue>;
 };
 
+type GatewayArgumentBinding = Readonly<{
+  status: "not_applicable" | "resolved" | "rejected";
+  effectiveArguments: Readonly<Record<string, JsonValue>> | null;
+  failureCode: string | null;
+  sources: readonly FlowBoundArgumentEvidence[];
+}>;
+
 type KernelRun = {
   runId: string;
   condition: CompiledBenchmarkCondition;
@@ -131,9 +174,11 @@ type KernelRun = {
   flowState: FlowExecutionState | null;
   loose: LooseState;
   memory: Map<string, JsonValue>;
+  ambiguityQuarantines: Map<string, AmbiguityQuarantine>;
   providerCalls: Map<string, Readonly<{
     fingerprint: string;
     outcome: BenchmarkGatewayOutcome;
+    argumentBinding: GatewayArgumentBinding;
   }>>;
   grants: Map<string, Readonly<{
     action: string;
@@ -144,12 +189,95 @@ type KernelRun = {
     expiresAtMs: number;
   }>>;
   target: CapabilityTarget;
-  catalogMode: "target" | "post_step_transition" | "terminal";
+  catalogMode: "target" | "post_step_transition" | "terminal" | "refresh_required";
+  refreshResumeMode: "target" | "post_step_transition" | "terminal";
   /** Exact latest catalog and scope emitted to the provider, without private grants. */
   lastSnapshot: ProviderCapabilitySnapshot | null;
   transcript: KernelTranscript | null;
   transcriptSecret: string;
+  committedTurn: number;
+  committedTurnIds: Set<string>;
+  speechGuardrailState: HaccSpeechGuardrailState;
+  speechGuardrailPacket: HaccSpeechGuardrailPacket;
+  speechProcessedWorldReceiptCount: number;
+  responsePlan: HaccResponsePlan | null;
+  responsePlanRevision: number;
 };
+
+type KernelRunMutationCheckpoint = Readonly<{
+  world: ToolWorldState;
+  worldHeadHash: string;
+  flowState: FlowExecutionState | null;
+  loose: LooseState;
+  memory: Map<string, JsonValue>;
+  ambiguityQuarantines: KernelRun["ambiguityQuarantines"];
+  providerCalls: KernelRun["providerCalls"];
+  grants: KernelRun["grants"];
+  target: CapabilityTarget;
+  catalogMode: KernelRun["catalogMode"];
+  refreshResumeMode: KernelRun["refreshResumeMode"];
+  lastSnapshot: ProviderCapabilitySnapshot | null;
+  transcript: KernelTranscript | null;
+  committedTurn: number;
+  committedTurnIds: Set<string>;
+  speechGuardrailState: HaccSpeechGuardrailState;
+  speechGuardrailPacket: HaccSpeechGuardrailPacket;
+  speechProcessedWorldReceiptCount: number;
+  responsePlan: HaccResponsePlan | null;
+  responsePlanRevision: number;
+}>;
+
+function mutationCheckpoint(run: KernelRun): KernelRunMutationCheckpoint {
+  return {
+    world: run.world,
+    worldHeadHash: run.worldHeadHash,
+    flowState: run.flowState,
+    loose: {
+      ...run.loose,
+      completedSteps: new Set(run.loose.completedSteps),
+      outputs: structuredClone(run.loose.outputs),
+    },
+    memory: cloneDurableMemory(run.memory),
+    ambiguityQuarantines: new Map(run.ambiguityQuarantines),
+    providerCalls: new Map(run.providerCalls),
+    grants: new Map(run.grants),
+    target: run.target,
+    catalogMode: run.catalogMode,
+    refreshResumeMode: run.refreshResumeMode,
+    lastSnapshot: run.lastSnapshot,
+    transcript: run.transcript,
+    committedTurn: run.committedTurn,
+    committedTurnIds: new Set(run.committedTurnIds),
+    speechGuardrailState: run.speechGuardrailState,
+    speechGuardrailPacket: run.speechGuardrailPacket,
+    speechProcessedWorldReceiptCount: run.speechProcessedWorldReceiptCount,
+    responsePlan: run.responsePlan,
+    responsePlanRevision: run.responsePlanRevision,
+  };
+}
+
+function restoreMutationCheckpoint(run: KernelRun, checkpoint: KernelRunMutationCheckpoint): void {
+  run.world = checkpoint.world;
+  run.worldHeadHash = checkpoint.worldHeadHash;
+  run.flowState = checkpoint.flowState;
+  run.loose = checkpoint.loose;
+  run.memory = checkpoint.memory;
+  run.ambiguityQuarantines = checkpoint.ambiguityQuarantines;
+  run.providerCalls = checkpoint.providerCalls;
+  run.grants = checkpoint.grants;
+  run.target = checkpoint.target;
+  run.catalogMode = checkpoint.catalogMode;
+  run.refreshResumeMode = checkpoint.refreshResumeMode;
+  run.lastSnapshot = checkpoint.lastSnapshot;
+  run.transcript = checkpoint.transcript;
+  run.committedTurn = checkpoint.committedTurn;
+  run.committedTurnIds = checkpoint.committedTurnIds;
+  run.speechGuardrailState = checkpoint.speechGuardrailState;
+  run.speechGuardrailPacket = checkpoint.speechGuardrailPacket;
+  run.speechProcessedWorldReceiptCount = checkpoint.speechProcessedWorldReceiptCount;
+  run.responsePlan = checkpoint.responsePlan;
+  run.responsePlanRevision = checkpoint.responsePlanRevision;
+}
 
 function defaultClock(): Clock {
   return Object.freeze({
@@ -171,6 +299,17 @@ function asJson(value: unknown): JsonValue {
   // Flow state and tool-world results are JSON-shaped. The round trip removes
   // optional `undefined` fields before the strict artifact schema sees them.
   return JsonValueSchema.parse(JSON.parse(JSON.stringify(value)));
+}
+
+function unboundArgumentBinding(
+  args: Readonly<Record<string, JsonValue>>,
+): GatewayArgumentBinding {
+  return Object.freeze({
+    status: "not_applicable" as const,
+    effectiveArguments: Object.freeze(structuredClone(args)),
+    failureCode: null,
+    sources: Object.freeze([]),
+  });
 }
 
 function record(value: JsonValue): Record<string, JsonValue> | null {
@@ -421,6 +560,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     const flowState = input.condition.behavior.durableFlowState
       ? createFlowExecutionState(this.#clock.nowIso())
       : null;
+    const speechGuardrailState = createInitialHaccSpeechGuardrailState();
+    const speechGuardrailPacket = createHaccSpeechGuardrailPacket(speechGuardrailState, null);
     const run: KernelRun = {
       runId: input.runId,
       condition: pinnedCondition,
@@ -440,10 +581,12 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         outputs: {},
       },
       memory: new Map(),
+      ambiguityQuarantines: new Map(),
       providerCalls: new Map(),
       grants: new Map(),
       target: "$base",
       catalogMode: "target",
+      refreshResumeMode: "target",
       lastSnapshot: null,
       transcript: null,
       transcriptSecret: createHmac("sha256", this.#secret)
@@ -455,6 +598,13 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           lease_subject_id: this.#leaseSubjectId,
         }))
         .digest("hex"),
+      committedTurn: 0,
+      committedTurnIds: new Set(),
+      speechGuardrailState,
+      speechGuardrailPacket,
+      speechProcessedWorldReceiptCount: 0,
+      responsePlan: null,
+      responsePlanRevision: 0,
     };
     const snapshot = this.#snapshot(run, pinnedCondition.visibleCapabilities);
     run.transcript = createKernelTranscript({
@@ -472,6 +622,181 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     });
     this.#run = run;
     return snapshot;
+  }
+
+  advanceCallerTurn(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
+  }> {
+    const run = this.#requireRun(input.condition);
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") {
+      throw new Error("caller-turn readiness updates are exclusive to host-managed conditions");
+    }
+    if (input.runId !== run.runId || canonicalJson(input.scenario) !== canonicalJson(run.scenario)) {
+      throw new Error("caller-turn readiness update differs from the initialized run or scenario");
+    }
+    if (!Number.isSafeInteger(input.turn) || input.turn !== run.committedTurn + 1) {
+      throw new Error("caller-turn readiness updates must be contiguous and exactly once");
+    }
+    if (!SAFE_OPAQUE_ID.test(input.turnId) || run.committedTurnIds.has(input.turnId)) {
+      throw new Error("caller-turn readiness update has an invalid or repeated turnId");
+    }
+    if (!run.scenario.caller.turns.some((turn) => turn.id === input.turnId)) {
+      throw new Error("caller-turn readiness update references a turn outside the frozen scenario");
+    }
+    const world = parseBoundToolWorldState(run.scenario, input.world);
+    if (worldStateHash(world) !== run.worldHeadHash || canonicalJson(world) !== canonicalJson(run.world)) {
+      throw new Error("caller-turn readiness update world differs from the authoritative kernel head");
+    }
+    const checkpoint = mutationCheckpoint(run);
+    try {
+      const preFlowState = run.flowState ? structuredClone(run.flowState) : null;
+      const preCapabilityHead = this.#capabilityHead(run);
+      run.committedTurn = input.turn;
+      run.committedTurnIds.add(input.turnId);
+      const frontier = computeAdmissibilityFrontier({
+        condition: run.condition,
+        scenario: run.scenario,
+        world: run.world,
+        turn: run.committedTurn,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode === "refresh_required" ? run.refreshResumeMode : run.catalogMode,
+      });
+      if (!run.flowState) throw new Error("host-managed readiness rotation requires durable Flow state");
+      run.flowState = rotateFlowCapabilityEpoch(run.flowState, this.#clock.nowIso());
+      if (run.catalogMode === "refresh_required") run.catalogMode = run.refreshResumeMode;
+      else run.refreshResumeMode = run.catalogMode;
+      const capabilitySnapshot = this.#snapshot(run, this.#capabilitiesForTarget(run));
+      const responsePlan = createHaccResponsePlan({
+        flow: this.#flow,
+        state: run.flowState,
+        conditionSha256: run.condition.conditionHash,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+        snapshot: capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+        quarantines: [...run.ambiguityQuarantines.values()],
+        speechGuardrailPacket: run.speechGuardrailPacket,
+        revision: run.responsePlanRevision + 1,
+        previousPlanSha256: run.responsePlan?.plan_sha256 ?? null,
+      });
+      run.responsePlan = responsePlan;
+      run.responsePlanRevision = responsePlan.revision;
+      if (!run.transcript) throw new Error("benchmark gateway transcript was not initialized");
+      run.transcript = appendKernelTranscriptCallerTurn(run.transcript, {
+        condition: run.condition,
+        scenario: run.scenario,
+        turn: input.turn,
+        turnId: input.turnId,
+        world: run.world,
+        preFlowState,
+        postFlowState: run.flowState,
+        preCapabilityHead,
+        postCapabilityHead: this.#capabilityHead(run),
+        frontierEvidence: frontier.evidence,
+        capabilitySnapshot,
+        responsePlan,
+        durableMemoryState: run.condition.behavior.genericDurableMemory ? run.memory : null,
+      });
+      return Object.freeze({
+        capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+        responsePlan,
+      });
+    } catch (error) {
+      restoreMutationCheckpoint(run, checkpoint);
+      throw error;
+    }
+  }
+
+  /**
+   * Recompile the model-visible plan immediately after an authoritative tool
+   * transition. The returned binding ties the fresh plan to the receipt that
+   * caused it. Capability rotation remains owned by the underlying Flow
+   * transition/quarantine logic so transcript state continuity is preserved.
+   */
+  rebindResponsePlanAfterTransition(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    world: ToolWorldState;
+    transitionReceiptSha256: string;
+    previousTransitionBindingSha256: string | null;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    responsePlan: HaccResponsePlan;
+    transitionBindingSha256: string;
+  }> {
+    const run = this.#requireRun(input.condition);
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") {
+      throw new Error("post-transition response-plan binding is exclusive to host-managed conditions");
+    }
+    if (input.runId !== run.runId || canonicalJson(input.scenario) !== canonicalJson(run.scenario)) {
+      throw new Error("post-transition response-plan binding differs from the initialized run or scenario");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(input.transitionReceiptSha256)) {
+      throw new Error("post-transition response-plan binding requires a receipt SHA-256");
+    }
+    if (input.previousTransitionBindingSha256 !== null
+      && !/^[a-f0-9]{64}$/u.test(input.previousTransitionBindingSha256)) {
+      throw new Error("post-transition response-plan chain head must be null or a SHA-256");
+    }
+    const world = parseBoundToolWorldState(run.scenario, input.world);
+    if (worldStateHash(world) !== run.worldHeadHash || canonicalJson(world) !== canonicalJson(run.world)) {
+      throw new Error("post-transition response-plan world differs from the authoritative kernel head");
+    }
+    if (!run.flowState) throw new Error("post-transition response-plan binding requires durable Flow state");
+    const checkpoint = mutationCheckpoint(run);
+    try {
+      const frontier = computeAdmissibilityFrontier({
+        condition: run.condition,
+        scenario: run.scenario,
+        world: run.world,
+        turn: run.committedTurn,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+      });
+      if (!run.lastSnapshot) throw new Error("post-transition response-plan binding lacks a provider snapshot");
+      const capabilitySnapshot = run.lastSnapshot;
+      const responsePlan = createHaccResponsePlan({
+        flow: this.#flow,
+        state: run.flowState,
+        conditionSha256: run.condition.conditionHash,
+        target: run.condition.behavior.progressiveDisclosure ? run.target : "$full-catalog",
+        catalogMode: run.catalogMode,
+        snapshot: capabilitySnapshot,
+        frontierEvidence: frontier.evidence,
+        quarantines: [...run.ambiguityQuarantines.values()],
+        speechGuardrailPacket: run.speechGuardrailPacket,
+        revision: run.responsePlanRevision,
+        previousPlanSha256: run.responsePlan?.plan_sha256 ?? null,
+      });
+      const transitionBindingSha256 = sha256Hex(canonicalJson({
+        domain: "harshas-amazing-call-center/post-transition-response-plan/v1",
+        run_id: run.runId,
+        turn: run.committedTurn,
+        previous_transition_binding_sha256: input.previousTransitionBindingSha256,
+        transition_receipt_sha256: input.transitionReceiptSha256,
+        plan_sha256: responsePlan.plan_sha256,
+        capability_epoch: responsePlan.capability_epoch,
+      }));
+      return Object.freeze({
+        capabilitySnapshot,
+        responsePlan,
+        transitionBindingSha256,
+      });
+    } catch (error) {
+      restoreMutationCheckpoint(run, checkpoint);
+      throw error;
+    }
   }
 
   /** Deeply immutable, grant-free replay material for artifact persistence. */
@@ -577,6 +902,10 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       target,
       catalogMode: run.catalogMode,
       internalFlowScope: run.flowState ? flowCapabilityScope(run.flowState).step : null,
+      visibleCatalog: snapshot.actions.map((action) => ({
+        name: action.name,
+        semantic_hash: action.semantic_hash,
+      })),
     });
     const visibleCatalog = snapshot.actions
       .map((action) => ({ name: action.name, semantic_hash: action.semantic_hash }))
@@ -611,6 +940,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       ? cloneDurableMemory(run.memory)
       : null;
     const preCapabilityHead = this.#capabilityHead(run);
+    const checkpoint = mutationCheckpoint(run);
     const boundInput: BenchmarkGatewayInvocation = Object.freeze({
       ...input,
       world: inputWorld,
@@ -629,23 +959,69 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         return { ...execution, state: nextWorld };
       },
     });
-    const { action } = input.call;
-    const fingerprint = sha256Hex(canonicalJson({
-      action,
-      arguments: input.call.arguments,
-    }));
-    const priorCall = run.providerCalls.get(input.providerCallId);
-    if (priorCall) {
-      if (priorCall.fingerprint !== fingerprint) {
+    let executionInput = boundInput;
+    let argumentBinding = unboundArgumentBinding(input.call.arguments);
+    try {
+      const { action } = input.call;
+      const fingerprint = sha256Hex(canonicalJson({
+        action,
+        arguments: input.call.arguments,
+      }));
+      const priorCall = run.providerCalls.get(input.providerCallId);
+      if (priorCall) {
+        if (priorCall.fingerprint !== fingerprint) {
+          const outcome = this.#speechGuardedOutcome(run, {
+            result: failure(
+              "provider_call_id_conflict",
+              "Provider call ID was reused with different action content",
+              action,
+              false,
+              this.#epoch(run)
+            ),
+          });
+          this.#recordInvocation(
+            run,
+            input,
+            inputWorld,
+            preFlowState,
+            preDurableMemoryState,
+            preCapabilityHead,
+            outcome
+          );
+          return outcome;
+        }
+        const replayedResult = priorCall.outcome.result.ok
+          ? { ...priorCall.outcome.result, disposition: "replayed" as const }
+          : priorCall.outcome.result;
         const outcome: BenchmarkGatewayOutcome = {
+          result: replayedResult,
+          ...(priorCall.outcome.providerVisibleOutput === undefined
+            ? {}
+            : { providerVisibleOutput: priorCall.outcome.providerVisibleOutput }),
+        };
+        argumentBinding = priorCall.argumentBinding;
+        this.#recordInvocation(
+          run,
+          input,
+          inputWorld,
+          preFlowState,
+          preDurableMemoryState,
+          preCapabilityHead,
+          outcome,
+          argumentBinding,
+        );
+        return outcome;
+      }
+      if (input.capabilityEpoch !== this.#epoch(run)) {
+        const outcome = this.#speechGuardedOutcome(run, {
           result: failure(
-            "provider_call_id_conflict",
-            "Provider call ID was reused with different action content",
+            "capability_epoch_mismatch",
+            "Host-bound capability epoch is stale",
             action,
             false,
             this.#epoch(run)
           ),
-        };
+        });
         this.#recordInvocation(
           run,
           input,
@@ -655,80 +1031,111 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
           preCapabilityHead,
           outcome
         );
+        run.providerCalls.set(input.providerCallId, Object.freeze({
+          fingerprint,
+          outcome: Object.freeze(structuredClone(outcome)),
+          argumentBinding,
+        }));
         return outcome;
       }
-      const replayedResult = priorCall.outcome.result.ok
-        ? { ...priorCall.outcome.result, disposition: "replayed" as const }
-        : priorCall.outcome.result;
-      const outcome: BenchmarkGatewayOutcome = {
-        result: replayedResult,
-        ...(priorCall.outcome.providerVisibleOutput === undefined
-          ? {}
-          : { providerVisibleOutput: priorCall.outcome.providerVisibleOutput }),
-      };
-      this.#recordInvocation(
-        run,
-        input,
-        inputWorld,
-        preFlowState,
-        preDurableMemoryState,
-        preCapabilityHead,
-        outcome
-      );
-      return outcome;
-    }
-    if (input.capabilityEpoch !== this.#epoch(run)) {
-      const outcome: BenchmarkGatewayOutcome = {
-        result: failure(
-          "capability_epoch_mismatch",
-          "Host-bound capability epoch is stale",
-          action,
-          false,
-          this.#epoch(run)
-        ),
-      };
-      this.#recordInvocation(
-        run,
-        input,
-        inputWorld,
-        preFlowState,
-        preDurableMemoryState,
-        preCapabilityHead,
-        outcome
-      );
-      run.providerCalls.set(input.providerCallId, Object.freeze({
-        fingerprint,
-        outcome: Object.freeze(structuredClone(outcome)),
-      }));
-      return outcome;
-    }
-    const condition = run.condition;
-    const knownLeaf = condition.semanticLeafTools.some((tool) => tool.name === action);
-    const knownControl = FLOW_CONTROL_ACTIONS.has(action);
-    const knownMemory = action === DURABLE_MEMORY_ACTION && condition.behavior.genericDurableMemory;
-    let outcome: BenchmarkGatewayOutcome | undefined;
-    if (!knownLeaf && !knownControl && !knownMemory) {
-      outcome = { result: failure("unknown_action", `Unknown logical action ${action}`, action, false, this.#epoch(run)) };
-    } else if (condition.behavior.enforceCapabilityGrants) {
-      const verified = this.#verifyGrant(run, action, input.call.capability_grant);
-      if (verified) outcome = { result: verified };
-    }
-    try {
+      const condition = run.condition;
+      const knownLeaf = condition.semanticLeafTools.some((tool) => tool.name === action);
+      const knownControl = FLOW_CONTROL_ACTIONS.has(action);
+      const knownMemory = action === DURABLE_MEMORY_ACTION && condition.behavior.genericDurableMemory;
+      let outcome: BenchmarkGatewayOutcome | undefined;
+      if (!knownLeaf && !knownControl && !knownMemory) {
+        outcome = { result: failure("unknown_action", `Unknown logical action ${action}`, action, false, this.#epoch(run)) };
+      } else if (condition.behavior.enforceCapabilityGrants) {
+        const verified = this.#verifyGrant(run, action, input.call.capability_grant);
+        if (verified) outcome = { result: verified };
+      }
+      if (!outcome) {
+        if (
+          knownLeaf
+          && condition.behavior.transitionOwnership === "host-managed-linear"
+          && run.flowState
+        ) {
+          const receiptResolved = resolveFlowBoundArguments(
+            this.#flow,
+            run.flowState,
+            action,
+            input.call.arguments,
+          );
+          const resolved = "error" in receiptResolved
+            ? receiptResolved
+            : (() => {
+              const ambiguityResolved = resolveAmbiguityInvocationArguments(
+                this.#flow,
+                run.flowState!,
+                [...run.ambiguityQuarantines.values()],
+                action,
+                receiptResolved.effectiveArguments,
+              );
+              if (ambiguityResolved === null) return receiptResolved;
+              if ("error" in ambiguityResolved) return ambiguityResolved;
+              return Object.freeze({
+                modelArguments: receiptResolved.modelArguments,
+                effectiveArguments: ambiguityResolved.effectiveArguments,
+                evidence: Object.freeze([...receiptResolved.evidence, ...ambiguityResolved.evidence]),
+              });
+            })();
+          if ("error" in resolved) {
+            argumentBinding = Object.freeze({
+              status: "rejected" as const,
+              effectiveArguments: null,
+              failureCode: resolved.code,
+              sources: Object.freeze([]),
+            });
+            outcome = {
+              result: failure(
+                resolved.code,
+                resolved.error,
+                action,
+                false,
+                this.#epoch(run),
+              ),
+            };
+          } else {
+            const effectiveArguments = JsonValueSchema.parse(resolved.effectiveArguments);
+            if (effectiveArguments === null || typeof effectiveArguments !== "object" || Array.isArray(effectiveArguments)) {
+              throw new Error("resolved Flow arguments must be a JSON object");
+            }
+            argumentBinding = resolved.evidence.length > 0
+              ? Object.freeze({
+                status: "resolved" as const,
+                effectiveArguments: Object.freeze(effectiveArguments),
+                failureCode: null,
+                sources: resolved.evidence,
+              })
+              : unboundArgumentBinding(input.call.arguments);
+            executionInput = Object.freeze({
+              ...boundInput,
+              call: Object.freeze({
+                ...boundInput.call,
+                arguments: effectiveArguments,
+              }),
+            });
+          }
+        }
+      }
       if (!outcome) {
         outcome = knownMemory
           ? this.#memory(run, input.providerCallId, input.call.arguments)
           : knownControl
             ? this.#flowControl(run, input.providerCallId, action, input.call.arguments)
             : condition.behavior.enforceExactlyOnce
-              ? this.#enforcedLeaf(run, boundInput)
-              : this.#unrestrictedLeaf(run, boundInput);
+              ? this.#enforcedLeaf(run, executionInput)
+              : this.#unrestrictedLeaf(run, executionInput);
       }
+      this.#advanceSpeechGuardrailState(run, outcome);
+      outcome = this.#speechGuardedOutcome(run, outcome);
       // Prepare the replay record before advancing the transcript. Once the
       // append succeeds, publishing the already-cloned entry is the only
       // remaining mutation and cannot observe caller-owned object identity.
       const providerCallRecord = Object.freeze({
         fingerprint,
         outcome: Object.freeze(structuredClone(outcome)),
+        argumentBinding: Object.freeze(structuredClone(argumentBinding)),
       });
       this.#recordInvocation(
         run,
@@ -737,20 +1144,112 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         preFlowState,
         preDurableMemoryState,
         preCapabilityHead,
-        outcome
+        outcome,
+        argumentBinding,
       );
       run.providerCalls.set(input.providerCallId, providerCallRecord);
+      return outcome;
     } catch (error) {
-      // Durable memory is fully kernel-local, so a failed evidence append must
-      // roll it back. Otherwise the next call or final signature could rely on
-      // state that has no transcript entry. Provider-call replay state is not
-      // published until after the append succeeds.
-      if (knownMemory && preDurableMemoryState) {
-        run.memory = cloneDurableMemory(preDurableMemoryState);
-      }
+      // No authoritative head may advance without its matching transcript
+      // entry. This covers leaf world/receipt writes, flow transitions,
+      // capability rotations, memory, grants, and provider-call replay state.
+      restoreMutationCheckpoint(run, checkpoint);
       throw error;
     }
-    return outcome;
+  }
+
+  #advanceSpeechGuardrailState(
+    run: KernelRun,
+    outcome: BenchmarkGatewayOutcome,
+  ): void {
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") return;
+    const appended = run.world.receipts.slice(run.speechProcessedWorldReceiptCount);
+    run.speechProcessedWorldReceiptCount = run.world.receipts.length;
+    if (appended.length === 0) return;
+    if (appended.length !== 1) {
+      throw new Error("one gateway invocation cannot append multiple speech-policy receipts");
+    }
+    if (!outcome.result.ok || !run.flowState) return;
+    const receiptId = outcome.result.receipt_id;
+    const worldReceipt = appended[0];
+    const flowReceipt = run.flowState.actionReceipts.find((receipt) =>
+      receipt.id === receiptId
+    );
+    const flowEvidenceVisible = flowReceipt?.status === "succeeded"
+      || (worldReceipt.status === "committed_after_error" && flowReceipt?.status === "indeterminate");
+    if (!flowReceipt || flowReceipt.tool !== worldReceipt.tool || !flowEvidenceVisible) return;
+    const step = findStep(this.#flow, flowReceipt.step)?.step;
+    if (!step) throw new Error("speech-policy receipt references an unknown Flow step");
+    const required = new Set(step.required_outputs ?? []);
+    const bindings = step.output_bindings ?? [];
+    const verificationTool = required.has("verified")
+      && bindings.some((binding) => binding.output === "verified" && binding.tool === worldReceipt.tool);
+    const reconciliationTools = new Set(bindings
+      .filter((binding) => binding.output === "authoritative_status" || binding.output === "commitment_receipt")
+      .map((binding) => binding.tool));
+    const reconciliationStep = required.has("authoritative_status")
+      && required.has("commitment_receipt")
+      && bindings.some((binding) => binding.output === "authoritative_status")
+      && bindings.some((binding) => binding.output === "commitment_receipt");
+    const receiptSucceeded = worldReceipt.status === "succeeded" || worldReceipt.status === "deduplicated";
+    let kind: HaccSpeechGuardrailEvidenceKind | null = null;
+    if (verificationTool && receiptSucceeded) {
+      kind = "verification_succeeded";
+    } else if (reconciliationStep && worldReceipt.status === "committed_after_error") {
+      // A new ambiguous commit always re-enters quarantine, even after an
+      // earlier reconciliation. Exactly-once admission remains the enforcing
+      // boundary; this packet is a repeated defense-in-depth instruction.
+      kind = "commit_ambiguous_after_commit";
+    } else if (
+      reconciliationStep
+      && reconciliationTools.has(worldReceipt.tool)
+      && receiptSucceeded
+    ) {
+      kind = "reconciliation_succeeded";
+    }
+    if (!kind) return;
+    const next = advanceHaccSpeechGuardrailState(run.speechGuardrailState, {
+      kind,
+      evidence_sha256: haccSpeechGuardrailEvidenceSha256({
+        kind,
+        action: worldReceipt.tool,
+        world_receipt_id: worldReceipt.receipt_id,
+        world_receipt_status: worldReceipt.status,
+        world_receipt_committed: worldReceipt.committed,
+        flow_receipt_id: flowReceipt.id,
+        flow_step: flowReceipt.step,
+        gateway_disposition: outcome.result.disposition,
+      }),
+    });
+    if (next === run.speechGuardrailState) return;
+    const previousPacketSha256 = run.speechGuardrailPacket.packet_sha256;
+    run.speechGuardrailState = next;
+    run.speechGuardrailPacket = createHaccSpeechGuardrailPacket(next, previousPacketSha256);
+  }
+
+  #speechGuardedOutcome(
+    run: KernelRun,
+    outcome: BenchmarkGatewayOutcome,
+  ): BenchmarkGatewayOutcome {
+    if (run.condition.behavior.transitionOwnership !== "host-managed-linear") return outcome;
+    const candidate = outcome.providerVisibleOutput ?? outcome.result;
+    const envelope = record(asJson(candidate));
+    const visible = envelope
+      && Object.prototype.hasOwnProperty.call(envelope, "gateway_result")
+      && (
+        Object.prototype.hasOwnProperty.call(envelope, HACC_SPEECH_GUARDRAIL_PACKET_KEY)
+        || Object.prototype.hasOwnProperty.call(envelope, HACC_RESPONSE_PLAN_KEY)
+      )
+      ? envelope.gateway_result
+      : candidate;
+    return Object.freeze({
+      ...outcome,
+      providerVisibleOutput: asJson({
+        gateway_result: visible,
+        [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: run.speechGuardrailPacket,
+        ...(run.responsePlan === null ? {} : { [HACC_RESPONSE_PLAN_KEY]: run.responsePlan }),
+      }),
+    });
   }
 
   #recordInvocation(
@@ -760,7 +1259,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     preFlowState: FlowExecutionState | null,
     preDurableMemoryState: ReadonlyMap<string, JsonValue> | null,
     preCapabilityHead: BenchmarkKernelCapabilityHead,
-    outcome: BenchmarkGatewayOutcome
+    outcome: BenchmarkGatewayOutcome,
+    argumentBinding: GatewayArgumentBinding = unboundArgumentBinding(input.call.arguments),
   ): void {
     if (!run.transcript) throw new Error("benchmark gateway transcript was not initialized");
     run.transcript = appendKernelTranscriptInvocation(run.transcript, {
@@ -779,6 +1279,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       postDurableMemoryState: run.condition.behavior.genericDurableMemory ? run.memory : null,
       preCapabilityHead,
       postCapabilityHead: this.#capabilityHead(run),
+      argumentBinding,
       sensitiveValueSecret: run.transcriptSecret,
     });
   }
@@ -930,18 +1431,48 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
   }
 
   #capabilitiesForTarget(run: KernelRun): readonly CompiledCapability[] {
-    if (!run.condition.behavior.progressiveDisclosure) return run.condition.visibleCapabilities;
-    if (run.catalogMode === "terminal") {
+    if (run.catalogMode === "refresh_required") {
       return allCapabilities(run.condition)
         .filter((capability) => capability.name === "flow.get_state");
     }
-    if (run.target === "$base") return run.condition.visibleCapabilities;
-    const disclosure = run.condition.disclosures.find((candidate) => candidate.target === run.target);
-    if (!disclosure) throw new Error(`compiled condition has no disclosure for ${run.target}`);
-    return disclosure.visibleCapabilities;
+    let capabilities: readonly CompiledCapability[];
+    if (!run.condition.behavior.progressiveDisclosure) {
+      capabilities = run.condition.visibleCapabilities;
+    } else if (run.catalogMode === "terminal") {
+      capabilities = allCapabilities(run.condition)
+        .filter((capability) => capability.name === "flow.get_state");
+    } else if (run.target === "$base") {
+      capabilities = run.condition.visibleCapabilities;
+    } else {
+      const disclosure = run.condition.disclosures.find((candidate) => candidate.target === run.target);
+      if (!disclosure) throw new Error(`compiled condition has no disclosure for ${run.target}`);
+      capabilities = computeAdmissibilityFrontier({
+        condition: run.condition,
+        scenario: run.scenario,
+        world: run.world,
+        turn: run.committedTurn,
+        target: run.target,
+        catalogMode: run.catalogMode,
+      }).capabilities;
+    }
+    const activeReconciliationActions = new Set([...run.ambiguityQuarantines.values()]
+      .filter((quarantine) => quarantine.status === "reconciliation_required")
+      .flatMap((quarantine) => quarantine.designatedReconciliationActions));
+    if (
+      activeReconciliationActions.size > 0
+      && run.condition.behavior.transitionOwnership === "host-managed-linear"
+    ) {
+      return capabilities.filter((capability) =>
+        capability.name === "flow.get_state" || activeReconciliationActions.has(capability.name)
+      );
+    }
+    return capabilities;
   }
 
-  #rotation(run: KernelRun, target?: CompiledDisclosure["target"]): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> {
+  #rotation(run: KernelRun, target?: CompiledDisclosure["target"]): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    disclosure?: NonNullable<BenchmarkGatewayOutcome["disclosure"]>;
+  }> {
     const capabilities = this.#capabilitiesForTarget(run);
     const snapshot = this.#snapshot(run, capabilities);
     if (run.condition.behavior.progressiveDisclosure && target) {
@@ -953,7 +1484,7 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
   #postCompletionRotation(
     run: KernelRun,
     terminal = run.flowState?.status === "completed"
-  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot"> {
+  ): Readonly<{ capabilitySnapshot: ProviderCapabilitySnapshot }> {
     if (!run.condition.behavior.progressiveDisclosure) {
       run.catalogMode = "target";
       return { capabilitySnapshot: this.#snapshot(run, run.condition.visibleCapabilities) };
@@ -968,6 +1499,65 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     // Reuse the exact compiler-produced topic catalog. This retains generic
     // always/topic tools while withholding the completed step's leaf tools.
     return { capabilitySnapshot: this.#snapshot(run, this.#capabilitiesForTarget(run)) };
+  }
+
+  #autoEnterSingleStep(
+    run: KernelRun,
+    nextSteps: readonly string[],
+  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
+    if (
+      run.condition.behavior.transitionOwnership !== "host-managed-linear"
+      || !run.condition.behavior.progressiveDisclosure
+      || !run.flowState
+      || nextSteps.length !== 1
+    ) return null;
+    const path = nextSteps[0];
+    const entered = enterFlowStep(this.#flow, run.flowState, path, this.#clock.nowIso());
+    if ("error" in entered) {
+      throw new Error(`host-managed flow entry failed: ${entered.code}: ${entered.error}`);
+    }
+    run.flowState = entered.state;
+    const target = `step:${path}` as const;
+    run.target = target;
+    run.catalogMode = "target";
+    return this.#rotation(run, target);
+  }
+
+  #autoAdvanceCompletedStep(
+    run: KernelRun,
+  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot" | "disclosure"> | null {
+    if (
+      run.condition.behavior.transitionOwnership !== "host-managed-linear"
+      || !run.condition.behavior.progressiveDisclosure
+      || !run.flowState?.currentStep
+    ) return null;
+    const completed = completeFlowStep(this.#flow, run.flowState, { outputs: {} }, this.#clock.nowIso());
+    // A multi-action step remains active until all receipt-bound outputs are
+    // present. Every other error after a settled successful receipt indicates
+    // a host/runtime invariant violation and must fail closed rather than
+    // silently falling back to model-authored transition calls that this
+    // condition never grants.
+    if ("error" in completed) {
+      if (
+        completed.code === "missing_action_evidence"
+        || completed.code === "missing_outputs"
+        || completed.code === "pending_action_evidence"
+      ) return null;
+      throw new Error(`host-managed flow transition failed: ${completed.code}: ${completed.error}`);
+    }
+    run.flowState = completed.state;
+    if (completed.state.nodeId) run.target = `topic:${completed.state.nodeId}`;
+    const entered = this.#autoEnterSingleStep(run, completed.nextSteps);
+    if (entered) return entered;
+    if (completed.nextSteps.length > 1) {
+      // Host ownership stops at a genuine choice. Rotate to the compiled topic
+      // branch catalog and disclose it; only this state can grant enter_step.
+      // Once the model selects a reachable branch, the host resumes ownership
+      // of receipt-bound completion and deterministic single-successor entry.
+      run.catalogMode = "target";
+      return this.#rotation(run, run.target === "$base" ? undefined : run.target);
+    }
+    return this.#postCompletionRotation(run);
   }
 
   #memory(run: KernelRun, callId: string, args: Readonly<Record<string, JsonValue>>): BenchmarkGatewayOutcome {
@@ -993,6 +1583,68 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
     return {
       result: success(DURABLE_MEMORY_ACTION, `memory:${callId}`, asJson({ operation, key, found, ...(found ? { value } : {}) })),
     };
+  }
+
+  #providerFlowState(
+    run: KernelRun,
+    snapshot: ProviderCapabilitySnapshot,
+  ): Readonly<Record<string, unknown>> {
+    if (!run.flowState) throw new Error("provider Flow projection requires durable state");
+    return projectQuarantinedFlowState(
+      this.#flow,
+      run.flowState,
+      [...run.ambiguityQuarantines.values()],
+      snapshot,
+    );
+  }
+
+  #releaseQuarantinesFromReadback(
+    run: KernelRun,
+    reconciliationFlowReceiptId: string,
+    reconciliationWorldReceipt: ToolExecution["receipt"],
+  ): boolean {
+    if (!run.flowState) throw new Error("ambiguity release requires durable Flow state");
+    let releasedAny = false;
+    for (const [flowReceiptId, quarantine] of run.ambiguityQuarantines) {
+      if (
+        quarantine.status !== "reconciliation_required"
+        || !quarantine.designatedReconciliationActions.includes(reconciliationWorldReceipt.tool)
+      ) continue;
+      const released = releaseAmbiguityQuarantine({
+        state: run.flowState,
+        quarantine,
+        reconciliationFlowReceiptId,
+        reconciliationWorldReceipt,
+        now: this.#clock.nowIso(),
+      });
+      if ("error" in released) {
+        if (released.code === "reconciliation_outcome_mismatch") continue;
+        throw new Error(`ambiguity reconciliation failed closed: ${released.code}: ${released.error}`);
+      }
+      run.flowState = released.state;
+      run.ambiguityQuarantines.set(flowReceiptId, released.quarantine);
+      releasedAny = true;
+    }
+    return releasedAny;
+  }
+
+  #isDesignatedQuarantineReconciliation(run: KernelRun, action: string): boolean {
+    return [...run.ambiguityQuarantines.values()].some((quarantine) =>
+      quarantine.status === "reconciliation_required"
+      && quarantine.designatedReconciliationActions.includes(action)
+    );
+  }
+
+  #suppressFailedReconciliationRetry(
+    run: KernelRun,
+  ): Pick<BenchmarkGatewayOutcome, "capabilitySnapshot"> {
+    if (!run.flowState) throw new Error("reconciliation retry suppression requires durable Flow state");
+    run.refreshResumeMode = run.catalogMode === "refresh_required"
+      ? run.refreshResumeMode
+      : run.catalogMode;
+    run.catalogMode = "refresh_required";
+    run.flowState = rotateFlowCapabilityEpoch(run.flowState, this.#clock.nowIso());
+    return { capabilitySnapshot: this.#snapshot(run, this.#capabilitiesForTarget(run)) };
   }
 
   #flowControl(
@@ -1127,7 +1779,8 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       run.catalogMode = "target";
       const nextSteps = topicEntryStepPaths(this.#flow, args.topic_id);
       const result = success(action, `control:${callId}`, asJson({ topic_id: args.topic_id, next_steps: nextSteps, capability_epoch: selected.capabilityEpoch }));
-      return { result, ...this.#rotation(run, run.condition.behavior.progressiveDisclosure ? target : undefined) };
+      const entered = this.#autoEnterSingleStep(run, nextSteps);
+      return { result, ...(entered ?? this.#rotation(run, run.condition.behavior.progressiveDisclosure ? target : undefined)) };
     }
     if (action === "flow.enter_step") {
       if (typeof args.path !== "string") return { result: failure("invalid_arguments", "path is required", action) };
@@ -1153,19 +1806,29 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       if ("error" in completed) return { result: runtimeFailure(completed, action, run.flowState.capabilityEpoch) };
       run.flowState = completed.state;
       if (completed.state.nodeId) run.target = `topic:${completed.state.nodeId}`;
+      const rotation = this.#postCompletionRotation(run);
       const result = success(action, `control:${callId}`, asJson({
         completed_step: completedPath,
         next_steps: completed.nextSteps,
-        state: flowStateSummary(this.#flow, completed.state),
+        state: this.#providerFlowState(run, rotation.capabilitySnapshot),
       }));
-      return { result, ...this.#postCompletionRotation(run) };
+      return { result, ...rotation };
     }
-    const result = success(action, `control:${callId}`, asJson(flowStateSummary(this.#flow, run.flowState)), "verified");
+    if (run.catalogMode === "refresh_required") {
+      run.catalogMode = run.refreshResumeMode;
+    }
     const target = run.condition.behavior.progressiveDisclosure
       && run.target !== "$base"
       ? run.target
       : undefined;
-    return { result, ...this.#rotation(run, target) };
+    const rotation = this.#rotation(run, target);
+    const result = success(
+      action,
+      `control:${callId}`,
+      asJson(this.#providerFlowState(run, rotation.capabilitySnapshot)),
+      "verified"
+    );
+    return { result, ...rotation };
   }
 
   #unrestrictedLeaf(run: KernelRun, input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome {
@@ -1175,6 +1838,21 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
 
   #enforcedLeaf(run: KernelRun, input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome {
     if (!run.flowState) throw new Error("exactly-once condition has no durable flow state");
+    const activeRetryQuarantine = [...run.ambiguityQuarantines.values()].find((quarantine) =>
+      quarantine.status === "reconciliation_required"
+      && quarantine.action === input.call.action
+    );
+    if (activeRetryQuarantine) {
+      return {
+        result: failure(
+          "action_indeterminate",
+          `Action ${input.call.action} may already have committed; retry is forbidden until designated reconciliation succeeds`,
+          input.call.action,
+          false,
+          run.flowState.capabilityEpoch,
+        ),
+      };
+    }
     const receiptId = `flow:${run.runId}:${input.providerCallId}`;
     const invocationId = deriveFlowActionInvocationId(receiptId);
     const reserved = reserveFlowAction(this.#flow, run.flowState, {
@@ -1241,22 +1919,66 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
       || execution.receipt.status === "committed_after_error"
       || execution.receipt.status === "deduplicated"
     );
+    if (committedAfterVisibleError && authoritative !== undefined) {
+      const quarantined = quarantineCommittedAfterError({
+        state: run.flowState,
+        flowReceiptId: receiptId,
+        worldReceipt: execution.receipt,
+        designatedReconciliationActions: designatedReconciliationActionsForReceipt(
+          this.#flow,
+          run.flowState,
+          receiptId,
+        ),
+        now: this.#clock.nowIso(),
+      });
+      if ("error" in quarantined) {
+        throw new Error(`after-commit ambiguity could not be quarantined: ${quarantined.code}: ${quarantined.error}`);
+      }
+      run.flowState = quarantined.state;
+      run.ambiguityQuarantines.set(receiptId, quarantined.quarantine);
+      const rotation = run.condition.behavior.transitionOwnership === "host-managed-linear"
+        ? this.#rotation(run, run.target === "$base" ? undefined : run.target)
+        : { capabilitySnapshot: this.#snapshot(run, this.#capabilitiesForTarget(run)) };
+      return {
+        result: success(input.call.action, receiptId, asJson(authoritative), "executed"),
+        providerVisibleOutput: failure(
+          "action_indeterminate",
+          "The effect may have committed; authoritative reconciliation is required and retry is forbidden",
+          input.call.action,
+          false,
+          run.flowState.capabilityEpoch,
+        ) as unknown as JsonValue,
+        ...rotation,
+      };
+    }
     const settled = settleFlowAction(run.flowState, didSucceed
       ? { receiptId, status: "succeeded", result: authoritative }
       : { receiptId, status: "failed", error: visibleError(execution, input.call.action).message },
     this.#clock.nowIso());
     if ("error" in settled) throw new Error(settled.error);
     run.flowState = settled.state;
-    if (!didSucceed) return { result: visibleError(execution, input.call.action, run.flowState.capabilityEpoch) };
+    if (!didSucceed) {
+      const result = visibleError(execution, input.call.action, run.flowState.capabilityEpoch);
+      return this.#isDesignatedQuarantineReconciliation(run, input.call.action)
+        ? { result, ...this.#suppressFailedReconciliationRetry(run) }
+        : { result };
+    }
+    const releasedQuarantine = this.#releaseQuarantinesFromReadback(run, receiptId, execution.receipt);
     const result = success(
       input.call.action,
       receiptId,
       asJson(authoritative),
       execution.disposition === "deduplicated" ? "deduplicated" : "executed"
     );
-    return committedAfterVisibleError
-      ? { result, providerVisibleOutput: visibleError(execution, input.call.action, run.flowState.capabilityEpoch) as unknown as JsonValue }
-      : { result };
+    const advanced = this.#autoAdvanceCompletedStep(run);
+    // A successful readback can release a reconciliation-only quarantine
+    // without completing the current Flow step. Rotate the provider catalog
+    // inside this invocation so its transcript post-capability head and the
+    // immediately rebound response plan both reflect the released frontier.
+    const releasedRotation = releasedQuarantine && !advanced
+      ? this.#rotation(run, run.target === "$base" ? undefined : run.target)
+      : null;
+    return { result, ...(advanced ?? releasedRotation ?? {}) };
   }
 
   #toolExecutionOutcome(run: KernelRun, action: string, execution: ToolExecution): BenchmarkGatewayOutcome {

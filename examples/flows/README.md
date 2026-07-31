@@ -67,6 +67,22 @@ The JSON validator proves shape, graph reachability, scoped grants, bindings, an
 From `web/`:
 
 ```bash
+npm run demo:offline
+```
+
+This is the fastest runnable tour. It catalog-checks and loads the 15-step
+service-appointment Flow v2 definition in memory, executes ten deterministic
+fake integration calls, and drives a nine-step booking path through the same
+receipt-backed scenario simulator used by the builder. The simulated write
+loses its response after dispatch, survives a process restart, refuses a blind
+retry, and completes only after authoritative read-back reconciliation. The
+command needs no provider keys or database and exits nonzero with structured
+evidence if catalog closure, a bound result, a terminal assertion, or the
+receipt/replay proof set fails.
+
+For the full example test suite:
+
+```bash
 npx vitest run lib/__tests__/deep-flow-examples.test.ts
 ```
 

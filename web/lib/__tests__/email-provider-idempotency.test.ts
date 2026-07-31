@@ -31,7 +31,7 @@ describe("agent email provider idempotency", () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it("forwards the durable execution UUID as Resend's provider idempotency key", async () => {
-    await sendAgentEmail({
+    const result = await sendAgentEmail({
       to: "member@example.test",
       subject: "Renewal",
       message: "Your renewal is ready.",
@@ -46,6 +46,18 @@ describe("agent email provider idempotency", () => {
       to: "member@example.test",
       subject: "Renewal",
     }));
+    expect(result).toEqual({ providerMessageId: "provider-message" });
+  });
+
+  it("rejects an accepted response without an opaque provider identity", async () => {
+    mocks.send.mockResolvedValueOnce({ data: null, error: null });
+
+    await expect(sendAgentEmail({
+      to: "member@example.test",
+      subject: "Renewal",
+      message: "Your renewal is ready.",
+      idempotencyKey: EXECUTION_ID,
+    })).rejects.toThrow("omitted a valid message identity");
   });
 
   it("rejects a caller-selected non-UUID key before contacting Resend", async () => {

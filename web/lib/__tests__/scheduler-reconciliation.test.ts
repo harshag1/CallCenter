@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   sweepCallTasks: vi.fn(),
   sweepGeneratedToolCleanup: vi.fn(),
   sweepExpiredOperatorPrivateDisplays: vi.fn(),
+  drainGovernedCallWorkers: vi.fn(),
 }));
 
 vi.mock("@/lib/cron-auth", () => ({ authorizeCronRequest: mocks.authorizeCronRequest }));
@@ -26,6 +27,9 @@ vi.mock("@/lib/toolfactory/cleanup", () => ({
 }));
 vi.mock("@/lib/operator-action-maintenance", () => ({
   sweepExpiredOperatorPrivateDisplays: mocks.sweepExpiredOperatorPrivateDisplays,
+}));
+vi.mock("@/lib/governed-worker-drain", () => ({
+  drainGovernedCallWorkers: mocks.drainGovernedCallWorkers,
 }));
 vi.mock("@/lib/log", () => ({ log: () => ({ warn: vi.fn() }) }));
 
@@ -46,6 +50,12 @@ describe("scheduler reconciliation ordering", () => {
       cleanupRequired: 0,
     });
     mocks.sweepExpiredOperatorPrivateDisplays.mockResolvedValue(3);
+    mocks.drainGovernedCallWorkers.mockResolvedValue({
+      attempted: 1,
+      executed: 1,
+      claimRaces: 0,
+      timeBudgetExhausted: false,
+    });
   });
 
   it("terminalizes crash orphans before claiming and writes quarantine receipts afterward", async () => {
@@ -88,6 +98,12 @@ describe("scheduler reconciliation ordering", () => {
       recordingCallSweepUnavailable: false,
       recordingsPurged: 7,
       recordingPurgeUnavailable: false,
+      governedWorkerDrain: {
+        attempted: 1,
+        executed: 1,
+        claimRaces: 0,
+        timeBudgetExhausted: false,
+      },
     });
     expect(mocks.sweepExpiredOperatorPrivateDisplays).toHaveBeenCalledWith(500);
     expect(mocks.q).toHaveBeenCalledWith("SELECT purge_expired_call_recordings(5000)::text AS purged");
@@ -104,6 +120,7 @@ describe("scheduler reconciliation ordering", () => {
     expect(mocks.quarantineStaleIndeterminateCampaigns).not.toHaveBeenCalled();
     expect(mocks.sweepGeneratedToolCleanup).not.toHaveBeenCalled();
     expect(mocks.sweepExpiredOperatorPrivateDisplays).not.toHaveBeenCalled();
+    expect(mocks.drainGovernedCallWorkers).not.toHaveBeenCalled();
   });
 
   it("keeps dialing available while reporting a failed independent privacy sweep", async () => {

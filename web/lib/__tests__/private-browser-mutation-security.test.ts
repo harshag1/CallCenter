@@ -36,7 +36,11 @@ vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
 vi.mock("@/lib/db", () => ({ q: mocks.q, qOne: mocks.qOne }));
 vi.mock("@vercel/functions", () => ({ waitUntil: mocks.waitUntil }));
 vi.mock("@/lib/analysis", () => ({ analyzeCall: mocks.analyzeCall }));
-vi.mock("@/lib/xai", () => ({ chatJSON: mocks.chatJSON, MODELS: { operator: "test-model" } }));
+vi.mock("@/lib/server-inference", () => ({
+  createServerInferenceRuntime: () => ({
+    completeJSON: mocks.chatJSON,
+  }),
+}));
 vi.mock("@/lib/onboarding", () => ({ runOnboardingPrep: mocks.runOnboardingPrep }));
 vi.mock("@/lib/campaigns", () => ({
   cancelCampaign: mocks.cancelCampaign,

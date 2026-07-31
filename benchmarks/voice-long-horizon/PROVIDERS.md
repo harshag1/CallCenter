@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-Reviewed against first-party documentation again on **2026-07-16**. Model aliases, preview status, protocol behavior, and prices can change; every run manifest must capture the exact requested model and every identity/configuration field the provider actually acknowledges, plus a pricing snapshot identifier. These experiments compare harness conditions **within the same pinned model**. They are not a cross-provider model leaderboard.
+Reviewed against first-party documentation again on **2026-07-28**. Model aliases, preview status, protocol behavior, and prices can change; every run manifest must capture the exact requested model and every identity/configuration field the provider actually acknowledges, plus a pricing snapshot identifier. These experiments compare harness conditions **within the same pinned model**. They are not a cross-provider model leaderboard.
 
 ## Primary model pins
 
@@ -32,7 +32,7 @@ The exact acknowledgement surface differs by provider and must be fixture-tested
 | Native tool configuration | Session tools can change via `session.update`; tools can also be scoped per `response.create` | Tools configured via `session.update`; wait for `session.updated` at a turn boundary | `BidiGenerateContentSetup` is the first/only setup message; treat native tools as connection-scoped |
 | Primary fair harness surface | One stable capability gateway | One stable capability gateway | One stable capability gateway |
 | Function-call behavior | Arguments stream; complete call is available in response events | Multiple `response.function_call_arguments.done` events can precede audio; submit all outputs before one `response.create` | Gemini 3.1 function calls are synchronous/sequential; async `NON_BLOCKING` is not supported |
-| Manual turns | Disable VAD and explicitly commit audio/create response | Set `turn_detection` to `null` and explicitly commit/create response | Disable automatic activity detection and send `activityStart`/`activityEnd` |
+| Primary LC4 turns | Disable VAD and explicitly commit audio/create response | Finite prerecorded cells disable VAD and explicitly commit audio/create one response; server VAD is a separate interactive-transport qualification | Disable automatic activity detection and send `activityStart`/`activityEnd` |
 | PCM normalization | Benchmark target: mono signed 16-bit little-endian PCM at 24 kHz | Supports PCM rates from 8–48 kHz; benchmark target 24 kHz input/output | Native raw input PCM is 16 kHz; output is 24 kHz |
 | Transcript caveat | Capture provider event order and final assembled transcript | Input transcription uses cumulative, revisable `.updated` events and requires `grok-transcribe` | Input/output transcription can arrive independently and without guaranteed ordering; process every part in multi-part server events |
 | Session/connection limit | Realtime session maximum 60 minutes | Session maximum 120 minutes | Connection around 10 minutes; without compression, audio-only session 15 minutes and audio-video 2 minutes |

@@ -5,6 +5,7 @@ import {
   XaiWebSocketTransport,
 } from "./xai-websocket";
 import type { RealtimeTransportStart } from "./types";
+import { OutboundSpeechGate, createOutboundSpeechGatePolicy } from "@/lib/realtime/outbound-speech-gate";
 
 const INITIAL_CATALOG_DIGEST = "a".repeat(64);
 const RESULT_CATALOG_DIGEST = "3abcd5265643ebb4c444771637530b52cde40c255231d25e0dd15f267a971154";
@@ -196,6 +197,16 @@ async function settle() {
   await Promise.resolve();
 }
 
+function initializeXaiSession(socket: FakeWebSocket, id = "s-1") {
+  socket.open();
+  expect(socket.sent).toEqual([]);
+  socket.receive({ type: "session.created", session: { id } });
+  expect(JSON.parse(socket.sent[0])).toMatchObject({
+    type: "session.update",
+    session: { resumption: { enabled: false } },
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   FakeWebSocket.instances.length = 0;
@@ -211,21 +222,136 @@ describe("xAI browser transport", () => {
 
   it("verifies the acknowledged voice/audio/VAD boundary and reports unverifiable fields honestly", () => {
     const sent = buildXaiBrowserSessionUpdate(sessionUpdate());
-    expect(verifyXaiBrowserSessionAcknowledgement(acknowledged(), sent)).toEqual({
+    expect(verifyXaiBrowserSessionAcknowledgement(acknowledged(), sent, "s-1")).toEqual({
       acknowledgement: "session.updated",
       strictParityVerified: false,
-      verifiedFields: ["voice", "input_audio", "output_audio", "turn_detection", "resumption_disabled"],
-      unverifiableFields: ["model", "instructions", "tools"],
+      verifiedFields: ["voice", "input_audio_format", "output_audio_format", "turn_detection_type", "resumption_disabled"],
+      unverifiableFields: [
+        "model",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "input_audio_configuration_except_format",
+        "output_audio_configuration_except_format",
+        "turn_detection_parameters",
+      ],
+      sessionIdentity: {
+        source: "session.created",
+        updatedContinuity: "unverifiable_session_updated_omitted_identity",
+      },
+      conversationIdentity: {
+        source: "conversation.created",
+        status: "not_observed_before_readiness",
+      },
+      modelIdentity: {
+        source: "provider_echo",
+        status: "unverifiable_provider_omitted",
+      },
     });
     expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({
       audio: {
         input: { format: { type: "audio/pcm", rate: 16_000 } },
         output: { format: { type: "audio/pcm", rate: 24_000 } },
       },
-    }), sent)).toThrow("audio.input.format.rate");
+    }), sent, "s-1")).toThrow("audio.input.format.rate");
     expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({
       resumption: { enabled: true },
-    }), sent)).toThrow("resumption.enabled");
+    }), sent, "s-1")).toThrow("resumption.enabled");
+    expect(() => verifyXaiBrowserSessionAcknowledgement(acknowledged({ id: "s-other" }), sent, "s-1"))
+      .toThrow("session.id");
+  });
+
+  it("accepts bounded omitted echo fields but rejects every conflicting field that is returned", () => {
+    const sent = buildXaiBrowserSessionUpdate(sessionUpdate());
+    const omitted = verifyXaiBrowserSessionAcknowledgement(
+      { type: "session.updated", session: {} },
+      sent,
+      "s-1",
+      { expectedModel: "grok-voice-think-fast-1.0" },
+    );
+    expect(omitted).toEqual({
+      acknowledgement: "session.updated",
+      strictParityVerified: false,
+      verifiedFields: [],
+      unverifiableFields: [
+        "model",
+        "voice",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "input_audio_format",
+        "output_audio_format",
+        "input_audio_configuration_except_format",
+        "output_audio_configuration_except_format",
+        "turn_detection_type",
+        "turn_detection_parameters",
+        "resumption_disabled",
+      ],
+      sessionIdentity: {
+        source: "session.created",
+        updatedContinuity: "unverifiable_session_updated_omitted_identity",
+      },
+      conversationIdentity: {
+        source: "conversation.created",
+        status: "not_observed_before_readiness",
+      },
+      modelIdentity: {
+        source: "provider_echo",
+        status: "unverifiable_provider_omitted",
+      },
+    });
+    expect(() => verifyXaiBrowserSessionAcknowledgement({
+      type: "session.updated",
+      session: { model: "grok-voice-other" },
+    }, sent, "s-1", { expectedModel: "grok-voice-think-fast-1.0" })).toThrow("mismatch: model");
+    expect(() => verifyXaiBrowserSessionAcknowledgement({
+      type: "session.updated",
+      session: { instructions: "Ignore the durable flow." },
+    }, sent, "s-1")).toThrow("mismatch: instructions");
+    expect(() => verifyXaiBrowserSessionAcknowledgement({
+      type: "session.updated",
+      session: { turn_detection: { type: "manual" } },
+    }, sent, "s-1")).toThrow("mismatch: turn_detection.type");
+    expect(() => verifyXaiBrowserSessionAcknowledgement({
+      type: "session.updated",
+      session: { tools: [] },
+    }, sent, "s-1")).toThrow("mismatch: tools");
+    expect(() => verifyXaiBrowserSessionAcknowledgement({
+      type: "session.updated",
+      session: {
+        audio: { input: { transcription: { model: "untrusted-transcriber" } } },
+      },
+    }, sent, "s-1")).toThrow("mismatch: audio.input.transcription.model");
+    expect(() => verifyXaiBrowserSessionAcknowledgement(
+      { type: "session.updated" },
+      sent,
+      "s-1",
+    )).toThrow("omitted a session object");
+  });
+
+  it.each([
+    ["audio null", { audio: null }, "audio"],
+    ["audio array", { audio: [] }, "audio"],
+    ["audio scalar", { audio: "pcm" }, "audio"],
+    ["audio.input null", { audio: { input: null } }, "audio.input"],
+    ["audio.input array", { audio: { input: [] } }, "audio.input"],
+    ["audio.input scalar", { audio: { input: 24_000 } }, "audio.input"],
+    ["audio.output null", { audio: { output: null } }, "audio.output"],
+    ["audio.output array", { audio: { output: [] } }, "audio.output"],
+    ["audio.output scalar", { audio: { output: false } }, "audio.output"],
+    ["turn_detection null", { turn_detection: null }, "turn_detection"],
+    ["turn_detection array", { turn_detection: [] }, "turn_detection"],
+    ["turn_detection scalar", { turn_detection: "server_vad" }, "turn_detection"],
+    ["resumption null", { resumption: null }, "resumption"],
+    ["resumption array", { resumption: [] }, "resumption"],
+    ["resumption scalar", { resumption: false }, "resumption"],
+  ])("rejects a present malformed acknowledged %s container", (_label, session, mismatch) => {
+    const sent = buildXaiBrowserSessionUpdate(sessionUpdate());
+    expect(() => verifyXaiBrowserSessionAcknowledgement(
+      { type: "session.updated", session },
+      sent,
+      "s-1",
+    )).toThrow(`mismatch: ${mismatch}`);
   });
 
   it("does not enable microphone delivery until session.updated passes verification", async () => {
@@ -238,9 +364,13 @@ describe("xAI browser transport", () => {
     await settle();
     const socket = FakeWebSocket.instances[0];
     socket.open();
-    expect(JSON.parse(socket.sent[0])).toMatchObject({ session: { resumption: { enabled: false } } });
+    expect(socket.sent).toEqual([]);
     expect(test.processor.onaudioprocess).toBeNull();
-    socket.receive({ type: "session.created", session: { id: "s-1" } });
+    socket.receive({
+      type: "session.created",
+      session: { id: "s-1", model: "grok-voice-think-fast-1.0" },
+    });
+    expect(JSON.parse(socket.sent[0])).toMatchObject({ session: { resumption: { enabled: false } } });
     expect(test.processor.onaudioprocess).toBeNull();
 
     socket.receive(acknowledged());
@@ -258,7 +388,7 @@ describe("xAI browser transport", () => {
     expect(test.handlers.onClose).not.toHaveBeenCalled();
   });
 
-  it("fails closed on a mismatched acknowledgement without ever enabling the mic", async () => {
+  it("accepts documented conversation.created ordering before session.updated and binds its identity", async () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal("window", { setTimeout, clearTimeout });
     const test = harness();
@@ -267,12 +397,159 @@ describe("xAI browser transport", () => {
     await settle();
     const socket = FakeWebSocket.instances[0];
     socket.open();
+    socket.receive({ type: "conversation.created", conversation: { id: "c-1" } });
+    expect(socket.sent).toEqual([]);
+    socket.receive({
+      type: "session.created",
+      session: { id: "s-1", model: "grok-voice-think-fast-1.0" },
+    });
+    expect(socket.sent).toHaveLength(1);
+    socket.receive({ type: "session.updated", session: {} });
+    await started;
+
+    expect(transport.sessionReadinessEvidence).toMatchObject({
+      verifiedFields: ["model"],
+      sessionIdentity: {
+        source: "session.created",
+        updatedContinuity: "unverifiable_session_updated_omitted_identity",
+      },
+      conversationIdentity: {
+        source: "conversation.created",
+        status: "verified",
+      },
+      modelIdentity: {
+        source: "session.created",
+        status: "verified",
+      },
+    });
+    expect(test.processor.onaudioprocess).toBeTypeOf("function");
+    await transport.stop();
+  });
+
+  it("rejects a conflicting session.created model before an empty acknowledgement can authorize audio", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({
+      type: "session.created",
+      session: { id: "s-1", model: "grok-voice-other" },
+    });
+
+    await expect(started).rejects.toThrow("session.created model differs from the requested model");
+    expect(socket.sent).toEqual([]);
+    expect(test.processor.onaudioprocess).toBeNull();
+    expect(socket.closeCode).toBe(1002);
+  });
+
+  it("accepts bounded ping control metadata while still withholding audio before readiness", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({ type: "ping", event_id: "ping-1" });
+    expect(socket.sent).toEqual([]);
+    expect(test.processor.onaudioprocess).toBeNull();
+    socket.receive({
+      type: "session.created",
+      session: { id: "s-1", model: "grok-voice-think-fast-1.0" },
+    });
+    socket.receive({ type: "session.updated", session: {} });
+    await started;
+    expect(test.processor.onaudioprocess).toBeTypeOf("function");
+    await transport.stop();
+  });
+
+  it("rejects malformed or duplicate conversation identities before enabling the mic", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const malformed = harness();
+    const malformedTransport = new XaiWebSocketTransport();
+    const malformedStarted = malformedTransport.start(malformed.args);
+    await settle();
+    const malformedSocket = FakeWebSocket.instances[0];
+    malformedSocket.open();
+    malformedSocket.receive({ type: "conversation.created", conversation: { id: " not-canonical " } });
+    await expect(malformedStarted).rejects.toThrow("conversation.created omitted a valid conversation identity");
+    expect(malformed.processor.onaudioprocess).toBeNull();
+    expect(malformedSocket.closeCode).toBe(1002);
+
+    const duplicate = harness();
+    const duplicateTransport = new XaiWebSocketTransport();
+    const duplicateStarted = duplicateTransport.start(duplicate.args);
+    await settle();
+    const duplicateSocket = FakeWebSocket.instances[1];
+    duplicateSocket.open();
+    duplicateSocket.receive({ type: "conversation.created", conversation: { id: "c-1" } });
+    duplicateSocket.receive({ type: "conversation.created", conversation: { id: "c-2" } });
+    await expect(duplicateStarted).rejects.toThrow("duplicate conversation.created");
+    expect(duplicate.processor.onaudioprocess).toBeNull();
+    expect(duplicateSocket.closeCode).toBe(1002);
+  });
+
+  it("fails closed on a mismatched acknowledgement without ever enabling the mic", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    initializeXaiSession(socket);
     socket.receive(acknowledged({ voice: "wrong" }));
 
     await expect(started).rejects.toThrow("acknowledgement mismatch: voice");
     expect(test.processor.onaudioprocess).toBeNull();
     expect(socket.closeCode).toBe(1002);
     expect(transport.sessionReadinessEvidence).toBeNull();
+  });
+
+  it("does not send configuration when session.created omits its identity", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({ type: "session.created", session: {} });
+
+    await expect(started).rejects.toThrow("session.created omitted a valid session identity");
+    expect(socket.sent).toEqual([]);
+    expect(socket.closeCode).toBe(1002);
+  });
+
+  it("rejects session.updated before creation and duplicate session.created", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const early = harness();
+    const earlyTransport = new XaiWebSocketTransport();
+    const earlyStarted = earlyTransport.start(early.args);
+    await settle();
+    const earlySocket = FakeWebSocket.instances[0];
+    earlySocket.open();
+    earlySocket.receive(acknowledged());
+    await expect(earlyStarted).rejects.toThrow("before session.created initialized the session");
+    expect(earlySocket.sent).toEqual([]);
+
+    const duplicate = harness();
+    const duplicateTransport = new XaiWebSocketTransport();
+    const duplicateStarted = duplicateTransport.start(duplicate.args);
+    await settle();
+    const duplicateSocket = FakeWebSocket.instances[1];
+    initializeXaiSession(duplicateSocket, "s-original");
+    duplicateSocket.receive({ type: "session.created", session: { id: "s-replacement" } });
+    await expect(duplicateStarted).rejects.toThrow("duplicate session.created");
+    expect(duplicateSocket.closeCode).toBe(1002);
   });
 
   it("rejects provider output before acknowledgement and bounds post-ready messages", async () => {
@@ -283,7 +560,7 @@ describe("xAI browser transport", () => {
     const earlyStart = earlyTransport.start(early.args);
     await settle();
     const earlySocket = FakeWebSocket.instances[0];
-    earlySocket.open();
+    initializeXaiSession(earlySocket, "s-early");
     earlySocket.receive({ type: "response.audio.delta", delta: "AQAA" });
     await expect(earlyStart).rejects.toThrow("before session.updated verification");
 
@@ -292,7 +569,7 @@ describe("xAI browser transport", () => {
     const readyStart = readyTransport.start(ready.args);
     await settle();
     const readySocket = FakeWebSocket.instances[1];
-    readySocket.open();
+    initializeXaiSession(readySocket, "s-ready");
     readySocket.receive(acknowledged());
     await readyStart;
     readySocket.receive("{");
@@ -308,7 +585,7 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged());
     await started;
 
@@ -324,6 +601,64 @@ describe("xAI browser transport", () => {
     }));
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("xai-live-secret");
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("alice@example.test");
+  });
+
+  it("quarantines xAI PCM until the terminal response passes the configured gate", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const test = harness();
+    const source = { buffer: null, connect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null };
+    const createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
+      duration: length / rate,
+      copyToChannel: vi.fn(),
+    }));
+    Object.assign(test.audioContext, {
+      createBuffer,
+      createBufferSource: vi.fn(() => source),
+    });
+    const onEvidence = vi.fn();
+    test.args.outboundSpeechGate = {
+      gate: new OutboundSpeechGate({
+        policy: createOutboundSpeechGatePolicy({ evidencePolicy: "provider_transcript_allowed" }),
+      }),
+      onEvidence,
+    };
+    const transport = new XaiWebSocketTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const socket = FakeWebSocket.instances[0];
+    initializeXaiSession(socket);
+    socket.receive(acknowledged());
+    await started;
+
+    socket.receive({ type: "response.created", response: { id: "speech-1" } });
+    socket.receive({
+      type: "response.audio.delta",
+      response_id: "speech-1",
+      delta: Buffer.from([1, 0, 2, 0]).toString("base64"),
+    });
+    expect(createBuffer).not.toHaveBeenCalled();
+    socket.receive({
+      type: "response.audio_transcript.done",
+      response_id: "speech-1",
+      transcript: "The safe answer",
+    });
+    expect(test.handlers.onTranscript).not.toHaveBeenCalled();
+    socket.receive({
+      type: "response.done",
+      response: { id: "speech-1", status: "completed", output: [] },
+    });
+
+    await vi.waitFor(() => expect(onEvidence).toHaveBeenCalledTimes(1));
+    expect(createBuffer).toHaveBeenCalledTimes(1);
+    expect(onEvidence.mock.calls[0][0]).toMatchObject({
+      provider: "xai",
+      responseId: "speech-1",
+      decision: { action: "release", evidenceCoverage: "provider_transcript_unbound" },
+      playout: { status: "released_to_audio_context", audioBytes: 4 },
+    });
+    expect(test.handlers.onTranscript).toHaveBeenCalledWith("agent", "The safe answer");
+    await transport.stop();
   });
 
   it("rejects start promptly when stopped while waiting for session acknowledgement", async () => {
@@ -351,7 +686,7 @@ describe("xAI browser transport", () => {
     const started = transport.start(test.args);
     await settle();
     const socket = FakeWebSocket.instances[0];
-    socket.open();
+    initializeXaiSession(socket);
     socket.receive(acknowledged());
     await started;
     socket.sent.length = 0;

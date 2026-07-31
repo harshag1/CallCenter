@@ -37,6 +37,9 @@ const mocks = vi.hoisted(() => ({
   sendSms: vi.fn(),
   admitMcpToolInvocation: vi.fn(),
   settleMcpToolInvocation: vi.fn(),
+  createServerInferenceRuntime: vi.fn(),
+  inferenceResearch: vi.fn(),
+  reconcileGovernedLaunchTask: vi.fn(),
 }));
 
 vi.mock("../db", () => ({ q: mocks.q, qOne: mocks.qOne }));
@@ -70,7 +73,16 @@ vi.mock("../mcp-invocation-store", () => ({
   admitMcpToolInvocation: mocks.admitMcpToolInvocation,
   settleMcpToolInvocation: mocks.settleMcpToolInvocation,
 }));
-vi.mock("../xai", () => ({ research: vi.fn() }));
+vi.mock("../server-inference", () => ({
+  createServerInferenceRuntime: mocks.createServerInferenceRuntime,
+}));
+vi.mock("../governed-launch-task-recovery", () => ({
+  buildGovernedLaunchTaskWorkerInput: vi.fn(),
+  deriveGovernedLaunchTaskIdentity: vi.fn(),
+  governedLaunchTaskResult: vi.fn(),
+  governedLaunchTaskRunActionResult: vi.fn(),
+  reconcileIndeterminateGovernedLaunchTask: mocks.reconcileGovernedLaunchTask,
+}));
 vi.mock("../datasets", () => ({
   queryRows: mocks.queryRows,
   upsertRow: vi.fn(),
@@ -93,8 +105,11 @@ import {
   activeCapabilityAuthorityFor,
   callActiveCapability,
   callTool,
+  callToolForAudience,
   downstreamActionIdempotencyKey,
+  listToolsForAudience,
 } from "../mcp";
+import { deriveActiveReadOnlyWorkerManifest } from "../voice-workers/capability-manifest";
 
 const scope = { callId: "call-1", agentId: "agent-1", orgId: "org-1" };
 const providerInvocationId = `mcp-jsonrpc:v1:${"a".repeat(64)}`;
@@ -317,6 +332,16 @@ describe("live generated-tool flow dispatch", () => {
       acknowledged: true,
       value: { ticket_id: "T-1" },
     });
+    mocks.createServerInferenceRuntime.mockReturnValue({
+      research: mocks.inferenceResearch,
+    });
+    mocks.inferenceResearch.mockResolvedValue({ text: "bounded findings" });
+    mocks.reconcileGovernedLaunchTask.mockResolvedValue({
+      reconciled: false,
+      code: "launch_task_spawn_not_found",
+      error: "no exact durable launch_task spawn exists",
+      receiptId: "0ddc0ffe-1234-5678-9234-0123456789ab",
+    });
     mocks.q.mockImplementation(async (sql: string) => {
       if (sql.includes("SELECT id, slug, description")) {
         return [{
@@ -401,6 +426,370 @@ describe("live generated-tool flow dispatch", () => {
       capability_grant: "grant",
     }, { invocationId: providerInvocationId });
   }
+
+  function useWorkerFlow(
+    datasetSlugs: readonly string[],
+    includeRealtimeSearch = false,
+  ) {
+    const workerFlow = {
+      ...flow,
+      nodes: flow.nodes.map((node) => node.id !== "operations"
+        ? node
+        : {
+            ...node,
+            steps: node.steps?.map((step) => ({
+              ...step,
+              tools: [
+                "launch_task",
+                "read_table",
+                ...(includeRealtimeSearch ? ["search"] : []),
+              ],
+              action_policies: [
+                { tool: "launch_task", idempotency: "per_arguments" as const },
+                { tool: "read_table", idempotency: "per_arguments" as const, effect: "read" as const },
+                ...(includeRealtimeSearch
+                  ? [{ tool: "search", idempotency: "per_arguments" as const, effect: "read" as const }]
+                  : []),
+              ],
+            })),
+          }),
+    };
+    const workerSnapshot = CallRuntimeSnapshotSchema.parse({
+      ...runtimeSnapshot,
+      flow: workerFlow,
+      environment: {
+        ...runtimeSnapshot.environment,
+        datasetSlugs: [...datasetSlugs],
+        internetEnabled: includeRealtimeSearch,
+      },
+    });
+    const workerDigest = callRuntimeDigest(workerSnapshot);
+    const baseQuery = mocks.qOne.getMockImplementation();
+    mocks.qOne.mockImplementation(async (...call) => {
+      const sql = String(call[0]);
+      if (sql.includes("FROM calls c") && sql.includes("JOIN agents")) {
+        return {
+          status: "active",
+          flow: workerFlow,
+          tool_ids: ["tool-1"],
+          runtime_snapshot: workerSnapshot,
+          runtime_digest: workerDigest,
+        };
+      }
+      return baseQuery?.(...call);
+    });
+    return { workerFlow, workerSnapshot, workerDigest };
+  }
+
+  function usePinnedDatasets(datasetSlugs: readonly string[]) {
+    const snapshot = CallRuntimeSnapshotSchema.parse({
+      ...runtimeSnapshot,
+      environment: {
+        ...runtimeSnapshot.environment,
+        datasetSlugs: [...datasetSlugs],
+      },
+    });
+    const digest = callRuntimeDigest(snapshot);
+    const baseQuery = mocks.qOne.getMockImplementation();
+    mocks.qOne.mockImplementation(async (...call) => {
+      const sql = String(call[0]);
+      if (sql.includes("FROM calls c") && sql.includes("JOIN agents")) {
+        return {
+          status: "active",
+          flow,
+          tool_ids: ["tool-1"],
+          runtime_snapshot: snapshot,
+          runtime_digest: digest,
+        };
+      }
+      return baseQuery?.(...call);
+    });
+  }
+
+  it("advertises only realtime tools the stock deployment can execute", async () => {
+    useWorkerFlow(["members"], true);
+    const priorWorkerDatabaseUrl = process.env.WORKER_DATABASE_URL;
+    delete process.env.WORKER_DATABASE_URL;
+    try {
+      const unconfigured = await activeCapabilityAuthorityFor(scope);
+      expect(unconfigured.catalog.tools.map(({ logical_name }) => logical_name))
+        .not.toEqual(expect.arrayContaining(["launch_task", "search"]));
+
+      process.env.WORKER_DATABASE_URL =
+        "postgresql://hacc_voice_worker_runtime:test@127.0.0.1:5432/voice_agents";
+      const configured = await activeCapabilityAuthorityFor(scope);
+      expect(configured.catalog.tools.map(({ logical_name }) => logical_name))
+        .toEqual(expect.arrayContaining(["launch_task", "read_table"]));
+      expect(configured.catalog.tools.map(({ logical_name }) => logical_name))
+        .not.toContain("search");
+    } finally {
+      if (priorWorkerDatabaseUrl === undefined) {
+        delete process.env.WORKER_DATABASE_URL;
+      } else {
+        process.env.WORKER_DATABASE_URL = priorWorkerDatabaseUrl;
+      }
+    }
+  });
+
+  it("rejects nested background search without its parent spend authority", async () => {
+    await expect(callToolForAudience(
+      scope,
+      "background",
+      "search",
+      { query: "must not mint a fresh research runtime" },
+    )).resolves.toEqual({
+      error: "background web search requires its parent operation spend authority",
+      code: "background_inference_authority_required",
+    });
+    expect(mocks.q).not.toHaveBeenCalled();
+    expect(mocks.qOne).not.toHaveBeenCalled();
+  });
+
+  it("rejects realtime search without explicit per-call spend authority before side effects", async () => {
+    await expect(callToolForAudience(
+      scope,
+      "realtime",
+      "search",
+      { query: "must not mint a per-tool research runtime" },
+    )).resolves.toEqual({
+      error: "live web search requires an explicit per-call spend authority",
+      code: "realtime_inference_authority_required",
+    });
+    expect(mocks.q).not.toHaveBeenCalled();
+    expect(mocks.qOne).not.toHaveBeenCalled();
+    expect(mocks.createServerInferenceRuntime).not.toHaveBeenCalled();
+    expect(mocks.inferenceResearch).not.toHaveBeenCalled();
+  });
+
+  it("binds nested background search to the exact parent spend authority", async () => {
+    const parentAuthority = Object.freeze({
+      budgetSnapshot: () => ({
+        providerRequestsReserved: 0,
+        outputTokensReserved: 0,
+        providerRequestsRemaining: 8,
+        outputTokensRemaining: 6_400,
+      }),
+    });
+    const searchSnapshot = CallRuntimeSnapshotSchema.parse({
+      ...runtimeSnapshot,
+      environment: {
+        ...runtimeSnapshot.environment,
+        internetEnabled: true,
+      },
+    });
+    const searchDigest = callRuntimeDigest(searchSnapshot);
+    const baseQuery = mocks.qOne.getMockImplementation();
+    mocks.qOne.mockImplementation(async (...call) => {
+      const sql = String(call[0]);
+      if (sql.includes("FROM calls c") && sql.includes("JOIN agents")) {
+        return {
+          status: "active",
+          flow,
+          tool_ids: ["tool-1"],
+          runtime_snapshot: searchSnapshot,
+          runtime_digest: searchDigest,
+        };
+      }
+      if (sql.includes("SELECT internet_enabled")) {
+        return { internet_enabled: true, allowed_domains: [] };
+      }
+      return baseQuery?.(...call);
+    });
+
+    await expect(callToolForAudience(
+      scope,
+      "background",
+      "search",
+      { query: "bounded lookup" },
+      { serverInferenceAuthority: parentAuthority },
+    )).resolves.toEqual({ findings: "bounded findings" });
+
+    expect(mocks.createServerInferenceRuntime).toHaveBeenCalledWith({
+      purpose: "background_task",
+      workload: "research",
+      authority: parentAuthority,
+    });
+    expect(mocks.inferenceResearch).toHaveBeenCalledOnce();
+  });
+
+  it("exposes universal worker pull controls without returning worker content", async () => {
+    const workerId = "8916eb0a-5332-4f4c-a330-746c516e83b9";
+    const authority = await activeCapabilityAuthorityFor(scope);
+    const workerTools = authority.catalog.tools.filter(({ logical_name }) =>
+      logical_name === "check_worker" || logical_name === "get_worker_updates",
+    );
+    expect(workerTools.map(({ logical_name }) => logical_name).sort()).toEqual([
+      "check_worker",
+      "get_worker_updates",
+    ]);
+    expect(workerTools.every(({ effect }) => effect === "read")).toBe(true);
+
+    const baseQuery = mocks.qOne.getMockImplementation();
+    let workerVisible = true;
+    mocks.qOne.mockImplementation(async (...call) => {
+      if (String(call[0]).includes("load_voice_worker_status")) {
+        return workerVisible ? { id: workerId, status: "succeeded" } : null;
+      }
+      return baseQuery?.(...call);
+    });
+    await expect(callTool(scope, "check_worker", {
+      worker_id: workerId,
+    })).resolves.toEqual({
+      found: true,
+      worker_id: workerId,
+      status: "succeeded",
+    });
+    workerVisible = false;
+    await expect(callTool(scope, "check_worker", {
+      worker_id: "8916eb0a-5332-4f4c-a330-746c516e83ba",
+    })).resolves.toEqual({ found: false });
+    const statusQueriesBeforeInvalid = mocks.qOne.mock.calls.filter(([sql]) =>
+      String(sql).includes("load_voice_worker_status"),
+    ).length;
+    await expect(callTool(scope, "check_worker", {
+      worker_id: "not-a-worker-id",
+    })).resolves.toMatchObject({ code: "invalid_worker_id" });
+    expect(mocks.qOne.mock.calls.filter(([sql]) =>
+      String(sql).includes("load_voice_worker_status"),
+    )).toHaveLength(statusQueriesBeforeInvalid);
+    workerVisible = true;
+    await expect(callTool(scope, "get_worker_updates", {})).resolves.toEqual({
+      ok: true,
+    });
+    const serialized = JSON.stringify([
+      await callTool(scope, "check_worker", { worker_id: workerId }),
+      await callTool(scope, "get_worker_updates", {}),
+    ]);
+    for (const forbidden of [
+      "result",
+      "error",
+      "owner_token",
+      "lease_expires_at",
+      "capability_manifest",
+      "worker_input",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("rejects launch_task before dispatch when the active step has no pinned background read", async () => {
+    useWorkerFlow([]);
+    const baseQuery = mocks.q.getMockImplementation();
+    mocks.q.mockImplementation(async (...call) => {
+      const sql = String(call[0]);
+      if (sql.includes("SELECT slug FROM datasets")) {
+        return [{ slug: "post_snapshot_private_table" }];
+      }
+      return baseQuery?.(...call) ?? [];
+    });
+    const result = await callTool(scope, "run_action", {
+      name: "launch_task",
+      arguments: { command: "Find the applicable policy." },
+      capability_grant: "grant",
+    }, { invocationId: providerInvocationId });
+
+    expect(result).toMatchObject({
+      code: "action_rejected",
+      rejection_code: "governed_worker_read_capability_required",
+      receipt_status: "failed",
+    });
+    expect(mocks.markFlowActionDispatchStartedAtomic).not.toHaveBeenCalled();
+    expect(mocks.settleFlowActionAtomic).toHaveBeenCalledWith(
+      scope.callId,
+      expect.objectContaining({
+        status: "failed",
+        deliveryState: "not_sent",
+      }),
+    );
+  });
+
+  it("rejects launch_task before dispatch when the isolated worker runtime is not configured", async () => {
+    useWorkerFlow(["members"]);
+    const priorWorkerDatabaseUrl = process.env.WORKER_DATABASE_URL;
+    delete process.env.WORKER_DATABASE_URL;
+    try {
+      const result = await callTool(scope, "run_action", {
+        name: "launch_task",
+        arguments: { command: "Find the applicable policy." },
+        capability_grant: "grant",
+      }, { invocationId: providerInvocationId });
+
+      expect(result).toMatchObject({
+        code: "action_rejected",
+        rejection_code: "governed_worker_runtime_not_configured",
+        receipt_status: "failed",
+      });
+      expect(mocks.markFlowActionDispatchStartedAtomic).not.toHaveBeenCalled();
+      expect(mocks.settleFlowActionAtomic).toHaveBeenCalledWith(
+        scope.callId,
+        expect.objectContaining({
+          status: "failed",
+          deliveryState: "not_sent",
+        }),
+      );
+    } finally {
+      if (priorWorkerDatabaseUrl === undefined) {
+        delete process.env.WORKER_DATABASE_URL;
+      } else {
+        process.env.WORKER_DATABASE_URL = priorWorkerDatabaseUrl;
+      }
+    }
+  });
+
+  it("binds read_table and the worker manifest to the pinned runtime dataset snapshot", async () => {
+    useWorkerFlow(["members"]);
+    const baseQuery = mocks.q.getMockImplementation();
+    mocks.q.mockImplementation(async (...call) => {
+      const sql = String(call[0]);
+      if (sql.includes("SELECT slug FROM datasets")) {
+        return [{ slug: "members" }, { slug: "post_snapshot_private_table" }];
+      }
+      return baseQuery?.(...call) ?? [];
+    });
+
+    const [authority, backgroundTools] = await Promise.all([
+      activeCapabilityAuthorityFor(scope),
+      listToolsForAudience(scope, "background"),
+    ]);
+    const readTable = backgroundTools.find(({ name }) => name === "read_table");
+    expect(readTable?.inputSchema).toMatchObject({
+      properties: { table: { enum: ["members"] } },
+    });
+    expect(JSON.stringify(authority.catalog)).not.toContain("post_snapshot_private_table");
+    expect(deriveActiveReadOnlyWorkerManifest({
+      catalog: authority.catalog,
+      executableBackgroundToolNames: backgroundTools.map(({ name }) => name),
+    }).capabilities).toEqual(["read_table"]);
+
+    await expect(callToolForAudience(
+      scope,
+      "background",
+      "read_table",
+      { table: "post_snapshot_private_table" },
+    )).resolves.toMatchObject({ code: "invalid_action_arguments" });
+    expect(mocks.queryRows).not.toHaveBeenCalled();
+
+    mocks.queryRows.mockResolvedValueOnce({
+      dataset: { slug: "members" },
+      rows: [{
+        id: "host-row-42",
+        data: { id: "business-controlled-id", tier: "gold" },
+      }],
+    });
+    await expect(callToolForAudience(
+      scope,
+      "background",
+      "read_table",
+      { table: "members" },
+    )).resolves.toEqual({
+      table: "members",
+      count: 1,
+      rows: [{
+        row_id: "host-row-42",
+        data: { id: "business-controlled-id", tier: "gold" },
+      }],
+    });
+  });
 
   it("keeps funded voice actions out of provider authority and rejects legacy direct invocations before side effects", async () => {
     const fundedNames = ["request_recall", "send_email", "send_sms"] as const;
@@ -789,6 +1178,7 @@ describe("live generated-tool flow dispatch", () => {
   });
 
   it("settles a built-in read failure as retry-safe instead of indeterminate", async () => {
+    usePinnedDatasets(["missing"]);
     await expect(callTool(scope, "run_action", {
       name: "read_table",
       arguments: { table: "missing" },
@@ -805,6 +1195,7 @@ describe("live generated-tool flow dispatch", () => {
   });
 
   it("settles a thrown built-in read failure as retry-safe while keeping mutation throws indeterminate", async () => {
+    usePinnedDatasets(["customers"]);
     mocks.queryRows.mockRejectedValueOnce(new Error("dataset connection reset"));
     await expect(callTool(scope, "run_action", {
       name: "read_table",
@@ -1185,6 +1576,59 @@ describe("live generated-tool flow dispatch", () => {
       scope.callId,
       expect.objectContaining({ status: "failed", deliveryState: "not_sent" })
     );
+  });
+
+  it("reconciles an existing launch_task spawn from a fresh provider invocation without redispatch", async () => {
+    const launchReceiptId = "2ddc0ffe-1234-5678-9234-0123456789ab";
+    mocks.loadFlowState.mockResolvedValueOnce({
+      ...state,
+      actionReceipts: [receipt("indeterminate", {
+        receiptId: launchReceiptId,
+        tool: "launch_task",
+        arguments: { command: "Research the member policy." },
+      })],
+    });
+    mocks.reconcileGovernedLaunchTask.mockResolvedValueOnce({
+      reconciled: true,
+      replayed: false,
+      receiptId: launchReceiptId,
+      proofId: "3ddc0ffe-1234-5678-9234-0123456789ab",
+      result: {
+        ok: true,
+        worker_id: "4ddc0ffe-1234-5678-9234-0123456789ab",
+        spawn_status: "accepted",
+      },
+    });
+
+    await expect(callTool(
+      scope,
+      "reconcile_action",
+      { receipt_id: launchReceiptId },
+      { invocationId: `fresh-reconcile:${providerInvocationId}` },
+    )).resolves.toEqual({
+      reconciled: true,
+      replayed: false,
+      outcome: "committed",
+      receipt_id: launchReceiptId,
+      proof_id: "3ddc0ffe-1234-5678-9234-0123456789ab",
+      result: {
+        ok: true,
+        worker_id: "4ddc0ffe-1234-5678-9234-0123456789ab",
+        spawn_status: "accepted",
+      },
+    });
+    expect(mocks.reconcileGovernedLaunchTask).toHaveBeenCalledWith({
+      callId: scope.callId,
+      organizationId: scope.orgId,
+      conversationId: scope.callId,
+      receiptId: launchReceiptId,
+      runtimeDigest,
+    });
+    expect(mocks.withLockedFlowState).not.toHaveBeenCalled();
+    expect(mocks.markFlowActionDispatchStartedAtomic).not.toHaveBeenCalled();
+    expect(mocks.prepareToolInvocation).not.toHaveBeenCalled();
+    expect(mocks.invokeTool).not.toHaveBeenCalled();
+    expect(mocks.remoteInvoke).not.toHaveBeenCalled();
   });
 
   it("rechecks generated read-back revocation after signing and performs zero network calls", async () => {

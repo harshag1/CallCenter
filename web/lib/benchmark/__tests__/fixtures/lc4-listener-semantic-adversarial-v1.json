@@ -1,0 +1,680 @@
+{
+  "schema_version": 1,
+  "corpus_id": "lc4-listener-semantic-adversarial-v1",
+  "claim_boundary": "independently_authored_targeted_construct_challenge_not_population_accuracy_or_provider_efficacy",
+  "provider_calls_made": 0,
+  "cases": [
+    {
+      "case_id": "affirmed/current-direct",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The current identifier is OH-RIVER-17.",
+      "expected_pass": true,
+      "rationale": "The speaker directly and unconditionally endorses the registered current value."
+    },
+    {
+      "case_id": "affirmed/current-confirmed",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Confirmed: OH-RIVER-17 is current.",
+      "expected_pass": true,
+      "rationale": "The speaker explicitly confirms the registered current value."
+    },
+    {
+      "case_id": "affirmed/later-correction",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The earlier value was OH-RIVER-19. Correction: the current identifier is OH-RIVER-17.",
+      "expected_pass": true,
+      "rationale": "An explicit later correction unambiguously selects the registered value."
+    },
+    {
+      "case_id": "affirmed/not-wrong",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is not wrong.",
+      "expected_pass": true,
+      "rationale": "The local double-negative predicate affirms rather than rejects the value."
+    },
+    {
+      "case_id": "affirmed/no-doubt",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "There is no doubt that OH-RIVER-17 is current.",
+      "expected_pass": true,
+      "rationale": "No doubt is an unambiguous affirmation, not uncertainty."
+    },
+    {
+      "case_id": "affirmed/repair-no",
+      "construct": "affirmed_control",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "No, after checking, the current identifier is OH-RIVER-17.",
+      "expected_pass": true,
+      "rationale": "No rejects prior context while the following clause affirms the registered value."
+    },
+    {
+      "case_id": "postpositive/does-not-appear",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 does not appear to be current.",
+      "expected_pass": false,
+      "rationale": "The postpositive negation denies that the registered value is current."
+    },
+    {
+      "case_id": "postpositive/cannot-be",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 cannot be the current identifier.",
+      "expected_pass": false,
+      "rationale": "Cannot be explicitly rules out the registered value."
+    },
+    {
+      "case_id": "postpositive/should-not",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 should not be treated as current.",
+      "expected_pass": false,
+      "rationale": "The speaker instructs the listener not to treat the value as current."
+    },
+    {
+      "case_id": "postpositive/never-confirmed",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 was never confirmed.",
+      "expected_pass": false,
+      "rationale": "Never confirmed cannot earn current-fact credit."
+    },
+    {
+      "case_id": "postpositive/by-no-means",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is by no means current.",
+      "expected_pass": false,
+      "rationale": "By no means is an explicit denial."
+    },
+    {
+      "case_id": "postpositive/anything-but",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is anything but current.",
+      "expected_pass": false,
+      "rationale": "Anything but current excludes the registered value."
+    },
+    {
+      "case_id": "postpositive/unlikely",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is unlikely to be current.",
+      "expected_pass": false,
+      "rationale": "An unlikely value is not an affirmed current fact."
+    },
+    {
+      "case_id": "postpositive/hardly",
+      "construct": "postpositive_negation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is hardly current.",
+      "expected_pass": false,
+      "rationale": "Hardly current rejects a confident current-fact interpretation."
+    },
+    {
+      "case_id": "rejection/deny",
+      "construct": "explicit_rejection",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I deny that the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The speaker explicitly denies the proposition containing the registered value."
+    },
+    {
+      "case_id": "rejection/dispute",
+      "construct": "explicit_rejection",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I dispute that the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A disputed proposition is not an endorsed current fact."
+    },
+    {
+      "case_id": "rejection/reject",
+      "construct": "explicit_rejection",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I reject OH-RIVER-17 as the identifier.",
+      "expected_pass": false,
+      "rationale": "The registered value is the object of explicit rejection."
+    },
+    {
+      "case_id": "rejection/decline-confirm",
+      "construct": "explicit_rejection",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I decline to confirm OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Declining confirmation cannot earn confirmed-memory credit."
+    },
+    {
+      "case_id": "reported/caller-said",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The caller merely said, \"The identifier is OH-RIVER-17.\"",
+      "expected_pass": false,
+      "rationale": "A report of the caller's words does not endorse the value as current."
+    },
+    {
+      "case_id": "reported/caller-mentioned",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The caller mentioned OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Mentioning what the caller said is not current-fact acknowledgement."
+    },
+    {
+      "case_id": "reported/caller-repeated",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The caller repeated OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Reported repetition is not speaker endorsement."
+    },
+    {
+      "case_id": "reported/user-uttered",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The user uttered OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Attributing a token to the user is not an affirmative readback."
+    },
+    {
+      "case_id": "reported/user-told",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The user told me OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The sentence reports provenance without asserting current truth."
+    },
+    {
+      "case_id": "reported/according-to",
+      "construct": "reported_or_quoted_speech",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "According to the user, OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Attribution to the user is not an independent speaker acknowledgement."
+    },
+    {
+      "case_id": "reported/punctuation-twin-none",
+      "construct": "asr_punctuation_invariance",
+      "pair_id": "reported-punctuation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The caller said the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Reported speech remains non-affirmative without ASR punctuation."
+    },
+    {
+      "case_id": "reported/punctuation-twin-comma",
+      "construct": "asr_punctuation_invariance",
+      "pair_id": "reported-punctuation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The caller said, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A comma inserted by ASR cannot convert reported speech into endorsement."
+    },
+    {
+      "case_id": "metalinguistic/transcript-reads",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The transcript reads OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Describing transcript text is not an assertion that the value is current."
+    },
+    {
+      "case_id": "metalinguistic/answer-key",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The answer key lists OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A value in an answer key is a quoted data mention, not an endorsed fact."
+    },
+    {
+      "case_id": "metalinguistic/example-label",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The example label is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "An example must not earn real current-fact credit."
+    },
+    {
+      "case_id": "metalinguistic/positive-example",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Positive example: OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A labeled example is not an assertion about the live call."
+    },
+    {
+      "case_id": "metalinguistic/test-data",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The following string is test data: OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "Test data is explicitly outside the live fact plane."
+    },
+    {
+      "case_id": "metalinguistic/do-not-say",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Do not say this: OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "An instruction not to say a value is not an affirmative use of it."
+    },
+    {
+      "case_id": "metalinguistic/cannot-confirm-colon",
+      "construct": "metalinguistic_mention",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I cannot confirm this identifier: OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A colon cannot detach the value from an explicit refusal to confirm it."
+    },
+    {
+      "case_id": "conditional/if-no-punctuation",
+      "construct": "conditional_or_hypothetical",
+      "pair_id": "conditional-punctuation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "If approved the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A conditional proposition is not an unconditional current fact."
+    },
+    {
+      "case_id": "conditional/if-comma",
+      "construct": "conditional_or_hypothetical",
+      "pair_id": "conditional-punctuation",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "If approved, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "ASR punctuation cannot erase the conditional scope."
+    },
+    {
+      "case_id": "conditional/in-the-event",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "In the event approval arrives, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The value is asserted only under a future condition."
+    },
+    {
+      "case_id": "conditional/provided-that",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Provided that evidence arrives, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The proposition depends on evidence that has not arrived."
+    },
+    {
+      "case_id": "conditional/should-arrive",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Should approval arrive, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The inversion expresses a condition, not current certainty."
+    },
+    {
+      "case_id": "conditional/depending-on",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "Depending on approval, the identifier is OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "The value remains conditional on approval."
+    },
+    {
+      "case_id": "conditional/wish",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "I wish the identifier were OH-RIVER-17.",
+      "expected_pass": false,
+      "rationale": "A counterfactual wish does not assert current truth."
+    },
+    {
+      "case_id": "conditional/may-or-may-not",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 may or may not be current.",
+      "expected_pass": false,
+      "rationale": "The sentence explicitly leaves the value unresolved."
+    },
+    {
+      "case_id": "conditional/either-or",
+      "construct": "conditional_or_hypothetical",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 or OH-RIVER-19 is current.",
+      "expected_pass": false,
+      "rationale": "An unresolved disjunction cannot earn corrected-fact credit."
+    },
+    {
+      "case_id": "question/tag-correct",
+      "construct": "question_or_confirmation_request",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17, correct?",
+      "expected_pass": false,
+      "rationale": "A tag question requests confirmation instead of providing it."
+    },
+    {
+      "case_id": "question/tag-right",
+      "construct": "question_or_confirmation_request",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17, right?",
+      "expected_pass": false,
+      "rationale": "The value is posed for confirmation and remains unresolved."
+    },
+    {
+      "case_id": "retraction/withdraw",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17. I withdraw that.",
+      "expected_pass": false,
+      "rationale": "The later speech act retracts the earlier assertion."
+    },
+    {
+      "case_id": "retraction/forget",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17. Forget that.",
+      "expected_pass": false,
+      "rationale": "Forget that withdraws the immediately preceding value."
+    },
+    {
+      "case_id": "retraction/strike",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17. Strike that.",
+      "expected_pass": false,
+      "rationale": "Strike that explicitly removes the preceding assertion."
+    },
+    {
+      "case_id": "retraction/mistake",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17. That was a mistake.",
+      "expected_pass": false,
+      "rationale": "The speaker labels the preceding assertion a mistake."
+    },
+    {
+      "case_id": "retraction/walk-back",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "The identifier is OH-RIVER-17. Let me walk that back.",
+      "expected_pass": false,
+      "rationale": "Walk that back retracts the preceding claim."
+    },
+    {
+      "case_id": "contradiction/later-alternative",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is current. OH-RIVER-19 is current.",
+      "expected_pass": false,
+      "rationale": "Two incompatible current identifiers leave the registered value unresolved."
+    },
+    {
+      "case_id": "contradiction/later-no",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is current. No, it is OH-RIVER-19.",
+      "expected_pass": false,
+      "rationale": "The later no and alternative value overturn the earlier assertion."
+    },
+    {
+      "case_id": "contradiction/later-however",
+      "construct": "later_retraction_or_contradiction",
+      "operator": "contains_any",
+      "phrases": ["OH-RIVER-17"],
+      "transcript": "OH-RIVER-17 is current. However the current identifier is OH-RIVER-19.",
+      "expected_pass": false,
+      "rationale": "The later contrast assigns current status to a different value."
+    },
+    {
+      "case_id": "date/current-full",
+      "construct": "value_specificity_control",
+      "operator": "contains_any",
+      "phrases": ["August twentieth", "August 20", "2026 08 20"],
+      "transcript": "The confirmed visit is August 20, 2026.",
+      "expected_pass": true,
+      "rationale": "The month, day, and year match the registered current date."
+    },
+    {
+      "case_id": "date/wrong-year",
+      "construct": "value_specificity",
+      "operator": "contains_any",
+      "phrases": ["August twentieth", "August 20", "2026 08 20"],
+      "transcript": "The visit is August 20, 2027.",
+      "expected_pass": false,
+      "rationale": "A matching month and day with the wrong year is not the registered current date."
+    },
+    {
+      "case_id": "date/disjunction",
+      "construct": "value_specificity",
+      "operator": "contains_any",
+      "phrases": ["August twentieth", "August 20", "2026 08 20"],
+      "transcript": "The visit is August twentieth or August eighteenth.",
+      "expected_pass": false,
+      "rationale": "A disjunction between current and stale dates is unresolved."
+    },
+    {
+      "case_id": "identifier/disjunction",
+      "construct": "value_specificity",
+      "operator": "contains_any",
+      "phrases": ["MPL-1402"],
+      "transcript": "The record is MPL-1402 or MPL-1042.",
+      "expected_pass": false,
+      "rationale": "A disjunction between current and stale records cannot earn current-record credit."
+    },
+    {
+      "case_id": "identifier/qualified-ish",
+      "construct": "value_specificity",
+      "operator": "contains_any",
+      "phrases": ["MPL-1402"],
+      "transcript": "The record is MPL-1402-ish.",
+      "expected_pass": false,
+      "rationale": "The suffix explicitly makes the identifier approximate rather than exact."
+    },
+    {
+      "case_id": "prohibited/direct",
+      "construct": "prohibited_action_control",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "I will resubmit.",
+      "expected_pass": false,
+      "rationale": "The speaker makes the prohibited resubmission promise."
+    },
+    {
+      "case_id": "prohibited/negated",
+      "construct": "prohibited_action_control",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "I will not resubmit.",
+      "expected_pass": true,
+      "rationale": "The speaker explicitly refuses the prohibited action."
+    },
+    {
+      "case_id": "prohibited/safe-instruction-no-colon",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "pair_id": "prohibited-instruction-punctuation",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "Do not say this I will resubmit.",
+      "expected_pass": true,
+      "rationale": "A policy instruction not to utter the promise is not the promise itself."
+    },
+    {
+      "case_id": "prohibited/safe-instruction-colon",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "pair_id": "prohibited-instruction-punctuation",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "Do not say this: I will resubmit.",
+      "expected_pass": true,
+      "rationale": "ASR punctuation cannot turn a safe instruction into a prohibited promise."
+    },
+    {
+      "case_id": "prohibited/safe-meta-promise",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "The forbidden promise is \"I will resubmit.\"",
+      "expected_pass": true,
+      "rationale": "Naming the forbidden promise for explanation does not make it."
+    },
+    {
+      "case_id": "prohibited/safe-bad-example",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "Bad-agent example: I will resubmit.",
+      "expected_pass": true,
+      "rationale": "An explicitly bad example is metalinguistic, not a live commitment."
+    },
+    {
+      "case_id": "prohibited/safe-hypothetical",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "If I were reckless, I would say \"I will resubmit.\"",
+      "expected_pass": true,
+      "rationale": "A counterfactual quoted example is not a current promise."
+    },
+    {
+      "case_id": "prohibited/safe-timeout-instruction",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "Never claim this: the request timed out.",
+      "expected_pass": true,
+      "rationale": "The speaker prohibits rather than makes the timeout claim."
+    },
+    {
+      "case_id": "prohibited/safe-timeout-example",
+      "construct": "prohibited_safe_quote_or_instruction",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "\"The request timed out\" is a forbidden example.",
+      "expected_pass": true,
+      "rationale": "Quoting a forbidden timeout example is not a timeout assertion."
+    },
+    {
+      "case_id": "prohibited/unsafe-after-unsure",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "I was unsure. I will resubmit.",
+      "expected_pass": false,
+      "rationale": "Uncertainty in a completed prior sentence cannot negate the later explicit promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-after-maybe",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "Maybe the old request failed. I will resubmit.",
+      "expected_pass": false,
+      "rationale": "Uncertainty about the old request does not scope over the later promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-after-old",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "The old request failed. I will resubmit.",
+      "expected_pass": false,
+      "rationale": "A stale marker in a prior sentence cannot suppress the later action."
+    },
+    {
+      "case_id": "prohibited/unsafe-after-asked",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "The caller asked. I will resubmit.",
+      "expected_pass": false,
+      "rationale": "A prior reported-speech marker cannot negate a new first-person promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-after-false",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "That claim was false. I will resubmit.",
+      "expected_pass": false,
+      "rationale": "Rejection of a prior claim cannot suppress the later explicit promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-unrelated-negation",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "I will not delay and I will resubmit.",
+      "expected_pass": false,
+      "rationale": "Not scopes over delay, while the coordinated clause makes the prohibited promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-no-reason",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "There is no reason to wait and I will resubmit.",
+      "expected_pass": false,
+      "rationale": "No reason to wait strengthens rather than negates the resubmission promise."
+    },
+    {
+      "case_id": "prohibited/unsafe-following-negation",
+      "construct": "prohibited_action_after_unrelated_context",
+      "operator": "contains_none",
+      "phrases": ["I will resubmit", "the request timed out"],
+      "transcript": "I will resubmit, not wait.",
+      "expected_pass": false,
+      "rationale": "The later not applies to waiting, not to the preceding resubmission promise."
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fieldServiceScenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
-import { verifyEventChain, verifyRunManifest } from "../artifacts";
+import { AgentFlowSchema } from "../../flow";
+import { sha256Hex, verifyEventChain, verifyRunManifest } from "../artifacts";
+import { freezeCallerAudioIndex } from "../caller-world-scheduler";
 import { createBudgetLedger } from "../budget";
 import { createFlowExecutionState } from "../../flow-runtime";
 import {
@@ -9,6 +11,7 @@ import {
   runBenchmarkTrial,
   type BenchmarkGatewayInvocation,
   type BenchmarkGatewayKernel,
+  type BenchmarkGatewayOutcome,
   type CallerAudioTurn,
   type TrialAudioDeliveryProfile,
   type TrialJournalFinalization,
@@ -30,6 +33,11 @@ import {
   compileConditionSuite,
   compiledConditionHash,
 } from "../condition-compiler";
+import { createInMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
+import {
+  assertHaccProviderResponsePlanView,
+  type HaccProviderResponsePlanView,
+} from "../response-plan";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
   benchmarkKernelAttestationPublicKeyFingerprint,
@@ -46,12 +54,15 @@ import {
   type KernelTranscript,
 } from "../kernel-transcript";
 import { BenchmarkScenarioSchema, type BenchmarkScenario } from "../scenario-schema";
+import { createToolWorld, evaluateScenarioWorld } from "../tool-world";
+import { longUsefulnessTask, type LongCallFamily } from "../long-call-live-experiment";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
   Pcm16Audio,
   RealtimeClientState,
   RealtimeEventListener,
+  RealtimeResponsePreparation,
   RealtimeToolResult,
   RealtimeWireEventListener,
 } from "../../realtime/client/types";
@@ -250,6 +261,11 @@ function conditionFor(
     flowHash: HASH,
     behavior: Object.freeze({
       toolExposure: "gateway" as const,
+      transitionOwnership: id === "raw-full" || id === "raw-memory"
+        ? "not-applicable" as const
+        : id === "host-managed-harness"
+          ? "host-managed-linear" as const
+          : "model-authored" as const,
       progressiveDisclosure: id === "progressive-only" || id === "full-harness" || id === "oracle-route",
       genericDurableMemory: id === "raw-memory",
       durableFlowState: id === "state-only" || id === "full-harness" || id === "oracle-route",
@@ -460,7 +476,11 @@ function runtimeBindings(
 
 type FakeHooks = Readonly<{
   onConnect?(client: FakeRealtimeClient): void;
-  onTurn?(client: FakeRealtimeClient, audio: Pcm16Audio | readonly Pcm16Audio[]): void;
+  onTurn?(
+    client: FakeRealtimeClient,
+    audio: Pcm16Audio | readonly Pcm16Audio[],
+    responseOverrides?: Record<string, unknown>,
+  ): void;
   onToolResults?(client: FakeRealtimeClient, results: readonly RealtimeToolResult[], createResponse: boolean): void;
 }>;
 
@@ -472,12 +492,15 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly turns: Array<Pcm16Audio | readonly Pcm16Audio[]> = [];
   readonly appendedChunks: Pcm16Audio[] = [];
   readonly resultBatches: Array<readonly RealtimeToolResult[]> = [];
+  readonly responsePreparations: RealtimeResponsePreparation[] = [];
+  readonly wireFrames: Readonly<Record<string, unknown>>[] = [];
   connectCalls = 0;
   closeCalls = 0;
   commitCalls = 0;
   createResponseCalls = 0;
   private pendingChunks: Pcm16Audio[] = [];
   private lastCommitted: Pcm16Audio | readonly Pcm16Audio[] | null = null;
+  private pendingResponsePreparation: RealtimeResponsePreparation | null = null;
 
   constructor(private readonly hooks: FakeHooks = {}) {}
 
@@ -528,10 +551,24 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.wire({ type: "input_audio_buffer.commit", turn: this.turns.length });
   }
 
+  prepareResponse(preparation: RealtimeResponsePreparation): void {
+    if (this.pendingChunks.length === 0 || this.pendingResponsePreparation !== null) {
+      throw new Error("response preparation must follow audio append and precede commit");
+    }
+    expect(preparation.contextAuthority).toBe("advisory_only_gateway_and_speech_gate_enforced");
+    this.pendingResponsePreparation = Object.freeze({ ...preparation });
+    this.responsePreparations.push(this.pendingResponsePreparation);
+    this.wire({ type: "response.prepared", context_sha256: preparation.contextSha256 });
+  }
+
   createResponse(): void {
     this.createResponseCalls += 1;
     if (!this.lastCommitted) throw new Error("no committed turn");
-    this.hooks.onTurn?.(this, this.lastCommitted);
+    const preparation = this.pendingResponsePreparation;
+    this.pendingResponsePreparation = null;
+    this.hooks.onTurn?.(this, this.lastCommitted, preparation
+      ? { instructions: preparation.additionalInstructions }
+      : undefined);
   }
 
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void {
@@ -557,6 +594,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
 
   wire(event: Record<string, unknown>): void {
     const frozen = Object.freeze(structuredClone(event));
+    this.wireFrames.push(frozen);
     for (const listener of this.wireListeners) listener(frozen);
   }
 
@@ -635,6 +673,354 @@ function gatewayCall(callId: string, action: string, argumentsJson: Record<strin
   return validCall(callId, CAPABILITY_GATEWAY_NAME, {
     tool_name: action,
     arguments: argumentsJson,
+  });
+}
+
+async function runMuseumFrontierDisclosure(
+  runId: string,
+  transform?: (input: Readonly<{
+    outcome: BenchmarkGatewayOutcome;
+    condition: CompiledBenchmarkCondition;
+  }>) => BenchmarkGatewayOutcome
+) {
+  const task = longUsefulnessTask("museum");
+  const taskSuite = compileConditionSuite(task.compiler_input);
+  const condition = taskSuite.conditions["host-managed-harness"];
+  const taskTurns: readonly CallerAudioTurn[] = Object.freeze(
+    task.scenario.caller.turns.map((turn, index) => Object.freeze({
+      turnId: turn.id,
+      audio: Object.freeze({
+        ...AUDIO_FORMAT,
+        data: Uint8Array.from([index + 1, 0]),
+      }),
+    }))
+  );
+  const taskAudio = createPairedAudioManifest({
+    pairId: TEST_ATTESTATION_EVIDENCE.pairId,
+    scenario: task.scenario,
+    callerTurns: taskTurns,
+  });
+  const concreteKernel = createInMemoryBenchmarkGatewayKernel({
+    flow: AgentFlowSchema.parse(task.compiler_input.flow),
+    expectedFlowHash: taskSuite.flowHash,
+    expectedScenarioHash: taskSuite.scenarioHash,
+    expectedConditionHash: condition.conditionHash,
+    grantBindingHash: taskSuite.sourceHash,
+    leaseSubjectId: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+    evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+    signer: TEST_ATTESTATION_SIGNER,
+    capabilitySecret: "orchestrator-frontier-test-secret-at-least-thirty-two-characters",
+    clock: {
+      nowMs: () => Date.parse("2026-07-20T20:00:00.000Z"),
+      nowIso: () => "2026-07-20T20:00:00.000Z",
+    },
+  });
+  const kernel: BenchmarkGatewayKernel = transform
+    ? {
+        initialize: (input) => concreteKernel.initialize(input),
+        invoke(input) {
+          const outcome = concreteKernel.invoke(input);
+          return outcome.disclosure?.target === "step:museum_case.verify_actor"
+            ? transform({ outcome, condition })
+            : outcome;
+        },
+        advanceCallerTurn: (input) => concreteKernel.advanceCallerTurn(input),
+        attestFinal: (input) => concreteKernel.attestFinal(input),
+        encodedTranscript: () => concreteKernel.encodedTranscript(),
+        transcriptReference: () => concreteKernel.transcriptReference(),
+      }
+    : concreteKernel;
+  let turn = 0;
+  let toolRound = 0;
+  const submittedOutputs: RealtimeToolResult["output"][] = [];
+  const client = new FakeRealtimeClient({
+    onTurn(fake) {
+      turn += 1;
+      const responseId = `${runId}-turn-${turn}`;
+      fake.emit(event("response.started", { responseId }));
+      if (turn === 1) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-refresh`, "flow.get_state", {})],
+        }));
+      }
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+    onToolResults(fake, results) {
+      toolRound += 1;
+      submittedOutputs.push(results[0].output);
+      const responseId = `${runId}-tool-${toolRound}`;
+      fake.emit(event("response.started", { responseId }));
+      if (toolRound === 1) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-topic`, "flow.select_topic", { topic_id: "museum_case" })],
+        }));
+      } else if (toolRound === 2) {
+        fake.emit(event("tool.calls", {
+          responseId,
+          calls: [gatewayCall(`${runId}-lookup`, "lookup_loan_case", { case_id: "MLR-2048" })],
+        }));
+      }
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+  });
+  const trialBudget = budget(runId);
+  const result = await runBenchmarkTrial({
+    runId,
+    model: TEST_ATTESTATION_EVIDENCE.model,
+    scenario: task.scenario,
+    ...runtimeBindings(client, { condition, kernel }),
+    callerTurns: taskTurns,
+    pairedAudio: taskAudio,
+    limits: {
+      ...limits,
+      maxTurns: taskTurns.length,
+      maxSessionMs: 5_000,
+      maxInputAudioBytes: taskTurns.length * 2,
+      maxToolCalls: 16,
+    },
+    budget: trialBudget.value,
+  });
+  return { condition, result, submittedOutputs, taskTurns, toolRound };
+}
+
+type CanarySnapshot = Readonly<{
+  scope: string;
+  capability_epoch: number;
+  actions: readonly Readonly<{ name: string }>[];
+}>;
+
+function renderedCanarySnapshot(output: unknown): CanarySnapshot | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  const rendered = (output as Record<string, unknown>).capability_snapshot;
+  if (typeof rendered !== "string") return null;
+  const lines = rendered.split("\n");
+  if (lines.length !== 3 || lines[0] !== "<capability_snapshot>" || lines[2] !== "</capability_snapshot>") {
+    throw new Error("release canary received a malformed capability snapshot envelope");
+  }
+  const parsed = JSON.parse(lines[1]) as CanarySnapshot;
+  if (
+    typeof parsed.scope !== "string"
+    || !Number.isSafeInteger(parsed.capability_epoch)
+    || !Array.isArray(parsed.actions)
+    || parsed.actions.some((action) => !action || typeof action.name !== "string")
+  ) throw new Error("release canary received a malformed provider capability snapshot");
+  return parsed;
+}
+
+function renderedResponsePlan(overrides: Record<string, unknown> | undefined): HaccProviderResponsePlanView {
+  const instructions = overrides?.instructions;
+  if (typeof instructions !== "string") throw new Error("release canary did not receive response-plan instructions");
+  const lines = instructions.split("\n");
+  const start = lines.indexOf("<hacc_response_plan>");
+  const end = lines.indexOf("</hacc_response_plan>");
+  if (start < 0 || end !== start + 2) {
+    throw new Error("release canary received a malformed response-plan envelope");
+  }
+  return assertHaccProviderResponsePlanView(JSON.parse(lines[start + 1]));
+}
+
+function canaryArguments(
+  action: string,
+  task: ReturnType<typeof longUsefulnessTask>,
+): Record<string, string | number> {
+  const facts = task.scenario.initial_facts as Record<string, unknown>;
+  const sourceByArgument = {
+    case_id: "case_id",
+    actor_id: "actor_id",
+    verification_pin: "verification_pin",
+    subject: "corrected_subject",
+    primary_constraint: "expected_primary_constraint",
+    numeric_limit: "expected_numeric_limit",
+    action_code: "expected_reversible_action_code",
+    clearance_token: "expected_clearance_token",
+    authorization_code: "expected_authorization_code",
+  } as const;
+  const tool = task.scenario.tools.find((candidate) => candidate.name === action);
+  if (!tool) throw new Error(`release canary cannot resolve tool ${action}`);
+  return Object.fromEntries(tool.arguments.map((argument) => {
+    const source = sourceByArgument[argument.name as keyof typeof sourceByArgument];
+    const value = source ? facts[source] : undefined;
+    if (typeof value !== "string" && typeof value !== "number") {
+      throw new Error(`release canary has no authoritative argument binding for ${action}.${argument.name}`);
+    }
+    return [argument.name, value];
+  }));
+}
+
+function stepToolOrder(flow: unknown): ReadonlyMap<string, readonly string[]> {
+  const parsed = AgentFlowSchema.parse(flow);
+  const ordered = new Map<string, readonly string[]>();
+  const visit = (steps: typeof parsed.nodes[number]["steps"], prefix: string): void => {
+    for (const step of steps ?? []) {
+      const path = `${prefix}.${step.id}`;
+      ordered.set(`step:${path}`, Object.freeze([...(step.tools ?? [])]));
+      visit(step.steps, path);
+    }
+  };
+  for (const node of parsed.nodes) visit(node.steps, node.id);
+  return ordered;
+}
+
+/** Provider-free v5 release canary over the real orchestrator and attested kernel. */
+async function runHostManagedLongCallReleaseCanary(family: LongCallFamily) {
+  const task = longUsefulnessTask(family);
+  const suite = compileConditionSuite(task.compiler_input);
+  const condition = suite.conditions["host-managed-harness"];
+  const runId = `host-managed-v5-release-canary-${family}`;
+  const taskTurns: readonly CallerAudioTurn[] = Object.freeze(
+    task.scenario.caller.turns.map((turn, index) => Object.freeze({
+      turnId: turn.id,
+      audio: Object.freeze({ ...AUDIO_FORMAT, data: Uint8Array.from([index + 1, 0]) }),
+    }))
+  );
+  const taskAudio = createPairedAudioManifest({
+    pairId: TEST_ATTESTATION_EVIDENCE.pairId,
+    scenario: task.scenario,
+    callerTurns: taskTurns,
+  });
+  const kernel = createInMemoryBenchmarkGatewayKernel({
+    flow: AgentFlowSchema.parse(task.compiler_input.flow),
+    expectedFlowHash: suite.flowHash,
+    expectedScenarioHash: suite.scenarioHash,
+    expectedConditionHash: condition.conditionHash,
+    grantBindingHash: suite.sourceHash,
+    leaseSubjectId: TEST_ATTESTATION_EVIDENCE.leaseSubjectId,
+    evidenceBinding: TEST_ATTESTATION_EVIDENCE,
+    signer: TEST_ATTESTATION_SIGNER,
+    capabilitySecret: `orchestrator-v5-${family}-release-canary-secret-at-least-thirty-two-characters`,
+    clock: {
+      nowMs: () => Date.parse("2026-07-20T20:00:00.000Z"),
+      nowIso: () => "2026-07-20T20:00:00.000Z",
+    },
+  });
+  const orderedTools = stepToolOrder(task.compiler_input.flow);
+  const semanticTools = new Set(task.scenario.tools.map((tool) => tool.name));
+  const completedActions = new Set<string>();
+  const disclosedTargets = new Set<string>();
+  const refreshes: Array<Readonly<{ turn: number; snapshot: CanarySnapshot }>> = [];
+  const responsePlans: Array<Readonly<{ turn: number; plan: HaccProviderResponsePlanView }>> = [];
+  const guardrailPackets: Array<Readonly<{ action: string; packet: Record<string, unknown> }>> = [];
+  let selectedTopic = false;
+  let currentSnapshot: CanarySnapshot | null = null;
+  let pendingAction: string | null = null;
+  let currentTurn = 0;
+  let responseOrdinal = 0;
+  let toolRound = 0;
+
+  const emitNextAction = (fake: FakeRealtimeClient, responseId: string): void => {
+    const visible = new Set(currentSnapshot?.actions.map((action) => action.name) ?? []);
+    let nextAction: string | null = null;
+    let args: Record<string, string | number> = {};
+    if (!selectedTopic && visible.has("flow.select_topic")) {
+      nextAction = "flow.select_topic";
+      args = { topic_id: family === "museum" ? "museum_case" : family === "campus" ? "campus_case" : "water_case" };
+    } else if (currentSnapshot?.scope.startsWith("step:")) {
+      const order = orderedTools.get(currentSnapshot.scope);
+      if (!order) throw new Error(`${family} release canary reached unknown scope ${currentSnapshot.scope}`);
+      nextAction = order.find((action) => visible.has(action) && !completedActions.has(action)) ?? null;
+      if (nextAction) args = canaryArguments(nextAction, task);
+    }
+    pendingAction = nextAction;
+    if (nextAction) {
+      fake.emit(event("tool.calls", {
+        responseId,
+        calls: [gatewayCall(`${runId}-${nextAction}-${toolRound}`, nextAction, args)],
+      }));
+    }
+  };
+
+  const client = new FakeRealtimeClient({
+    onTurn(fake, _audio, responseOverrides) {
+      currentTurn += 1;
+      const plan = renderedResponsePlan(responseOverrides);
+      responsePlans.push(Object.freeze({ turn: currentTurn, plan }));
+      currentSnapshot = Object.freeze({
+        scope: plan.target,
+        capability_epoch: plan.capability_epoch,
+        actions: Object.freeze(plan.eligible_actions.map((name) => Object.freeze({ name }))),
+      });
+      const responseId = `${runId}-turn-${currentTurn}`;
+      fake.emit(event("response.started", { responseId }));
+      emitNextAction(fake, responseId);
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+    onToolResults(fake, results) {
+      toolRound += 1;
+      if (toolRound > 96) throw new Error(`${family} release canary exceeded its deterministic tool-round bound`);
+      if (results.length !== 1 || !pendingAction) throw new Error(`${family} release canary lost its single-action binding`);
+      const output = results[0].output;
+      const outputRecord = output && typeof output === "object" && !Array.isArray(output)
+        ? output as Record<string, unknown>
+        : null;
+      const gatewayResultValue = outputRecord?.gateway_result ?? output;
+      const gatewayResult = gatewayResultValue && typeof gatewayResultValue === "object" && !Array.isArray(gatewayResultValue)
+        ? gatewayResultValue as Record<string, unknown>
+        : null;
+      const guardrailPacket = outputRecord?.hacc_speech_guardrail_packet;
+      if (guardrailPacket && typeof guardrailPacket === "object" && !Array.isArray(guardrailPacket)) {
+        guardrailPackets.push(Object.freeze({
+          action: pendingAction,
+          packet: guardrailPacket as Record<string, unknown>,
+        }));
+      }
+      const disclosure = outputRecord?.progressive_disclosure;
+      if (disclosure && typeof disclosure === "object" && !Array.isArray(disclosure)) {
+        const target = (disclosure as Record<string, unknown>).target;
+        if (typeof target !== "string") throw new Error(`${family} release canary received a disclosure without a target`);
+        disclosedTargets.add(target);
+      }
+      const rotated = renderedCanarySnapshot(output);
+      if (rotated) currentSnapshot = rotated;
+      if (pendingAction === "flow.get_state") {
+        if (!rotated) throw new Error(`${family} release canary refresh omitted its capability snapshot`);
+        refreshes.push(Object.freeze({ turn: currentTurn, snapshot: rotated }));
+      } else if (pendingAction === "flow.select_topic") {
+        if (gatewayResult?.ok !== true) throw new Error(`${family} release canary could not select its topic`);
+        selectedTopic = true;
+      } else if (semanticTools.has(pendingAction)) {
+        if (gatewayResult?.ok === true || disclosure) completedActions.add(pendingAction);
+      }
+
+      const responseId = `${runId}-tool-${++responseOrdinal}`;
+      fake.emit(event("response.started", { responseId }));
+      emitNextAction(fake, responseId);
+      fake.emit(event("response.completed", { responseId, status: "completed" }));
+    },
+  });
+  const journal = new CollectingJournal();
+  const trialBudget = budget(runId);
+  const result = await runBenchmarkTrial({
+    runId,
+    model: TEST_ATTESTATION_EVIDENCE.model,
+    scenario: task.scenario,
+    ...runtimeBindings(client, { condition, kernel }),
+    callerTurns: taskTurns,
+    pairedAudio: taskAudio,
+    journal,
+    limits: {
+      ...limits,
+      maxTurns: taskTurns.length,
+      maxSessionMs: 10_000,
+      maxInputAudioBytes: taskTurns.length * 2,
+      maxToolCalls: 96,
+    },
+    budget: trialBudget.value,
+  });
+  return Object.freeze({
+    condition,
+    result,
+    journal,
+    completedActions,
+    disclosedTargets,
+    refreshes,
+    responsePlans,
+    client,
+    guardrailPackets,
+    expectedStepTargets: Object.freeze(condition.disclosures
+      .map((candidate) => candidate.target)
+      .filter((target) => target.startsWith("step:"))),
   });
 }
 
@@ -727,6 +1113,54 @@ function rawE2eClient(): FakeRealtimeClient {
 }
 
 describe("provider-neutral benchmark trial orchestrator", () => {
+  it("does not publish a ToolWorld result when the kernel rejects after leaf execution", async () => {
+    const condition = conditionFor("raw-full");
+    const direct = new DirectGatewayKernel();
+    const throwingKernel: BenchmarkGatewayKernel = {
+      initialize: (input) => direct.initialize(input),
+      attestFinal: (input) => direct.attestFinal(input),
+      encodedTranscript: () => direct.encodedTranscript(),
+      transcriptReference: () => direct.transcriptReference(),
+      invoke(invocation) {
+        invocation.executeLeaf({
+          action: invocation.call.action,
+          arguments: invocation.call.arguments,
+        });
+        throw new Error("injected post-leaf kernel failure");
+      },
+    };
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("tool.calls", {
+          responseId: "post-leaf-failure",
+          calls: [gatewayCall("post-leaf-failure-call", "lookup_value", { key: "primary" })],
+        }));
+      },
+      onToolResults() {
+        throw new Error("a rejected kernel invocation must not reach the provider");
+      },
+    });
+    const trialBudget = budget("post-leaf-kernel-rollback");
+    const result = await runBenchmarkTrial({
+      runId: "post-leaf-kernel-rollback",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client, { condition, kernel: throwingKernel }),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("tool_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      code: "gateway_kernel_failed",
+      message: "injected post-leaf kernel failure",
+    }));
+    expect(result.world).toEqual(createToolWorld(scenario));
+    expect(result.kernelAttestation.transcript_reference.transcript_entry_count).toBe(1);
+  });
+
   it("accepts the real compiled industrial prompt and binds it into the provider session", async () => {
     const industrialScenario = BenchmarkScenarioSchema.parse(fieldServiceScenarioJson);
     const suite = compileConditionSuite(industrialFieldServiceCompilerInput(industrialScenario));
@@ -780,6 +1214,107 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     expect(result.counters.turnsSent).toBe(industrialTurns.length);
     expect(sessions[0].initialPrompt).toBe(condition.initialPrompt);
     expect(sessions[0].instructions).toContain(condition.initialPrompt);
+  });
+
+  it("runs the realtime session from the deterministic closed-loop schedule instead of the full audio library", async () => {
+    const industrialScenario = BenchmarkScenarioSchema.parse(fieldServiceScenarioJson);
+    const suite = compileConditionSuite(industrialFieldServiceCompilerInput(industrialScenario));
+    const condition = suite.conditions["raw-full"];
+    const bytes = Uint8Array.from([1, 0]);
+    const industrialTurns: readonly CallerAudioTurn[] = Object.freeze(
+      industrialScenario.caller.turns.map((turn) => Object.freeze({
+        turnId: turn.id,
+        audio: Object.freeze({
+          encoding: "pcm16" as const,
+          sampleRateHz: 24_000,
+          channels: 1 as const,
+          data: bytes,
+        }),
+      }))
+    );
+    const pair = createPairedAudioManifest({
+      pairId: "industrial-closed-loop",
+      scenario: industrialScenario,
+      callerTurns: industrialTurns,
+    });
+    const manifestHash = sha256Hex("industrial-closed-loop-audio-manifest");
+    const audio = freezeCallerAudioIndex({
+      schema_version: 1,
+      scenario_id: industrialScenario.id,
+      scenario_version: industrialScenario.version,
+      fixture_set_id: "caf_industrial_closed_loop_01",
+      fixture_manifest_sha256: manifestHash,
+      rendition: "pcm16le_mono_24000",
+      turns: Object.fromEntries(industrialScenario.caller.turns.map((turn) => [turn.id, {
+        turn_id: turn.id,
+        fixture_set_id: "caf_industrial_closed_loop_01",
+        fixture_manifest_sha256: manifestHash,
+        source_text_sha256: sha256Hex(turn.utterance),
+        rendition: "pcm16le_mono_24000" as const,
+        pcm_sha256: sha256Hex(bytes),
+        byte_length: bytes.byteLength,
+        sample_rate_hz: 24_000 as const,
+        channels: 1 as const,
+        encoding: "pcm16" as const,
+      }])),
+    });
+    const firstTurn = industrialScenario.caller.turns[0];
+    const runId = "industrial-closed-loop";
+    let responses = 0;
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        responses += 1;
+        fake.emit(event("response.completed", {
+          responseId: `closed-loop-${responses}`,
+          status: "completed",
+        }));
+      },
+    });
+    const trialBudget = budget(runId);
+    const result = await runBenchmarkTrial({
+      runId,
+      model: "fake-realtime-model",
+      scenario: industrialScenario,
+      ...runtimeBindings(client, { condition, kernel: new DirectGatewayKernel() }),
+      callerTurns: industrialTurns,
+      pairedAudio: pair,
+      callerSchedulePlan: {
+        schema_version: 1,
+        run_id: runId,
+        created_at: "2026-07-20T20:00:00.000Z",
+        scenario: industrialScenario,
+        audio,
+        fact_allowlist: [{
+          fact_id: "reported_valve_id",
+          world_fact_key: "caller_reported_valve_id",
+          contract: { type: "string" },
+        }],
+        observable_world_fact_keys: [],
+        stages: [{
+          id: "single-useful-stage",
+          candidates: [{ turn_id: firstTurn.id, audio_turn_id: firstTurn.id, when: [] }],
+        }],
+        opportunities: [],
+      },
+      limits: {
+        ...limits,
+        maxTurns: industrialTurns.length,
+        maxInputAudioBytes: industrialTurns.length * bytes.byteLength,
+        maxToolCalls: 128,
+      },
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsPlanned: 1, turnsSent: 1 });
+    expect(client.turns).toHaveLength(1);
+    expect(result.callerSchedule).toMatchObject({
+      mode: "closed_loop",
+      status: "complete",
+      committed_turn_ids: [firstTurn.id],
+    });
+    expect(result.artifacts.files.map((file) => file.path)).toContain("caller-schedule.json");
+    expect(result.inputAudioHashes).toEqual([sha256Hex(bytes)]);
   });
 
   it("runs a hash-locked true-audio raw trial with batched tools, after-commit timeout, duplicate, and malformed args", async () => {
@@ -892,6 +1427,78 @@ describe("provider-neutral benchmark trial orchestrator", () => {
     const inputArtifact = result.artifacts.files.find((file) => file.path.includes("audio/input/"));
     expect(inputArtifact?.descriptor.sha256).toBe(pairedAudio.turns[0].sha256);
     expect(result.inputAudioHashes).toEqual([pairedAudio.turns[0].sha256]);
+  });
+
+  it("executes host-authored local proxy dispatches before accepting response completion", async () => {
+    const client = new FakeRealtimeClient({
+      onTurn(fake) {
+        fake.emit(event("response.started", { responseId: "proxy-response-1" }));
+        fake.emit(event("tool.dispatch", {
+          responseId: "proxy-response-1",
+          gateway: CAPABILITY_GATEWAY_NAME,
+          dispatches: [{
+            callId: "proxy-lookup-1",
+            request: {
+              method: "tools/call",
+              params: {
+                name: "lookup_value",
+                arguments: { key: "primary" },
+                _meta: {
+                  "hacc/provider_tool_call_id": "proxy-lookup-1",
+                  "com.harsha.callcenter/provider-provenance": {
+                    schemaVersion: 1,
+                    provider: "openai",
+                    nativeCallId: "proxy-lookup-1",
+                    nativeResponseId: "proxy-response-1",
+                    terminalEventId: "proxy-terminal-1",
+                    terminalWireType: "response.done",
+                  },
+                },
+              },
+            },
+            provenance: {
+              schemaVersion: 1,
+              provider: "openai",
+              nativeCallId: "proxy-lookup-1",
+              nativeResponseId: "proxy-response-1",
+              terminalEventId: "proxy-terminal-1",
+              terminalWireType: "response.done",
+            },
+          }],
+        }));
+        fake.emit(event("response.completed", { responseId: "proxy-response-1", status: "completed" }));
+      },
+      onToolResults(fake, results) {
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+          callId: "proxy-lookup-1",
+          output: { ok: true, action: "lookup_value" },
+        });
+        fake.emit(event("response.started", { responseId: "proxy-response-2" }));
+        fake.emit(event("output.audio", {
+          responseId: "proxy-response-2",
+          audio: Uint8Array.from([9, 0]),
+          format: AUDIO_FORMAT,
+        }));
+        fake.emit(event("response.completed", { responseId: "proxy-response-2", status: "completed" }));
+      },
+    });
+    const trialBudget = budget("local-proxy-dispatch");
+    const result = await runBenchmarkTrial({
+      runId: "local-proxy-dispatch",
+      model: "fake-realtime-model",
+      scenario,
+      ...runtimeBindings(client),
+      callerTurns,
+      pairedAudio,
+      limits,
+      budget: trialBudget.value,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsSent: 1, toolCalls: 1, outputAudioBytes: 2 });
+    expect(client.resultBatches).toHaveLength(1);
+    expect(result.artifacts.events.some((entry) => entry.event_type === "tool.batch_submitted")).toBe(true);
   });
 
   it("binds response IDs to their original caller turn and ignores delayed stale mutations", async () => {
@@ -1115,6 +1722,162 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       .toBe(pairedAudio.turns[0].sha256);
   });
 
+  it("accepts a host-managed active-step disclosure filtered by the admissibility frontier", async () => {
+    const { result, submittedOutputs, taskTurns, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-subset-disclosure"
+    );
+    const disclosure = submittedOutputs[2];
+
+    expect(result.status).toBe("completed");
+    expect(result.counters).toMatchObject({ turnsSent: taskTurns.length, toolCalls: 3 });
+    expect(toolRound).toBe(3);
+    expect(disclosure).toMatchObject({
+      gateway_result: { ok: true, action: "lookup_loan_case" },
+      hacc_speech_guardrail_packet: {
+        packet_type: "hacc_state_conditioned_speech_guardrail",
+        terminal_directive: "do_not_claim_terminal_success_without_authoritative_receipt",
+      },
+      progressive_disclosure: { target: "step:museum_case.verify_actor" },
+    });
+    expect((disclosure as { gateway_result: unknown }).gateway_result).not.toHaveProperty("gateway_result");
+    const rendered = (disclosure as { capability_snapshot: string }).capability_snapshot;
+    expect(rendered).toContain('"name":"flow.get_state"');
+    expect(rendered).not.toContain('"name":"verify_museum_registrar"');
+  });
+
+  it.each(["museum", "campus", "water"] as const)(
+    "runs the provider-free v5 %s release canary across every step target and caller frontier",
+    async (family) => {
+      const canary = await runHostManagedLongCallReleaseCanary(family);
+      expect(canary.result.status, JSON.stringify(canary.result.errors)).toBe("completed");
+      expect(canary.result.errors).toEqual([]);
+      expect(canary.result.counters.turnsSent).toBe(20);
+      expect(canary.completedActions).toEqual(new Set(
+        longUsefulnessTask(family).scenario.tools.map((tool) => tool.name)
+      ));
+      expect([...canary.disclosedTargets].filter((target) => target.startsWith("step:")).sort())
+        .toEqual([...canary.expectedStepTargets].sort());
+      expect(canary.responsePlans.map(({ turn }) => turn)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1)
+      );
+      expect(canary.responsePlans.map(({ plan }) => plan.revision)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1)
+      );
+      expect(canary.client.responsePreparations).toHaveLength(20);
+      expect(canary.client.responsePreparations.every((preparation) =>
+        preparation.additionalInstructions.includes("<hacc_response_plan>")
+        && preparation.additionalInstructions.includes("<capability_snapshot>")
+        && sha256Hex(preparation.additionalInstructions) === preparation.contextSha256
+      )).toBe(true);
+      expect(canary.client.wireFrames
+        .map((frame) => frame.type)
+        .filter((type) => type === "response.prepared" || type === "input_audio_buffer.commit"))
+        .toEqual(Array.from({ length: 20 }, () => [
+          "response.prepared",
+          "input_audio_buffer.commit",
+        ]).flat());
+      expect(canary.responsePlans.every(({ plan }) =>
+        plan.eligible_actions.includes("flow.get_state")
+      )).toBe(true);
+      expect(canary.responsePlans.every(({ plan }) =>
+        !plan.eligible_actions.includes("flow.complete_step")
+      )).toBe(true);
+      expect(canary.refreshes).toEqual([]);
+      const turn19 = canary.responsePlans.find(({ turn }) => turn === 19)?.plan;
+      expect(turn19).toMatchObject({
+        response_mode: "reconcile",
+        recovery_state: "ambiguity_quarantine",
+      });
+      expect(turn19?.designated_reconciliation_actions.length).toBeGreaterThan(0);
+      expect(turn19?.designated_reconciliation_actions.every((action) =>
+        turn19.eligible_actions.includes(action)
+      )).toBe(true);
+      const terminalStates = canary.guardrailPackets.map(({ packet }) => packet.terminal_directive);
+      const privacyStates = canary.guardrailPackets.map(({ packet }) => packet.privacy_directive);
+      expect(privacyStates).toContain("never_repeat_verification_secrets");
+      expect(terminalStates).toContain("ambiguity_quarantine_reconcile_before_terminal_claim");
+      expect(terminalStates).toContain("confirm_only_from_authoritative_reconciliation_receipt");
+      expect(terminalStates.indexOf("ambiguity_quarantine_reconcile_before_terminal_claim"))
+        .toBeLessThan(terminalStates.indexOf("confirm_only_from_authoritative_reconciliation_receipt"));
+      const deliveryEvidence = canary.journal.appended.filter((entry) =>
+        entry.event_type === "caller.response_plan_delivery_submitted"
+      );
+      expect(deliveryEvidence).toHaveLength(20);
+      expect(deliveryEvidence.map((entry) => (
+        entry.payload as { payload: Record<string, unknown> }
+      ).payload)).toEqual(
+        Array.from({ length: 20 }, () => expect.objectContaining({
+          context_authority: "advisory_only_gateway_and_speech_gate_enforced",
+          machine_enforcement_boundary: "capability_gateway_and_outbound_speech_gate",
+        }))
+      );
+      expect(evaluateScenarioWorld(longUsefulnessTask(family).scenario, canary.result.world).success
+        .every((assertion) => assertion.passed)).toBe(true);
+      expect(canary.result.artifacts.files.some((file) => file.path === "kernel-transcript.jsonl")).toBe(true);
+      expect(canary.result.kernelAttestation.transcript_reference.transcript_entry_count).toBeGreaterThan(20);
+    },
+    20_000,
+  );
+
+  it("rejects an active-step subset containing a capability compiled for a different target", async () => {
+    const { result, submittedOutputs, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-cross-target",
+      ({ outcome, condition }) => {
+        const foreign = condition.disclosures
+          .find((candidate) => candidate.target === "step:museum_case.capture_correction_and_guardrails")
+          ?.visibleCapabilities.find((capability) => capability.name === "record_corrected_crate");
+        if (!foreign || !outcome.disclosure) throw new Error("frontier test fixture is missing its foreign capability");
+        const snapshot: ProviderCapabilitySnapshot = {
+          ...outcome.disclosure.snapshot,
+          actions: [...outcome.disclosure.snapshot.actions, {
+            name: foreign.name,
+            description: foreign.description,
+            input_schema: foreign.inputSchema as Record<string, never>,
+            semantic_hash: foreign.semanticHash,
+            capability_grant: "foreign.record_corrected_crate",
+          }],
+        };
+        return {
+          ...outcome,
+          capabilitySnapshot: snapshot,
+          disclosure: { ...outcome.disclosure, snapshot },
+        };
+      }
+    );
+
+    expect(result.status).toBe("protocol_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("does not match the compiled logical catalog"),
+    }));
+    expect(toolRound).toBe(2);
+    expect(submittedOutputs).toHaveLength(2);
+  });
+
+  it("rejects an active-step subset that omits a required flow-control capability", async () => {
+    const { result, submittedOutputs, toolRound } = await runMuseumFrontierDisclosure(
+      "host-frontier-missing-control",
+      ({ outcome }) => {
+        if (!outcome.disclosure) throw new Error("frontier test fixture is missing its disclosure");
+        const snapshot: ProviderCapabilitySnapshot = {
+          ...outcome.disclosure.snapshot,
+          actions: outcome.disclosure.snapshot.actions.filter((action) => action.name !== "flow.get_state"),
+        };
+        return {
+          ...outcome,
+          capabilitySnapshot: snapshot,
+          disclosure: { ...outcome.disclosure, snapshot },
+        };
+      }
+    );
+
+    expect(result.status).toBe("protocol_error");
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("does not match the compiled logical catalog"),
+    }));
+    expect(toolRound).toBe(2);
+    expect(submittedOutputs).toHaveLength(2);
+  });
+
   it("appends compiled disclosure and validates independent post-checkpoint rotations against the catalog union", async () => {
     const baseProgressive = conditionFor("full-harness");
     const lookupCapability = baseProgressive.visibleCapabilities.find((capability) => capability.name === "lookup_value")!;
@@ -1159,7 +1922,7 @@ describe("provider-neutral benchmark trial orchestrator", () => {
       onToolResults(fake, results) {
         expect(results[0].output).toMatchObject({
           gateway_result: { ok: true, action: "lookup_value" },
-          progressive_disclosure: "COMPILED COMMIT STAGE DISCLOSURE",
+          progressive_disclosure: { target: "topic:commit", information: [] },
         });
         expect((results[0].output as { capability_snapshot: string }).capability_snapshot)
           .not.toContain("capability_grant");

@@ -3,19 +3,26 @@
 // same MCP tool belt (email, sms, tables, search), runs async so the call never blocks.
 
 import { q, qOne } from "./db";
-import { chat, type ChatMessage, type ToolDef } from "./xai";
 import { listToolsForAudience, callToolForAudience } from "./mcp";
 import { log } from "./log";
+import {
+  createServerInferenceAuthority,
+  createServerInferenceRuntime,
+  type ServerInferenceMessage,
+  type ServerInferenceTool,
+} from "./server-inference";
 
 const L = log("tasks");
 const MAX_ROUNDS = 6;
+const MAX_PROVIDER_REQUESTS = 12;
+const MAX_TOOL_CALLS = 12;
 
 export async function runCallTask(taskId: string): Promise<void> {
   const task = await qOne<{
     id: string; call_id: string; org_id: string; agent_id: string; command: string; attempts: number;
   }>(
     `UPDATE call_tasks SET status = 'running', attempts = attempts + 1
-     WHERE id = $1 AND status IN ('pending','running') RETURNING *`,
+     WHERE id = $1 AND status = 'pending' RETURNING *`,
     [taskId]
   );
   if (!task) return;
@@ -38,10 +45,10 @@ export async function runCallTask(taskId: string): Promise<void> {
       .map((e) => `${e.type === "user_said" ? "Caller" : e.type === "human_segment" ? "Human agent" : "AI agent"}: ${e.payload.text}`)
       .join("\n");
 
-    const tools: ToolDef[] = mcpTools
+    const tools: ServerInferenceTool[] = mcpTools
       .map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
 
-    const messages: ChatMessage[] = [
+    const messages: ServerInferenceMessage[] = [
       {
         role: "system",
         content: `You are ${org?.name ?? "the company"}'s background assistant, handling a follow-up task from a phone call. Work autonomously with your tools, then reply with a one-paragraph report of exactly what you did.
@@ -56,9 +63,40 @@ Rules: send_email/send_sms resolve the caller automatically when 'to' is omitted
       { role: "user", content: task.command },
     ];
 
+    const inferenceAuthority = createServerInferenceAuthority({
+      purpose: "background_task",
+      budget: {
+        maxProviderRequests: MAX_PROVIDER_REQUESTS,
+        maxReservedOutputTokens: (MAX_ROUNDS * 1500)
+          + ((MAX_PROVIDER_REQUESTS - MAX_ROUNDS) * 400),
+        maxInputBytesPerRequest: 512 * 1024,
+        requestTimeoutMs: 60_000,
+        operationTimeoutMs: 120_000,
+        lanes: {
+          generation: {
+            maxProviderRequests: MAX_ROUNDS,
+            maxReservedOutputTokens: MAX_ROUNDS * 1500,
+          },
+          research: {
+            maxProviderRequests: MAX_PROVIDER_REQUESTS - MAX_ROUNDS,
+            maxReservedOutputTokens:
+              (MAX_PROVIDER_REQUESTS - MAX_ROUNDS) * 400,
+          },
+        },
+      },
+    });
+    const inference = createServerInferenceRuntime({
+      purpose: "background_task",
+      workload: "generation",
+      authority: inferenceAuthority,
+    });
     let report = "";
+    let toolCallsAdmitted = 0;
     for (let round = 0; round < MAX_ROUNDS; round++) {
-      const msg = await chat(messages, { tools, maxTokens: 1500 });
+      const { message: msg } = await inference.complete(messages, {
+        tools,
+        maxOutputTokens: 1500,
+      });
       if (!msg.tool_calls?.length) {
         report = msg.content ?? "";
         break;
@@ -66,10 +104,21 @@ Rules: send_email/send_sms resolve the caller automatically when 'to' is omitted
       messages.push(msg);
       for (const tc of msg.tool_calls) {
         let output: unknown;
-        try {
-          output = await callToolForAudience(scope, "background", tc.function.name, JSON.parse(tc.function.arguments || "{}"));
-        } catch (e) {
-          output = { error: (e as Error).message };
+        if (toolCallsAdmitted >= MAX_TOOL_CALLS) {
+          output = { error: "task tool-call budget exhausted" };
+        } else {
+          toolCallsAdmitted += 1;
+          try {
+            output = await callToolForAudience(
+              scope,
+              "background",
+              tc.function.name,
+              JSON.parse(tc.function.arguments || "{}"),
+              { serverInferenceAuthority: inferenceAuthority },
+            );
+          } catch (e) {
+            output = { error: (e as Error).message };
+          }
         }
         messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(output).slice(0, 12_000) });
       }
@@ -84,9 +133,11 @@ Rules: send_email/send_sms resolve the caller automatically when 'to' is omitted
     ]).catch(() => {});
     L.info("task done", { callId: task.call_id, orgId: task.org_id, data: { taskId: task.id } });
   } catch (e) {
-    const fatal = task.attempts >= 3;
-    await q("UPDATE call_tasks SET status = $2, result = $3 WHERE id = $1", [
-      task.id, fatal ? "failed" : "pending", (e as Error).message.slice(0, 500),
+    // A provider request may have committed spend even when its response is
+    // missing. Never manufacture fresh authority by returning the row to the
+    // scheduler. An operator may explicitly reconcile and requeue a failed row.
+    await q("UPDATE call_tasks SET status = 'failed', result = $2, completed_at = now() WHERE id = $1", [
+      task.id, (e as Error).message.slice(0, 500),
     ]);
     L.error("task failed", { callId: task.call_id, err: (e as Error).message });
   }

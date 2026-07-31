@@ -299,6 +299,19 @@ function updateCapabilities(
   return updateState(state, { ...patch, capabilityEpoch: state.capabilityEpoch + 1 }, now);
 }
 
+/**
+ * Rotate grants when a host-owned policy changes the visible catalog without
+ * changing the active Flow node. The normal transition helpers already call
+ * updateCapabilities; this explicit boundary is for independently attested
+ * policy changes such as turn-aware action readiness.
+ */
+export function rotateFlowCapabilityEpoch(
+  state: FlowExecutionState,
+  now?: string
+): FlowExecutionState {
+  return updateCapabilities(state, {}, now);
+}
+
 function canonicalJson(value: unknown, seen = new Set<object>()): string {
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
@@ -980,6 +993,133 @@ function valuesEqual(left: unknown, right: unknown): boolean {
   }
 }
 
+export type FlowReceiptResultArgumentEvidence = Readonly<{
+  argument: string;
+  source_kind: "receipt_result";
+  source_tool: string;
+  source_step: string;
+  source_receipt_id: string;
+  source_receipt_result_hash: string;
+  result_path: string;
+}>;
+
+export type FlowAmbiguityInvocationArgumentEvidence = Readonly<{
+  argument: string;
+  source_kind: "ambiguity_original_invocation_id";
+  source_tool: string;
+  source_step: string;
+  source_receipt_id: string;
+  source_receipt_invocation_id_sha256: string;
+  quarantine_evidence_head_sha256: string;
+}>;
+
+export type FlowBoundArgumentEvidence =
+  | FlowReceiptResultArgumentEvidence
+  | FlowAmbiguityInvocationArgumentEvidence;
+
+export type FlowBoundArgumentResolution = Readonly<{
+  modelArguments: Readonly<Record<string, unknown>>;
+  effectiveArguments: Readonly<Record<string, unknown>>;
+  evidence: readonly FlowBoundArgumentEvidence[];
+}>;
+
+/**
+ * Resolves operator-declared arguments from authoritative receipts before action admission.
+ * The model cannot name a receipt, provide the bound value, or reach across step attempts.
+ */
+export function resolveFlowBoundArguments(
+  flow: AgentFlow,
+  state: FlowExecutionState,
+  tool: string,
+  modelArguments: Readonly<Record<string, unknown>>
+): FlowBoundArgumentResolution | RuntimeError {
+  const stepPath = state.currentStep;
+  if (!stepPath || state.completedSteps.includes(stepPath)) {
+    return { error: "receipt-bound arguments require an active step", code: "bound_argument_no_active_step" };
+  }
+  const ref = findStep(flow, stepPath);
+  if (!ref) return { error: `unknown active step "${stepPath}"`, code: "unknown_step" };
+  const policy = ref.step.action_policies?.find((candidate) => candidate.tool === tool);
+  const bindings = policy?.bound_arguments ?? [];
+  if (bindings.length === 0) {
+    return {
+      modelArguments: structuredClone(modelArguments),
+      effectiveArguments: structuredClone(modelArguments),
+      evidence: Object.freeze([]),
+    };
+  }
+
+  const effectiveArguments = structuredClone(modelArguments) as Record<string, unknown>;
+  const evidence: FlowBoundArgumentEvidence[] = [];
+  const seen = new Set<string>();
+  for (const binding of bindings) {
+    if (seen.has(binding.argument)) {
+      return { error: `bound argument "${binding.argument}" is declared more than once`, code: "invalid_bound_argument_declaration" };
+    }
+    seen.add(binding.argument);
+    if (Object.prototype.hasOwnProperty.call(modelArguments, binding.argument)) {
+      return {
+        error: `model must not supply host-bound argument "${binding.argument}"`,
+        code: "bound_argument_override",
+      };
+    }
+    const candidates = state.actionReceipts.filter((receipt) =>
+      receipt.status === "succeeded"
+      && receipt.step === stepPath
+      && receipt.capabilityEpoch === state.capabilityEpoch
+      && receipt.tool === binding.source.tool
+    );
+    if (candidates.length > 1) {
+      return {
+        error: `bound argument "${binding.argument}" has ambiguous current-step receipt authority`,
+        code: "ambiguous_bound_argument_source",
+      };
+    }
+    const receipt = candidates[0];
+    if (!receipt) {
+      const stale = state.actionReceipts.some((candidate) =>
+        candidate.status === "succeeded" && candidate.tool === binding.source.tool
+      );
+      return stale
+        ? { error: `bound argument "${binding.argument}" has only stale receipt authority`, code: "stale_bound_argument_source" }
+        : { error: `bound argument "${binding.argument}" is missing successful receipt authority`, code: "missing_bound_argument_source" };
+    }
+    if (receipt.result === undefined || !receipt.resultHash || receipt.resultCompacted) {
+      return {
+        error: `bound argument "${binding.argument}" source receipt has no live authoritative result`,
+        code: "missing_bound_argument_source",
+      };
+    }
+    const resolved = resultAtPath(receipt.result, binding.source.result_path);
+    if (!resolved.found) {
+      return {
+        error: `bound argument "${binding.argument}" source path is absent or unsafe`,
+        code: "missing_bound_argument_output",
+      };
+    }
+    try {
+      hashFlowValue(resolved.value);
+    } catch {
+      return { error: `bound argument "${binding.argument}" is not finite JSON`, code: "invalid_bound_argument_output" };
+    }
+    effectiveArguments[binding.argument] = structuredClone(resolved.value);
+    evidence.push(Object.freeze({
+      argument: binding.argument,
+      source_kind: "receipt_result",
+      source_tool: binding.source.tool,
+      source_step: stepPath,
+      source_receipt_id: receipt.id,
+      source_receipt_result_hash: receipt.resultHash,
+      result_path: binding.source.result_path,
+    }));
+  }
+  return Object.freeze({
+    modelArguments: Object.freeze(structuredClone(modelArguments)),
+    effectiveArguments: Object.freeze(effectiveArguments),
+    evidence: Object.freeze(evidence),
+  });
+}
+
 function verifiedOutputs(
   state: FlowExecutionState,
   ref: StepRef,
@@ -1039,10 +1179,10 @@ export function completeFlowStep(
   now?: string
 ): { state: FlowExecutionState; nextSteps: string[] } | RuntimeError {
   const path = args.path ?? state.currentStep;
-  if (path && state.completedSteps.includes(path)) {
+  if (!path || path !== state.currentStep) return { error: "complete_step must target the active step", code: "not_active_step" };
+  if (state.completedSteps.includes(path)) {
     return { state, nextSteps: allowedStepPaths(flow, state) };
   }
-  if (!path || path !== state.currentStep) return { error: "complete_step must target the active step", code: "not_active_step" };
   const ref = findStep(flow, path);
   if (!ref) return { error: `unknown step "${path}"`, code: "unknown_step" };
   const pending = state.actionReceipts.filter((receipt) =>

@@ -190,6 +190,7 @@ function conditionFor(): CompiledBenchmarkCondition {
     flowHash: HASH,
     behavior: Object.freeze({
       toolExposure: "gateway" as const,
+      transitionOwnership: "not-applicable" as const,
       progressiveDisclosure: false,
       genericDurableMemory: false,
       durableFlowState: false,

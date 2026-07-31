@@ -1,5 +1,9 @@
 import { createHmac } from "node:crypto";
-import type { FlowExecutionState } from "../flow-runtime";
+import {
+  hashFlowValue,
+  type FlowBoundArgumentEvidence,
+  type FlowExecutionState,
+} from "../flow-runtime";
 import {
   canonicalJson,
   immutableJson,
@@ -40,6 +44,15 @@ import {
   parseBoundToolWorldState,
   type ToolWorldState,
 } from "./tool-world";
+import {
+  computeAdmissibilityFrontier,
+  verifyAdmissibilityFrontierEvidence,
+  type AdmissibilityFrontierEvidence,
+} from "./admissibility-frontier";
+import {
+  assertHaccResponsePlan,
+  type HaccResponsePlan,
+} from "./response-plan";
 
 const TRANSCRIPT_TYPE = "benchmark_kernel_replay_public_commitment" as const;
 const RESTRICTED_TRANSCRIPT_TYPE = "benchmark_kernel_replay_restricted_exact" as const;
@@ -188,7 +201,15 @@ export type KernelTranscriptInvokePayload = Readonly<{
     turn: number;
     condition_hash: string;
     action: string;
+    /** Provider-authored arguments, retained for provider-call replay identity. */
     arguments: JsonValue;
+    /** Exact arguments admitted by the host after receipt binding; null when binding rejected. */
+    effective_arguments: JsonValue | null;
+    argument_binding: Readonly<{
+      status: "not_applicable" | "resolved" | "rejected";
+      failure_code: string | null;
+      sources: readonly FlowBoundArgumentEvidence[];
+    }>;
     capability_grant_commitment: string;
   }>;
   pre_state: KernelTranscriptStateHeads;
@@ -225,7 +246,28 @@ export type KernelTranscriptInvokeEntry = KernelTranscriptEntryBase & Readonly<{
   payload: KernelTranscriptInvokePayload;
 }>;
 
-export type KernelTranscriptEntry = KernelTranscriptInitializeEntry | KernelTranscriptInvokeEntry;
+export type KernelTranscriptCallerTurnPayload = Readonly<{
+  input: Readonly<{
+    turn: number;
+    turn_id: string;
+    condition_hash: string;
+  }>;
+  pre_state: KernelTranscriptStateHeads;
+  post_state: KernelTranscriptStateHeads;
+  frontier_evidence: AdmissibilityFrontierEvidence;
+  capability_snapshot: KernelTranscriptCapabilitySnapshot;
+  response_plan: HaccResponsePlan;
+}>;
+
+export type KernelTranscriptCallerTurnEntry = KernelTranscriptEntryBase & Readonly<{
+  operation: "caller_turn";
+  payload: KernelTranscriptCallerTurnPayload;
+}>;
+
+export type KernelTranscriptEntry =
+  | KernelTranscriptInitializeEntry
+  | KernelTranscriptInvokeEntry
+  | KernelTranscriptCallerTurnEntry;
 
 export type KernelTranscript = Readonly<{
   /** Restricted in-memory recorder. Serialize only through encodeKernelTranscript(). */
@@ -256,7 +298,7 @@ export type PublicKernelTranscriptEntry = Readonly<{
   transcript_type: typeof TRANSCRIPT_TYPE;
   run_id: string;
   sequence: number;
-  operation: "initialize" | "invoke";
+  operation: "initialize" | "invoke" | "caller_turn";
   payload: JsonValue;
   previous_entry_sha256: string | null;
   entry_sha256: string;
@@ -359,12 +401,37 @@ const INVOKE_PAYLOAD_KEYS = Object.freeze([
 ].sort());
 const INVOKE_INPUT_KEYS = Object.freeze([
   "action",
+  "argument_binding",
   "arguments",
   "capability_grant_commitment",
   "condition_hash",
+  "effective_arguments",
   "provider_call_id",
   "turn",
 ].sort());
+const ARGUMENT_BINDING_KEYS = Object.freeze(["failure_code", "sources", "status"].sort());
+const RECEIPT_RESULT_ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
+  "argument",
+  "result_path",
+  "source_kind",
+  "source_receipt_id",
+  "source_receipt_result_hash",
+  "source_step",
+  "source_tool",
+].sort());
+const AMBIGUITY_INVOCATION_ARGUMENT_BINDING_SOURCE_KEYS = Object.freeze([
+  "argument",
+  "quarantine_evidence_head_sha256",
+  "source_kind",
+  "source_receipt_id",
+  "source_receipt_invocation_id_sha256",
+  "source_step",
+  "source_tool",
+].sort());
+const CALLER_TURN_PAYLOAD_KEYS = Object.freeze([
+  "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state", "response_plan",
+].sort());
+const CALLER_TURN_INPUT_KEYS = Object.freeze(["condition_hash", "turn", "turn_id"].sort());
 const STATE_HEAD_KEYS = Object.freeze([
   "capability_head", "durable_memory_head", "flow_state_sha256", "world_head",
 ].sort());
@@ -985,6 +1052,16 @@ function publicInvokeEntry(
     "$provider_call.arguments",
     restricted.payload.input.arguments
   );
+  const effectiveArgumentsHmac = hmacCommitment(
+    secret,
+    SENSITIVE_VALUE_COMMITMENT_DOMAIN,
+    "$provider_call.effective_arguments",
+    restricted.payload.input.effective_arguments
+  );
+  const argumentBindingSha256 = domainHash(
+    "harshas-amazing-call-center/kernel-argument-binding/v1\n",
+    restricted.payload.input.argument_binding,
+  );
   const providerCallFingerprint = hmacCommitment(
     secret,
     SENSITIVE_VALUE_COMMITMENT_DOMAIN,
@@ -1008,6 +1085,8 @@ function publicInvokeEntry(
         condition_hash: restricted.payload.input.condition_hash,
         action: restricted.payload.input.action,
         arguments_hmac_sha256: argumentsHmac,
+        effective_arguments_hmac_sha256: effectiveArgumentsHmac,
+        argument_binding_sha256: argumentBindingSha256,
         capability_grant_commitment: restricted.payload.input.capability_grant_commitment,
         provider_call_fingerprint_hmac_sha256: providerCallFingerprint,
       },
@@ -1046,6 +1125,30 @@ function publicInvokeEntry(
   return Object.freeze({ entry, afterShadow, afterDurableMemory });
 }
 
+function publicCallerTurnEntry(
+  restricted: KernelTranscriptCallerTurnEntry,
+  shadow: JsonValue,
+  durableMemory: PublicKernelTranscriptDurableMemoryState | null,
+  previousPublicHash: string
+): PublicKernelTranscriptEntry {
+  return createPublicEntry({
+    schema_version: 1,
+    transcript_type: TRANSCRIPT_TYPE,
+    run_id: restricted.run_id,
+    sequence: restricted.sequence,
+    operation: "caller_turn",
+    payload: immutableJson({
+      input: restricted.payload.input,
+      pre_state: publicStateHeads(restricted.payload.pre_state, shadow, durableMemory),
+      post_state: publicStateHeads(restricted.payload.post_state, shadow, durableMemory),
+      frontier_evidence: restricted.payload.frontier_evidence,
+      capability_snapshot: publicSnapshot(restricted.payload.capability_snapshot),
+      response_plan: restricted.payload.response_plan,
+    }) as JsonValue,
+    previous_entry_sha256: previousPublicHash,
+  });
+}
+
 function flowStateHead(state: FlowExecutionState | null): string | null {
   return state === null ? null : domainHash(FLOW_STATE_DOMAIN, state);
 }
@@ -1080,6 +1183,7 @@ function validateCapabilityHead(
     target: input.target,
     catalogMode: input.catalog_mode,
     internalFlowScope: input.internal_flow_scope,
+    visibleCatalog: input.catalog,
   });
   if (canonicalJson(expected) !== canonicalJson(input)) {
     throw new Error("capability head differs from the compiled condition target");
@@ -1335,6 +1439,12 @@ export function appendKernelTranscriptInvocation(
     postFlowState: FlowExecutionState | null;
     preCapabilityHead: BenchmarkKernelCapabilityHead;
     postCapabilityHead: BenchmarkKernelCapabilityHead;
+    argumentBinding?: Readonly<{
+      status: "not_applicable" | "resolved" | "rejected";
+      effectiveArguments: Readonly<Record<string, JsonValue>> | null;
+      failureCode: string | null;
+      sources: readonly FlowBoundArgumentEvidence[];
+    }>;
     /** Private HMAC key. It is never persisted in the transcript. */
     sensitiveValueSecret: string;
     /** Exact snapshots captured before and after kernel execution. Required for durable-memory arms. */
@@ -1413,6 +1523,88 @@ export function appendKernelTranscriptInvocation(
     throw new Error("invocation pre-state does not continue the prior transcript state");
   }
   const outcome = sanitizeOutcome(input.outcome, input.sensitiveValueSecret);
+  const argumentBinding = input.argumentBinding ?? Object.freeze({
+    status: "not_applicable" as const,
+    effectiveArguments: input.invocation.call.arguments,
+    failureCode: null,
+    sources: Object.freeze([]),
+  });
+  if ((argumentBinding.status === "rejected") !== (argumentBinding.effectiveArguments === null)) {
+    throw new Error("effective arguments disagree with argument-binding status");
+  }
+  const parsedArgumentBinding = parseArgumentBinding({
+    status: argumentBinding.status,
+    failure_code: argumentBinding.failureCode,
+    sources: argumentBinding.sources,
+  }, "invocation argument_binding");
+  if (parsedArgumentBinding.status === "resolved") {
+    const replayed = input.outcome.result.ok && input.outcome.result.disposition === "replayed";
+    if (argumentBinding.effectiveArguments === null) throw new Error("resolved argument binding requires effective arguments");
+    const boundNames = new Set(parsedArgumentBinding.sources.map((source) => source.argument));
+    const expectedKeys = [...Object.keys(input.invocation.call.arguments), ...boundNames].sort();
+    const effectiveKeys = Object.keys(argumentBinding.effectiveArguments).sort();
+    if (canonicalJson(expectedKeys) !== canonicalJson(effectiveKeys)) {
+      throw new Error("effective argument keys differ from model arguments plus declared bindings");
+    }
+    for (const [key, value] of Object.entries(input.invocation.call.arguments)) {
+      if (canonicalJson(argumentBinding.effectiveArguments[key]) !== canonicalJson(value)) {
+        throw new Error(`effective arguments changed model-owned argument ${key}`);
+      }
+    }
+    for (const source of parsedArgumentBinding.sources) {
+      if (Object.prototype.hasOwnProperty.call(input.invocation.call.arguments, source.argument)) {
+        throw new Error(`model arguments override host-bound argument ${source.argument}`);
+      }
+      if (!Object.prototype.hasOwnProperty.call(argumentBinding.effectiveArguments, source.argument)) {
+        throw new Error(`effective arguments omit host-bound argument ${source.argument}`);
+      }
+      if (!replayed) {
+        if (!input.preFlowState?.currentStep) {
+          throw new Error("resolved argument binding requires an active pre-invocation Flow step");
+        }
+        const receipt = input.preFlowState.actionReceipts.find((candidate) => candidate.id === source.source_receipt_id);
+        if (source.source_kind === "receipt_result") {
+          const currentReceiptAuthority = receipt
+            && receipt.step === input.preFlowState.currentStep
+            && receipt.step === source.source_step
+            && receipt.tool === source.source_tool;
+          if (
+            !currentReceiptAuthority
+            || receipt.status !== "succeeded"
+            || receipt.capabilityEpoch !== input.preFlowState.capabilityEpoch
+            || receipt.resultHash !== source.source_receipt_result_hash
+          ) throw new Error(`bound argument ${source.argument} source receipt is not current successful Flow authority`);
+        } else if (
+          !receipt
+          || receipt.step !== source.source_step
+          || receipt.tool !== source.source_tool
+          || receipt.status !== "indeterminate"
+          || !receipt.invocationId
+          || hashFlowValue(receipt.invocationId) !== source.source_receipt_invocation_id_sha256
+        ) {
+          throw new Error(`bound argument ${source.argument} source receipt is not quarantined invocation authority`);
+        }
+      }
+    }
+    if (input.outcome.result.ok) {
+      const appendedReceipts = after.receipts.slice(before.receipts.length);
+      const executionReceipt = appendedReceipts.find((receipt) => receipt.tool === input.invocation.call.action);
+      if (
+        executionReceipt
+        && canonicalJson(executionReceipt.arguments) !== canonicalJson(argumentBinding.effectiveArguments)
+      ) throw new Error("effective arguments differ from the authoritative ToolWorld receipt");
+    }
+  } else if (
+    parsedArgumentBinding.status === "rejected"
+    && (input.outcome.result.ok || input.outcome.result.code !== parsedArgumentBinding.failure_code)
+  ) {
+    throw new Error("rejected argument binding differs from the authoritative gateway failure");
+  } else if (
+    parsedArgumentBinding.status === "not_applicable"
+    && canonicalJson(argumentBinding.effectiveArguments) !== canonicalJson(input.invocation.call.arguments)
+  ) {
+    throw new Error("unbound effective arguments differ from model arguments");
+  }
   if (outcome.capability_snapshot) {
     assertSnapshotMatchesHead(outcome.capability_snapshot, post.capability_head, "rotated capability snapshot");
   } else if (canonicalJson(pre.capability_head) !== canonicalJson(post.capability_head)) {
@@ -1440,6 +1632,10 @@ export function appendKernelTranscriptInvocation(
         condition_hash: input.invocation.condition.conditionHash,
         action: input.invocation.call.action,
         arguments: commitSensitiveTranscriptValues(input.invocation.call.arguments, input.sensitiveValueSecret),
+        effective_arguments: argumentBinding.effectiveArguments === null
+          ? null
+          : commitSensitiveTranscriptValues(argumentBinding.effectiveArguments, input.sensitiveValueSecret),
+        argument_binding: parsedArgumentBinding,
         capability_grant_commitment: kernelTranscriptGrantCommitment(input.invocation.call.capability_grant),
       },
       pre_state: pre,
@@ -1475,6 +1671,144 @@ export function appendKernelTranscriptInvocation(
     durableMemoryState: postDurableMemoryState,
     durableMemoryRevision: postDurableMemoryRevision,
     publicDurableMemoryState: publicAppend.afterDurableMemory,
+  }));
+  return next;
+}
+
+export function appendKernelTranscriptCallerTurn(
+  transcript: KernelTranscript,
+  input: Readonly<{
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+    preFlowState: FlowExecutionState | null;
+    postFlowState: FlowExecutionState | null;
+    preCapabilityHead: BenchmarkKernelCapabilityHead;
+    postCapabilityHead: BenchmarkKernelCapabilityHead;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    responsePlan: HaccResponsePlan;
+    durableMemoryState?: ReadonlyMap<string, JsonValue> | null;
+  }>
+): KernelTranscript {
+  const entries = transcript.entries;
+  const privateState = TRANSCRIPT_PRIVATE.get(transcript);
+  if (!privateState) throw new Error("kernel transcript recorder private state is unavailable");
+  const prior = entries.at(-1);
+  const initialize = entries[0];
+  if (!prior || initialize?.operation !== "initialize") throw new Error("kernel transcript has no initialization entry");
+  if (input.condition.conditionHash !== initialize.payload.input.condition.conditionHash) {
+    throw new Error("caller-turn condition differs from initialized transcript condition");
+  }
+  if (input.condition.behavior.transitionOwnership !== "host-managed-linear") {
+    throw new Error("caller-turn readiness entries require a host-managed condition");
+  }
+  assertPositiveInteger(input.turn, "caller-turn ordinal");
+  assertSafeId(input.turnId, "caller-turn ID");
+  const priorTurns = entries.filter((entry): entry is KernelTranscriptCallerTurnEntry =>
+    entry.operation === "caller_turn"
+  );
+  if (input.turn !== priorTurns.length + 1 || priorTurns.some((entry) => entry.payload.input.turn_id === input.turnId)) {
+    throw new Error("caller-turn transcript entries must be contiguous and unique");
+  }
+  const scenario = BenchmarkScenarioSchema.parse(input.scenario);
+  const world = parseBoundToolWorldState(scenario, input.world);
+  const durableMemory = canonicalDurableMemoryState(
+    input.durableMemoryState,
+    input.condition.behavior.genericDurableMemory,
+    "caller-turn durable memory"
+  );
+  if (canonicalJson(durableMemory) !== canonicalJson(privateState.durableMemoryState)) {
+    throw new Error("caller-turn durable memory differs from prior transcript state");
+  }
+  const pre = stateHeads({
+    condition: input.condition,
+    world,
+    flowState: input.preFlowState,
+    capabilityHead: input.preCapabilityHead,
+    durableMemoryState: durableMemory,
+    durableMemoryRevision: privateState.durableMemoryRevision,
+  });
+  const post = stateHeads({
+    condition: input.condition,
+    world,
+    flowState: input.postFlowState,
+    capabilityHead: input.postCapabilityHead,
+    durableMemoryState: durableMemory,
+    durableMemoryRevision: privateState.durableMemoryRevision,
+  });
+  if (canonicalJson(pre) !== canonicalJson(prior.payload.post_state)) {
+    throw new Error("caller-turn pre-state does not continue the prior transcript state");
+  }
+  const frontierMode = input.preCapabilityHead.target.startsWith("step:")
+    ? "target"
+    : input.preCapabilityHead.catalog_mode === "terminal"
+      ? "terminal"
+      : input.preCapabilityHead.catalog_mode === "post_step_transition"
+        ? "post_step_transition"
+        : "target";
+  const expectedFrontier = computeAdmissibilityFrontier({
+    condition: input.condition,
+    scenario,
+    world,
+    turn: input.turn,
+    target: input.preCapabilityHead.target,
+    catalogMode: frontierMode,
+  }).evidence;
+  if (canonicalJson(expectedFrontier) !== canonicalJson(input.frontierEvidence)) {
+    throw new Error("caller-turn admissibility evidence is not derived from authoritative state");
+  }
+  const snapshot = sanitizeSnapshot(input.capabilitySnapshot);
+  assertSnapshotMatchesHead(snapshot, post.capability_head, "caller-turn response-plan snapshot");
+  const responsePlan = assertHaccResponsePlan(input.responsePlan, {
+    revision: input.turn,
+    capabilityEpoch: snapshot.capability_epoch,
+    target: snapshot.scope,
+    eligibleActions: snapshot.actions.map((action) => action.name),
+    frontierEvidenceSha256: input.frontierEvidence.evidence_sha256,
+    previousPlanSha256: priorTurns.at(-1)?.payload.response_plan.plan_sha256 ?? null,
+  });
+  const entry = appendEntry<KernelTranscriptCallerTurnEntry>({
+    schema_version: 1,
+    transcript_type: RESTRICTED_TRANSCRIPT_TYPE,
+    run_id: initialize.run_id,
+    sequence: entries.length,
+    operation: "caller_turn",
+    payload: {
+      input: {
+        turn: input.turn,
+        turn_id: input.turnId,
+        condition_hash: input.condition.conditionHash,
+      },
+      pre_state: pre,
+      post_state: post,
+      frontier_evidence: input.frontierEvidence,
+      capability_snapshot: snapshot,
+      response_plan: responsePlan,
+    },
+    previous_entry_sha256: prior.entry_sha256,
+  });
+  const previousPublic = privateState.publicEntries.at(-1);
+  if (!previousPublic) throw new Error("kernel transcript public chain is unavailable");
+  const publicEntry = publicCallerTurnEntry(
+    entry,
+    privateState.publicWorldShadow,
+    privateState.publicDurableMemoryState,
+    previousPublic.entry_sha256
+  );
+  const publicByteLength = livePublicEntryBytes(
+    publicEntry,
+    privateState.limits,
+    privateState.publicByteLength,
+    entries.length + 1
+  );
+  const next = Object.freeze({ entries: Object.freeze([...entries, entry]) });
+  TRANSCRIPT_PRIVATE.set(next, Object.freeze({
+    ...privateState,
+    publicEntries: Object.freeze([...privateState.publicEntries, publicEntry]),
+    publicByteLength,
   }));
   return next;
 }
@@ -1580,7 +1914,12 @@ function parseCapabilityHead(input: unknown, label: string): BenchmarkKernelCapa
   assertNonNegativeInteger(input.epoch, `${label}.epoch`);
   assertNonNegativeInteger(input.action_count, `${label}.action_count`);
   if (typeof input.target !== "string" || !input.target) throw new Error(`${label}.target is invalid`);
-  if (input.catalog_mode !== "target" && input.catalog_mode !== "post_step_transition" && input.catalog_mode !== "terminal") {
+  if (
+    input.catalog_mode !== "target"
+    && input.catalog_mode !== "post_step_transition"
+    && input.catalog_mode !== "terminal"
+    && input.catalog_mode !== "refresh_required"
+  ) {
     throw new Error(`${label}.catalog_mode is invalid`);
   }
   if (typeof input.provider_grant_scope !== "string" || !input.provider_grant_scope) {
@@ -1681,6 +2020,69 @@ function parseStateHeads(input: unknown, label: string): KernelTranscriptStateHe
   });
 }
 
+function parseArgumentBinding(
+  input: unknown,
+  label: string,
+): KernelTranscriptInvokePayload["input"]["argument_binding"] {
+  exactKeys(input, ARGUMENT_BINDING_KEYS, label);
+  if (
+    input.status !== "not_applicable"
+    && input.status !== "resolved"
+    && input.status !== "rejected"
+  ) throw new Error(`${label}.status is invalid`);
+  if (input.failure_code !== null && (typeof input.failure_code !== "string" || !/^[a-z][a-z0-9_.-]{0,95}$/u.test(input.failure_code))) {
+    throw new Error(`${label}.failure_code is invalid`);
+  }
+  if (!Array.isArray(input.sources) || input.sources.length > 64) throw new Error(`${label}.sources is invalid`);
+  const sources = input.sources.map((source, index) => {
+    if (source === null || typeof source !== "object" || Array.isArray(source)) {
+      throw new Error(`${label}.sources[${index}] is invalid`);
+    }
+    const sourceKind = (source as Record<string, unknown>).source_kind;
+    exactKeys(
+      source,
+      sourceKind === "ambiguity_original_invocation_id"
+        ? AMBIGUITY_INVOCATION_ARGUMENT_BINDING_SOURCE_KEYS
+        : RECEIPT_RESULT_ARGUMENT_BINDING_SOURCE_KEYS,
+      `${label}.sources[${index}]`,
+    );
+    if (typeof source.argument !== "string" || !/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u.test(source.argument)) {
+      throw new Error(`${label}.sources[${index}].argument is invalid`);
+    }
+    if (source.source_kind !== "receipt_result" && source.source_kind !== "ambiguity_original_invocation_id") {
+      throw new Error(`${label}.sources[${index}].source_kind is invalid`);
+    }
+    for (const key of ["source_tool", "source_step", "source_receipt_id"] as const) {
+      if (typeof source[key] !== "string" || source[key].length < 1 || source[key].length > 512) {
+        throw new Error(`${label}.sources[${index}].${key} is invalid`);
+      }
+    }
+    if (source.source_kind === "receipt_result") {
+      if (typeof source.result_path !== "string" || source.result_path.length < 1 || source.result_path.length > 512) {
+        throw new Error(`${label}.sources[${index}].result_path is invalid`);
+      }
+      assertSha(source.source_receipt_result_hash, `${label}.sources[${index}].source_receipt_result_hash`);
+    } else {
+      assertSha(source.source_receipt_invocation_id_sha256, `${label}.sources[${index}].source_receipt_invocation_id_sha256`);
+      assertSha(source.quarantine_evidence_head_sha256, `${label}.sources[${index}].quarantine_evidence_head_sha256`);
+    }
+    return immutableJson(source) as unknown as FlowBoundArgumentEvidence;
+  });
+  if (new Set(sources.map((source) => source.argument)).size !== sources.length) {
+    throw new Error(`${label}.sources repeats a bound argument`);
+  }
+  if (
+    (input.status === "resolved") !== (sources.length > 0)
+    || (input.status === "rejected") !== (input.failure_code !== null)
+    || (input.status === "not_applicable" && input.failure_code !== null)
+  ) throw new Error(`${label} status, sources, and failure code disagree`);
+  return Object.freeze({
+    status: input.status,
+    failure_code: input.failure_code,
+    sources: Object.freeze(sources),
+  });
+}
+
 function parseSnapshot(input: unknown, label: string): KernelTranscriptCapabilitySnapshot {
   exactKeys(input, SNAPSHOT_KEYS, label);
   if (input.gateway_version !== 1) throw new Error(`${label}.gateway_version is invalid`);
@@ -1756,6 +2158,27 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
     });
     return immutableJson({ ...input, operation: "initialize", payload }) as unknown as KernelTranscriptInitializeEntry;
   }
+  if (input.operation === "caller_turn") {
+    if (index === 0) throw new Error("caller_turn cannot initialize a transcript");
+    exactKeys(input.payload, CALLER_TURN_PAYLOAD_KEYS, `entry[${index}] caller_turn payload`);
+    exactKeys(input.payload.input, CALLER_TURN_INPUT_KEYS, `entry[${index}] caller_turn input`);
+    assertPositiveInteger(input.payload.input.turn, `entry[${index}] caller turn`);
+    assertSafeId(input.payload.input.turn_id, `entry[${index}] caller turn_id`);
+    assertSha(input.payload.input.condition_hash, `entry[${index}] caller condition_hash`);
+    const payload: KernelTranscriptCallerTurnPayload = Object.freeze({
+      input: Object.freeze({
+        turn: input.payload.input.turn,
+        turn_id: input.payload.input.turn_id,
+        condition_hash: input.payload.input.condition_hash,
+      }),
+      pre_state: parseStateHeads(input.payload.pre_state, `entry[${index}] caller pre_state`),
+      post_state: parseStateHeads(input.payload.post_state, `entry[${index}] caller post_state`),
+      frontier_evidence: immutableJson(JsonValueSchema.parse(input.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence,
+      capability_snapshot: parseSnapshot(input.payload.capability_snapshot, `entry[${index}] caller capability_snapshot`),
+      response_plan: assertHaccResponsePlan(input.payload.response_plan),
+    });
+    return immutableJson({ ...input, operation: "caller_turn", payload }) as unknown as KernelTranscriptCallerTurnEntry;
+  }
   if (input.operation !== "invoke" || index === 0) throw new Error(`entry[${index}].operation is invalid`);
   exactKeys(input.payload, INVOKE_PAYLOAD_KEYS, `entry[${index}] payload`);
   exactKeys(input.payload.input, INVOKE_INPUT_KEYS, `entry[${index}] input`);
@@ -1765,8 +2188,46 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
   if (typeof input.payload.input.action !== "string" || !input.payload.input.action) throw new Error(`entry[${index}] action is invalid`);
   assertSha(input.payload.input.capability_grant_commitment, `entry[${index}] grant commitment`);
   const args = JsonValueSchema.parse(input.payload.input.arguments);
+  const effectiveArgs = input.payload.input.effective_arguments === null
+    ? null
+    : JsonValueSchema.parse(input.payload.input.effective_arguments);
+  const argumentBinding = parseArgumentBinding(
+    input.payload.input.argument_binding,
+    `entry[${index}] argument_binding`,
+  );
+  if ((argumentBinding.status === "rejected") !== (effectiveArgs === null)) {
+    throw new Error(`entry[${index}] effective arguments disagree with argument-binding status`);
+  }
   exactKeys(input.payload.outcome, OUTCOME_KEYS, `entry[${index}] outcome`);
   const result = CapabilityGatewayResultSchema.parse(input.payload.outcome.authoritative_result);
+  if (argumentBinding.status === "resolved") {
+    if (effectiveArgs === null || typeof effectiveArgs !== "object" || Array.isArray(effectiveArgs)) {
+      throw new Error(`entry[${index}] resolved binding requires object effective arguments`);
+    }
+    if (args === null || typeof args !== "object" || Array.isArray(args)) {
+      throw new Error(`entry[${index}] model arguments must be an object`);
+    }
+    const boundNames = argumentBinding.sources.map((source) => source.argument);
+    const expectedKeys = [...Object.keys(args), ...boundNames].sort();
+    if (canonicalJson(expectedKeys) !== canonicalJson(Object.keys(effectiveArgs).sort())) {
+      throw new Error(`entry[${index}] effective argument keys differ from the signed binding overlay`);
+    }
+    for (const [key, value] of Object.entries(args)) {
+      if (canonicalJson(effectiveArgs[key]) !== canonicalJson(value)) {
+        throw new Error(`entry[${index}] effective arguments changed model-owned argument ${key}`);
+      }
+    }
+  } else if (
+    argumentBinding.status === "not_applicable"
+    && canonicalJson(effectiveArgs) !== canonicalJson(args)
+  ) {
+    throw new Error(`entry[${index}] unbound effective arguments differ from model arguments`);
+  } else if (
+    argumentBinding.status === "rejected"
+    && (result.ok || result.code !== argumentBinding.failure_code)
+  ) {
+    throw new Error(`entry[${index}] rejected binding differs from its gateway failure`);
+  }
   const providerVisible = JsonValueSchema.parse(input.payload.outcome.provider_visible_output);
   const snapshot = input.payload.outcome.capability_snapshot === null
     ? null
@@ -1789,6 +2250,8 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
       condition_hash: input.payload.input.condition_hash,
       action: input.payload.input.action,
       arguments: args,
+      effective_arguments: effectiveArgs,
+      argument_binding: argumentBinding,
       capability_grant_commitment: input.payload.input.capability_grant_commitment,
     }),
     pre_state: parseStateHeads(input.payload.pre_state, `entry[${index}] pre_state`),
@@ -1940,6 +2403,9 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
     errors.push(error instanceof Error ? error.message : "initialize replay failed");
   }
   const callFingerprints = new Map<string, string>();
+  let committedTurn = 0;
+  const committedTurnIds = new Set<string>();
+  let responsePlanSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== runId) errors.push(`entry ${index} changed run_id`);
@@ -1947,8 +2413,71 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, entryBody(entry)) !== entry.entry_sha256) {
       errors.push(`entry ${index} hash mismatch`);
     }
+    if (entry.operation === "caller_turn") {
+      try {
+        if (entry.payload.input.condition_hash !== condition.conditionHash) {
+          errors.push(`entry ${index} caller condition hash mismatch`);
+        }
+        if (
+          entry.payload.input.turn !== committedTurn + 1
+          || committedTurnIds.has(entry.payload.input.turn_id)
+        ) errors.push(`entry ${index} caller turn is non-contiguous or repeated`);
+        compare(`entry ${index} caller pre-state`, entry.payload.pre_state, heads, errors);
+        const mode = heads.capability_head.target.startsWith("step:")
+          ? "target"
+          : heads.capability_head.catalog_mode === "terminal"
+            ? "terminal"
+            : heads.capability_head.catalog_mode === "post_step_transition"
+              ? "post_step_transition"
+              : "target";
+        const expectedFrontier = computeAdmissibilityFrontier({
+          condition,
+          scenario,
+          world,
+          turn: entry.payload.input.turn,
+          target: heads.capability_head.target,
+          catalogMode: mode,
+        }).evidence;
+        compare(`entry ${index} caller frontier evidence`, entry.payload.frontier_evidence, expectedFrontier, errors);
+        compare(`entry ${index} caller world head`, entry.payload.post_state.world_head, heads.world_head, errors);
+        compare(
+          `entry ${index} caller durable memory head`,
+          entry.payload.post_state.durable_memory_head,
+          heads.durable_memory_head,
+          errors
+        );
+        if (entry.payload.post_state.capability_head.epoch !== heads.capability_head.epoch + 1) {
+          errors.push(`entry ${index} caller capability epoch mismatch`);
+        }
+        assertSnapshotMatchesHead(
+          entry.payload.capability_snapshot,
+          entry.payload.post_state.capability_head,
+          `entry ${index} caller capability snapshot`
+        );
+        const responsePlan = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: entry.payload.input.turn,
+          capabilityEpoch: entry.payload.capability_snapshot.capability_epoch,
+          target: entry.payload.capability_snapshot.scope,
+          eligibleActions: entry.payload.capability_snapshot.actions.map((action) => action.name),
+          frontierEvidenceSha256: entry.payload.frontier_evidence.evidence_sha256,
+          previousPlanSha256: responsePlanSha256,
+        });
+        responsePlanSha256 = responsePlan.plan_sha256;
+        committedTurn = entry.payload.input.turn;
+        committedTurnIds.add(entry.payload.input.turn_id);
+        heads = entry.payload.post_state;
+      } catch (error) {
+        errors.push(error instanceof Error ? `entry ${index}: ${error.message}` : `entry ${index} caller replay failed`);
+      }
+      continue;
+    }
     if (entry.operation !== "invoke") continue;
     try {
+      if (
+        condition.behavior.transitionOwnership === "host-managed-linear"
+        && committedTurn > 0
+        && entry.payload.input.turn !== committedTurn
+      ) errors.push(`entry ${index} invocation is not bound to the committed caller turn`);
       if (entry.payload.input.condition_hash !== condition.conditionHash) {
         errors.push(`entry ${index} condition hash mismatch`);
       }
@@ -1991,6 +2520,24 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
       );
       const nextCapability = validateCapabilityHead(condition, entry.payload.post_state.capability_head);
       compare(`entry ${index} post capability head`, entry.payload.post_state.capability_head, nextCapability, errors);
+      if (
+        condition.behavior.transitionOwnership === "host-managed-linear"
+        && nextCapability.target.startsWith("step:")
+        && nextCapability.catalog_mode === "target"
+      ) {
+        const expected = computeAdmissibilityFrontier({
+          condition,
+          scenario,
+          world: nextWorld,
+          turn: committedTurn,
+          target: nextCapability.target,
+          catalogMode: "target",
+        }).capabilities.map((capability) => ({
+          name: capability.name,
+          semantic_hash: capability.semanticHash,
+        })).sort((left, right) => left.name.localeCompare(right.name));
+        compare(`entry ${index} admissibility catalog`, nextCapability.catalog, expected, errors);
+      }
       if (entry.payload.outcome.capability_snapshot) {
         assertSnapshotMatchesHead(
           entry.payload.outcome.capability_snapshot,
@@ -2119,9 +2666,11 @@ const PUBLIC_INVOKE_PAYLOAD_KEYS = Object.freeze([
 ].sort());
 const PUBLIC_INPUT_KEYS = Object.freeze([
   "action",
+  "argument_binding_sha256",
   "arguments_hmac_sha256",
   "capability_grant_commitment",
   "condition_hash",
+  "effective_arguments_hmac_sha256",
   "provider_call_fingerprint_hmac_sha256",
   "provider_call_id",
   "turn",
@@ -2308,7 +2857,11 @@ function parsePublicEntry(input: unknown, index: number): PublicKernelTranscript
   if (input.previous_entry_sha256 !== null) assertSha(input.previous_entry_sha256, `public entry[${index}].previous_entry_sha256`);
   assertSha(input.entry_sha256, `public entry[${index}].entry_sha256`);
   if ((index === 0) !== (input.operation === "initialize")) throw new Error(`public entry[${index}] has an invalid operation`);
-  if (input.operation !== "initialize" && input.operation !== "invoke") throw new Error(`public entry[${index}] has an invalid operation`);
+  if (
+    input.operation !== "initialize"
+    && input.operation !== "invoke"
+    && input.operation !== "caller_turn"
+  ) throw new Error(`public entry[${index}] has an invalid operation`);
   const payload = JsonValueSchema.parse(input.payload);
   return immutableJson({ ...input, payload }) as unknown as PublicKernelTranscriptEntry;
 }
@@ -2467,11 +3020,69 @@ export function verifyKernelTranscript(input: Readonly<{
   ) errors.push("public initialize durable memory applicability mismatch");
   try { assertPublicSnapshotMatchesHead(initialSnapshot, heads.capability_head, "public initialize snapshot"); } catch (error) { errors.push((error as Error).message); }
   const callFingerprints = new Map<string, string>();
+  let committedTurn = 0;
+  const committedTurnIds = new Set<string>();
+  let responsePlanSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== initialize.run_id) errors.push(`public entry ${index} changed run_id`);
     if (entry.previous_entry_sha256 !== expectedPrevious) errors.push(`public entry ${index} previous hash mismatch`);
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, publicEntryBody(entry)) !== entry.entry_sha256) errors.push(`public entry ${index} hash mismatch`);
+    if (entry.operation === "caller_turn") {
+      try {
+        exactKeys(entry.payload, CALLER_TURN_PAYLOAD_KEYS, `public entry ${index} caller payload`);
+        exactKeys(entry.payload.input, CALLER_TURN_INPUT_KEYS, `public entry ${index} caller input`);
+        assertPositiveInteger(entry.payload.input.turn, `public entry ${index} caller turn`);
+        assertSafeId(entry.payload.input.turn_id, `public entry ${index} caller turn_id`);
+        assertSha(entry.payload.input.condition_hash, `public entry ${index} caller condition_hash`);
+        if (entry.payload.input.condition_hash !== bindings.condition_hash) {
+          errors.push(`public entry ${index} caller condition binding mismatch`);
+        }
+        if (
+          entry.payload.input.turn !== committedTurn + 1
+          || committedTurnIds.has(entry.payload.input.turn_id as string)
+        ) errors.push(`public entry ${index} caller turn is non-contiguous or repeated`);
+        const pre = parsePublicStateHeads(entry.payload.pre_state, `public entry ${index} caller pre_state`);
+        const post = parsePublicStateHeads(entry.payload.post_state, `public entry ${index} caller post_state`);
+        compare(`public entry ${index} caller pre-state`, pre, heads, errors);
+        compare(`public entry ${index} caller world head`, post.authoritative_world_head, pre.authoritative_world_head, errors);
+        compare(`public entry ${index} caller shadow head`, post.public_shadow_world_sha256, pre.public_shadow_world_sha256, errors);
+        compare(`public entry ${index} caller memory head`, post.durable_memory_head, pre.durable_memory_head, errors);
+        if (post.capability_head.epoch !== pre.capability_head.epoch + 1) {
+          errors.push(`public entry ${index} caller capability epoch mismatch`);
+        }
+        const evidence = immutableJson(JsonValueSchema.parse(entry.payload.frontier_evidence)) as unknown as AdmissibilityFrontierEvidence;
+        if (!verifyAdmissibilityFrontierEvidence(evidence)) {
+          errors.push(`public entry ${index} caller frontier evidence hash mismatch`);
+        }
+        if (
+          evidence.condition_hash !== bindings.condition_hash
+          || evidence.scenario_hash !== bindings.scenario_hash
+          || evidence.turn !== entry.payload.input.turn
+          || evidence.target !== pre.capability_head.target
+        ) errors.push(`public entry ${index} caller frontier binding mismatch`);
+        const snapshot = parsePublicSnapshot(
+          entry.payload.capability_snapshot,
+          `public entry ${index} caller capability snapshot`
+        );
+        assertPublicSnapshotMatchesHead(snapshot, post.capability_head, `public entry ${index} caller capability snapshot`);
+        const responsePlan = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: entry.payload.input.turn as number,
+          capabilityEpoch: snapshot.capability_epoch,
+          target: snapshot.scope,
+          eligibleActions: snapshot.actions.map((action) => action.name),
+          frontierEvidenceSha256: evidence.evidence_sha256,
+          previousPlanSha256: responsePlanSha256,
+        });
+        responsePlanSha256 = responsePlan.plan_sha256;
+        committedTurn = entry.payload.input.turn as number;
+        committedTurnIds.add(entry.payload.input.turn_id as string);
+        heads = post;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : `public entry ${index} caller replay failed`);
+      }
+      continue;
+    }
     if (entry.operation !== "invoke") continue;
     try {
       exactKeys(entry.payload, PUBLIC_INVOKE_PAYLOAD_KEYS, `public entry ${index} payload`);
@@ -2481,9 +3092,14 @@ export function verifyKernelTranscript(input: Readonly<{
       assertNonNegativeInteger(call.turn, `public entry ${index} turn`);
       assertSha(call.condition_hash, `public entry ${index} condition_hash`);
       assertSha(call.arguments_hmac_sha256, `public entry ${index} arguments HMAC`);
+      assertSha(call.effective_arguments_hmac_sha256, `public entry ${index} effective arguments HMAC`);
+      assertSha(call.argument_binding_sha256, `public entry ${index} argument binding commitment`);
       assertSha(call.capability_grant_commitment, `public entry ${index} grant commitment`);
       assertSha(call.provider_call_fingerprint_hmac_sha256, `public entry ${index} call fingerprint`);
       if (call.condition_hash !== bindings.condition_hash) errors.push(`public entry ${index} condition binding mismatch`);
+      if (bindings.condition_id === "host-managed-harness" && committedTurn > 0 && call.turn !== committedTurn) {
+        errors.push(`public entry ${index} invocation is not bound to the committed caller turn`);
+      }
       const pre = parsePublicStateHeads(entry.payload.pre_state, `public entry ${index} pre_state`);
       compare(`public entry ${index} pre-state`, pre, heads, errors);
       const delta = entry.payload.public_world_delta as JsonValue;

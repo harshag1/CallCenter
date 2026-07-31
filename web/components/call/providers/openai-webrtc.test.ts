@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenAIWebRtcTransport } from "./openai-webrtc";
 import type { RealtimeTransportStart } from "./types";
+import {
+  OutboundSpeechGate,
+  createOutboundSpeechGatePolicy,
+} from "@/lib/realtime/outbound-speech-gate";
 
 const INITIAL_CATALOG_DIGEST = "a".repeat(64);
 const RESULT_CATALOG_DIGEST = "3abcd5265643ebb4c444771637530b52cde40c255231d25e0dd15f267a971154";
@@ -76,9 +80,35 @@ class FakePeer {
 
 function harness(recording = false) {
   const remoteSource = { connect: vi.fn(), disconnect: vi.fn() };
+  const captureProcessor = {
+    onaudioprocess: null as ((event: { inputBuffer: { getChannelData: (channel: number) => Float32Array } }) => void) | null,
+    connect: vi.fn(() => captureMute),
+    disconnect: vi.fn(),
+  };
+  const captureMute = {
+    gain: { value: 1 },
+    connect: vi.fn(() => captureMute),
+    disconnect: vi.fn(),
+  };
+  const playbackSource = {
+    buffer: null as AudioBuffer | null,
+    connect: vi.fn(),
+    start: vi.fn(),
+    stop: vi.fn(),
+    onended: null as (() => void) | null,
+  };
   const audioContext = {
+    currentTime: 4,
+    sampleRate: 24_000,
     destination: { kind: "speakers" },
     createMediaStreamSource: vi.fn(() => remoteSource),
+    createScriptProcessor: vi.fn(() => captureProcessor),
+    createGain: vi.fn(() => captureMute),
+    createBuffer: vi.fn((_channels: number, length: number, sampleRate: number) => ({
+      duration: length / sampleRate,
+      copyToChannel: vi.fn(),
+    })),
+    createBufferSource: vi.fn(() => playbackSource),
   } as unknown as AudioContext;
   const track = { kind: "audio" } as MediaStreamTrack;
   const mic = { getTracks: () => [track] } as unknown as MediaStream;
@@ -109,7 +139,17 @@ function harness(recording = false) {
     recordingDestination,
     handlers,
   };
-  return { args, handlers, audioContext, remoteSource, recordingDestination, track };
+  return {
+    args,
+    handlers,
+    audioContext,
+    remoteSource,
+    captureProcessor,
+    captureMute,
+    playbackSource,
+    recordingDestination,
+    track,
+  };
 }
 
 function installFetch(sdp: () => Promise<Response>) {
@@ -154,6 +194,60 @@ afterEach(() => {
 });
 
 describe("OpenAI browser WebRTC transport", () => {
+  it("routes captured remote-track PCM through policy before AudioContext playout", async () => {
+    vi.stubGlobal("RTCPeerConnection", FakePeer);
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const network = installFetch(async () => new Response("v=0\r\no=answer"));
+    const test = harness();
+    const onEvidence = vi.fn();
+    test.args.outboundSpeechGate = {
+      gate: new OutboundSpeechGate({
+        policy: createOutboundSpeechGatePolicy({ evidencePolicy: "provider_transcript_allowed" }),
+      }),
+      onEvidence,
+    };
+    const transport = new OpenAIWebRtcTransport();
+    const started = transport.start(test.args);
+    await settle();
+    const peer = FakePeer.instances[0];
+    peer.channel.open();
+    await started;
+    peer.ontrack?.({ track: test.track, streams: [{} as MediaStream] });
+    expect(test.remoteSource.connect).toHaveBeenCalledWith(test.captureProcessor);
+    expect(test.remoteSource.connect).not.toHaveBeenCalledWith(test.audioContext.destination);
+    expect(test.playbackSource.start).not.toHaveBeenCalled();
+
+    peer.channel.receive({ type: "response.created", response: { id: "response-guarded" } });
+    peer.channel.receive({
+      type: "response.output_audio_transcript.done",
+      response_id: "response-guarded",
+      transcript: "Safe answer",
+    });
+    test.captureProcessor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.25]) },
+    });
+    peer.channel.receive({
+      type: "response.done",
+      response: { id: "response-guarded", status: "completed", output: [] },
+    });
+    await vi.waitFor(() => expect(onEvidence).toHaveBeenCalledTimes(1));
+
+    expect(test.playbackSource.start).toHaveBeenCalledWith(4.05);
+    expect(onEvidence.mock.calls[0]?.[0]).toMatchObject({
+      provider: "openai",
+      responseId: "response-guarded",
+      decision: { action: "release", audioBytes: 4 },
+      playout: {
+        status: "released_to_audio_context",
+        audioBytes: 4,
+        ranges: [{ byteStart: 0, byteEnd: 4 }],
+      },
+    });
+    expect(test.handlers.onTranscript).toHaveBeenCalledWith("agent", "Safe answer");
+    expect(transport.outboundSpeechGateSupport.supported).toBe(true);
+    expect(network.fetchMock).toHaveBeenCalled();
+  });
+
   it("bounds SDP, waits for the data channel, and validates transcript events", async () => {
     vi.stubGlobal("RTCPeerConnection", FakePeer);
     vi.stubGlobal("window", { setTimeout, clearTimeout });

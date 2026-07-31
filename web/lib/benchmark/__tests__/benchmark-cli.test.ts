@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runBenchmarkCli } from "../benchmark-cli";
+import {
+  isSupportedBenchmarkNodeVersion,
+  runBenchmarkCli,
+} from "../benchmark-cli";
 import {
   createBenchmarkExecutionPlan,
   benchmarkPairInvariantsSha256,
@@ -249,6 +252,30 @@ describe("voice benchmark CLI", () => {
     expect(exit).toBe(0);
     expect(output.stdout()).not.toContain(secret);
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "doctor", network_calls: 0, spend_usd: "0" });
+  });
+
+  it("requires an explicit env file instead of accepting an implicit GPU Hub credential source", async () => {
+    const output = capturedIo();
+    expect(await runBenchmarkCli(["doctor", "--include-gpu-hub-env", "--json"], {
+      io: output.io,
+    })).toBe(2);
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      exit_code: 2,
+      error: { code: "unknown_option" },
+    });
+  });
+
+  it("uses the same Node release floors as the package engine contract", () => {
+    expect(isSupportedBenchmarkNodeVersion("20.18.9")).toBe(false);
+    expect(isSupportedBenchmarkNodeVersion("20.19.0")).toBe(true);
+    expect(isSupportedBenchmarkNodeVersion("21.9.0")).toBe(false);
+    expect(isSupportedBenchmarkNodeVersion("22.12.9")).toBe(false);
+    expect(isSupportedBenchmarkNodeVersion("v22.13.0")).toBe(true);
+    expect(isSupportedBenchmarkNodeVersion("23.11.0")).toBe(false);
+    expect(isSupportedBenchmarkNodeVersion("24.0.0")).toBe(true);
+    expect(isSupportedBenchmarkNodeVersion("25.0.0")).toBe(true);
+    expect(isSupportedBenchmarkNodeVersion("25.0.0-rc.1")).toBe(false);
+    expect(isSupportedBenchmarkNodeVersion("not-a-version")).toBe(false);
   });
 
   it("doctor fails closed when a requested ledger or freeze cannot be verified", async () => {

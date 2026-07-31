@@ -224,6 +224,26 @@ describe("public working-tree secret audit", () => {
     expect(JSON.stringify(audit)).not.toContain(secret);
   });
 
+  it("detects a populated outbound-speech ASR receipt secret without reporting it", () => {
+    const repo = temporaryRepo();
+    const secret = Buffer.from("independent-asr-receipt-key-material-123456789", "utf8")
+      .toString("base64");
+    writeFileSync(
+      join(repo, "deployment.env.txt"),
+      `HACC_OUTBOUND_SPEECH_ASR_RECEIPT_HMAC_KEY=${secret}\n`,
+      "utf8",
+    );
+
+    const audit = auditPublishableWorkingTree(repo);
+    expect(audit.pass).toBe(false);
+    expect(audit.unresolved_findings).toContainEqual({
+      path: "deployment.env.txt",
+      source: "untracked",
+      finding_class: "provider_secret_assignment",
+    });
+    expect(JSON.stringify(audit)).not.toContain(secret);
+  });
+
   it("detects named provider secrets in env, YAML, JSON, and source assignment syntax", () => {
     const repo = temporaryRepo();
     const token = "a1b2c3d4".repeat(4);

@@ -99,6 +99,8 @@ describe("realtime provider configuration", () => {
     vi.stubGlobal("fetch", fetchMock);
     const toolProxyUrl = "https://app.example.test/api/mcp";
     const toolProxyToken = "scope-token-must-stay-local";
+    const tenantXaiRoot = ["tenant", "xai", "browser", "root", "not", "deployment"].join("-");
+    const tenantOpenaiRoot = ["tenant", "openai", "browser", "root", "not", "deployment"].join("-");
     const common = {
       instructions: "Use only the local gateway.",
       settings: {},
@@ -124,12 +126,20 @@ describe("realtime provider configuration", () => {
           provider: "xai",
           model: "grok-voice-think-fast-1.0",
           voice: "ara",
+        }, {
+          source: "tenant_byok",
+          provider: "xai",
+          apiKey: tenantXaiRoot,
         }),
         openaiAdapter.createBrowserConnection({
           ...common,
           provider: "openai",
           model: "gpt-realtime-2.1",
           voice: "marin",
+        }, {
+          source: "tenant_byok",
+          provider: "openai",
+          apiKey: tenantOpenaiRoot,
         }),
       ]);
       expect(xai).toMatchObject({ toolProxyUrl, toolProxyToken });
@@ -145,6 +155,14 @@ describe("realtime provider configuration", () => {
         expect(String(init?.body ?? "")).not.toContain(toolProxyToken);
         expect(String(init?.body ?? "")).not.toContain(TOOL_PROXY_ROTATION.renewalToken);
       }
+      const xaiMint = fetchMock.mock.calls.find(([url]) => String(url).includes("api.x.ai"));
+      const openaiMint = fetchMock.mock.calls.find(([url]) => String(url).includes("api.openai.com"));
+      expect((xaiMint?.[1]?.headers as Record<string, string>).Authorization)
+        .toBe(`Bearer ${tenantXaiRoot}`);
+      expect((openaiMint?.[1]?.headers as Record<string, string>).Authorization)
+        .toBe(`Bearer ${tenantOpenaiRoot}`);
+      expect(JSON.stringify(xai)).not.toContain(tenantXaiRoot);
+      expect(JSON.stringify(openai)).not.toContain(tenantOpenaiRoot);
     } finally {
       vi.unstubAllGlobals();
       if (priorXaiKey === undefined) delete process.env.XAI_API_KEY;
@@ -183,12 +201,20 @@ describe("realtime provider configuration", () => {
         provider: "openai",
         model: "gpt-realtime-2.1",
         voice: "marin",
+      }, {
+        source: "tenant_byok",
+        provider: "openai",
+        apiKey: "tenant-openai-proxy-disclosure-test-root",
       })).rejects.toThrow(/same-origin or local endpoint/);
       await expect(xaiAdapter.createBrowserConnection({
         ...local,
         provider: "xai",
         model: "grok-voice-think-fast-1.0",
         voice: "ara",
+      }, {
+        source: "tenant_byok",
+        provider: "xai",
+        apiKey: "tenant-xai-proxy-disclosure-test-root",
       })).rejects.toThrow(/same-origin or local endpoint/);
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {

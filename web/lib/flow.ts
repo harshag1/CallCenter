@@ -46,6 +46,20 @@ export type FlowActionPolicy = {
   effect?: "read" | "write" | "opaque";
   /** Pinned server-side read-back contract. Parsed against the strict reconciliation schema. */
   reconciliation?: unknown;
+  /** Provider-omitted arguments resolved by the host from this step's successful receipts. */
+  bound_arguments?: FlowBoundArgument[];
+};
+
+export type FlowBoundArgument = {
+  /** Argument on this policy's target tool that the model must not supply. */
+  argument: string;
+  /** The only admissible authority is an authoritative Flow receipt result. */
+  source: {
+    kind: "receipt_result";
+    tool: string;
+    /** Safe dot path (or "$" for the full result) inside the receipt result. */
+    result_path: string;
+  };
 };
 
 export type FlowStep = {
@@ -90,6 +104,15 @@ export const FlowTransitionSchema: z.ZodType<FlowTransition> = z.object({
   }).optional(),
 });
 
+const FlowBoundArgumentSchema: z.ZodType<FlowBoundArgument> = z.object({
+  argument: z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/),
+  source: z.object({
+    kind: z.literal("receipt_result"),
+    tool: z.string().regex(TOOL_NAME),
+    result_path: z.string().min(1).max(512),
+  }).strict(),
+}).strict();
+
 export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
   z.object({
     id: z.string().min(1),
@@ -111,6 +134,7 @@ export const FlowStepSchema: z.ZodType<FlowStep> = z.lazy(() =>
       idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
       effect: z.enum(["read", "write", "opaque"]).optional(),
       reconciliation: z.record(z.string(), z.unknown()).optional(),
+      bound_arguments: z.array(FlowBoundArgumentSchema).max(64).optional(),
     })).optional(),
     success_criteria: z.array(z.string().min(1)).optional(),
     transitions: z.array(FlowTransitionSchema).optional(),
@@ -158,6 +182,7 @@ export const AgentFlowSchema = z.object({
     idempotency: z.enum(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]).optional(),
     effect: z.enum(["read", "write", "opaque"]).optional(),
     reconciliation: z.record(z.string(), z.unknown()).optional(),
+    bound_arguments: z.array(FlowBoundArgumentSchema).max(64).optional(),
   })).optional(),
   /** gateway exposes one guarded run_action tool; direct exposes every attached tool up front. */
   tool_exposure: z.enum(["gateway", "direct"]).optional(),
@@ -316,6 +341,13 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
         message: "reconciliation requires a non-read effect and explicit non-none idempotency",
       });
     }
+    if (policy.bound_arguments?.length) {
+      diagnostics.push({
+        level: "error",
+        path: `always_action_policies.${index}.bound_arguments`,
+        message: "receipt-bound arguments require an active step and cannot be declared globally",
+      });
+    }
   }
   const stepPaths = new Set(refs.map((ref) => ref.path));
   const seenPaths = new Set<string>();
@@ -375,6 +407,41 @@ export function validateAgentFlow(input: unknown): { flow?: AgentFlow; diagnosti
           path: `${ref.path}.action_policies.${policyIndex}.reconciliation`,
           message: "reconciliation requires a non-read effect and explicit non-none idempotency",
         });
+      }
+      if (policy.bound_arguments?.length && flow.schema_version !== 2) {
+        diagnostics.push({
+          level: "error",
+          path: `${ref.path}.action_policies.${policyIndex}.bound_arguments`,
+          message: "receipt-bound arguments require Flow v2",
+        });
+      }
+      const boundArguments = new Set<string>();
+      for (const [bindingIndex, binding] of (policy.bound_arguments ?? []).entries()) {
+        const bindingPath = `${ref.path}.action_policies.${policyIndex}.bound_arguments.${bindingIndex}`;
+        if (boundArguments.has(binding.argument)) {
+          diagnostics.push({ level: "error", path: `${bindingPath}.argument`, message: `duplicate bound argument "${binding.argument}"` });
+        }
+        boundArguments.add(binding.argument);
+        if (UNSAFE_OUTPUT_KEYS.has(binding.argument)) {
+          diagnostics.push({ level: "error", path: `${bindingPath}.argument`, message: `unsafe bound argument "${binding.argument}"` });
+        }
+        if (!granted.has(binding.source.tool)) {
+          diagnostics.push({
+            level: "error",
+            path: `${bindingPath}.source.tool`,
+            message: `bound-argument source tool "${binding.source.tool}" is not granted in this step`,
+          });
+        }
+        const segments = binding.source.result_path === "$"
+          ? []
+          : binding.source.result_path.replace(/^\$\.?/, "").split(".");
+        if (segments.some((segment) => !segment || UNSAFE_OUTPUT_KEYS.has(segment))) {
+          diagnostics.push({
+            level: "error",
+            path: `${bindingPath}.source.result_path`,
+            message: `unsafe receipt result path "${binding.source.result_path}"`,
+          });
+        }
       }
     }
     for (const transition of ref.step.transitions ?? []) {

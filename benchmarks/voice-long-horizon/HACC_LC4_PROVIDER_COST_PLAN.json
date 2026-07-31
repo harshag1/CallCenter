@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "protocol_id": "HACC-LC4-v1",
+  "artifact_id": "lc4-provider-cost-plan-v1",
+  "created_on": "2026-07-21",
+  "currency": "USD",
+  "schedule": {
+    "episodes": 144,
+    "episodes_per_provider": 48,
+    "caller_turns_per_episode": 60,
+    "logical_segments_per_episode": 3,
+    "caller_turns_per_segment": 20,
+    "scheduled_caller_turns": 8640,
+    "provider_caller_turns": 2880
+  },
+  "limits": {
+    "scheduling_ceiling_micro_usd": 900000000,
+    "pricing_max_age_days": 7
+  },
+  "pricing": [
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-2.1",
+      "source": {
+        "url": "https://developers.openai.com/api/docs/models/gpt-realtime-2.1",
+        "accessed_on": "2026-07-21"
+      },
+      "rates": {
+        "input_text_micro_usd_per_million_tokens": 4000000,
+        "cached_input_text_micro_usd_per_million_tokens": 400000,
+        "input_audio_micro_usd_per_million_tokens": 32000000,
+        "cached_input_audio_micro_usd_per_million_tokens": 400000,
+        "output_text_micro_usd_per_million_tokens": 24000000,
+        "output_audio_micro_usd_per_million_tokens": 64000000
+      }
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-live-preview",
+      "source": {
+        "url": "https://ai.google.dev/gemini-api/docs/pricing",
+        "accessed_on": "2026-07-21"
+      },
+      "rates": {
+        "input_text_micro_usd_per_million_tokens": 750000,
+        "input_audio_micro_usd_per_million_tokens": 3000000,
+        "output_text_micro_usd_per_million_tokens": 4500000,
+        "output_audio_micro_usd_per_million_tokens": 12000000
+      },
+      "unclassified_token_policy": "charge_at_max_same_direction_modality_rate"
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-think-fast-1.0",
+      "source": {
+        "url": "https://docs.x.ai/developers/models/voice-agent-api",
+        "accessed_on": "2026-07-21"
+      },
+      "rates": {
+        "audio_micro_usd_per_minute": 50000,
+        "text_input_micro_usd_per_event": 4000
+      }
+    }
+  ],
+  "retained_development_source": {
+    "experiment_id": "hacc-lc3-v8",
+    "protocol_id": "HACC-LC3-v6",
+    "collected_on": "2026-07-21",
+    "source_commit": "88a5d03a8bc762481519dd03f478b5d463201258",
+    "retained_result_file_sha256": "cba41cddf3dbc42a27d7fe69300a1c933e9aced731a0bff9cc786255edcf924a",
+    "derivation_scope": "provider_aggregate_usage_only_no_condition_or_outcome_fields",
+    "aggregate_usage_sha256": "43e2d7145c1aae357c9277df32f9a1f83d257b1644c3b0d80d3b28dfed44fae6"
+  },
+  "aggregate_usage": [
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-2.1",
+      "observed_episodes": 6,
+      "observed_caller_turns": 65,
+      "usage_events": 131,
+      "input_text_tokens": 1520063,
+      "cached_input_text_tokens": 1443840,
+      "input_audio_tokens": 82461,
+      "cached_input_audio_tokens": 75712,
+      "output_text_tokens": 15735,
+      "output_audio_tokens": 29352
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-live-preview",
+      "observed_episodes": 6,
+      "observed_caller_turns": 96,
+      "usage_events": 96,
+      "input_text_tokens": 4105200,
+      "input_audio_tokens": 832945,
+      "unclassified_input_tokens": 703491,
+      "output_text_tokens": 0,
+      "output_audio_tokens": 23661,
+      "unclassified_output_tokens": 3917
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-think-fast-1.0",
+      "observed_episodes": 6,
+      "observed_caller_turns": 90,
+      "usage_events": 194,
+      "input_audio_micro_minutes": 10171303,
+      "output_audio_micro_minutes": 31753856,
+      "billable_text_input_events": 0
+    }
+  ],
+  "envelope_policy": {
+    "scale_basis": "observed_provider_cost_per_caller_turn_times_2880_provider_turns",
+    "segment_basis": "three_20_turn_segments_match_retained_20_turn_development_horizon",
+    "low_multiplier_ppm": 750000,
+    "nominal_multiplier_ppm": 1000000,
+    "stress_multiplier_ppm": 1500000
+  },
+  "envelopes": {
+    "low": {
+      "usage_multiplier_ppm": 750000,
+      "provider_micro_usd": { "openai": 112481136, "gemini": 180430740, "xai": 50310192 },
+      "total_micro_usd": 343222068
+    },
+    "nominal": {
+      "usage_multiplier_ppm": 1000000,
+      "provider_micro_usd": { "openai": 149974848, "gemini": 240574320, "xai": 67080256 },
+      "total_micro_usd": 457629424
+    },
+    "stress": {
+      "usage_multiplier_ppm": 1500000,
+      "provider_micro_usd": { "openai": 224962272, "gemini": 360861480, "xai": 100620384 },
+      "total_micro_usd": 686444136
+    }
+  }
+}

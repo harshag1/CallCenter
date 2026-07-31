@@ -106,6 +106,80 @@ describe("MCP invocation quota admission", () => {
     expect(mocks.qOne).toHaveBeenCalledTimes(1);
   });
 
+  it("settles an expired receipt from exact host recovery before quarantining it", async () => {
+    const executing = {
+      id: "8916eb0a-5332-4f4c-a330-746c516e83ba",
+      call_id: identity.callId,
+      provider_invocation_id: identity.providerInvocationId,
+      logical_name: identity.logicalName,
+      model_arguments: identity.modelArguments,
+      model_arguments_hash: hashFlowValue(identity.modelArguments),
+      active_catalog_digest: identity.expectedCatalog.catalog_digest,
+      active_catalog_epoch: identity.expectedCatalog.capability_epoch,
+      status: "executing",
+      owner_token: "8916eb0a-5332-4f4c-a330-746c516e83bb",
+      lease_expires_at: new Date(Date.now() - 1_000),
+      result: null,
+      result_hash: null,
+    };
+    const recoveredResult = { ok: true, worker_id: "worker-1" };
+    mocks.qOne
+      .mockResolvedValueOnce(executing)
+      .mockResolvedValueOnce({
+        ...executing,
+        status: "completed",
+        result: recoveredResult,
+        result_hash: hashFlowValue(recoveredResult),
+      });
+    const recoverExpired = vi.fn().mockResolvedValue({ result: recoveredResult });
+
+    await expect(admitMcpToolInvocation(identity, {
+      replayWaitMs: 0,
+      recoverExpired,
+    })).resolves.toMatchObject({
+      execute: false,
+      replayed: true,
+      result: recoveredResult,
+    });
+    expect(recoverExpired).toHaveBeenCalledWith(expect.objectContaining({
+      receiptId: executing.id,
+      callId: identity.callId,
+      modelArguments: identity.modelArguments,
+    }));
+    expect(mocks.qOne.mock.calls[1]?.[0]).toMatch(/'completed'[\s\S]*true/);
+    expect(mocks.qOne.mock.calls.some(([sql]) =>
+      String(sql).includes("'indeterminate'") && String(sql).includes("true"),
+    )).toBe(false);
+  });
+
+  it("leaves an expired receipt retryable when proof recovery has a transient failure", async () => {
+    mocks.qOne.mockResolvedValueOnce({
+      id: "8916eb0a-5332-4f4c-a330-746c516e83ba",
+      call_id: identity.callId,
+      provider_invocation_id: identity.providerInvocationId,
+      logical_name: identity.logicalName,
+      model_arguments: identity.modelArguments,
+      model_arguments_hash: hashFlowValue(identity.modelArguments),
+      active_catalog_digest: identity.expectedCatalog.catalog_digest,
+      active_catalog_epoch: identity.expectedCatalog.capability_epoch,
+      status: "executing",
+      owner_token: "8916eb0a-5332-4f4c-a330-746c516e83bb",
+      lease_expires_at: new Date(Date.now() - 1_000),
+      result: null,
+      result_hash: null,
+    });
+
+    await expect(admitMcpToolInvocation(identity, {
+      replayWaitMs: 0,
+      recoverExpired: vi.fn().mockRejectedValue(new Error("temporary proof read failure")),
+    })).resolves.toMatchObject({
+      execute: false,
+      replayed: false,
+      result: { code: "tool_invocation_pending" },
+    });
+    expect(mocks.qOne).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces an oversized terminal result with a bounded indeterminate receipt", async () => {
     mocks.qOne.mockImplementationOnce((_sql: string, params: unknown[]) => Promise.resolve({
       status: params[2],

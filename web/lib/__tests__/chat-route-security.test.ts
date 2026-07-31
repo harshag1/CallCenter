@@ -147,6 +147,7 @@ describe("POST /api/chat security boundary", () => {
       AGENT_ID,
       APP_ORIGIN,
       { id: `inbound:${AGENT_ID}`, label: "Membership" },
+      expect.any(AbortSignal),
     );
     expect(await response.text()).toContain('"text":"Ready."');
   });
@@ -161,5 +162,31 @@ describe("POST /api/chat security boundary", () => {
     expect(text).toContain("operator_request_failed");
     expect(text).not.toContain("provider-root-secret");
     expect(text).not.toContain("Bearer");
+  });
+
+  it("aborts the operator turn when the response stream is cancelled", async () => {
+    let turnSignal: AbortSignal | undefined;
+    mocks.runOperator.mockImplementationOnce((
+      _session: unknown,
+      _threadId: unknown,
+      _message: unknown,
+      _agentId: unknown,
+      _origin: unknown,
+      _openFlow: unknown,
+      signal: AbortSignal,
+    ) => {
+      turnSignal = signal;
+      return (async function* () {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        if (false) yield { type: "done" };
+      })();
+    });
+
+    const response = await POST(request());
+    expect(turnSignal?.aborted).toBe(false);
+    await response.body?.cancel();
+    expect(turnSignal?.aborted).toBe(true);
   });
 });

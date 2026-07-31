@@ -78,21 +78,21 @@ describe("pre-canary discovery and conditional-test completeness", () => {
       exit_code: 0,
       success: true,
       total_tests: 1_700,
-      passed_tests: 1_646,
+      passed_tests: 1_641,
       failed_tests: 0,
-      pending_tests: 54,
-      expected_conditional_pending_tests: 54,
+      pending_tests: 59,
+      expected_conditional_pending_tests: 59,
     };
     expect(preCanaryWebTestsComplete(complete)).toBe(true);
     expect(preCanaryWebTestsComplete({
       ...complete,
-      passed_tests: 1_647,
-      pending_tests: 53,
+      passed_tests: 1_642,
+      pending_tests: 58,
     })).toBe(false);
     expect(preCanaryWebTestsComplete({
       ...complete,
-      passed_tests: 1_645,
-      pending_tests: 55,
+      passed_tests: 1_640,
+      pending_tests: 60,
     })).toBe(false);
     expect(preCanaryWebTestsComplete({
       ...complete,
@@ -104,15 +104,15 @@ describe("pre-canary discovery and conditional-test completeness", () => {
     })).toBe(false);
   });
 
-  it("accepts the disposable database run only with the exact 18-file/54-test inventory binding", () => {
+  it("accepts the disposable database run only with the exact 19-file/56-test inventory binding", () => {
     const complete = {
       inventory_sha256: H("a"),
       expected_inventory_sha256: H("a"),
-      test_file_count: 18,
-      expected_test_file_count: 18,
-      total_tests: 54,
-      expected_total_tests: 54,
-      passed_tests: 54,
+      test_file_count: 19,
+      expected_test_file_count: 19,
+      total_tests: 56,
+      expected_total_tests: 56,
+      passed_tests: 56,
       failed_tests: 0,
       pending_tests: 0,
       provider_sessions_opened: 0,
@@ -121,9 +121,9 @@ describe("pre-canary discovery and conditional-test completeness", () => {
     expect(preCanaryConditionalDatabaseTestsComplete(complete)).toBe(true);
     for (const mutation of [
       { inventory_sha256: H("b") },
-      { test_file_count: 17 },
-      { total_tests: 53 },
-      { passed_tests: 53 },
+      { test_file_count: 18 },
+      { total_tests: 55 },
+      { passed_tests: 55 },
       { failed_tests: 1 },
       { pending_tests: 1 },
       { provider_sessions_opened: 1 },

@@ -6,7 +6,9 @@ const mocks = vi.hoisted(() => ({
   loadActiveAgent: vi.fn(),
   buildVoiceSession: vi.fn(),
   createBrowserRealtimeConnection: vi.fn(),
-  allowsLocalDevelopmentFundedAi: vi.fn(),
+  resolveBrowserVoiceFundingAuthority: vi.fn(),
+  browserSpeechGuardrailConfigForCall: vi.fn(),
+  assertOutboundSpeechAsrTenantFundingAvailable: vi.fn(),
   q: vi.fn(),
   qOne: vi.fn(),
 }));
@@ -19,8 +21,15 @@ vi.mock("@/lib/voice", () => ({
 vi.mock("@/lib/realtime/registry", () => ({
   createBrowserRealtimeConnection: mocks.createBrowserRealtimeConnection,
 }));
-vi.mock("@/lib/deployment-funded-ai", () => ({
-  allowsLocalDevelopmentFundedAi: mocks.allowsLocalDevelopmentFundedAi,
+vi.mock("@/lib/voice-provider-credentials", () => ({
+  resolveBrowserVoiceFundingAuthority: mocks.resolveBrowserVoiceFundingAuthority,
+}));
+vi.mock("@/lib/realtime/browser-speech-guardrail-config.server", () => ({
+  browserSpeechGuardrailConfigForCall: mocks.browserSpeechGuardrailConfigForCall,
+}));
+vi.mock("@/lib/realtime/outbound-speech-asr-authority.server", () => ({
+  assertOutboundSpeechAsrTenantFundingAvailable:
+    mocks.assertOutboundSpeechAsrTenantFundingAvailable,
 }));
 vi.mock("@/lib/db", () => ({ q: mocks.q, qOne: mocks.qOne }));
 vi.mock("@/lib/public-origin", () => ({
@@ -70,11 +79,21 @@ describe("voice token recording-consent boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("PUBLIC_ORIGIN", APP_ORIGIN);
-    mocks.allowsLocalDevelopmentFundedAi.mockReturnValue(true);
+    mocks.resolveBrowserVoiceFundingAuthority.mockResolvedValue({
+      source: "tenant_byok",
+      provider: "openai",
+      apiKey: "tenant-openai-root-never-returned",
+    });
+    mocks.browserSpeechGuardrailConfigForCall.mockReturnValue(null);
+    mocks.assertOutboundSpeechAsrTenantFundingAvailable.mockResolvedValue(undefined);
     vi.stubEnv("CALL_RECORDING_RETENTION_DAYS", "30");
     vi.stubEnv("MCP_GATEWAY_SECRET", MCP_SECRET);
     mocks.getSession.mockResolvedValue({ orgId: "org-1" });
-    mocks.loadActiveAgent.mockResolvedValue({ id: AGENT_ID });
+    mocks.loadActiveAgent.mockResolvedValue({
+      id: AGENT_ID,
+      settings: { voice_provider: "openai" },
+      voice: "marin",
+    });
     mocks.buildVoiceSession.mockResolvedValue({
       callId: CALL_ID,
       sessionSpec: { provider: "openai", model: "gpt-realtime" },
@@ -131,18 +150,19 @@ describe("voice token recording-consent boundary", () => {
     expect(mocks.getSession).not.toHaveBeenCalled();
   });
 
-  it("fails production deployment-funded sessions closed under direct, repeated, and concurrent attempts", async () => {
-    mocks.allowsLocalDevelopmentFundedAi.mockReturnValue(false);
+  it("fails sessions without tenant or local funding authority closed under concurrent attempts", async () => {
+    mocks.resolveBrowserVoiceFundingAuthority.mockResolvedValue(null);
 
     const responses = await Promise.all(
       Array.from({ length: 12 }, () => POST(request({ agentId: AGENT_ID }))),
     );
     expect(responses.map((response) => response.status)).toEqual(Array(12).fill(503));
     await expect(Promise.all(responses.map((response) => response.json()))).resolves.toEqual(
-      Array(12).fill({ error: "deployment_funded_ai_disabled" }),
+      Array(12).fill({ error: "voice_funding_authority_required" }),
     );
     expect(mocks.getSession).toHaveBeenCalledTimes(12);
-    expect(mocks.loadActiveAgent).not.toHaveBeenCalled();
+    expect(mocks.loadActiveAgent).toHaveBeenCalledTimes(12);
+    expect(mocks.resolveBrowserVoiceFundingAuthority).toHaveBeenCalledTimes(12);
     expect(mocks.buildVoiceSession).not.toHaveBeenCalled();
     expect(mocks.createBrowserRealtimeConnection).not.toHaveBeenCalled();
     expect(mocks.q).not.toHaveBeenCalled();
@@ -150,11 +170,15 @@ describe("voice token recording-consent boundary", () => {
   });
 
   it("denies a direct request before allocating a call or minting a token when funded authority is unavailable", async () => {
-    mocks.allowsLocalDevelopmentFundedAi.mockReturnValue(false);
+    mocks.resolveBrowserVoiceFundingAuthority.mockResolvedValue(null);
     const response = await POST(request({ agentId: AGENT_ID }));
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "deployment_funded_ai_disabled" });
-    expect(mocks.loadActiveAgent).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ error: "voice_funding_authority_required" });
+    expect(mocks.loadActiveAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveBrowserVoiceFundingAuthority).toHaveBeenCalledWith({
+      orgId: "org-1",
+      provider: "openai",
+    });
     expect(mocks.buildVoiceSession).not.toHaveBeenCalled();
     expect(mocks.createBrowserRealtimeConnection).not.toHaveBeenCalled();
     expect(mocks.q).not.toHaveBeenCalled();
@@ -169,7 +193,64 @@ describe("voice token recording-consent boundary", () => {
     expect(payload).toMatchObject({ callId: CALL_ID });
     expect(payload).not.toHaveProperty("recordingUploadToken");
     expect(mocks.q).not.toHaveBeenCalled();
-    expect(mocks.createBrowserRealtimeConnection).toHaveBeenCalledTimes(1);
+    expect(mocks.createBrowserRealtimeConnection).toHaveBeenCalledWith(
+      { provider: "openai", model: "gpt-realtime" },
+      {
+        source: "tenant_byok",
+        provider: "openai",
+        apiKey: "tenant-openai-root-never-returned",
+      },
+    );
+    expect(JSON.stringify(payload)).not.toContain("tenant-openai-root-never-returned");
+  });
+
+  it("preflights tenant-owned independent ASR funding before minting a guarded connection", async () => {
+    mocks.browserSpeechGuardrailConfigForCall.mockReturnValue({
+      schemaVersion: 1,
+      mode: "enforce",
+      organizationId: "org-1",
+      provider: "openai",
+      callId: CALL_ID,
+      asrEndpoint: "/api/voice/outbound-speech/asr",
+      policy: {},
+    });
+    mocks.assertOutboundSpeechAsrTenantFundingAvailable.mockRejectedValue(
+      new Error("tenant OpenAI BYOK missing"),
+    );
+    const response = await POST(request({ agentId: AGENT_ID }));
+    expect(response.status).toBe(503);
+    expect(mocks.assertOutboundSpeechAsrTenantFundingAvailable)
+      .toHaveBeenCalledWith("org-1");
+    expect(mocks.createBrowserRealtimeConnection).not.toHaveBeenCalled();
+    expect(mocks.q).toHaveBeenCalledWith(
+      "UPDATE calls SET status = 'failed', ended_at = now() WHERE id = $1",
+      [CALL_ID],
+    );
+  });
+
+  it("passes an authorized local capability through without converting it to omitted authority", async () => {
+    const localAuthority = {
+      source: "local_deployment_authorized",
+      provider: "openai",
+    };
+    mocks.resolveBrowserVoiceFundingAuthority.mockResolvedValue(localAuthority);
+
+    const response = await POST(request({ agentId: AGENT_ID }));
+    expect(response.status).toBe(200);
+    expect(mocks.buildVoiceSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: AGENT_ID }),
+      "web",
+      APP_ORIGIN,
+      {},
+      {
+        flowId: null,
+        browserFundingAuthority: localAuthority,
+      },
+    );
+    expect(mocks.createBrowserRealtimeConnection).toHaveBeenCalledWith(
+      { provider: "openai", model: "gpt-realtime" },
+      localAuthority,
+    );
   });
 
   it("stores canonical consent before returning a provider connection", async () => {

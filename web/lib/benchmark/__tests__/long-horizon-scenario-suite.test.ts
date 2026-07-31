@@ -115,7 +115,7 @@ describe("long-horizon scenario suite", () => {
     }
   });
 
-  it("compiles all six arms with valid parity and stable semantic tools within each family", () => {
+  it("compiles all seven arms with valid parity and stable semantic tools within each family", () => {
     const semanticHashes = new Map<LongHorizonFamily, string>();
     for (const source of LONG_HORIZON_SCENARIO_SUITE) {
       const validation = validateAgentFlow(source.compilerInput.flow);

@@ -4,6 +4,7 @@
 import { getPool, q } from "../../db";
 import { AgentFlowSchema, validateAgentFlow, type AgentFlow } from "../../flow";
 import type { OperatorTool } from "../types";
+import { FLOW_V2_AUTHORING_SCHEMA } from "./flows-tools";
 
 export const listAgents: OperatorTool = {
   name: "list_agents",
@@ -27,6 +28,7 @@ export const updateAgent: OperatorTool = {
     "Update a bot by creating a new immutable version (append-only; old versions remain revertible). Providers: xai, openai, or gemini; model ids stay configurable for new releases. Prefer Flow v2 nested steps and scoped tools. Topic nodes MUST keep their context and steps (copy them from the current flow when unchanged). The incoming_call and fallback nodes are preserved automatically if omitted.",
   parameters: {
     type: "object",
+    additionalProperties: false,
     properties: {
       agent_id: { type: "string" },
       name: { type: "string" },
@@ -35,7 +37,12 @@ export const updateAgent: OperatorTool = {
       model: { type: "string", description: "Optional provider model id; omit to use the provider default." },
       voice: { type: "string", description: "Provider voice id/name. Defaults: xAI ara, OpenAI marin, Gemini Kore." },
       provider_settings: { type: "object", description: "Advanced provider-specific realtime session settings." },
-      flow: { type: "object" },
+      speech_guardrail: {
+        type: "object",
+        description:
+          "Host-enforced outbound speech policy. Set mode=enforce to quarantine exact generated PCM until independent ASR passes; configure forbidden_terminal_claims and secret-echo rules here, never in the prompt.",
+      },
+      flow: FLOW_V2_AUTHORING_SCHEMA,
       tool_ids: { type: "array", items: { type: "string" } },
       mcp_server_ids: { type: "array", items: { type: "string" } },
     },
@@ -114,6 +121,7 @@ export const updateAgent: OperatorTool = {
         ...(args.provider ? { voice_provider: args.provider } : {}),
         ...(args.model ? { voice_model: args.model } : {}),
         ...(args.provider_settings ? { provider_settings: args.provider_settings } : {}),
+        ...(args.speech_guardrail ? { speech_guardrail: args.speech_guardrail } : {}),
       };
       const inserted = await client.query<{ version: number }>(
         `WITH next_version AS (

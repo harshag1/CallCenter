@@ -44,6 +44,7 @@ import {
   CapabilityGatewayResultSchema,
   ProviderCapabilitySnapshotSchema,
   bindCapabilityGatewayCall,
+  renderCompactProviderCapabilitySnapshot,
   renderProviderCapabilitySnapshot,
   type AuthorizedCapabilityGatewayCall,
   type CapabilityGatewayResult,
@@ -67,6 +68,12 @@ import {
   verifyKernelTranscript,
   type KernelTranscriptReference,
 } from "./kernel-transcript";
+import {
+  assertHaccResponsePlan,
+  HACC_RESPONSE_PLAN_KEY,
+  renderHaccResponsePlan,
+  type HaccResponsePlan,
+} from "./response-plan";
 import {
   buildProviderTransportEvidence,
   type ProviderNormalizedWireLink,
@@ -95,12 +102,22 @@ import type {
   Pcm16Audio,
   RealtimeToolCall,
   RealtimeToolResult,
+  RealtimeResponsePreparation,
   RealtimeWireObservation,
   ServerRealtimeProvider,
   SessionConfigurationAcknowledgement,
 } from "../realtime/client/types";
 import type { ProviderHardSessionCaps } from "./provider-pricing-proof";
 import { realtimeWireIdentitySha256 } from "../realtime/client/wire-evidence";
+import {
+  createDeterministicCallerWorldScheduler,
+  observeCallerWorld,
+  type CallerSchedulerState,
+  type CallerWorldSchedulePlan,
+  type ScheduledCallerOpportunity,
+} from "./caller-world-scheduler";
+import type { AdmissibilityFrontierEvidence } from "./admissibility-frontier";
+import { HACC_SPEECH_GUARDRAIL_PACKET_KEY } from "./speech-guardrail-packet";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -152,6 +169,23 @@ export interface BenchmarkGatewayKernel {
     world: ToolWorldState;
   }>): ProviderCapabilitySnapshot | Promise<ProviderCapabilitySnapshot>;
   invoke(input: BenchmarkGatewayInvocation): BenchmarkGatewayOutcome | Promise<BenchmarkGatewayOutcome>;
+  /** Commit one caller turn and return its host-derived live plan and catalog. */
+  advanceCallerTurn?(input: Readonly<{
+    runId: string;
+    condition: CompiledBenchmarkCondition;
+    scenario: BenchmarkScenario;
+    turn: number;
+    turnId: string;
+    world: ToolWorldState;
+  }>): Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
+  }> | Promise<Readonly<{
+    capabilitySnapshot: ProviderCapabilitySnapshot;
+    frontierEvidence: AdmissibilityFrontierEvidence;
+    responsePlan: HaccResponsePlan;
+  }>>;
   /**
    * Read-only final-state proof. Implementations must bind their exact internal
    * treatment state to the supplied authoritative world without rotating
@@ -174,6 +208,13 @@ export type TrialSessionConfiguration = Readonly<{
   model: string;
   conditionId: BenchmarkConditionId;
   instructions: string;
+  /**
+   * Content-free transport capability flag. A rotating session sets this only
+   * when it will hydrate prior turns through the provider's native history
+   * protocol after setup acknowledgement. Conversation content never belongs
+   * in the session configuration.
+   */
+  initialConversationHistoryHydrationRequired?: boolean;
   initialPrompt: string;
   renderedCapabilitySnapshot: string;
   providerTools: readonly ProviderFunctionTool[];
@@ -425,6 +466,7 @@ export type TrialResult = Readonly<{
   providerReceiptLinkage: ProviderReadOnlyReceiptLinkage | null;
   audibility: TrialAudibilityReport;
   audioDelivery: TrialAudioDeliveryReport;
+  callerSchedule: TrialCallerScheduleReport | null;
   kernelAttestation: BenchmarkKernelFinalAttestation;
   world: ToolWorldState;
   budgetLedger: BudgetLedger;
@@ -454,6 +496,8 @@ export type RunTrialInput = Readonly<{
   audioDeliveryProfile?: TrialAudioDeliveryProfile;
   sleep?: TrialSleep;
   callerTurns: readonly CallerAudioTurn[];
+  /** Omit for the secondary open-loop stress mode. */
+  callerSchedulePlan?: CallerWorldSchedulePlan;
   pairedAudio: PairedAudioManifest;
   /** Frozen hash shared by the baseline/treatment pair and preregistration. */
   pairInvariantsHash: string;
@@ -478,6 +522,19 @@ type PreparedTurn = Readonly<{
   turnId: string;
   scenarioTurn: BenchmarkScenario["caller"]["turns"][number];
   material: AudioMaterial;
+  /** One-based source ordinal in the frozen paired audio library. */
+  pairedOrdinal: number;
+}>;
+
+export type TrialCallerScheduleReport = Readonly<{
+  schema_version: 1;
+  mode: "closed_loop";
+  schedule_sha256: string;
+  status: "complete" | "blocked" | "failed";
+  stage_id: string | null;
+  committed_turn_ids: readonly string[];
+  opportunities: readonly ScheduledCallerOpportunity[];
+  evidence: readonly BenchmarkEventEnvelope[];
 }>;
 
 type QueuedEvent = Readonly<{
@@ -836,7 +893,7 @@ function validateAndPrepareTurns(
     ) {
       throw new Error(`caller audio hash or format mismatch for ${turn.turnId}`);
     }
-    return Object.freeze({ turnId: turn.turnId, scenarioTurn, material });
+    return Object.freeze({ turnId: turn.turnId, scenarioTurn, material, pairedOrdinal: index + 1 });
   });
   if (totalBytes > limits.maxInputAudioBytes) {
     throw new Error(`caller audio exceeds the ${limits.maxInputAudioBytes}-byte input cap`);
@@ -1132,22 +1189,29 @@ function validateCompiledCondition(condition: CompiledBenchmarkCondition): void 
 function assertSnapshotMatches(
   snapshotInput: unknown,
   capabilities: CompiledBenchmarkCondition["visibleCapabilities"] | CompiledDisclosure["visibleCapabilities"],
-  label: string
+  label: string,
+  options: Readonly<{ allowLeafSubset?: boolean }> = {}
 ): ProviderCapabilitySnapshot {
   const snapshot = ProviderCapabilitySnapshotSchema.parse(snapshotInput);
   const expected = [...capabilities].sort((left, right) => left.name.localeCompare(right.name));
   const actual = [...snapshot.actions].sort((left, right) => left.name.localeCompare(right.name));
+  const expectedByName = new Map(expected.map((capability) => [capability.name, capability]));
   if (new Set(actual.map((action) => action.capability_grant)).size !== actual.length) {
     throw new Error(`${label} capability snapshot must use action-bound unique grants`);
   }
   if (
-    expected.length !== actual.length
-    || expected.some((capability, index) =>
-      capability.name !== actual[index]?.name
-      || capability.description !== actual[index]?.description
-      || capability.semanticHash !== actual[index]?.semantic_hash
-      || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(actual[index]?.input_schema)
-    )
+    (options.allowLeafSubset ? actual.length > expected.length : expected.length !== actual.length)
+    || actual.some((action) => {
+      const capability = expectedByName.get(action.name);
+      return !capability
+        || capability.description !== action.description
+        || capability.semanticHash !== action.semantic_hash
+        || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(action.input_schema);
+    })
+    || (options.allowLeafSubset && expected.some((capability) =>
+      capability.category !== "leaf"
+      && !actual.some((action) => action.name === capability.name)
+    ))
   ) {
     throw new Error(`${label} capability snapshot does not match the compiled logical catalog`);
   }
@@ -1166,20 +1230,18 @@ function assertSnapshotSubset(
   if (!condition.behavior.progressiveDisclosure) {
     return assertSnapshotMatches(snapshot, condition.visibleCapabilities, label);
   }
-  const catalog = new Map(
-    [
-      ...condition.visibleCapabilities,
-      ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
-    ].map((capability) => [capability.name, capability])
-  );
+  const catalog = [
+    ...condition.visibleCapabilities,
+    ...condition.disclosures.flatMap((disclosure) => disclosure.visibleCapabilities),
+  ];
   for (const action of snapshot.actions) {
-    const capability = catalog.get(action.name);
-    if (
-      !capability
-      || capability.description !== action.description
-      || capability.semanticHash !== action.semantic_hash
-      || canonicalArtifactJson(capability.inputSchema) !== canonicalArtifactJson(action.input_schema)
-    ) {
+    const matches = catalog.some((capability) =>
+      capability.name === action.name
+      && capability.description === action.description
+      && capability.semanticHash === action.semantic_hash
+      && canonicalArtifactJson(capability.inputSchema) === canonicalArtifactJson(action.input_schema)
+    );
+    if (!matches) {
       throw new Error(`${label} capability snapshot action ${action.name} is outside the compiled catalog`);
     }
   }
@@ -1326,6 +1388,7 @@ function responseIdForEvent(event: NormalizedRealtimeEvent): string | undefined 
     case "response.started":
     case "response.completed":
     case "tool.calls":
+    case "tool.dispatch":
     case "output.audio":
     case "output.transcript":
     case "turn.interrupted":
@@ -1339,9 +1402,32 @@ function requiresResponseIdentity(event: NormalizedRealtimeEvent): boolean {
   return event.type === "response.started"
     || event.type === "response.completed"
     || event.type === "tool.calls"
+    || event.type === "tool.dispatch"
     || event.type === "output.audio"
     || event.type === "output.transcript"
     || event.type === "turn.interrupted";
+}
+
+function executableToolCalls(
+  event: Extract<NormalizedRealtimeEvent, { type: "tool.calls" | "tool.dispatch" }>
+): readonly RealtimeToolCall[] {
+  if (event.type === "tool.calls") return event.calls;
+  return Object.freeze(event.dispatches.map((dispatch) => {
+    const argumentsJson = Object.freeze({
+      tool_name: dispatch.request.params.name,
+      arguments: dispatch.request.params.arguments,
+    });
+    return Object.freeze({
+      callId: dispatch.callId,
+      name: event.gateway,
+      argumentsText: canonicalArtifactJson(artifactJson(argumentsJson)),
+      argumentsJson,
+      ...(dispatch.provenance.nativeItemId ? { itemId: dispatch.provenance.nativeItemId } : {}),
+      responseId: event.responseId,
+      terminalEventId: dispatch.provenance.terminalEventId,
+      terminalWireType: dispatch.provenance.terminalWireType,
+    });
+  }));
 }
 
 type ResponseEventBinding = Readonly<{
@@ -1426,6 +1512,22 @@ function gatewayFailure(code: string, message: string, action?: string): Capabil
     code,
     message,
     retriable: false,
+  });
+}
+
+function compactDisclosure(template: CompiledDisclosure): JsonValue {
+  const retainedFields = ["label", "instructions", "context", "required_outputs", "success_criteria"] as const;
+  return JsonValueSchema.parse({
+    target: template.target,
+    information: template.information.map((unit) => {
+      const payload = jsonRecord(unit.payload);
+      if (!payload) return { id: unit.id, kind: unit.kind, payload: unit.payload };
+      const compactPayload: Record<string, JsonValue> = {};
+      for (const field of retainedFields) {
+        if (Object.hasOwn(payload, field)) compactPayload[field] = payload[field];
+      }
+      return { id: unit.id, kind: unit.kind, payload: compactPayload };
+    }),
   });
 }
 
@@ -1517,6 +1619,7 @@ async function dispatchToolCall(input: Readonly<{
   }
 
   let execution: ToolExecution | null = null;
+  let acceptedWorld: ToolWorldState | null = null;
   const executeLeaf: GatewayLeafExecutor = (request) => {
     if (execution) throw new Error("gateway kernel attempted more than one leaf execution for one model call");
     const argumentsRecord = jsonRecord(request.arguments);
@@ -1528,7 +1631,7 @@ async function dispatchToolCall(input: Readonly<{
       turn,
       ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
     });
-    runtime.world = execution.state;
+    acceptedWorld = execution.state;
     return execution;
   };
 
@@ -1546,10 +1649,23 @@ async function dispatchToolCall(input: Readonly<{
   } catch (error) {
     throw trialError("tool_error", "gateway_kernel_failed", errorMessage(error), "tool", { fatal: true });
   }
+  // The kernel may still reject a post-leaf transition or evidence append.
+  // Publish ToolWorld only after the invocation and its transcript commit.
+  if (acceptedWorld) runtime.world = acceptedWorld;
   const result = CapabilityGatewayResultSchema.parse(outcome?.result);
   const visibleOutput = outcome.providerVisibleOutput === undefined
     ? result
     : JsonValueSchema.parse(outcome.providerVisibleOutput);
+  const visibleEnvelope = visibleOutput !== null && typeof visibleOutput === "object" && !Array.isArray(visibleOutput)
+    ? visibleOutput as Record<string, JsonValue>
+    : null;
+  const speechGuardrailPacket = visibleEnvelope?.[HACC_SPEECH_GUARDRAIL_PACKET_KEY];
+  const responsePlan = visibleEnvelope?.[HACC_RESPONSE_PLAN_KEY];
+  const gatewayVisibleOutput = visibleEnvelope !== null
+    && (speechGuardrailPacket !== undefined || responsePlan !== undefined)
+    && Object.prototype.hasOwnProperty.call(visibleEnvelope, "gateway_result")
+    ? visibleEnvelope.gateway_result
+    : visibleOutput;
   let disclosure: Readonly<{ target: string; prompt: string; renderedSnapshot: string }> | null = null;
   let providerOutput: unknown = visibleOutput;
   if (outcome.disclosure) {
@@ -1579,14 +1695,26 @@ async function dispatchToolCall(input: Readonly<{
     const snapshot = assertSnapshotMatches(
       selectedSnapshot,
       template.visibleCapabilities,
-      `disclosure ${template.target}`
+      `disclosure ${template.target}`,
+      {
+        allowLeafSubset: condition.behavior.transitionOwnership === "host-managed-linear"
+          && template.target.startsWith("step:"),
+      }
     );
     runtime.currentCapabilitySnapshot = snapshot;
-    const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
+    const renderedSnapshot = condition.behavior.progressiveDisclosure
+      ? renderCompactProviderCapabilitySnapshot(snapshot)
+      : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: template.target, prompt: template.prompt, renderedSnapshot });
     providerOutput = {
-      gateway_result: visibleOutput,
-      progressive_disclosure: template.prompt,
+      gateway_result: gatewayVisibleOutput,
+      ...(speechGuardrailPacket === undefined
+        ? {}
+        : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
+      ...(responsePlan === undefined ? {} : { [HACC_RESPONSE_PLAN_KEY]: responsePlan }),
+      progressive_disclosure: condition.behavior.progressiveDisclosure
+        ? compactDisclosure(template)
+        : template.prompt,
       capability_snapshot: renderedSnapshot,
     };
   } else if (outcome.capabilitySnapshot) {
@@ -1596,10 +1724,16 @@ async function dispatchToolCall(input: Readonly<{
       "rotated"
     );
     runtime.currentCapabilitySnapshot = snapshot;
-    const renderedSnapshot = renderProviderCapabilitySnapshot(snapshot);
+    const renderedSnapshot = condition.behavior.progressiveDisclosure
+      ? renderCompactProviderCapabilitySnapshot(snapshot)
+      : renderProviderCapabilitySnapshot(snapshot);
     disclosure = Object.freeze({ target: "$grant-rotation", prompt: "", renderedSnapshot });
     providerOutput = {
-      gateway_result: visibleOutput,
+      gateway_result: gatewayVisibleOutput,
+      ...(speechGuardrailPacket === undefined
+        ? {}
+        : { [HACC_SPEECH_GUARDRAIL_PACKET_KEY]: speechGuardrailPacket }),
+      ...(responsePlan === undefined ? {} : { [HACC_RESPONSE_PLAN_KEY]: responsePlan }),
       capability_snapshot: renderedSnapshot,
     };
   }
@@ -1636,6 +1770,7 @@ async function deliverCallerAudio(input: Readonly<{
   runtime: MutableRuntime;
   journal: TrialJournalCoordinator;
   record(type: string, payload: unknown): void;
+  prepareResponseBeforeCommit?: () => RealtimeResponsePreparation | Promise<RealtimeResponsePreparation>;
 }>): Promise<void> {
   const delivery = deliveryPlan(input.turn.material, input.profile);
   if (input.runtime.inputAudioBytes + input.turn.material.bytes.byteLength > input.limits.maxInputAudioBytes) {
@@ -1715,13 +1850,81 @@ async function deliverCallerAudio(input: Readonly<{
   });
   await input.journal.flush();
   try {
+    const wireObservationStart = input.runtime.wireObservations.length;
+    const responsePreparation = await input.prepareResponseBeforeCommit?.();
+    if (responsePreparation) {
+      input.record("caller.response_control_prepare_intent", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        byte_length: Buffer.byteLength(responsePreparation.additionalInstructions, "utf8"),
+        context_authority: responsePreparation.contextAuthority,
+      });
+      await input.journal.flush();
+      input.client.prepareResponse(responsePreparation);
+      input.record("caller.response_plan_prepared", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        context_authority: responsePreparation.contextAuthority,
+      });
+      await input.journal.flush();
+    }
     input.client.commitInputAudio();
+    if (input.client.provider === "xai") {
+      if (typeof input.client.waitForInputAudioCommit !== "function") {
+        throw trialError("protocol_error", "commit_acknowledgement_failed", "provider commit acknowledgement barrier is unavailable", "turn", { fatal: true });
+      }
+      try {
+        await input.client.waitForInputAudioCommit(5_000);
+      } catch (error) {
+        throw trialError("protocol_error", "commit_acknowledgement_failed", errorMessage(error), "turn", { fatal: true });
+      }
+      input.record("caller.turn_commit_acknowledged", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+      });
+      await input.journal.flush();
+    }
     // Open the response window only after caller audio is durably committed,
     // but before createResponse because test and provider adapters may emit
     // normalized response events synchronously from that call.
     input.runtime.responseWindowOpen = true;
     input.runtime.activeResponseId = null;
     input.client.createResponse();
+    if (responsePreparation) {
+      const expectedWireType = input.client.provider === "gemini"
+        ? "realtimeInput.text"
+        : "response.create";
+      const wireObservation = input.runtime.wireObservations
+        .slice(wireObservationStart)
+        .find((observation) => observation.direction === "outbound" && observation.wireType === expectedWireType);
+      input.record("caller.response_plan_delivery_submitted", {
+        turn: input.ordinal,
+        turn_id: input.turn.turnId,
+        context_sha256: responsePreparation.contextSha256,
+        context_authority: responsePreparation.contextAuthority,
+        provider_context_channel: input.client.provider === "gemini"
+          ? "unprivileged_realtime_input_text"
+          : "per_response_instructions_composed_with_base",
+        machine_enforcement_boundary: "capability_gateway_and_outbound_speech_gate",
+        provider_wire_evidence: wireObservation
+          ? {
+              status: "observed",
+              sequence: wireObservation.sequence,
+              wire_type: wireObservation.wireType,
+              observation_sha256: wireObservation.observationSha256,
+              payload_sha256: wireObservation.payloadSha256,
+            }
+          : {
+              status: "unavailable",
+              reason: input.client.onWireObservation
+                ? "expected_delivery_frame_not_observed"
+                : "client_has_no_wire_observation_stream",
+            },
+      });
+      await input.journal.flush();
+    }
   } catch (error) {
     input.runtime.responseWindowOpen = false;
     input.runtime.activeResponseId = null;
@@ -1967,11 +2170,12 @@ async function awaitLogicalResponse(input: Readonly<{
         { fatal: true }
       );
     }
-    if (event.type === "tool.calls") {
-      if (event.calls.length === 0) {
+    if (event.type === "tool.calls" || event.type === "tool.dispatch") {
+      const calls = executableToolCalls(event);
+      if (calls.length === 0) {
         throw trialError("protocol_error", "empty_tool_batch", "Provider emitted an empty tool call batch", "tool", { fatal: true });
       }
-      if (input.runtime.toolCalls + event.calls.length > input.limits.maxToolCalls) {
+      if (input.runtime.toolCalls + calls.length > input.limits.maxToolCalls) {
         throw trialError(
           "cap_exceeded",
           "tool_call_cap_exceeded",
@@ -1980,19 +2184,19 @@ async function awaitLogicalResponse(input: Readonly<{
           { fatal: true }
         );
       }
-      const ids = event.calls.map((call) => call.callId);
+      const ids = calls.map((call) => call.callId);
       if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
         throw trialError("protocol_error", "invalid_tool_batch_ids", "Tool batch contains missing or duplicate call IDs", "tool", { fatal: true });
       }
-      input.runtime.toolCalls += event.calls.length;
+      input.runtime.toolCalls += calls.length;
       input.record("tool.batch_received", {
         turn: input.runtime.currentTurnIndex + 1,
         response_id: event.responseId ?? null,
-        call_count: event.calls.length,
+        call_count: calls.length,
         call_ids: ids,
       });
       const results: RealtimeToolResult[] = [];
-      for (const call of event.calls) {
+      for (const call of calls) {
         await input.journal.flush();
         // Reserve every syntactically present provider ID before validating the
         // tool name or arguments. A malformed first use therefore cannot evade
@@ -2106,6 +2310,7 @@ function assertCompleteTrialArtifacts(
     kernelAttestation: BenchmarkKernelFinalAttestation;
     kernelTranscript: string;
     kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
+    callerSchedule: TrialCallerScheduleReport | null;
   }>
 ): void {
   const eventVerification = verifyEventChain(artifacts.events);
@@ -2144,6 +2349,7 @@ function assertCompleteTrialArtifacts(
     "audio/delivery.json",
     "audio/pair-manifest.json",
   ];
+  if (expected.callerSchedule) required.push("caller-schedule.json");
   for (const path of required) {
     if (!fileByPath.has(path)) throw new Error(`required trial artifact ${path} is missing`);
   }
@@ -2197,7 +2403,8 @@ function assertCompleteTrialArtifacts(
       throw new Error(`output audio artifact for sent turn ${turn.turnId} is missing`);
     }
     const delivered = expected.audioDelivery.deliveries.filter((entry) => entry.turn === index + 1);
-    const pairedTurn = expected.pair.turns[index];
+    const pairedTurn = expected.pair.turns[turn.pairedOrdinal - 1];
+    if (!pairedTurn) throw new Error(`paired audio source ${turn.pairedOrdinal} is missing for ${turn.turnId}`);
     if (index < expected.turnsSent && delivered.length !== pairedTurn.chunk_hashes.length) {
       throw new Error(`successful turn ${turn.turnId} does not have a complete paced delivery trace`);
     }
@@ -2248,6 +2455,7 @@ function buildArtifacts(input: Readonly<{
   kernelAttestation: BenchmarkKernelFinalAttestation;
   kernelTranscript: string;
   kernelAttestationExpectation: RunTrialInput["kernelAttestationExpectation"];
+  callerSchedule: TrialCallerScheduleReport | null;
   pairInvariantsHash: string;
   studyPlanHash: string;
   ledger: BudgetLedger;
@@ -2323,6 +2531,13 @@ function buildArtifacts(input: Readonly<{
     `${canonicalArtifactJson(input.audioDelivery)}\n`,
     "application/json"
   ));
+  if (input.callerSchedule) {
+    files.push(makeArtifactFile(
+      "caller-schedule.json",
+      `${canonicalArtifactJson(artifactJson(input.callerSchedule))}\n`,
+      "application/json",
+    ));
+  }
   files.push(makeArtifactFile(
     "trial-result.json",
     `${canonicalArtifactJson({
@@ -2355,6 +2570,8 @@ function buildArtifacts(input: Readonly<{
       },
       audibility_applicability: input.audibility.applicability,
       audio_delivery_profile_hash: input.audioDelivery.profile_hash,
+      caller_mode: input.callerSchedule ? "closed_loop" : "open_loop",
+      caller_schedule_sha256: input.callerSchedule?.schedule_sha256 ?? null,
       errors: input.errors,
       counters: input.counters,
       budget: budgetSnapshot(input.ledger),
@@ -2432,15 +2649,15 @@ function buildArtifacts(input: Readonly<{
     kernelAttestation: input.kernelAttestation,
     kernelTranscript: input.kernelTranscript,
     kernelAttestationExpectation: input.kernelAttestationExpectation,
+    callerSchedule: input.callerSchedule,
   });
   return artifacts;
 }
 
 /**
- * Run one provider/condition trial. The caller sequence is deliberately open
- * loop: every pre-recorded turn is sent in scenario order, independent of model
- * prose. This is the first reproducible benchmark mode; adaptive caller policy
- * can be layered on later without changing the evidence format.
+ * Run one provider/condition trial. A callerSchedulePlan activates the primary
+ * condition-blind closed-loop mode; omitting it preserves the secondary static
+ * open-loop stress mode for backwards-compatible transport experiments.
  */
 export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResult> {
   requireNonEmpty(input.runId, "runId");
@@ -2472,6 +2689,38 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     input.limits,
     audioDeliveryProfile
   );
+  const callerScheduler = input.callerSchedulePlan
+    ? createDeterministicCallerWorldScheduler(input.callerSchedulePlan)
+    : null;
+  const plannedTurnCount = callerScheduler
+    ? (input.callerSchedulePlan!.stages?.length ?? scenario.caller.turns.length)
+    : planned.length;
+  if (plannedTurnCount > input.limits.maxTurns || plannedTurnCount > scenario.max_turns) {
+    throw new Error("closed-loop caller stage count exceeds the scenario or trial turn cap");
+  }
+  if (callerScheduler) {
+    if (callerScheduler.initialState.run_id !== input.runId) {
+      throw new Error("closed-loop caller plan run_id must equal the trial runId");
+    }
+    if (
+      callerScheduler.scenario.id !== scenario.id
+      || callerScheduler.scenario.version !== scenario.version
+      || canonicalArtifactJson(callerScheduler.scenario) !== canonicalArtifactJson(scenario)
+    ) {
+      throw new Error("closed-loop caller plan uses a different canonical scenario");
+    }
+    for (const reference of Object.values(input.callerSchedulePlan!.audio.turns)) {
+      const prepared = planned.find((turn) => turn.turnId === reference.turn_id);
+      if (!prepared) throw new Error(`closed-loop audio reference ${reference.turn_id} is absent from paired audio`);
+      if (
+        prepared.material.hash !== reference.pcm_sha256
+        || prepared.material.bytes.byteLength !== reference.byte_length
+        || prepared.material.format.sampleRateHz !== reference.sample_rate_hz
+      ) {
+        throw new Error(`closed-loop audio reference ${reference.turn_id} differs from paired PCM`);
+      }
+    }
+  }
   const sleep = input.sleep ?? defaultTrialSleep;
   const clock = input.clock ?? defaultClock();
   const journal = new TrialJournalCoordinator(
@@ -2482,6 +2731,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   const sessionStartedMs = clock.monotonicNowMs();
   if (!Number.isFinite(sessionStartedMs)) throw new Error("clock.monotonicNowMs() must be finite");
   const createdAt = clock.wallTimeIso();
+  let callerSchedulerState: CallerSchedulerState | null = callerScheduler?.initialState ?? null;
+  let callerScheduleStatus: TrialCallerScheduleReport["status"] | null = callerScheduler ? "failed" : null;
+  let callerBlockedStageId: string | null = null;
+  const callerScheduledOpportunities: ScheduledCallerOpportunity[] = [];
+  const deliveredTurns: PreparedTurn[] = [];
   const initialWorld = createToolWorld(scenario);
   const initialSnapshot = assertSnapshotMatches(
     await input.gatewayKernel.initialize(Object.freeze({
@@ -2527,8 +2781,10 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       condition_hash: input.condition.conditionHash,
       initial_prompt_hash: input.condition.initialPromptHash,
       initial_capability_snapshot_hash: sha256Hex(renderedInitialSnapshot),
-      turns_planned: planned.length,
+      turns_planned: plannedTurnCount,
       input_audio_hashes: planned.map((turn) => turn.material.hash),
+      caller_mode: callerScheduler ? "closed_loop" : "open_loop",
+      caller_schedule_sha256: callerScheduler?.initialState.schedule_sha256 ?? null,
       audio_delivery_profile: audioDeliveryProfile,
       audio_delivery_profile_hash: audioDeliveryProfileHash,
       retry_policy: "none",
@@ -2669,8 +2925,8 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         : null;
       runtime.sessionConfiguration = event.configuration ?? client.sessionConfigurationAcknowledgement ?? null;
     }
-    if (event.type === "tool.calls") {
-      runtime.normalizedToolCallCount += event.calls.filter(
+    if (event.type === "tool.calls" || event.type === "tool.dispatch") {
+      runtime.normalizedToolCallCount += executableToolCalls(event).filter(
         (call) => call.name === CAPABILITY_GATEWAY_NAME,
       ).length;
     }
@@ -2889,10 +3145,11 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
       session_state: client.state,
     });
 
-    for (const [index, turn] of planned.entries()) {
+    const executePreparedTurn = async (turn: PreparedTurn, index: number): Promise<void> => {
       if (sessionRemainingMs(clock, sessionStartedMs, input.limits.maxSessionMs) <= 0) {
         throw trialError("session_timeout", "session_timeout", "Trial exceeded the monotonic session cap", "session", { fatal: true });
       }
+      deliveredTurns.push(turn);
       runtime.currentTurnIndex = index;
       record("caller.turn_delivery_intent", {
         ordinal: index + 1,
@@ -2914,6 +3171,60 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         runtime,
         journal,
         record,
+        prepareResponseBeforeCommit: input.condition.behavior.transitionOwnership === "host-managed-linear"
+          ? async () => {
+              if (!input.gatewayKernel.advanceCallerTurn) {
+                throw trialError(
+                  "protocol_error",
+                  "caller_turn_frontier_unavailable",
+                  "Host-managed condition requires a turn-boundary admissibility kernel",
+                  "turn",
+                  { fatal: true }
+                );
+              }
+              const advanced = await input.gatewayKernel.advanceCallerTurn({
+                runId: input.runId,
+                condition: input.condition,
+                scenario,
+                turn: index + 1,
+                turnId: turn.turnId,
+                world: ToolWorldStateSchema.parse(structuredClone(runtime.world)),
+              });
+              const snapshot = assertSnapshotSubset(
+                advanced.capabilitySnapshot,
+                input.condition,
+                "caller-turn response plan"
+              );
+              const responsePlan = assertHaccResponsePlan(advanced.responsePlan, {
+                revision: index + 1,
+                capabilityEpoch: snapshot.capability_epoch,
+                target: snapshot.scope,
+                eligibleActions: snapshot.actions.map((action) => action.name),
+                frontierEvidenceSha256: advanced.frontierEvidence.evidence_sha256,
+              });
+              runtime.currentCapabilitySnapshot = snapshot;
+              const renderedSnapshot = input.condition.behavior.progressiveDisclosure
+                ? renderCompactProviderCapabilitySnapshot(snapshot)
+                : renderProviderCapabilitySnapshot(snapshot);
+              const controlContext = `${renderHaccResponsePlan(responsePlan)}\n${renderedSnapshot}`;
+              record("caller.response_plan_derived", {
+                turn: index + 1,
+                turn_id: turn.turnId,
+                capability_epoch: snapshot.capability_epoch,
+                scope: snapshot.scope,
+                frontier_evidence_sha256: advanced.frontierEvidence.evidence_sha256,
+                response_plan_revision: responsePlan.revision,
+                response_plan_sha256: responsePlan.plan_sha256,
+                eligible_action_count: responsePlan.eligible_actions.length,
+              });
+              await journal.flush();
+              return Object.freeze({
+                additionalInstructions: controlContext,
+                contextSha256: sha256Hex(controlContext),
+                contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+              });
+            }
+          : undefined,
       });
       runtime.turnsSent += 1;
       record("caller.turn_sent", {
@@ -2949,6 +3260,105 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
         turn_id: turn.turnId,
         output_audio_bytes: runtime.outputByTurn[index].reduce((sum, chunk) => sum + chunk.byteLength, 0),
       });
+    };
+
+    if (!callerScheduler) {
+      for (const [index, turn] of planned.entries()) await executePreparedTurn(turn, index);
+    } else {
+      while (true) {
+        if (!callerSchedulerState) throw new Error("closed-loop caller state is missing");
+        const observation = observeCallerWorld(
+          runtime.world,
+          input.callerSchedulePlan!.observable_world_fact_keys,
+        );
+        const selected = callerScheduler.selectNext({
+          state: callerSchedulerState,
+          observation,
+          observed_at: clock.wallTimeIso(),
+        });
+        callerSchedulerState = selected.state;
+        if (selected.status === "complete") {
+          callerScheduleStatus = "complete";
+          record("caller.schedule_completed", {
+            schedule_sha256: callerSchedulerState.schedule_sha256,
+            committed_turn_ids: callerSchedulerState.committed_turn_ids,
+          });
+          break;
+        }
+        if (selected.status === "blocked") {
+          callerScheduleStatus = "blocked";
+          callerBlockedStageId = selected.stage_id;
+          record("caller.schedule_blocked", {
+            schedule_sha256: callerSchedulerState.schedule_sha256,
+            stage_id: selected.stage_id,
+            unmet: selected.unmet,
+          });
+          throw trialError(
+            "protocol_error",
+            "caller_policy_blocked",
+            `Closed-loop caller could not select a unique utterance at stage ${selected.stage_id}`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        callerScheduledOpportunities.push(...selected.opportunities);
+        const source = planned.find((turn) => turn.turnId === selected.selection.audio.turn_id);
+        const scenarioTurn = scenario.caller.turns.find((turn) => turn.id === selected.selection.turn_id);
+        if (!source || !scenarioTurn) {
+          throw trialError(
+            "protocol_error",
+            "caller_selection_not_in_frozen_library",
+            `Closed-loop selection ${selected.selection.turn_id} is not in the frozen scenario/audio library`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        if (source.material.hash !== selected.selection.audio.pcm_sha256) {
+          throw trialError(
+            "protocol_error",
+            "caller_selection_audio_mismatch",
+            `Closed-loop selection ${selected.selection.turn_id} does not match frozen PCM`,
+            "turn",
+            { fatal: true },
+          );
+        }
+        const selectedTurn: PreparedTurn = Object.freeze({
+          turnId: selected.selection.turn_id,
+          scenarioTurn,
+          material: source.material,
+          pairedOrdinal: source.pairedOrdinal,
+        });
+        record("caller.schedule_selected", {
+          schedule_sha256: callerSchedulerState.schedule_sha256,
+          stage_id: selected.selection.stage_id,
+          selection_id: selected.selection.selection_id,
+          turn_id: selected.selection.turn_id,
+          source_audio_turn_id: selected.selection.audio.turn_id,
+          audio_sha256: selected.selection.audio.pcm_sha256,
+          observation_sha256: selected.selection.observation_sha256,
+          opportunities: selected.opportunities,
+        });
+        await executePreparedTurn(selectedTurn, deliveredTurns.length);
+        const committed = callerScheduler.commitTurn({
+          state: callerSchedulerState,
+          selection_id: selected.selection.selection_id,
+          observation: observeCallerWorld(
+            runtime.world,
+            input.callerSchedulePlan!.observable_world_fact_keys,
+          ),
+          observed_at: clock.wallTimeIso(),
+        });
+        callerSchedulerState = committed.state;
+        callerScheduledOpportunities.push(...committed.opportunities);
+        record("caller.schedule_committed", {
+          schedule_sha256: callerSchedulerState.schedule_sha256,
+          stage_id: selected.selection.stage_id,
+          selection_id: selected.selection.selection_id,
+          turn_id: selected.selection.turn_id,
+          caller_world_events: committed.world_events,
+          opportunities: committed.opportunities,
+        });
+      }
     }
   } catch (error) {
     const failure = asTrialRuntimeError(error, runtime.connected ? "turn" : "connect");
@@ -3054,7 +3464,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
 
   const elapsedMs = Math.max(0, clock.monotonicNowMs() - sessionStartedMs);
   const counters: TrialCounters = Object.freeze({
-    turnsPlanned: planned.length,
+    turnsPlanned: plannedTurnCount,
     turnsSent: runtime.turnsSent,
     inputAudioBytes,
     outputAudioBytes: runtime.outputAudioBytes,
@@ -3077,6 +3487,18 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     profile_hash: audioDeliveryProfileHash,
     deliveries: Object.freeze([...runtime.audioDeliveries]),
   });
+  const callerSchedule: TrialCallerScheduleReport | null = callerScheduler && callerSchedulerState
+    ? Object.freeze({
+        schema_version: 1 as const,
+        mode: "closed_loop" as const,
+        schedule_sha256: callerSchedulerState.schedule_sha256,
+        status: callerScheduleStatus ?? "failed",
+        stage_id: callerBlockedStageId,
+        committed_turn_ids: callerSchedulerState.committed_turn_ids,
+        opportunities: Object.freeze(callerScheduledOpportunities),
+        evidence: callerSchedulerState.evidence,
+      })
+    : null;
   // The treatment kernel is the only component that can prove its private
   // final FlowExecutionState. Require that proof for every terminal outcome,
   // including provider/timeout failures, before emitting a complete run.
@@ -3189,7 +3611,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
   });
   await journal.flush();
 
-  const providerInputAudio: ProviderPcmEvidence[] = planned
+  const providerInputAudio: ProviderPcmEvidence[] = deliveredTurns
     .slice(0, runtime.turnsSent)
     .map((turn, index) => Object.freeze({
       ordinal: index + 1,
@@ -3241,7 +3663,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     status: runtime.status,
     errors: publicErrors,
     counters,
-    planned,
+    planned: deliveredTurns,
     outputByTurn: runtime.outputByTurn,
     outputFormatByTurn: runtime.outputFormatByTurn,
     usageRecords: runtime.usageRecords,
@@ -3253,6 +3675,7 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     kernelAttestation,
     kernelTranscript,
     kernelAttestationExpectation: input.kernelAttestationExpectation,
+    callerSchedule,
     pairInvariantsHash: input.pairInvariantsHash,
     studyPlanHash: input.studyPlanHash,
     ledger: budgetLedger,
@@ -3271,13 +3694,14 @@ export async function runBenchmarkTrial(input: RunTrialInput): Promise<TrialResu
     status: runtime.status,
     errors: publicErrors,
     counters,
-    inputAudioHashes: Object.freeze(planned.map((turn) => turn.material.hash)),
+    inputAudioHashes: Object.freeze(deliveredTurns.map((turn) => turn.material.hash)),
     outputAudioHashes: Object.freeze(runtime.outputByTurn.slice(0, runtime.turnsSent).map((chunks) => sha256Hex(concatBytes(chunks)))),
     usage: Object.freeze([...runtime.usage]),
     providerEvidence,
     providerReceiptLinkage,
     audibility,
     audioDelivery,
+    callerSchedule,
     kernelAttestation,
     world: ToolWorldStateSchema.parse(runtime.world),
     budgetLedger,

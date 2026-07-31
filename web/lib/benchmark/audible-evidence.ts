@@ -317,6 +317,10 @@ export type IndependentAsrAdapterInput = Readonly<{
   schema_version: 1;
   adapter_blind_nonce_sha256: string;
   asr_contract_sha256: string;
+  /** Opaque request binding; contains no provider, arm, or semantic labels. */
+  source_request_sha256: string;
+  /** Opaque exact played-chunk binding; contains no provider or arm labels. */
+  source_chunk_sequence_sha256: string;
   format: IndependentAsrRequest["format"];
   played_sample_count: number;
   played_pcm: Uint8Array;
@@ -1368,6 +1372,8 @@ export async function runIndependentAsrAdapter(input: Readonly<{
     schema_version: 1 as const,
     adapter_blind_nonce_sha256: input.request.adapter_blind_nonce_sha256,
     asr_contract_sha256: contractSha256,
+    source_request_sha256: input.request.request_sha256,
+    source_chunk_sequence_sha256: input.request.source_chunk_sequence_sha256,
     format: input.request.format,
     played_sample_count: input.request.played_sample_count,
     played_pcm: adapterPcm,
@@ -1779,11 +1785,19 @@ export function prepareAudibleSemanticUnit(input: Readonly<{
       no_speech_probability_ppm: asrResult.no_speech_probability_ppm,
     });
     if (processedCoverage < UNIT_MIN_PROCESSED_AUDIO_COVERAGE_PPM) reasons.push("processed_audio_coverage_below_threshold");
-    if (confidenceCoverage < UNIT_MIN_CONFIDENCE_COVERAGE_PPM) reasons.push("confidence_coverage_below_threshold");
-    if (meanConfidence === null) reasons.push("confidence_unavailable");
-    else if (meanConfidence < UNIT_MIN_MEAN_CONFIDENCE_PPM) reasons.push("mean_confidence_below_threshold");
-    if (asrResult.no_speech_probability_ppm === null) reasons.push("no_speech_probability_unavailable");
-    else if (asrResult.no_speech_probability_ppm > UNIT_MAX_NO_SPEECH_PROBABILITY_PPM) {
+    // Confidence and no-speech probabilities are optional in the normalized
+    // result schema because pinned open-weight engines such as whisper.cpp do
+    // not expose them through every deterministic output format. A passing,
+    // route-bound calibration is the admissibility gate when they are absent;
+    // when present, the stricter per-unit thresholds still apply.
+    if (meanConfidence !== null && confidenceCoverage < UNIT_MIN_CONFIDENCE_COVERAGE_PPM) {
+      reasons.push("confidence_coverage_below_threshold");
+    }
+    if (meanConfidence !== null && meanConfidence < UNIT_MIN_MEAN_CONFIDENCE_PPM) {
+      reasons.push("mean_confidence_below_threshold");
+    }
+    if (asrResult.no_speech_probability_ppm !== null
+      && asrResult.no_speech_probability_ppm > UNIT_MAX_NO_SPEECH_PROBABILITY_PPM) {
       reasons.push("no_speech_probability_above_threshold");
     }
   }

@@ -1,0 +1,113 @@
+{
+  "scope": {
+    "conversationId": "membership-renewal-demo",
+    "organizationId": "demo-organization"
+  },
+  "turnId": "turn-001",
+  "occurredAtMs": 1800000000000,
+  "durableEvents": [
+    {
+      "operationId": "policy-v1",
+      "payload": {
+        "type": "policy.advanced",
+        "epoch": 1,
+        "invariants": [
+          {
+            "invariantId": "verify-before-account-access",
+            "text": "Verify the caller before accessing membership data."
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "member-id",
+      "payload": {
+        "type": "fact.asserted",
+        "key": "member.id",
+        "value": "MEM-42",
+        "revision": 1,
+        "authority": {
+          "kind": "system_of_record",
+          "issuer": "membership-api",
+          "evidenceId": "lookup-MEM-42",
+          "issuedAtMs": 1800000000000
+        }
+      }
+    },
+    {
+      "operationId": "renewal-goal",
+      "payload": {
+        "type": "goal.activated",
+        "goalId": "membership-renewal",
+        "description": "Find the renewal date and explain the available options."
+      }
+    }
+  ],
+  "flowCheckpoint": {
+    "operationId": "flow-membership-r3",
+    "goalId": "membership-renewal",
+    "runtimeDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": {
+      "version": 2,
+      "status": "active",
+      "nodeId": "membership",
+      "currentStep": "membership.lookup",
+      "completedSteps": [],
+      "stepEntries": 1,
+      "attempts": {
+        "membership.lookup": 1
+      },
+      "outputs": {},
+      "checkpoints": [],
+      "capabilityEpoch": 2,
+      "actionReceipts": [],
+      "revision": 3,
+      "updatedAt": "2027-01-15T08:00:00.000Z"
+    }
+  },
+  "actions": [
+    {
+      "operationId": "lookup-membership",
+      "request": {
+        "tool": "membership.lookup",
+        "arguments": {
+          "memberId": "MEM-42"
+        }
+      }
+    }
+  ],
+  "workers": [
+    {
+      "operationId": "research-renewal-options",
+      "request": {
+        "workerKind": "membership.research",
+        "purpose": "Find current renewal options and return cited facts.",
+        "dependencies": [
+          {
+            "key": "member.id",
+            "revision": 1
+          }
+        ]
+      }
+    }
+  ],
+  "packet": {
+    "capabilityCatalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capabilityEpoch": 2,
+    "capabilities": [
+      {
+        "name": "capability_gateway",
+        "description": "Invoke only the capabilities authorized for the current Flow step."
+      }
+    ],
+    "recentAudibleTurns": [
+      {
+        "turnId": "caller-001",
+        "speaker": "caller",
+        "text": "When does my membership renew?",
+        "heardAtMs": 1800000000000
+      }
+    ],
+    "byteBudget": 4096
+  }
+}

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="HACC phone flow mark">
+  <rect width="64" height="64" rx="14" fill="#0a0a0a"/>
+  <path
+    d="M16 10c-4 0-7 3-7 7 0 21 17 38 38 38 4 0 7-3 7-7v-7l-14-5-6 8c-7-3-11-7-14-14l8-6-5-14h-7Zm0 5h3l3 7-8 6 1 3c3 9 10 16 19 19l3 1 6-8 7 3v2c0 1-.9 2-2 2-18.8 0-34-15.2-34-34 0-.6.4-1 1-1h1Z"
+    fill="#fff"
+    fill-rule="evenodd"
+  />
+  <path d="M38 17h9v3h-9zm7 0 8-8 2 2-8 9zm0 2 2-2 8 8-2 2z" fill="#fff"/>
+  <circle cx="38" cy="18.5" r="3" fill="#fff"/>
+  <circle cx="54" cy="10" r="3" fill="#fff"/>
+  <circle cx="54" cy="26" r="3" fill="#fff"/>
+</svg>

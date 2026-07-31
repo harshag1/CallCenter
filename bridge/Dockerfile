@@ -1,5 +1,6 @@
 # Author: Harsha Gundala — Harsha's Amazing Call Center bridge container
-FROM node:22-alpine
+# Multi-architecture OCI index for node:22-alpine, resolved 2026-07-28.
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./

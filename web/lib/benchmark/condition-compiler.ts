@@ -1,5 +1,6 @@
 import {
   AgentFlowSchema,
+  findStep,
   listStepRefs,
   topicEntryStepPaths,
   validateAgentFlow,
@@ -20,6 +21,7 @@ import {
   type ToolDefinition,
 } from "./scenario-schema";
 import { valueAtPath } from "./tool-world";
+import { ActionReconciliationSpecSchema } from "../action-reconciliation";
 
 export const CONDITION_COMPILER_VERSION = "voice-condition-compiler.v1" as const;
 
@@ -29,6 +31,7 @@ export const BENCHMARK_CONDITION_IDS = [
   "progressive-only",
   "state-only",
   "full-harness",
+  "host-managed-harness",
   "oracle-route",
 ] as const;
 
@@ -93,6 +96,8 @@ export type CompiledDisclosure = Readonly<{
 export type ConditionBehavior = Readonly<{
   /** Every primary arm uses this exact native surface; scope is logical. */
   toolExposure: "gateway";
+  /** Attested owner of routine Flow entry/completion lifecycle transitions. */
+  transitionOwnership: "not-applicable" | "model-authored" | "host-managed-linear";
   progressiveDisclosure: boolean;
   genericDurableMemory: boolean;
   durableFlowState: boolean;
@@ -392,36 +397,50 @@ const GATEWAY_CONTROL = [
   "Flow-control actions move between disclosures; business actions retain the same canonical argument schemas as their direct-function counterparts.",
 ].join("\n");
 
+const HOST_MANAGED_GATEWAY_CONTROL = [
+  SHARED_VOICE_RULES,
+  `All logical actions are invoked through ${CAPABILITY_GATEWAY_NAME}. Use only the latest disclosed tool catalog; send exactly tool_name and arguments. The host binds the current capability grant and epoch outside model-authored arguments.`,
+  "At every caller turn, the host pushes a hash-bound <hacc_response_plan> with the current flow target, exact eligible action names, public slot presence, recovery state, and prohibited claims. Treat that plan and its matching live catalog as current authority; use flow.get_state only after uncertainty or reconnect, not as a routine poll.",
+  "A disclosed capability is permission, not evidence that the action is ready. Do not invoke it until the caller has supplied every required semantic input and every declared tool prerequisite is satisfied; ask one concise question when something is missing.",
+  "The host completes a step only from authoritative receipt-bound outputs and automatically enters its sole successor. Do not invent routine entry or completion calls. If the latest catalog exposes flow.enter_step, choose one currently reachable branch; use flow.get_state after uncertainty or reconnect.",
+  "After a successful business action and automatic transition, stop unless the current caller utterance already supplies the next step's required inputs.",
+].join("\n");
+
 const MEMORY_CONTROL = "Use durable_memory to preserve important caller corrections, authoritative receipt IDs, and unfinished obligations; memory entries are notes, not proof that an action happened.";
 
 const BEHAVIORS: Readonly<Record<BenchmarkConditionId, ConditionBehavior>> = Object.freeze({
   "raw-full": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: false, genericDurableMemory: false,
+    toolExposure: "gateway", transitionOwnership: "not-applicable", progressiveDisclosure: false, genericDurableMemory: false,
     durableFlowState: false, enforceTransitions: false, enforceCapabilityGrants: false,
     enforceExactlyOnce: false, oracleRoute: false,
   }),
   "raw-memory": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: false, genericDurableMemory: true,
+    toolExposure: "gateway", transitionOwnership: "not-applicable", progressiveDisclosure: false, genericDurableMemory: true,
     durableFlowState: false, enforceTransitions: false, enforceCapabilityGrants: false,
     enforceExactlyOnce: false, oracleRoute: false,
   }),
   "progressive-only": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: true, genericDurableMemory: false,
+    toolExposure: "gateway", transitionOwnership: "model-authored", progressiveDisclosure: true, genericDurableMemory: false,
     durableFlowState: false, enforceTransitions: false, enforceCapabilityGrants: false,
     enforceExactlyOnce: false, oracleRoute: false,
   }),
   "state-only": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: false, genericDurableMemory: false,
+    toolExposure: "gateway", transitionOwnership: "model-authored", progressiveDisclosure: false, genericDurableMemory: false,
     durableFlowState: true, enforceTransitions: true, enforceCapabilityGrants: true,
     enforceExactlyOnce: true, oracleRoute: false,
   }),
   "full-harness": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: true, genericDurableMemory: false,
+    toolExposure: "gateway", transitionOwnership: "model-authored", progressiveDisclosure: true, genericDurableMemory: false,
+    durableFlowState: true, enforceTransitions: true, enforceCapabilityGrants: true,
+    enforceExactlyOnce: true, oracleRoute: false,
+  }),
+  "host-managed-harness": Object.freeze({
+    toolExposure: "gateway", transitionOwnership: "host-managed-linear", progressiveDisclosure: true, genericDurableMemory: false,
     durableFlowState: true, enforceTransitions: true, enforceCapabilityGrants: true,
     enforceExactlyOnce: true, oracleRoute: false,
   }),
   "oracle-route": Object.freeze({
-    toolExposure: "gateway", progressiveDisclosure: true, genericDurableMemory: false,
+    toolExposure: "gateway", transitionOwnership: "model-authored", progressiveDisclosure: true, genericDurableMemory: false,
     durableFlowState: true, enforceTransitions: true, enforceCapabilityGrants: true,
     enforceExactlyOnce: true, oracleRoute: true,
   }),
@@ -438,7 +457,7 @@ const CONDITION_KEYS = [
   "initialPromptHash", "providerToolsHash", "conditionHash",
 ] as const;
 const BEHAVIOR_KEYS = [
-  "toolExposure", "progressiveDisclosure", "genericDurableMemory", "durableFlowState",
+  "toolExposure", "transitionOwnership", "progressiveDisclosure", "genericDurableMemory", "durableFlowState",
   "enforceTransitions", "enforceCapabilityGrants", "enforceExactlyOnce", "oracleRoute",
 ] as const;
 const INFORMATION_KEYS = ["id", "kind", "target", "payload", "contentHash"] as const;
@@ -570,7 +589,14 @@ function assertConditionShape(value: unknown, path: string): asserts value is Co
   }
   const behavior = exactRecord(record.behavior, BEHAVIOR_KEYS, `${path}.behavior`);
   if (behavior.toolExposure !== "gateway") throw new ConditionCompilerError(`${path}.behavior.toolExposure is invalid`);
-  for (const key of BEHAVIOR_KEYS.filter((key) => key !== "toolExposure")) {
+  if (![
+    "not-applicable",
+    "model-authored",
+    "host-managed-linear",
+  ].includes(stringValue(behavior.transitionOwnership, `${path}.behavior.transitionOwnership`))) {
+    throw new ConditionCompilerError(`${path}.behavior.transitionOwnership is invalid`);
+  }
+  for (const key of BEHAVIOR_KEYS.filter((key) => key !== "toolExposure" && key !== "transitionOwnership")) {
     if (typeof behavior[key] !== "boolean") throw new ConditionCompilerError(`${path}.behavior.${key} must be boolean`);
   }
   for (const [index, unit] of arrayValue(record.initialInformation, `${path}.initialInformation`).entries()) {
@@ -689,6 +715,24 @@ function normalizeSource(input: CanonicalConditionCompilerInput): NormalizedSour
       unknown.length ? `flow grants unknown scenario tools: ${unknown.join(", ")}` : "",
       omitted.length ? `scenario tools absent from every flow grant: ${omitted.join(", ")}` : "",
     ].filter(Boolean).join("; "));
+  }
+  const toolsByName = new Map(scenario.tools.map((tool) => [tool.name, tool]));
+  for (const ref of listStepRefs(flow)) {
+    for (const policy of ref.step.action_policies ?? []) {
+      const target = toolsByName.get(policy.tool);
+      for (const binding of policy.bound_arguments ?? []) {
+        if (!target?.arguments.some((argument) => argument.name === binding.argument)) {
+          throw new ConditionCompilerError(
+            `bound argument "${binding.argument}" is not declared by scenario tool "${policy.tool}" at ${ref.path}`
+          );
+        }
+        if (!toolsByName.has(binding.source.tool)) {
+          throw new ConditionCompilerError(
+            `bound argument source tool "${binding.source.tool}" is absent from the scenario at ${ref.path}`
+          );
+        }
+      }
+    }
   }
 
   const validTargets = new Set<DisclosureTarget>(["$base"]);
@@ -985,12 +1029,67 @@ function leafToolNamesAtTarget(flow: AgentFlow, target: DisclosureTarget): strin
   ]);
 }
 
-function flowControlsAtTarget(target: DisclosureTarget, controls: readonly CompiledCapability[]): CompiledCapability[] {
+function hostBoundCapability(
+  capability: CompiledCapability,
+  boundArguments: readonly string[],
+): CompiledCapability {
+  if (capability.category !== "leaf" || boundArguments.length === 0) return capability;
+  const input = structuredClone(capability.inputSchema) as Record<string, JsonValue>;
+  const properties = input.properties && typeof input.properties === "object" && !Array.isArray(input.properties)
+    ? { ...(input.properties as Record<string, JsonValue>) }
+    : {};
+  const omitted = [...new Set(boundArguments)].sort();
+  for (const argument of omitted) delete properties[argument];
+  input.properties = properties;
+  if (Array.isArray(input.required)) {
+    input.required = input.required.filter((argument) => typeof argument !== "string" || !omitted.includes(argument));
+  }
+  return {
+    ...capability,
+    description: `${capability.description} Host-bound arguments (omit them): ${omitted.join(", ")}.`,
+    inputSchema: asImmutableJson(input),
+  };
+}
+
+function capabilityAtTarget(
+  flow: AgentFlow,
+  target: DisclosureTarget,
+  capability: CompiledCapability,
+  behavior: ConditionBehavior,
+): CompiledCapability {
+  if (
+    behavior.transitionOwnership !== "host-managed-linear"
+    || capability.category !== "leaf"
+    || !target.startsWith("step:")
+  ) return capability;
+  const ref = findStep(flow, target.slice("step:".length));
+  const policy = ref?.step.action_policies?.find((candidate) => candidate.tool === capability.name);
+  const reconciliationBindings = (ref?.step.action_policies ?? []).flatMap((candidate) => {
+    const parsed = ActionReconciliationSpecSchema.safeParse(candidate.reconciliation);
+    if (!parsed.success || parsed.data.queryTool !== capability.name) return [];
+    return Object.entries(parsed.data.queryArguments)
+      .filter(([, source]) => source.source === "invocation_id")
+      .map(([argument]) => argument);
+  });
+  return hostBoundCapability(capability, [
+    ...(policy?.bound_arguments ?? []).map((binding) => binding.argument),
+    ...reconciliationBindings,
+  ]);
+}
+
+function flowControlsAtTarget(
+  target: DisclosureTarget,
+  controls: readonly CompiledCapability[],
+  behavior: ConditionBehavior,
+): CompiledCapability[] {
+  const hostManaged = behavior.transitionOwnership === "host-managed-linear";
   const names = target === "$base"
     ? ["flow.get_state", "flow.select_topic"]
     : target.startsWith("topic:")
       ? ["flow.enter_step", "flow.get_state"]
-      : ["flow.complete_step", "flow.enter_step", "flow.get_state"];
+      : hostManaged
+        ? ["flow.get_state"]
+        : ["flow.complete_step", "flow.enter_step", "flow.get_state"];
   return controls.filter((capability) => names.includes(capability.name));
 }
 
@@ -998,12 +1097,15 @@ function capabilitiesAtTarget(
   flow: AgentFlow,
   target: DisclosureTarget,
   tools: readonly CompiledLogicalTool[],
-  controls: readonly CompiledCapability[]
+  controls: readonly CompiledCapability[],
+  behavior: ConditionBehavior,
 ): CompiledCapability[] {
   const leafNames = new Set(leafToolNamesAtTarget(flow, target));
   return [
-    ...flowControlsAtTarget(target, controls),
-    ...tools.filter((tool) => leafNames.has(tool.name)).map((tool) => tool.capability),
+    ...flowControlsAtTarget(target, controls, behavior),
+    ...tools
+      .filter((tool) => leafNames.has(tool.name))
+      .map((tool) => capabilityAtTarget(flow, target, tool.capability, behavior)),
   ].sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -1035,6 +1137,7 @@ function renderCapabilities(capabilities: readonly CompiledCapability[]): string
 function controlInstructions(id: BenchmarkConditionId, oracleRoute: readonly string[]): string {
   if (id === "raw-full") return DIRECT_CONTROL;
   if (id === "raw-memory") return `${DIRECT_CONTROL}\n${MEMORY_CONTROL}`;
+  if (id === "host-managed-harness") return HOST_MANAGED_GATEWAY_CONTROL;
   if (id === "oracle-route") {
     return `${GATEWAY_CONTROL}\nDiagnostic route supplied by the benchmark: ${oracleRoute.join(" -> ")}. Follow it unless doing so would violate a safety policy.`;
   }
@@ -1088,7 +1191,8 @@ function buildDisclosureTemplates(
   flow: AgentFlow,
   information: readonly CompiledInformationUnit[],
   tools: readonly CompiledLogicalTool[],
-  controls: readonly CompiledCapability[]
+  controls: readonly CompiledCapability[],
+  behavior: ConditionBehavior,
 ): CompiledDisclosure[] {
   const targets = new Set<Exclude<DisclosureTarget, "$base">>();
   for (const unit of information) if (unit.target !== "$base") targets.add(unit.target);
@@ -1099,7 +1203,7 @@ function buildDisclosureTemplates(
 
   return [...targets].sort().map((target) => {
     const targetInformation = information.filter((unit) => unit.target === target);
-    const visibleCapabilities = capabilitiesAtTarget(flow, target, tools, controls);
+    const visibleCapabilities = capabilitiesAtTarget(flow, target, tools, controls, behavior);
     const prompt = renderDisclosure(target, targetInformation, visibleCapabilities);
     const withoutHash = {
       target,
@@ -1165,6 +1269,19 @@ export function benchmarkScenarioHash(scenario: unknown): string {
   return hashJson("scenario", BenchmarkScenarioSchema.parse(scenario));
 }
 
+function assertHostManagedFlowCompatibility(flow: AgentFlow): void {
+  for (const ref of listStepRefs(flow)) {
+    const requiredOutputs = new Set(ref.step.required_outputs ?? []);
+    const boundOutputs = new Set((ref.step.output_bindings ?? []).map((binding) => binding.output));
+    const unbound = [...requiredOutputs].filter((output) => !boundOutputs.has(output)).sort();
+    if (unbound.length > 0) {
+      throw new ConditionCompilerError(
+        `host-managed step "${ref.path}" has required outputs without authoritative receipt bindings: ${unbound.join(", ")}`,
+      );
+    }
+  }
+}
+
 function compileCondition(
   id: BenchmarkConditionId,
   source: NormalizedSource,
@@ -1172,9 +1289,11 @@ function compileCondition(
   information: readonly CompiledInformationUnit[],
   tools: readonly CompiledLogicalTool[],
   controls: readonly CompiledCapability[],
-  disclosureTemplates: readonly CompiledDisclosure[]
 ): CompiledBenchmarkCondition {
   const behavior = BEHAVIORS[id];
+  if (behavior.transitionOwnership === "host-managed-linear") {
+    assertHostManagedFlowCompatibility(source.flow);
+  }
   const allCapabilities = [...controls, ...tools.map((tool) => tool.capability)]
     .sort((left, right) => left.name.localeCompare(right.name));
   const progressive = behavior.progressiveDisclosure;
@@ -1188,8 +1307,10 @@ function compileCondition(
         .sort((left, right) => left.name.localeCompare(right.name))
       : !progressive
         ? allCapabilities
-        : capabilitiesAtTarget(source.flow, "$base", tools, controls);
-  const disclosures = progressive ? [...disclosureTemplates] : [];
+        : capabilitiesAtTarget(source.flow, "$base", tools, controls, behavior);
+  const disclosures = progressive
+    ? buildDisclosureTemplates(source.flow, information, tools, controls, behavior)
+    : [];
   const providerTools = [CAPABILITY_GATEWAY_TOOL];
   const initialPrompt = renderInitialPrompt(id, initialInformation, visibleCapabilities, source.oracleRoute);
   const withoutHash: Omit<CompiledBenchmarkCondition, "conditionHash"> = {
@@ -1274,10 +1395,9 @@ export function compileConditionSuite(input: CanonicalConditionCompilerInput): C
   const information = buildInformation(source);
   const tools = buildLogicalTools(source.scenario);
   const controls = buildFlowControlCapabilities();
-  const disclosures = buildDisclosureTemplates(source.flow, information, tools, controls);
   const conditions = Object.fromEntries(BENCHMARK_CONDITION_IDS.map((id) => [
     id,
-    compileCondition(id, source, bindings, information, tools, controls, disclosures),
+    compileCondition(id, source, bindings, information, tools, controls),
   ])) as Record<BenchmarkConditionId, CompiledBenchmarkCondition>;
   const withoutHash: Omit<CompiledConditionSuite, "suiteHash"> = {
     schemaVersion: 1,
@@ -1321,6 +1441,50 @@ function leafCapabilityUnion(condition: CompiledBenchmarkCondition): readonly Co
   return [condition.visibleCapabilities, ...condition.disclosures.map((disclosure) => disclosure.visibleCapabilities)]
     .flat()
     .filter((capability) => capability.category === "leaf");
+}
+
+function canonicalBoundArguments(
+  information: readonly CompiledInformationUnit[],
+  target: DisclosureTarget,
+  tool: string,
+): readonly string[] {
+  if (!target.startsWith("step:")) return [];
+  const unit = information.find((candidate) => candidate.id === `step.${target.slice("step:".length)}`);
+  if (!unit || unit.payload === null || typeof unit.payload !== "object" || Array.isArray(unit.payload)) return [];
+  const policies = Array.isArray(unit.payload.action_policies) ? unit.payload.action_policies : [];
+  const policy = policies.find((candidate) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+    return (candidate as Record<string, JsonValue>).tool === tool;
+  });
+  const bindings = policy && typeof policy === "object" && !Array.isArray(policy)
+    ? (policy as Record<string, JsonValue>).bound_arguments
+    : [];
+  const receiptBound = Array.isArray(bindings) ? bindings.flatMap((candidate) =>
+    candidate !== null
+    && typeof candidate === "object"
+    && !Array.isArray(candidate)
+    && typeof (candidate as Record<string, JsonValue>).argument === "string"
+      ? [(candidate as Record<string, JsonValue>).argument as string]
+      : []
+  ) : [];
+  const reconciliationBound = policies.flatMap((candidate) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const reconciliation = (candidate as Record<string, JsonValue>).reconciliation;
+    if (reconciliation === null || typeof reconciliation !== "object" || Array.isArray(reconciliation)) return [];
+    const record = reconciliation as Record<string, JsonValue>;
+    if (record.queryTool !== tool) return [];
+    const queryArguments = record.queryArguments;
+    if (queryArguments === null || typeof queryArguments !== "object" || Array.isArray(queryArguments)) return [];
+    return Object.entries(queryArguments).flatMap(([argument, source]) =>
+      source !== null
+      && typeof source === "object"
+      && !Array.isArray(source)
+      && (source as Record<string, JsonValue>).source === "invocation_id"
+        ? [argument]
+        : []
+    );
+  });
+  return sortedUnique([...receiptBound, ...reconciliationBound]);
 }
 
 function unitSetHash(units: readonly CompiledInformationUnit[], kind?: CompiledInformationUnit["kind"]): string {
@@ -1637,7 +1801,7 @@ export function auditConditionParity(
         }
         if (condition.behavior.progressiveDisclosure) {
           const actualControls = container.capabilities.filter((capability) => capability.category === "flow-control");
-          const expectedTargetControls = flowControlsAtTarget(container.target, expectedControls);
+          const expectedTargetControls = flowControlsAtTarget(container.target, expectedControls, condition.behavior);
           if (canonicalJson(actualControls) !== canonicalJson(expectedTargetControls)) {
             addIssue(issues, "target_flow_controls", `${container.label} has incorrect flow controls for its disclosure target`, id);
           }
@@ -1645,25 +1809,33 @@ export function auditConditionParity(
       }
       const allVisibleCapabilities = capabilityContainers.flatMap((container) => container.capabilities);
       const canonicalLeafByName = new Map(suite.semanticLeafTools.map((tool) => [tool.name, tool.capability]));
-      for (const capability of allVisibleCapabilities.filter((candidate) => candidate.category === "leaf")) {
-        if (canonicalJson(capability) !== canonicalJson(canonicalLeafByName.get(capability.name))) {
-          addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${capability.name}`, id);
+      for (const container of capabilityContainers) {
+        for (const capability of container.capabilities.filter((candidate) => candidate.category === "leaf")) {
+          const canonical = canonicalLeafByName.get(capability.name);
+          const expected = canonical && condition.behavior.transitionOwnership === "host-managed-linear"
+            ? hostBoundCapability(
+              canonical,
+              canonicalBoundArguments(suite.canonicalInformation, container.target, capability.name),
+            )
+            : canonical;
+          if (canonicalJson(capability) !== canonicalJson(expected)) {
+            addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${capability.name}`, id);
+          }
         }
       }
-      const leafCapabilities = new Map(leafCapabilityUnion(condition).map((capability) => [capability.name, capability]));
-      if (!sameStringSet([...leafCapabilities.keys()], suite.semanticLeafTools.map((tool) => tool.name))) {
+      const visibleLeafNames = leafCapabilityUnion(condition).map((capability) => capability.name);
+      if (!sameStringSet(visibleLeafNames, suite.semanticLeafTools.map((tool) => tool.name))) {
         addIssue(issues, "logical_capability_parity", "condition's visible leaf-capability union differs from canonical tools", id);
-      }
-      for (const tool of suite.semanticLeafTools) {
-        if (canonicalJson(leafCapabilities.get(tool.name)) !== canonicalJson(tool.capability)) {
-          addIssue(issues, "logical_capability_mismatch", `condition changed visible contract for ${tool.name}`, id);
-        }
       }
       const controlUnion = [...new Map(allVisibleCapabilities
         .filter((capability) => capability.category === "flow-control")
         .map((capability) => [capability.name, capability] as const)).values()]
         .sort((left, right) => left.name.localeCompare(right.name));
-      const expectedControlUnion = (id === "raw-full" || id === "raw-memory") ? [] : expectedControls;
+      const expectedControlUnion = (id === "raw-full" || id === "raw-memory")
+        ? []
+        : id === "host-managed-harness"
+          ? expectedControls.filter((capability) => capability.name !== "flow.complete_step")
+          : expectedControls;
       if (canonicalJson(controlUnion) !== canonicalJson(expectedControlUnion)) {
         addIssue(issues, "condition_flow_controls", "condition flow-control capability union differs from its treatment contract", id);
       }

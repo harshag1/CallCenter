@@ -2,9 +2,8 @@
 
 import { randomUUID } from "node:crypto";
 import { q, qOne } from "../db";
-import { sendAgentEmail } from "../email";
-import { sendSms } from "../sms";
 import { originateCall, purchaseNumber } from "../telephony";
+import { operatorCommunicationDispatch } from "../communications";
 import {
   campaignAuthorizationArguments,
   kickCampaign,
@@ -137,8 +136,24 @@ async function dispatchEmail(approved: ApprovedOperatorAction): Promise<Confirme
     "email_send"
   );
   return approvedExecution(approved, async ({ executionId }) => {
-    await sendAgentEmail({ to, subject, message, brand, idempotencyKey: executionId });
-    return { accepted: true, to };
+    const receipt = await operatorCommunicationDispatch.email({
+      to,
+      subject,
+      message,
+      brand,
+      context: {
+        approvalId: approved.approvalId,
+        executionId,
+        expectedQuote: parseOperatorCostQuote(args.cost_quote),
+      },
+    });
+    if (receipt.status === "indeterminate") {
+      throw new Error("provider email outcome is indeterminate");
+    }
+    if (receipt.status === "rejected") {
+      return { status: "rejected", code: "provider_rejected" };
+    }
+    return { accepted: true, to, communication_receipt: receipt };
   });
 }
 
@@ -156,9 +171,24 @@ async function dispatchSms(approved: ApprovedOperatorAction): Promise<ConfirmedA
     createSmsCostQuote({ destinationE164: to, segmentCount: segments }),
     "sms_segment"
   );
-  return approvedExecution(approved, async () => {
-    await sendSms(to, message);
-    return { accepted: true, to, segments };
+  return approvedExecution(approved, async ({ executionId }) => {
+    const receipt = await operatorCommunicationDispatch.sms({
+      to,
+      message,
+      segments,
+      context: {
+        approvalId: approved.approvalId,
+        executionId,
+        expectedQuote: parseOperatorCostQuote(args.cost_quote),
+      },
+    });
+    if (receipt.status === "indeterminate") {
+      throw new Error("provider SMS outcome is indeterminate");
+    }
+    if (receipt.status === "rejected") {
+      return { status: "rejected", code: "provider_rejected" };
+    }
+    return { accepted: true, to, segments, communication_receipt: receipt };
   });
 }
 

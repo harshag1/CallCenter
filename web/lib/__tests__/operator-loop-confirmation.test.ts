@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  chatStream: vi.fn(),
+  streamBuilderModel: vi.fn(),
   operatorPrompt: vi.fn(() => "system prompt"),
   operatorToolCatalog: vi.fn(),
   q: vi.fn(),
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
-vi.mock("../xai", () => ({ chatStream: mocks.chatStream }));
+vi.mock("../agent/builder-model", () => ({ streamBuilderModel: mocks.streamBuilderModel }));
 vi.mock("../agent/prompt", () => ({ operatorPrompt: mocks.operatorPrompt }));
 vi.mock("../agent/tools", () => ({ operatorToolCatalog: mocks.operatorToolCatalog }));
 vi.mock("../db", () => ({ q: mocks.q }));
@@ -18,6 +18,7 @@ vi.mock("../log", () => ({
 }));
 
 import { runOperator, type LoopEvent } from "../agent/loop";
+import { OPERATOR_TURN_INFERENCE_LIMITS } from "../agent/operator-turn-inference-authority";
 import {
   operatorActionArgumentsSha256,
   type OperatorActionProposal,
@@ -112,7 +113,7 @@ describe("operator loop human-confirmation boundary", () => {
       } as never)),
     } satisfies OperatorTool;
     mocks.operatorToolCatalog.mockResolvedValue(catalog([sendEmail]));
-    mocks.chatStream.mockImplementation(() => stream([
+    mocks.streamBuilderModel.mockImplementation(() => stream([
       { type: "text", delta: "Sent — your member will receive it now." },
       {
         type: "tool_calls",
@@ -137,7 +138,7 @@ describe("operator loop human-confirmation boundary", () => {
     ));
 
     expect(sendEmail.execute).toHaveBeenCalledOnce();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events).toContainEqual({ type: "operator_action_confirmation", proposal });
     expect(events.some((event) => event.type === "text")).toBe(false);
     expect(JSON.stringify(events)).not.toContain("Sent —");
@@ -190,7 +191,7 @@ describe("operator loop human-confirmation boundary", () => {
       },
     ] satisfies OperatorTool[];
     mocks.operatorToolCatalog.mockResolvedValue(catalog(tools));
-    mocks.chatStream.mockImplementation(() => stream([{
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
       type: "tool_calls",
       calls: [
         { id: "funded", name: "send_sms", arguments: "{}" },
@@ -208,7 +209,7 @@ describe("operator loop human-confirmation boundary", () => {
 
     expect(fundedExecute).not.toHaveBeenCalled();
     expect(safeExecute).not.toHaveBeenCalled();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events.filter((event) => event.type === "tool" && event.status === "error"))
       .toHaveLength(2);
     expect(events).toContainEqual({
@@ -226,7 +227,7 @@ describe("operator loop human-confirmation boundary", () => {
       parameters: { type: "object", properties: {} },
       execute: extensionExecute,
     }]));
-    mocks.chatStream
+    mocks.streamBuilderModel
       .mockImplementationOnce(() => stream([
         { type: "text", delta: "Checking the integration…" },
         {
@@ -248,7 +249,7 @@ describe("operator loop human-confirmation boundary", () => {
     expect(events).toContainEqual({ type: "text", delta: "Checking the integration…" });
     expect(events).toContainEqual({ type: "tool", name: "custom_read", status: "done" });
     expect(mocks.error).not.toHaveBeenCalled();
-    expect(mocks.chatStream).toHaveBeenCalledTimes(2);
+    expect(mocks.streamBuilderModel).toHaveBeenCalledTimes(2);
     expect(events.at(-1)).toEqual({ type: "done" });
   });
 
@@ -265,7 +266,7 @@ describe("operator loop human-confirmation boundary", () => {
       parameters: { type: "object", properties: {} },
       execute: fundedExecute,
     }]));
-    mocks.chatStream.mockImplementation(() => stream([{
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
       type: "tool_calls",
       calls: [{ id: "funded-without-card", name: "send_sms", arguments: "{}" }],
     }]));
@@ -279,7 +280,7 @@ describe("operator loop human-confirmation boundary", () => {
     ));
 
     expect(fundedExecute).toHaveBeenCalledOnce();
-    expect(mocks.chatStream).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
     expect(events).toContainEqual({ type: "tool", name: "send_sms", status: "error" });
     expect(events.at(-1)).toEqual({ type: "done" });
     expect(JSON.stringify(events)).not.toContain("must-not-enter-model-history");
@@ -288,5 +289,92 @@ describe("operator loop human-confirmation boundary", () => {
     );
     expect(String(persistedToolReceipt![1][3])).toContain("funded_action_confirmation_required");
     expect(String(persistedToolReceipt![1][3])).not.toContain("must-not-enter-model-history");
+  });
+
+  it("rejects an oversized tool batch atomically before its first execution", async () => {
+    const execute = vi.fn(async () => ({ output: { ok: true } }));
+    mocks.operatorToolCatalog.mockResolvedValue(catalog([{
+      name: "custom_read",
+      description: "Read a custom source",
+      parameters: { type: "object", properties: {} },
+      execute,
+    }]));
+    const calls = Array.from(
+      { length: OPERATOR_TURN_INFERENCE_LIMITS.maxToolCalls + 1 },
+      (_, index) => ({
+        id: `call-${index}`,
+        name: "custom_read",
+        arguments: "{}",
+      }),
+    );
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
+      type: "tool_calls",
+      calls,
+    }]));
+
+    const events = await collect(runOperator(
+      session,
+      THREAD_ID,
+      "Run too many reads",
+      null,
+      "https://operator.example.test",
+    ));
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
+    expect(events.filter(
+      (event) => event.type === "tool" && event.status === "error",
+    )).toHaveLength(calls.length);
+    expect(events).toContainEqual({
+      type: "notice",
+      text: "This turn reached its tool or time budget. Continue with another message.",
+    });
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("suppresses tool output that settles after the parent turn is cancelled", async () => {
+    const parent = new AbortController();
+    const execute = vi.fn(async () => {
+      parent.abort();
+      return { output: { late_secret: "must-not-enter-model-history" } };
+    });
+    mocks.operatorToolCatalog.mockResolvedValue(catalog([{
+      name: "custom_read",
+      description: "Read a custom source",
+      parameters: { type: "object", properties: {} },
+      execute,
+    }]));
+    mocks.streamBuilderModel.mockImplementation(() => stream([{
+      type: "tool_calls",
+      calls: [{ id: "late-call", name: "custom_read", arguments: "{}" }],
+    }]));
+
+    const events = await collect(runOperator(
+      session,
+      THREAD_ID,
+      "Run then disconnect",
+      null,
+      "https://operator.example.test",
+      null,
+      parent.signal,
+    ));
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(mocks.streamBuilderModel).toHaveBeenCalledOnce();
+    expect(events).toContainEqual({
+      type: "tool",
+      name: "custom_read",
+      status: "error",
+    });
+    expect(events).toContainEqual({
+      type: "notice",
+      text: "This turn reached its tool or time budget. Continue with another message.",
+    });
+    expect(JSON.stringify(events)).not.toContain("must-not-enter-model-history");
+    const persisted = mocks.q.mock.calls.find(([, params]) =>
+      Array.isArray(params) && params[2] === "tool"
+    );
+    expect(String(persisted?.[1][3])).toContain("operator_turn_inference_unavailable");
+    expect(String(persisted?.[1][3])).not.toContain("must-not-enter-model-history");
   });
 });

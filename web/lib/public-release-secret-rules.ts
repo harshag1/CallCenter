@@ -53,7 +53,7 @@ export const PUBLIC_RELEASE_SECRET_PATTERNS = Object.freeze([
       "[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[0-9A-Fa-f]{32,64}[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
       "[\"']?(TWILIO_API_KEY_SECRET|TELEPHONY_RECEIPT_SECRET)",
       "[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[^\"' \\t\\r\\n]{20,256}[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
-      "[\"']?(AUTH_CODE_HMAC_SECRET|CAMPAIGN_COMMITMENT_SECRET|ENV_VAULT_MASTER_KEY|MCP_GATEWAY_SECRET|MCP_SCOPE_SECRET|SESSION_SECRET)",
+      "[\"']?(AUTH_CODE_HMAC_SECRET|CAMPAIGN_COMMITMENT_SECRET|ENV_VAULT_MASTER_KEY|HACC_OUTBOUND_SPEECH_ASR_RECEIPT_HMAC_KEY|MCP_GATEWAY_SECRET|MCP_SCOPE_SECRET|SESSION_SECRET)",
       "[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[0-9A-Za-z_+./=-]{32,256}[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
       "[\"']?AWS_SECRET_ACCESS_KEY[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[0-9A-Za-z/+]{40}=?[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
       "[\"']?(AZURE_OPENAI_API_KEY|CARTESIA_API_KEY|CLOUDFLARE_API_TOKEN|LIVEKIT_API_SECRET|MISTRAL_API_KEY|TOGETHER_API_KEY|VERCEL_TOKEN)",

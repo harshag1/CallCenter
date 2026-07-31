@@ -30,7 +30,33 @@ Flow v2 is one orchestration kernel, not the architecture's ceiling. The experim
 - OpenAI: WebRTC in browsers and WebSocket/PCMU in the Twilio bridge.
 - Gemini: Live API WebSocket with blocking function execution through the same local gateway.
 
-Provider adapters do not change Flow state semantics. An opt-in [Realtime Provider Plugin v1 contract](../web/lib/realtime/plugins/README.md) now provides validated manifests, media/transport preflight, normalized event/tool-result hooks, and a conformance kit. Its built-in provider exports are transitional wrappers; the release-critical core registry still uses static provider wiring. Adding a provider to the stock application therefore still requires updating the provider ID/default/voice registry, browser transport, builder input enum, and integration metadata.
+Provider adapters do not change Flow state semantics. An opt-in
+[Realtime Provider Plugin v1 contract](../web/lib/realtime/plugins/README.md)
+provides validated manifests, media/transport preflight, normalized
+event/tool-result hooks, and a conformance kit. The runtime registry accepts
+validated dynamic registrations. Stock agent selection, browser transport,
+BYOK setup, bootstrap defaults, and builder input still recognize only the
+bundled providers, so a production plugin must integrate those application
+surfaces explicitly.
+
+### Provider lifecycle and replay authority
+
+Realtime APIs disagree about where a response begins and ends, whether a tool call is repeated across progress frames, and whether a provider response ID exists at all. The harness therefore treats provider normalization as an evidence boundary, not a lossy event-name translation. A replay-valid tool roundtrip must bind an ordered, hash-chained sequence containing:
+
+1. the exact input/generation trigger;
+2. one logical capability-gateway call and its accepted wire observation;
+3. the host's exact tool result;
+4. a distinct post-tool continuation trigger and response identity;
+5. continuation output, a completed terminal, and response-scoped usage; and
+6. the distinction between retained provider output and audio released as caller-playable.
+
+Provider-specific lifecycle policies satisfy that common shape without pretending that their wire semantics are identical:
+
+- **OpenAI:** one function call may appear in multiple item-added, item-done, argument-done, and response-done projections. Replay deduplicates only equivalent projections of the same call identity. A present conflicting identity, completed-argument mutation, duplicate terminal form, or missing accepted-observation binding fails closed.
+- **Gemini:** Live does not supply provider response IDs for this path. The outbound `toolResponse` closes the tool-call phase and deterministically arms a new client-local continuation identity. Subsequent provider content, terminal, and provider-reported usage must bind to that continuation and to the same connection epoch and input turn. The local identity is labeled `client_local`; it is never represented as a provider-issued ID.
+- **xAI:** finite prerecorded LC4 calls use explicit manual turn mode, with one byte-exact caller PCM delivery, one acknowledged commit, and one response request. The separately qualified interactive path uses provider-native `server_vad`: caller PCM stays byte-exact and is accounted separately from a zero-PCM end-of-speech transport delimiter paced in 20 ms frames. Native stop is accepted after the 500 ms policy minimum and stops delivery immediately; a 2 second/100-frame hard cap without native stop fails at the transport boundary instead of leaking into the generic response timer. Interactive replay binds the exact delivered delimiter prefix and requires the acknowledged turn controls plus ordered caller audio, delimiter, native speech stop, automatic commit, automatic initial response, tool result, and explicit post-tool continuation. Root-response audio observed before the tool call is retained only as suppressed quarantine evidence with zero released bytes; only the response-scoped continuation output is caller-playable.
+
+The common replay artifact retains only hashes, bounded counters, normalized provenance, and explicit identity-source labels. If a provider omits evidence needed by the common lifecycle, the harness records that limitation or a failed execution; it does not infer the missing event from a later success signal. This layer establishes mechanism integrity and reproducibility, not comparative model efficacy.
 
 ## Tool layers
 
@@ -44,7 +70,16 @@ All secured Flow v2 live-call actions converge on the scoped MCP gateway and are
 
 ## Data and tenancy
 
-Application data routes resolve an authenticated organization or a signed call scope before tenant access. Product datasets are represented by `datasets` and `dataset_rows`; public raw-SQL management is disabled. The 31 ordered migrations (`001`–`031`) revoke public/API-role access and enable and force RLS across the public and private application relations. Production still requires a separate non-owner, non-superuser, non-`BYPASSRLS` runtime login; connecting as the migration owner defeats that boundary. Postgres stores experiment assignments, schedules, logs, flow state, call events, transcripts, and browser-call recording metadata/objects. The supplied PSTN bridges do not persist audio.
+Application data routes resolve an authenticated organization or a signed call
+scope before tenant access. Product datasets are represented by `datasets` and
+`dataset_rows`; public raw-SQL management is disabled. The ordered migrations
+in `web/migrations/` revoke public/API-role access and enable and force RLS
+across the public and private application relations. Production still requires
+a separate non-owner, non-superuser, non-`BYPASSRLS` runtime login; connecting
+as the migration owner defeats that boundary. Postgres stores experiment
+assignments, schedules, logs, flow state, call events, transcripts, tenant
+voice-provider credential envelopes, and browser-call recording
+metadata/objects. The supplied PSTN bridges do not persist audio.
 
 ## Deployment boundaries
 

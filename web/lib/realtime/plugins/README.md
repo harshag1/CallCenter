@@ -26,6 +26,90 @@ import {
 The server-only entrypoint is intentionally separate. Importing the ordinary
 plugin barrel does not pull credential-bearing adapters into browser bundles.
 
+The registry is dynamically extensible, but registration alone is not a full
+stock-app installation. Agent selection, browser consumers, BYOK setup,
+bootstrap defaults, builder enums, and integration metadata currently recognize
+the bundled OpenAI, xAI, and Gemini providers. A self-hosted plugin must wire
+each application surface it intends to expose.
+
+## Install in a self-hosted runtime
+
+The plugin contract owns wire normalization and conformance. The application
+runtime uses a smaller server adapter for token minting, session updates, and
+telephony bridge metadata. Install that adapter once during server bootstrap:
+
+```ts
+import {
+  registerRealtimeProvider,
+  type RealtimeProviderRegistration,
+} from "@/lib/realtime/registry";
+
+const communitySip = {
+  id: "community-sip",
+  label: "Community SIP",
+  defaultModel: "community-realtime-v1",
+  defaultVoice: "river",
+  env: ["COMMUNITY_SIP_TOKEN"],
+  capabilities: {
+    browser: "websocket",
+    telephony: "requires-transcoding",
+    remoteMcp: false,
+    clientFunctions: true,
+    sessionResumption: { supported: false, enabledByDefault: false },
+    notes: ["Browser connections use short-lived, server-minted tokens."],
+  },
+  createBrowserConnection: async (session, fundingAuthority) => {
+    if (
+      fundingAuthority.source !== "tenant_byok"
+      || fundingAuthority.provider !== "community-sip"
+    ) throw new Error("community-sip tenant funding authority required");
+    // Use fundingAuthority.apiKey only to mint an ephemeral token on the
+    // server. Never return it or a deployment credential.
+    return {
+      provider: "community-sip",
+      model: session.model,
+      voice: session.voice,
+      transport: "websocket",
+      wsUrl: "wss://voice.example.test/realtime",
+      token: "short-lived-token",
+    };
+  },
+  createServerConnection: async (session) => ({
+    provider: "community-sip",
+    model: session.model,
+    voice: session.voice,
+    wsUrl: "wss://voice.example.test/realtime",
+    headers: {},
+    sessionUpdate: { type: "session.update" },
+    wireProtocol: "openai-realtime",
+  }),
+  buildSessionUpdate: (session) => ({
+    type: "session.update",
+    model: session.model,
+  }),
+} satisfies RealtimeProviderRegistration<"community-sip">;
+
+registerRealtimeProvider(communitySip);
+```
+
+Registration is atomic and fail-closed. IDs are bounded kebab-case strings;
+environment names are unique uppercase identifiers; metadata is detached and
+frozen; duplicate IDs and capability contradictions are rejected. Bundled
+providers cannot be unregistered. A self-hosted extension can be removed with
+`unregisterRealtimeProvider("community-sip")`.
+
+The runtime validates that returned provider/model/voice/transport metadata
+matches the registration. `native-pcmu` additionally requires a direct `wss:`
+endpoint; `requires-transcoding` must omit it. These checks catch manifest
+drift, but they do not prove live network or audio compatibility.
+Registered WSS URLs cannot contain userinfo or fragments; put server
+credentials in headers and expose only ephemeral browser credentials.
+
+`registry.ts` is `server-only`. A custom browser provider also needs a
+client-side consumer for its public ephemeral connection shape. Keep adapter
+implementations, credential reads, and registration imports out of client
+components.
+
 ## Contract boundary
 
 Every plugin declares an immutable `contractVersion: "1.0"` manifest that binds:
@@ -83,10 +167,12 @@ current wrappers and a synthetic fourth provider, then runs the kit.
 ## Current boundary
 
 The OpenAI, xAI, and Gemini exports are transitional wrappers around the
-existing adapters. They make the new catalog and conformance surface available
-without changing the release-critical runtime registry. Those legacy adapters
-still own their existing environment and network access. A direct v1 plugin
-should use only `context.readCredential` and `context.fetch`.
+existing adapters. They make the normalized plugin catalog and conformance
+surface available while the protected runtime registry preserves existing
+browser and bridge behavior. Those legacy adapters still own their existing
+environment and network access. A direct v1 plugin should use only
+`context.readCredential` and `context.fetch`; its server-facing runtime adapter
+should expose only ephemeral browser credentials.
 
 This contract validates cooperative plugins; it is not a sandbox for hostile
 JavaScript. Run third-party plugin code in an isolated process if it is not

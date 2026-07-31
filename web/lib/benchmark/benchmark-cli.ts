@@ -543,19 +543,34 @@ function expectedRendition(provider: ServerRealtimeProvider): CallerAudioRenditi
   return provider === "gemini" ? "pcm16le_mono_16000" : "pcm16le_mono_24000";
 }
 
+/** Mirrors the package engine floor without depending on npm at runtime. */
+export function isSupportedBenchmarkNodeVersion(version: string): boolean {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:\+.*)?$/.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor)) return false;
+  if (major >= 24) return true;
+  if (major === 22) return minor >= 13;
+  return major === 20 && minor >= 19;
+}
+
 async function commandDoctor(args: ParsedArguments, dependencies: Required<Pick<BenchmarkCliDependencies, "repositoryRoot" | "cwd" | "now" | "io">> & BenchmarkCliDependencies): Promise<number> {
-  rejectUnknown(args, ["json", "ledger", "freeze-lock", "env-file", "include-gpu-hub-env"]);
+  rejectUnknown(args, ["json", "ledger", "freeze-lock", "env-file"]);
   if (args.positionals.length !== 1) cliFail(EXIT.usage, "usage", "usage: voice-benchmark doctor [options]");
   const envFile = option(args, "env-file");
   const environment = await resolveBenchmarkEnvironment({
     names: Object.values(PROVIDER_ENV),
     explicitEnvFiles: envFile ? [absolutePath(envFile, dependencies.cwd)] : [],
     repositoryRoot: dependencies.repositoryRoot,
-    gpuHubRoot: flag(args, "include-gpu-hub-env") ? undefined : null,
+    gpuHubRoot: null,
     cwd: dependencies.cwd,
   });
   const checks: Record<string, unknown> = {
-    node: { version: process.versions.node, supported: Number(process.versions.node.split(".")[0]) >= 24 },
+    node: {
+      version: process.versions.node,
+      supported: isSupportedBenchmarkNodeVersion(process.versions.node),
+    },
     repository_root: dependencies.repositoryRoot,
     provider_environment: environment.describe(),
   };
@@ -1453,7 +1468,7 @@ async function commandOfflineRun(args: ParsedArguments, dependencies: Required<P
 
 async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick<BenchmarkCliDependencies, "repositoryRoot" | "cwd" | "now" | "io">> & BenchmarkCliDependencies): Promise<number> {
   rejectUnknown(args, [
-    "json", "plan", "freeze-lock", "fixture-root", "ledger", "output-root", "env-file", "include-gpu-hub-env",
+    "json", "plan", "freeze-lock", "fixture-root", "ledger", "output-root", "env-file",
     "confirm-paid-sha256", "confirm-max-usd", "kernel-attestation-private-key", "gate0-packet",
   ]);
   if (args.positionals.join(" ") !== "run paid" && args.positionals.join(" ") !== "paid run") {
@@ -1632,7 +1647,7 @@ async function commandPaidRun(args: ParsedArguments, dependencies: Required<Pick
       names: [PROVIDER_ENV[plan.cell.provider]],
       explicitEnvFiles: envFile ? [absolutePath(envFile, dependencies.cwd)] : [],
       repositoryRoot: dependencies.repositoryRoot,
-      gpuHubRoot: flag(args, "include-gpu-hub-env") ? undefined : null,
+      gpuHubRoot: null,
       cwd: dependencies.cwd,
     })
   );

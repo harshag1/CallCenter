@@ -10,8 +10,9 @@ type SkipInventoryEntry = Readonly<{
   condition: string;
   reason_category:
     | "missing_postgresql_integration_environment"
-    | "missing_postgresql_admin_integration_environment";
-  gate0_disposition: "must_run";
+    | "missing_postgresql_admin_integration_environment"
+    | "missing_local_asr_integration_environment";
+  gate0_disposition: "must_run" | "environment_qualified_release_receipt";
 }>;
 
 type SkipInventory = Readonly<{
@@ -34,10 +35,17 @@ type SkipInventory = Readonly<{
     unexpected_skip: "fail";
     known_conditional_skip: "must_run_for_gate0";
     zero_failures_with_skips: "insufficient";
+    public_ci_required_disposition: "must_run";
+    environment_qualified_disposition: "release_receipt_required_for_lc4_publication";
+    environment_qualified_receipt_command: string;
   }>;
   entries: readonly SkipInventoryEntry[];
   total_skipped_suites_when_unconfigured: number;
   total_skipped_tests_when_unconfigured: number;
+  public_ci_required_suites: number;
+  public_ci_required_tests: number;
+  environment_qualified_suites: number;
+  environment_qualified_tests: number;
 }>;
 
 const repositoryRoot = resolve(process.cwd(), "..");
@@ -100,6 +108,10 @@ describe("Gate 0 conditional-test skip inventory", () => {
         unexpected_skip: "fail",
         known_conditional_skip: "must_run_for_gate0",
         zero_failures_with_skips: "insufficient",
+        public_ci_required_disposition: "must_run",
+        environment_qualified_disposition: "release_receipt_required_for_lc4_publication",
+        environment_qualified_receipt_command:
+          "npm run benchmark:lc4:asr-environment:receipt -- --out ABSOLUTE_PATH",
       },
     });
     expect(inventory).not.toHaveProperty("source_commit");
@@ -118,6 +130,10 @@ describe("Gate 0 conditional-test skip inventory", () => {
     })));
 
     let testTotal = 0;
+    let publicCiSuites = 0;
+    let publicCiTests = 0;
+    let environmentQualifiedSuites = 0;
+    let environmentQualifiedTests = 0;
     for (const entry of inventory.entries) {
       const source = readFileSync(resolve(repositoryRoot, entry.path), "utf8");
       expect(createHash("sha256").update(source).digest("hex")).toBe(entry.content_sha256);
@@ -126,13 +142,33 @@ describe("Gate 0 conditional-test skip inventory", () => {
         /const\s+([A-Za-z_$][\w$]*)\s*=\s*process\.env\.([A-Z0-9_]+);[\s\S]*?describe\.runIf\(Boolean\(\1\)\)/
       );
       expect(exactCondition?.[2], entry.path).toBe(environmentVariable);
-      expect(entry.gate0_disposition).toBe("must_run");
       const testCount = (source.match(/(?:^|\n)\s*(?:it|test)\s*\(/g) ?? []).length;
       expect(testCount, entry.path).toBe(entry.test_count);
       testTotal += testCount;
+      if (entry.reason_category === "missing_local_asr_integration_environment") {
+        expect(entry.gate0_disposition).toBe("environment_qualified_release_receipt");
+        expect(source).not.toMatch(/\/Users\/harsha|\/opt\/homebrew|\/private\/tmp/u);
+        environmentQualifiedSuites += 1;
+        environmentQualifiedTests += testCount;
+      } else {
+        expect(entry.gate0_disposition).toBe("must_run");
+        publicCiSuites += 1;
+        publicCiTests += testCount;
+      }
     }
     expect(inventory.entries).toHaveLength(inventory.total_skipped_suites_when_unconfigured);
     expect(testTotal).toBe(inventory.total_skipped_tests_when_unconfigured);
+    expect(publicCiSuites).toBe(inventory.public_ci_required_suites);
+    expect(publicCiTests).toBe(inventory.public_ci_required_tests);
+    expect(environmentQualifiedSuites).toBe(inventory.environment_qualified_suites);
+    expect(environmentQualifiedTests).toBe(inventory.environment_qualified_tests);
+    expect({
+      suites: publicCiSuites + environmentQualifiedSuites,
+      tests: publicCiTests + environmentQualifiedTests,
+    }).toEqual({
+      suites: inventory.total_skipped_suites_when_unconfigured,
+      tests: inventory.total_skipped_tests_when_unconfigured,
+    });
 
     const manifestBody = {
       scope: inventory.source_binding.scope,

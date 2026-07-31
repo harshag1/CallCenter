@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { CAPABILITY_GATEWAY_FUNCTION_NAME } from "./capability-gateway";
 import {
   buildGeminiBrowserFunctionDeclarations,
@@ -7,6 +8,11 @@ import {
   isGeminiSetupCompleteMessage,
 } from "./gemini-websocket";
 import type { RealtimeTransportStart } from "./types";
+import {
+  OutboundSpeechGate,
+  createOutboundSpeechGatePolicy,
+  independentSpeechAsrReceiptDigestMessage,
+} from "@/lib/realtime/outbound-speech-gate";
 
 const ORIGIN = "https://voice.example.test";
 const TOKEN = `scope.${"a".repeat(96)}`;
@@ -458,6 +464,90 @@ describe("Gemini browser capability gateway transport", () => {
     }));
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("gemini-live-secret");
     expect(JSON.stringify(test.handlers.onError.mock.calls)).not.toContain("alice@example.test");
+  });
+
+  it("quarantines Gemini PCM until turnComplete and records exact scheduled bytes", async () => {
+    installBrowserGlobals();
+    installGatewayFetch();
+    const transport = new GeminiWebSocketTransport();
+    const test = transportArgs();
+    const playbackSource = { buffer: null, connect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null };
+    const createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
+      duration: length / rate,
+      copyToChannel: vi.fn(),
+    }));
+    Object.assign(test.audioContext, {
+      createBuffer,
+      createBufferSource: vi.fn(() => playbackSource),
+    });
+    const onEvidence = vi.fn();
+    test.args.outboundSpeechGate = {
+      gate: new OutboundSpeechGate({
+        policy: createOutboundSpeechGatePolicy({ evidencePolicy: "independent_asr_required" }),
+        receiptContext: {
+          organizationId: "00000000-0000-4000-8000-0000000000a1",
+          callId: "00000000-0000-4000-8000-0000000000c1",
+        },
+        independentAsr: vi.fn(async (input) => {
+          const receipt = {
+            schemaVersion: 2 as const,
+            authorityId: "00000000-0000-4000-8000-0000000000d1",
+            organizationId: input.organizationId,
+            callId: input.callId,
+            provider: input.provider,
+            responseId: input.responseId,
+            text: "The safe answer",
+            transcriptSha256: createHash("sha256").update("The safe answer").digest("hex"),
+            audioSha256: input.audioSha256,
+            audioBytes: input.audioBytes,
+            sampleRateHz: input.audio.sampleRateHz,
+            channels: 1 as const,
+            complete: true as const,
+            engine: "test-independent-asr",
+            model: "test-model",
+            decision: "transcribed" as const,
+            receiptHmacSha256: "d".repeat(64),
+          };
+          return {
+            ...receipt,
+            receiptSha256: createHash("sha256")
+              .update(independentSpeechAsrReceiptDigestMessage(receipt))
+              .digest("hex"),
+          };
+        }),
+      }),
+      onEvidence,
+    };
+    const started = transport.start(test.args);
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0]!;
+    socket.open();
+    socket.receive({ setupComplete: {} });
+    await started;
+
+    socket.receive({
+      serverContent: {
+        modelTurn: {
+          parts: [{
+            inlineData: {
+              mimeType: "audio/pcm;rate=24000",
+              data: Buffer.from([1, 0, 2, 0]).toString("base64"),
+            },
+          }],
+        },
+        turnComplete: true,
+      },
+    });
+
+    await vi.waitFor(() => expect(onEvidence).toHaveBeenCalledTimes(1));
+    expect(createBuffer).toHaveBeenCalledTimes(1);
+    expect(onEvidence.mock.calls[0][0]).toMatchObject({
+      provider: "gemini",
+      decision: { action: "release", evidenceCoverage: "exact_buffered_pcm" },
+      playout: { status: "released_to_audio_context", audioBytes: 4 },
+    });
+    expect(transport.outboundSpeechGateSupport.supported).toBe(true);
+    await transport.stop();
   });
 
   it("closes a mixed server-message union before dispatching any tool", async () => {

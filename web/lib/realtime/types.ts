@@ -15,6 +15,44 @@ export type VoiceProviderConfig = {
   settings: Record<string, unknown>;
 };
 
+/**
+ * Server-only root used solely to mint a provider's short-lived browser
+ * credential. Adapters must never copy this object or apiKey into their return.
+ */
+export type TenantBrowserVoiceProviderId = Extract<
+  VoiceProviderId,
+  "xai" | "openai"
+>;
+
+export type BrowserProviderRootCredential<
+  Id extends TenantBrowserVoiceProviderId = TenantBrowserVoiceProviderId,
+> = Readonly<{
+  source: "tenant_byok";
+  provider: Id;
+  apiKey: string;
+}>;
+
+declare const LOCAL_DEPLOYMENT_BROWSER_FUNDING_AUTHORITY: unique symbol;
+
+/**
+ * Opaque process-local capability. Only the server-side authority module can
+ * mint an instance, and runtime consumers additionally verify object identity.
+ */
+export type LocalDeploymentBrowserFundingAuthority<
+  Id extends VoiceProviderId = VoiceProviderId,
+> = Readonly<{
+  source: "local_deployment_authorized";
+  provider: Id;
+  [LOCAL_DEPLOYMENT_BROWSER_FUNDING_AUTHORITY]: true;
+}>;
+
+export type BrowserProviderFundingAuthority<
+  Id extends VoiceProviderId = VoiceProviderId,
+> = Id extends TenantBrowserVoiceProviderId
+  ? BrowserProviderRootCredential<Id>
+    | LocalDeploymentBrowserFundingAuthority<Id>
+  : LocalDeploymentBrowserFundingAuthority<Id>;
+
 /** Public, token-free pointer to the server-authored catalog shown to the model. */
 export type ActiveCatalogAuthorityRef = Readonly<{
   catalogDigest: string;
@@ -117,7 +155,7 @@ export type ProviderCapabilities = {
     supported: boolean;
     enabledByDefault: boolean;
   }>;
-  notes: string[];
+  notes: readonly string[];
 };
 
 export type ProviderDefinition = {
@@ -130,7 +168,10 @@ export type ProviderDefinition = {
 };
 
 export type RealtimeProviderAdapter = ProviderDefinition & {
-  createBrowserConnection(spec: VoiceSessionSpec): Promise<BrowserRealtimeConnection>;
+  createBrowserConnection(
+    spec: VoiceSessionSpec,
+    fundingAuthority: BrowserProviderFundingAuthority,
+  ): Promise<BrowserRealtimeConnection>;
   createServerConnection(spec: VoiceSessionSpec, audio: RealtimeAudioFormat): Promise<ServerRealtimeConnection>;
   buildSessionUpdate(spec: VoiceSessionSpec, audio: RealtimeAudioFormat): Record<string, unknown>;
 };

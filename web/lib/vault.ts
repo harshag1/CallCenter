@@ -17,7 +17,7 @@ const MAX_CREDENTIAL_ENVELOPE_BYTES = 256 * 1024;
 
 export type CredentialSecretContext = Readonly<{
   orgId: string;
-  sinkKind: "env_var" | "mcp_server";
+  sinkKind: "env_var" | "mcp_server" | "voice_provider";
   sinkId: string;
   slotId: string;
 }>;
@@ -28,17 +28,23 @@ function canonicalCredentialContext(context: CredentialSecretContext): string {
     || typeof context !== "object"
     || !UUID_PATTERN.test(context.orgId)
     || !SLOT_ID_PATTERN.test(context.slotId)
-    || (context.sinkKind !== "env_var" && context.sinkKind !== "mcp_server")
+    || (
+      context.sinkKind !== "env_var"
+      && context.sinkKind !== "mcp_server"
+      && context.sinkKind !== "voice_provider"
+    )
     || (context.sinkKind === "env_var"
       ? !ENV_NAME_PATTERN.test(context.sinkId)
-      : !SLOT_ID_PATTERN.test(context.sinkId))
+      : context.sinkKind === "mcp_server"
+        ? !SLOT_ID_PATTERN.test(context.sinkId)
+        : context.sinkId !== "openai" && context.sinkId !== "xai")
   ) throw new Error("invalid credential encryption context");
   return JSON.stringify([
     "harshas-amazing-call-center/credential-vault",
     2,
     context.orgId.toLowerCase(),
     context.sinkKind,
-    context.sinkKind === "mcp_server" ? context.sinkId.toLowerCase() : context.sinkId,
+    context.sinkKind === "env_var" ? context.sinkId : context.sinkId.toLowerCase(),
     context.slotId.toLowerCase(),
   ]);
 }

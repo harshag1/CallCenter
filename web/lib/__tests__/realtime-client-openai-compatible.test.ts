@@ -8,13 +8,17 @@ import {
 } from "../realtime/client/events";
 import {
   OpenAICompatibleRealtimeClient,
+  XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR,
+  XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
   buildSessionConfigurationAcknowledgement,
   createOpenAIRealtimeClient,
   createXaiRealtimeClient,
+  realtimeToolFrontierSha256,
   validateManualPcmSessionAcknowledgement,
   withManualPcmSession,
 } from "../realtime/client/openai-compatible";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
+import { assertRealtimeTransportFailureDiagnostic } from "../realtime/client/transport-diagnostics";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
   LOCAL_TOOL_PROXY_FUNCTION,
@@ -40,7 +44,7 @@ const baseSession = {
       },
       output: { format: { type: "audio/pcmu" }, voice: "marin" },
     },
-    turn_detection: { type: "server_vad" },
+    turn_detection: { type: null },
   },
 };
 
@@ -57,10 +61,12 @@ class FakeSocket implements RealtimeWebSocket {
   sent: string[] = [];
   closed: { code?: number; reason?: string } | null = null;
   terminated = false;
+  onSend: ((data: string) => void) | null = null;
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
 
   send(data: string) {
     this.sent.push(data);
+    this.onSend?.(data);
   }
 
   close(code?: number, reason?: string) {
@@ -82,7 +88,10 @@ class FakeSocket implements RealtimeWebSocket {
   }
 }
 
-function fakeClient(provider: "openai" | "xai" = "openai") {
+function fakeClient(
+  provider: "openai" | "xai" = "openai",
+  overrides: Partial<ConstructorParameters<typeof OpenAICompatibleRealtimeClient>[0]> = {},
+) {
   const socket = new FakeSocket();
   let factoryArgs: Parameters<RealtimeWebSocketFactory> | undefined;
   const factory: RealtimeWebSocketFactory = (...args) => {
@@ -96,6 +105,7 @@ function fakeClient(provider: "openai" | "xai" = "openai") {
     sessionUpdate: baseSession,
     socketFactory: factory,
     connectTimeoutMs: 1_000,
+    ...overrides,
   });
   return { client, socket, factoryArgs: () => factoryArgs };
 }
@@ -103,6 +113,12 @@ function fakeClient(provider: "openai" | "xai" = "openai") {
 async function connect(client: OpenAICompatibleRealtimeClient, socket: FakeSocket) {
   const connected = client.connect();
   socket.emit("open");
+  if (client.provider === "xai") {
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
+  }
   socket.emit("message", JSON.stringify(sessionAcknowledgement(client.provider)));
   await connected;
 }
@@ -116,7 +132,7 @@ function sessionAcknowledgement(
     type: "session.updated",
     session: {
       id: "sess_1",
-      ...(provider === "xai" ? { turn_detection: null } : {}),
+      ...(provider === "xai" ? { turn_detection: { type: null } } : {}),
       ...(resumption ? { resumption: { enabled: true } } : {}),
       audio: {
         input: {
@@ -171,6 +187,27 @@ function deliverToolBatch(
   }));
 }
 
+async function acknowledgeHistoryItems(
+  socket: FakeSocket,
+  expectedCount: number,
+  wireType: "conversation.item.added" | "conversation.item.created" = "conversation.item.added",
+) {
+  for (let index = 0; index < expectedCount; index += 1) {
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(index + 1);
+    });
+    const created = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))[index] as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: wireType,
+      item: created.item,
+    }));
+  }
+}
+
 describe("PCM realtime audio", () => {
   it("round-trips exact signed PCM16 bytes and computes duration", () => {
     const audio = { ...PCM, data: Uint8Array.from([0, 128, 255, 127]) };
@@ -190,6 +227,1095 @@ describe("PCM realtime audio", () => {
     const chunks = chunkPcm16(audio, 10);
     expect(chunks).toHaveLength(5);
     expect(chunks.map((chunk) => chunk.data.byteLength)).toEqual([480, 480, 480, 480, 480]);
+  });
+});
+
+describe("provider-neutral conversation history hydration", () => {
+  const sourceSha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+  const canonicalJsonForHistory = (value: unknown): string => {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(canonicalJsonForHistory).join(",")}]`;
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalJsonForHistory(object[key])}`
+    )).join(",")}}`;
+  };
+
+  it.each(["openai", "xai"] as const)(
+    "hydrates exact ordered user, assistant, and synthetic tool history on %s without generation",
+    async (provider) => {
+      const { client, socket } = fakeClient(provider, { sessionUpdate: localProxySession });
+      const observations: RealtimeWireObservation[] = [];
+      const normalizedEvents: NormalizedRealtimeEvent[] = [];
+      client.onWireObservation((observation) => observations.push(observation));
+      client.onEvent((event) => normalizedEvents.push(event));
+      await connect(client, socket);
+      const largeToolOutput = `result:${"z".repeat(9_180)}`;
+      expect(Buffer.byteLength(largeToolOutput, "utf8")).toBe(9_187);
+      const turns = [
+        {
+          role: "user" as const,
+          text: "Please check the exact membership record.",
+          sourceSha256: sourceSha256("caller-audio-1"),
+        },
+        {
+          role: "assistant" as const,
+          text: "I will inspect the membership record now.",
+          sourceSha256: sourceSha256("assistant-audio-1"),
+        },
+        {
+          role: "tool" as const,
+          toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          toolArguments: {
+            tool_name: "membership.lookup",
+            arguments: { memberId: "m_17", includeExpiry: true },
+          },
+          output: largeToolOutput,
+          sourceSha256: sourceSha256("tool-receipt-1"),
+        },
+        {
+          role: "assistant" as const,
+          text: "The verified record is available.",
+          sourceSha256: sourceSha256("assistant-audio-2"),
+        },
+      ];
+      const pending = client.hydrateConversationHistory(turns);
+      await acknowledgeHistoryItems(socket, 5);
+      const receipt = await pending;
+
+      const sent = socket.sent.map((value) => JSON.parse(value));
+      const historyFrames = sent.filter((event) => event.type === "conversation.item.create");
+      expect(historyFrames).toHaveLength(5);
+      expect(historyFrames.map((event) => event.item.type)).toEqual([
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+      ]);
+      for (const [index, frame] of historyFrames.entries()) {
+        expect(frame.item.id).toMatch(
+          new RegExp(`^item_hacc_${String(index + 1).padStart(4, "0")}_[a-f0-9]{17}$`),
+        );
+        expect(Buffer.byteLength(frame.item.id, "utf8")).toBe(32);
+      }
+      expect(new Set(historyFrames.map((frame) => frame.item.id)).size).toBe(historyFrames.length);
+      expect(historyFrames[0].item).toMatchObject({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: turns[0].text }],
+      });
+      expect(historyFrames[1].item).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: turns[1].text }],
+      });
+      expect(historyFrames[2].item).toMatchObject({
+        type: "function_call",
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: "{\"arguments\":{\"includeExpiry\":true,\"memberId\":\"m_17\"},\"tool_name\":\"membership.lookup\"}",
+      });
+      expect(historyFrames[2].item.call_id).toMatch(/^call_hacc_0003_001_[a-f0-9]{13}$/);
+      expect(Buffer.byteLength(historyFrames[2].item.call_id, "utf8")).toBe(32);
+      expect(historyFrames[3].item).toEqual(expect.objectContaining({
+        type: "function_call_output",
+        call_id: historyFrames[2].item.call_id,
+        output: largeToolOutput,
+      }));
+      expect(sent.some((event) => event.type === "response.create")).toBe(false);
+      expect(receipt).toMatchObject({
+        schemaVersion: 1,
+        provider,
+        connectionEpoch: 1,
+        status: "acknowledged",
+        turnCount: 4,
+        providerItemCount: 5,
+        historySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        sourceBindingSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        items: [
+          { providerItemOrdinal: 1, historyTurnOrdinal: 1, kind: "user_message" },
+          { providerItemOrdinal: 2, historyTurnOrdinal: 2, kind: "assistant_message" },
+          {
+            providerItemOrdinal: 3,
+            historyTurnOrdinal: 3,
+            kind: "synthetic_tool_call",
+            syntheticCallIdSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          {
+            providerItemOrdinal: 4,
+            historyTurnOrdinal: 3,
+            kind: "synthetic_tool_output",
+            syntheticCallIdSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          { providerItemOrdinal: 5, historyTurnOrdinal: 4, kind: "assistant_message" },
+        ],
+      });
+      for (const item of receipt.items) {
+        expect(item.outboundObservation).toMatchObject({
+          availability: "observed",
+          observationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+        expect(item.inboundObservation).toMatchObject({
+          availability: "observed",
+          observationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+      }
+      const historyObservations = observations.filter((observation) => (
+        recordForTest(observation.projection).conversationHistoryItem !== undefined
+      ));
+      expect(historyObservations).toHaveLength(10);
+      expect(historyObservations.every((observation) => (
+        recordForTest(observation.projection).gatewayCalls === undefined
+        && recordForTest(observation.projection).gatewayResults === undefined
+      ))).toBe(true);
+      expect(historyObservations.map((observation) => (
+        recordForTest(recordForTest(observation.projection).conversationHistoryItem).kind
+      ))).toEqual([
+        "user_message", "user_message",
+        "assistant_message", "assistant_message",
+        "synthetic_tool_call", "synthetic_tool_call",
+        "synthetic_tool_output", "synthetic_tool_output",
+        "assistant_message", "assistant_message",
+      ]);
+      expect(verifyRealtimeWireObservationChain(observations)).toMatchObject({ valid: true });
+      const serializedEvidence = JSON.stringify(observations);
+      expect(serializedEvidence).not.toContain(turns[0].text);
+      expect(serializedEvidence).not.toContain(largeToolOutput);
+      for (const turn of turns) {
+        expect(JSON.stringify(historyFrames)).not.toContain(turn.sourceSha256);
+      }
+      if (provider === "xai") {
+        client.close();
+        expect(normalizedEvents.findLast((event) => (
+          event.type === "usage" && event.scope === "session"
+        ))).toMatchObject({
+          type: "usage",
+          usage: { billableTextInputEvents: 4 },
+        });
+      }
+    },
+  );
+
+  it("keeps all 1,024 legal provider history item IDs unique and exactly 32 bytes", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    socket.onSend = (data) => {
+      const event = JSON.parse(data) as { type?: string; item?: Record<string, unknown> };
+      if (event.type !== "conversation.item.create" || event.item === undefined) return;
+      queueMicrotask(() => {
+        socket.emit("message", JSON.stringify({
+          type: "conversation.item.added",
+          item: event.item,
+        }));
+      });
+    };
+    const turns = Array.from({ length: 512 }, (_, index) => ({
+      role: "tool" as const,
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: {
+        tool_name: "membership.lookup",
+        arguments: { ordinal: index + 1 },
+      },
+      output: `result-${index + 1}`,
+      sourceSha256: sourceSha256(`maximum-history-tool-${index + 1}`),
+    }));
+
+    const receipt = await client.hydrateConversationHistory(turns);
+    const historyFrames = socket.sent
+      .map((value) => JSON.parse(value))
+      .filter((event) => event.type === "conversation.item.create");
+    const itemIds = historyFrames.map((frame) => String(frame.item.id));
+
+    expect(receipt.providerItemCount).toBe(1_024);
+    expect(historyFrames).toHaveLength(1_024);
+    expect(new Set(itemIds).size).toBe(1_024);
+    expect(itemIds.every((itemId) => Buffer.byteLength(itemId, "utf8") === 32)).toBe(true);
+    expect(itemIds[0]).toMatch(/^item_hacc_0001_[a-f0-9]{17}$/);
+    expect(itemIds.at(-1)).toMatch(/^item_hacc_1024_[a-f0-9]{17}$/);
+    const callIds = historyFrames
+      .filter((frame) => frame.item.type === "function_call")
+      .map((frame) => String(frame.item.call_id));
+    expect(callIds).toHaveLength(512);
+    expect(new Set(callIds).size).toBe(512);
+    expect(callIds.every((callId) => Buffer.byteLength(callId, "utf8") === 32)).toBe(true);
+    expect(callIds[0]).toMatch(/^call_hacc_0001_001_[a-f0-9]{13}$/);
+    expect(callIds.at(-1)).toMatch(/^call_hacc_0512_001_[a-f0-9]{13}$/);
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("rejects 1,025 provider history items before sending any history frame", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const singleCallTurns = Array.from({ length: 510 }, (_, index) => ({
+      role: "tool" as const,
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { ordinal: index + 1 } },
+      output: `result-${index + 1}`,
+      sourceSha256: sourceSha256(`overflow-history-tool-${index + 1}`),
+    }));
+    const twoCallBatch = {
+      role: "tool_batch" as const,
+      calls: [1, 2].map((ordinal) => ({
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { ordinal } },
+        output: `batch-result-${ordinal}`,
+        sourceSha256: sourceSha256(`overflow-history-batch-${ordinal}`),
+      })),
+    };
+    const finalMessage = {
+      role: "user" as const,
+      text: "This would be provider item 1,025.",
+      sourceSha256: sourceSha256("overflow-history-message"),
+    };
+
+    await expect(client.hydrateConversationHistory([
+      ...singleCallTurns,
+      twoCallBatch,
+      finalMessage,
+    ])).rejects.toThrow("Conversation history exceeds 1024 provider items");
+    expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toHaveLength(0);
+  });
+
+  it.each(["openai", "xai"] as const)(
+    "hydrates a canonical two-call tool batch on %s as all calls followed by all outputs",
+    async (provider) => {
+      const multiToolSession = {
+        ...baseSession,
+        session: {
+          ...baseSession.session,
+          tools: [
+            { type: "function", name: "records.lookup", parameters: { type: "object" } },
+            { type: "function", name: "rates.quote", parameters: { type: "object" } },
+          ],
+        },
+      };
+      const { client, socket } = fakeClient(provider, { sessionUpdate: multiToolSession });
+      const events: NormalizedRealtimeEvent[] = [];
+      client.onEvent((event) => events.push(event));
+      await connect(client, socket);
+      const firstSource = sourceSha256("batch-call-one");
+      const secondSource = sourceSha256("batch-call-two");
+      const calls = [
+        {
+          toolName: "records.lookup",
+          toolArguments: { include_history: true, member_id: "m_17" },
+          output: "{\"member\":\"active\"}",
+          sourceSha256: firstSource,
+        },
+        {
+          toolName: "rates.quote",
+          toolArguments: { plan: "annual", seats: 3 },
+          output: "{\"currency\":\"USD\",\"total\":420}",
+          sourceSha256: secondSource,
+        },
+      ] as const;
+      const pending = client.hydrateConversationHistory([{
+        role: "tool_batch",
+        calls,
+      }]);
+      await acknowledgeHistoryItems(
+        socket,
+        4,
+        provider === "openai" ? "conversation.item.created" : "conversation.item.added",
+      );
+      const receipt = await pending;
+      const frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ));
+      expect(frames.map((frame) => frame.item.type)).toEqual([
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+      ]);
+      expect(frames[0].item).toMatchObject({
+        name: "records.lookup",
+        arguments: "{\"include_history\":true,\"member_id\":\"m_17\"}",
+      });
+      expect(frames[1].item).toMatchObject({
+        name: "rates.quote",
+        arguments: "{\"plan\":\"annual\",\"seats\":3}",
+      });
+      expect(frames[0].item.call_id).toMatch(/^call_hacc_0001_001_[a-f0-9]{13}$/);
+      expect(frames[1].item.call_id).toMatch(/^call_hacc_0001_002_[a-f0-9]{13}$/);
+      expect(Buffer.byteLength(frames[0].item.call_id, "utf8")).toBe(32);
+      expect(Buffer.byteLength(frames[1].item.call_id, "utf8")).toBe(32);
+      expect(frames[2].item).toMatchObject({
+        call_id: frames[0].item.call_id,
+        output: calls[0].output,
+      });
+      expect(frames[3].item).toMatchObject({
+        call_id: frames[1].item.call_id,
+        output: calls[1].output,
+      });
+      const visible = [{
+        role: "tool_batch",
+        calls: calls.map((call) => ({
+          toolName: call.toolName,
+          toolArguments: call.toolArguments,
+          output: call.output,
+        })),
+      }];
+      const expectedHistorySha256 = createHash("sha256")
+        .update("harshas-amazing-call-center/realtime-conversation-history/provider-visible/v2\n")
+        .update(canonicalJsonForHistory(visible))
+        .digest("hex");
+      const expectedSourceBindingSha256 = createHash("sha256")
+        .update("harshas-amazing-call-center/realtime-conversation-history/source-binding/v2\n")
+        .update(canonicalJsonForHistory({
+          historySha256: expectedHistorySha256,
+          sources: [{
+            ordinal: 1,
+            role: "tool_batch",
+            calls: [
+              { callOrdinal: 1, sourceSha256: firstSource },
+              { callOrdinal: 2, sourceSha256: secondSource },
+            ],
+          }],
+        }))
+        .digest("hex");
+      expect(receipt).toMatchObject({
+        status: "acknowledged",
+        turnCount: 1,
+        providerItemCount: 4,
+        historySha256: expectedHistorySha256,
+        sourceBindingSha256: expectedSourceBindingSha256,
+        items: [
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 1,
+            kind: "synthetic_tool_call",
+            sourceSha256: firstSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 2,
+            kind: "synthetic_tool_call",
+            sourceSha256: secondSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 3,
+            kind: "synthetic_tool_output",
+            sourceSha256: firstSource,
+          },
+          {
+            historyTurnOrdinal: 1,
+            providerItemOrdinal: 4,
+            kind: "synthetic_tool_output",
+            sourceSha256: secondSource,
+          },
+        ],
+      });
+      expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+      if (provider === "xai") {
+        client.close();
+        expect(events.findLast((event) => (
+          event.type === "usage" && event.scope === "session"
+        ))).toMatchObject({ type: "usage", usage: { billableTextInputEvents: 2 } });
+      }
+    },
+  );
+
+  it("normalizes singleton tool sugar to the identical canonical one-call batch", async () => {
+    const singleton = fakeClient("openai", { sessionUpdate: localProxySession });
+    const canonical = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(singleton.client, singleton.socket);
+    await connect(canonical.client, canonical.socket);
+    const call = {
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("singleton-normalization-source"),
+    } as const;
+    const singletonPending = singleton.client.hydrateConversationHistory([{
+      role: "tool",
+      ...call,
+    }]);
+    const canonicalPending = canonical.client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [call],
+    }]);
+    await Promise.all([
+      acknowledgeHistoryItems(singleton.socket, 2),
+      acknowledgeHistoryItems(canonical.socket, 2),
+    ]);
+    const [singletonReceipt, canonicalReceipt] = await Promise.all([
+      singletonPending,
+      canonicalPending,
+    ]);
+    expect(singletonReceipt.historySha256).toBe(canonicalReceipt.historySha256);
+    expect(singletonReceipt.sourceBindingSha256).toBe(canonicalReceipt.sourceBindingSha256);
+    expect(singletonReceipt.providerItemCount).toBe(2);
+    expect(singleton.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toEqual(canonical.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )));
+  });
+
+  it("hydrates more than 48 chronological turns with one acknowledgement barrier per item", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const turns = Array.from({ length: 60 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      text: `${index % 2 === 0 ? "caller" : "assistant"} history turn ${index + 1}`,
+      sourceSha256: sourceSha256(`history-source-${index + 1}`),
+    }));
+    const pending = client.hydrateConversationHistory(turns);
+    await acknowledgeHistoryItems(socket, 60);
+    await expect(pending).resolves.toMatchObject({
+      status: "acknowledged",
+      turnCount: 60,
+      providerItemCount: 60,
+    });
+    expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toHaveLength(60);
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("keeps provider-visible history identity independent from host source bindings", async () => {
+    const openai = fakeClient("openai");
+    const xai = fakeClient("xai");
+    await connect(openai.client, openai.socket);
+    await connect(xai.client, xai.socket);
+    const visible = {
+      role: "assistant" as const,
+      text: "The same exact audible assistant history.",
+    };
+    const openaiPending = openai.client.hydrateConversationHistory([{
+      ...visible,
+      sourceSha256: sourceSha256("openai-capture-receipt"),
+    }]);
+    const xaiPending = xai.client.hydrateConversationHistory([{
+      ...visible,
+      sourceSha256: sourceSha256("xai-capture-receipt"),
+    }]);
+    await Promise.all([
+      acknowledgeHistoryItems(openai.socket, 1, "conversation.item.created"),
+      acknowledgeHistoryItems(xai.socket, 1, "conversation.item.added"),
+    ]);
+    const [openaiReceipt, xaiReceipt] = await Promise.all([openaiPending, xaiPending]);
+    expect(openaiReceipt.historySha256).toBe(xaiReceipt.historySha256);
+    expect(openaiReceipt.sourceBindingSha256).not.toBe(xaiReceipt.sourceBindingSha256);
+    const openaiItem = JSON.parse(openai.socket.sent.at(-1)!).item;
+    const xaiItem = JSON.parse(xai.socket.sent.at(-1)!).item;
+    expect(openaiItem).toEqual(xaiItem);
+  });
+
+  it("accepts a matching GA item.done lifecycle event without treating it as generation", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "assistant",
+      text: "completed historical assistant item",
+      sourceSha256: sourceSha256("done-history-source"),
+    }]);
+    await acknowledgeHistoryItems(socket, 1, "conversation.item.added");
+    const created = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.done",
+      item: created.item,
+    }));
+    await expect(pending).resolves.toMatchObject({ status: "acknowledged" });
+    expect(client.state).toBe("ready");
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("accepts a late item.done for the prior item while the next history item is pending", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([
+      {
+        role: "user",
+        text: "Please check the historical record.",
+        sourceSha256: sourceSha256("late-done-user"),
+      },
+      {
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "records.lookup", arguments: { id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256("late-done-tool"),
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const first = socket.sent.map((value) => JSON.parse(value)).find((event) => (
+      event.type === "conversation.item.create"
+    )) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: first.item,
+    }));
+
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.done",
+      item: first.item,
+    }));
+    let frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )) as Array<{ item: Record<string, unknown> }>;
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: frames[1].item,
+    }));
+    await vi.waitFor(() => {
+      expect(socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+        event.type === "conversation.item.create"
+      ))).toHaveLength(3);
+    });
+    frames = socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    )) as Array<{ item: Record<string, unknown> }>;
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: frames[2].item,
+    }));
+    await expect(pending).resolves.toMatchObject({
+      status: "acknowledged",
+      providerItemCount: 3,
+    });
+    expect(client.state).toBe("ready");
+    expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+  });
+
+  it("validates an entire history batch before sending and rejects oversized content", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    socket.sent.length = 0;
+    await expect(client.hydrateConversationHistory([
+      {
+        role: "user",
+        text: "valid first turn",
+        sourceSha256: sourceSha256("valid-source"),
+      },
+      {
+        role: "tool",
+        toolName: "records.lookup",
+        toolArguments: {},
+        output: "x".repeat(64 * 1_024 + 1),
+        sourceSha256: sourceSha256("oversized-source"),
+      },
+    ])).rejects.toThrow(/output is .* UTF-8 bytes/);
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("ready");
+    await expect(client.hydrateConversationHistory([{
+      role: "user",
+      text: "boxed hashes are not primitive evidence",
+      sourceSha256: new String(sourceSha256("boxed-source")) as unknown as string,
+    }])).rejects.toThrow(/sourceSha256 is invalid/);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("rejects empty, oversized, and undeclared tool batches before any wire item", async () => {
+    const declaredSession = {
+      ...baseSession,
+      session: {
+        ...baseSession.session,
+        tools: [{ type: "function", name: "records.lookup", parameters: { type: "object" } }],
+      },
+    };
+    const { client, socket } = fakeClient("openai", { sessionUpdate: declaredSession });
+    await connect(client, socket);
+    socket.sent.length = 0;
+
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [],
+    }])).rejects.toThrow(/tool batch must be non-empty/);
+    expect(socket.sent).toEqual([]);
+
+    const oversizedCalls = Array.from({ length: 5 }, (_, index) => ({
+      toolName: "records.lookup",
+      toolArguments: { ordinal: index + 1 },
+      output: "x".repeat(60 * 1_024),
+      sourceSha256: sourceSha256(`oversized-batch-source-${index + 1}`),
+    }));
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: oversizedCalls,
+    }])).rejects.toThrow(/tool batch is .* UTF-8 bytes/);
+    expect(socket.sent).toEqual([]);
+
+    await expect(client.hydrateConversationHistory([{
+      role: "tool_batch",
+      calls: [
+        {
+          toolName: "records.lookup",
+          toolArguments: { member_id: "m_17" },
+          output: "{\"status\":\"active\"}",
+          sourceSha256: sourceSha256("declared-batch-source"),
+        },
+        {
+          toolName: "billing.charge",
+          toolArguments: { amount: 420 },
+          output: "{\"charged\":true}",
+          sourceSha256: sourceSha256("undeclared-batch-source"),
+        },
+      ],
+    }])).rejects.toThrow(/tool billing\.charge is not declared/);
+    expect(socket.sent).toEqual([]);
+    expect(client.state).toBe("ready");
+  });
+
+  it("rejects wrong-state, mid-turn, concurrent, and repeated hydration", async () => {
+    const turn = [{
+      role: "user" as const,
+      text: "one historical caller turn",
+      sourceSha256: sourceSha256("one-history-source"),
+    }];
+    const idle = fakeClient("openai");
+    await expect(idle.client.hydrateConversationHistory(turn)).rejects.toThrow(/requires a ready/);
+    expect(idle.socket.sent).toEqual([]);
+
+    const active = fakeClient("openai");
+    await connect(active.client, active.socket);
+    active.client.sendTextTurn("live caller turn", false);
+    await expect(active.client.hydrateConversationHistory(turn)).rejects.toThrow(/before the first live/);
+
+    const once = fakeClient("xai");
+    await connect(once.client, once.socket);
+    const reentrantErrors: string[] = [];
+    once.client.onWireObservation((observation) => {
+      if (
+        observation.direction !== "outbound"
+        || observation.wireType !== "conversation.item.create"
+      ) return;
+      try {
+        once.client.sendTextTurn("observer must not interleave", false);
+      } catch (error) {
+        reentrantErrors.push(error instanceof Error ? error.message : String(error));
+      }
+    });
+    const pending = once.client.hydrateConversationHistory(turn);
+    expect(reentrantErrors).toEqual([
+      expect.stringMatching(/cannot interleave conversation history hydration/),
+    ]);
+    const sentDuringHydration = once.socket.sent.length;
+    expect(() => once.client.sendTextTurn("must not interleave", false))
+      .toThrow(/cannot interleave conversation history hydration/);
+    expect(once.socket.sent).toHaveLength(sentDuringHydration);
+    await expect(once.client.hydrateConversationHistory(turn)).rejects.toThrow(/exactly once/);
+    await acknowledgeHistoryItems(once.socket, 1);
+    await expect(pending).resolves.toMatchObject({ status: "acknowledged" });
+    await expect(once.client.hydrateConversationHistory(turn)).rejects.toThrow(/exactly once/);
+  });
+
+  it("fails closed if a provider starts generation while history acknowledgement is pending", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "historical caller content",
+      sourceSha256: sourceSha256("interleaved-provider-source"),
+    }]);
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "unrequested-response", status: "in_progress" },
+    }));
+    await expect(pending).rejects.toThrow(/Provider emitted response.created/);
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
+  it("retains a sanitized provider rejection instead of misclassifying it as interleaving", async () => {
+    const { client, socket } = fakeClient("openai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "history the provider will reject",
+      sourceSha256: sourceSha256("provider-rejection-source"),
+    }]);
+    socket.emit("message", JSON.stringify({
+      type: "error",
+      error: {
+        code: "invalid_request_error",
+        message: "private provider rejection account@example.test secret-marker",
+      },
+    }));
+    await expect(pending).rejects.toThrow(/Provider rejected conversation history item 1/);
+    expect(client.state).toBe("failed");
+    const failure = events.findLast((event) => event.type === "error");
+    expect(failure).toMatchObject({
+      type: "error",
+      code: "conversation_history_provider_rejected",
+      fatal: true,
+      transportDiagnostic: {
+        origin: "provider_wire",
+        category: "provider_request",
+        safeRawCode: "invalid_request_error",
+        messageSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("account@example.test");
+    expect(JSON.stringify(failure)).not.toContain("secret-marker");
+  });
+
+  it("keeps xAI provider resumption mutually exclusive with manual history hydration", async () => {
+    const historicalTurn = [{
+      role: "user" as const,
+      text: "must not be appended over resumed provider history",
+      sourceSha256: sourceSha256("resumed-history-source"),
+    }];
+    const resumedFirst = fakeClient("xai", {
+      url: "wss://xai.example/realtime?conversation_id=conv_prior",
+    });
+    await connect(resumedFirst.client, resumedFirst.socket);
+    resumedFirst.socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: {
+        id: "provider_replayed_item",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "provider replay" }],
+      },
+    }));
+    await expect(resumedFirst.client.hydrateConversationHistory(historicalTurn))
+      .rejects.toThrow(/cannot be combined with xAI conversation resumption/);
+
+    const hydrationFirst = fakeClient("xai", {
+      url: "wss://xai.example/realtime?conversation_id=conv_prior",
+    });
+    await connect(hydrationFirst.client, hydrationFirst.socket);
+    await expect(hydrationFirst.client.hydrateConversationHistory(historicalTurn))
+      .rejects.toThrow(/cannot be combined with xAI conversation resumption/);
+    hydrationFirst.socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: {
+        id: "provider_replayed_item",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "provider replay" }],
+      },
+    }));
+    expect(hydrationFirst.client.state).toBe("ready");
+    expect(hydrationFirst.socket.sent.map((value) => JSON.parse(value)).filter((event) => (
+      event.type === "conversation.item.create"
+    ))).toEqual([]);
+  });
+
+  it("records xAI identity-only tool acknowledgements without treating omitted content as echoed", async () => {
+    const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+    const observations: RealtimeWireObservation[] = [];
+    client.onWireObservation((observation) => observations.push(observation));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: {
+        tool_name: "membership.lookup",
+        arguments: { member_id: "m_17" },
+      },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("xai-identity-only-tool-source"),
+    }]);
+
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const call = JSON.parse(socket.sent.at(-1)!) as {
+      item: Record<string, unknown>;
+    };
+    expect(call.item.id).toMatch(/^item_hacc_/);
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: { ...call.item, arguments: "" },
+    }));
+
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    const output = JSON.parse(socket.sent.at(-1)!) as {
+      item: Record<string, unknown>;
+    };
+    expect(output.item.id).toMatch(/^item_hacc_/);
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: output.item,
+    }));
+
+    await expect(pending).resolves.toMatchObject({
+      status: "identity_acknowledged_content_unverifiable",
+      items: [
+        {
+          kind: "synthetic_tool_call",
+          providerContentOmission: {
+            field: "arguments",
+            observedShape: "empty_string",
+          },
+        },
+        {
+          kind: "synthetic_tool_output",
+        },
+      ],
+    });
+    const history = observations.filter((observation) => (
+      recordForTest(observation.projection).conversationHistoryItem !== undefined
+    ));
+    expect(history).toHaveLength(4);
+    expect(recordForTest(recordForTest(history[1]!.projection).conversationHistoryItem))
+      .toMatchObject({
+        kind: "synthetic_tool_call",
+        argumentsBytes: 0,
+        argumentsPresent: true,
+        argumentsJsonValid: false,
+      });
+    expect(recordForTest(recordForTest(history[3]!.projection).conversationHistoryItem))
+      .toMatchObject({
+        kind: "synthetic_tool_output",
+        outputBytes: Buffer.byteLength("{\"status\":\"active\"}", "utf8"),
+        outputPresent: true,
+      });
+  });
+
+  it.each([
+    ["openai", "conversation.item.created"],
+    ["xai", "conversation.item.added"],
+  ] as const)(
+    "rejects a nonempty changed tool payload in a %s history acknowledgement",
+    async (provider, wireType) => {
+      const { client, socket } = fakeClient(provider, { sessionUpdate: localProxySession });
+      await connect(client, socket);
+      const pending = client.hydrateConversationHistory([{
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256(`${provider}-changed-tool-source`),
+      }]);
+      const frame = JSON.parse(socket.sent.at(-1)!) as {
+        item: Record<string, unknown>;
+      };
+      socket.emit("message", JSON.stringify({
+        type: wireType,
+        item: { ...frame.item, arguments: "{\"changed\":true}" },
+      }));
+      await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+      expect(client.state).toBe("failed");
+    },
+  );
+
+  it("rejects an OpenAI empty arguments echo rather than treating it as identity-only", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("openai-empty-arguments-source"),
+    }]);
+    const frame = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: { ...frame.item, arguments: "" },
+    }));
+    await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+    expect(client.state).toBe("failed");
+  });
+
+  it.each([
+    ["name", { name: "different_tool" }],
+    ["call id", { call_id: "different_call" }],
+    ["type", { type: "function_call_output" }],
+  ] as const)(
+    "rejects an xAI identity-only acknowledgement with a changed %s",
+    async (_label, mutation) => {
+      const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+      await connect(client, socket);
+      const pending = client.hydrateConversationHistory([{
+        role: "tool",
+        toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+        output: "{\"status\":\"active\"}",
+        sourceSha256: sourceSha256(`xai-changed-${String(_label)}-source`),
+      }]);
+      const frame = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+      socket.emit("message", JSON.stringify({
+        type: "conversation.item.added",
+        item: { ...frame.item, ...mutation, arguments: "" },
+      }));
+      await expect(pending).rejects.toThrow(/altered synthetic conversation history tool call/);
+      expect(client.state).toBe("failed");
+    },
+  );
+
+  it("rejects an xAI omitted synthetic tool output without retained provider evidence", async () => {
+    const { client, socket } = fakeClient("xai", { sessionUpdate: localProxySession });
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("xai-empty-output-source"),
+    }]);
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(1);
+    });
+    const call = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: call.item,
+    }));
+    await vi.waitFor(() => {
+      expect(socket.sent.filter((value) => (
+        JSON.parse(value).type === "conversation.item.create"
+      ))).toHaveLength(2);
+    });
+    const output = JSON.parse(socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    socket.emit("message", JSON.stringify({
+      type: "conversation.item.added",
+      item: { ...output.item, output: "" },
+    }));
+    await expect(pending).rejects.toThrow(/altered synthetic conversation history tool output/);
+    expect(client.state).toBe("failed");
+  });
+
+  it("fails the connection on mismatched or duplicate provider acknowledgements", async () => {
+    const mismatched = fakeClient("openai");
+    await connect(mismatched.client, mismatched.socket);
+    const mismatchPending = mismatched.client.hydrateConversationHistory([{
+      role: "assistant",
+      text: "exact assistant history",
+      sourceSha256: sourceSha256("assistant-history-source"),
+    }]);
+    const frame = JSON.parse(mismatched.socket.sent.at(-1)!) as {
+      item: { content: Array<{ text: string }> };
+    };
+    frame.item.content[0]!.text = "provider-altered history";
+    mismatched.socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: frame.item,
+    }));
+    await expect(mismatchPending).rejects.toThrow(/altered conversation history message content/);
+    expect(mismatched.client.state).toBe("failed");
+
+    const duplicated = fakeClient("xai");
+    await connect(duplicated.client, duplicated.socket);
+    const duplicatePending = duplicated.client.hydrateConversationHistory([{
+      role: "user",
+      text: "exact caller history",
+      sourceSha256: sourceSha256("caller-history-source"),
+    }]);
+    await acknowledgeHistoryItems(duplicated.socket, 1);
+    await duplicatePending;
+    const created = JSON.parse(duplicated.socket.sent.at(-1)!) as { item: Record<string, unknown> };
+    duplicated.socket.emit("message", JSON.stringify({
+      type: "conversation.item.created",
+      item: created.item,
+    }));
+    expect(duplicated.client.state).toBe("failed");
+  });
+
+  it("seals hydrated synthetic call IDs against later executable reuse", async () => {
+    const { client, socket } = fakeClient("openai", { sessionUpdate: localProxySession });
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "tool",
+      toolName: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+      toolArguments: { tool_name: "membership.lookup", arguments: { member_id: "m_17" } },
+      output: "{\"status\":\"active\"}",
+      sourceSha256: sourceSha256("sealed-history-tool-source"),
+    }]);
+    await acknowledgeHistoryItems(socket, 2);
+    await pending;
+    const historyCall = socket.sent.map((value) => JSON.parse(value)).find((event) => (
+      event.type === "conversation.item.create" && event.item.type === "function_call"
+    )).item as {
+      id: string;
+      call_id: string;
+      name: string;
+      arguments: string;
+    };
+    socket.emit("message", JSON.stringify({
+      type: "response.function_call_arguments.done",
+      response_id: "response_reusing_history",
+      call_id: historyCall.call_id,
+      name: historyCall.name,
+      arguments: historyCall.arguments,
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      response: {
+        id: "response_reusing_history",
+        status: "completed",
+        output: [{
+          type: "function_call",
+          id: historyCall.id,
+          call_id: historyCall.call_id,
+          name: historyCall.name,
+          arguments: historyCall.arguments,
+          status: "completed",
+        }],
+      },
+    }));
+    expect(client.state).toBe("failed");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "invalid_provider_tool_call_identity",
+      message: expect.stringContaining("reused hydrated conversation history tool call id"),
+      fatal: true,
+    }));
+    expect(events.some((event) => event.type === "tool.dispatch")).toBe(false);
+  });
+
+  it("rejects a pending hydration immediately when the connection closes", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    const pending = client.hydrateConversationHistory([{
+      role: "user",
+      text: "pending history item",
+      sourceSha256: sourceSha256("close-history-source"),
+    }], 10_000);
+    client.close();
+    await expect(pending).rejects.toThrow(/closed before conversation history item acknowledgement/);
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
+  it("times out waiting for an exact item acknowledgement and leaves no usable partial session", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    vi.useFakeTimers();
+    try {
+      const pending = client.hydrateConversationHistory([{
+        role: "user",
+        text: "history requiring acknowledgement",
+        sourceSha256: sourceSha256("timeout-history-source"),
+      }], 10);
+      const rejected = expect(pending).rejects.toThrow(/timed out after 10 ms/);
+      await vi.advanceTimersByTimeAsync(11);
+      await rejected;
+      expect(client.state).toBe("failed");
+      expect(socket.terminated).toBe(true);
+      expect(socket.sent.some((value) => JSON.parse(value).type === "response.create")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -833,6 +1959,87 @@ describe("safe realtime event normalization", () => {
 });
 
 describe("OpenAI-compatible realtime client", () => {
+  it.each(["openai", "xai"] as const)(
+    "preserves immutable base instructions when preparing a %s response",
+    async (provider) => {
+      const socket = new FakeSocket();
+      const client = new OpenAICompatibleRealtimeClient({
+        provider,
+        url: `wss://${provider}.example/realtime`,
+        sessionUpdate: {
+          ...baseSession,
+          session: { ...baseSession.session, instructions: "BASE SAFETY AND FLOW GUARDRAILS" },
+        },
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      const observations: RealtimeWireObservation[] = [];
+      client.onWireObservation((observation) => observations.push(observation));
+      await connect(client, socket);
+      socket.sent.length = 0;
+      const dynamic = "<hacc_response_plan>\n{\"revision\":19}\n</hacc_response_plan>";
+      client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+      client.prepareResponse({
+        additionalInstructions: dynamic,
+        contextSha256: createHash("sha256").update(dynamic).digest("hex"),
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+      expect(() => client.createResponse({ instructions: "unbound replacement" }))
+        .toThrow("Prepared response instructions cannot be overridden");
+      client.commitInputAudio();
+      client.createResponse();
+
+      const frames = socket.sent.map((value) => JSON.parse(value));
+      expect(frames.map((frame) => frame.type)).toEqual([
+        "input_audio_buffer.append",
+        "input_audio_buffer.commit",
+        "response.create",
+      ]);
+      expect(frames[2]).toEqual({
+        type: "response.create",
+        response: {
+          instructions: `BASE SAFETY AND FLOW GUARDRAILS\n${dynamic}`,
+        },
+      });
+      const responseObservation = observations.find((entry) => (
+        entry.direction === "outbound" && entry.wireType === "response.create"
+      ));
+      expect(responseObservation?.projection).toMatchObject({
+        dynamicControl: {
+          sha256: createHash("sha256").update(dynamic).digest("hex"),
+          byteLength: Buffer.byteLength(dynamic, "utf8"),
+          authority: "advisory_only_gateway_and_speech_gate_enforced",
+        },
+      });
+      expect(JSON.stringify(responseObservation?.projection)).not.toContain(dynamic);
+      expect(JSON.stringify(responseObservation?.projection)).not.toContain("BASE SAFETY");
+    },
+  );
+
+  it("binds response preparation to buffered audio and clears stale preparation", async () => {
+    const { client, socket } = fakeClient("openai");
+    await connect(client, socket);
+    socket.sent.length = 0;
+    const dynamic = "<hacc_response_plan>{\"revision\":1}</hacc_response_plan>";
+    const preparation = {
+      additionalInstructions: dynamic,
+      contextSha256: createHash("sha256").update(dynamic).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+    };
+
+    expect(() => client.prepareResponse(preparation)).toThrow("requires buffered uncommitted audio");
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+    client.prepareResponse(preparation);
+    expect(() => client.prepareResponse(preparation)).toThrow("already prepared");
+    client.clearInputAudio();
+    expect(() => client.commitInputAudio()).toThrow("not buffered for commit");
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([0, 0]) });
+    client.commitInputAudio();
+    expect(() => client.prepareResponse(preparation)).toThrow("requires buffered uncommitted audio");
+    client.createResponse();
+    expect(socket.sent.map((frame) => JSON.parse(frame)).at(-1)).toEqual({ type: "response.create" });
+  });
   it("waits for session.updated before becoming ready", async () => {
     const { client, socket, factoryArgs } = fakeClient();
     let resolved = false;
@@ -853,6 +2060,44 @@ describe("OpenAI-compatible realtime client", () => {
 
     socket.emit("message", Buffer.from(JSON.stringify(sessionAcknowledgement("openai"))));
     await pending;
+    expect(client.state).toBe("ready");
+  });
+
+  it("sends xAI session.update first and waits for the provider acknowledgement", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    expect(socket.sent.map((frame) => JSON.parse(frame))).toEqual([
+      expect.objectContaining({ type: "session.update" }),
+    ]);
+
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
+    expect(client.state).toBe("connecting");
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+  });
+
+  it("keeps an omitted xAI created-session identity unverifiable without blocking the update", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({ type: "session.created", session: {} }));
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+    expect(socket.sent).toHaveLength(1);
+    expect(client.state).toBe("ready");
+  });
+
+  it("accepts xAI session.updated without treating session.created as a transport prerequisite", async () => {
+    const { client, socket } = fakeClient("xai");
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+    expect(socket.sent).toHaveLength(1);
     expect(client.state).toBe("ready");
   });
 
@@ -1255,7 +2500,7 @@ describe("OpenAI-compatible realtime client", () => {
     socket.emit("open");
     socket.emit("message", JSON.stringify({
       type: "session.created",
-      session: { model: "grok-voice-think-fast-1.0" },
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
     }));
     const updated = sessionAcknowledgement("xai") as unknown as Record<string, unknown>;
     recordForTest(updated.session).model = "grok-voice-fast-1.0";
@@ -1371,11 +2616,90 @@ describe("OpenAI-compatible realtime client", () => {
     });
     const substitutedPending = substitutedClient.connect();
     substitutedSocket.emit("open");
+    substitutedSocket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
+    }));
     const substitutedAck = sessionAcknowledgement("xai") as unknown as Record<string, unknown>;
     recordForTest(substitutedAck.session).model = "grok-voice-fast-1.0";
     substitutedSocket.emit("message", JSON.stringify(substitutedAck));
     await expect(substitutedPending).rejects.toThrow(/differs from requested model/);
     expect(substitutedClient.state).toBe("failed");
+  });
+
+  it("rejects nested tool-schema and tool-choice capability widening", async () => {
+    const requestedTool = {
+      type: "function",
+      name: "lookup_member",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { member_id: { type: "string" } },
+        required: ["member_id"],
+      },
+    };
+    const omission = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: {
+        type: "session.update",
+        session: { tools: [requestedTool] },
+      },
+      acknowledgedEvent: {
+        type: "session.updated",
+        session: { tools: [{ type: "function" }] },
+      },
+    });
+    expect(omission.fields.tools).toMatchObject({
+      status: "unverifiable",
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: ["tools[0].name", "tools[0].parameters"],
+      },
+    });
+
+    const schemaSocket = new FakeSocket();
+    const schemaClient = new OpenAICompatibleRealtimeClient({
+      provider: "openai",
+      url: "wss://openai.example/realtime",
+      sessionUpdate: {
+        ...baseSession,
+        session: { ...baseSession.session, tools: [requestedTool], tool_choice: "auto" },
+      },
+      socketFactory: () => schemaSocket,
+      connectTimeoutMs: 1_000,
+    });
+    const schemaPending = schemaClient.connect();
+    schemaSocket.emit("open");
+    const schemaAck = JSON.parse(schemaSocket.sent[0]) as Record<string, unknown>;
+    const acknowledgedTool = recordForTest((recordForTest(schemaAck.session).tools as unknown[])[0]);
+    const acknowledgedParameters = recordForTest(acknowledgedTool.parameters);
+    acknowledgedParameters["x-provider-extension"] = { permits: "unrequested" };
+    schemaSocket.emit("message", JSON.stringify({ type: "session.updated", session: schemaAck.session }));
+    await expect(schemaPending).rejects.toThrow(/tools differs/);
+    expect(schemaClient.state).toBe("failed");
+
+    const choiceSocket = new FakeSocket();
+    const choiceClient = new OpenAICompatibleRealtimeClient({
+      provider: "openai",
+      url: "wss://openai.example/realtime",
+      sessionUpdate: {
+        ...baseSession,
+        session: {
+          ...baseSession.session,
+          tools: [requestedTool],
+          tool_choice: { type: "function", name: "lookup_member" },
+        },
+      },
+      socketFactory: () => choiceSocket,
+      connectTimeoutMs: 1_000,
+    });
+    const choicePending = choiceClient.connect();
+    choiceSocket.emit("open");
+    const choiceAck = JSON.parse(choiceSocket.sent[0]) as Record<string, unknown>;
+    recordForTest(recordForTest(choiceAck.session).tool_choice).fallback = "auto";
+    choiceSocket.emit("message", JSON.stringify({ type: "session.updated", session: choiceAck.session }));
+    await expect(choicePending).rejects.toThrow(/tool_choice differs/);
+    expect(choiceClient.state).toBe("failed");
   });
 
   it("rejects an acknowledgement that did not preserve manual PCM invariants", async () => {
@@ -1423,6 +2747,33 @@ describe("OpenAI-compatible realtime client", () => {
     }));
   });
 
+  it("accepts xAI keepalive pings before session configuration acknowledgement", async () => {
+    const { client, socket } = fakeClient("xai");
+    const observed: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => observed.push(event));
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "ping",
+      event_id: "keepalive_1",
+      timestamp: 1_752_000_000,
+    }));
+
+    expect(client.state).toBe("connecting");
+    expect(observed).not.toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "pre_ready_application_event",
+    }));
+
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1" },
+    }));
+    socket.emit("message", JSON.stringify(sessionAcknowledgement("xai")));
+    await pending;
+    expect(client.state).toBe("ready");
+  });
+
   it("revalidates every post-ready session.updated against the frozen configuration", async () => {
     const exact = fakeClient();
     const exactEvents: NormalizedRealtimeEvent[] = [];
@@ -1465,6 +2816,247 @@ describe("OpenAI-compatible realtime client", () => {
       { type: "input_audio_buffer.commit" },
       { type: "response.create" },
     ]);
+  });
+
+  it("binds xAI server-VAD control acknowledgement before audio and accepts only the provider-native turn order", async () => {
+    const serverVadSession = {
+      type: "session.update",
+      session: {
+        instructions: "immutable base",
+        audio: {
+          input: { format: { type: "audio/pcm", rate: 24_000 } },
+          output: { format: { type: "audio/pcm", rate: 24_000 } },
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.85,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 333,
+          idle_timeout_ms: null,
+        },
+      },
+    };
+    const { client, socket } = fakeClient("xai", { sessionUpdate: serverVadSession });
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    client.onWireObservation(() => undefined);
+    const connecting = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_server_vad" },
+    }));
+    const initialUpdate = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_server_vad", ...initialUpdate.session },
+    }));
+    await connecting;
+    socket.sent.length = 0;
+
+    const additionalInstructions = "Classify and invoke only the current closed frontier.";
+    await expect(client.prepareServerVadTurn!({
+      additionalInstructions,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools: [LOCAL_TOOL_PROXY_FUNCTION],
+      toolFrontierSha256: realtimeToolFrontierSha256([LOCAL_TOOL_PROXY_FUNCTION]),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100)).rejects.toThrow("frozen matched-pair gateway schema");
+    const tools: readonly Readonly<Record<string, unknown>>[] = [];
+    const preparation = client.prepareServerVadTurn!({
+      additionalInstructions,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools,
+      toolFrontierSha256: realtimeToolFrontierSha256(tools),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100);
+    expect(() => client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) }))
+      .toThrow("acknowledged before audio");
+    const perTurnUpdate = JSON.parse(socket.sent.at(-1)!);
+    expect(perTurnUpdate).toMatchObject({
+      type: "session.update",
+      session: {
+        instructions: `immutable base\n${additionalInstructions}`,
+        tools: [],
+        tool_choice: "auto",
+        turn_detection: { type: "server_vad" },
+      },
+    });
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_server_vad", ...perTurnUpdate.session },
+    }));
+    const acknowledgement = await preparation;
+    expect(acknowledgement).toMatchObject({
+      provider: "xai",
+      status: "acknowledged",
+      turnOrdinal: 1,
+      contextSha256: createHash("sha256").update(additionalInstructions).digest("hex"),
+      outboundObservation: { availability: "observed" },
+      inboundObservation: { availability: "observed" },
+    });
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0, 2, 0]) });
+    expect(() => client.commitInputAudio()).toThrow("forbidden");
+    expect(() => client.createResponse()).toThrow("Initial response.create is forbidden");
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_started", event_id: "vad-start-1" }));
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_stopped", event_id: "vad-stop-1" }));
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.committed", event_id: "vad-commit-1", item_id: "item-1" }));
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      event_id: "response-start-1",
+      response: { id: "response-1", status: "in_progress", output: [] },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      event_id: "response-done-1",
+      response: {
+        id: "response-1",
+        status: "completed",
+        output: [{
+          type: "function_call",
+          id: "item-tool-1",
+          call_id: "call-tool-1",
+          name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          arguments: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
+        }],
+        usage: { total_tokens: 1 },
+      },
+    }));
+
+    expect(client.state).toBe("ready");
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.speech_activity", phase: "started" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.speech_activity", phase: "stopped" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "input.audio_committed", commitOrdinal: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.started",
+      responseId: "response-1",
+      causalBinding: expect.objectContaining({
+        trigger: "server_vad_speech_stopped",
+        turnOrdinal: 1,
+      }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool.calls",
+      responseId: "response-1",
+    }));
+    // The provider may finish a tool-bearing root response between silence
+    // delimiter frames. The post-stop guard must win over the now-pending tool
+    // batch so the adapter can recognize an exact accepted delimiter prefix.
+    expect(() => client.appendInputAudio({ ...PCM, data: new Uint8Array(960) }))
+      .toThrow(XAI_SERVER_VAD_AUDIO_AFTER_STOP_ERROR);
+    const outboundTypes = socket.sent.map((frame) => JSON.parse(frame).type);
+    expect(outboundTypes.filter((type) => type === "input_audio_buffer.commit")).toHaveLength(0);
+    expect(outboundTypes.filter((type) => type === "response.create")).toHaveLength(0);
+  });
+
+  it("fails closed when xAI server-VAD stops speech before it starts", async () => {
+    const { client, socket } = fakeClient("xai", {
+      sessionUpdate: {
+        type: "session.update",
+        session: {
+          audio: { input: {}, output: {} },
+          turn_detection: { type: "server_vad", threshold: 0.85, silence_duration_ms: 500, prefix_padding_ms: 333, idle_timeout_ms: null },
+        },
+      },
+    });
+    const connecting = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_bad_order" },
+    }));
+    const initialUpdate = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({ type: "session.updated", session: { id: "sess_bad_order", ...initialUpdate.session } }));
+    await connecting;
+    const control = "Use only this turn's exact frontier.";
+    const pending = client.prepareServerVadTurn!({
+      additionalInstructions: control,
+      contextSha256: createHash("sha256").update(control).digest("hex"),
+      contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      tools: [],
+      toolFrontierSha256: realtimeToolFrontierSha256([]),
+      transportParitySha256: client.serverVadTransportParitySha256!,
+    }, 100);
+    const update = JSON.parse(socket.sent.at(-1)!);
+    socket.emit("message", JSON.stringify({ type: "session.updated", session: { id: "sess_bad_order", ...update.session } }));
+    await pending;
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+    socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_stopped", event_id: "bad-stop" }));
+    expect(client.state).toBe("failed");
+    expect(socket.terminated).toBe(true);
+  });
+
+  it("offers an opt-in ordered commit acknowledgement barrier without blocking ordinary turns", async () => {
+    const { client, socket } = fakeClient("xai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    await connect(client, socket);
+
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+    socket.emit("message", JSON.stringify({
+      type: "input_audio_buffer.committed",
+      event_id: "evt_commit_1",
+      item_id: "item_audio_1",
+    }));
+    const acknowledgement = await client.waitForInputAudioCommit(100);
+    expect(acknowledgement).toMatchObject({
+      provider: "xai",
+      connectionEpoch: 1,
+      commitOrdinal: 1,
+      status: "acknowledged",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "input.audio_committed",
+      commitOrdinal: 1,
+    }));
+
+    // No acknowledgement is required to keep the default, non-barrier path usable.
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([2, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+    client.appendInputAudio({ ...PCM, data: Uint8Array.from([3, 0]) });
+    client.commitInputAudio();
+    client.createResponse();
+  });
+
+  it("classifies manual-mode provider VAD activity and deduplicates native event replays", async () => {
+    const diagnostic = fakeClient("xai");
+    const observed: NormalizedRealtimeEvent[] = [];
+    diagnostic.client.onEvent((event) => observed.push(event));
+    await connect(diagnostic.client, diagnostic.socket);
+    const speechStarted = {
+      type: "input_audio_buffer.speech_started",
+      event_id: "evt_speech_1",
+      item_id: "item_audio_1",
+      audio_start_ms: 0,
+    };
+    diagnostic.socket.emit("message", JSON.stringify(speechStarted));
+    diagnostic.socket.emit("message", JSON.stringify(speechStarted));
+    expect(observed.filter(
+      (event) => event.type === "error" && event.code === "unexpected_manual_turn_detection_event",
+    )).toHaveLength(1);
+    expect(diagnostic.client.state).toBe("ready");
+
+    const strict = fakeClient("xai", { unexpectedManualTurnDetectionPolicy: "fail" });
+    const strictEvents: NormalizedRealtimeEvent[] = [];
+    strict.client.onEvent((event) => strictEvents.push(event));
+    await connect(strict.client, strict.socket);
+    strict.socket.emit("message", JSON.stringify({
+      ...speechStarted,
+      event_id: "evt_speech_strict",
+    }));
+    expect(strict.client.state).toBe("failed");
+    expect(strictEvents).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "unexpected_manual_turn_detection_event",
+      fatal: true,
+      details: expect.objectContaining({ classification: "manual_mode_provider_vad_activity" }),
+    }));
   });
 
   it("requires explicit response and item targets for cancel/truncate repair", async () => {
@@ -1568,6 +3160,8 @@ describe("OpenAI-compatible realtime client", () => {
 
   it("submits every tool result before one continuation response", async () => {
     const { client, socket } = fakeClient("xai");
+    const events: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => events.push(event));
     await connect(client, socket);
     deliverToolBatch(socket, [
       { callId: "call_1", name: "lookup" },
@@ -1589,6 +3183,31 @@ describe("OpenAI-compatible realtime client", () => {
       },
       { type: "response.create" },
     ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool.results.submitted",
+      responseId: "r_tools",
+      responseIdSource: "provider",
+      callIds: ["call_1", "call_2"],
+      continuationRequested: true,
+    }));
+
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "r_post_tool", status: "in_progress" },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "response.done",
+      response: { id: "r_post_tool", status: "completed", output: [] },
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.started",
+      responseId: "r_post_tool",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response.completed",
+      responseId: "r_post_tool",
+      status: "completed",
+    }));
   });
 
   it("requires the exact local gateway declaration before enabling authoritative dispatch", () => {
@@ -1725,6 +3344,198 @@ describe("OpenAI-compatible realtime client", () => {
       },
     }]);
   });
+
+  it.each(["openai", "xai"] as const)(
+    "hash-binds current control to an explicit %s tool continuation",
+    async (provider) => {
+      const socket = new FakeSocket();
+      const observations: RealtimeWireObservation[] = [];
+      const client = new OpenAICompatibleRealtimeClient({
+        provider,
+        url: `wss://${provider}.example/realtime`,
+        sessionUpdate: localProxySession,
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      client.onWireObservation((observation) => observations.push(observation));
+      await connect(client, socket);
+      socket.sent.length = 0;
+
+      const argumentsText = JSON.stringify({
+        tool_name: "complete_current_stage",
+        arguments: {},
+      });
+      socket.emit("message", JSON.stringify({
+        type: "response.function_call_arguments.done",
+        response_id: "response_control_rebind",
+        item_id: "item_control_rebind",
+        call_id: "call_control_rebind",
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: argumentsText,
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.done",
+        response: {
+          id: "response_control_rebind",
+          status: "completed",
+          output: [terminalToolOutput(
+            "call_control_rebind",
+            LOCAL_TOOL_PROXY_FUNCTION_NAME,
+            argumentsText,
+            "item_control_rebind",
+          )],
+        },
+      }));
+
+      const control =
+        "<hacc_response_plan>{\"revision\":20,\"phase\":\"canonical\"}</hacc_response_plan>";
+      const contextSha256 = createHash("sha256").update(control).digest("hex");
+      client.prepareToolContinuation({
+        additionalInstructions: control,
+        contextSha256,
+        contextAuthority: "advisory_only_gateway_and_speech_gate_enforced",
+      });
+      client.submitToolResults([{
+        callId: "call_control_rebind",
+        output: { ok: false, code: "capability_request_rejected" },
+      }], false);
+      client.createResponse();
+
+      const frames = socket.sent.map((value) => JSON.parse(value));
+      expect(frames.at(-1)).toEqual({
+        type: "response.create",
+        response: { instructions: control },
+      });
+      const continuation = observations.findLast((entry) => (
+        entry.direction === "outbound" && entry.wireType === "response.create"
+      ));
+      expect(continuation?.projection).toMatchObject({
+        dynamicControl: {
+          sha256: contextSha256,
+          byteLength: Buffer.byteLength(control, "utf8"),
+          authority: "advisory_only_gateway_and_speech_gate_enforced",
+        },
+      });
+    },
+  );
+
+  for (const variant of [
+    { id: "required", toolChoice: "required" as const },
+    {
+      id: "forced_function",
+      toolChoice: { type: "function" as const, name: LOCAL_TOOL_PROXY_FUNCTION_NAME },
+    },
+  ] as const) {
+    it(`admits a duplicated incremental-plus-terminal gateway call before completion for ${variant.id}`, async () => {
+      const socket = new FakeSocket();
+      const observed: NormalizedRealtimeEvent[] = [];
+      const client = new OpenAICompatibleRealtimeClient({
+        provider: "openai",
+        url: "wss://openai.example/realtime",
+        sessionUpdate: localProxySession,
+        socketFactory: () => socket,
+        connectTimeoutMs: 1_000,
+      });
+      client.onEvent((event) => observed.push(event));
+      await connect(client, socket);
+      observed.length = 0;
+      socket.sent.length = 0;
+      client.createResponse({ tool_choice: variant.toolChoice });
+
+      const argumentsText = JSON.stringify({
+        tool_name: "complete_current_stage",
+        arguments: {},
+      });
+      socket.emit("message", JSON.stringify({
+        type: "response.output_item.added",
+        event_id: `evt_added_${variant.id}`,
+        response_id: `resp_${variant.id}`,
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: `item_${variant.id}`,
+          call_id: `call_${variant.id}`,
+          name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          arguments: "",
+        },
+      }));
+      for (const delta of [argumentsText.slice(0, 17), argumentsText.slice(17)]) {
+        socket.emit("message", JSON.stringify({
+          type: "response.function_call_arguments.delta",
+          response_id: `resp_${variant.id}`,
+          item_id: `item_${variant.id}`,
+          call_id: `call_${variant.id}`,
+          delta,
+        }));
+      }
+      socket.emit("message", JSON.stringify({
+        type: "response.function_call_arguments.done",
+        response_id: `resp_${variant.id}`,
+        item_id: `item_${variant.id}`,
+        call_id: `call_${variant.id}`,
+        name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
+        arguments: argumentsText,
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.output_item.done",
+        response_id: `resp_${variant.id}`,
+        output_index: 0,
+        item: terminalToolOutput(
+          `call_${variant.id}`,
+          LOCAL_TOOL_PROXY_FUNCTION_NAME,
+          argumentsText,
+          `item_${variant.id}`,
+        ),
+      }));
+      socket.emit("message", JSON.stringify({
+        type: "response.done",
+        event_id: `evt_done_${variant.id}`,
+        response: {
+          id: `resp_${variant.id}`,
+          status: "completed",
+          output: [terminalToolOutput(
+            `call_${variant.id}`,
+            LOCAL_TOOL_PROXY_FUNCTION_NAME,
+            argumentsText,
+            `item_${variant.id}`,
+          )],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        },
+      }));
+
+      expect(JSON.parse(socket.sent[0]!)).toMatchObject({
+        type: "response.create",
+        response: { tool_choice: variant.toolChoice },
+      });
+      const terminal = observed.filter((event) => (
+        event.type === "tool.dispatch"
+        || event.type === "usage"
+        || event.type === "response.completed"
+      ));
+      expect(terminal.map((event) => event.type)).toEqual([
+        "tool.dispatch",
+        "usage",
+        "response.completed",
+      ]);
+      expect(terminal[0]).toMatchObject({
+        type: "tool.dispatch",
+        nativeEventId: `evt_done_${variant.id}`,
+        responseId: `resp_${variant.id}`,
+        dispatches: [{
+          callId: `call_${variant.id}`,
+          provenance: {
+            nativeCallId: `call_${variant.id}`,
+            nativeResponseId: `resp_${variant.id}`,
+            nativeItemId: `item_${variant.id}`,
+            terminalEventId: `evt_done_${variant.id}`,
+            terminalWireType: "response.done",
+          },
+        }],
+      });
+      expect(observed.filter((event) => event.type === "tool.dispatch")).toHaveLength(1);
+      expect(observed.some((event) => event.type === "tool.calls")).toBe(false);
+    });
+  }
 
   it("fails closed when model arguments try to overwrite local-dispatch provenance", async () => {
     const socket = new FakeSocket();
@@ -2482,9 +4293,215 @@ describe("OpenAI-compatible realtime client", () => {
       vi.useRealTimers();
     }
   });
+
+  it("normalizes provider wire failures without retaining provider plaintext", async () => {
+    const { client, socket } = fakeClient();
+    const observed: NormalizedRealtimeEvent[] = [];
+    client.onEvent((event) => observed.push(event));
+    await connect(client, socket);
+    client.sendTextTurn("diagnostic request");
+    socket.emit("message", JSON.stringify({
+      type: "response.created",
+      response: { id: "response-diagnostic", status: "in_progress" },
+    }));
+    socket.emit("message", JSON.stringify({
+      type: "error",
+      error: {
+        code: "insufficient_quota",
+        message: "sensitive provider prose account@example.test secret-marker",
+      },
+    }));
+    const event = observed.findLast((candidate) => candidate.type === "error");
+    expect(event).toMatchObject({
+      type: "error",
+      transportDiagnostic: {
+        schemaVersion: 1,
+        origin: "provider_wire",
+        category: "provider_quota",
+        safeRawCode: "insufficient_quota",
+        responseGenerationRequested: true,
+        responseGenerationStarted: true,
+        responseTerminalObserved: false,
+      },
+    });
+    if (event?.type !== "error" || !event.transportDiagnostic) throw new Error("missing diagnostic");
+    assertRealtimeTransportFailureDiagnostic(event.transportDiagnostic);
+    expect(JSON.stringify(event.transportDiagnostic)).not.toContain("account@example.test");
+    expect(JSON.stringify(event.transportDiagnostic)).not.toContain("secret-marker");
+    expect(event.transportDiagnostic.messageSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("distinguishes WebSocket error and close origins with content-free evidence", async () => {
+    const errored = fakeClient();
+    const errorEvents: NormalizedRealtimeEvent[] = [];
+    errored.client.onEvent((event) => errorEvents.push(event));
+    await connect(errored.client, errored.socket);
+    errored.client.sendTextTurn("diagnostic request");
+    errored.socket.emit("error", Object.assign(new Error("private network path"), { code: "ECONNRESET" }));
+    const error = errorEvents.findLast((event) => event.type === "error");
+    expect(error).toMatchObject({
+      type: "error",
+      transportDiagnostic: {
+        origin: "websocket_error",
+        category: "network",
+        safeRawCode: "ECONNRESET",
+        responseGenerationRequested: true,
+        responseGenerationStarted: false,
+        responseTerminalObserved: false,
+      },
+    });
+
+    const closed = fakeClient("xai");
+    const closeEvents: NormalizedRealtimeEvent[] = [];
+    closed.client.onEvent((event) => closeEvents.push(event));
+    await connect(closed.client, closed.socket);
+    closed.socket.emit("close", 1011, Buffer.from("private close reason"));
+    const close = closeEvents.findLast((event) => event.type === "connection.closed");
+    expect(close).toMatchObject({
+      type: "connection.closed",
+      transportDiagnostic: {
+        origin: "websocket_close",
+        category: "server_close",
+        closeCodeClass: "server_error",
+        responseGenerationRequested: false,
+        responseGenerationStarted: false,
+        responseTerminalObserved: false,
+      },
+    });
+    if (close?.type !== "connection.closed" || !close.transportDiagnostic) throw new Error("missing close diagnostic");
+    assertRealtimeTransportFailureDiagnostic(close.transportDiagnostic);
+    expect(JSON.stringify(close.transportDiagnostic)).not.toContain("private close reason");
+    expect(close.transportDiagnostic.reasonSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
 });
 
 describe("manual PCM session compilation", () => {
+  it("normalizes only the exact xAI nested function wire alias and retains safe evidence", () => {
+    const tool = {
+      type: "function",
+      name: "capability_gateway",
+      description: "Dispatch one scoped capability.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { tool_name: { type: "string" } },
+        required: ["tool_name"],
+      },
+    };
+    const proofFor = (tools: unknown[], provider: "xai" | "openai" = "xai") => (
+      buildSessionConfigurationAcknowledgement({
+        provider,
+        requestedUpdate: { type: "session.update", session: { tools: [tool] } },
+        acknowledgedEvent: { type: "session.updated", session: { tools } },
+      })
+    );
+    const nested = {
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+    };
+    const exact = proofFor([nested]);
+    expect(exact.fields.tools).toMatchObject({
+      status: "verified",
+      aliasNormalization: {
+        kind: "xai_function_tool_wire_alias_v1",
+        policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+        sourcePaths: ["tools[0]", "tools[0].function"],
+        keyInventory: [
+          { path: "tools[0]", keys: ["function", "type"] },
+          { path: "tools[0].function", keys: ["description", "name", "parameters"] },
+        ],
+        canonicalSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+      },
+    });
+    expect(exact.session).toMatchObject({ status: "verified" });
+
+    const omitted = proofFor([{ type: "function", function: {} }]);
+    expect(omitted.fields.tools).toMatchObject({
+      status: "unverifiable",
+      omission: {
+        paths: ["tools[0].description", "tools[0].name", "tools[0].parameters"],
+      },
+      aliasNormalization: { policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256 },
+    });
+
+    const exactBoth = proofFor([{ ...tool, function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    } }]);
+    expect(exactBoth.fields.tools.status).toBe("verified");
+
+    const adversarial = [
+      [{ ...tool, function: { ...nested.function, name: "other_gateway" } }],
+      [{ ...nested, extra_callable: { name: "hidden" } }],
+      [{ ...nested, function: { ...nested.function, additional_schema: {} } }],
+      [{ ...nested, function: { ...nested.function, name: "other_gateway" } }],
+      [{ ...nested, function: { ...nested.function, parameters: { type: "object", additionalProperties: true } } }],
+      [nested, nested],
+    ];
+    for (const acknowledgedTools of adversarial) {
+      const rejected = proofFor(acknowledgedTools);
+      expect(rejected.fields.tools.status).toBe("mismatch");
+      expect(rejected.fields.tools.contradiction?.paths.length).toBeGreaterThan(0);
+    }
+    expect(proofFor([nested], "openai").fields.tools.status).toBe("mismatch");
+  });
+
+  it("admits xAI's nested function acknowledgement at the real readiness boundary", async () => {
+    const socket = new FakeSocket();
+    const events: NormalizedRealtimeEvent[] = [];
+    const client = new OpenAICompatibleRealtimeClient({
+      provider: "xai",
+      url: "wss://xai.example/realtime?model=grok-voice-think-fast-1.0",
+      sessionUpdate: localProxySession,
+      socketFactory: () => socket,
+      connectTimeoutMs: 1_000,
+    });
+    client.onEvent((event) => events.push(event));
+    const pending = client.connect();
+    socket.emit("open");
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_alias", model: "grok-voice-think-fast-1.0" },
+    }));
+    const sent = JSON.parse(socket.sent[0]!) as Record<string, unknown>;
+    const acknowledgedSession = structuredClone(recordForTest(sent.session));
+    const sentTools = acknowledgedSession.tools as Array<Record<string, unknown>>;
+    const flat = sentTools[0]!;
+    sentTools[0] = {
+      type: "function",
+      function: {
+        name: flat.name,
+        description: flat.description,
+        parameters: flat.parameters,
+      },
+    };
+    socket.emit("message", JSON.stringify({
+      type: "session.updated",
+      session: { id: "sess_alias", ...acknowledgedSession },
+    }));
+    await expect(pending).resolves.toBeUndefined();
+    expect(client.state).toBe("ready");
+    expect(events.find((event) => event.type === "session.ready")).toMatchObject({
+      configuration: {
+        fields: {
+          tools: {
+            status: "verified",
+            aliasNormalization: {
+              policySha256: XAI_FUNCTION_TOOL_ALIAS_POLICY_SHA256,
+              claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required",
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("hashes exact effective OpenAI session identity without mistaking provider defaults for drift", () => {
     const requested = {
       type: "session.update",
@@ -2537,7 +4554,7 @@ describe("manual PCM session compilation", () => {
           input: { format: { type: "audio/pcm", rate: 24_000 } },
           output: { format: { type: "audio/pcm", rate: 24_000 } },
         },
-        turn_detection: null,
+        turn_detection: { type: null },
       },
     };
     const proof = buildSessionConfigurationAcknowledgement({
@@ -2550,19 +4567,71 @@ describe("manual PCM session compilation", () => {
           voice: "ara",
           instructions: "Use every available tool.",
           audio: requested.session.audio,
-          turn_detection: null,
+          turn_detection: { type: null },
         },
       },
     });
     expect(proof.strictParityVerified).toBe(false);
     expect(proof.paidBenchmarkReady).toBe(false);
-    expect(proof.session).toMatchObject({ status: "unverifiable" });
+    expect(proof.session).toMatchObject({ status: "mismatch" });
     expect(proof.fields.instructions).toMatchObject({ status: "mismatch" });
     expect(proof.fields.tools).toMatchObject({
       status: "unverifiable",
       reason: expect.stringContaining("omitted"),
     });
     expect(proof.fields.model).toMatchObject({ status: "unverifiable" });
+  });
+
+  it("does not hide an explicit server-VAD contradiction behind omitted sibling paths", () => {
+    const requested = {
+      type: "session.update",
+      session: {
+        voice: "ara",
+        instructions: "Use only the scoped gateway.",
+        tools: [],
+        tool_choice: "auto",
+        audio: {
+          input: { format: { type: "audio/pcm", rate: 24_000 } },
+          output: { format: { type: "audio/pcm", rate: 24_000 } },
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.85,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 333,
+          idle_timeout_ms: null,
+        },
+      },
+    };
+    const proof = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: requested,
+      requestedModel: "grok-voice-think-fast-1.0",
+      acknowledgedModel: { value: "grok-voice-think-fast-1.0", wireType: "session.updated" },
+      acknowledgedEvent: {
+        type: "session.updated",
+        session: {
+          ...requested.session,
+          turn_detection: { type: "server_vad", threshold: 0.1 },
+        },
+      },
+    });
+    expect(proof.fields.turn_detection).toMatchObject({
+      status: "mismatch",
+      contradiction: {
+        kind: "requested_paths_mismatched",
+        paths: ["turn_detection.threshold"],
+      },
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: [
+          "turn_detection.idle_timeout_ms",
+          "turn_detection.prefix_padding_ms",
+          "turn_detection.silence_duration_ms",
+        ],
+      },
+    });
+    expect(proof.session).toMatchObject({ status: "mismatch" });
   });
 
   it("pins OpenAI VAD inside input audio without mutating the source", () => {
@@ -2585,7 +4654,7 @@ describe("manual PCM session compilation", () => {
   it("pins xAI's session-level VAD to manual boundaries", () => {
     expect(withManualPcmSession("xai", baseSession)).toMatchObject({
       session: {
-        turn_detection: null,
+        turn_detection: { type: null },
         audio: {
           input: { format: { type: "audio/pcm", rate: 24_000 } },
           output: { format: { type: "audio/pcm", rate: 24_000 } },
@@ -2599,13 +4668,42 @@ describe("manual PCM session compilation", () => {
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("xai"))).toEqual({ ok: true });
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("openai"))).toMatchObject({
       ok: false,
-      mismatches: expect.arrayContaining(["xAI session.turn_detection is not null"]),
+      mismatches: expect.arrayContaining(["xAI session.turn_detection.type is not null"]),
     });
     expect(validateManualPcmSessionAcknowledgement("xai", sessionAcknowledgement("xai"), PCM, PCM, true))
       .toMatchObject({
         ok: false,
         mismatches: expect.arrayContaining(["xAI resumption.enabled was not acknowledged"]),
       });
+  });
+
+  it("keeps xAI's empty manual-turn acknowledgement explicitly unverifiable", () => {
+    const requested = withManualPcmSession("xai", baseSession);
+    const acknowledged = sessionAcknowledgement("xai") as Record<string, unknown>;
+    recordForTest(acknowledged.session).turn_detection = {};
+
+    expect(validateManualPcmSessionAcknowledgement("xai", acknowledged)).toEqual({ ok: true });
+    const proof = buildSessionConfigurationAcknowledgement({
+      provider: "xai",
+      requestedUpdate: requested,
+      requestedModel: "grok-voice-think-fast-1.0",
+      acknowledgedModel: {
+        value: "grok-voice-think-fast-1.0",
+        wireType: "session.created",
+      },
+      acknowledgedEvent: acknowledged,
+    });
+    expect(proof.fields.turn_detection).toMatchObject({
+      status: "unverifiable",
+      reason: expect.stringContaining("turn_detection.type"),
+      omission: {
+        kind: "requested_paths_omitted",
+        paths: ["turn_detection.type"],
+        acknowledgedShape: "empty_object",
+      },
+    });
+    expect(proof.strictParityVerified).toBe(false);
+    expect(proof.paidBenchmarkReady).toBe(false);
   });
 
   it("enforces each hosted provider's documented PCM rates", () => {
@@ -2793,6 +4891,11 @@ describe("manual PCM session compilation", () => {
     client.onEvent((event) => events.push(event));
     const pending = client.connect();
     socket.emit("open");
+    expect(socket.sent).toHaveLength(1);
+    socket.emit("message", JSON.stringify({
+      type: "session.created",
+      session: { id: "sess_1", model: "grok-voice-think-fast-1.0" },
+    }));
     const sent = JSON.parse(socket.sent[0]);
     expect(sent).toMatchObject({ session: { resumption: { enabled: true } } });
     const url = new URL(connectedUrl);

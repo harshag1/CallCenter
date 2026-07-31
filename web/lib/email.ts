@@ -39,12 +39,12 @@ export async function sendAgentEmail(opts: {
   brand?: string | null;
   /** Opaque durable execution identity for provider-side replay suppression. */
   idempotencyKey?: string;
-}): Promise<void> {
+}): Promise<Readonly<{ providerMessageId: string }>> {
   if (opts.idempotencyKey !== undefined) requireEmailIdempotencyKey(opts.idempotencyKey);
   const brand = escapeHtml(opts.brand ?? PRODUCT_NAME);
   const subject = escapeHtml(opts.subject);
   const body = escapeHtml(opts.message);
-  const { error } = await getResend().emails.send({
+  const { data, error } = await getResend().emails.send({
     from: fromAddress(),
     to: opts.to,
     subject: opts.subject,
@@ -61,6 +61,14 @@ export async function sendAgentEmail(opts: {
     </div>`,
   }, opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined);
   if (error) throw new Error(`resend: ${error.message}`);
+  if (!data || typeof data.id !== "string" || !data.id || data.id.length > 2_048
+      || /[\u0000-\u001f\u007f]/.test(data.id)) {
+    // The provider request has already crossed the network boundary. A
+    // response without an immutable identity is therefore ambiguous, never a
+    // successful send with a fabricated local identifier.
+    throw new Error("resend accepted response omitted a valid message identity");
+  }
+  return Object.freeze({ providerMessageId: data.id });
 }
 
 export async function sendLoginCode(

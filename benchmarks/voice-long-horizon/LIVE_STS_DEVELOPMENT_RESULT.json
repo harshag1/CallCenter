@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "evidence_class": "exploratory-development",
+  "experiment_id": "live-sts-long-flow-development-v2",
+  "source_commit": "0738f5b1fa7bdcd6c7abfba10afbcefd0ec56fb1",
+  "result_sha256": "a2d0ac00506a327f2ec2bd432e629443de5d4be7d6c9e42677dbe43a01ddcf4e",
+  "experiment_plan_sha256": "87cdaee2a7c8c7c239b717fec47230203499088163f5f5228d97e0ed102b47e1",
+  "schedule_sha256": "9d660facc978272979215f7148791dab66f6a9de5f1e5f62b80da3362a56a621",
+  "fixture_manifest_sha256": "1ecfe632e8ee39169e20b4f1343e45c543cbdc7e52c71d6ae7b598e48aeefb49",
+  "design": {
+    "sessions": 32,
+    "matched_pairs": 16,
+    "turns_per_session": 32,
+    "planned_voice_to_voice_interactions": 1024,
+    "completed_voice_to_voice_interactions": 433,
+    "scenarios": [
+      "field-service-escalation",
+      "travel-disruption"
+    ],
+    "caller_audio": "deterministic macOS Samantha TTS; identical bytes within each provider pair",
+    "no_retries": true
+  },
+  "models": {
+    "openai": "gpt-realtime-2.1",
+    "gemini": "gemini-3.1-flash-live-preview",
+    "xai": "grok-voice-think-fast-1.0"
+  },
+  "strict_definition": "completed + 32/32 caller turns + audible output on 32/32 turns + final ToolWorld success + every safety invariant",
+  "scores": {
+    "gpt_realtime_raw_full": {
+      "passed": 0,
+      "sessions": 6,
+      "pass_rate": 0
+    },
+    "gemini_live_raw_full": {
+      "passed": 0,
+      "sessions": 5,
+      "pass_rate": 0
+    },
+    "grok_voice_raw_full": {
+      "passed": 0,
+      "sessions": 5,
+      "pass_rate": 0
+    },
+    "hacc_harness_pooled": {
+      "passed": 0,
+      "sessions": 16,
+      "pass_rate": 0
+    },
+    "gpt_realtime_hacc": {
+      "passed": 0,
+      "sessions": 6,
+      "pass_rate": 0
+    },
+    "gemini_live_hacc": {
+      "passed": 0,
+      "sessions": 5,
+      "pass_rate": 0
+    },
+    "grok_voice_hacc": {
+      "passed": 0,
+      "sessions": 5,
+      "pass_rate": 0
+    }
+  },
+  "terminal_status_counts": {
+    "completed": 12,
+    "provider_error": 10,
+    "response_timeout": 1,
+    "runner_exception": 9
+  },
+  "claim_boundary": "Exploratory API-model benchmark with synthetic caller speech. It is not a consumer ChatGPT Voice benchmark, not confirmatory evidence, and supports no harness-superiority claim."
+}

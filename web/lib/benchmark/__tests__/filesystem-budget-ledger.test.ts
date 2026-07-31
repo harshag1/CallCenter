@@ -1,5 +1,5 @@
 import { appendFile, chmod, link, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { mkdirSync, renameSync } from "node:fs";
+import { linkSync, mkdirSync, renameSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -501,6 +501,88 @@ describe("append-only filesystem budget ledger", () => {
       ...reservation(fourth, "secret", 1),
       model: "sk-supersecretcredentialmaterial",
     }), "invalid_input");
+  });
+
+  it("rejects persistent hard links for every signed-ledger file", async () => {
+    for (const suffix of ["", ".head.json", ".signing-key.pem"]) {
+      const path = await ledgerPath();
+      await initialize(path);
+      await link(`${path}${suffix}`, `${path}${suffix}.linked`);
+      await expectCode(
+        suffix === ".signing-key.pem"
+          ? reserveFilesystemBudget(reservation(path, "linked-key", 1))
+          : inspectFilesystemBudgetLedger({ ledgerPath: path }),
+        "unsafe_filesystem",
+      );
+    }
+  });
+
+  it("stabilizes a transient link-count disagreement on the same inode without replaying the operation", async () => {
+    const path = await ledgerPath();
+    const initialized = await initialize(path);
+    const linked = `${path}.transient-link`;
+    await link(path, linked);
+    const removed = new Promise<void>((resolveRemoved, rejectRemoved) => {
+      setTimeout(() => {
+        rm(linked, { force: false }).then(() => resolveRemoved(), rejectRemoved);
+      }, 2);
+    });
+
+    let randomIdCalls = 0;
+    const result = await reserveFilesystemBudget({
+      ...reservation(path, "transient-link", 1),
+      randomId: () => {
+        randomIdCalls += 1;
+        return `transient-link-id-${randomIdCalls}`;
+      },
+    });
+    await removed;
+
+    expect(randomIdCalls).toBe(2);
+    expect(result.idempotent_replay).toBe(false);
+    expect(result.snapshot.sequence).toBe(initialized.snapshot.sequence + 1);
+    expect(result.snapshot.reservations).toHaveLength(1);
+  });
+
+  it("fails closed if a hard link appears after verification but before append", async () => {
+    const path = await ledgerPath();
+    const initialized = await initialize(path);
+    const linked = `${path}.append-race-link`;
+    let randomIdCalls = 0;
+
+    await expectCode(reserveFilesystemBudget({
+      ...reservation(path, "append-race", 1),
+      randomId: () => {
+        randomIdCalls += 1;
+        if (randomIdCalls === 2) linkSync(path, linked);
+        return `append-race-id-${randomIdCalls}`;
+      },
+    }), "unsafe_filesystem");
+
+    await rm(linked, { force: true });
+    const after = await inspectFilesystemBudgetLedger({ ledgerPath: path });
+    expect(randomIdCalls).toBe(2);
+    expect(after.sequence).toBe(initialized.snapshot.sequence);
+    expect(after.head_sha256).toBe(initialized.snapshot.head_sha256);
+    expect(after.reservations).toEqual([]);
+  });
+
+  it("does not confuse xAI provider labels in run identities with API keys", async () => {
+    const path = await ledgerPath();
+    await initialize(path);
+
+    const accepted = await reserveFilesystemBudget({
+      ...reservation(path, "xai-provider-canary", 1),
+      reservationId: "c3-xai-20260720-v6-reservation",
+      runId: "c3-xai-20260720-v6-full-harness",
+      provider: "xai",
+      model: "grok-voice-think-fast-1.0",
+    });
+
+    expect(accepted.snapshot.reservations).toContainEqual(expect.objectContaining({
+      reservation_id: "c3-xai-20260720-v6-reservation",
+      provider: "xai",
+    }));
   });
 
   it("never steals a dead same-host lock or exposes its partial append", async () => {

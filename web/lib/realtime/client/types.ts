@@ -72,6 +72,43 @@ export function isLocalToolProxyFunction(value: unknown): boolean {
   return jsonContractEqual(value, LOCAL_TOOL_PROXY_FUNCTION);
 }
 
+/**
+ * Accept the canonical open catalog proxy or a stricter closed-enum variant.
+ * Closed variants must preserve the exact envelope keys and may only narrow
+ * `tool_name`; provider adapters still derive provenance from the wire.
+ */
+export function isSafeLocalToolProxyFunction(value: unknown): boolean {
+  if (isLocalToolProxyFunction(value)) return true;
+  if (!isPlainRecord(value)
+    || value.type !== "function"
+    || value.name !== LOCAL_TOOL_PROXY_FUNCTION_NAME
+    || typeof value.description !== "string"
+    || !isPlainRecord(value.parameters)) return false;
+  const parameters = value.parameters;
+  if (parameters.type !== "object"
+    || parameters.additionalProperties !== false
+    || !isPlainRecord(parameters.properties)
+    || !Array.isArray(parameters.required)
+    || parameters.required.length !== 2
+    || parameters.required[0] !== "tool_name"
+    || parameters.required[1] !== "arguments") return false;
+  const propertyKeys = Object.keys(parameters.properties).sort();
+  if (propertyKeys.length !== 2 || propertyKeys[0] !== "arguments" || propertyKeys[1] !== "tool_name") return false;
+  const toolName = parameters.properties.tool_name;
+  const arguments_ = parameters.properties.arguments;
+  if (!isPlainRecord(toolName)
+    || toolName.type !== "string"
+    || !Array.isArray(toolName.enum)
+    || toolName.enum.length === 0
+    || new Set(toolName.enum).size !== toolName.enum.length
+    || toolName.enum.some((item) => typeof item !== "string" || !/^[a-z][a-z0-9_]{1,63}$/u.test(item))) return false;
+  return isPlainRecord(arguments_)
+    && arguments_.type === "object"
+    && arguments_.additionalProperties === false
+    && isPlainRecord(arguments_.properties)
+    && Object.keys(arguments_.properties).length === 0;
+}
+
 export type ProviderToolCallProvenance = Readonly<{
   schemaVersion: 1;
   provider: Extract<ServerRealtimeProvider, "openai" | "xai">;
@@ -116,6 +153,22 @@ export type RealtimeToolCall = {
   itemId?: string;
   /** Immutable response provenance established before this call becomes executable. */
   responseId: string;
+  /** Gemini has no provider response ID; its adapter labels the local correlation ID explicitly. */
+  responseIdSource?: "provider" | "client_local";
+  /**
+   * Provider-neutral causal join for calls emitted by transports without a
+   * provider response identity. The provider call ID remains authoritative;
+   * the trigger and turn fields only bind it to this client's exact turn.
+   */
+  causalBinding?: Readonly<{
+    connectionEpoch: number;
+    inputTurn: number;
+    trigger: "audio_activity_end" | "client_content" | "tool_response";
+    clientMessageOrdinal: number;
+    triggerObservationSha256?: string;
+    providerCallId: string;
+    localResponseId: string;
+  }>;
   /** Provider event that made the call terminal/executable, when the provider supplies one. */
   terminalEventId?: string;
   terminalWireType: string;
@@ -170,6 +223,33 @@ export type SessionConfigurationFieldProof = Readonly<{
   /** Exact provider event that supplied the acknowledged value. */
   acknowledgedBy?: "session.created" | "session.updated";
   reason?: string;
+  /** Structured omission evidence; consumers must not parse the human reason string. */
+  omission?: Readonly<{
+    kind: "field_omitted" | "requested_paths_omitted";
+    paths: readonly string[];
+    acknowledgedShape: "missing" | "empty_object" | "partial_value";
+  }>;
+  /** Requested paths whose provider-echoed values explicitly differ. */
+  contradiction?: Readonly<{
+    kind: "requested_paths_mismatched";
+    paths: readonly string[];
+  }>;
+  /**
+   * Safe evidence that xAI's documented nested function wrapper was reduced to
+   * the same canonical callable identity as the requested flat declaration.
+   * Values remain hashed; only structural key names and source paths are kept.
+   */
+  aliasNormalization?: Readonly<{
+    kind: "xai_function_tool_wire_alias_v1";
+    policySha256: string;
+    sourcePaths: readonly string[];
+    keyInventory: readonly Readonly<{
+      path: string;
+      keys: readonly string[];
+    }>[];
+    canonicalSha256: string;
+    claimBoundary: "wire_alias_equivalence_only_paid_exact_call_still_required";
+  }>;
 }>;
 
 /**
@@ -191,6 +271,14 @@ export type RealtimeToolResult = {
   callId: string;
   output: unknown;
 };
+
+export type RealtimeInputAudioCommitAcknowledgement = Readonly<{
+  provider: Extract<ServerRealtimeProvider, "openai" | "xai">;
+  connectionEpoch: number;
+  commitOrdinal: number;
+  status: "acknowledged";
+  wireObservation?: RealtimeWireObservationAttribution;
+}>;
 
 export type NormalizedRealtimeUsage = {
   inputTextTokens?: number;
@@ -232,6 +320,58 @@ export type RealtimeWireObservationUnavailable = Readonly<{
 export type RealtimeWireObservationAttribution =
   | RealtimeWireObservationReference
   | RealtimeWireObservationUnavailable;
+
+/**
+ * Content-free failure evidence for OpenAI-compatible realtime transports.
+ * Provider/socket plaintext is never retained here: raw values are represented
+ * by domain-separated hashes and a raw code is included only from a closed,
+ * non-sensitive allowlist.
+ */
+export type RealtimeTransportFailureDiagnostic = Readonly<{
+  schemaVersion: 1;
+  origin: "provider_wire" | "websocket_error" | "websocket_close" | "client_transport";
+  category:
+    | "provider_authentication"
+    | "provider_quota"
+    | "provider_rate_limit"
+    | "provider_request"
+    | "provider_safety"
+    | "provider_service"
+    | "provider_protocol"
+    | "network"
+    | "tls"
+    | "websocket_protocol"
+    | "normal_close"
+    | "policy_close"
+    | "server_close"
+    | "application_close"
+    | "unknown";
+  /** Present only when the exact code belongs to the module's closed allowlist. */
+  safeRawCode?: string;
+  rawCodeSha256?: string;
+  messageSha256?: string;
+  reasonSha256?: string;
+  closeCodeClass?:
+    | "normal"
+    | "going_away"
+    | "protocol_error"
+    | "unsupported_data"
+    | "abnormal"
+    | "invalid_payload"
+    | "policy_violation"
+    | "message_too_big"
+    | "extension_required"
+    | "server_error"
+    | "service_restart"
+    | "try_again_later"
+    | "bad_gateway"
+    | "registered"
+    | "private_use"
+    | "unknown";
+  responseGenerationRequested: boolean;
+  responseGenerationStarted: boolean;
+  responseTerminalObserved: boolean;
+}>;
 
 type EventBase = {
   provider: ServerRealtimeProvider;
@@ -287,10 +427,18 @@ export type NormalizedRealtimeEvent =
   | (EventBase & {
       type: "response.started";
       responseId: string;
+      responseIdSource?: "provider" | "client_local";
+      causalBinding?: Readonly<{
+        trigger: "server_vad_speech_stopped" | "tool_continuation";
+        turnOrdinal: number;
+        triggerObservationSha256: string;
+        originResponseId?: string;
+      }>;
     })
   | (EventBase & {
       type: "response.completed";
       responseId: string;
+      responseIdSource?: "provider" | "client_local";
       status: RealtimeResponseTerminalStatus;
       /** Provider terminal detail kept separate so `status` remains enumerable. */
       reason?: string;
@@ -300,6 +448,38 @@ export type NormalizedRealtimeEvent =
       type: "tool.calls";
       responseId: string;
       calls: RealtimeToolCall[];
+    })
+  | (EventBase & {
+      /** A complete provider call batch was returned to the provider. */
+      type: "tool.results.submitted";
+      responseId: string;
+      responseIdSource: "provider" | "client_local";
+      callIds: string[];
+      continuationRequested: boolean;
+    })
+  | (EventBase & {
+      /** Explicit post-tool generation trigger for a previously returned batch. */
+      type: "tool.continuation.requested";
+      originResponseId: string;
+      responseIdSource: "provider" | "client_local";
+    })
+  | (EventBase & {
+      /** Explicit acknowledgement of a prior manual input-buffer commit. */
+      type: "input.audio_committed";
+      connectionEpoch: number;
+      commitOrdinal: number;
+    })
+  | (EventBase & {
+      /** Provider wire acknowledgement before client-side FIFO correlation. */
+      type: "input.audio_commit_acknowledgement";
+      itemId?: string;
+    })
+  | (EventBase & {
+      /** Provider VAD activity; expected only for an explicitly configured server-VAD session. */
+      type: "input.speech_activity";
+      phase: "started" | "stopped";
+      itemId?: string;
+      audioOffsetMs?: number;
     })
   | (EventBase & {
       /**
@@ -345,12 +525,14 @@ export type NormalizedRealtimeEvent =
       code?: string;
       fatal: boolean;
       details?: Record<string, unknown>;
+      transportDiagnostic?: RealtimeTransportFailureDiagnostic;
     })
   | (EventBase & {
       type: "connection.closed";
       code?: number;
       reason?: string;
       clean?: boolean;
+      transportDiagnostic?: RealtimeTransportFailureDiagnostic;
     })
   | (EventBase & {
       /** Escape hatch for provider lifecycle events without weakening typed core events. */
@@ -420,6 +602,168 @@ export type RealtimeClientState =
   | "closed"
   | "failed";
 
+/** Fail-closed diagnostic for provider-specific per-turn control limits. */
+export class RealtimeDynamicControlLimitError extends Error {
+  readonly provider: ServerRealtimeProvider;
+  readonly actualBytes: number;
+  readonly maximumBytes: number;
+
+  constructor(input: Readonly<{
+    provider: ServerRealtimeProvider;
+    actualBytes: number;
+    maximumBytes: number;
+  }>) {
+    super(
+      `${input.provider} dynamic response control is ${input.actualBytes} UTF-8 bytes; `
+      + `provider limit is ${input.maximumBytes}`,
+    );
+    this.name = "RealtimeDynamicControlLimitError";
+    this.provider = input.provider;
+    this.actualBytes = input.actualBytes;
+    this.maximumBytes = input.maximumBytes;
+  }
+}
+
+/**
+ * Host-authored, provider-neutral control context for exactly the next model
+ * response. Adapters must deliver it before that provider can begin generation.
+ */
+export type RealtimeResponsePreparation = Readonly<{
+  additionalInstructions: string;
+  contextSha256: string;
+  /** Provider prompt context is advisory; host gateways remain authoritative. */
+  contextAuthority: "advisory_only_gateway_and_speech_gate_enforced";
+}>;
+
+/**
+ * xAI server-VAD needs the next turn's control plane installed before the first
+ * audio byte can trigger speech detection. The provider still owns audio
+ * commit and the initial response trigger; this packet only updates the exact
+ * instructions/tool frontier for that one caller turn.
+ */
+export type RealtimeServerVadTurnPreparation = Readonly<{
+  additionalInstructions: string;
+  contextSha256: string;
+  contextAuthority: "advisory_only_gateway_and_speech_gate_enforced";
+  tools: readonly Readonly<Record<string, unknown>>[];
+  toolFrontierSha256: string;
+  transportParitySha256: string;
+}>;
+
+export type RealtimeServerVadTurnAcknowledgement = Readonly<{
+  provider: "xai";
+  connectionEpoch: number;
+  turnOrdinal: number;
+  status: "acknowledged";
+  contextSha256: string;
+  toolFrontierSha256: string;
+  transportParitySha256: string;
+  configuration: SessionConfigurationAcknowledgement;
+  outboundObservation?: RealtimeWireObservationAttribution;
+  inboundObservation?: RealtimeWireObservationAttribution;
+}>;
+
+export type RealtimeConversationHistoryJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly RealtimeConversationHistoryJsonValue[]
+  | Readonly<{ [key: string]: RealtimeConversationHistoryJsonValue }>;
+
+export type RealtimeConversationHistoryToolCall = Readonly<{
+  toolName: string;
+  toolArguments: Readonly<Record<string, RealtimeConversationHistoryJsonValue>>;
+  /**
+   * Canonical gateway-result history. Provider-specific transport control
+   * envelopes are deliberately excluded and remain in the HACC control plane.
+   * The string itself is never JSON-normalized by the neutral contract.
+   */
+  output: string;
+  sourceSha256: string;
+}>;
+
+export type RealtimeConversationHistoryToolBatchTurn = Readonly<{
+  role: "tool_batch";
+  /** One provider response's ordered, non-empty parallel function-call batch. */
+  calls: readonly RealtimeConversationHistoryToolCall[];
+}>;
+
+/**
+ * Exact, chronological conversation content admitted for provider history
+ * hydration. Source hashes bind turns/calls to host evidence, but are never
+ * copied into provider-visible content or its content hash. Singleton `tool`
+ * remains backward-compatible sugar for a one-call `tool_batch`.
+ */
+export type RealtimeConversationHistoryTurn =
+  | Readonly<{
+      role: "user" | "assistant";
+      text: string;
+      sourceSha256: string;
+    }>
+  | (RealtimeConversationHistoryToolCall & Readonly<{
+      role: "tool";
+    }>)
+  | RealtimeConversationHistoryToolBatchTurn;
+
+export type RealtimeConversationHistoryHydratedItemKind =
+  | "user_message"
+  | "assistant_message"
+  | "synthetic_tool_call"
+  | "synthetic_tool_output";
+
+export type RealtimeConversationHistoryHydratedItemAcknowledgement = Readonly<{
+  /** One-based index in the provider-neutral turn list. */
+  historyTurnOrdinal: number;
+  /** One-based index in the provider wire-item list; tool batches occupy 2N items. */
+  providerItemOrdinal: number;
+  kind: RealtimeConversationHistoryHydratedItemKind;
+  sourceSha256: string;
+  /** Present for both halves of one deterministic synthetic tool-call pair. */
+  syntheticCallIdSha256?: string;
+  /**
+   * Exceptional provider acknowledgement semantics. Absence means the
+   * provider echoed the exact expected content (or, for a protocol with no
+   * item acknowledgement, that no inbound acknowledgement was claimed).
+   *
+   * xAI was observed acknowledging a seeded tool call by identity while
+   * returning empty arguments in `conversation.item.added`. This marker does
+   * not claim that the provider echoed or independently verified the content;
+   * the exact outbound wire observation remains the content proof.
+   */
+  providerContentOmission?: Readonly<{
+    field: "arguments";
+    observedShape: "empty_string";
+  }>;
+  outboundObservation?: RealtimeWireObservationAttribution;
+  inboundObservation?: RealtimeWireObservationAttribution;
+}>;
+
+/**
+ * Fail-closed proof that one exact history batch was delivered in wire order.
+ * Exact provider echoes report `acknowledged`; identity acknowledgements that
+ * omit tool content report `identity_acknowledged_content_unverifiable`, with
+ * the per-item omission and exact outbound content retained separately.
+ * Protocols without an item event state that limitation rather than fabricate
+ * acceptance.
+ * `historySha256` commits only to ordered provider-visible content.
+ * `sourceBindingSha256` separately binds the ordered host evidence sources.
+ */
+export type RealtimeConversationHistoryHydrationAcknowledgement = Readonly<{
+  schemaVersion: 1;
+  provider: ServerRealtimeProvider;
+  connectionEpoch: number;
+  status:
+    | "acknowledged"
+    | "identity_acknowledged_content_unverifiable"
+    | "sent_unacknowledged_by_provider_protocol";
+  turnCount: number;
+  providerItemCount: number;
+  historySha256: string;
+  sourceBindingSha256: string;
+  items: readonly RealtimeConversationHistoryHydratedItemAcknowledgement[];
+}>;
+
 export interface NormalizedRealtimeClient {
   readonly provider: ServerRealtimeProvider;
   readonly state: RealtimeClientState;
@@ -431,14 +775,51 @@ export interface NormalizedRealtimeClient {
   onWireObservation?(listener: RealtimeWireObservationListener): () => void;
   /** Last provider acknowledgement, detached and frozen; null before readiness. */
   readonly sessionConfigurationAcknowledgement?: SessionConfigurationAcknowledgement | null;
+  /** Independently derived non-treatment transport hash for provider-native server-VAD sessions. */
+  readonly serverVadTransportParitySha256?: string | null;
   appendInputAudio(audio: Pcm16Audio): void;
+  /** Must precede commitInputAudio for providers where commit starts generation. */
+  prepareResponse(preparation: RealtimeResponsePreparation): void;
+  /**
+   * Bind hash-verified dynamic control to the continuation of the currently
+   * pending provider tool-call batch. Providers differ on the wire ordering:
+   * OpenAI-compatible transports attach it to the subsequent response.create,
+   * while Gemini embeds it in the blocking toolResponse so that message remains
+   * the sole provider continuation trigger.
+   */
+  prepareToolContinuation?(preparation: RealtimeResponsePreparation): void;
+  /**
+   * Optional provider-native server-VAD barrier. It must resolve on the exact
+   * `session.updated` acknowledgement before caller audio is appended.
+   */
+  prepareServerVadTurn?(
+    preparation: RealtimeServerVadTurnPreparation,
+    timeoutMs?: number,
+  ): Promise<RealtimeServerVadTurnAcknowledgement>;
   commitInputAudio(): void;
+  /**
+   * Optional provider acknowledgement barrier. Call only after commitInputAudio;
+   * clients that do not expose an acknowledgement leave this method absent.
+   */
+  waitForInputAudioCommit?(
+    timeoutMs?: number,
+  ): Promise<RealtimeInputAudioCommitAcknowledgement>;
   createResponse(overrides?: Record<string, unknown>): void;
   /** Optional because not every provider exposes response-targeted cancellation. */
   cancelResponse?(target: RealtimeResponseCancelTarget): void;
   /** Optional because not every provider can reconcile unheard assistant audio. */
   truncateOutputAudio?(target: RealtimeOutputAudioTruncation): void;
   sendTurn(audio: Pcm16Audio | readonly Pcm16Audio[]): void;
+  /** Optional provider-native text turn used by explicitly zero-audio probes. */
+  sendTextTurn?(text: string): void;
+  /**
+   * Seed exact chronological history before the first live turn. The receipt
+   * distinguishes acknowledged delivery from protocols that expose no item ack.
+   */
+  hydrateConversationHistory?(
+    turns: readonly RealtimeConversationHistoryTurn[],
+    timeoutMs?: number,
+  ): Promise<RealtimeConversationHistoryHydrationAcknowledgement>;
   submitToolResults(results: readonly RealtimeToolResult[], createResponse?: boolean): void;
 }
 

@@ -50,9 +50,9 @@ The checked JSON artifact is `tool-world-causal-containment.v1.json` (file SHA-2
 
 ## Source and Git provenance
 
-`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `f6e3c3383a047b3cf9169a403c2dc2f4266afafaa7d78f90b6eebe460d0ed34b`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `9115824a6c63e9d143f7f0b989ba06eefa3f435ac83ba9e614887614e781ca0b`.
+`tool-world-causal-containment.v1.provenance.json` (file SHA-256 `a01027b9ec8c51ad0d1775adfa0f9444d8f037bb4d0707e6a0095738a24480a1`) binds the checked artifact to the exact bytes of the experiment, ToolWorld, world-event, and scenario-schema sources. Its binding SHA-256 is `bc9e9a78fed8e4ebe02629bc00f5cd7518d902a1c65f510673d763ca6f7b450f`.
 
-The capture was honestly marked dirty. Commit `a78630e83371b595e56bd8601ecced50b106c5e2` and tree `bbfd17d5d8d8937eb626d4e81e337ca27747a8d9` are the tracked base before the selected worktree bytes, not a clean-build claim. The experiment source was untracked at that base; the three core sources were modified from their recorded base blobs. Current per-file SHA-256 and byte lengths are authoritative for the tested implementation, and unrelated worktree changes are explicitly outside the binding scope.
+The provenance capture started from clean commit `22f3f5c9e4eb1712b65fd8046d24c42e1a2c31cd` and tree `40f8575f61dbb62767e4a2a7db456cecf9c3a03e`. All four bound source files match their base blobs exactly; current per-file SHA-256 values and byte lengths bind the tested implementation.
 
 The verifier recomputes the artifact identity, manifest binding, source byte hashes, base commit/tree, base blob identities, and each file's relation to the base. The focused test substitutes bytes into every bound source path in turn and requires all four substitutions to fail verification.
 

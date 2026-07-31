@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MODELS } from "../xai";
 import { PROVIDER_DEFAULTS } from "../realtime/config";
 import { xaiAdapter } from "../realtime/providers/xai";
 
 describe("production voice model pinning", () => {
   it("has no mutable xAI voice alias in any production default", () => {
     const defaults = [
-      MODELS.voice,
       PROVIDER_DEFAULTS.xai.model,
       xaiAdapter.defaultModel,
     ];

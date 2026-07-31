@@ -272,7 +272,7 @@ export function createProviderClient(
           instructions: configuration.instructions,
           turn_detection: null,
           audio: {
-            input: { transcription: null },
+            input: {},
             output: {},
           },
           tools: configuration.providerTools,

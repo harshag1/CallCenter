@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
+import { AgentFlowSchema } from "../../flow";
 import { deriveFlowActionInvocationId } from "../../flow-runtime";
 import { compileConditionSuite, type CompiledBenchmarkCondition } from "../condition-compiler";
 import { createInMemoryBenchmarkGatewayKernel, type InMemoryBenchmarkGatewayKernel } from "../gateway-kernel";
@@ -18,6 +19,7 @@ import {
   INDUSTRIAL_FIELD_SERVICE_FLOW,
   industrialFieldServiceCompilerInput,
 } from "../industrial-field-service-source";
+import { longUsefulnessTask } from "../long-call-live-experiment";
 import { BenchmarkScenarioSchema, type JsonValue } from "../scenario-schema";
 import { createToolWorld, executeTool, type ToolWorldState } from "../tool-world";
 import type { BenchmarkGatewayOutcome } from "../orchestrator";
@@ -86,6 +88,7 @@ type PublicInvokePayload = Readonly<{
   }>;
   outcome: Readonly<{
     result_class: string;
+    provider_visible_output_hmac_sha256: string;
   }>;
 }>;
 
@@ -101,7 +104,10 @@ function publicInvokePayload(
 function createHarness(
   id: keyof typeof suite.conditions,
   runId = `run-${id}`,
-  options: Readonly<{ transcriptLimits?: KernelTranscriptLimits }> = {}
+  options: Readonly<{
+    transcriptLimits?: KernelTranscriptLimits;
+    clock?: Readonly<{ nowMs(): number; nowIso(): string }>;
+  }> = {}
 ): Harness {
   const condition = suite.conditions[id];
   const kernel = createInMemoryBenchmarkGatewayKernel({
@@ -113,7 +119,7 @@ function createHarness(
     leaseSubjectId: "pair-industrial-test",
     ...TEST_ATTESTATION_OPTIONS,
     capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
-    clock: FIXED_CLOCK,
+    clock: options.clock ?? FIXED_CLOCK,
     ...(options.transcriptLimits ? { transcriptLimits: options.transcriptLimits } : {}),
   });
   const world = createToolWorld(scenario);
@@ -131,10 +137,11 @@ function invoke(
   harness: Harness,
   action: string,
   args: Record<string, JsonValue>,
-  options: { grant?: string; preserveSnapshot?: boolean; providerCallId?: string } = {}
+  options: { grant?: string; preserveSnapshot?: boolean; providerCallId?: string; turn?: number } = {}
 ): BenchmarkGatewayOutcome {
   harness.sequence += 1;
   const providerCallId = options.providerCallId ?? `provider-call-${harness.sequence}`;
+  let acceptedWorld: ToolWorldState | null = null;
   const outcome = harness.kernel.invoke({
     providerCallId,
     call: {
@@ -144,7 +151,7 @@ function invoke(
     },
     capabilityEpoch: harness.snapshot.capability_epoch,
     condition: harness.condition,
-    turn: harness.sequence,
+    turn: options.turn ?? harness.sequence,
     world: structuredClone(harness.world),
     executeLeaf: (request) => {
       const execution = executeTool(scenario, harness.world, {
@@ -159,10 +166,11 @@ function invoke(
         turn: Math.min(harness.sequence, scenario.max_turns),
         ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
       });
-      harness.world = execution.state;
+      acceptedWorld = execution.state;
       return execution;
     },
   });
+  if (acceptedWorld) harness.world = acceptedWorld;
   if (outcome.capabilitySnapshot && !options.preserveSnapshot) {
     harness.snapshot = outcome.capabilitySnapshot;
   }
@@ -193,7 +201,499 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
   expectOk(invoke(harness, "flow.enter_step", { path: next }));
 }
 
-describe("six-arm benchmark gateway kernel", () => {
+describe("benchmark gateway kernel", () => {
+  it("compiles designated reconciliation with invocation identity omitted from the HACC schema", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const step = topic?.steps?.find((candidate) => candidate.id === "close_and_reconcile");
+    const closePolicy = step?.action_policies?.find((candidate) => candidate.tool === "close_work_order");
+    if (!closePolicy) throw new Error("test flow is missing close_work_order policy");
+    closePolicy.effect = "write";
+    closePolicy.reconciliation = {
+      queryTool: "get_work_order_status",
+      queryArguments: { work_order_id: { source: "invocation_id" } },
+      committedWhen: [
+        { resultPath: "close_receipt", equals: { source: "invocation_id" } },
+        { resultPath: "status", equals: { source: "literal", value: "closed" } },
+      ],
+      absentWhen: [
+        { resultPath: "close_receipt", equals: { source: "invocation_id" } },
+        { resultPath: "status", equals: { source: "literal", value: "absent" } },
+      ],
+      authoritativeResultPath: "$",
+      maxProofAttempts: 2,
+    };
+    const source = industrialFieldServiceCompilerInput(scenario);
+    const compiled = compileConditionSuite({ ...source, flow }).conditions["host-managed-harness"];
+    const disclosure = compiled.disclosures.find(
+      (candidate) => candidate.target === "step:field_service.close_and_reconcile"
+    );
+    const readback = disclosure?.visibleCapabilities.find(
+      (capability) => capability.name === "get_work_order_status"
+    );
+    const nativeContract = compiled.semanticLeafTools.find(
+      (tool) => tool.name === "get_work_order_status"
+    );
+    expect(readback?.description).toContain("Host-bound arguments (omit them): work_order_id");
+    expect(readback?.inputSchema).toMatchObject({ properties: {}, required: [] });
+    expect(readback?.semanticHash).toBe(nativeContract?.publicContractHash);
+  });
+
+  it("omits and injects receipt-bound arguments before reservation and execution", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const step = topic?.steps?.find((candidate) => candidate.id === "collect_safety_and_diagnosis");
+    const policy = step?.action_policies?.find((candidate) => candidate.tool === "confirm_zero_energy");
+    if (!policy) throw new Error("test flow is missing confirm_zero_energy policy");
+    policy.bound_arguments = [{
+      argument: "work_order_id",
+      source: { kind: "receipt_result", tool: "record_diagnostic", result_path: "valve_id" },
+    }];
+    const source = industrialFieldServiceCompilerInput(scenario);
+    const boundSuite = compileConditionSuite({ ...source, flow });
+    const condition = boundSuite.conditions["host-managed-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow,
+      expectedFlowHash: boundSuite.flowHash,
+      expectedScenarioHash: boundSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: boundSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    const harness: Harness = {
+      kernel,
+      condition,
+      snapshot: kernel.initialize({
+        runId: "run-bound-argument",
+        condition,
+        scenario,
+        world: createToolWorld(scenario),
+      }),
+      world: createToolWorld(scenario),
+      sequence: 0,
+    };
+    const boundDisclosure = condition.disclosures.find(
+      (candidate) => candidate.target === "step:field_service.collect_safety_and_diagnosis"
+    );
+    const compiledZeroCapability = boundDisclosure?.visibleCapabilities.find(
+      (action) => action.name === "confirm_zero_energy"
+    );
+    expect(compiledZeroCapability?.description).toContain("Host-bound arguments (omit them): work_order_id");
+    expect(compiledZeroCapability?.inputSchema).not.toHaveProperty("properties.work_order_id");
+    expect(compiledZeroCapability?.inputSchema).toMatchObject({
+      required: ["measured_voltage", "residual_pressure_psi"],
+    });
+
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    expectOk(invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }));
+    expectOk(invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" }));
+
+    expectOk(invoke(harness, "record_diagnostic", {
+      work_order_id: "WO-2048",
+      valve_id: "V-9B",
+      pressure_psi: 212,
+      diagnostic_code: "OVERPRESSURE_VALVE",
+    }));
+    expectOk(invoke(harness, "confirm_lockout", { work_order_id: "WO-2048", lockout_tag: "LOT-884" }));
+    expectOk(invoke(harness, "flow.get_state", {}));
+    const receiptsBeforeOverride = harness.world.receipts.length;
+    const override = invoke(harness, "confirm_zero_energy", {
+      work_order_id: "MODEL-OVERRIDE",
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+    });
+    expect(override.result).toMatchObject({ ok: false, code: "bound_argument_override" });
+    expect(harness.world.receipts).toHaveLength(receiptsBeforeOverride);
+    const zero = invoke(harness, "confirm_zero_energy", {
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+    });
+    expectOk(zero);
+    expect(harness.world.receipts.at(-1)?.arguments).toEqual({
+      measured_voltage: 0,
+      residual_pressure_psi: 0,
+      work_order_id: "V-9B",
+    });
+
+    const publicInvoke = harness.kernel.transcript().entries.at(-1);
+    expect(publicInvoke?.operation).toBe("invoke");
+    expect(publicInvoke?.payload).toMatchObject({
+      input: {
+        argument_binding_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        effective_arguments_hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+  });
+
+  it("derives host-owned linear transitions from the attested condition", () => {
+    const harness = createHarness("host-managed-harness", "run-auto-linear");
+    expect(harness.snapshot.actions.map((action) => action.name).sort()).toEqual([
+      "flow.get_state",
+      "flow.select_topic",
+    ]);
+    const turnPlan = harness.kernel.advanceCallerTurn({
+      runId: "run-auto-linear",
+      condition: harness.condition,
+      scenario,
+      turn: 1,
+      turnId: scenario.caller.turns[0].id,
+      world: harness.world,
+    });
+    harness.snapshot = turnPlan.capabilitySnapshot;
+    expect(turnPlan.responsePlan).toMatchObject({
+      revision: 1,
+      response_mode: "route",
+      eligible_actions: ["flow.get_state", "flow.select_topic"],
+    });
+    const selected = invoke(harness, "flow.select_topic", { topic_id: "field_service" }, { turn: 1 });
+    expectOk(selected);
+    expect(selected.disclosure?.target).toBe("step:field_service.locate_work_order");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("lookup_work_order");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
+
+    const lookupGrant = grant(harness, "lookup_work_order");
+    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId: "host-managed-stable-lookup",
+      grant: lookupGrant,
+      turn: 1,
+    });
+    expectOk(lookup);
+    expect(lookup.providerVisibleOutput).toMatchObject({
+      gateway_result: { ok: true, action: "lookup_work_order" },
+      hacc_speech_guardrail_packet: {
+        packet_type: "hacc_state_conditioned_speech_guardrail",
+      },
+      hacc_response_plan: {
+        revision: 1,
+        plan_sha256: turnPlan.responsePlan.plan_sha256,
+      },
+    });
+    expect(lookup.disclosure?.target).toBe("step:field_service.verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
+    const verified = invoke(harness, "verify_technician", { employee_id: "E-731", pin: "4826" }, { turn: 1 });
+    expectOk(verified);
+    expect(verified.providerVisibleOutput).toMatchObject({
+      hacc_speech_guardrail_packet: {
+        revision: 1,
+        privacy_directive: "never_repeat_verification_secrets",
+      },
+    });
+    const replay = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId: "host-managed-stable-lookup",
+      grant: lookupGrant,
+      turn: 1,
+    });
+    expect(replay.result).toMatchObject({ ok: true, disposition: "replayed" });
+    expect(replay.providerVisibleOutput).toEqual(lookup.providerVisibleOutput);
+    const staleCompletion = invoke(harness, "flow.complete_step", {
+      path: "field_service.locate_work_order",
+      outputs: {},
+    }, { grant: "g1.invalid", turn: 1 });
+    expect(staleCompletion.result).toMatchObject({ ok: false, code: "invalid_capability" });
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("record_diagnostic");
+    const attestation = harness.kernel.attestFinal({
+      runId: "run-auto-linear",
+      condition: harness.condition,
+      scenario,
+      world: harness.world,
+    });
+    const publicInvocations = harness.kernel.transcript().entries
+      .filter((entry) => entry.operation === "invoke")
+      .map(publicInvokePayload);
+    expect(publicInvocations.every((entry) =>
+      /^[a-f0-9]{64}$/.test(entry.outcome.provider_visible_output_hmac_sha256)
+    )).toBe(true);
+    const replayVerification = verifyKernelTranscript({
+      transcript: harness.kernel.encodedTranscript(),
+      finalAttestation: attestation,
+      attestationExpectation: {
+        runId: "run-auto-linear",
+        condition: harness.condition,
+        scenario,
+        world: harness.world,
+        transcriptReference: harness.kernel.transcriptReference(),
+        evidenceBinding: TEST_EVIDENCE_BINDING,
+        trust: TEST_TRUST,
+      },
+    });
+    expect(replayVerification.errors).toEqual([]);
+    expect(replayVerification).toMatchObject({ valid: true, authenticity: "signed_attestation_verified" });
+  });
+
+  it("journals the first receipt in a real two-action long-call step before host auto-advance", () => {
+    const task = longUsefulnessTask("museum");
+    const longScenario = task.scenario;
+    const longFlow = AgentFlowSchema.parse(task.compiler_input.flow);
+    const longSuite = compileConditionSuite(task.compiler_input);
+    const condition = longSuite.conditions["host-managed-harness"];
+    const runId = "run-long-two-action-checkpoint";
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow: longFlow,
+      expectedFlowHash: longSuite.flowHash,
+      expectedScenarioHash: longSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: longSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    let world = createToolWorld(longScenario);
+    let visible = kernel.initialize({ runId, condition, scenario: longScenario, world });
+    let sequence = 0;
+    const invokeLong = (
+      action: string,
+      args: Record<string, JsonValue>,
+      turn: number,
+      capabilityGrant?: string
+    ) => {
+      const capability = visible.actions.find((candidate) => candidate.name === action);
+      if (!capability && !capabilityGrant) throw new Error(`long-call snapshot does not expose ${action}`);
+      let acceptedWorld: ToolWorldState | null = null;
+      const outcome = kernel.invoke({
+        providerCallId: `long-provider-call-${++sequence}`,
+        call: { action, arguments: args, capability_grant: capabilityGrant ?? capability!.capability_grant },
+        capabilityEpoch: visible.capability_epoch,
+        condition,
+        turn,
+        world: structuredClone(world),
+        executeLeaf: (request) => {
+          const execution = executeTool(longScenario, world, {
+            invocation_id: `long-world-invocation-${sequence}`,
+            tool: request.action,
+            arguments: structuredClone(request.arguments),
+            turn,
+            ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
+          });
+          acceptedWorld = execution.state;
+          return execution;
+        },
+      });
+      if (acceptedWorld) world = acceptedWorld;
+      if (outcome.capabilitySnapshot) visible = outcome.capabilitySnapshot;
+      return outcome;
+    };
+    let committedTurn = 0;
+    const advanceToTurn = (target: number) => {
+      while (committedTurn < target) {
+        committedTurn += 1;
+        const update = kernel.advanceCallerTurn({
+          runId,
+          condition,
+          scenario: longScenario,
+          turn: committedTurn,
+          turnId: longScenario.caller.turns[committedTurn - 1].id,
+          world,
+        });
+        if (update.capabilitySnapshot) visible = update.capabilitySnapshot;
+        expectOk(invokeLong("flow.get_state", {}, committedTurn));
+      }
+    };
+    const verifyCurrentHead = () => {
+      const attestation = kernel.attestFinal({ runId, condition, scenario: longScenario, world });
+      expect(verifyKernelTranscript({
+        transcript: kernel.encodedTranscript(),
+        finalAttestation: attestation,
+        attestationExpectation: {
+          runId,
+          condition,
+          scenario: longScenario,
+          world,
+          transcriptReference: kernel.transcriptReference(),
+          evidenceBinding: TEST_EVIDENCE_BINDING,
+          trust: TEST_TRUST,
+        },
+      })).toMatchObject({ valid: true, authenticity: "signed_attestation_verified", errors: [] });
+    };
+
+    advanceToTurn(1);
+    expectOk(invokeLong("flow.select_topic", { topic_id: "museum_case" }, 1));
+    expectOk(invokeLong("lookup_loan_case", { case_id: "MLR-2048" }, 1));
+    advanceToTurn(2);
+    expectOk(invokeLong("verify_museum_registrar", {
+      case_id: "MLR-2048",
+      actor_id: "REG-44",
+      verification_pin: "7316",
+    }, 2));
+
+    advanceToTurn(4);
+    const beforeCorrectionEntries = kernel.transcriptReference().transcript_entry_count;
+    const correction = invokeLong("record_corrected_crate", {
+      case_id: "MLR-2048",
+      subject: "CRATE-A71",
+    }, 4);
+    expectOk(correction);
+    expect(correction.disclosure).toBeUndefined();
+    expect(visible.actions.map((action) => action.name)).toContain("record_corrected_crate");
+    expect(visible.actions.map((action) => action.name)).not.toContain("record_conservation_limits");
+    expect(kernel.transcriptReference().transcript_entry_count).toBe(beforeCorrectionEntries + 1);
+    verifyCurrentHead();
+
+    advanceToTurn(9);
+    const priorTurnGrant = visible.actions.find(
+      (action) => action.name === "record_conservation_limits"
+    )?.capability_grant;
+    expect(priorTurnGrant).toBeTruthy();
+    const guardrails = invokeLong("record_conservation_limits", {
+      case_id: "MLR-2048",
+      primary_constraint: "climate_stable_chain_of_custody",
+      numeric_limit: 52,
+    }, 9);
+    expectOk(guardrails);
+    expect(guardrails.disclosure?.target).toBe("step:museum_case.recover_reversible_action_and_clearance");
+    expect(visible.actions.map((action) => action.name)).not.toContain("hold_bonded_courier");
+    advanceToTurn(10);
+    expect(visible.actions.map((action) => action.name)).toContain("hold_bonded_courier");
+    const stalePriorTurnCall = invokeLong("record_conservation_limits", {
+      case_id: "MLR-2048",
+      primary_constraint: "climate_stable_chain_of_custody",
+      numeric_limit: 52,
+    }, 10, priorTurnGrant);
+    expect(stalePriorTurnCall.result).toMatchObject({ ok: false, code: "capability_scope_mismatch" });
+    verifyCurrentHead();
+  });
+
+  it("rolls back every kernel head when host auto-advance throws after leaf execution", () => {
+    let armed = false;
+    let armedCalls = 0;
+    const clock = {
+      nowMs: FIXED_CLOCK.nowMs,
+      nowIso: () => {
+        if (armed && ++armedCalls === 4) throw new Error("injected post-leaf transition failure");
+        return FIXED_CLOCK.nowIso();
+      },
+    };
+    const harness = createHarness("host-managed-harness", "run-host-transaction-rollback", { clock });
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    const beforeWorld = structuredClone(harness.world);
+    const beforeTranscript = harness.kernel.encodedTranscript();
+    const beforeReference = harness.kernel.transcriptReference();
+    const providerCallId = "provider-rollback-leaf";
+
+    armed = true;
+    expect(() => invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId,
+    })).toThrow("injected post-leaf transition failure");
+    armed = false;
+
+    expect(harness.world).toEqual(beforeWorld);
+    expect(harness.kernel.encodedTranscript()).toBe(beforeTranscript);
+    expect(harness.kernel.transcriptReference()).toEqual(beforeReference);
+    expect(() => harness.kernel.attestFinal({
+      runId: "run-host-transaction-rollback",
+      condition: harness.condition,
+      scenario,
+      world: beforeWorld,
+    })).not.toThrow();
+
+    const retried = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId,
+    });
+    expect(retried.result).toMatchObject({ ok: true, disposition: "executed" });
+    expect(retried.disclosure?.target).toBe("step:field_service.verify_technician");
+  });
+
+  it("does not let a runtime option override model-authored transition ownership", () => {
+    const condition = suite.conditions["full-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow: INDUSTRIAL_FIELD_SERVICE_FLOW,
+      expectedFlowHash: suite.flowHash,
+      expectedScenarioHash: suite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: suite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+      autoAdvanceLinearFlow: true,
+    });
+    const world = createToolWorld(scenario);
+    let snapshot = kernel.initialize({ runId: "run-option-cannot-override", condition, scenario, world });
+    const providerCall = (action: string, args: Record<string, JsonValue>) => {
+      const capability = snapshot.actions.find((candidate) => candidate.name === action);
+      if (!capability) throw new Error(`missing ${action}`);
+      const outcome = kernel.invoke({
+        providerCallId: `override-${action}`,
+        call: { action, arguments: args, capability_grant: capability.capability_grant },
+        capabilityEpoch: snapshot.capability_epoch,
+        condition,
+        turn: 1,
+        world,
+        executeLeaf: () => { throw new Error("leaf execution is not expected"); },
+      });
+      if (outcome.capabilitySnapshot) snapshot = outcome.capabilitySnapshot;
+      return outcome;
+    };
+    expectOk(providerCall("flow.select_topic", { topic_id: "field_service" }));
+    expect(snapshot.actions.map((action) => action.name)).toContain("flow.enter_step");
+    expect(snapshot.actions.map((action) => action.name)).not.toContain("lookup_work_order");
+  });
+
+  it("does not add HACC speech guardrails to the native raw arm", () => {
+    const raw = createHarness("raw-memory", "run-raw-no-speech-packet");
+    const lookup = invoke(raw, "lookup_work_order", { work_order_id: "WO-2048" });
+    expectOk(lookup);
+    expect(lookup.providerVisibleOutput).toBeUndefined();
+    expect(raw.kernel.encodedTranscript()).not.toContain("hacc_speech_guardrail_packet");
+  });
+
+  it("cedes only a genuine branch choice to the model, then resumes host ownership", () => {
+    const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
+    const topic = flow.nodes.find((node) => node.id === "field_service");
+    const locate = topic?.steps?.find((step) => step.id === "locate_work_order");
+    if (!locate) throw new Error("test flow is missing locate_work_order");
+    locate.transitions = [
+      { to: "field_service.verify_technician", label: "Verify first" },
+      { to: "field_service.collect_safety_and_diagnosis", label: "Collect evidence first" },
+    ];
+    const branchedSuite = compileConditionSuite({
+      ...industrialFieldServiceCompilerInput(scenario),
+      flow,
+    });
+    const condition = branchedSuite.conditions["host-managed-harness"];
+    const kernel = createInMemoryBenchmarkGatewayKernel({
+      flow,
+      expectedFlowHash: branchedSuite.flowHash,
+      expectedScenarioHash: branchedSuite.scenarioHash,
+      expectedConditionHash: condition.conditionHash,
+      grantBindingHash: branchedSuite.sourceHash,
+      leaseSubjectId: "pair-industrial-test",
+      ...TEST_ATTESTATION_OPTIONS,
+      capabilitySecret: "benchmark-test-secret-that-is-at-least-thirty-two-characters",
+      clock: FIXED_CLOCK,
+    });
+    const world = createToolWorld(scenario);
+    const snapshot = kernel.initialize({
+      runId: "run-host-managed-branch",
+      condition,
+      scenario,
+      world,
+    });
+    const harness: Harness = { kernel, condition, world, snapshot, sequence: 0 };
+
+    expectOk(invoke(harness, "flow.select_topic", { topic_id: "field_service" }));
+    const lookup = invoke(harness, "lookup_work_order", { work_order_id: "WO-2048" });
+    expectOk(lookup);
+    expect(lookup.disclosure?.target).toBe("topic:field_service");
+    expect(harness.snapshot.actions.map((action) => action.name).sort()).toEqual([
+      "flow.enter_step",
+      "flow.get_state",
+    ]);
+
+    const entered = invoke(harness, "flow.enter_step", { path: "field_service.verify_technician" });
+    expectOk(entered);
+    expect(entered.disclosure?.target).toBe("step:field_service.verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).toContain("verify_technician");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.enter_step");
+    expect(harness.snapshot.actions.map((action) => action.name)).not.toContain("flow.complete_step");
+  });
+
   it("keeps progressive-only and full-harness grants, scopes, and rotations treatment-blind", () => {
     const progressive = createHarness("progressive-only");
     const harness = createHarness("full-harness");
@@ -673,12 +1173,65 @@ describe("six-arm benchmark gateway kernel", () => {
 
     const close = invoke(harness, "close_work_order", { work_order_id: "WO-2048", confirmed: true });
     expect(close.result).toMatchObject({ ok: true, action: "close_work_order", disposition: "executed" });
-    expect(close.providerVisibleOutput).toMatchObject({ ok: false, code: "transport_timeout", retriable: true });
+    expect(close.providerVisibleOutput).toMatchObject({
+      ok: false,
+      code: "action_indeterminate",
+      retriable: false,
+    });
+
+    const quarantinedState = expectOk(invoke(harness, "flow.get_state", {}))
+      .authoritative_result as Record<string, unknown>;
+    expect(quarantinedState).not.toHaveProperty("available_tools");
+    expect(quarantinedState).not.toHaveProperty("released_outcomes");
+    expect(JSON.stringify(quarantinedState)).not.toContain("CLS-WO2048-AUTH-1");
+    expect(quarantinedState).toMatchObject({
+      action_receipts: expect.arrayContaining([
+        expect.objectContaining({
+          tool: "close_work_order",
+          status: "indeterminate",
+          reconciliation_required: true,
+          retry_authority: false,
+        }),
+      ]),
+      provider_visible_frontier: {
+        scope: "step:field_service.close_and_reconcile",
+        capability_epoch: harness.snapshot.capability_epoch,
+        actions: harness.snapshot.actions.map((action) => expect.objectContaining({
+          name: action.name,
+          semantic_hash: action.semantic_hash,
+        })),
+      },
+    });
+    expect(JSON.stringify(quarantinedState)).not.toContain("capability_grant");
 
     const closeReplay = invoke(harness, "close_work_order", { work_order_id: "WO-2048", confirmed: true });
-    expect(closeReplay.result).toMatchObject({ ok: true, disposition: "replayed" });
+    expect(closeReplay.result).toMatchObject({
+      ok: false,
+      code: "action_indeterminate",
+      retriable: false,
+    });
     expect(harness.world.facts.close_count).toBe(1);
     expectOk(invoke(harness, "get_work_order_status", { work_order_id: "WO-2048" }));
+    const reconciledState = expectOk(invoke(harness, "flow.get_state", {}))
+      .authoritative_result as Record<string, unknown>;
+    expect(reconciledState).toMatchObject({
+      action_receipts: expect.arrayContaining([
+        expect.objectContaining({
+          tool: "close_work_order",
+          status: "succeeded",
+          reconciliation_required: false,
+          retry_authority: false,
+        }),
+      ]),
+      released_outcomes: [{
+        status: "succeeded",
+        authoritative_result: {
+          status: "closed",
+          close_receipt: "CLS-WO2048-AUTH-1",
+          close_count: 1,
+        },
+      }],
+    });
     completeAndEnter(
       harness,
       "field_service.close_and_reconcile",

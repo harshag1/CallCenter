@@ -10,7 +10,14 @@ export const PROVIDER_DEFAULTS = {
 
 const XAI_VOICES = new Set(["eve", "ara", "rex", "sal", "leo"]);
 const OPENAI_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
-const RESERVED_SETTINGS = new Set(["voice_provider", "voice_model", "provider_settings"]);
+const RESERVED_SETTINGS = new Set([
+  "voice_provider",
+  "voice_model",
+  "provider_settings",
+  // Host-owned enforcement policy. It must never be serialized into a
+  // provider session or treated as an advanced provider setting.
+  "speech_guardrail",
+]);
 
 export function isVoiceProvider(value: unknown): value is VoiceProviderId {
   return value === "xai" || value === "openai" || value === "gemini";
