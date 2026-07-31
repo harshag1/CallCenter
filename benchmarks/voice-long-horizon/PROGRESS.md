@@ -1612,3 +1612,50 @@ and ESLint pass. No provider call was made by the hardening.
 - Current post-baseline conservative exposure: **$134.00**
 - Active reservations: **$0.00**
 - Publication status: **blocked; no score and no graph**
+
+## 2026-07-31 — Release boundary after the 159/360 DEV terminal
+
+The exact-source Gate D and three-provider qualification at
+`ebae000fa68b0e9376095e216fbf4481bcb64055` passed. Its one-shot six-cell
+DEV run then completed both OpenAI cells and 39 Gemini HACC opportunities
+before failing during the repair response for opportunity 40:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **160/159**;
+- provider calls started/made: **171/171**;
+- generations requested/completed: **171/170**;
+- repair playbacks: **10**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+The primary immutable evidence is
+`2427ad53e940942b0357cead46f22813b3148516764bd6c50760cfeee4c75fb4`.
+Gemini emitted **12,078,750 PCM bytes** in **767 chunks**, equivalent to
+**251.64 seconds** of 24 kHz mono PCM16, but never emitted a provider terminal
+before the 75-second wall-clock fuse. Cleanup's `segment_close_failed` is
+secondary. The report is incomplete, evidence-incomplete, task-result
+unavailable, efficacy-claim ineligible, and therefore contributes no score or
+graph.
+
+Two release repairs now bound this failure mode independently:
+
+1. Gemini Live requests `maxOutputTokens: 1536`, approximately 61.44 seconds
+   at the provider's documented audio-token rate; and
+2. the provider-neutral adapter fails closed after **65 seconds** of generated
+   PCM, retains only the bounded partial-output commitment, closes once, and
+   emits `provider_output_limit_exceeded` rather than waiting for a generic
+   timeout.
+
+The exact bounded-generation source
+`d101005fbd4ceaf29bd2030abb0f8b7121588246` passed a fresh paid compatibility
+qualification across pinned OpenAI, Gemini, and xAI models: three provider
+calls, six physical provider sessions, three spoken tool roundtrips, six
+generation phases, **466** replay events, zero retries, and **$3.00 / $0.00**
+conservative settlement/active liability. This qualifies provider integration;
+it does not complete LC4 or prove HACC efficacy.
+
+The deterministic cap regressions pass **246/246** across Gemini Live,
+production adapter, failure evidence, runner timeout ownership, exchange
+replay, and provider profiles. Publication remains limited to the framework
+and the latest already-completed benchmark. **LC4 remains blocked: no new
+comparative score, superiority claim, or graph.**

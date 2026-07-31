@@ -4,14 +4,13 @@
 
 - Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
   $250.00 USD**
-- Next declared release sequence: **$19.00 USD maximum** (`$1` fresh-source
-  Gate D + `$3` fresh-source qualification + `$15` one-shot six-cell DEV)
-- Post-baseline conservative paid-provider exposure: **$110.00 USD**
-- Post-baseline maximum after the next declared sequence: **$129.00 USD**
+- Next declared paid sequence: **none authorized**
+- Post-baseline conservative paid-provider exposure: **$148.50 USD**
+- Post-baseline maximum after currently authorized work: **$148.50 USD**
 - Ultra-conservative post-baseline maximum including frozen authority:
-  **$144.00 USD**
+  **$163.50 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$181.00 USD**
+- LC4 conservative filesystem-ledger settlements: **$218.50 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$4.379655 USD**, including the separate
@@ -25,13 +24,11 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-Immutable roots have now conservatively charged **$110.00** after that baseline,
-with **$0.00** active. Only one new **$19.00** sequence is authorized:
-fresh-source Gate D, qualification, and one-shot six-cell DEV. That would bound
-the ordinary post-baseline total at **$129.00**. Even adding the separate,
-frozen, non-reusable **$15.00** authority produces an ultra-conservative
-**$144.00**, still below the user's remaining-work ceiling. The frozen authority
-cannot fund a run and is not a settlement or invoice.
+Immutable roots have now conservatively charged **$148.50** after that
+baseline, with **$0.00** active. No further paid sequence is authorized. Even
+adding the separate, frozen, non-reusable **$15.00** authority produces an
+ultra-conservative **$163.50**, still below the user's remaining-work ceiling.
+The frozen authority cannot fund a run and is not a settlement or invoice.
 
 No paid session in the next sequence may open until a new clean source commit,
 fresh source-bound ASR receipt, provider-free timeout/partial-output evidence
@@ -131,17 +128,17 @@ For the current 642-session planning candidate, outcome-blind low/nominal/stress
 | 2026-07-29 | Source `deea288` Gate D + qualification | OpenAI, Gemini, xAI | One transport gate plus one failed three-provider qualification | $4.00 charged; $0.00 active | $45.50 cumulative post-baseline exposure | immutable and unscored | This ledger |
 | 2026-07-29 | Source `a9c2c66` Gate D + qualification | OpenAI, Gemini, xAI | One transport gate plus one failed three-provider qualification | $4.00 charged; $0.00 active | $49.50 cumulative post-baseline exposure | immutable and unscored | This ledger |
 | 2026-07-29 | OpenAI zero-generation ID diagnostics | OpenAI | Three sessions; no response generation or benchmark observation | no signed reservation; conservative diagnostic settlement $0.00 | provider-billed amount unavailable | sealed control deviation; no repeat permitted outside signed authority | This ledger |
-| 2026-07-29 | Next fresh-source release sequence | OpenAI, Gemini, xAI | Gate D, qualification, one one-shot six-cell DEV root | $19.00 maximum; `< $250.00` hard epoch ceiling | not started; $0.00 active | blocked on new clean commit, public audits, and exact-source ASR receipt | This ledger |
+| 2026-07-29 | Next fresh-source release sequence | OpenAI, Gemini, xAI | Gate D, qualification, one one-shot six-cell DEV root | $19.00 maximum; `< $250.00` hard epoch ceiling | consumed by later immutable attempts; $0.00 active | historical authority; no longer reusable | This ledger |
 
 - **Retained estimated provider cost before HACC-LC3: $6.878733**
 - **Provider-billed cost: unreconciled**
 - **Active reservations in terminal ledgers: $0.00; separately quarantined
   nonterminal reservation authority: $15.00 maximum**
-- **Next declared release sequence: $19.00 maximum**
-- **Post-baseline conservative paid-provider exposure: $110.00**
-- **Post-baseline maximum after the next sequence: $129.00**
+- **Next declared paid sequence: none authorized**
+- **Post-baseline conservative paid-provider exposure: $148.50**
+- **Post-baseline maximum after currently authorized work: $148.50**
 - **Ultra-conservative post-baseline maximum including frozen authority:
-  $144.00**
+  $163.50**
 - **Current remaining-work hard ceiling: strictly less than $250.00**
 - **Post-baseline paid-provider exposure at epoch entry: $0.00**
 
@@ -161,11 +158,11 @@ Auxiliary costs are tracked separately so architecture advice cannot be mistaken
 
 - **Cumulative auxiliary review spend: $4.379655**
 - **Cumulative provider-billed voice spend: unreconciled**
-- **Cumulative LC4 conservative settlements: $181.00; these are pessimistic
+- **Cumulative LC4 conservative settlements: $218.50; these are pessimistic
   reservation accounting, not provider invoices or cash-spend evidence**
 - **Cumulative total program cash spend: unreconciled**
 
-Changing the current epoch or declared `$19.00` release sequence requires a
+Changing the current epoch or authorizing another paid release sequence requires a
 dated ledger entry linking the exact release evidence, source commit,
 test/artifact IDs, and any unresolved accounting uncertainty. There is no
 automatic reserve in the current epoch.
@@ -1001,3 +998,25 @@ liability view yields **$168.00**, still below the strict `< $250.00` ceiling.
 A claimed Gate D failure always settles its entire local `$1.00` authority;
 that is conservative authorization accounting, not provider invoice
 reconciliation.
+
+## 2026-07-31 — Final release sequence stopped; bounded Gemini source qualified
+
+The exact-source sequence at `ebae000fa68b0e9376095e216fbf4481bcb64055`
+settled **$1.00** for Gate D, **$3.00** for three-provider qualification, and
+**$7.50** for the failed-closed DEV attempt. DEV stopped at 159/360 completed
+opportunities with zero paid retries and zero active liability. It is
+incomplete, unscorable, and cannot support a comparison or graph.
+
+The bounded-generation repair at
+`d101005fbd4ceaf29bd2030abb0f8b7121588246` then used one separately
+authorized **$3.00 maximum** qualification. OpenAI, Gemini, and xAI all
+completed the spoken tool roundtrip; the filesystem ledger conservatively
+settled the full **$3.00**, with zero retries and zero active liability. This
+is compatibility evidence only, not model or harness efficacy evidence.
+
+- New conservative settlement: **$14.50**
+- Current post-baseline conservative exposure: **$148.50**
+- Current LC4 filesystem-ledger settlements: **$218.50**
+- Active reservations: **$0.00**
+- Further paid work: **not authorized**
+- Provider-billed cash spend: **still unreconciled**

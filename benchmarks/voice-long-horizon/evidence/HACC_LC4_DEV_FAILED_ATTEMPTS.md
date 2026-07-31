@@ -1167,6 +1167,46 @@ It reports `completed: false`, `evidence_complete: false`,
 `task_results_available: false`, and `efficacy_claim_eligible: false`.
 Nothing from this root may populate a comparative score or graph.
 
+## 2026-07-31 DEV terminal at source `ebae000`
+
+**Failed closed after 159/360 completed opportunities. No efficacy score is
+admissible.**
+
+The run completed OpenAI Native and OpenAI HACC, then reached Gemini HACC
+opportunity 40. The repair generation started and streamed **12,078,750 bytes**
+of 24 kHz mono PCM16 across **767 chunks**—**251.64 seconds** of generated
+audio—but no provider terminal arrived before the independent 75-second
+wall-clock fuse.
+
+- execution ID: `hacc-lc4-dev-release-20260730T223659Z`;
+- run/package:
+  `25c0d70f9be535f612f9f5de5ea480d0493b62c513f7a8ca465d6692a1072c1d`
+  /
+  `07230abaa7cf5f60bce7613821d2424c0e8ef382b6d70bca0359bdaf2b3e31eb`;
+- report:
+  `c686cfee8b1c56a0eb809c90633b060ca78de707fa6fc5ffeeaddac1c8bbac43`;
+- primary failure evidence:
+  `2427ad53e940942b0357cead46f22813b3148516764bd6c50760cfeee4c75fb4`;
+- failure: `timeout / provider_response_timeout / provider_wait`;
+- opportunities submitted/completed: **160/159**;
+- provider calls: **171**;
+- response generations requested/completed: **171/170**;
+- repair playbacks: **10**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+The linked segment-close failure is secondary cleanup evidence. The terminal
+report states `completed: false`, `evidence_complete: false`,
+`task_results_available: false`, and `efficacy_claim_eligible: false`.
+Accordingly, no individual cell, aggregate score, provider comparison, or
+launch graph from this root is reusable.
+
+The release repair requests a bounded Gemini generation and adds a separate
+65-second media-duration fuse in the provider-neutral adapter. The source
+containing the Gemini request bound passed a fresh three-provider spoken-tool
+compatibility qualification. That qualification is not a replacement efficacy
+run and does not change this failed attempt's immutable status.
+
 ## 2026-07-29 DEV terminal at source `1dbcb68`
 
 **Failed closed after 121/360 completed opportunities. No efficacy score is
