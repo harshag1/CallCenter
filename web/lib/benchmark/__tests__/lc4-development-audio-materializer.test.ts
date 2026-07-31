@@ -172,7 +172,7 @@ describe("LC4-DEV audio materializer", () => {
     }
   });
 
-  it("rejects manifest mutation and mismatched executable hashes", async () => {
+  it("rejects manifest mutation and unavailable or mismatched pinned executables", async () => {
     const parent = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-hash-"));
     roots.push(parent);
     const outputRoot = join(parent, "published");
@@ -185,7 +185,11 @@ describe("LC4-DEV audio materializer", () => {
       say_sha256: "0".repeat(64),
       ffmpeg_path: "/usr/bin/false",
       ffmpeg_sha256: "0".repeat(64),
-    })).rejects.toThrow("macOS say executable hash mismatch");
+    })).rejects.toThrow(
+      process.platform === "darwin"
+        ? "macOS say executable hash mismatch"
+        : "ENOENT",
+    );
   }, 30_000);
 
   it("rejects internally rehashed stale provider, delivery, packetizer, and rendition commitments", async () => {
