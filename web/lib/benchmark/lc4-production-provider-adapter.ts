@@ -2484,7 +2484,8 @@ export class Lc4RealtimeProviderBridge {
     let manualResponseCreateWireFloor = 0;
     let manualTransportFatal: Error | null = null;
     let terminalError: Error | null = null;
-    let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
+    let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "provider_output_limit_exceeded" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
+    let opportunityOutputByteLength = 0;
     let hostCloseInitiated = false;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
@@ -2705,6 +2706,19 @@ export class Lc4RealtimeProviderBridge {
           terminalError = new Error("provider output PCM format differs from the frozen LC4 profile");
           terminalFailureCode = "invalid_output_audio";
         } else {
+          const maximumOutputBytes = Math.floor(
+            input.profile.output_sample_rate_hz
+              * 2
+              * LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_output_audio_ms
+              / 1_000,
+          );
+          if (opportunityOutputByteLength + event.audio.byteLength > maximumOutputBytes) {
+            terminalError ??= new Error("LC4 provider output audio limit exceeded");
+            terminalFailureCode ??= "provider_output_limit_exceeded";
+            waiters.get(currentOpportunity ?? "")?.();
+            return;
+          }
+          opportunityOutputByteLength += event.audio.byteLength;
           outputFormatByResponse.set(event.responseId, Object.freeze({ ...event.format }));
         }
         const chunks = outputByResponse.get(event.responseId) ?? [];
@@ -3065,6 +3079,7 @@ export class Lc4RealtimeProviderBridge {
         activeResponseId = null;
         rootResponseId = null;
         outputByResponse.clear();
+        opportunityOutputByteLength = 0;
         outputFormatByResponse.clear();
         finalToolAudioBoundaryByResponse.clear();
         terminalByResponse.clear();

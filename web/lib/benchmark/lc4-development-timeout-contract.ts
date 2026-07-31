@@ -14,6 +14,12 @@ export const LC4_DEV_TIMEOUT_CONTRACT = Object.freeze({
   // enough headroom for a similarly sized response to reach the terminal
   // without converting valid provider output into a local timeout.
   provider_response_ms: 75_000,
+  // A conversational response that exceeds 65 seconds of generated PCM is a
+  // runaway generation, even when the provider emits it faster than realtime.
+  // The longest completed retained Gemini response is 59.98 seconds. This
+  // independent media-duration fuse bounds memory/cost and wakes the response
+  // waiter before the wall-clock timeout can misclassify the failure.
+  maximum_provider_output_audio_ms: 65_000,
   listener_asr_ms: 600_000,
   post_inner_timeout_evidence_margin_ms: 30_000,
   opportunity_emergency_watchdog_ms: 730_000,

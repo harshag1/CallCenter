@@ -1603,6 +1603,50 @@ class PartialAudioHangingRealtimeClient extends FakeRealtimeClient {
   }
 }
 
+class RunawayAudioRealtimeClient extends FakeRealtimeClient {
+  override createResponse() {
+    this.events.push("create");
+    this.wire("response.create", {});
+    queueMicrotask(() => {
+      const responseId = "runaway-audio-response";
+      const responseStarted = this.wire(
+        "response.created",
+        { response_id: responseId },
+        "inbound",
+      );
+      this.emit({
+        type: "response.started",
+        provider: this.provider,
+        receivedAtMs: 1,
+        wireType: responseStarted.wireType,
+        responseId,
+        wireObservation: wireReference(responseStarted),
+      });
+      const maximumBytes = 24_000
+        * 2
+        * LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_output_audio_ms
+        / 1_000;
+      for (const audio of [new Uint8Array(maximumBytes), new Uint8Array([1, 0])]) {
+        const audioObservation = this.wire(
+          "response.audio.delta",
+          { byte_length: audio.byteLength, pcm_sha256: sha256Hex(audio) },
+          "inbound",
+        );
+        this.emit({
+          type: "output.audio",
+          provider: this.provider,
+          receivedAtMs: 2,
+          wireType: audioObservation.wireType,
+          responseId,
+          audio,
+          format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+          wireObservation: wireReference(audioObservation),
+        });
+      }
+    });
+  }
+}
+
 class XaiResponseBeforeAckRealtimeClient extends FakeRealtimeClient {
   override commitInputAudio() {
     super.commitInputAudio();
@@ -2541,6 +2585,39 @@ describe("LC4 production realtime adapter bridge", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("fails closed at the media-duration fuse before a runaway response reaches the wall timeout", async () => {
+    const listener = vi.fn();
+    const events: string[] = [];
+    const fixture = await openDevFailureFixture({
+      client: new RunawayAudioRealtimeClient("openai", events),
+      listener,
+    });
+    const error = await caughtFailure(fixture.session.exchange({
+      opportunity_id: fixture.opportunity_id,
+      caller_pcm: fixture.caller_pcm,
+      response_control: { kind: "hacc_response_plan", plan: responsePlan() },
+    }));
+    const maximumBytes = 24_000
+      * 2
+      * LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_output_audio_ms
+      / 1_000;
+    expect(error.failure).toMatchObject({
+      failure_stage: "provider_wait",
+      failure_code: "provider_output_limit_exceeded",
+      failure_class: "provider_external",
+      response_generation_requested: true,
+      response_generation_started: true,
+      response_terminal_observed: false,
+      response_completed: false,
+      output_pcm_byte_length: maximumBytes,
+      output_pcm_chunk_count: 1,
+    });
+    expect(error.failure.output_pcm_sha256).toBe(sha256Hex(new Uint8Array(maximumBytes)));
+    expect(listener).not.toHaveBeenCalled();
+    expect(events.filter((event) => event === "close")).toHaveLength(1);
+    await caughtFailure(fixture.session.close());
   });
 
   it("delivers and replay-binds a native stop on the final frozen xAI delimiter frame without changing caller PCM", async () => {

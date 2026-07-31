@@ -166,6 +166,7 @@ describe("LC4-DEV timeout ownership", () => {
     expect(LC4_DEV_MINIMUM_OPPORTUNITY_WATCHDOG_MS).toBe(718_000);
     expect(LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms).toBe(730_000);
     expect(LC4_DEV_TIMEOUT_CONTRACT.provider_response_ms).toBe(75_000);
+    expect(LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_output_audio_ms).toBe(65_000);
     expect(LC4_DEV_TIMEOUT_CONTRACT.listener_asr_ms).toBe(600_000);
   });
 });

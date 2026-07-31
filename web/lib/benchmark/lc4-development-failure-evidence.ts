@@ -37,6 +37,7 @@ export type Lc4DevFailureCode =
   | "provider_fatal"
   | "provider_connection_closed"
   | "provider_terminal_failed"
+  | "provider_output_limit_exceeded"
   | "provider_response_timeout"
   | "gateway_fatal"
   | "missing_terminal_response"
@@ -167,7 +168,7 @@ const CODES = new Set<Lc4DevFailureCode>([
   "response_request_failed", "server_vad_control_ack_failed", "server_vad_delimiter_exhausted",
   "server_vad_protocol_failure", "provider_fatal",
   "provider_connection_closed",
-  "provider_terminal_failed", "provider_response_timeout", "gateway_fatal",
+  "provider_terminal_failed", "provider_output_limit_exceeded", "provider_response_timeout", "gateway_fatal",
   "missing_terminal_response", "invalid_output_audio", "missing_output_audio",
   "listener_failed", "evidence_assembly_failed", "segment_close_failed", "adapter_failure",
 ]);
