@@ -4,9 +4,9 @@ Status: **outcome-blind executable method; not a preregistration, provider-call 
 
 Machine artifact: [`HACC_LC4_CONSTRAINED_INFERENCE_V1.json`](./HACC_LC4_CONSTRAINED_INFERENCE_V1.json)
 
-Artifact SHA-256: `84ff4802dc2379ce59b98300fede35465cd37591dc3b0bdfc8bf277e6090e9b1`
+Artifact SHA-256: `f72ec204f035dd25e75f9205a4784826b8f5e131bae2307f164e52c342d1d669`
 
-Bound power-plan artifact SHA-256: `3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c`
+Bound power-plan artifact SHA-256: `afee913240b4741ed59c00c5d0e02345de2ee52bb80bf8c682c6738e34bfb7cd`
 
 Bound allocation SHA-256: `c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba`
 

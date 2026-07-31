@@ -1429,7 +1429,7 @@
         "discordance": 0.35,
         "treatment_only_probability": 0.3,
         "baseline_only_probability": 0.04999999999999999,
-        "power": 0.9601001249977493
+        "power": 0.96010012499775
       },
       {
         "hacc_only_probability": 0.35,
@@ -1441,7 +1441,7 @@
         "discordance": 0.44999999999999996,
         "treatment_only_probability": 0.35,
         "baseline_only_probability": 0.09999999999999999,
-        "power": 0.8772507900580806
+        "power": 0.87725079005808
       }
     ]
   },
@@ -1455,7 +1455,7 @@
         "providers_per_template": 3,
         "design_effect": 1,
         "effective_pairs_floor": 72,
-        "exact_power_at_effective_pairs": 0.9601001249977493
+        "exact_power_at_effective_pairs": 0.96010012499775
       },
       {
         "alternative": "hacc-only-0.35_native-only-0.10",
@@ -1463,7 +1463,7 @@
         "providers_per_template": 3,
         "design_effect": 1,
         "effective_pairs_floor": 72,
-        "exact_power_at_effective_pairs": 0.8772507900580803
+        "exact_power_at_effective_pairs": 0.87725079005808
       },
       {
         "alternative": "hacc-only-0.30_native-only-0.05",
@@ -1471,7 +1471,7 @@
         "providers_per_template": 3,
         "design_effect": 1.2,
         "effective_pairs_floor": 60,
-        "exact_power_at_effective_pairs": 0.9186662307332938
+        "exact_power_at_effective_pairs": 0.91866623073329
       },
       {
         "alternative": "hacc-only-0.35_native-only-0.10",
@@ -1479,7 +1479,7 @@
         "providers_per_template": 3,
         "design_effect": 1.2,
         "effective_pairs_floor": 60,
-        "exact_power_at_effective_pairs": 0.8014223234096615
+        "exact_power_at_effective_pairs": 0.80142232340966
       },
       {
         "alternative": "hacc-only-0.30_native-only-0.05",
@@ -1487,7 +1487,7 @@
         "providers_per_template": 3,
         "design_effect": 1.5,
         "effective_pairs_floor": 48,
-        "exact_power_at_effective_pairs": 0.8358440679142405
+        "exact_power_at_effective_pairs": 0.83584406791424
       },
       {
         "alternative": "hacc-only-0.35_native-only-0.10",
@@ -1495,7 +1495,7 @@
         "providers_per_template": 3,
         "design_effect": 1.5,
         "effective_pairs_floor": 48,
-        "exact_power_at_effective_pairs": 0.6952042194243462
+        "exact_power_at_effective_pairs": 0.69520421942435
       },
       {
         "alternative": "hacc-only-0.30_native-only-0.05",
@@ -1503,7 +1503,7 @@
         "providers_per_template": 3,
         "design_effect": 2,
         "effective_pairs_floor": 36,
-        "exact_power_at_effective_pairs": 0.6794577804388112
+        "exact_power_at_effective_pairs": 0.67945778043881
       },
       {
         "alternative": "hacc-only-0.35_native-only-0.10",
@@ -1511,7 +1511,7 @@
         "providers_per_template": 3,
         "design_effect": 2,
         "effective_pairs_floor": 36,
-        "exact_power_at_effective_pairs": 0.5482371829343844
+        "exact_power_at_effective_pairs": 0.54823718293438
       },
       {
         "alternative": "hacc-only-0.30_native-only-0.05",
@@ -1519,7 +1519,7 @@
         "providers_per_template": 3,
         "design_effect": 3,
         "effective_pairs_floor": 24,
-        "exact_power_at_effective_pairs": 0.43219033659290973
+        "exact_power_at_effective_pairs": 0.43219033659291
       },
       {
         "alternative": "hacc-only-0.35_native-only-0.10",
@@ -1527,7 +1527,7 @@
         "providers_per_template": 3,
         "design_effect": 3,
         "effective_pairs_floor": 24,
-        "exact_power_at_effective_pairs": 0.3392263361999647
+        "exact_power_at_effective_pairs": 0.33922633619996
       }
     ],
     "perfect_cluster_note": "ICC=1 reduces the sensitivity calculation to 24 effective template pairs; provider-specific rows and clustered confirmation remain descriptive unless separately powered."
@@ -1540,5 +1540,5 @@
     "LC3 outcomes are development evidence and were not used to choose LC4 power assumptions or resize the schedule.",
     "This artifact authorizes zero provider calls and zero efficacy claims."
   ],
-  "artifact_sha256": "3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c"
+  "artifact_sha256": "afee913240b4741ed59c00c5d0e02345de2ee52bb80bf8c682c6738e34bfb7cd"
 }

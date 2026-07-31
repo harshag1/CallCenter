@@ -4,7 +4,7 @@ Status: **planning artifact only; not a preregistration, provider-call authoriza
 
 Machine artifact: [`HACC_LC4_POWER_PLAN_V1.json`](./HACC_LC4_POWER_PLAN_V1.json)
 
-Artifact SHA-256: `3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c`
+Artifact SHA-256: `afee913240b4741ed59c00c5d0e02345de2ee52bb80bf8c682c6738e34bfb7cd`
 
 Allocation SHA-256: `c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba`
 

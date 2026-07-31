@@ -22,6 +22,16 @@ const VARIANTS = Object.freeze([
 ] as const);
 const TTS_VOICE_SLOTS = Object.freeze(["tts-slot-1", "tts-slot-2", "tts-slot-3"] as const);
 
+// V8/libm revisions can differ by one or two ULPs in the accumulated exact
+// binomial power. Canonical artifacts must be byte-identical across supported
+// Node runtimes, so freeze probabilities well beyond inferential precision.
+function canonicalProbability(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error("probability must be finite and within [0,1]");
+  }
+  return Number(value.toPrecision(14));
+}
+
 function seededOrder<const T extends readonly string[]>(values: T, label: string): T[number][] {
   return [...values].sort((left, right) => {
     const leftHash = sha256Hex(`${LC4_POWER_PLAN_SEED}\n${label}\n${left}`);
@@ -100,27 +110,29 @@ function selectUniformSupportIndex(provider: string, supportSize: number) {
 function powerScenario(haccOnly: number, nativeOnly: number) {
   const discordance = haccOnly + nativeOnly;
   const riskDifference = haccOnly - nativeOnly;
+  const exact = exactConditionalMcNemarPower({
+    sample_size: 72,
+    risk_difference: riskDifference,
+    discordance,
+    alpha: 0.05,
+  });
   return Object.freeze({
     hacc_only_probability: haccOnly,
     native_only_probability: nativeOnly,
-    ...exactConditionalMcNemarPower({
-      sample_size: 72,
-      risk_difference: riskDifference,
-      discordance,
-      alpha: 0.05,
-    }),
+    ...exact,
+    power: canonicalProbability(exact.power),
   });
 }
 
 function clusterSensitivity(icc: number, discordance: number) {
   const designEffect = 1 + (3 - 1) * icc;
   const effectivePairs = Math.floor(72 / designEffect);
-  const power = exactConditionalMcNemarPower({
+  const power = canonicalProbability(exactConditionalMcNemarPower({
     sample_size: effectivePairs,
     risk_difference: 0.25,
     discordance,
     alpha: 0.05,
-  }).power;
+  }).power);
   return Object.freeze({
     within_template_provider_icc: icc,
     providers_per_template: 3,

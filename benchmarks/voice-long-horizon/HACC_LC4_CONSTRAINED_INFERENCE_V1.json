@@ -6,7 +6,7 @@
   "created_at": "2026-07-21T00:00:00.000Z",
   "binds": {
     "power_plan_artifact_id": "HACC-LC4-POWER-v1",
-    "power_plan_artifact_sha256": "3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c",
+    "power_plan_artifact_sha256": "afee913240b4741ed59c00c5d0e02345de2ee52bb80bf8c682c6738e34bfb7cd",
     "allocation_sha256": "c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba"
   },
   "constrained_randomization": {
@@ -107,5 +107,5 @@
     "The synthetic mechanics check has no efficacy or provider-comparison evidentiary value.",
     "This artifact authorizes zero provider calls and zero efficacy claims."
   ],
-  "artifact_sha256": "84ff4802dc2379ce59b98300fede35465cd37591dc3b0bdfc8bf277e6090e9b1"
+  "artifact_sha256": "f72ec204f035dd25e75f9205a4784826b8f5e131bae2307f164e52c342d1d669"
 }

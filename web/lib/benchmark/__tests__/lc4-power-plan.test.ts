@@ -76,11 +76,11 @@ describe("outcome-blind LC4 power and randomization plan", () => {
     );
     expect(adverse.map((row) => row.effective_pairs_floor)).toEqual([72, 60, 48, 36, 24]);
     expect(adverse.map((row) => row.exact_power_at_effective_pairs)).toEqual([
-      0.8772507900580803,
-      0.8014223234096615,
-      0.6952042194243462,
-      0.5482371829343844,
-      0.3392263361999647,
+      0.87725079005808,
+      0.80142232340966,
+      0.69520421942435,
+      0.54823718293438,
+      0.33922633619996,
     ]);
     expect(artifact.template_cluster_sensitivity.method_scope).toMatch(/not power for the final/);
     expect(artifact.claim_boundaries.join(" ")).toMatch(/zero provider calls/);
@@ -92,8 +92,13 @@ describe("outcome-blind LC4 power and randomization plan", () => {
       process.cwd(),
       "../benchmarks/voice-long-horizon/HACC_LC4_POWER_PLAN_V1.json",
     ), "utf8"));
+    const companion = await readFile(resolve(
+      process.cwd(),
+      "../benchmarks/voice-long-horizon/HACC_LC4_POWER_PLAN_V1.md",
+    ), "utf8");
     expect(checkedIn).toEqual(generated);
-    expect(generated.artifact_sha256).toBe("3f0ddf9aa1b01feff4aebf7ec4f02c4eabc4c5a8a6b1681aa4dacd2378518f0c");
+    expect(generated.artifact_sha256).toBe("afee913240b4741ed59c00c5d0e02345de2ee52bb80bf8c682c6738e34bfb7cd");
+    expect(companion).toContain(`Artifact SHA-256: \`${generated.artifact_sha256}\``);
     expect(generated.randomization.allocation_sha256).toBe("c2dfc96536e3444b4ee6c8478174c9796eca30e8261f9695743dbd36a01e35ba");
     const body = Object.fromEntries(Object.entries(generated).filter(([key]) => key !== "artifact_sha256"));
     expect(generated.artifact_sha256).toBe(sha256Hex(

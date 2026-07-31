@@ -192,8 +192,16 @@ describe("LC4 executable constrained inference", () => {
       process.cwd(),
       "../benchmarks/voice-long-horizon/HACC_LC4_CONSTRAINED_INFERENCE_V1.json",
     ), "utf8"));
+    const companion = await readFile(resolve(
+      process.cwd(),
+      "../benchmarks/voice-long-horizon/HACC_LC4_CONSTRAINED_INFERENCE_V1.md",
+    ), "utf8");
     expect(checkedIn).toEqual(generated);
-    expect(generated.artifact_sha256).toBe("84ff4802dc2379ce59b98300fede35465cd37591dc3b0bdfc8bf277e6090e9b1");
+    expect(generated.artifact_sha256).toBe("f72ec204f035dd25e75f9205a4784826b8f5e131bae2307f164e52c342d1d669");
+    expect(companion).toContain(`Artifact SHA-256: \`${generated.artifact_sha256}\``);
+    expect(companion).toContain(
+      `Bound power-plan artifact SHA-256: \`${generated.binds.power_plan_artifact_sha256}\``,
+    );
     const body = Object.fromEntries(Object.entries(generated).filter(([key]) => key !== "artifact_sha256"));
     expect(generated.artifact_sha256).toBe(sha256Hex(
       `harshas-amazing-call-center/lc4-constrained-inference/v1\n${canonicalJson(body)}`,
