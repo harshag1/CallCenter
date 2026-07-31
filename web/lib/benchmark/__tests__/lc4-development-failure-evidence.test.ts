@@ -523,6 +523,39 @@ describe("LC4-DEV failure evidence", () => {
     expect(classifyLc4DevTerminalWireType("response.failed")).toBe("response_terminal");
     expect(classifyLc4DevTerminalWireType("error")).toBe("provider_error");
     expect(classifyLc4DevTerminalWireType("response.function_call_arguments.done")).toBe("tool_activity");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "failed",
+      reasonClass: "malformed_function_call",
+    })).toBe("response_terminal_malformed_function_call");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "failed",
+      reasonClass: "response_rejected",
+    })).toBe("response_terminal_rejected");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "failed",
+      reasonClass: "safety",
+    })).toBe("response_terminal_safety");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "incomplete",
+      reasonClass: "need_more_input",
+    })).toBe("response_terminal_incomplete");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "failed",
+      reasonClass: "regeneration_exhausted",
+    })).toBe("response_terminal_regeneration_exhausted");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "failed",
+      reasonClass: "unknown",
+    })).toBe("response_terminal_unknown");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "interrupted",
+      reasonClass: "none",
+    })).toBe("response_terminal_interrupted");
+    expect(classifyLc4DevTerminalWireType("serverContent", {
+      status: "completed",
+      reasonClass: "none",
+    })).toBe("response_terminal");
+    expect(classifyLc4DevTerminalWireType("serverContent", null)).toBe("other");
     expect(classifyLc4DevTerminalWireType("private.provider.event.SENTINEL")).toBe("other");
   });
 });

@@ -62,6 +62,13 @@ export type Lc4DevFailureClass =
 export type Lc4DevTerminalWireType =
   | "none"
   | "response_terminal"
+  | "response_terminal_interrupted"
+  | "response_terminal_rejected"
+  | "response_terminal_malformed_function_call"
+  | "response_terminal_safety"
+  | "response_terminal_incomplete"
+  | "response_terminal_regeneration_exhausted"
+  | "response_terminal_unknown"
   | "provider_error"
   | "connection_closed"
   | "audio_append"
@@ -177,7 +184,11 @@ const CLASSES = new Set<Lc4DevFailureClass>([
   "listener", "evidence_retention", "cleanup", "unknown",
 ]);
 const TERMINAL_WIRE_TYPES = new Set<Lc4DevTerminalWireType>([
-  "none", "response_terminal", "provider_error", "connection_closed", "audio_append",
+  "none", "response_terminal", "response_terminal_interrupted", "response_terminal_rejected",
+  "response_terminal_malformed_function_call", "response_terminal_safety",
+  "response_terminal_incomplete", "response_terminal_regeneration_exhausted",
+  "response_terminal_unknown",
+  "provider_error", "connection_closed", "audio_append",
   "audio_commit", "response_request", "tool_activity", "other",
 ]);
 const GATEWAY_FATAL_CLASSES = new Set<Lc4DevFailureEvidenceBody["gateway_fatal_class"]>([
@@ -228,8 +239,25 @@ function requireHashOrNull(value: string | null, label: string): void {
   if (value !== null && !HASH.test(value)) throw new Error(`${label} must be null or one lowercase SHA-256`);
 }
 
-export function classifyLc4DevTerminalWireType(wireType: string | null): Lc4DevTerminalWireType {
+export function classifyLc4DevTerminalWireType(
+  wireType: string | null,
+  terminalProjection?: Readonly<{ status?: unknown; reasonClass?: unknown }> | null,
+): Lc4DevTerminalWireType {
   if (wireType === null) return "none";
+  if (wireType === "serverContent" && terminalProjection) {
+    if (terminalProjection.status === "interrupted") return "response_terminal_interrupted";
+    if (terminalProjection.reasonClass === "response_rejected") return "response_terminal_rejected";
+    if (terminalProjection.reasonClass === "malformed_function_call") {
+      return "response_terminal_malformed_function_call";
+    }
+    if (terminalProjection.reasonClass === "safety") return "response_terminal_safety";
+    if (terminalProjection.reasonClass === "need_more_input") return "response_terminal_incomplete";
+    if (terminalProjection.reasonClass === "regeneration_exhausted") {
+      return "response_terminal_regeneration_exhausted";
+    }
+    if (terminalProjection.reasonClass === "unknown") return "response_terminal_unknown";
+    if (["completed", "failed"].includes(String(terminalProjection.status))) return "response_terminal";
+  }
   if (["response.done", "response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(wireType)) return "response_terminal";
   if (wireType === "error" || wireType.endsWith(".error")) return "provider_error";
   if (wireType === "connection.closed" || wireType === "client.close") return "connection_closed";

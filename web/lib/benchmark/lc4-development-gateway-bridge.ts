@@ -128,13 +128,15 @@ export function lc4DevSemanticIntentsForActions(
 
 function lc4DevGatewayContract(eligibleSemanticIntents: readonly Lc4DevSemanticIntent[]): Readonly<{
   function_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
-  tool_name_policy: "one_exact_eligible_semantic_intent";
+  tool_name_policy: "one_exact_eligible_semantic_intent" | "tools_forbidden_speech_only";
   arguments_policy: "exact_empty_object";
   eligible_semantic_intents: readonly Lc4DevSemanticIntent[];
 }> {
   return freeze({
     function_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
-    tool_name_policy: "one_exact_eligible_semantic_intent",
+    tool_name_policy: eligibleSemanticIntents.length === 0
+      ? "tools_forbidden_speech_only"
+      : "one_exact_eligible_semantic_intent",
     arguments_policy: "exact_empty_object",
     eligible_semantic_intents: Object.freeze([...eligibleSemanticIntents]),
   });
@@ -173,6 +175,9 @@ export function renderLc4DevHaccResponsePlan(
   });
   return [
     `<hacc_response_plan>\n${canonicalJson(view)}\n</hacc_response_plan>`,
+    ...(phase === "repair"
+      ? ["Repair playback is speech-only. Do not call any tool. Speak one concise answer to the caller now."]
+      : []),
     renderLc4ListenerAssertionContract(),
   ].join("\n");
 }
@@ -193,6 +198,9 @@ export function appendLc4DevNativeGatewayContract(
   return [
     instructions,
     `<lc4_gateway_contract>\n${canonicalJson(contract)}\n</lc4_gateway_contract>`,
+    ...(phase === "repair"
+      ? ["Repair playback is speech-only. Do not call any tool. Speak one concise answer to the caller now."]
+      : []),
     renderLc4ListenerAssertionContract(),
   ].join("\n");
 }

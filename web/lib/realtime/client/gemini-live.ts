@@ -1551,16 +1551,78 @@ function geminiUsageWireProjection(
   return Object.keys(usage).length ? usage : undefined;
 }
 
+const GEMINI_SAFETY_TURN_COMPLETE_REASONS = new Set([
+  "BLOCKLIST",
+  "GENERATED_AUDIO_SAFETY",
+  "GENERATED_CONTENT_BLOCKLIST",
+  "GENERATED_CONTENT_PROHIBITED",
+  "GENERATED_CONTENT_SAFETY",
+  "GENERATED_IMAGE_CELEBRITY",
+  "GENERATED_IMAGE_IDENTIFIABLE_PEOPLE",
+  "GENERATED_IMAGE_MINORS",
+  "GENERATED_IMAGE_PROHIBITED",
+  "GENERATED_IMAGE_PROMINENT_PEOPLE_DETECTED_BY_REWRITER",
+  "GENERATED_IMAGE_SAFETY",
+  "GENERATED_OTHER",
+  "GENERATED_VIDEO_SAFETY",
+  "IMAGE_PROHIBITED_INPUT_CONTENT",
+  "INPUT_IMAGE_CELEBRITY",
+  "INPUT_IMAGE_PHOTO_REALISTIC_CHILD_PROHIBITED",
+  "INPUT_IP_PROHIBITED",
+  "INPUT_OTHER",
+  "INPUT_TEXT_CONTAIN_PROMINENT_PERSON_PROHIBITED",
+  "INPUT_TEXT_NCII_PROHIBITED",
+  "OUTPUT_IMAGE_IP_PROHIBITED",
+  "PROHIBITED_INPUT_CONTENT",
+  "UNSAFE_PROMPT_FOR_IMAGE_GENERATION",
+]);
+
+function classifyGeminiTurnComplete(
+  reason: string,
+  interrupted: boolean,
+  waitingForInput: boolean,
+): Readonly<{
+  status: "completed" | "failed" | "incomplete" | "interrupted";
+  reasonClass: "none" | "response_rejected" | "malformed_function_call" | "need_more_input"
+    | "safety" | "regeneration_exhausted" | "unknown";
+}> {
+  if (interrupted) return { status: "interrupted", reasonClass: "none" };
+  if (reason === "NEED_MORE_INPUT" || waitingForInput) {
+    return { status: "incomplete", reasonClass: "need_more_input" };
+  }
+  if (reason === "") return { status: "completed", reasonClass: "none" };
+  if (reason === "TURN_COMPLETE_REASON_UNSPECIFIED") {
+    return { status: "completed", reasonClass: "none" };
+  }
+  if (reason === "RESPONSE_REJECTED") {
+    return { status: "failed", reasonClass: "response_rejected" };
+  }
+  if (reason === "MALFORMED_FUNCTION_CALL") {
+    return { status: "failed", reasonClass: "malformed_function_call" };
+  }
+  if (reason === "MAX_REGENERATION_REACHED") {
+    return { status: "failed", reasonClass: "regeneration_exhausted" };
+  }
+  if (GEMINI_SAFETY_TURN_COMPLETE_REASONS.has(reason) || reason.includes("PROHIBITED")) {
+    return { status: "failed", reasonClass: "safety" };
+  }
+  // Gemini can add enum members independently of this client. Unknown reasons
+  // are provider-reported noncompletion until explicitly qualified; silently
+  // accepting them would turn protocol drift into false benchmark success.
+  return { status: "failed", reasonClass: "unknown" };
+}
+
 function geminiTerminalWireProjection(
   event: Readonly<Record<string, unknown>>,
 ): Record<string, string> | undefined {
   const content = isRecord(event.serverContent) ? event.serverContent : {};
   if (content.turnComplete !== true) return undefined;
   const reason = typeof content.turnCompleteReason === "string" ? content.turnCompleteReason : "";
-  const failed = reason === "RESPONSE_REJECTED"
-    || reason === "MALFORMED_FUNCTION_CALL"
-    || reason.includes("PROHIBITED");
-  return { status: content.interrupted === true ? "interrupted" : failed ? "failed" : "completed" };
+  return classifyGeminiTurnComplete(
+    reason,
+    content.interrupted === true,
+    content.waitingForInput === true,
+  );
 }
 
 function geminiWireIdentityProjection(
@@ -2574,9 +2636,13 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       const terminal = this.completedResponseTerminal;
       const lateReason =
         typeof content.turnCompleteReason === "string" ? content.turnCompleteReason : undefined;
-      const lateRejected = lateReason === "RESPONSE_REJECTED"
-        || lateReason === "MALFORMED_FUNCTION_CALL"
-        || Boolean(lateReason?.includes("PROHIBITED"));
+      const lateCompletion = lateReason === undefined
+        ? null
+        : classifyGeminiTurnComplete(
+            lateReason,
+            content.interrupted === true,
+            content.waitingForInput === true,
+          );
       // Audio for the next caller turn is paced before activityEnd arms its
       // generation trigger. During that interval Gemini may already stream
       // input transcription while the completed response remains the only
@@ -2596,7 +2662,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         || !terminalInputTurnStillCurrent
         || (content.interrupted === true && terminal.status !== "interrupted")
         || (content.generationComplete === true && terminal.status === "interrupted")
-        || (lateRejected && terminal.status !== "failed")
+        || (lateCompletion !== null && terminal.status !== lateCompletion.status)
         || (terminal.reason !== undefined
           && lateReason !== undefined
           && terminal.reason !== lateReason);
@@ -2691,9 +2757,12 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       this.finalizeTranscript("input");
       this.finalizeTranscript("output");
       const reason = typeof content.turnCompleteReason === "string" ? content.turnCompleteReason : undefined;
-      const rejected = reason === "RESPONSE_REJECTED" || reason === "MALFORMED_FUNCTION_CALL"
-        || Boolean(reason?.includes("PROHIBITED"));
-      if (rejected) {
+      const completion = classifyGeminiTurnComplete(
+        reason ?? "",
+        this.currentResponseInterrupted || content.interrupted === true,
+        content.waitingForInput === true,
+      );
+      if (completion.status === "failed") {
         this.emitError(
           new Error(`Gemini response ended with ${reason}`),
           false,
@@ -2702,11 +2771,7 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
         );
       }
       this.completeResponse(
-        this.currentResponseInterrupted || content.interrupted === true
-          ? "interrupted"
-          : rejected
-            ? "failed"
-            : "completed",
+        completion.status,
         reason ?? "turn_complete",
         "serverContent.turnComplete",
       );

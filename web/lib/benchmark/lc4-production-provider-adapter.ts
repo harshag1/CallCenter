@@ -2458,6 +2458,7 @@ export class Lc4RealtimeProviderBridge {
     const geminiWireProjections = new Map<string, JsonValue>();
     const terminalByResponse = new Set<string>();
     const completedByResponse = new Set<string>();
+    const terminalObservationByResponse = new Map<string, Lc4SanitizedWireObservation>();
     const waiters = new Map<string, () => void>();
     let currentOpportunity: string | null = null;
     let activeResponseId: string | null = null;
@@ -2731,6 +2732,13 @@ export class Lc4RealtimeProviderBridge {
       if (event.type === "response.completed") {
         activeResponseId = event.responseId;
         terminalByResponse.add(event.responseId);
+        if (event.wireObservation?.availability === "observed") {
+          const terminalObservationSha256 = event.wireObservation.observationSha256;
+          const terminalObservation = wire.find((observation) => (
+            observation.observation_sha256 === terminalObservationSha256
+          ));
+          if (terminalObservation) terminalObservationByResponse.set(event.responseId, terminalObservation);
+        }
         if (event.status !== "completed") {
           terminalError = new Error(`provider response ended with ${event.status}`);
           terminalFailureCode = "provider_terminal_failed";
@@ -2869,7 +2877,27 @@ export class Lc4RealtimeProviderBridge {
       operation_order: readonly Lc4ProviderExchangeEvidence["operation_order"][number][];
     }>) => {
       const opportunityWire = wire.slice(failureInput.wire_start);
-      const terminalWire = opportunityWire.at(-1) ?? null;
+      // The terminal frame is not necessarily the final frame: providers may
+      // append usage or transcription bookkeeping after response completion.
+      // Prefer the normalized terminal event's exact wire attribution so
+      // diagnostics cannot silently describe a later, unrelated frame.
+      const terminalWire = activeResponseId === null
+        ? opportunityWire.at(-1) ?? null
+        : terminalObservationByResponse.get(activeResponseId) ?? opportunityWire.at(-1) ?? null;
+      const terminalProjection = terminalWire?.provider === "gemini"
+        ? geminiWireProjections.get(terminalWire.observation_sha256)
+        : null;
+      const terminalProjectionRecord = terminalProjection !== null
+        && typeof terminalProjection === "object"
+        && !Array.isArray(terminalProjection)
+        ? terminalProjection as Readonly<Record<string, JsonValue>>
+        : null;
+      const terminalRecord = terminalProjectionRecord?.terminal;
+      const geminiTerminalProjection = terminalRecord !== null
+        && typeof terminalRecord === "object"
+        && !Array.isArray(terminalRecord)
+        ? terminalRecord as Readonly<Record<string, JsonValue>>
+        : null;
       const gateway = devGateway?.diagnosticSnapshot() ?? Object.freeze({
         batch_count: 0,
         receipt_count: 0,
@@ -2998,7 +3026,10 @@ export class Lc4RealtimeProviderBridge {
         output_pcm_byte_length: outputPcm.byteLength,
         output_pcm_chunk_count: outputChunks.length,
         wire_observation_count: opportunityWire.length,
-        terminal_wire_type: classifyLc4DevTerminalWireType(terminalWire?.wire_type ?? null),
+        terminal_wire_type: classifyLc4DevTerminalWireType(
+          terminalWire?.wire_type ?? null,
+          geminiTerminalProjection,
+        ),
         terminal_wire_type_sha256: terminalWire === null ? null : sha256Hex(terminalWire.wire_type),
         terminal_wire_observation_sha256: terminalWire?.observation_sha256 ?? null,
         gateway_batch_count: gateway.batch_count,
