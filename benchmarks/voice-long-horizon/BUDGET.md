@@ -1020,3 +1020,31 @@ is compatibility evidence only, not model or harness efficacy evidence.
 - Active reservations: **$0.00**
 - Further paid work: **not authorized**
 - Provider-billed cash spend: **still unreconciled**
+
+## 2026-07-31 — Public-merge LC4 sequence stopped at 139/360
+
+The exact public merge `d7b77bebdbd8c339901b9b96872803270bab0f39`
+used one fresh preregistered sequence with a **$19.00 maximum**. The source-
+bound ASR environment receipt passed 3/3 tests with zero provider sessions and
+zero spend. xAI finite-manual Gate D then passed for **$1.00**, and the
+three-provider qualification passed for **$3.00**. The one-shot six-cell DEV
+run stopped during Gemini HACC and conservatively settled **$7.50**; the three
+unopened cells were cancelled with **$0.00** settlement.
+
+| Public-merge operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D | **$1.00** | passed; one session, two generations, one tool roundtrip |
+| Three-provider qualification | **$3.00** | passed; three paid sessions, zero retries |
+| Six-cell DEV | **$7.50** | terminal failure after two completed OpenAI cells and a partial Gemini HACC cell |
+| **Total** | **$11.50** | **$7.50 of the authorized ceiling remained unopened and was cancelled** |
+
+- Current post-baseline conservative exposure: **$160.00**
+- Current LC4 filesystem-ledger settlements: **$230.00**
+- Active reservations: **$0.00**
+- Paid retries: **0**
+- Further paid work: **not authorized**
+- Provider-billed cash spend: **still unreconciled**
+
+The DEV root is immutable and cannot be retried or resumed. Its report is
+incomplete, evidence-incomplete, unscorable, and efficacy-claim ineligible;
+it authorizes no comparative score or benchmark graph.

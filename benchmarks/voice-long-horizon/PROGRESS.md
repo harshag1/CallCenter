@@ -1659,3 +1659,56 @@ production adapter, failure evidence, runner timeout ownership, exchange
 replay, and provider profiles. Publication remains limited to the framework
 and the latest already-completed benchmark. **LC4 remains blocked: no new
 comparative score, superiority claim, or graph.**
+
+## 2026-07-31 — Public-merge LC4 terminal at 139/360
+
+The public merge
+`d7b77bebdbd8c339901b9b96872803270bab0f39` passed every zero-provider
+admission gate: claims verification **98/98**, current Gate 0 inventory, clean
+public worktree/history audits, and an exact-source real-ASR receipt with
+**3/3** tests, zero provider sessions, and zero spend. The ASR receipt SHA-256
+is `934875ba005448e127ba71720a94bafa42a9f6d424aad984c46b32cf6888736d`.
+
+The fresh xAI finite-manual Gate D passed with one provider session, two
+generation phases, one gateway tool roundtrip, and no retry, reconnect, or
+fallback. Its receipt SHA-256 is
+`b1f3815aba48b7fa34e246c14861a1c9b740e712f56b251d9b4c07b5955503d8`.
+Fresh qualification then passed on `gpt-realtime-2.1`,
+`gemini-3.1-flash-live-preview`, and `grok-voice-think-fast-1.0`: three spoken
+tool roundtrips, six generation phases, six physical provider sessions, 483
+replayed wire events, and zero retries or reconnects.
+
+Strict DEV preflight reported no blockers and bound exactly six episodes and
+360 opportunities. The one-shot run then stopped during Gemini HACC repair at
+opportunity 20:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **140/139**;
+- provider calls started/made: **150/150**;
+- generations requested/completed: **150/149**;
+- repair playbacks: **9**;
+- retained caller/assistant audio records: **150/149**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+Both OpenAI cells completed. Gemini HACC completed 19 opportunities, then the
+repair for opportunity 20 received a provider terminal wire event after
+**2,168,162 PCM bytes in 150 chunks**, but the response was not completed.
+The primary retained failure is `provider_external/provider_terminal_failed`
+at `provider_wait`; `cleanup/segment_close_failed` is secondary. Their failure-
+evidence SHA-256 values are
+`1e3226a76ef48d8a3aa0a70d7a6abde2023f467cbd03cc64df98328bc6a71a2b`
+and `5f94f43b1ab5026138985d7ca7890ae606eb9ad7086984185c5aa2d8748bb400`.
+
+The immutable run, package, terminal budget-ledger head, and report SHA-256
+values are, respectively:
+
+- `e539d3affafebfd3861a6524c701785cc7152d86600b1b6bebcf0b5f09226bb6`;
+- `d3d416b016872e25ee4df91d31114351c4fb08bb676be5317a453813edcf366a`;
+- `f7c20876f495711dc2d49cd5b9ddd5621b329bf3924e218c7251d766c7be79c1`;
+- `1d8ad23b58954ff9b7af3de1fa130092d6601e8f5665fa76ef77479c95643670`.
+
+Budget replay verified and active reservations are zero. The report is
+incomplete, evidence-incomplete, missing four authority evaluations,
+task-result unavailable, and efficacy-claim ineligible. It contributes no
+score and no graph. The root is immutable; it will not be retried or resumed.
