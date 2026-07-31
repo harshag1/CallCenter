@@ -11,7 +11,10 @@ import {
   createLc4ProviderProfileManifest,
 } from "../lc4-provider-profiles";
 import { LIVE_STS_PROVIDER_SPECS } from "../live-sts-development-experiment";
-import { buildGeminiLiveSetup } from "../../realtime/client/gemini-live";
+import {
+  buildGeminiLiveSetup,
+  GEMINI_LIVE_MAX_OUTPUT_TOKENS,
+} from "../../realtime/client/gemini-live";
 import { withManualPcmSession } from "../../realtime/client/openai-compatible";
 import { LOCAL_TOOL_PROXY_FUNCTION } from "../../realtime/client/types";
 
@@ -175,6 +178,7 @@ describe("HACC-LC4 frozen realtime provider profiles", () => {
         model: "models/gemini-3.1-flash-live-preview",
         generationConfig: {
           responseModalities: ["AUDIO"],
+          maxOutputTokens: GEMINI_LIVE_MAX_OUTPUT_TOKENS,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } },
         },
         realtimeInputConfig: {

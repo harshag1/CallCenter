@@ -21,6 +21,7 @@ import { assertRealtimeTransportFailureDiagnostic } from "./transport-diagnostic
 import {
   buildGeminiFunctionDeclarations,
   buildGeminiLiveSetup,
+  GEMINI_LIVE_MAX_OUTPUT_TOKENS,
   GEMINI_CAPABILITY_GATEWAY_NAME,
   GEMINI_HACC_CONTINUATION_CONTROL_FIELD,
   GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ,
@@ -249,6 +250,7 @@ describe("GeminiLiveClient", () => {
         model: "models/gemini-3.1-flash-live-preview",
         generationConfig: {
           responseModalities: ["AUDIO"],
+          maxOutputTokens: GEMINI_LIVE_MAX_OUTPUT_TOKENS,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } },
         },
         realtimeInputConfig: {

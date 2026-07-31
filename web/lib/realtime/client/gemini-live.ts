@@ -42,6 +42,15 @@ import {
 export const GEMINI_LIVE_INPUT_SAMPLE_RATE_HZ = 16_000;
 export const GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ = 24_000;
 export const GEMINI_LIVE_MAX_AUDIO_ONLY_SESSION_MS = 15 * 60_000;
+/**
+ * Gemini native-audio output is metered at roughly 25 tokens/second. A
+ * conversational turn should never be allowed to stream indefinitely while
+ * the application waits for `generationComplete`. 1,536 tokens leaves room
+ * for a little over a minute of speech, including the longest valid retained
+ * LC4 response (42.77s), while bounding runaway generations well inside the
+ * independent 75-second transport timeout.
+ */
+export const GEMINI_LIVE_MAX_OUTPUT_TOKENS = 1_536;
 export { GEMINI_PROVIDER_TRANSCRIPTION_POLICY } from "../gemini-policy";
 export const GEMINI_CAPABILITY_GATEWAY_NAME = "capability_gateway";
 export const GEMINI_HACC_CONTINUATION_CONTROL_FIELD =
@@ -1056,6 +1065,7 @@ export function buildGeminiLiveSetup(options: Pick<
       model,
       generationConfig: {
         responseModalities: ["AUDIO"],
+        maxOutputTokens: GEMINI_LIVE_MAX_OUTPUT_TOKENS,
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: options.voice } },
         },
@@ -1119,6 +1129,7 @@ function geminiSetupConfigurationEvidence(
         sampleRateHz: GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ,
         channels: 1,
         responseModalities: generation.responseModalities,
+        maxOutputTokens: generation.maxOutputTokens,
       }),
       turn_detection: requestedButUnverifiable(realtimeInput),
     }),
@@ -1352,6 +1363,7 @@ function geminiSessionWireProjection(
       sampleRateHz: GEMINI_LIVE_OUTPUT_SAMPLE_RATE_HZ,
       channels: 1,
       responseModalities: generation.responseModalities,
+      maxOutputTokens: generation.maxOutputTokens,
     }),
     turn_detection: geminiConfigurationHash("turn_detection", realtimeInput),
   };
