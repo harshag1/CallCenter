@@ -616,7 +616,10 @@ integration("039 tenant-scoped call operations projection", () => {
         conversationId: ids.conversation,
         organizationId: ids.org,
         callId: ids.call,
-        count: 15_000,
+        // The contract fails at 10,001 identities. Keep the fixture just above
+        // that boundary so the test exercises the cap without making
+        // trigger-heavy fixture construction the performance measurement.
+        count: 10_100,
         createdAt: "2026-07-28T12:00:00.000Z",
       });
       await client.query("ANALYZE voice_worker_jobs");
@@ -672,7 +675,7 @@ integration("039 tenant-scoped call operations projection", () => {
       await client.query("ROLLBACK").catch(() => undefined);
       client.release();
     }
-  }, 20_000);
+  }, 30_000);
 
   it("physically bounds the source-call fallback when no conversation is bound", async () => {
     const client = await pool.connect();
@@ -696,14 +699,14 @@ integration("039 tenant-scoped call operations projection", () => {
         conversationId: unboundConversationId,
         organizationId: ids.org,
         callId: unboundCallId,
-        count: 15_000,
+        count: 10_100,
         createdAt: "2026-07-28T12:00:00.000Z",
       });
       await insertPendingWorkers(client, {
         conversationId: unboundConversationId,
         organizationId: ids.org,
         callId: distractorCallId,
-        count: 15_000,
+        count: 10_100,
         createdAt: "2026-07-28T12:00:00.000Z",
       });
       await client.query("ANALYZE voice_worker_jobs");

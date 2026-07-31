@@ -4,7 +4,7 @@
   "source_binding": {
     "kind": "canonical_relevant_source_manifest",
     "hash_domain": "harshas-amazing-call-center/gate0-skip-source-manifest/v1",
-    "source_manifest_sha256": "5b2f683c83f73d5617f718ad80f37c366bc1e07f4113b67f35ef1898952f6a85",
+    "source_manifest_sha256": "e6d950a889d7944d9d8362dd0c334240e2c96dd9a3ae7ae018dbe2133177626f",
     "source_manifest_file_count": 331,
     "manifest_semantics": "all_test_paths_plus_conditional_contents_and_runner_config",
     "scope": [
@@ -65,7 +65,7 @@
     },
     {
       "path": "web/lib/__tests__/call-operations-store.integration.test.ts",
-      "content_sha256": "035b7f40054d5a21a3367ed8fb1c5c8f1f76f6760149c644479531818aac319b",
+      "content_sha256": "6f98f3df1eef94255b73bc2216e9f0394a6939dbc46fda54497d530cbe54b272",
       "test_count": 9,
       "condition": "CONVERSATION_INTEGRATION_DATABASE_URL is absent",
       "reason_category": "missing_postgresql_integration_environment",
