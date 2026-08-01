@@ -8,7 +8,7 @@
   },
   "audit_policy": {
     "production_scope": "no_advisories",
-    "development_scope": "exact_reviewed_graph_only"
+    "development_scope": "no_advisories"
   },
   "exceptions": [
     {

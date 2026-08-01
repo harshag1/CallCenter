@@ -121,10 +121,16 @@ function leafAdvisory(report: AuditFixture): AuditAdvisory {
 }
 
 function validInput(): AuditGateInput {
+  const reviewedManifest = clone(manifest);
+  reviewedManifest.audit_policy.development_scope = "exact_reviewed_graph_only";
+  const reviewedLockfile = clone(lockfile);
+  for (const constraint of reviewedManifest.exceptions[0].dependency_node_constraints) {
+    reviewedLockfile.packages[constraint.path].version = constraint.version;
+  }
   return {
-    manifest: clone(manifest),
+    manifest: reviewedManifest,
     packageJson: clone(packageJson),
-    lockfile: clone(lockfile),
+    lockfile: reviewedLockfile,
     productionAudit: { auditReportVersion: 2, vulnerabilities: {} },
     fullAudit: npmAuditFromReviewedGraph(),
     now: new Date("2026-07-28T12:00:00.000Z"),
@@ -136,6 +142,23 @@ function expectRejected(input: AuditGateInput, message: RegExp): void {
 }
 
 describe("locked dependency audit exception gate", () => {
+  it("requires a completely clean development graph when the exception is disabled", () => {
+    expect(evaluateAuditGate({
+      ...validInput(),
+      manifest: clone(manifest),
+      fullAudit: { vulnerabilities: {} },
+    })).toEqual({
+      pass: true,
+      policy: "no_advisories",
+      exception_id: null,
+      expires_on: null,
+      advisory_id: null,
+      production_advisory_count: 0,
+      development_vulnerability_package_count: 0,
+      constrained_dependency_node_count: 0,
+    });
+  });
+
   it("accepts only the exact reviewed development graph with a clean production graph", () => {
     expect(evaluateAuditGate(validInput())).toEqual({
       pass: true,

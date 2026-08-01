@@ -61,7 +61,7 @@ const ManifestSchema = z
     audit_policy: z
       .object({
         production_scope: z.literal("no_advisories"),
-        development_scope: z.literal("exact_reviewed_graph_only"),
+        development_scope: z.enum(["no_advisories", "exact_reviewed_graph_only"]),
       })
       .strict(),
     exceptions: z
@@ -132,15 +132,26 @@ export type AuditGateInput = {
   now: Date;
 };
 
-export type AuditGateDecision = {
-  pass: true;
-  exception_id: string;
-  expires_on: string;
-  advisory_id: number;
-  production_advisory_count: 0;
-  development_vulnerability_package_count: number;
-  constrained_dependency_node_count: number;
-};
+export type AuditGateDecision =
+  | {
+      pass: true;
+      policy: "no_advisories";
+      exception_id: null;
+      expires_on: null;
+      advisory_id: null;
+      production_advisory_count: 0;
+      development_vulnerability_package_count: 0;
+      constrained_dependency_node_count: 0;
+    }
+  | {
+      pass: true;
+      exception_id: string;
+      expires_on: string;
+      advisory_id: number;
+      production_advisory_count: 0;
+      development_vulnerability_package_count: number;
+      constrained_dependency_node_count: number;
+    };
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -310,9 +321,6 @@ export function evaluateAuditGate(input: AuditGateInput): AuditGateDecision {
   if (!Number.isFinite(input.now.getTime())) {
     throw new Error("current time is invalid");
   }
-  if (input.now.getTime() > parseExpiration(exception.expires_on)) {
-    throw new Error(`audit exception ${exception.id} expired on ${exception.expires_on}`);
-  }
 
   exactMatch(packageJson.name, manifest.package.name, "package name");
   exactMatch(lockfile.name, manifest.package.name, "lockfile package name");
@@ -320,6 +328,31 @@ export function evaluateAuditGate(input: AuditGateInput): AuditGateDecision {
   exactMatch(packageJson.engines, { node: manifest.package.node_engine }, "package Node engine");
   exactMatch(rootLock.engines, { node: manifest.package.node_engine }, "lockfile Node engine");
 
+  const productionCount = auditVulnerabilityCount(input.productionAudit);
+  if (productionCount !== 0) {
+    throw new Error(
+      `production dependency audit reported ${productionCount} vulnerable package(s); exceptions are forbidden`,
+    );
+  }
+
+  const actualGraph = normalizeVulnerabilityGraph(input.fullAudit);
+  if (manifest.audit_policy.development_scope === "no_advisories") {
+    exactMatch(actualGraph, [], "development vulnerability graph");
+    return {
+      pass: true,
+      policy: "no_advisories",
+      exception_id: null,
+      expires_on: null,
+      advisory_id: null,
+      production_advisory_count: 0,
+      development_vulnerability_package_count: 0,
+      constrained_dependency_node_count: 0,
+    };
+  }
+
+  if (input.now.getTime() > parseExpiration(exception.expires_on)) {
+    throw new Error(`audit exception ${exception.id} expired on ${exception.expires_on}`);
+  }
   const packageDevDependencies = assertPlainObject(
     packageJson.devDependencies,
     "package.json devDependencies",
@@ -337,15 +370,6 @@ export function evaluateAuditGate(input: AuditGateInput): AuditGateDecision {
       throw new Error(`${name} is no longer development-only`);
     }
   }
-
-  const productionCount = auditVulnerabilityCount(input.productionAudit);
-  if (productionCount !== 0) {
-    throw new Error(
-      `production dependency audit reported ${productionCount} vulnerable package(s); exceptions are forbidden`,
-    );
-  }
-
-  const actualGraph = normalizeVulnerabilityGraph(input.fullAudit);
   exactMatch(
     actualGraph,
     exception.expected_vulnerability_graph,
@@ -444,9 +468,9 @@ export function main(): void {
     throw new Error(`production npm audit failed with exit code ${production.exitCode}`);
   }
   const full = runNpmAudit(false);
-  if (full.exitCode !== 1) {
+  if (full.exitCode !== 0 && full.exitCode !== 1) {
     throw new Error(
-      `complete npm audit returned unexpected exit code ${full.exitCode}; expected 1 for the exact reviewed advisory`,
+      `complete npm audit returned unexpected exit code ${full.exitCode}; expected 0 or 1`,
     );
   }
 
