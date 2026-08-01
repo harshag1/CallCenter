@@ -934,6 +934,17 @@ export type Lc4DevLiveRunnerDependencies = Readonly<{
       segment_finalizations: readonly Lc4DevReplayArtifactReference[];
     }>): Promise<Lc4DevReplayArtifactReference>;
   }>;
+  cell_checkpoint?: Readonly<{
+    beforeFirstNetworkEmission(input: Readonly<{
+      episode: Lc4DevLiveEpisodePlan;
+      prior_run_ledger_head_sha256: string;
+    }>): Promise<void>;
+    afterEpisodeTerminal(input: Readonly<{
+      episode: Lc4DevLiveEpisodePlan;
+      episode_finalization_sha256: string;
+      terminal_run_ledger_head_sha256: string;
+    }>): Promise<void>;
+  }>;
   now(): Date;
 }>;
 
@@ -1393,6 +1404,12 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         });
         providerSegmentIntents += 1;
         try {
+          if (segmentOrdinal === 1 && input.dependencies.cell_checkpoint) {
+            await input.dependencies.cell_checkpoint.beforeFirstNetworkEmission({
+              episode,
+              prior_run_ledger_head_sha256: previousEvent!,
+            });
+          }
           session = await boundedSegmentOpen(LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, (signal) => input.dependencies.adapter.openSegment({
             episode,
             segment_ordinal: segmentOrdinal,
@@ -1921,6 +1938,11 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         { status: "completed", canonical_opportunities: 60, episode_finalization_sha256: episodeFinalization.evidence_sha256 },
         [episodeFinalization, ...segmentFinalizations],
       );
+      await input.dependencies.cell_checkpoint?.afterEpisodeTerminal({
+        episode,
+        episode_finalization_sha256: episodeFinalization.evidence_sha256,
+        terminal_run_ledger_head_sha256: previousEvent!,
+      });
       episodesCompleted += 1;
     }
   } catch (error) {

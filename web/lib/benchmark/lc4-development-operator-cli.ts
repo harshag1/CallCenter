@@ -81,6 +81,15 @@ import {
   type Lc4DevRunPackage,
 } from "./lc4-development-budget";
 import {
+  beginLc4Cell,
+  completeLc4Cell,
+  createLc4CellResumePlan,
+  initializeLc4CellResumeJournal,
+  inspectLc4CellResumeJournal,
+  markLc4CellNetworkEmissionStarted,
+} from "./lc4-cell-resume-journal";
+import { inspectFilesystemBudgetLedger } from "./filesystem-budget-ledger";
+import {
   LC4_DEV_OPERATOR_VERSION,
   lc4DevSharedAuthorizationBindingSha256,
   lc4DevSharedLedgerGenesisSha256,
@@ -106,6 +115,7 @@ export const LC4_DEV_OPERATOR_FILENAMES = Object.freeze({
   budget_lease: "budget-run-lease.json",
   budget_evidence: "budget-terminal-evidence.json",
   run_package: "run-package.json",
+  cell_resume_journal: "cell-resume-journal.json",
   report: "report.json",
   ledger: "ledger.jsonl",
   cas: "cas",
@@ -734,6 +744,38 @@ export async function runLc4DevelopmentOperatorCli(
   try {
     const command = args[0];
     const parsed = flags(args.slice(1));
+    if (command === "resume-status") {
+      exact(parsed, ["--evidence-root"]);
+      const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
+      const resume = await inspectLc4CellResumeJournal({
+        journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+      });
+      const lease = await readBoundedJson<Lc4DevRunLease>(
+        artifactPath(evidenceRoot, "budget_lease"),
+        "LC4-DEV budget lease",
+      );
+      const budget = await inspectFilesystemBudgetLedger({
+        ledgerPath: lease.ledger_path,
+        now: io.now,
+      });
+      io.stdout(canonicalJson({
+        command: "resume-status",
+        execution_id: lease.execution_id,
+        resume,
+        budget: {
+          ledger_id: budget.ledger_id,
+          head_sha256: budget.head_sha256,
+          paused: budget.paused,
+          active_reservations_micro_usd: budget.active_reservations_micro_usd,
+          conservative_settled_micro_usd: budget.conservative_settled_micro_usd,
+        },
+        provider_calls_made: null,
+        provider_calls_reason: "cell_journal_does_not_fabricate_opportunity_counts",
+        automatic_run_resume_supported: false,
+        claim_boundary: "only_unopened_pre_network_cells_are_resume_eligible_composite_runner_not_yet_available",
+      }));
+      return 0;
+    }
     if (command === "status") {
       exact(parsed, withRuntimeFlags(dependencies, [
         "--repository-root", "--audio-root", "--qualification-root", "--evidence-root",
@@ -1059,11 +1101,93 @@ export async function runLc4DevelopmentOperatorCli(
         now: io.now,
       });
       await writeImmutableJson(artifactPath(evidenceRoot, "budget_lease"), budgetLease);
+      const resumePlan = createLc4CellResumePlan({
+        prepare,
+        preflight,
+        lease: budgetLease,
+        history_compiler_sha256: roots.runtime_config_sha256,
+        repair_policy_sha256: audio.repair_manifest.repair_manifest_sha256,
+        scorer_policy_sha256: sha256Hex(canonicalJson({
+          asr_evaluator_build_sha256: roots.asr_evaluator_build_sha256,
+          asr_evaluator_toolchain_sha256: roots.asr_evaluator_toolchain_sha256,
+          asr_contract_sha256: roots.asr_contract_sha256,
+        })),
+      });
+      let resumeStatus = await initializeLc4CellResumeJournal({
+        journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+        plan: resumePlan,
+      });
       const budgetAuthority = new Lc4DevBudgetLifecycle({ lease: budgetLease, binding: { prepare, preflight }, now: io.now });
       budgetAuthority.assertProviderConstructionAuthorized();
       const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer, budget_authority: budgetAuthority });
+      const cellOwners = new Map<string, Readonly<{
+        owner_id: string;
+        owner_token_sha256: string;
+      }>>();
+      const checkpointedDependencies = Object.freeze({
+        ...bundle.dependencies,
+        cell_checkpoint: Object.freeze({
+          beforeFirstNetworkEmission: async ({ episode, prior_run_ledger_head_sha256 }: Readonly<{
+            episode: Lc4DevLivePrepareArtifact["episodes"][number];
+            prior_run_ledger_head_sha256: string;
+          }>) => {
+            const owner = Object.freeze({
+              owner_id: `lc4dev-${process.pid}-${episode.episode_id}`,
+              owner_token_sha256: sha256Hex(randomBytes(32)),
+            });
+            cellOwners.set(episode.episode_id, owner);
+            resumeStatus = await beginLc4Cell({
+              journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+              expected_head_sha256: resumeStatus.head_sha256,
+              expected_plan: resumePlan,
+              cell_id: episode.episode_id,
+              ...owner,
+              owner_expires_at: budgetLease.hard_deadline_at,
+              now: io.now,
+            });
+            resumeStatus = await markLc4CellNetworkEmissionStarted({
+              journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+              expected_head_sha256: resumeStatus.head_sha256,
+              expected_plan: resumePlan,
+              cell_id: episode.episode_id,
+              ...owner,
+              network_intent_sha256: sha256Hex(canonicalJson({
+                execution_id: prepare.execution_id,
+                cell_id: episode.episode_id,
+                provider: episode.provider,
+                arm: episode.arm,
+                model: episode.model,
+                voice: episode.voice,
+                prior_run_ledger_head_sha256,
+                provider_session_schedule_sha256: prepare.provider_session_schedule_sha256,
+              })),
+              now: io.now,
+            });
+          },
+          afterEpisodeTerminal: async ({ episode, episode_finalization_sha256, terminal_run_ledger_head_sha256 }: Readonly<{
+            episode: Lc4DevLivePrepareArtifact["episodes"][number];
+            episode_finalization_sha256: string;
+            terminal_run_ledger_head_sha256: string;
+          }>) => {
+            const owner = cellOwners.get(episode.episode_id);
+            if (!owner) throw new Error("LC4-DEV cell terminal lacks journal owner custody");
+            resumeStatus = await completeLc4Cell({
+              journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+              expected_head_sha256: resumeStatus.head_sha256,
+              expected_plan: resumePlan,
+              cell_id: episode.episode_id,
+              ...owner,
+              cell_artifact_sha256: sha256Hex(canonicalJson({
+                episode_finalization_sha256,
+                terminal_run_ledger_head_sha256,
+              })),
+              now: io.now,
+            });
+          },
+        }),
+      });
       const closed = await closeLc4DevTerminalRunCustody({
-        execute_run: () => executeLc4DevLiveRun({ prepare, preflight, dependencies: bundle.dependencies }),
+        execute_run: () => executeLc4DevLiveRun({ prepare, preflight, dependencies: checkpointedDependencies }),
         write_terminal_run: (run) => writeImmutableJson(artifactPath(evidenceRoot, "run"), run),
         finalize_runtime: () => bundle.finalize(),
         finalize_budget: (run) => finalizeLc4DevRunBudget({ lease: budgetLease, binding: { prepare, preflight }, run, now: io.now }),
@@ -1129,7 +1253,7 @@ export async function runLc4DevelopmentOperatorCli(
       io.stdout(canonicalJson(report));
       return report.task_results_available ? 0 : 2;
     }
-    throw new Error("usage: lc4-development-live <status|prepare|preflight|run|report>");
+    throw new Error("usage: lc4-development-live <status|resume-status|prepare|preflight|run|report>");
   } catch (error) {
     io.stderr(error instanceof Error ? error.message : "LC4-DEV operator failed");
     return 1;

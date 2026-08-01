@@ -2062,6 +2062,7 @@ describe("LC4-DEV live runner", () => {
     const compileFailureMessage = "LC4 rotation conversation text is invalid";
     let adapterOpenCalls = 0;
     let providerSocketOpens = 0;
+    const paidBoundaryOrder: string[] = [];
     const compileRotationContext = (): string => {
       throw new Error(compileFailureMessage);
     };
@@ -2075,6 +2076,7 @@ describe("LC4-DEV live runner", () => {
           preflight_sha256: preflight.preflight_sha256,
           maximum_total_micro_usd: prepare.maximum_total_micro_usd,
           async openSegment() {
+            paidBoundaryOrder.push("adapter-open");
             adapterOpenCalls += 1;
             const compiled = compileRotationContext();
             providerSocketOpens += 1;
@@ -2082,6 +2084,14 @@ describe("LC4-DEV live runner", () => {
           },
         },
         ...retained,
+        cell_checkpoint: {
+          async beforeFirstNetworkEmission() {
+            paidBoundaryOrder.push("journal-fsync");
+          },
+          async afterEpisodeTerminal() {
+            paidBoundaryOrder.push("cell-terminal");
+          },
+        },
         ledger: { async append() {} },
         now: () => new Date(NOW),
       },
@@ -2089,6 +2099,7 @@ describe("LC4-DEV live runner", () => {
 
     expect(adapterOpenCalls).toBe(1);
     expect(providerSocketOpens).toBe(0);
+    expect(paidBoundaryOrder).toEqual(["journal-fsync", "adapter-open"]);
     expect(run).toMatchObject({
       status: "failed",
       episodes_started: 1,
