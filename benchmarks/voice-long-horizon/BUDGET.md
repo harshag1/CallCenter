@@ -1089,3 +1089,50 @@ provider-generation calls.
 The repair creates no efficacy evidence and authorizes no score or graph. A
 fresh exact-source ASR receipt and a new explicit paid-run authorization remain
 required before another Gate D, qualification, or six-cell DEV sequence.
+
+## 2026-07-31 — Exact public source `317af1a` stopped at 120/360
+
+The explicitly authorized one-shot sequence at
+`317af1ae2936e0734270e6d22753b509d375c148` passed the source-bound xAI
+finite-manual Gate D and the OpenAI/Gemini/xAI spoken qualification. Strict DEV
+preflight then bound a clean source, six cells, 360 opportunities, the pinned
+audio corpus, the calibrated listener, and a **$15.00** hard ceiling with an
+empty blocker list.
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; one session, two generations, one gateway roundtrip, zero retries/reconnects/fallbacks |
+| Three-provider qualification v3 | **$3.00** | passed; 3/3 providers and tool roundtrips replay verified, zero paid retries |
+| Six-cell DEV | **$7.50** | failed closed; 3 episodes started, 2 completed, 120/360 opportunities completed, zero paid retries |
+| **Sequence total** | **$11.50** | **$7.50 of unopened authority cancelled** |
+
+The DEV terminal evidence reports **$0.00 active**, with OpenAI Native,
+OpenAI HACC, and the opened Gemini HACC reservation conservatively settled at
+**$2.50** each. Gemini Native and both xAI cells were never opened and were
+cancelled at **$0.00**. The terminal budget evidence is
+`697ff69af33cae74514235353c53319c2371b23c990cc4ad1073534707d19085`;
+its final signed head is
+`7e834ecd0bfb9160d048e8c3e90eea378646c36f782fe871f5b63025acd8331f`.
+
+The immutable DEV run/package commitments are
+`bb46186efa83be49ff88bbc4cb035966beffece556a12c69fce6ffb3d4c57ff2`
+and
+`40796c6b28217a2ac30db8e27de38f5998d5c592cb876b6b4b3afff20f56a432`.
+The root is incomplete, unscorable, immutable, and ineligible for a comparison
+or launch graph. It was not retried or resumed.
+
+- New conservative settlement: **$11.50**
+- Current post-baseline conservative exposure: **$172.50**
+- Current LC4 filesystem-ledger settlements: **$242.50**
+- Active reservations: **$0.00**
+- Further paid work: **not authorized**
+- Provider-billed cash spend: **still unreconciled**
+
+Provider-free forensics showed that the retained failure label was internally
+overbroad: Gemini's response generation, completed terminal, and PCM output
+were all observed, yet later attribution assembly was reported as
+`missing_terminal_response`. The offline hardening now admits non-audio
+post-terminal Gemini bookkeeping, still rejects any post-terminal audio or
+second terminal, and classifies later attribution construction failures as
+evidence-retention failures. This repair consumed **$0.00** and does not turn
+the failed root into efficacy evidence.

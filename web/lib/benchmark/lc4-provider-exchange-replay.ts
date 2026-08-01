@@ -1815,11 +1815,16 @@ function assertVersionedGeminiOutputAttribution(input: Readonly<{
       terminalObservation = observation;
     }
   }
-  if (terminalObservation === null
-    || intervalObservations.at(-1)!.observation_sha256
-      !== terminalObservation.observation_sha256) {
+  if (terminalObservation === null) {
     throw new Error(
       "LC4 Gemini versioned attribution interval is not terminal-complete",
+    );
+  }
+  const terminalSequence = terminalObservation.sequence;
+  if (attributedChunks.some((chunk) =>
+    chunk.interval_sequence > terminalSequence)) {
+    throw new Error(
+      "LC4 Gemini versioned attribution contains post-terminal output",
     );
   }
 

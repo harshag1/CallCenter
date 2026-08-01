@@ -2085,14 +2085,21 @@ export function createLc4GeminiOutputAttribution(input: Readonly<{
     || terminalFrames[0]!.parsed.terminalStatus !== "completed") {
     throw new Error("LC4 Gemini output attribution requires one completed terminal");
   }
-  const terminalObservation = terminalFrames[0]!.observation;
-  if (observationsAfterEnd.at(-1)!.observation_sha256
-    !== terminalObservation.observation_sha256) {
-    throw new Error("LC4 Gemini output attribution contains a post-terminal frame");
+  const terminalFrame = terminalFrames[0]!;
+  const terminalObservation = terminalFrame.observation;
+  const terminalFrameIndex = parsedFrames.findIndex((frame) =>
+    frame.observation.observation_sha256
+      === terminalObservation.observation_sha256);
+  // Gemini may append non-audio usage, late transcription, or resumption
+  // bookkeeping after turnComplete. That tail is part of the retained wire
+  // set, but it must never introduce a second terminal or any audio that could
+  // escape the listener-admitted capture.
+  if (parsedFrames.slice(terminalFrameIndex + 1).some((frame) =>
+    frame.parsed.terminalStatus !== null || frame.parsed.chunks.length > 0)) {
+    throw new Error("LC4 Gemini output attribution contains post-terminal output");
   }
   const interval = observationsAfterEnd;
-  if (interval.length < 1
-    || interval.at(-1)!.observation_sha256 !== terminalObservation.observation_sha256) {
+  if (interval.length < 1) {
     throw new Error("LC4 Gemini output attribution interval is incomplete");
   }
   const intervalIndex = new Map(interval.map((observation, index) =>
@@ -3493,6 +3500,10 @@ export class Lc4RealtimeProviderBridge {
           const pcm = concatenate(chunks);
           diagnosticStage = "response_validate";
           if (pcm.byteLength === 0) throw new Error("LC4 provider response produced no PCM output");
+          // Everything after the terminal/PCM admission check constructs
+          // replay evidence. Keep failures here distinct from a genuinely
+          // missing provider terminal or missing audio response.
+          diagnosticStage = "exchange_evidence";
           const responseIds = responseIdsByOpportunity.get(opportunityId) ?? [activeResponseId];
           const orderedResponseIds = [...new Set([
             ...responseIds,

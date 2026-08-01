@@ -1784,3 +1784,51 @@ is **$0.00**; current post-baseline conservative exposure remains **$161.00**,
 active liability remains **$0.00**, and further paid work remains unauthorized.
 The failed root is immutable and was not retried. No benchmark score, comparison,
 or graph may be derived from this repair.
+
+## 2026-07-31 — `317af1a` exact-public-source sequence and Gemini attribution hardening
+
+The exact public source
+`317af1ae2936e0734270e6d22753b509d375c148` passed its real-ASR admission
+receipt (**3/3**, zero provider sessions), xAI finite-manual Gate D, and fresh
+three-provider spoken qualification. Qualification retained one completed
+tool roundtrip for each of `gpt-realtime-2.1`,
+`gemini-3.1-flash-live-preview`, and `grok-voice-think-fast-1.0`, with six
+generation phases, six physical provider sessions, three paid sessions, 453
+replay events, and zero retries.
+
+Strict DEV status then reported `execution_ready: true`, an empty blocker
+list, exactly six cells, exactly 360 opportunities, verified audio/listener
+inputs, and a **$15.00** ceiling. The single authorized process completed both
+OpenAI cells (**60/60 Native and 60/60 HACC**) before the first Gemini HACC
+opportunity failed closed:
+
+- episodes started/completed: **3/2**;
+- opportunities submitted/completed: **121/120**;
+- provider calls started/made: **129/129**;
+- response generations requested/completed: **129/129**;
+- repair playbacks: **8**;
+- paid retries: **0**; and
+- conservative DEV settlement/active: **$7.50 / $0.00**.
+
+The failure summary claimed `adapter_contract / missing_terminal_response`,
+but its own allowlisted evidence proves response generation started, a
+completed terminal was observed, output PCM was captured, and the terminal
+wire was Gemini `serverContent`. The adapter's Gemini attribution builder had
+an unconditional terminal-must-be-last rule even though Gemini can append
+non-audio transcription, usage, or resumption bookkeeping after
+`turnComplete`. The failure classifier also left the diagnostic stage at
+`response_validate` throughout later evidence construction, collapsing any
+attribution error into a false missing-terminal label.
+
+The provider-free repair now retains and verifies the whole observed tail,
+allows only non-audio post-terminal bookkeeping, rejects any post-terminal
+audio or second terminal, and moves later construction failures under
+`exchange_evidence`. Focused adapter/replay validation passes **124/124**;
+the complete web matrix passes **3,326 executed tests** with 85 skipped;
+TypeScript and ESLint pass. No additional provider call was made.
+
+This is a real framework reliability fix, not a recovered benchmark result.
+The immutable DEV root remains **120/360**, incomplete, unscorable, and
+ineligible for a comparison or graph. The authorized sequence conservatively
+settled **$11.50**, active liability is **$0.00**, and no paid retry or further
+sequence is authorized.

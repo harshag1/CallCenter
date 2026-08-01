@@ -915,7 +915,9 @@ function schemaV4SuppressedOpenAiFixture(): Fixture {
   return updated;
 }
 
-function schemaV5GeminiFixture(): Fixture {
+function schemaV5GeminiFixture(options: Readonly<{
+  post_terminal_audio?: boolean;
+}> = {}): Fixture {
   let source = fixture("gemini");
   const listenerPcm = Uint8Array.from(
     source.expectation.listener_consumed_pcm,
@@ -964,6 +966,23 @@ function schemaV5GeminiFixture(): Fixture {
   const terminalProjection = {
     terminal: { status: "completed" },
   };
+  const postTerminalBookkeepingProjection = options.post_terminal_audio
+    ? {
+        audio: {
+          direction: "output",
+          chunks: [{
+            ...pcmEvidence(outputChunks[0]!, 24_000),
+            mimeTypeRecognized: true,
+          }],
+        },
+      }
+    : {
+        text: [{
+          byteLength: 24,
+          kind: "output_transcript",
+          sha256: sha256Hex("post-terminal transcript"),
+        }],
+      };
   const observations = wireFor("gemini", [
     { direction: "outbound", wire_type: "realtimeInput.activityStart" },
     ...callerFrames.map((frame) =>
@@ -995,6 +1014,12 @@ function schemaV5GeminiFixture(): Fixture {
       direction: "inbound",
       wire_type: "serverContent",
       projection_sha256: realtimeWireProjectionSha256(terminalProjection),
+    },
+    {
+      direction: "inbound",
+      wire_type: "serverContent",
+      projection_sha256:
+        realtimeWireProjectionSha256(postTerminalBookkeepingProjection),
     },
   ]);
   const wireSetSha256 = domainHash(WIRE_SET_DOMAIN, observations);
@@ -1037,6 +1062,10 @@ function schemaV5GeminiFixture(): Fixture {
       {
         wire_observation_sha256: interval[4]!.observation_sha256,
         redacted_projection: terminalProjection,
+      },
+      {
+        wire_observation_sha256: interval[5]!.observation_sha256,
+        redacted_projection: postTerminalBookkeepingProjection,
       },
     ],
     capture,
@@ -1111,8 +1140,13 @@ describe("LC4 retained provider exchange audio-lineage replay", () => {
     expect(() => replay(schemaV4SuppressedOpenAiFixture())).not.toThrow();
   });
 
-  it("replays schema-v5 Gemini through its complete versioned output attribution", () => {
+  it("replays schema-v5 Gemini with post-terminal transcript bookkeeping", () => {
     expect(() => replay(schemaV5GeminiFixture())).not.toThrow();
+  });
+
+  it("rejects Gemini audio appended after the completed terminal", () => {
+    expect(() => schemaV5GeminiFixture({ post_terminal_audio: true }))
+      .toThrow(/post-terminal output/u);
   });
 
   it("rejects schema-v5 Gemini when an attributed interval preimage is substituted", () => {
