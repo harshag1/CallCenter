@@ -3,24 +3,29 @@ import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   analyzeFlowV2Import,
+  createFlowCatalogSkeleton,
   createImmutableFlowV2Export,
+  FLOW_CATALOG_SKELETON_FORMAT,
   materializeFlowV2Import,
   serializeFlowV2Export,
 } from "../lib/flow-package";
 import { canonicalJson } from "../lib/conversation-kernel";
 
-type Command = "inspect" | "export" | "import";
+type Command = "inspect" | "catalog-skeleton" | "export" | "import";
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 
 function usage(): never {
   throw new Error([
     "Usage:",
     "  npx tsx scripts/flow-package.ts inspect <flow-or-export.json> [--catalog <catalog.json>]",
+    "  npx tsx scripts/flow-package.ts catalog-skeleton <flow-or-export.json> [--out <new-file.json>]",
     "  npx tsx scripts/flow-package.ts export <flow-or-export.json> [--out <new-file.json>]",
     "  npx tsx scripts/flow-package.ts import <flow-or-export.json> --catalog <catalog.json> --dry-run",
     "  npx tsx scripts/flow-package.ts import <flow-or-export.json> --catalog <catalog.json> --out <new-flow.json>",
     "",
-    "A catalog is either [\"tool_name\"] or {\"tools\":[\"tool_name\"]}. Output files are",
+    "A catalog is either [\"tool_name\"] or {\"tools\":[\"tool_name\"]}. A generated",
+    "catalog skeleton is a non-authoritative implementation checklist, not an admitted catalog.",
+    "Output files are",
     "created exclusively; this command never overwrites an existing file.",
   ].join("\n"));
 }
@@ -33,7 +38,7 @@ function parseArgs(argv: readonly string[]): {
   dryRun: boolean;
 } {
   const [command, source, ...rest] = argv;
-  if (!["inspect", "export", "import"].includes(command ?? "") || !source) usage();
+  if (!["inspect", "catalog-skeleton", "export", "import"].includes(command ?? "") || !source) usage();
   let catalog: string | undefined;
   let out: string | undefined;
   let dryRun = false;
@@ -50,6 +55,7 @@ function parseArgs(argv: readonly string[]): {
     }
   }
   if (command === "export" && (catalog || dryRun)) usage();
+  if (command === "catalog-skeleton" && (catalog || dryRun)) usage();
   if (command === "inspect" && (out || dryRun)) usage();
   if (command === "import" && (!catalog || (dryRun === !!out))) usage();
   return { command: command as Command, source, catalog, out, dryRun };
@@ -66,6 +72,15 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 function parseCatalog(input: unknown): string[] {
+  if (
+    input &&
+    typeof input === "object" &&
+    (input as { format?: unknown }).format === FLOW_CATALOG_SKELETON_FORMAT
+  ) {
+    throw new Error(
+      "catalog skeleton status is not_checked and is not authoritative; register and test the tools, then provide a separate explicit catalog"
+    );
+  }
   const candidate = Array.isArray(input)
     ? input
     : input && typeof input === "object" && Array.isArray((input as { tools?: unknown }).tools)
@@ -100,6 +115,14 @@ async function main(): Promise<void> {
   if (args.command === "inspect") {
     process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
     process.exitCode = plan.valid && plan.catalog.status !== "incomplete" ? 0 : 1;
+    return;
+  }
+
+  if (args.command === "catalog-skeleton") {
+    const skeleton = createFlowCatalogSkeleton(source);
+    const serialized = canonicalJson(skeleton);
+    if (args.out) await writeExclusive(args.out, serialized);
+    else process.stdout.write(`${serialized}\n`);
     return;
   }
 

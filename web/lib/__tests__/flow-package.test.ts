@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   analyzeFlowV2Import,
+  createFlowCatalogSkeleton,
   createImmutableFlowV2Export,
   flowToolDependencies,
   flowV2Digest,
@@ -105,6 +106,43 @@ describe("Flow v2 immutable import and export", () => {
     expect(plan.catalog.status).toBe("not_checked");
     expect(plan.readyForInstall).toBe(false);
     expect(() => materializeFlowV2Import(plan)).toThrow(/tool catalog was not checked/);
+  });
+
+  it("emits a deterministic non-authoritative catalog skeleton without claiming closure", () => {
+    const source = load();
+    const plan = analyzeFlowV2Import(source);
+    const skeleton = createFlowCatalogSkeleton(source);
+
+    expect(plan.valid).toBe(true);
+    expect(plan.catalog.status).toBe("not_checked");
+    expect(skeleton).toMatchObject({
+      format: "hacc.tool-catalog-skeleton",
+      format_version: 1,
+      authoritative: false,
+      catalog_status: "not_checked",
+      flow_sha256: plan.flowSha256,
+    });
+    expect(skeleton.tools.map(({ name }) => name)).toEqual(plan.catalog.required);
+    expect(skeleton.tools.every(({ implemented }) => implemented === false)).toBe(true);
+    expect(skeleton.tools.find(({ name }) => name === "lookup_appointment_invocation")?.usages)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "reconciliation_query" }),
+      ]));
+    expect(Object.isFrozen(skeleton)).toBe(true);
+    expect(Object.isFrozen(skeleton.tools)).toBe(true);
+  });
+
+  it("keeps invalid flows distinct from valid flows whose catalog was not checked", () => {
+    const invalid = clone(load() as AgentFlow);
+    invalid.schema_version = 1;
+
+    expect(analyzeFlowV2Import(invalid)).toMatchObject({
+      valid: false,
+      readyForInstall: false,
+    });
+    expect(() => createFlowCatalogSkeleton(invalid)).toThrow(
+      /cannot create a catalog skeleton from an invalid Flow v2 definition/
+    );
   });
 
   it("detects flow and dependency-manifest tampering in an immutable export", () => {

@@ -14,6 +14,8 @@ import { canonicalJson } from "./conversation-kernel";
 
 export const FLOW_V2_EXPORT_FORMAT = "hacc.flow-v2" as const;
 export const FLOW_V2_EXPORT_VERSION = 1 as const;
+export const FLOW_CATALOG_SKELETON_FORMAT = "hacc.tool-catalog-skeleton" as const;
+export const FLOW_CATALOG_SKELETON_VERSION = 1 as const;
 export const MAX_FLOW_V2_IMPORT_BYTES = 1024 * 1024;
 export const MAX_FLOW_V2_IMPORT_NODES = 256;
 export const MAX_FLOW_V2_IMPORT_EDGES = 1024;
@@ -75,6 +77,20 @@ export type FlowV2ImportPlan = Readonly<{
   dependencies: FlowToolDependencyReport;
   catalog: FlowCatalogReport;
   flow?: AgentFlow;
+}>;
+
+export type FlowCatalogSkeleton = Readonly<{
+  format: typeof FLOW_CATALOG_SKELETON_FORMAT;
+  format_version: typeof FLOW_CATALOG_SKELETON_VERSION;
+  authoritative: false;
+  catalog_status: "not_checked";
+  flow_sha256: string;
+  tools: readonly Readonly<{
+    name: string;
+    implemented: false;
+    usages: FlowToolDependencyReport["tools"][number]["usages"];
+  }>[];
+  next_step: string;
 }>;
 
 type MutableUsage = { kind: FlowToolUsageKind; path: string };
@@ -392,6 +408,37 @@ export function createImmutableFlowV2Export(input: unknown): FlowV2Export {
     flow_sha256: plan.flowSha256,
     dependencies: plan.dependencies,
     flow: plan.flow,
+  });
+}
+
+/**
+ * Extracts a review/implementation checklist without claiming that any tool exists.
+ * The skeleton is deliberately not an admissible catalog: callers must register and
+ * independently attest implementations before supplying an explicit catalog to import.
+ */
+export function createFlowCatalogSkeleton(input: unknown): FlowCatalogSkeleton {
+  const plan = analyzeFlowV2Import(input);
+  if (!plan.valid || !plan.flowSha256) {
+    const reasons = plan.diagnostics
+      .filter((diagnostic) => diagnostic.level === "error")
+      .map((diagnostic) => `${diagnostic.path || "$"}: ${diagnostic.message}`)
+      .join("; ");
+    throw new Error(`cannot create a catalog skeleton from an invalid Flow v2 definition${
+      reasons ? `: ${reasons}` : ""
+    }`);
+  }
+  return deepFreeze({
+    format: FLOW_CATALOG_SKELETON_FORMAT,
+    format_version: FLOW_CATALOG_SKELETON_VERSION,
+    authoritative: false,
+    catalog_status: "not_checked",
+    flow_sha256: plan.flowSha256,
+    tools: plan.dependencies.tools.map((dependency) => ({
+      name: dependency.name,
+      implemented: false as const,
+      usages: dependency.usages,
+    })),
+    next_step: "Register and test each implementation, then provide a separate explicit tool-name catalog for admission.",
   });
 }
 

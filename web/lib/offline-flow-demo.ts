@@ -23,6 +23,49 @@ type FakeCallReceipt = Readonly<{
   result_sha256: string;
 }>;
 
+type OfflineDeveloperStep = Readonly<{
+  active_at_event: number;
+  path: string;
+  status: "completed";
+  scoped_tools: readonly string[];
+  receipt_ids: readonly string[];
+  output: unknown;
+}>;
+
+type OfflineDeveloperReceipt = Readonly<{
+  id: string;
+  step: string;
+  tool: string;
+  status: string;
+  reconciliation_proof_id?: string;
+}>;
+
+type OfflineDeveloperView = Readonly<{
+  steps: readonly OfflineDeveloperStep[];
+  recovery: Readonly<{
+    restart: Readonly<{
+      reason: string;
+      recovered_receipt_ids: readonly string[];
+    }>;
+    reconciliations: readonly Readonly<{
+      receipt_id: string;
+      resolution: string;
+      proof_id: string;
+      status: string;
+    }>[];
+  }>;
+  final_state: Readonly<{
+    status: string;
+    topic: string | null;
+    active_step: string | null;
+    completed_steps: readonly string[];
+    next_steps: readonly string[];
+    checkpoints: readonly string[];
+    receipts: readonly OfflineDeveloperReceipt[];
+    outputs: Readonly<Record<string, unknown>>;
+  }>;
+}>;
+
 type OfflineDemoFailure = Readonly<{
   ok: false;
   mode: "offline";
@@ -57,6 +100,8 @@ export type OfflineDemoSuccess = Readonly<{
     trace_sha256: string;
     final_state_sha256: string;
   }>;
+  /** Stable, human-oriented projection of the simulator's existing trace and terminal state. */
+  developer_view: OfflineDeveloperView;
   final: unknown;
 }>;
 
@@ -71,6 +116,90 @@ function sha256(value: unknown): string {
 
 function jsonRoundTrip(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
+function objectValue(value: unknown): JsonObject {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonObject
+    : {};
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function developerView(traceInput: unknown, finalInput: unknown): OfflineDeveloperView {
+  const trace = Array.isArray(traceInput) ? traceInput.map(objectValue) : [];
+  const final = objectValue(finalInput);
+  const outputs = objectValue(final.outputs);
+  const finalReceipts = Array.isArray(final.action_receipts)
+    ? final.action_receipts.map(objectValue)
+    : [];
+  const receipts = finalReceipts
+    .filter((receipt) =>
+      typeof receipt.id === "string" &&
+      typeof receipt.step === "string" &&
+      typeof receipt.tool === "string" &&
+      typeof receipt.status === "string")
+    .map((receipt): OfflineDeveloperReceipt => Object.freeze({
+      id: receipt.id as string,
+      step: receipt.step as string,
+      tool: receipt.tool as string,
+      status: receipt.status as string,
+      ...(typeof receipt.reconciliation_proof_id === "string"
+        ? { reconciliation_proof_id: receipt.reconciliation_proof_id }
+        : {}),
+    }));
+  const steps = trace
+    .filter((entry) => entry.type === "enter_step" && typeof entry.path === "string")
+    .map((entry): OfflineDeveloperStep => {
+      const path = entry.path as string;
+      return Object.freeze({
+        active_at_event: typeof entry.index === "number" ? entry.index : -1,
+        path,
+        status: "completed",
+        scoped_tools: Object.freeze(stringArray(entry.available_tools)),
+        receipt_ids: Object.freeze(receipts
+          .filter((receipt) => receipt.step === path)
+          .map((receipt) => receipt.id)),
+        output: jsonRoundTrip(outputs[path] ?? null),
+      });
+    });
+  const restartEntry = trace.find((entry) => entry.type === "interrupt") ?? {};
+  const reconciliations = trace
+    .filter((entry) => entry.type === "reconcile_action")
+    .map((entry) => Object.freeze({
+      receipt_id: typeof entry.receipt_id === "string" ? entry.receipt_id : "",
+      resolution: typeof entry.resolution === "string" ? entry.resolution : "",
+      proof_id: typeof entry.proof_id === "string" ? entry.proof_id : "",
+      status: typeof entry.status === "string" ? entry.status : "",
+    }));
+  const checkpoints = Array.isArray(final.checkpoints)
+    ? final.checkpoints
+      .map(objectValue)
+      .map((checkpoint) => checkpoint.step)
+      .filter((step): step is string => typeof step === "string")
+    : [];
+  return Object.freeze({
+    steps: Object.freeze(steps),
+    recovery: Object.freeze({
+      restart: Object.freeze({
+        reason: typeof restartEntry.reason === "string" ? restartEntry.reason : "",
+        recovered_receipt_ids: Object.freeze(stringArray(restartEntry.recovered_receipt_ids)),
+      }),
+      reconciliations: Object.freeze(reconciliations),
+    }),
+    final_state: Object.freeze({
+      status: typeof final.status === "string" ? final.status : "unknown",
+      topic: typeof final.topic === "string" ? final.topic : null,
+      active_step: typeof final.current_step === "string" ? final.current_step : null,
+      completed_steps: Object.freeze(stringArray(final.completed_steps)),
+      next_steps: Object.freeze(stringArray(final.next_steps)),
+      checkpoints: Object.freeze(checkpoints),
+      receipts: Object.freeze(receipts),
+      outputs: Object.freeze(jsonRoundTrip(outputs) as Record<string, unknown>),
+    }),
+  });
 }
 
 function tool(execute: OfflineDemoTool["execute"]): OfflineDemoTool {
@@ -466,6 +595,7 @@ export function runOfflineFlowDemo(
       trace_sha256: sha256(simulation.trace),
       final_state_sha256: sha256(canonicalFinal),
     },
+    developer_view: developerView(simulation.trace, canonicalFinal),
     final: canonicalFinal,
   };
   return Object.freeze(success);

@@ -1,0 +1,13 @@
+{
+  "name": "harshas-amazing-call-center",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A provider-neutral, durable voice-agent framework with a provider-free first run.",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "demo:offline": "node scripts/provider-free-first-run.mjs",
+    "demo:offline:check": "node scripts/provider-free-first-run.mjs --check"
+  }
+}

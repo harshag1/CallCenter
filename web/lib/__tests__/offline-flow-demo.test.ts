@@ -52,6 +52,54 @@ describe("five-minute offline Flow v2 demo", () => {
       "lookup_appointment_invocation",
       "submit_appointment_notification",
     ]);
+    expect(first.developer_view.steps).toHaveLength(9);
+    expect(first.developer_view.steps[0]).toEqual({
+      active_at_event: 0,
+      path: "appointment.route",
+      status: "completed",
+      scoped_tools: [
+        "contact_support",
+        "request_recall",
+        "end_call",
+        "lookup_service_customer",
+      ],
+      receipt_ids: ["receipt:customer"],
+      output: { customer_id: "customer_demo_001" },
+    });
+    expect(first.developer_view.recovery).toEqual({
+      restart: {
+        reason: "process_restart",
+        recovered_receipt_ids: ["receipt:commit"],
+      },
+      reconciliations: [{
+        receipt_id: "receipt:commit",
+        resolution: "committed",
+        proof_id: "proof:appointment-readback:001",
+        status: "succeeded",
+      }],
+    });
+    expect(first.developer_view.final_state).toMatchObject({
+      status: "completed",
+      active_step: null,
+      completed_steps: expect.arrayContaining(["appointment.commit"]),
+      next_steps: [],
+      checkpoints: ["appointment.route", "appointment.schedule", "appointment.commit"],
+      receipts: expect.arrayContaining([
+        expect.objectContaining({
+          id: "receipt:commit",
+          tool: "commit_service_appointment_operation",
+          status: "succeeded",
+        }),
+      ]),
+      outputs: {
+        "appointment.commit": {
+          appointment_id: "appointment_demo_001",
+          scheduled_at: "2026-02-03T15:30:00.000Z",
+        },
+      },
+    });
+    expect(Object.isFrozen(first.developer_view)).toBe(true);
+    expect(Object.isFrozen(first.developer_view.steps)).toBe(true);
   });
 
   it("fails before simulation when the integration catalog is incomplete", () => {
