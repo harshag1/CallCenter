@@ -130,6 +130,56 @@ Liveness means the HTTP process can answer. Readiness means the listener is acti
 
 During drain, readiness returns `503` with `not_ready`, new WebSocket upgrades receive `503`, and existing sessions are asked to shut down.
 
+## No-spend PSTN admission preflight
+
+Run the web-side admission check before any live PSTN qualification. The default
+command reads only local environment and Git state: it cannot create a call,
+send an SMS, purchase a number, update a webhook, or mutate a Twilio resource.
+
+Private configuration must include:
+
+- an explicitly reviewed Restricted key bound by
+  `TWILIO_API_KEY_TYPE=restricted` and
+  `TWILIO_API_KEY_ACCOUNT_SID=TWILIO_ACCOUNT_SID`;
+- canonical `TWILIO_ACCOUNT_SID`, `TWILIO_PHONE_NUMBER`, and one
+  user-approved canonical E.164 destination in `TWILIO_APPROVED_TEST_TO`;
+- inbound-only `TWILIO_AUTH_TOKEN` and a distinct, receipt-only
+  `TELEPHONY_RECEIPT_SECRET` of 32–256 control-free characters; and
+- the exact standalone `wss://<public-bridge-host>/stream` URL in
+  `BRIDGE_WS_URL`. The legacy same-origin `/api/bridge` route is rejected.
+
+From `web/`, validate configuration at the fixed $30-or-lower authority bound:
+
+```bash
+npm run twilio:pstn:preflight -- \
+  --max-usd 30 \
+  --out /private/tmp/hacc-twilio-pstn-preflight.json
+```
+
+For stronger admission evidence, explicitly opt into the read-only network
+probes:
+
+```bash
+npm run twilio:pstn:preflight -- \
+  --max-usd 30 \
+  --probe-read-only \
+  --out /private/tmp/hacc-twilio-pstn-readiness.json
+```
+
+`--probe-read-only` adds exactly three bounded GET requests: the configured
+Twilio account, its incoming-number inventory filtered to the configured caller,
+and the standalone bridge's `/health/ready`. Redirects are rejected. The Twilio
+requests authenticate only with the attested Restricted key; the account auth
+token is never used for REST. No probe contains a request body.
+
+The command writes redacted structured JSON with source commit/tree, hashed
+configuration bindings, probe outcomes, ordered blockers, and one exact next
+step. It never emits credential or phone-number preimages. Exit `0` means every
+requested check passed, exit `2` means the receipt contains blockers, and exit
+`1` means command usage or local execution failed. A passing preflight is not
+authorization to place a call: retain its receipt, then use a separately
+authorized, spend-reserved, resumable PSTN canary workflow.
+
 ## Edge and Twilio setup
 
 The public edge must:
