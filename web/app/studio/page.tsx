@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LogOut, Phone, ArrowUp, ArrowRight, Play, Loader2, LayoutGrid } from "lucide-react";
+import { LogOut, Phone, ArrowUp, ArrowRight, Play, Loader2, LayoutGrid, ScanSearch } from "lucide-react";
 import {
   ASSISTANT_PROSE,
   PixelLoader,
@@ -31,6 +31,7 @@ import { shortBrand } from "@/lib/brand";
 import NodeEditor from "@/components/studio/NodeEditor";
 import TracePanel, { type TraceEvent } from "@/components/studio/TracePanel";
 import { PRODUCT_NAME } from "@/lib/product";
+import { inspectFlow } from "@/lib/flow-inspector";
 
 type Status = {
   onboarding: { agent_id?: string; company?: string; number_status?: string; number?: string; flow_ready?: boolean };
@@ -51,6 +52,8 @@ export default function Studio() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [docCount, setDocCount] = useState(0);
   const [trying, setTrying] = useState(false);
+  const [showFlowInspector, setShowFlowInspector] = useState(false);
+  const [showLiveTestConfirm, setShowLiveTestConfirm] = useState(false);
   const [holdMusicUrl, setHoldMusicUrl] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
@@ -286,6 +289,7 @@ export default function Studio() {
 
   const company = status?.onboarding.company;
   const brand = shortBrand(company);
+  const inspection = flow ? inspectFlow(flow) : null;
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -370,13 +374,98 @@ export default function Studio() {
               }}
             />
           )}
-          {flow && !trying && (
-            <button
-              onClick={() => { setTraceEvents([]); setTrying(true); }}
-              className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
+          {flow && !trying && !showFlowInspector && !showLiveTestConfirm && (
+            <div className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2">
+              <button
+                onClick={() => setShowFlowInspector(true)}
+                className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-4 py-2 text-[12px] font-medium text-neutral-800 shadow-sm transition-transform duration-[240ms] hover:scale-[1.03]"
+              >
+                <ScanSearch size={12} /> Inspect · free
+              </button>
+              <button
+                onClick={() => setShowLiveTestConfirm(true)}
+                className="flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
+              >
+                <Play size={11} fill="currentColor" /> Test live
+              </button>
+            </div>
+          )}
+          {showFlowInspector && inspection && (
+            <div
+              role="dialog"
+              aria-label="Flow inspection"
+              className="absolute inset-x-3 bottom-3 z-20 rounded-2xl border border-neutral-200 bg-white/95 p-4 shadow-xl backdrop-blur"
             >
-              <Play size={11} fill="currentColor" /> Test
-            </button>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[13px] font-semibold text-neutral-950">Flow inspection</span>
+                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">0 provider calls</span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-neutral-500">
+                    Click any node after closing this card to inspect its context, steps, and scoped tools.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowFlowInspector(false)}
+                  className="text-[11px] font-medium text-neutral-500 hover:text-neutral-950"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-5 gap-2">
+                {[
+                  ["Nodes", inspection.nodeCount],
+                  ["Routes", inspection.routeCount],
+                  ["Steps", inspection.stepCount],
+                  ["Checkpoints", inspection.checkpointCount],
+                  ["Depth", inspection.maxStepDepth],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-xl bg-neutral-50 px-2.5 py-2">
+                    <div className="text-[15px] font-semibold tracking-tight text-neutral-950">{value}</div>
+                    <div className="text-[10px] text-neutral-500">{label}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[10px] text-neutral-600">
+                <span className="font-medium text-neutral-800">{inspection.toolExposure === "gateway" ? "Progressive gateway" : "Direct tools"}</span>
+                <span className="text-neutral-300">·</span>
+                <span>{inspection.alwaysTools.length} always available</span>
+                <span className="text-neutral-300">·</span>
+                <span>{inspection.scopedTools.length} scoped across the flow</span>
+              </div>
+            </div>
+          )}
+          {showLiveTestConfirm && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Confirm live provider test"
+              className="absolute bottom-3 left-1/2 z-20 w-[min(92%,390px)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl"
+            >
+              <p className="text-[13px] font-semibold text-neutral-950">Start a live provider test?</p>
+              <p className="mt-1 text-[11px] leading-4 text-neutral-500">
+                This opens your microphone and uses the configured realtime voice provider. Provider charges may apply.
+              </p>
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setShowLiveTestConfirm(false)}
+                  className="rounded-full px-3 py-1.5 text-[11px] font-medium text-neutral-600 hover:bg-neutral-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setShowLiveTestConfirm(false);
+                    setTraceEvents([]);
+                    setTrying(true);
+                  }}
+                  className="flex items-center gap-1.5 rounded-full bg-neutral-950 px-3.5 py-1.5 text-[11px] font-medium text-white hover:bg-neutral-800"
+                >
+                  <Play size={10} fill="currentColor" /> Start live test
+                </button>
+              </div>
+            </div>
           )}
           {(trying || traceEvents.length > 0) && (
             <TracePanel events={traceEvents} live={trying} onClose={() => setTraceEvents([])} />
