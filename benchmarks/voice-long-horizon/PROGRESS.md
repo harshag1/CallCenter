@@ -1747,3 +1747,40 @@ It retains no raw error, credentials, or audio and reports zero retries,
 reconnects, or fallbacks. The `$1.00` authority is conservatively settled and
 the root is immutable. Qualification and DEV were not authorized, so this
 attempt contributes no score, comparison, graph, or efficacy claim.
+
+## 2026-07-31 — xAI commit acknowledgement blocker isolated and repaired
+
+The redacted detail commitment from the failed `ff0c108` xAI Gate D was
+independently recomputed from the exact normalized error:
+
+`Input audio commit acknowledgement timed out after 5000 ms (provider=xai; commit=1)`
+
+Its salted commitment exactly matches
+`d8ed693b267429e3b65de6725327b2c2f4f1296ebdfe19cf8773dadcdb5e1751`.
+This proves the session reached the manual `input_audio_buffer.commit` control
+point, did not receive `input_audio_buffer.committed` inside the former
+five-second ceiling, and never advanced to `response.create`. It does not
+prove a provider outage or model-quality failure.
+
+Implementation commit `b2d4044` replaces the duplicated five-second control
+deadline with one shared **15-second** acknowledgement ceiling across the LC4
+development adapter, xAI Gate D, provider qualification, and the production
+orchestrator. The realtime client still fails closed: a delayed acknowledgement
+at six seconds now succeeds and only then permits `response.create`; a missing
+acknowledgement at 15 seconds still terminates before response generation.
+Focused validation passed **331/331** tests, including exact-timeout assertions
+at every benchmark entry point. The complete repository suite passed
+**3,325** tests with 85 skipped, and TypeScript, ESLint, production build,
+claim verification **98/98**, public worktree/history audits, dependency audit,
+and `git diff --check` all passed on the same source tree before commit.
+
+A zero-generation HTTPS readiness check returned HTTP 200 for both xAI model
+catalog access and the `eve` voice metadata endpoint. This confirms only that
+the retained credential can access current model and voice metadata; it is not
+realtime-WebSocket compatibility evidence.
+
+No provider generation was invoked for this diagnosis or repair. Spend delta
+is **$0.00**; current post-baseline conservative exposure remains **$161.00**,
+active liability remains **$0.00**, and further paid work remains unauthorized.
+The failed root is immutable and was not retried. No benchmark score, comparison,
+or graph may be derived from this repair.

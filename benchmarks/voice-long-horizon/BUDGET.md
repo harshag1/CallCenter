@@ -1065,3 +1065,27 @@ The gate reports **$0 active**, **$1.00 settled**, and no retry permission.
 Failure evidence:
 `169d5753d34c9b89eeeafa02c3434aac7caa8edd6cabd8b6df4abb699a82c2ae`.
 No benchmark score or launch graph may be derived from this gate.
+
+## 2026-07-31 — xAI acknowledgement repair: no-spend accounting
+
+The terminal-signed xAI Gate D detail commitment was resolved to a five-second
+manual-commit acknowledgement timeout. Commit `b2d4044` widens that bounded,
+fail-closed control wait to 15 seconds and adds delayed/missing-acknowledgement
+regressions. Diagnosis, implementation, and offline verification made **zero**
+provider-generation calls.
+
+| Operation | Conservative settlement | Outcome |
+|---|---:|---|
+| Detail-commitment forensics | **$0.00** | exact salted commitment match |
+| Transport repair and offline validation | **$0.00** | 331/331 focused; 3,325 full-suite tests passed |
+| Credential and voice-metadata readiness checks | **$0.00** | HTTPS 200; not realtime compatibility evidence |
+| Further paid provider sequence | **$0.00** | not authorized |
+
+- Current post-baseline conservative exposure: **$161.00**
+- Active reservations: **$0.00**
+- Paid retries from the failed root: **0**
+- Provider-billed cash spend: **still unreconciled**
+
+The repair creates no efficacy evidence and authorizes no score or graph. A
+fresh exact-source ASR receipt and a new explicit paid-run authorization remain
+required before another Gate D, qualification, or six-cell DEV sequence.
