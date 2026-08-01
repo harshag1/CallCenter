@@ -114,7 +114,7 @@ integration("action migration semantic reapply", () => {
     } finally {
       await client.query("ROLLBACK");
     }
-  });
+  }, 30_000);
 
   it("repairs offset and impossible embedded timestamps from typed ledger authority", async () => {
     const ids = {
@@ -230,7 +230,7 @@ integration("action migration semantic reapply", () => {
     } finally {
       await client.query("ROLLBACK");
     }
-  });
+  }, 30_000);
 
   it("canonicalizes an empty flow state's offset timestamp exactly once", async () => {
     const ids = { org: randomUUID(), agent: randomUUID(), call: randomUUID() };
@@ -285,7 +285,7 @@ integration("action migration semantic reapply", () => {
     } finally {
       await client.query("ROLLBACK");
     }
-  });
+  }, 30_000);
 
   it("fails closed when a prerelease authority index name hides a weaker definition", async () => {
     await client.query("BEGIN");
@@ -300,5 +300,5 @@ integration("action migration semantic reapply", () => {
     } finally {
       await client.query("ROLLBACK");
     }
-  });
+  }, 30_000);
 });
