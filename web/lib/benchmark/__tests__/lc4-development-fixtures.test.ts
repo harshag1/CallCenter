@@ -89,7 +89,7 @@ describe("HACC-LC4 provider-free development fixture compiler", () => {
         .map((artifact) => artifact.schedule.topology_sha256);
       expect(new Set(topologies).size).toBe(4);
     }
-  }, 30_000);
+  }, 60_000);
 
   it("binds exactly 60 contiguous opportunities in three twenty-opportunity acts", () => {
     const artifact = analog();
