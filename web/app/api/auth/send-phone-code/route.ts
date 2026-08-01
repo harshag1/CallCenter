@@ -6,9 +6,13 @@ import { q } from "@/lib/db";
 import {
   AUTH_NO_STORE_HEADERS,
   AuthRequestInputError,
+  generateCode,
   getSession,
   hasExactKeys,
+  hmacPhoneVerificationCode,
+  issueLocalPhoneVerificationCode,
   issuePhoneVerificationMarker,
+  localDevelopmentPhoneOtpStdoutAuthorized,
   normalizePhoneNumber,
   readAuthJsonObject,
 } from "@/lib/auth";
@@ -47,13 +51,27 @@ export async function POST(req: Request) {
   const clean = normalizePhoneNumber(String(body.phone ?? ""));
   if (!clean) return json({ error: "enter a valid phone number" }, 400);
 
-  const markerId = await issuePhoneVerificationMarker(clean);
+  const localStdout = localDevelopmentPhoneOtpStdoutAuthorized(
+    req,
+    "/api/auth/send-phone-code",
+  );
+  const localCode = localStdout ? generateCode() : null;
+  const markerId = localCode
+    ? await issueLocalPhoneVerificationCode(
+        clean,
+        hmacPhoneVerificationCode(localCode, clean),
+      )
+    : await issuePhoneVerificationMarker(clean);
   if (!markerId) {
     return json({ error: "too many codes requested — wait a few minutes" }, 429);
   }
 
   try {
-    await startPhoneVerification(clean);
+    if (localCode) {
+      console.log(`[explicit dev phone auth] ${clean}: ${localCode}`);
+    } else {
+      await startPhoneVerification(clean);
+    }
   } catch (e) {
     await q("UPDATE phone_codes SET used = true WHERE id = $1", [markerId]).catch(() => {});
     L.error("send failed", { orgId: session.orgId, kind: e instanceof Error ? e.name : "unknown" });

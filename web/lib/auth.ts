@@ -11,6 +11,8 @@ import { PrivateRequestError, readStrictJsonObject } from "./private-json-reques
 const SESSION_TTL_MS = 30 * 24 * 3600_000;
 const IDLE_TTL_MS = 7 * 24 * 3600_000;
 const AUTH_CODE_KEY_DOMAIN = "harshas-amazing-call-center/auth-code/v2\n";
+const AUTH_PHONE_CODE_KEY_DOMAIN =
+  "harshas-amazing-call-center/auth-phone-code/v1\n";
 const AUTH_ABUSE_SOURCE_KEY_DOMAIN = "harshas-amazing-call-center/auth-abuse-source/v1\n";
 const AUTH_LOCAL_DEVELOPMENT_SOURCE_KEY_DOMAIN =
   "harshas-amazing-call-center/auth-local-development-source/v1\n";
@@ -155,6 +157,68 @@ export function hmacCode(code: string, email: string): string {
     .update("\n", "utf8")
     .update(code, "utf8")
     .digest("hex");
+}
+
+/** Development phone OTPs are phone-bound and never persisted as plaintext. */
+export function hmacPhoneVerificationCode(code: string, phoneNumber: string): string {
+  const cleanPhone = normalizePhoneNumber(phoneNumber);
+  if (!cleanPhone || !/^\d{4,10}$/.test(code)) {
+    throw new Error("invalid phone verification code HMAC input");
+  }
+  return createHmac("sha256", authCodeHmacKey())
+    .update(AUTH_PHONE_CODE_KEY_DOMAIN, "utf8")
+    .update(cleanPhone, "utf8")
+    .update("\n", "utf8")
+    .update(code, "utf8")
+    .digest("hex");
+}
+
+type LocalPhoneOtpPath =
+  | "/api/auth/send-phone-code"
+  | "/api/auth/verify-phone-code";
+
+/**
+ * Exact authority for the terminal-only phone OTP quickstart.
+ *
+ * This is deliberately narrower than general development mode: it requires a
+ * separate opt-in, an exact plaintext loopback PUBLIC_ORIGIN and request URL,
+ * and no configured Twilio Verify service. A copied flag therefore cannot
+ * disable real phone ownership verification on a deployment or tunnel.
+ */
+export function localDevelopmentPhoneOtpStdoutAuthorized(
+  request: Request,
+  expectedPath: LocalPhoneOtpPath,
+): boolean {
+  if (
+    process.env.NODE_ENV !== "development"
+    || process.env.ALLOW_DEV_PHONE_OTP_STDOUT !== "true"
+    || Boolean(process.env.TWILIO_VERIFY_SERVICE_SID)
+  ) {
+    return false;
+  }
+  const configured = process.env.PUBLIC_ORIGIN?.trim();
+  if (!configured) return false;
+  try {
+    const publicOrigin = new URL(configured);
+    const requestUrl = new URL(request.url);
+    return publicOrigin.protocol === "http:"
+      && requestUrl.protocol === "http:"
+      && isLoopbackSessionHostname(publicOrigin.hostname)
+      && isLoopbackSessionHostname(requestUrl.hostname)
+      && !publicOrigin.username
+      && !publicOrigin.password
+      && publicOrigin.pathname === "/"
+      && !publicOrigin.search
+      && !publicOrigin.hash
+      && !requestUrl.username
+      && !requestUrl.password
+      && requestUrl.origin === publicOrigin.origin
+      && requestUrl.pathname === expectedPath
+      && !requestUrl.search
+      && !requestUrl.hash;
+  } catch {
+    return false;
+  }
 }
 
 export function generateToken(): string {
@@ -463,10 +527,17 @@ export async function issueEmailVerificationCode(
   });
 }
 
-/** Phone-delivery equivalent of issueEmailVerificationCode. */
-export async function issuePhoneVerificationMarker(phoneNumber: string): Promise<string | null> {
+async function issuePhoneVerificationChallenge(
+  phoneNumber: string,
+  storedChallenge: string,
+): Promise<string | null> {
   const cleanPhone = normalizePhoneNumber(phoneNumber);
-  if (!cleanPhone) throw new Error("invalid phone verification issuance input");
+  if (
+    !cleanPhone
+    || (storedChallenge !== "twilio-verify" && !/^[a-f0-9]{64}$/.test(storedChallenge))
+  ) {
+    throw new Error("invalid phone verification issuance input");
+  }
   return withAuthTransaction(async (client) => {
     const locks = (await client.query<{ global_acquired: boolean; subject_acquired: boolean }>(
       `SELECT pg_try_advisory_xact_lock(670043::bigint) AS global_acquired,
@@ -488,17 +559,30 @@ export async function issuePhoneVerificationMarker(phoneNumber: string): Promise
          RETURNING 1
        )
        INSERT INTO phone_codes (phone_number, code_hmac, expires_at)
-       SELECT $1, 'twilio-verify', now() + interval '10 minutes'
+       SELECT $1, $2, now() + interval '10 minutes'
        WHERE (SELECT count(*) FROM pruned) >= 0
          AND (SELECT count(*) FROM phone_codes
               WHERE phone_number = $1 AND created_at > now() - interval '10 minutes') < 5
          AND (SELECT count(*) FROM phone_codes
               WHERE created_at > now() - interval '1 minute') < 30
        RETURNING id`,
-      [cleanPhone]
+      [cleanPhone, storedChallenge]
     )).rows[0];
     return marker?.id ?? null;
   });
+}
+
+/** Phone-delivery equivalent of issueEmailVerificationCode. */
+export async function issuePhoneVerificationMarker(phoneNumber: string): Promise<string | null> {
+  return issuePhoneVerificationChallenge(phoneNumber, "twilio-verify");
+}
+
+/** Issues a bounded local challenge while persisting only its phone-bound HMAC. */
+export async function issueLocalPhoneVerificationCode(
+  phoneNumber: string,
+  codeHmac: string,
+): Promise<string | null> {
+  return issuePhoneVerificationChallenge(phoneNumber, codeHmac);
 }
 
 async function establishSessionInTransaction(
@@ -605,8 +689,10 @@ export async function verifyEmailCodeAndEstablishSession(input: Readonly<{
   });
 }
 
-/** Reserves one of at most five provider checks across every live challenge for a phone. */
-export async function reservePhoneVerificationAttempt(phoneNumber: string): Promise<string | null> {
+async function reservePhoneVerificationAttemptForKind(
+  phoneNumber: string,
+  kind: "twilio-verify" | "local-development",
+): Promise<string | null> {
   const cleanPhone = normalizePhoneNumber(phoneNumber);
   if (!cleanPhone) throw new Error("invalid phone verification input");
   return withAuthTransaction(async (client) => {
@@ -619,7 +705,8 @@ export async function reservePhoneVerificationAttempt(phoneNumber: string): Prom
          SELECT p.id
          FROM phone_codes p
          WHERE p.phone_number = $1
-           AND p.code_hmac = 'twilio-verify'
+           AND (($2 = 'twilio-verify' AND p.code_hmac = 'twilio-verify')
+             OR ($2 = 'local-development' AND p.code_hmac ~ '^[a-f0-9]{64}$'))
            AND p.used = false
            AND p.expires_at > statement_timestamp()
          ORDER BY p.created_at DESC, p.id DESC
@@ -638,10 +725,20 @@ export async function reservePhoneVerificationAttempt(phoneNumber: string): Prom
          AND p.attempts < 5
          AND b.attempts < 5
        RETURNING p.id`,
-      [cleanPhone]
+      [cleanPhone, kind]
     )).rows[0];
     return attempt?.id ?? null;
   });
+}
+
+/** Reserves one of at most five provider checks across every live challenge for a phone. */
+export async function reservePhoneVerificationAttempt(phoneNumber: string): Promise<string | null> {
+  return reservePhoneVerificationAttemptForKind(phoneNumber, "twilio-verify");
+}
+
+/** Reserves one of the same five attempts for a local HMAC-backed challenge. */
+export async function reserveLocalPhoneVerificationAttempt(phoneNumber: string): Promise<string | null> {
+  return reservePhoneVerificationAttemptForKind(phoneNumber, "local-development");
 }
 
 /**

@@ -7,8 +7,11 @@ import {
   AuthRequestInputError,
   getSession,
   hasExactKeys,
+  hmacPhoneVerificationCode,
+  localDevelopmentPhoneOtpStdoutAuthorized,
   normalizePhoneNumber,
   readAuthJsonObject,
+  reserveLocalPhoneVerificationAttempt,
   reservePhoneVerificationAttempt,
 } from "@/lib/auth";
 import { checkPhoneVerification } from "@/lib/sms";
@@ -47,10 +50,21 @@ export async function POST(req: Request) {
     return json({ error: "wrong code" }, 401);
   }
 
-  const attemptId = await reservePhoneVerificationAttempt(clean);
+  const localStdout = localDevelopmentPhoneOtpStdoutAuthorized(
+    req,
+    "/api/auth/verify-phone-code",
+  );
+  const attemptId = localStdout
+    ? await reserveLocalPhoneVerificationAttempt(clean)
+    : await reservePhoneVerificationAttempt(clean);
   if (!attemptId) return json({ error: "wrong code" }, 401);
 
-  const approved = await checkPhoneVerification(clean, body.code).catch(() => false);
+  const expectedStoredChallenge = localStdout
+    ? hmacPhoneVerificationCode(body.code, clean)
+    : "twilio-verify";
+  const approved = localStdout
+    ? true
+    : await checkPhoneVerification(clean, body.code).catch(() => false);
   if (!approved) {
     return json({ error: "wrong code" }, 401);
   }
@@ -76,7 +90,7 @@ export async function POST(req: Request) {
        SET used = true
        WHERE p.id = $1
          AND p.phone_number = $3
-         AND p.code_hmac = 'twilio-verify'
+         AND p.code_hmac = $6
          AND p.used = false
          AND p.expires_at > statement_timestamp()
          AND EXISTS (SELECT 1 FROM target_user)
@@ -105,6 +119,7 @@ export async function POST(req: Request) {
       clean,
       session.authSessionTokenHash,
       session.orgId,
+      expectedStoredChallenge,
     ]
   );
   if (!consumed) return json({ error: "wrong code" }, 401);

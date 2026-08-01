@@ -19,8 +19,12 @@ vi.mock("../db", () => ({
 import {
   anonymousAuthAbuseSourceHmac,
   establishSession,
+  hmacPhoneVerificationCode,
   issueEmailVerificationCode,
+  issueLocalPhoneVerificationCode,
   issuePhoneVerificationMarker,
+  localDevelopmentPhoneOtpStdoutAuthorized,
+  reserveLocalPhoneVerificationAttempt,
   reservePhoneVerificationAttempt,
   verifyEmailCodeAndEstablishSession,
 } from "../auth";
@@ -162,6 +166,79 @@ describe("authentication tenant isolation", () => {
     expect(attemptIndex).toBe(lockIndex + 1);
     expect(statements[attemptIndex][0]).toContain("sum(p.attempts)");
     expect(statements[attemptIndex][0]).toContain("b.attempts < 5");
+    expect(statements[attemptIndex][1]).toEqual(["+14155550123", "twilio-verify"]);
+  });
+
+  it("stores a phone-bound local challenge HMAC and applies the shared durable budgets", async () => {
+    vi.stubEnv("AUTH_CODE_HMAC_SECRET", "0123456789abcdef".repeat(4));
+    const digest = hmacPhoneVerificationCode("483920", "+14155550123");
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(digest).not.toContain("483920");
+    expect(hmacPhoneVerificationCode("483920", "+14155550124")).not.toBe(digest);
+
+    mocks.clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes("pg_try_advisory_xact_lock")) {
+        return { rows: [{ global_acquired: true, subject_acquired: true }] };
+      }
+      if (sql.includes("INSERT INTO phone_codes")) return { rows: [{ id: "local-marker" }] };
+      if (sql.includes("UPDATE phone_codes p")) return { rows: [{ id: "local-marker" }] };
+      return { rows: [] };
+    });
+    await expect(issueLocalPhoneVerificationCode("+14155550123", digest))
+      .resolves.toBe("local-marker");
+    await expect(reserveLocalPhoneVerificationAttempt("+14155550123"))
+      .resolves.toBe("local-marker");
+
+    const statements = mocks.clientQuery.mock.calls as [string, unknown[] | undefined][];
+    const issuance = statements.find(([sql]) => sql.includes("INSERT INTO phone_codes"));
+    expect(issuance?.[1]).toEqual(["+14155550123", digest]);
+    expect(issuance?.[0]).toContain("interval '10 minutes') < 5");
+    expect(issuance?.[0]).toContain("interval '1 minute') < 30");
+    const attempt = statements.find(([sql]) => sql.includes("UPDATE phone_codes p"));
+    expect(attempt?.[1]).toEqual(["+14155550123", "local-development"]);
+    expect(attempt?.[0]).toContain("p.code_hmac ~ '^[a-f0-9]{64}$'");
+    expect(attempt?.[0]).toContain("b.attempts < 5");
+  });
+
+  it("authorizes phone OTP stdout only on the exact local development authority", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("ALLOW_DEV_PHONE_OTP_STDOUT", "true");
+    vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", "");
+    vi.stubEnv("PUBLIC_ORIGIN", "http://localhost:3000");
+    expect(localDevelopmentPhoneOtpStdoutAuthorized(
+      new Request("http://localhost:3000/api/auth/send-phone-code"),
+      "/api/auth/send-phone-code",
+    )).toBe(true);
+    expect(localDevelopmentPhoneOtpStdoutAuthorized(
+      new Request("http://localhost:3000/api/auth/verify-phone-code"),
+      "/api/auth/verify-phone-code",
+    )).toBe(true);
+  });
+
+  it.each([
+    ["production", "production", "http://localhost:3000", "", "http://localhost:3000/api/auth/send-phone-code"],
+    ["missing opt-in", "development", "http://localhost:3000", "", "http://localhost:3000/api/auth/send-phone-code", "false"],
+    ["Twilio configured", "development", "http://localhost:3000", "VA00000000000000000000000000000000", "http://localhost:3000/api/auth/send-phone-code"],
+    ["non-loopback origin", "development", "https://app.example.test", "", "https://app.example.test/api/auth/send-phone-code"],
+    ["different loopback alias", "development", "http://localhost:3000", "", "http://127.0.0.1:3000/api/auth/send-phone-code"],
+    ["wrong route", "development", "http://localhost:3000", "", "http://localhost:3000/api/auth/verify-phone-code"],
+    ["query-bearing route", "development", "http://localhost:3000", "", "http://localhost:3000/api/auth/send-phone-code?local=true"],
+  ])("rejects local phone OTP stdout for %s", (
+    _label,
+    nodeEnv,
+    publicOrigin,
+    twilioService,
+    requestUrl,
+    optIn = "true",
+  ) => {
+    vi.stubEnv("NODE_ENV", nodeEnv);
+    vi.stubEnv("ALLOW_DEV_PHONE_OTP_STDOUT", optIn);
+    vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", twilioService);
+    vi.stubEnv("PUBLIC_ORIGIN", publicOrigin);
+    expect(localDevelopmentPhoneOtpStdoutAuthorized(
+      new Request(requestUrl),
+      "/api/auth/send-phone-code",
+    )).toBe(false);
   });
 
   it("takes a fresh statement snapshot after delivery-rate locks", async () => {

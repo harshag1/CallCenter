@@ -188,14 +188,15 @@ Do not reuse the web, scheduled-dialer, or migration-owner database credential.
 In production, provision and rotate the worker login through your secret
 manager; see [database tenancy](docs/database-tenancy.md).
 
-For local login, either configure Resend or add the terminal-only OTP opt-in to `web/.env.local` before starting the app:
+For local login without Resend or Twilio Verify, add both terminal-only OTP opt-ins to `web/.env.local` before starting the app:
 
 ```bash
 # web/.env.local — local development only; ignored in production.
 ALLOW_DEV_OTP_STDOUT=true
+ALLOW_DEV_PHONE_OTP_STDOUT=true
 ```
 
-Outside that exact loopback, stdout-only development exception, anonymous email OTP requires a trustworthy request-source boundary. Vercel selects its platform-overwritten `x-vercel-forwarded-for` automatically. A self-hosted deployment must set `AUTH_TRUSTED_CLIENT_IP_HEADER` to an allowed IP header its own edge overwrites; arbitrary client-supplied forwarding headers are unsafe. Without either boundary, OTP issuance fails closed with `429` before generating or sending a code.
+The email and phone codes print to the `npm run dev` terminal. The phone opt-in is separate, stores only a phone-bound HMAC, retains the normal ten-minute issuance and five-attempt limits, and is ignored in production, on non-loopback origins, or whenever `TWILIO_VERIFY_SERVICE_SID` is configured. Outside the exact email loopback exception, anonymous email OTP requires a trustworthy request-source boundary. Vercel selects its platform-overwritten `x-vercel-forwarded-for` automatically. A self-hosted deployment must set `AUTH_TRUSTED_CLIENT_IP_HEADER` to an allowed IP header its own edge overwrites; arbitrary client-supplied forwarding headers are unsafe. Without either boundary, email OTP issuance fails closed with `429` before generating or sending a code.
 
 Open [http://localhost:3000](http://localhost:3000). Builder/operator chat defaults
 to xAI, but it can use xAI, OpenAI, or Gemini through the server-owned

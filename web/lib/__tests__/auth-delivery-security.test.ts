@@ -10,8 +10,12 @@ const mocks = vi.hoisted(() => ({
   readAuthJsonObject: vi.fn(),
   hasExactKeys: vi.fn(),
   getSession: vi.fn(),
+  hmacPhoneVerificationCode: vi.fn(),
   issueEmailVerificationCode: vi.fn(),
+  issueLocalPhoneVerificationCode: vi.fn(),
   issuePhoneVerificationMarker: vi.fn(),
+  localDevelopmentPhoneOtpStdoutAuthorized: vi.fn(),
+  reserveLocalPhoneVerificationAttempt: vi.fn(),
   reservePhoneVerificationAttempt: vi.fn(),
   anonymousAuthAbuseSourceHmac: vi.fn(),
   sendLoginCode: vi.fn(),
@@ -33,8 +37,12 @@ vi.mock("@/lib/auth", () => ({
   readAuthJsonObject: mocks.readAuthJsonObject,
   hasExactKeys: mocks.hasExactKeys,
   getSession: mocks.getSession,
+  hmacPhoneVerificationCode: mocks.hmacPhoneVerificationCode,
   issueEmailVerificationCode: mocks.issueEmailVerificationCode,
+  issueLocalPhoneVerificationCode: mocks.issueLocalPhoneVerificationCode,
   issuePhoneVerificationMarker: mocks.issuePhoneVerificationMarker,
+  localDevelopmentPhoneOtpStdoutAuthorized: mocks.localDevelopmentPhoneOtpStdoutAuthorized,
+  reserveLocalPhoneVerificationAttempt: mocks.reserveLocalPhoneVerificationAttempt,
   reservePhoneVerificationAttempt: mocks.reservePhoneVerificationAttempt,
   anonymousAuthAbuseSourceHmac: mocks.anonymousAuthAbuseSourceHmac,
 }));
@@ -85,9 +93,13 @@ describe("auth delivery and phone verification security", () => {
       phoneVerifiedAt: null,
       authSessionTokenHash: "session-token-hash",
     });
+    mocks.hmacPhoneVerificationCode.mockReturnValue("local-phone-subject-hmac");
     mocks.anonymousAuthAbuseSourceHmac.mockReturnValue("source-hmac");
     mocks.issueEmailVerificationCode.mockResolvedValue(null);
+    mocks.issueLocalPhoneVerificationCode.mockResolvedValue(null);
     mocks.issuePhoneVerificationMarker.mockResolvedValue(null);
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValue(false);
+    mocks.reserveLocalPhoneVerificationAttempt.mockResolvedValue(null);
     mocks.reservePhoneVerificationAttempt.mockResolvedValue(null);
     mocks.sendLoginCode.mockResolvedValue(undefined);
     mocks.startPhoneVerification.mockResolvedValue(undefined);
@@ -157,6 +169,59 @@ describe("auth delivery and phone verification security", () => {
     );
   });
 
+  it("prints a separately authorized local phone OTP while storing only its HMAC", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValueOnce(true);
+    mocks.issueLocalPhoneVerificationCode.mockResolvedValueOnce("local-phone-marker");
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const response = await sendPhoneCode(new Request(
+        "http://localhost:3000/api/auth/send-phone-code",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.test",
+            "sec-fetch-site": "same-origin",
+          },
+          body: JSON.stringify({ phone: "+14155550123" }),
+        },
+      ));
+      expect(response.status).toBe(200);
+      expect(mocks.hmacPhoneVerificationCode).toHaveBeenCalledWith(
+        "483920",
+        "+14155550123",
+      );
+      expect(mocks.issueLocalPhoneVerificationCode).toHaveBeenCalledWith(
+        "+14155550123",
+        "local-phone-subject-hmac",
+      );
+      expect(mocks.issuePhoneVerificationMarker).not.toHaveBeenCalled();
+      expect(mocks.startPhoneVerification).not.toHaveBeenCalled();
+      expect(stdout).toHaveBeenCalledWith(
+        "[explicit dev phone auth] +14155550123: 483920",
+      );
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
+  it("does not print or dispatch a local phone OTP after issuance exhaustion", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValueOnce(true);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const response = await sendPhoneCode(jsonRequest("/api/auth/send-phone-code", {
+        phone: "+14155550123",
+      }));
+      expect(response.status).toBe(429);
+      expect(mocks.issueLocalPhoneVerificationCode).toHaveBeenCalledOnce();
+      expect(stdout).not.toHaveBeenCalled();
+      expect(mocks.startPhoneVerification).not.toHaveBeenCalled();
+      expect(mocks.q).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
   it("requires and consumes a live, attempt-limited dispatch marker before phone ownership", async () => {
     mocks.reservePhoneVerificationAttempt.mockResolvedValueOnce("phone-marker");
     mocks.qOne.mockResolvedValueOnce({ id: "phone-marker" });
@@ -170,7 +235,7 @@ describe("auth delivery and phone verification security", () => {
     expect(mocks.qOne.mock.calls[0][0]).toContain("WITH target_user");
     expect(mocks.qOne.mock.calls[0][0]).toContain("UPDATE users u");
     expect(mocks.qOne.mock.calls[0][0]).toContain("p.phone_number = $3");
-    expect(mocks.qOne.mock.calls[0][0]).toContain("p.code_hmac = 'twilio-verify'");
+    expect(mocks.qOne.mock.calls[0][0]).toContain("p.code_hmac = $6");
     expect(mocks.qOne.mock.calls[0][0]).toContain("p.expires_at > statement_timestamp()");
     expect(mocks.qOne.mock.calls[0][0]).toContain("s.token = $4");
     expect(mocks.qOne.mock.calls[0][0]).toContain("s.org_id = u.org_id");
@@ -186,8 +251,70 @@ describe("auth delivery and phone verification security", () => {
       "+14155550123",
       "session-token-hash",
       "00000000-0000-4000-8000-000000000001",
+      "twilio-verify",
     ]);
     expect(mocks.q).not.toHaveBeenCalled();
+  });
+
+  it("verifies a local HMAC challenge without calling Twilio", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValueOnce(true);
+    mocks.reserveLocalPhoneVerificationAttempt.mockResolvedValueOnce("local-phone-marker");
+    mocks.qOne.mockResolvedValueOnce({ id: "local-phone-marker" });
+    const response = await verifyPhoneCode(jsonRequest("/api/auth/verify-phone-code", {
+      phone: "+14155550123",
+      code: "483920",
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, next: "/studio" });
+    expect(mocks.reserveLocalPhoneVerificationAttempt).toHaveBeenCalledWith("+14155550123");
+    expect(mocks.reservePhoneVerificationAttempt).not.toHaveBeenCalled();
+    expect(mocks.checkPhoneVerification).not.toHaveBeenCalled();
+    expect(mocks.qOne.mock.calls[0][1]?.at(-1)).toBe("local-phone-subject-hmac");
+  });
+
+  it("rejects a wrong local phone code after consuming one bounded attempt", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValueOnce(true);
+    mocks.reserveLocalPhoneVerificationAttempt.mockResolvedValueOnce("local-phone-marker");
+    const response = await verifyPhoneCode(jsonRequest("/api/auth/verify-phone-code", {
+      phone: "+14155550123",
+      code: "111111",
+    }));
+    expect(response.status).toBe(401);
+    expect(mocks.hmacPhoneVerificationCode).toHaveBeenCalledWith("111111", "+14155550123");
+    expect(mocks.reserveLocalPhoneVerificationAttempt).toHaveBeenCalledOnce();
+    expect(mocks.qOne).toHaveBeenCalledOnce();
+    expect(mocks.checkPhoneVerification).not.toHaveBeenCalled();
+  });
+
+  it("rejects local challenge replay after its one-time marker is consumed", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValue(true);
+    mocks.reserveLocalPhoneVerificationAttempt
+      .mockResolvedValueOnce("local-phone-marker")
+      .mockResolvedValueOnce(null);
+    mocks.qOne.mockResolvedValueOnce({ id: "local-phone-marker" });
+    const requestBody = { phone: "+14155550123", code: "483920" };
+    expect((await verifyPhoneCode(jsonRequest(
+      "/api/auth/verify-phone-code",
+      requestBody,
+    ))).status).toBe(200);
+    expect((await verifyPhoneCode(jsonRequest(
+      "/api/auth/verify-phone-code",
+      requestBody,
+    ))).status).toBe(401);
+    expect(mocks.qOne).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed before local code comparison after attempt exhaustion", async () => {
+    mocks.localDevelopmentPhoneOtpStdoutAuthorized.mockReturnValueOnce(true);
+    const response = await verifyPhoneCode(jsonRequest("/api/auth/verify-phone-code", {
+      phone: "+14155550123",
+      code: "483920",
+    }));
+    expect(response.status).toBe(401);
+    expect(mocks.reserveLocalPhoneVerificationAttempt).toHaveBeenCalledOnce();
+    expect(mocks.hmacPhoneVerificationCode).not.toHaveBeenCalled();
+    expect(mocks.qOne).not.toHaveBeenCalled();
+    expect(mocks.checkPhoneVerification).not.toHaveBeenCalled();
   });
 
   it("never calls Twilio verification without a live dispatch marker", async () => {
