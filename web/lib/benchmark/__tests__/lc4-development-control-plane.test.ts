@@ -180,6 +180,15 @@ describe("LC4-DEV municipal executable control plane", () => {
           sha256Hex(repairPreparation.additionalInstructions),
         );
         expect(repairPreparation.contextSha256).not.toBe(currentPreparation.contextSha256);
+        expect(repairPreparation.additionalInstructions).toContain(
+          '"tool_name_policy":"tools_forbidden_speech_only"',
+        );
+        expect(repairPreparation.additionalInstructions).toContain(
+          '"eligible_semantic_intents":[]',
+        );
+        expect(repairPreparation.additionalInstructions).toContain(
+          "Repair playback is speech-only. Do not call any tool.",
+        );
         (arm === "hacc" ? haccContinuity : nativeContinuity).push(receipt.native_continuity_state_sha256);
         let callSequence = 0;
         for (;;) {

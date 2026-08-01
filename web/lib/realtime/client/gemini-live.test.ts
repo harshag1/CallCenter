@@ -2761,6 +2761,35 @@ describe("GeminiLiveClient", () => {
       .toBe(completions[0]?.type === "response.completed" ? completions[0].responseId : undefined);
   });
 
+  it.each([
+    ["MALFORMED_FUNCTION_CALL", "failed"],
+    ["RESPONSE_REJECTED", "failed"],
+    ["GENERATED_AUDIO_SAFETY", "failed"],
+    ["BLOCKLIST", "failed"],
+    ["MAX_REGENERATION_REACHED", "failed"],
+    ["NEED_MORE_INPUT", "incomplete"],
+    ["FUTURE_PROVIDER_REASON", "failed"],
+    ["TURN_COMPLETE_REASON_UNSPECIFIED", "completed"],
+  ] as const)("classifies Gemini terminal reason %s as %s", async (reason, status) => {
+    const test = harness();
+    const observations: RealtimeWireObservation[] = [];
+    test.client.onWireObservation((observation) => observations.push(observation));
+    await connectReady(test);
+    triggerProviderTurn(test);
+    test.socket.receive({
+      serverContent: { turnComplete: true, turnCompleteReason: reason },
+    });
+    await settle();
+
+    const completion = test.events.find((event) => event.type === "response.completed");
+    expect(completion?.type === "response.completed" ? completion.status : undefined).toBe(status);
+    const terminal = observations.find((observation) => observation.wireType === "serverContent")
+      ?.projection.terminal as Record<string, unknown> | undefined;
+    expect(terminal?.status).toBe(status);
+    expect(terminal?.reasonClass).toMatch(/^(malformed_function_call|response_rejected|safety|regeneration_exhausted|need_more_input|unknown|none)$/u);
+    expect(JSON.stringify(terminal)).not.toContain(reason);
+  });
+
   it("never exposes an authenticated key-bearing URL through transport diagnostics", async () => {
     const key = "super-secret/+token";
     const factoryEvents: NormalizedRealtimeEvent[] = [];

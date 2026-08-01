@@ -1712,3 +1712,38 @@ Budget replay verified and active reservations are zero. The report is
 incomplete, evidence-incomplete, missing four authority evaluations,
 task-result unavailable, and efficacy-claim ineligible. It contributes no
 score and no graph. The root is immutable; it will not be retried or resumed.
+
+## 2026-07-31 — Gemini terminal semantics hardened; fresh xAI gate failed closed
+
+Source commit `ff0c10834b6b5698fb8856432c7e39a3081ab3c2` repairs the diagnostic gap
+exposed by the preceding incomplete DEV run without rewriting that immutable
+evidence. Gemini `serverContent.turnComplete` now maps the current closed
+`TurnCompleteReason` vocabulary to completed, incomplete, interrupted, or
+failed outcomes; unknown future reasons fail closed instead of becoming false
+successes. Failure evidence binds the exact wire observation attributed to the
+normalized terminal event, even when provider usage or transcription frames
+arrive afterward. Repair playback is explicitly speech-only for both Native
+and HACC arms, while the host gateway continues to reject any repair-phase tool
+attempt.
+
+Offline release evidence at that commit:
+
+- full suite: **3,322 passed**, 85 skipped;
+- focused terminal, gateway, control-plane, and adapter suite: **231/231**;
+- public claim verification: **98/98**;
+- TypeScript, ESLint, production build, worktree audit, history audit, and
+  `git diff --check`: passed;
+- provider calls during those gates: **0**.
+
+The fresh xAI finite-manual Gate D root
+`/private/tmp/hacc-lc4-terminal-v2-gate-ff0c108-20260731T214500Z` then claimed
+exactly one authorized provider invocation and failed closed at
+`provider_execution` with class `provider_transport`. The terminal-signed
+failure artifact is
+`169d5753d34c9b89eeeafa02c3434aac7caa8edd6cabd8b6df4abb699a82c2ae`;
+its redacted detail commitment is
+`d8ed693b267429e3b65de6725327b2c2f4f1296ebdfe19cf8773dadcdb5e1751`.
+It retains no raw error, credentials, or audio and reports zero retries,
+reconnects, or fallbacks. The `$1.00` authority is conservatively settled and
+the root is immutable. Qualification and DEV were not authorized, so this
+attempt contributes no score, comparison, graph, or efficacy claim.
