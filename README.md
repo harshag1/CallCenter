@@ -128,7 +128,25 @@ flowchart LR
 - `examples/` — the tested [deep Flow v2 example pack](examples/flows/README.md) and a multi-goal mission example.
 - `docs/` — architecture, provider, flow, and extension guides.
 
-## Quick start
+## 90-second, $0 first run
+
+You can inspect the runtime before configuring Docker, a database, telephony,
+or any provider key:
+
+```bash
+git clone https://github.com/harshag1/CallCenter.git harsha-amazing-call-center
+cd harsha-amazing-call-center
+npm run demo:offline
+```
+
+The root command performs a locked, lifecycle-script-free dependency install
+when needed, strips application credentials from its child process, and runs a
+deterministic long-flow trace. It shows the active/completed steps, exact tools
+available at each step, receipts, checkpoints, durable outputs, a simulated
+process restart, indeterminate-write reconciliation, and the terminal state.
+It opens zero provider sessions and expects $0 spend.
+
+## Full local Studio
 
 Prerequisites: Node.js 22.13.0 (pinned in `.node-version` and `.nvmrc`). Supported runtimes are Node.js 20.19.x, 22.13.x or newer 22.x releases, and Node.js 24+. You also need npm, Docker, a key for the configured builder/server-inference provider, and a key for the realtime provider you want to call.
 
@@ -245,7 +263,6 @@ Start with the tested [deep Flow v2 example pack](examples/flows/README.md). It 
 For a provider-key-free, database-free runnable tour:
 
 ```bash
-cd web
 npm run demo:offline
 ```
 
@@ -253,6 +270,17 @@ It admits the complete fake tool catalog, installs the 15-step appointment flow
 in memory, executes a nine-step booking scenario, and proves receipt-backed
 restart recovery and read-after-write reconciliation. The structured output is
 deterministic and fail-closed; it is framework evidence, not an STS benchmark.
+
+When authoring a custom flow, generate a non-authoritative implementation
+checklist before writing adapters:
+
+```bash
+cd web
+npm run flow:package -- catalog-skeleton ../examples/flows/membership-and-returns.json --out /tmp/membership-tools.json
+```
+
+The skeleton is deliberately marked `not_checked`; it cannot be admitted as a
+runtime catalog until each tool is implemented and validated.
 
 > Build a Flow v2 membership and returns agent. Keep routing tools minimal, verify identity before account actions, require durable IDs from every write, checkpoint after verification, add explicit failure paths, validate the flow, and list the action fixtures needed for receipt-backed scenario tests before attaching it.
 
