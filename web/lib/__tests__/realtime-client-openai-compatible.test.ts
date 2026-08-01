@@ -19,6 +19,7 @@ import {
 } from "../realtime/client/openai-compatible";
 import { verifyRealtimeWireObservationChain } from "../realtime/client/wire-evidence";
 import { assertRealtimeTransportFailureDiagnostic } from "../realtime/client/transport-diagnostics";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "../benchmark/lc4-development-timeout-contract";
 import {
   LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY,
   LOCAL_TOOL_PROXY_FUNCTION,
@@ -3022,6 +3023,63 @@ describe("OpenAI-compatible realtime client", () => {
     client.appendInputAudio({ ...PCM, data: Uint8Array.from([3, 0]) });
     client.commitInputAudio();
     client.createResponse();
+  });
+
+  it("accepts an xAI commit acknowledgement after 5 seconds but before the bounded LC4 deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, socket } = fakeClient("xai");
+      await connect(client, socket);
+      client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+      client.commitInputAudio();
+
+      const turn = (async () => {
+        await client.waitForInputAudioCommit(
+          LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+        );
+        client.createResponse();
+      })();
+      setTimeout(() => socket.emit("message", JSON.stringify({
+        type: "input_audio_buffer.committed",
+        event_id: "evt_delayed_commit",
+        item_id: "item_delayed_audio",
+      })), 6_000);
+
+      await vi.advanceTimersByTimeAsync(5_999);
+      expect(socket.sent.map((frame) => JSON.parse(frame).type))
+        .not.toContain("response.create");
+      await vi.advanceTimersByTimeAsync(1);
+      await turn;
+      expect(socket.sent.map((frame) => JSON.parse(frame).type)
+        .filter((type) => type === "response.create")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails closed at the bounded LC4 commit deadline before response generation", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, socket } = fakeClient("xai");
+      await connect(client, socket);
+      client.appendInputAudio({ ...PCM, data: Uint8Array.from([1, 0]) });
+      client.commitInputAudio();
+      const pending = client.waitForInputAudioCommit(
+        LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+      );
+      const rejected = expect(pending).rejects.toThrow(
+        /timed out after 15000 ms/u,
+      );
+
+      await vi.advanceTimersByTimeAsync(
+        LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+      );
+      await rejected;
+      expect(socket.sent.map((frame) => JSON.parse(frame).type))
+        .not.toContain("response.create");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("classifies manual-mode provider VAD activity and deduplicates native event replays", async () => {

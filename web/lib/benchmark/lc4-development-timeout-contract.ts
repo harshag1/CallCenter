@@ -1,3 +1,7 @@
+import {
+  PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
+} from "./realtime-control-timeout";
+
 /**
  * LC4-DEV has multiple sequential timeout owners inside one opportunity:
  * paced caller audio, provider control/commit acknowledgement, provider
@@ -8,7 +12,12 @@
 export const LC4_DEV_TIMEOUT_CONTRACT = Object.freeze({
   // Frozen corpus maximum is 7,776.25 ms (the op-42 branch rendition).
   maximum_frozen_paced_input_ms: 8_000,
-  maximum_provider_control_or_commit_ack_ms: 5_000,
+  // A retained xAI Gate D session reached manual commit but did not return
+  // input_audio_buffer.committed inside the former 5 s bound. Keep this
+  // acknowledgement independently bounded, while allowing ordinary provider
+  // scheduling jitter before any response generation is requested.
+  maximum_provider_control_or_commit_ack_ms:
+    PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
   // A retained Gemini 3.1 Flash Live response emitted 2,052,990 PCM bytes
   // (42.77 seconds at 24 kHz mono PCM16) before its terminal frame. Leave
   // enough headroom for a similarly sized response to reach the terminal

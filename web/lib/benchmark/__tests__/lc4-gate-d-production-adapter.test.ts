@@ -9,6 +9,7 @@ import {
 import {
   LC4_XAI_GATE_D_PRODUCTION_ADAPTER_CAPABILITY,
 } from "../lc4-production-provider-contract";
+import { LC4_DEV_TIMEOUT_CONTRACT } from "../lc4-development-timeout-contract";
 import {
   assertLc4XaiFiniteManualGateDExecutionEvidence,
   createLc4XaiFiniteManualGateDAuthorization,
@@ -130,6 +131,7 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
   readonly provider = "xai" as const;
   state: "idle" | "ready" | "closed" = "idle";
   readonly operations: string[] = [];
+  readonly commitAckTimeouts: number[] = [];
   readonly appendedAudio: Pcm16Audio[] = [];
   readonly preparations: RealtimeResponsePreparation[] = [];
   readonly submittedResults: Array<Readonly<{
@@ -211,7 +213,8 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
     this.#wire("outbound", "input_audio_buffer.commit");
   }
 
-  async waitForInputAudioCommit() {
+  async waitForInputAudioCommit(timeoutMs?: number) {
+    this.commitAckTimeouts.push(timeoutMs ?? -1);
     this.operations.push("wait_for_commit_ack");
     if (this.#fault !== "unsolicited_vad") {
       const started = this.#wire(
@@ -605,6 +608,9 @@ describe("LC4 Gate D concrete xAI production adapter", () => {
       "submit_tool_result:false",
       "create_response:continuation",
       "close:1000:LC4 Gate D complete",
+    ]);
+    expect(client.commitAckTimeouts).toEqual([
+      LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
     ]);
     expect(client.submittedResults).toEqual([{
       createResponse: false,

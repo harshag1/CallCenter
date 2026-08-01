@@ -9,9 +9,12 @@
 
 ## 2026-07-21 HACC-LC3-v6 evaluator-development batch
 
-The latest paid run completed all 18 scheduled production-API episodes without
-retry or substitution. Its nine matched Native/HACC pairs produced 251 retained
-and independently transcribed assistant-output turns out of 360 scheduled.
+The latest completed paid comparative dataset contains all 18 scheduled
+production-API episodes, run without retry or substitution. Its nine matched
+Native/HACC pairs produced 251 retained and independently transcribed
+assistant-output turns out of 360 scheduled. Later paid LC4 attempts are
+retained as failed or quarantined transport/mechanism evidence, not completed
+comparative datasets.
 
 | Endpoint | Native | HACC |
 |---|---:|---:|

@@ -140,7 +140,7 @@ an arm-specific outcome.
 Once a call/episode opens, it remains in the denominator. Every missing
 scheduled opportunity is a failure, not missing-at-random data. An incomplete
 or unscorable episode cannot achieve strict success. The public publisher is
-stricter: it refuses output unless all six calls and all 24 preregistered
+stricter: it refuses output unless all six calls and all 36 preregistered
 physical provider sessions opened and completed, all 360 first-response
 listener observations and every selected repair-assisted listener observation
 replay, every authority artifact is scorable, the budget ledger is terminal,

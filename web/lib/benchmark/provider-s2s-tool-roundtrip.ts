@@ -10,6 +10,9 @@ import { createLc4ImmutableCas } from "./lc4-development-live-dependencies";
 import {
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
 } from "./lc4-development-gateway-bridge";
+import {
+  PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
+} from "./realtime-control-timeout";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
 import {
   trialAudioDeliveryProfileHash,
@@ -1718,7 +1721,9 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         throw new Error("provider commit acknowledgement barrier is unavailable");
       }
       try {
-        await input.client.waitForInputAudioCommit(5_000);
+        await input.client.waitForInputAudioCommit(
+          PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
+        );
       } catch {
         failure = "commit_acknowledgement_failed";
         throw new Error("provider did not acknowledge the explicit manual-turn commit");
