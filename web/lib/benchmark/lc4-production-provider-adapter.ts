@@ -3395,7 +3395,9 @@ export class Lc4RealtimeProviderBridge {
               if (typeof client.waitForInputAudioCommit !== "function") {
                 throw new Error("LC4 finite-clip xAI commit acknowledgement barrier is unavailable");
               }
-              const acknowledgement = await client.waitForInputAudioCommit(5_000);
+              const acknowledgement = await client.waitForInputAudioCommit(
+                LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+              );
               const acknowledgementReference = observedWireReference(
                 acknowledgement.wireObservation,
                 "commit acknowledgement barrier",
@@ -5157,7 +5159,9 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
       "input_audio_buffer.commit",
       "manual commit",
     );
-    const acknowledgement = await client.waitForInputAudioCommit(5_000);
+    const acknowledgement = await client.waitForInputAudioCommit(
+      LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+    );
     commitAck = lc4GateDObservedAttribution(
       acknowledgement.wireObservation,
       wire,

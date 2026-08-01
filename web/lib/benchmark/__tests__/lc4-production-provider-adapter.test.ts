@@ -531,6 +531,7 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
   readonly provider;
   state: "idle" | "ready" | "closed" = "idle";
   readonly events: string[];
+  readonly commitAckTimeouts: number[] = [];
   readonly #listeners = new Set<RealtimeEventListener>();
   readonly #wire = new Set<RealtimeWireObservationListener>();
   #wireSequence = 0;
@@ -966,7 +967,8 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
     this.#manualCommitOrdinal += 1;
     this.wire("input_audio_buffer.commit", {});
   }
-  async waitForInputAudioCommit() {
+  async waitForInputAudioCommit(timeoutMs?: number) {
+    this.commitAckTimeouts.push(timeoutMs ?? -1);
     this.events.push("commit-ack");
     const acknowledgement = this.wire("input_audio_buffer.committed", {}, "inbound");
     const wireObservation = wireReference(acknowledgement);
@@ -2845,6 +2847,9 @@ describe("LC4 production realtime adapter bridge", () => {
     ]);
     expect(events.filter((event) => event === "commit")).toHaveLength(1);
     expect(events.filter((event) => event === "commit-ack")).toHaveLength(1);
+    expect(client.commitAckTimeouts).toEqual([
+      LC4_DEV_TIMEOUT_CONTRACT.maximum_provider_control_or_commit_ack_ms,
+    ]);
     expect(events.filter((event) => event === "create")).toHaveLength(1);
     expect(events).not.toContain("session-update");
     expect(client.appendedAudio).toHaveLength(1);

@@ -41,7 +41,7 @@ using six preregistered 10-opportunity physical provider sessions. The
 resulting 36 transport sessions and 30 planned transitions are transport
 accounting, not additional calls or independent samples.
 
-A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That candidate matrix must not be used to describe the current LC4 Registered Native comparator.
+A separate, longer-term causal design—still not frozen—proposes `raw-full`, `full-harness`, `progressive-only`, `state-only`, `raw-memory`, and an `oracle-route` diagnostic ceiling. See [PROTOCOL.md](PROTOCOL.md) and [PREREGISTRATION.md](PREREGISTRATION.md). That generic 642-session candidate and the separate 144-episode LC4-v1 draft are unresolved design proposals; neither is preregistered or authorized. Neither may be used to describe the current six-cell LC4 Registered Native comparator.
 
 All paired conditions use the same provider model, voice, frozen caller PCM fixture library, condition-blind caller policy and seed, hidden world, business facts, leaf tool implementations and responses, limits, and failure schedule. When both arms select the same caller utterance, they receive identical bytes; a closed-loop caller may select a different next utterance after observable outcomes diverge. The intervention is the orchestration method, not extra information.
 
@@ -68,9 +68,9 @@ These are design hypotheses until the implementation and confirmatory evidence a
 - A plan-pinned Ed25519 kernel attestation binds an artifact to its run, condition, source/build hashes, final heads, and signing identity. Because the signer currently runs in-process, that signature proves provenance and detects mutation/substitution; it does **not** prove that the kernel described itself honestly. Replayable ToolWorld/event/receipt claims get their truth from independent deterministic replay against the frozen source. Private Flow claims remain tied to the pinned implementation and must not be described as independently observed. Provider settings that are not acknowledged stay labeled `unverifiable`.
 - Missing, invalid, or non-replayable final evidence is preserved and fails the strict endpoint. A kernel crash or absent attestation is never silently excluded.
 - Results include sample counts, paired effect sizes, uncertainty intervals, and per-provider breakdowns. No claim is made from a showcase run or a selectively retained subset.
-- Costs are controlled by [BUDGET.md](BUDGET.md). The current release sequence
-  is capped at `$19` and the remaining-work epoch must stay strictly below
-  `$250`, including active reservations.
+- Costs are controlled by [BUDGET.md](BUDGET.md). No further paid sequence is
+  currently authorized. Any future authorization must keep the remaining-work
+  epoch strictly below `$250`, including active reservations.
 
 ## Reproduce the deterministic engineering evidence
 

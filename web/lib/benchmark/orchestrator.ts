@@ -118,6 +118,9 @@ import {
 } from "./caller-world-scheduler";
 import type { AdmissibilityFrontierEvidence } from "./admissibility-frontier";
 import { HACC_SPEECH_GUARDRAIL_PACKET_KEY } from "./speech-guardrail-packet";
+import {
+  PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
+} from "./realtime-control-timeout";
 
 export type GatewayLeafExecutionRequest = Readonly<{
   action: string;
@@ -1876,7 +1879,9 @@ async function deliverCallerAudio(input: Readonly<{
         throw trialError("protocol_error", "commit_acknowledgement_failed", "provider commit acknowledgement barrier is unavailable", "turn", { fatal: true });
       }
       try {
-        await input.client.waitForInputAudioCommit(5_000);
+        await input.client.waitForInputAudioCommit(
+          PROVIDER_CONTROL_OR_COMMIT_ACK_TIMEOUT_MS,
+        );
       } catch (error) {
         throw trialError("protocol_error", "commit_acknowledgement_failed", errorMessage(error), "turn", { fatal: true });
       }
