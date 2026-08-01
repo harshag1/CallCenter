@@ -5,12 +5,12 @@
 - Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
   $250.00 USD**
 - Next declared paid sequence: **none authorized**
-- Post-baseline conservative paid-provider exposure: **$148.50 USD**
-- Post-baseline maximum after currently authorized work: **$148.50 USD**
+- Post-baseline conservative paid-provider exposure: **$161.00 USD**
+- Post-baseline maximum after currently authorized work: **$161.00 USD**
 - Ultra-conservative post-baseline maximum including frozen authority:
-  **$163.50 USD**
+  **$176.00 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$218.50 USD**
+- LC4 conservative filesystem-ledger settlements: **$231.00 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$4.379655 USD**, including the separate
@@ -24,10 +24,10 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
 
-Immutable roots have now conservatively charged **$148.50** after that
+Immutable roots have now conservatively charged **$161.00** after that
 baseline, with **$0.00** active. No further paid sequence is authorized. Even
 adding the separate, frozen, non-reusable **$15.00** authority produces an
-ultra-conservative **$163.50**, still below the user's remaining-work ceiling.
+ultra-conservative **$176.00**, still below the user's remaining-work ceiling.
 The frozen authority cannot fund a run and is not a settlement or invoice.
 
 No paid session in the next sequence may open until a new clean source commit,
@@ -1048,3 +1048,20 @@ unopened cells were cancelled with **$0.00** settlement.
 The DEV root is immutable and cannot be retried or resumed. Its report is
 incomplete, evidence-incomplete, unscorable, and efficacy-claim ineligible;
 it authorizes no comparative score or benchmark graph.
+
+## 2026-07-31 — `ff0c108` terminal hardening gate settlement
+
+All provider-free tests and release audits passed before a new exact-source
+xAI finite-manual Gate D was authorized. That one-shot gate failed closed at
+the provider transport boundary after its invocation claim:
+
+| Stage | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | failed; terminal-signed `provider_transport` evidence, zero retries/reconnects/fallbacks |
+| Three-provider qualification | **$0.00** | not authorized |
+| Six-cell DEV | **$0.00** | not authorized |
+
+The gate reports **$0 active**, **$1.00 settled**, and no retry permission.
+Failure evidence:
+`169d5753d34c9b89eeeafa02c3434aac7caa8edd6cabd8b6df4abb699a82c2ae`.
+No benchmark score or launch graph may be derived from this gate.
