@@ -314,10 +314,7 @@ export default function Studio() {
 
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6">
         {/* Flow */}
-        <p className="mt-5 shrink-0 text-center text-[13px] text-neutral-500">
-          Here&apos;s a starting point for your new agent. Edit it with the chat below, or try it out.
-        </p>
-        <div className="relative mt-3 h-[44vh] shrink-0 overflow-hidden rounded-[24px] border border-neutral-200">
+        <div className="relative mt-5 h-[44vh] shrink-0 overflow-hidden rounded-[24px] border border-neutral-200">
           {status && (
             <TopPills
               enabled={status.internet_enabled}
@@ -380,13 +377,13 @@ export default function Studio() {
                 onClick={() => setShowFlowInspector(true)}
                 className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-4 py-2 text-[12px] font-medium text-neutral-800 shadow-sm transition-transform duration-[240ms] hover:scale-[1.03]"
               >
-                <ScanSearch size={12} /> Inspect · free
+                <ScanSearch size={12} /> Inspect
               </button>
               <button
                 onClick={() => setShowLiveTestConfirm(true)}
                 className="flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
               >
-                <Play size={11} fill="currentColor" /> Test live
+                <Play size={11} fill="currentColor" /> Live test
               </button>
             </div>
           )}
@@ -396,24 +393,16 @@ export default function Studio() {
               aria-label="Flow inspection"
               className="absolute inset-x-3 bottom-3 z-20 rounded-2xl border border-neutral-200 bg-white/95 p-4 shadow-xl backdrop-blur"
             >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-semibold text-neutral-950">Flow inspection</span>
-                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">0 provider calls</span>
-                  </div>
-                  <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-                    Click any node after closing this card to inspect its context, steps, and scoped tools.
-                  </p>
-                </div>
+              <div className="flex justify-end">
                 <button
+                  aria-label="Close"
                   onClick={() => setShowFlowInspector(false)}
-                  className="text-[11px] font-medium text-neutral-500 hover:text-neutral-950"
+                  className="text-[16px] leading-none text-neutral-400 hover:text-neutral-950"
                 >
-                  Close
+                  ×
                 </button>
               </div>
-              <div className="mt-3 grid grid-cols-5 gap-2">
+              <div className="mt-1 grid grid-cols-5 gap-2">
                 {[
                   ["Nodes", inspection.nodeCount],
                   ["Routes", inspection.routeCount],
@@ -428,11 +417,11 @@ export default function Studio() {
                 ))}
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[10px] text-neutral-600">
-                <span className="font-medium text-neutral-800">{inspection.toolExposure === "gateway" ? "Progressive gateway" : "Direct tools"}</span>
+                <span className="font-medium text-neutral-800">{inspection.toolExposure === "gateway" ? "Gateway" : "Direct"}</span>
                 <span className="text-neutral-300">·</span>
-                <span>{inspection.alwaysTools.length} always available</span>
+                <span>{inspection.alwaysTools.length} global tools</span>
                 <span className="text-neutral-300">·</span>
-                <span>{inspection.scopedTools.length} scoped across the flow</span>
+                <span>{inspection.scopedTools.length} scoped</span>
               </div>
             </div>
           )}
@@ -443,9 +432,9 @@ export default function Studio() {
               aria-label="Confirm live provider test"
               className="absolute bottom-3 left-1/2 z-20 w-[min(92%,390px)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl"
             >
-              <p className="text-[13px] font-semibold text-neutral-950">Start a live provider test?</p>
+              <p className="text-[13px] font-semibold text-neutral-950">Live test</p>
               <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-                This opens your microphone and uses the configured realtime voice provider. Provider charges may apply.
+                Uses your microphone and realtime provider credits.
               </p>
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button
@@ -462,7 +451,7 @@ export default function Studio() {
                   }}
                   className="flex items-center gap-1.5 rounded-full bg-neutral-950 px-3.5 py-1.5 text-[11px] font-medium text-white hover:bg-neutral-800"
                 >
-                  <Play size={10} fill="currentColor" /> Start live test
+                  <Play size={10} fill="currentColor" /> Start
                 </button>
               </div>
             </div>
@@ -512,7 +501,7 @@ export default function Studio() {
                 rows={1}
                 ref={inputRef}
                 value={input}
-                placeholder={brand ? `Refine the ${brand} Agent` : "Refine your agent"}
+                placeholder="Describe a change"
                 onChange={(e) => { setInput(e.target.value); autoGrow(); }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
