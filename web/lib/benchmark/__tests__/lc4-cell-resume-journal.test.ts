@@ -411,7 +411,7 @@ describe("LC4 whole-cell paid resume journal", () => {
     expect(JSON.parse(stdout[0]!)).toMatchObject({
       command: "resume-status",
       provider_calls_made: null,
-      automatic_run_resume_supported: false,
+      automatic_run_resume_supported: true,
       resume: { state: "ready", scoring_available: false },
       budget: { paused: false, active_reservations_micro_usd: 0 },
     });

@@ -30,6 +30,7 @@ const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-plan/v1\n";
 const EVENT_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-event/v1\n";
 const SNAPSHOT_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-snapshot/v1\n";
 const CREDIT_DOMAIN = "harshas-amazing-call-center/lc4-provider-credit-rejection/v1\n";
+const CUSTODY_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-custody/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
@@ -145,6 +146,33 @@ export type Lc4CellResumeStatus = Readonly<{
   all_cells_completed: boolean;
   scoring_available: boolean;
 }>;
+
+export type Lc4CellResumeCustodyBinding = Readonly<{
+  cell_resume_plan_sha256: string;
+  cell_resume_terminal_head_sha256: string;
+  completed_cell_artifact_set_sha256: string;
+  completed_cell_count: number;
+  all_cells_completed: boolean;
+  quarantine_present: boolean;
+}>;
+
+export function createLc4CellResumeCustodyBinding(
+  status: Lc4CellResumeStatus,
+): Lc4CellResumeCustodyBinding {
+  requireHash(status.plan_sha256, "custody plan_sha256");
+  requireHash(status.head_sha256, "custody head_sha256");
+  const completedCellArtifactSetSha256 = sha256Hex(
+    `${CUSTODY_DOMAIN}${canonicalJson(status.completed_cells)}`,
+  );
+  return Object.freeze({
+    cell_resume_plan_sha256: status.plan_sha256,
+    cell_resume_terminal_head_sha256: status.head_sha256,
+    completed_cell_artifact_set_sha256: completedCellArtifactSetSha256,
+    completed_cell_count: status.completed_cells.length,
+    all_cells_completed: status.all_cells_completed,
+    quarantine_present: status.quarantined_cell_ids.length > 0,
+  });
+}
 
 function fail(message: string): never {
   throw new Error(`LC4 cell resume refused: ${message}`);

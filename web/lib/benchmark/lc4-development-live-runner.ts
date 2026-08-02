@@ -2231,6 +2231,59 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   return result.run;
 }
 
+export function createLc4DevInterruptedTerminalRun(input: Readonly<{
+  prepare: Lc4DevLivePrepareArtifact;
+  preflight: Lc4DevLivePreflightArtifact;
+  completed_prefix?: Lc4DevLiveRunPrefixArtifact;
+  completed_at: string;
+  failure_evidence_sha256: string;
+}>): Lc4DevLiveRunArtifact {
+  if (input.completed_prefix) {
+    assertLc4DevLiveRunPrefixArtifact(input.completed_prefix, input.prepare, input.preflight);
+  }
+  requireHash(input.failure_evidence_sha256, "LC4-DEV interrupted failure evidence");
+  assertCanonicalTimestamp(input.completed_at, "LC4-DEV interrupted terminal completed_at");
+  const prefix = input.completed_prefix;
+  const ledger = Object.freeze([...(prefix?.ledger ?? [])]);
+  const body = freeze({
+    schema_version: 3 as const,
+    execution_id: input.prepare.execution_id,
+    prepare_sha256: input.prepare.prepare_sha256,
+    preflight_sha256: input.preflight.preflight_sha256,
+    started_at: prefix?.started_at ?? input.preflight.checked_at,
+    completed_at: input.completed_at,
+    status: "failed" as const,
+    episodes_started: prefix?.episodes_started ?? 0,
+    episodes_completed: prefix?.episodes_completed ?? 0,
+    provider_segment_intent_count: prefix?.provider_segment_intent_count ?? 0,
+    provider_segment_opened_count: prefix?.provider_segment_opened_count ?? 0,
+    opportunities_submitted: prefix?.opportunities_submitted ?? 0,
+    opportunities_completed: prefix?.opportunities_completed ?? 0,
+    response_generations_requested: prefix?.response_generations_requested ?? 0,
+    provider_calls_started: prefix?.provider_calls_started ?? 0,
+    response_generations_completed: prefix?.response_generations_completed ?? 0,
+    provider_calls_made: prefix?.provider_calls_started ?? 0,
+    repair_playbacks: prefix?.repair_playbacks ?? 0,
+    total_response_generations: prefix?.response_generations_completed ?? 0,
+    paid_retry_count: 0 as const,
+    maximum_total_micro_usd: input.prepare.maximum_total_micro_usd,
+    retained_caller_audio: prefix?.retained_caller_audio ?? 0,
+    retained_assistant_audio: prefix?.retained_assistant_audio ?? 0,
+    listener_evidence_count: prefix?.listener_evidence_count ?? 0,
+    mechanism_receipt_count: prefix?.mechanism_receipt_count ?? 0,
+    episode_finalization_count: prefix?.episode_finalization_count ?? 0,
+    replay_evidence_reference_count: ledger.reduce(
+      (total, event) => total + 1 + event.evidence_references.length,
+      0,
+    ),
+    failure_class: "transport" as const,
+    failure_message_sha256: input.failure_evidence_sha256,
+    ledger,
+    ledger_head_sha256: prefix?.ledger_head_sha256 ?? null,
+  });
+  return freeze({ ...body, run_sha256: hash(RUN_DOMAIN, body) });
+}
+
 export type Lc4DevLiveReportArtifact = Readonly<{
   schema_version: 2;
   execution_id: string;

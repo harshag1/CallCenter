@@ -38,6 +38,7 @@ import {
   createLc4DevLivePreflightArtifact,
   createLc4DevLivePrepareArtifact,
   createLc4DevLiveReportArtifact,
+  createLc4DevInterruptedTerminalRun,
   assertLc4DevLiveRunPrefixArtifact,
   executeLc4DevLiveRunSlice,
   lc4DevLiveAuthorizationArtifactSha256,
@@ -87,6 +88,7 @@ import {
   beginLc4Cell,
   claimLc4PausedCell,
   completeLc4Cell,
+  createLc4CellResumeCustodyBinding,
   createLc4CellResumePlan,
   initializeLc4CellResumeJournal,
   inspectLc4CellResumeJournal,
@@ -817,8 +819,8 @@ export async function runLc4DevelopmentOperatorCli(
         },
         provider_calls_made: null,
         provider_calls_reason: "cell_journal_does_not_fabricate_opportunity_counts",
-        automatic_run_resume_supported: false,
-        claim_boundary: "only_unopened_pre_network_cells_are_resume_eligible_composite_runner_not_yet_available",
+        automatic_run_resume_supported: resume.state === "ready" || resume.state === "paused_before_network",
+        claim_boundary: "completed_cells_are_immutable_and_only_the_exact_next_unopened_pre_network_cell_can_continue",
       }));
       return 0;
     }
@@ -1089,16 +1091,54 @@ export async function runLc4DevelopmentOperatorCli(
         "--xai-gate-d-receipt",
         "--xai-gate-d-trust-root",
       ]));
-      const runtime = await runtimeFromFlags(parsed, dependencies);
-      if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const repositoryRoot = absolute(parsed["--repository-root"]!, "LC4-DEV repository root");
       const evidenceRoot = absolute(parsed["--evidence-root"]!, "LC4-DEV evidence root");
       assertOutside(evidenceRoot, repositoryRoot);
-      await Promise.all([
-        assertAbsent(artifactPath(evidenceRoot, "run"), "LC4-DEV terminal run artifact"),
-        assertAbsent(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV terminal budget evidence"),
-        assertAbsent(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),
-      ]);
+      const terminalExists = await lstat(artifactPath(evidenceRoot, "run"))
+        .then(() => true).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        });
+      if (terminalExists) {
+        const [prepare, preflight, run, lease, evidence, runPackage, cellResume] = await Promise.all([
+          readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
+          readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+          readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV terminal run artifact"),
+          readBoundedJson<Lc4DevRunLease>(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV budget lease"),
+          readBoundedJson<Lc4DevBudgetEvidence>(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV terminal budget evidence"),
+          readBoundedJson<Lc4DevRunPackage>(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),
+          inspectLc4CellResumeJournal({ journal_path: artifactPath(evidenceRoot, "cell_resume_journal") }),
+        ]);
+        assertLc4DevLivePrepareArtifact(prepare);
+        assertLc4DevLivePreflightArtifact(preflight, prepare, new Date(preflight.checked_at));
+        await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({
+          lease,
+          binding: { prepare, preflight },
+          evidence,
+          now: io.now,
+        });
+        assertLc4DevRunPackage({
+          package: runPackage,
+          lease,
+          evidence,
+          run,
+          cell_custody: createLc4CellResumeCustodyBinding(cellResume),
+        });
+        io.stdout(canonicalJson({
+          command: "run",
+          execution_id: run.execution_id,
+          status: run.status,
+          terminal_replayed: true,
+          run_sha256: run.run_sha256,
+          run_package_sha256: runPackage.package_sha256,
+          budget_terminal_ledger_head_sha256: evidence.terminal_ledger_head_sha256,
+          provider_calls_made: run.provider_calls_made,
+          paid_retry_count: run.paid_retry_count,
+        }));
+        return run.status === "completed" ? 0 : 2;
+      }
+      const runtime = await runtimeFromFlags(parsed, dependencies);
+      if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const [prepare, preflight, source, audio, qualification, credentials, signer] = await Promise.all([
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
         readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
@@ -1109,6 +1149,11 @@ export async function runLc4DevelopmentOperatorCli(
         loadSigner(parsed["--authority-private-key-source"]!),
       ]);
       assertLc4DevLivePrepareArtifact(prepare);
+      const leasePath = artifactPath(evidenceRoot, "budget_lease");
+      const existingLease = await lstat(leasePath).then(() => true).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      });
       const xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
         receipt_path: parsed["--xai-gate-d-receipt"]!,
         plan_trust_root_sha256:
@@ -1118,7 +1163,11 @@ export async function runLc4DevelopmentOperatorCli(
         expected_provider_profile_manifest_sha256:
           LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
       });
-      assertLc4DevLivePreflightArtifact(preflight, prepare, io.now());
+      assertLc4DevLivePreflightArtifact(
+        preflight,
+        prepare,
+        existingLease ? new Date(preflight.checked_at) : io.now(),
+      );
       if (source.source_commit !== prepare.source_commit || source.source_tree_sha256 !== prepare.source_tree_sha256) throw new Error("LC4-DEV run source differs from prepare");
       if (qualification.receipt_sha256 !== preflight.qualification.receipt_sha256) throw new Error("LC4-DEV run qualification differs from preflight");
       if (xaiFiniteManualGateD.receipt_sha256
@@ -1139,11 +1188,6 @@ export async function runLc4DevelopmentOperatorCli(
         || roots.asr_evaluator_toolchain_sha256 !== preflight.asr_evaluator_toolchain_sha256) {
         throw new Error("LC4-DEV executable runtime, ASR evaluator build, or toolchain roots differ from preflight");
       }
-      const leasePath = artifactPath(evidenceRoot, "budget_lease");
-      const existingLease = await lstat(leasePath).then(() => true).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return false;
-        throw error;
-      });
       const budgetLease = existingLease
         ? await readBoundedJson<Lc4DevRunLease>(leasePath, "LC4-DEV budget lease")
         : await reserveLc4DevRunBudget({
@@ -1151,7 +1195,12 @@ export async function runLc4DevelopmentOperatorCli(
             binding: { prepare, preflight },
             now: io.now,
           });
-      assertLc4DevRunLease({ lease: budgetLease, binding: { prepare, preflight }, now: io.now(), admission: true });
+      assertLc4DevRunLease({
+        lease: budgetLease,
+        binding: { prepare, preflight },
+        now: existingLease ? new Date(budgetLease.admitted_at) : io.now(),
+        admission: true,
+      });
       if (!existingLease) await writeImmutableJson(leasePath, budgetLease);
       const resumePlan = createLc4CellResumePlan({
         prepare,
@@ -1174,26 +1223,7 @@ export async function runLc4DevelopmentOperatorCli(
             journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
             plan: resumePlan,
           });
-      if (resumeStatus.state === "network_ambiguous") {
-        if (resumeStatus.quarantined_cell_ids.length === 0) {
-          resumeStatus = await quarantineLc4InterruptedNetworkCell({
-            journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
-            expected_head_sha256: resumeStatus.head_sha256,
-            expected_plan: resumePlan,
-            failure_evidence_sha256: sha256Hex(canonicalJson({
-              execution_id: prepare.execution_id,
-              active_cell_id: resumeStatus.active_cell_id,
-              reason: "process_restarted_after_network_admission_without_terminal_cell",
-            })),
-            now: io.now,
-          });
-        }
-        throw new Error("LC4-DEV network-admitted nonterminal cell is quarantined; composite scoring is permanently withheld");
-      }
-      if (resumeStatus.state === "owned_before_network") {
-        throw new Error("LC4-DEV pre-network owner is still nonterminal; use the explicit pause/claim recovery before continuing");
-      }
-      const completedPrefix = await loadLc4DevCompletedPrefix({
+      let completedPrefix = await loadLc4DevCompletedPrefix({
         evidence_root: evidenceRoot,
         prepare,
         preflight,
@@ -1202,6 +1232,77 @@ export async function runLc4DevelopmentOperatorCli(
       });
       if (completedPrefix?.completed_episode_ids.length !== resumeStatus.completed_cell_ids.length) {
         throw new Error("LC4-DEV completed prefix count differs from journal custody");
+      }
+      if (resumeStatus.state === "network_ambiguous") {
+        const ambiguityEvidenceSha256 = sha256Hex(canonicalJson({
+          execution_id: prepare.execution_id,
+          active_cell_id: resumeStatus.active_cell_id,
+          reason: "process_restarted_after_network_admission_without_terminal_cell",
+        }));
+        if (resumeStatus.quarantined_cell_ids.length === 0) {
+          resumeStatus = await quarantineLc4InterruptedNetworkCell({
+            journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+            expected_head_sha256: resumeStatus.head_sha256,
+            expected_plan: resumePlan,
+            failure_evidence_sha256: ambiguityEvidenceSha256,
+            now: io.now,
+          });
+        }
+        completedPrefix = await loadLc4DevCompletedPrefix({
+          evidence_root: evidenceRoot,
+          prepare,
+          preflight,
+          plan: resumePlan,
+          status: resumeStatus,
+        });
+        const run = createLc4DevInterruptedTerminalRun({
+          prepare,
+          preflight,
+          completed_prefix: completedPrefix,
+          completed_at: io.now().toISOString(),
+          failure_evidence_sha256: ambiguityEvidenceSha256,
+        });
+        await writeImmutableJson(artifactPath(evidenceRoot, "run"), run);
+        await chmod(artifactPath(evidenceRoot, "ledger"), 0o400);
+        const budgetEvidence = await finalizeLc4DevRunBudget({
+          lease: budgetLease,
+          binding: { prepare, preflight },
+          run,
+          now: io.now,
+        });
+        await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({
+          lease: budgetLease,
+          binding: { prepare, preflight },
+          evidence: budgetEvidence,
+          now: io.now,
+        });
+        const runPackage = createLc4DevRunPackage({
+          lease: budgetLease,
+          evidence: budgetEvidence,
+          run,
+          cell_custody: createLc4CellResumeCustodyBinding(resumeStatus),
+        });
+        await writeImmutableJsonPair({
+          first_path: artifactPath(evidenceRoot, "budget_evidence"),
+          first_value: budgetEvidence,
+          second_path: artifactPath(evidenceRoot, "run_package"),
+          second_value: runPackage,
+        });
+        io.stdout(canonicalJson({
+          command: "run",
+          execution_id: run.execution_id,
+          status: run.status,
+          terminal_reason: "network_admitted_cell_quarantined",
+          run_sha256: run.run_sha256,
+          run_package_sha256: runPackage.package_sha256,
+          budget_terminal_ledger_head_sha256: budgetEvidence.terminal_ledger_head_sha256,
+          provider_calls_made: run.provider_calls_made,
+          paid_retry_count: run.paid_retry_count,
+        }));
+        return 2;
+      }
+      if (resumeStatus.state === "owned_before_network") {
+        throw new Error("LC4-DEV pre-network owner is still nonterminal; use the explicit pause/claim recovery before continuing");
       }
       const budgetAuthority = new Lc4DevBudgetLifecycle({
         lease: budgetLease,
@@ -1349,7 +1450,12 @@ export async function runLc4DevelopmentOperatorCli(
           evidence,
           now: io.now,
         }),
-        create_run_package: (run, evidence) => createLc4DevRunPackage({ lease: budgetLease, evidence, run }),
+        create_run_package: (run, evidence) => createLc4DevRunPackage({
+          lease: budgetLease,
+          evidence,
+          run,
+          cell_custody: createLc4CellResumeCustodyBinding(resumeStatus),
+        }),
         write_terminal_pair: (evidence, runPackage) => writeImmutableJsonPair({
           first_path: artifactPath(evidenceRoot, "budget_evidence"),
           first_value: evidence,
@@ -1387,7 +1493,13 @@ export async function runLc4DevelopmentOperatorCli(
         throw new Error("LC4-DEV report run differs from its prepare/preflight custody chain");
       }
       await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({ lease: budgetLease, binding: { prepare, preflight }, evidence: budgetEvidence, now: io.now });
-      assertLc4DevRunPackage({ package: runPackage, lease: budgetLease, evidence: budgetEvidence, run });
+      assertLc4DevRunPackage({
+        package: runPackage,
+        lease: budgetLease,
+        evidence: budgetEvidence,
+        run,
+        cell_custody: runPackage.cell_custody,
+      });
       const authority = await (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
         run,
         preflight,

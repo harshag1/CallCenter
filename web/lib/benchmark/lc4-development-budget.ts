@@ -22,6 +22,7 @@ import type {
   Lc4DevLivePrepareArtifact,
   Lc4DevLiveRunArtifact,
 } from "./lc4-development-live-runner";
+import type { Lc4CellResumeCustodyBinding } from "./lc4-cell-resume-journal";
 import {
   LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
   LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
@@ -124,8 +125,8 @@ export type Lc4DevBudgetEvidence = Readonly<{
 }>;
 
 export type Lc4DevRunPackage = Readonly<{
-  schema_version: 1;
-  package_version: "HACC-LC4-DEV-RUN-PACKAGE-v1";
+  schema_version: 2;
+  package_version: "HACC-LC4-DEV-RUN-PACKAGE-v2";
   execution_id: string;
   prepare_sha256: string;
   preflight_sha256: string;
@@ -134,6 +135,7 @@ export type Lc4DevRunPackage = Readonly<{
   budget_terminal_evidence_sha256: string;
   budget_terminal_ledger_head_sha256: string;
   budget_ledger_public_key_fingerprint_sha256: string;
+  cell_custody: Lc4CellResumeCustodyBinding;
   package_sha256: string;
 }>;
 
@@ -638,6 +640,7 @@ export function createLc4DevRunPackage(input: Readonly<{
   lease: Lc4DevRunLease;
   evidence: Lc4DevBudgetEvidence;
   run: Lc4DevLiveRunArtifact;
+  cell_custody: Lc4CellResumeCustodyBinding;
 }>): Lc4DevRunPackage {
   if (input.run.execution_id !== input.lease.execution_id
     || input.run.run_sha256 !== input.evidence.run_sha256
@@ -645,9 +648,26 @@ export function createLc4DevRunPackage(input: Readonly<{
     || input.evidence.execution_id !== input.lease.execution_id) {
     throw new Error("LC4-DEV run package inputs do not share one execution authority");
   }
+  for (const digest of [
+    input.cell_custody.cell_resume_plan_sha256,
+    input.cell_custody.cell_resume_terminal_head_sha256,
+    input.cell_custody.completed_cell_artifact_set_sha256,
+  ]) {
+    if (!HASH.test(digest)) throw new Error("LC4-DEV run package cell custody hash is invalid");
+  }
+  if (!Number.isSafeInteger(input.cell_custody.completed_cell_count)
+    || input.cell_custody.completed_cell_count < 0
+    || input.cell_custody.completed_cell_count > 6
+    || (input.run.status === "completed"
+      && (!input.cell_custody.all_cells_completed
+        || input.cell_custody.quarantine_present
+        || input.cell_custody.completed_cell_count !== 6))
+    || (input.cell_custody.quarantine_present && input.run.status !== "failed")) {
+    throw new Error("LC4-DEV run package cell custody disposition differs from terminal run");
+  }
   const body = Object.freeze({
-    schema_version: 1 as const,
-    package_version: "HACC-LC4-DEV-RUN-PACKAGE-v1" as const,
+    schema_version: 2 as const,
+    package_version: "HACC-LC4-DEV-RUN-PACKAGE-v2" as const,
     execution_id: input.run.execution_id,
     prepare_sha256: input.run.prepare_sha256,
     preflight_sha256: input.run.preflight_sha256,
@@ -656,6 +676,7 @@ export function createLc4DevRunPackage(input: Readonly<{
     budget_terminal_evidence_sha256: input.evidence.evidence_sha256,
     budget_terminal_ledger_head_sha256: input.evidence.terminal_ledger_head_sha256,
     budget_ledger_public_key_fingerprint_sha256: input.evidence.ledger_public_key_fingerprint_sha256,
+    cell_custody: input.cell_custody,
   });
   return Object.freeze({ ...body, package_sha256: sha256Hex(`${PACKAGE_DOMAIN}${canonicalJson(body)}`) });
 }
@@ -665,6 +686,7 @@ export function assertLc4DevRunPackage(input: Readonly<{
   lease: Lc4DevRunLease;
   evidence: Lc4DevBudgetEvidence;
   run: Lc4DevLiveRunArtifact;
+  cell_custody: Lc4CellResumeCustodyBinding;
 }>): void {
   const expected = createLc4DevRunPackage(input);
   if (canonicalJson(expected) !== canonicalJson(input.package)) throw new Error("LC4-DEV run package hash or binding mismatch");

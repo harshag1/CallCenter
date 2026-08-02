@@ -182,7 +182,19 @@ async function runReportCase(run: Lc4DevLiveRunArtifact, authority: AuthorityRep
     terminal_ledger_head_sha256: sha256Hex("operator-test-budget-head"),
     ledger_public_key_fingerprint_sha256: sha256Hex("operator-test-budget-key"),
   } as Lc4DevBudgetEvidence;
-  const runPackage = createLc4DevRunPackage({ lease: budgetLease, evidence: budgetEvidence, run });
+  const runPackage = createLc4DevRunPackage({
+    lease: budgetLease,
+    evidence: budgetEvidence,
+    run,
+    cell_custody: {
+      cell_resume_plan_sha256: "1".repeat(64),
+      cell_resume_terminal_head_sha256: "2".repeat(64),
+      completed_cell_artifact_set_sha256: "3".repeat(64),
+      completed_cell_count: run.status === "completed" ? 6 : 0,
+      all_cells_completed: run.status === "completed",
+      quarantine_present: false,
+    },
+  });
   await Promise.all([
     writeFile(join(root, "prepare.json"), `${canonicalJson(custody.prepare)}\n`, { mode: 0o400 }),
     writeFile(join(root, "run.json"), `${canonicalJson(run)}\n`, { mode: 0o400 }),

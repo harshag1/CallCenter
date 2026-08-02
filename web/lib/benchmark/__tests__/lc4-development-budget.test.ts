@@ -246,13 +246,22 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     expect(evidence.reservations[0]).toMatchObject({ status: "settled", terminal_outcome: "failed", conservative_settled_micro_usd: 2_499_999 });
     expect(evidence.reservations.slice(1).every((item) => item.status === "cancelled" && item.conservative_settled_micro_usd === 0)).toBe(true);
     await expect(replayLc4DevBudgetEvidence({ lease, binding: bindingValue, evidence, now })).resolves.toBeUndefined();
-    const runPackage = createLc4DevRunPackage({ lease, evidence, run });
-    expect(() => assertLc4DevRunPackage({ package: runPackage, lease, evidence, run })).not.toThrow();
+    const cellCustody = {
+      cell_resume_plan_sha256: "1".repeat(64),
+      cell_resume_terminal_head_sha256: "2".repeat(64),
+      completed_cell_artifact_set_sha256: "3".repeat(64),
+      completed_cell_count: 0,
+      all_cells_completed: false,
+      quarantine_present: true,
+    } as const;
+    const runPackage = createLc4DevRunPackage({ lease, evidence, run, cell_custody: cellCustody });
+    expect(() => assertLc4DevRunPackage({ package: runPackage, lease, evidence, run, cell_custody: cellCustody })).not.toThrow();
     expect(() => assertLc4DevRunPackage({
       package: { ...runPackage, budget_terminal_ledger_head_sha256: "0".repeat(64) },
       lease,
       evidence,
       run,
+      cell_custody: cellCustody,
     })).toThrow("package hash or binding mismatch");
 
     const tampered = { ...evidence, conservative_settled_micro_usd: 0 };

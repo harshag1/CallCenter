@@ -21,6 +21,10 @@ import {
 } from "./lc4-development-budget";
 import { replayLc4DevAuthorityReport } from "./lc4-development-live-dependencies";
 import {
+  createLc4CellResumeCustodyBinding,
+  inspectLc4CellResumeJournal,
+} from "./lc4-cell-resume-journal";
+import {
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   createLc4DevLiveReportArtifact,
@@ -336,7 +340,16 @@ async function verifyLc4DevEvidenceRootWithDependencies(
     binding: { prepare, preflight },
     evidence: budget,
   });
-  assertLc4DevRunPackage({ package: packageArtifact, lease, evidence: budget, run });
+  const cellResume = await inspectLc4CellResumeJournal({
+    journal_path: resolve(evidenceRoot, LC4_DEV_OPERATOR_FILENAMES.cell_resume_journal),
+  });
+  assertLc4DevRunPackage({
+    package: packageArtifact,
+    lease,
+    evidence: budget,
+    run,
+    cell_custody: createLc4CellResumeCustodyBinding(cellResume),
+  });
 
   const casRoot = resolve(evidenceRoot, LC4_DEV_OPERATOR_FILENAMES.cas);
   await assertRealDirectory(casRoot, "LC4-DEV CAS root");
