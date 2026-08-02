@@ -22,6 +22,7 @@ if (phase === "initial") {
     scenario,
     action: "reserve_part",
     arguments: { work_order_id: scenario.work_order_id, sku: scenario.repair.part_sku },
+    probe: true,
   });
 
   appendEvent(journalPath, "safety.branch.entered", { reason: "authoritative_clearance_available" });

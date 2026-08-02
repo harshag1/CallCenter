@@ -64,6 +64,7 @@ function initialState() {
     completed_goals: [],
     facts: {},
     receipts: {},
+    admission_denials: [],
     workers: {},
     trace: [],
   };
@@ -103,6 +104,9 @@ export function replay(path) {
         break;
       case "action.receipt.recorded":
         state.receipts[payload.receipt_id] = payload;
+        break;
+      case "action.admission.denied":
+        state.admission_denials.push(payload);
         break;
       case "action.receipt.reconciled":
         state.receipts[payload.receipt_id] = {
@@ -164,7 +168,7 @@ function successfulReceipt(state, action) {
   return Object.values(state.receipts).some((receipt) => receipt.action === action && receipt.status === "succeeded");
 }
 
-export function governedMutation({ journalPath, worldPath, scenario, action, arguments: args, loseResponse = false, confirmation }) {
+export function governedMutation({ journalPath, worldPath, scenario, action, arguments: args, loseResponse = false, confirmation, probe = false }) {
   const { state, head_hash: authorityHead } = replay(journalPath);
   // Invocation identity is bound to the exact durable authority snapshot. A
   // denied attempt and a later authorized attempt therefore cannot collapse
@@ -175,16 +179,16 @@ export function governedMutation({ journalPath, worldPath, scenario, action, arg
   const idempotencyKey = stableId("idem", scenario.conversation_id, action, canonicalJson(args));
   const deniedReason = actionAllowed(state, action, confirmation);
   if (deniedReason) {
-    appendEvent(journalPath, "action.receipt.recorded", {
-      receipt_id: receiptId,
+    appendEvent(journalPath, "action.admission.denied", {
+      admission_id: stableId("admission", invocationId),
       invocation_id: invocationId,
       action,
-      status: "denied",
       reason: deniedReason,
+      required_attempt: !probe,
       authority_head: authorityHead,
       effect_count: 0,
     });
-    return { receiptId, status: "denied" };
+    return { receiptId: null, status: "denied" };
   }
 
   const world = readWorld(worldPath);
@@ -226,26 +230,68 @@ export function reconcileMutation({ journalPath, worldPath, receiptId }) {
   return effect;
 }
 
+const requiredActions = [
+  "schedule_visit",
+  "send_visit_confirmation",
+  "reserve_part",
+  "record_repair",
+  "close_work_order",
+  "notify_dispatch",
+];
+
+function authoritativeSuccess(state, world, action) {
+  const receipts = Object.values(state.receipts).filter((receipt) => receipt.action === action && receipt.status === "succeeded");
+  if (receipts.length !== 1) return false;
+  const receipt = receipts[0];
+  return typeof receipt.idempotency_key === "string" &&
+    world.dispatch_count[receipt.idempotency_key] === 1 &&
+    canonicalJson(world.effects[receipt.idempotency_key]) === canonicalJson(receipt.result);
+}
+
+export function evaluateProofEvidence({ state, world, distinctProcesses, replayStateHash, journalIntegrityVerified }) {
+  const receipts = Object.values(state.receipts);
+  const reserveReceipt = receipts.find((receipt) => receipt.action === "reserve_part" && receipt.status === "succeeded");
+  const deniedSafetyProbe = state.admission_denials.find((denial) => denial.action === "reserve_part" && denial.required_attempt === false);
+  const worker = Object.values(state.workers)[0];
+  const deniedRequired = state.admission_denials.some((denial) => denial.required_attempt && requiredActions.includes(denial.action)) ||
+    receipts.some((receipt) => requiredActions.includes(receipt.action) && receipt.status === "denied");
+  const unresolvedRequired = receipts.some((receipt) => requiredActions.includes(receipt.action) && receipt.status !== "succeeded");
+  const requiredEffectsSucceeded = requiredActions.every((action) => authoritativeSuccess(state, world, action));
+  const registeredGoalPredicatesSatisfied = state.status === "completed" && state.active_goal === null &&
+    state.goal_stack.length === 0 && state.completed_goals.includes("schedule_followup") &&
+    state.completed_goals.includes("repair") && requiredEffectsSucceeded;
+  const assertions = {
+    classified: state.trace.includes("intent.classified"),
+    safety_branch_blocked_unsafe_mutation: deniedSafetyProbe?.reason === "safety_clearance_required" && deniedSafetyProbe.effect_count === 0,
+    detour_resumed_original_goal: state.completed_goals.includes("schedule_followup") &&
+      state.completed_goals.includes("repair") && successfulReceipt(state, "schedule_visit") &&
+      successfulReceipt(state, "send_visit_confirmation"),
+    lost_response_reconciled_without_retry: reserveReceipt?.reconciliation === "authoritative_read_by_idempotency_key" &&
+      world.dispatch_count[reserveReceipt.idempotency_key] === 1,
+    worker_was_read_only: worker?.status === "succeeded" && worker?.capabilities?.length === 1 && worker?.mutation_count === 0,
+    fresh_process_replay: distinctProcesses === true && replayStateHash === digest(state),
+    journal_integrity_verified: journalIntegrityVerified === true,
+    no_denied_required_actions: !deniedRequired,
+    no_unresolved_required_receipts: !unresolvedRequired,
+    registered_goal_predicates_satisfied: registeredGoalPredicatesSatisfied,
+    terminal_actions_authoritatively_succeeded: authoritativeSuccess(state, world, "close_work_order") &&
+      authoritativeSuccess(state, world, "notify_dispatch"),
+    mission_completed: registeredGoalPredicatesSatisfied && !deniedRequired && !unresolvedRequired,
+  };
+  return { assertions, passed: Object.values(assertions).every(Boolean) };
+}
+
 export function finalArtifact({ journalPath, worldPath, distinctProcesses, replayStateHash }) {
   const { events, state, head_hash: headHash } = replay(journalPath);
   const world = readWorld(worldPath);
   const receipts = Object.values(state.receipts).sort((a, b) => a.receipt_id.localeCompare(b.receipt_id));
-  const reserveReceipt = receipts.find((receipt) => receipt.action === "reserve_part" && receipt.status === "succeeded");
-  const deniedReceipt = receipts.find((receipt) => receipt.action === "reserve_part" && receipt.status === "denied");
-  const worker = Object.values(state.workers)[0];
-  const effectCounts = Object.values(world.dispatch_count);
-  const assertions = {
-    classified: state.trace.includes("intent.classified"),
-    safety_branch_blocked_unsafe_mutation: deniedReceipt?.reason === "safety_clearance_required" && deniedReceipt.effect_count === 0,
-    detour_resumed_original_goal: state.completed_goals.includes("schedule_followup") &&
-      state.completed_goals.includes("repair") && successfulReceipt(state, "schedule_visit") &&
-      successfulReceipt(state, "send_visit_confirmation"),
-    lost_response_reconciled_without_retry: reserveReceipt?.reconciliation === "authoritative_read_by_idempotency_key" && Math.max(...effectCounts) === 1,
-    worker_was_read_only: worker?.status === "succeeded" && worker?.capabilities?.length === 1 && worker?.mutation_count === 0,
-    fresh_process_replay: distinctProcesses === true && replayStateHash === digest(state),
-    journal_integrity_verified: events.length > 0,
-    mission_completed: state.status === "completed",
-  };
+  const evaluation = evaluateProofEvidence({
+    state,
+    world,
+    distinctProcesses,
+    replayStateHash,
+    journalIntegrityVerified: events.length > 0,
+  });
   return {
     schema_version: 1,
     proof: "hacc-provider-free-field-service-v1",
@@ -257,8 +303,8 @@ export function finalArtifact({ journalPath, worldPath, distinctProcesses, repla
     journal_head_sha256: headHash,
     final_state_sha256: digest(state),
     world_sha256: digest(world),
-    assertions,
-    passed: Object.values(assertions).every(Boolean),
+    assertions: evaluation.assertions,
+    passed: evaluation.passed,
     final_state: state,
     authoritative_world: world,
     receipts,

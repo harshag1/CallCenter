@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { digest, evaluateProofEvidence } from "./proof-runtime.mjs";
 import { runProof } from "./run-proof.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,10 @@ test("field-service proof is deterministic, complete, and provider-free", () => 
     worker_was_read_only: true,
     fresh_process_replay: true,
     journal_integrity_verified: true,
+    no_denied_required_actions: true,
+    no_unresolved_required_receipts: true,
+    registered_goal_predicates_satisfied: true,
+    terminal_actions_authoritatively_succeeded: true,
     mission_completed: true,
   });
   assert.equal(first.provider, null);
@@ -34,6 +39,35 @@ test("field-service proof is deterministic, complete, and provider-free", () => 
   const reserve = first.receipts.find((receipt) => receipt.action === "reserve_part" && receipt.status === "succeeded");
   assert.equal(reserve.reconciliation, "authoritative_read_by_idempotency_key");
   assert.equal(first.authoritative_world.dispatch_count[reserve.idempotency_key], 1);
+});
+
+test("negative evidence mutations cannot preserve a passing result", () => {
+  const valid = runProof();
+  const evaluate = (state) => evaluateProofEvidence({
+    state,
+    world: valid.authoritative_world,
+    distinctProcesses: true,
+    replayStateHash: digest(state),
+    journalIntegrityVerified: true,
+  });
+  const closeReceiptId = Object.values(valid.final_state.receipts)
+    .find((receipt) => receipt.action === "close_work_order").receipt_id;
+
+  const deniedClose = structuredClone(valid.final_state);
+  deniedClose.receipts[closeReceiptId].status = "denied";
+  assert.equal(evaluate(deniedClose).passed, false);
+  assert.equal(evaluate(deniedClose).assertions.no_denied_required_actions, false);
+  assert.equal(evaluate(deniedClose).assertions.terminal_actions_authoritatively_succeeded, false);
+
+  const unresolvedClose = structuredClone(valid.final_state);
+  unresolvedClose.receipts[closeReceiptId].status = "indeterminate";
+  assert.equal(evaluate(unresolvedClose).passed, false);
+  assert.equal(evaluate(unresolvedClose).assertions.no_unresolved_required_receipts, false);
+
+  const missingGoalPredicate = structuredClone(valid.final_state);
+  missingGoalPredicate.completed_goals = missingGoalPredicate.completed_goals.filter((goal) => goal !== "repair");
+  assert.equal(evaluate(missingGoalPredicate).passed, false);
+  assert.equal(evaluate(missingGoalPredicate).assertions.registered_goal_predicates_satisfied, false);
 });
 
 test("proof implementation has no network, provider, database, or secret access surface", () => {
