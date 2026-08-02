@@ -2,38 +2,42 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-- Current remaining-work ceiling (authorized 2026-07-28): **strictly less than
-  $250.00 USD**
-- Next declared paid sequence: **none authorized**
-- Post-baseline conservative paid-provider exposure: **$161.00 USD**
-- Post-baseline maximum after currently authorized work: **$161.00 USD**
+- Current cumulative ceiling (raised 2026-08-01): **$300.00 USD**
+- Next proposed paid sequence: **$19.00 maximum**, requiring fresh authority
+  bound to the final clean source after every provider-free scientific and
+  release gate passes
+- Post-baseline conservative paid-provider exposure: **$172.50 USD**
+- Post-baseline maximum after the proposed sequence: **$191.50 USD**
 - Ultra-conservative post-baseline maximum including frozen authority:
-  **$176.00 USD**
+  **$206.50 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$231.00 USD**
+- LC4 conservative filesystem-ledger settlements: **$242.50 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$4.379655 USD**, including the separate
   **$0.57204** 2026-07-29 rotation review
 - Recorded total program cash spend: **unreconciled**
 
-The 2026-07-28 authorization is a new remaining-work epoch, not a reset of the
-historical ledger and not a spending target. The epoch baseline is the
+The 2026-08-01 ceiling increase does not reset the historical ledger and is
+not a spending target. The epoch baseline is the
 **$71.00** conservative settlement plus the separate, non-reusable **$15.00
 maximum** quarantined authority recorded below. Admission requires
 
-`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
+`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) <= $300.00`
 
-Immutable roots have now conservatively charged **$161.00** after that
-baseline, with **$0.00** active. No further paid sequence is authorized. Even
+Immutable roots have now conservatively charged **$172.50** after that
+baseline, with **$0.00** active. One further sequence is proposed at a
+**$19.00** maximum but is neither authorized nor admissible for the changed
+source until every provider-free gate passes and the user binds authority to
+the final clean commit. Even
 adding the separate, frozen, non-reusable **$15.00** authority produces an
-ultra-conservative **$176.00**, still below the user's remaining-work ceiling.
+ultra-conservative **$206.50**, below the current ceiling.
 The frozen authority cannot fund a run and is not a settlement or invoice.
 
 No paid session in the next sequence may open until a new clean source commit,
-fresh source-bound ASR receipt, provider-free timeout/partial-output evidence
-regressions, history-ID regression tests, and whitespace-transcript
-causal-classification tests all pass.
+fresh source-bound ASR receipt, complete resumable-qualification-to-DEV
+admission, provider-free crash/restart and evidence regressions, the full test
+suite, claims verifier, build, and public audits all pass.
 No other provider session may be scheduled without a new dated authorization
 entry. The prior `$1,000 / $900 / $100 / $270` program ceilings are historical,
 superseded planning authority; they do not authorize current work. Auxiliary
@@ -75,7 +79,7 @@ The $15 ceiling is aggregate. Smokes run sequentially with a $5 pessimistic rese
 
 For budget admission, `budget_charged_spend` is the sum, per settled run, of the largest currently known post-run estimate, provider-reported amount, or reconciled amount. Before opening any paid session in the current epoch, an atomic reservation must satisfy both:
 
-`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) < $250.00`
+`post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) <= $300.00`
 
 `next_sequence_charged_spend + active_next_sequence_reservations + pessimistic_max_cost(proposed_run) <= $19.00`
 
@@ -1136,3 +1140,31 @@ post-terminal Gemini bookkeeping, still rejects any post-terminal audio or
 second terminal, and classifies later attribution construction failures as
 evidence-retention failures. This repair consumed **$0.00** and does not turn
 the failed root into efficacy evidence.
+
+## 2026-08-01 — Bounded launch sequence plan
+
+The cumulative ledger ceiling is now **$300.00**. The next proposed provider
+work is one serial, stop-on-failure sequence with a **$19.00 aggregate
+maximum**. The previous paid release authority was bound to source commit
+`317af1ae2936e0734270e6d22753b509d375c148`; it does not authorize this changed
+source. A fresh exact-commit authorization is required before any network
+admission:
+
+| Gate | Maximum | Admission |
+|---|---:|---|
+| xAI finite-manual Gate D | **$1.00** | Exact final clean source and fresh source-bound receipts |
+| Resumable OpenAI/Gemini/xAI qualification | **$3.00** | Gate D passed; signed per-provider shards and DEV projection verified |
+| Six-cell LC4-DEV | **$15.00** | Qualification passed; all crash/restart, parity, replay, ASR, and release gates passed |
+| **Total** | **$19.00** | No retries, replacement cells, fallbacks, or reserve |
+
+Current conservative exposure is **$172.50**, so full settlement would reach
+**$191.50**. Adding the separately frozen, non-reusable **$15.00** authority
+only as a pessimistic liability view yields **$206.50**. Provider-billed cash
+spend remains unreconciled, so these are authorization-ledger figures rather
+than invoice claims.
+
+The sequence is planned but currently unauthorized. Any provider-free gate
+failure stops before an authorization request or network admission. A proven
+pre-generation credit rejection may preserve the exact unopened shard/cell for
+later continuation; an ambiguous or post-generation failure terminalizes that
+paid unit and cannot be retried under this authority.
