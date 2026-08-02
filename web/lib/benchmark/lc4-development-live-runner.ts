@@ -59,7 +59,11 @@ import {
   LC4_DEV_AUDIO_PACKETIZER_CONTRACT_SHA256,
 } from "./lc4-development-audio-contract";
 import { createLc4ProviderExecutionProfile } from "./lc4-production-runner-foundation";
-import { assertLc4ProviderExchangeReplayProjection } from "./lc4-provider-exchange-replay";
+import {
+  assertLc4ProviderExchangeReplayProjection,
+  assertLc4ProviderExchangeTreatmentReplayProjection,
+  type Lc4ProviderExchangeTreatmentReplayExpectation,
+} from "./lc4-provider-exchange-replay";
 import {
   independentAsrContractSha256,
   type IndependentAsrContract,
@@ -1421,13 +1425,21 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
     expected: Readonly<{
       episode: Lc4DevLiveEpisodePlan;
       opportunity_id: string;
+      opportunity_index: number;
       segment_ordinal: Lc4DevProviderSegmentOrdinal;
       playback_kind: "canonical" | "repair";
       caller_pcm_sha256: string;
       caller_pcm_byte_length: number;
       caller_pcm: Uint8Array;
+      control_authority_projection: JsonValue;
+      control_receipt_sha256: string;
+      repair_decision_projection: JsonValue | null;
+      repair_decision_receipt_sha256: string | null;
+      canonical_provider_exchange_sha256: string | null;
+      expected_previous_provider_exchange_sha256: string | null;
+      expected_previous_hacc_response_plan_sha256: string | null;
     }>,
-  ): Promise<void> => {
+  ) => {
     requireHash(exchange.provider_exchange_sha256, "LC4-DEV provider exchange");
     requireHash(exchange.listener_evidence_sha256, "LC4-DEV listener evidence");
     if (exchange.provider_exchange_evidence.evidence_sha256 !== exchange.provider_exchange_sha256
@@ -1440,9 +1452,10 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
     }
     const retainedListenerProjection =
       await input.dependencies.evidence.resolveJson(exchange.listener_evidence);
-    assertLc4ProviderExchangeReplayProjection(retainedProjection, {
+    const replayExpectation: Lc4ProviderExchangeTreatmentReplayExpectation = {
       run_id: expected.episode.episode_id,
       opportunity_id: expected.opportunity_id,
+      opportunity_index: expected.opportunity_index,
       segment_ordinal: expected.segment_ordinal,
       playback_kind: expected.playback_kind,
       caller_pcm_sha256: expected.caller_pcm_sha256,
@@ -1460,6 +1473,38 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
         input.preflight.listener_evidence_manifest_sha256,
       evaluator_build_sha256:
         input.preflight.asr_evaluator_build_sha256,
+      arm: expected.episode.arm,
+      control_authority_projection:
+        expected.control_authority_projection,
+      control_receipt_sha256: expected.control_receipt_sha256,
+      repair_decision_projection: expected.repair_decision_projection,
+      repair_decision_receipt_sha256:
+        expected.repair_decision_receipt_sha256,
+      canonical_provider_exchange_sha256:
+        expected.canonical_provider_exchange_sha256,
+      expected_previous_provider_exchange_sha256:
+        expected.expected_previous_provider_exchange_sha256,
+      expected_previous_hacc_response_plan_sha256:
+        expected.expected_previous_hacc_response_plan_sha256,
+    };
+    const schemaVersion = typeof retainedProjection === "object"
+      && retainedProjection !== null
+      && !Array.isArray(retainedProjection)
+      ? (retainedProjection as { readonly schema_version?: JsonValue })
+        .schema_version
+      : null;
+    if (schemaVersion === 5) {
+      return assertLc4ProviderExchangeTreatmentReplayProjection(
+        retainedProjection,
+        replayExpectation,
+      );
+    }
+    return Object.freeze({
+      ...assertLc4ProviderExchangeReplayProjection(
+        retainedProjection,
+        replayExpectation,
+      ),
+      treatment_binding: null,
     });
   };
 
@@ -1602,6 +1647,7 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
       const providerBindings = input.prepare.audio_bindings.filter((binding) => binding.provider === episode.provider);
       let previousRotationReceipt: string | null = null;
       let priorExchange: string | null = null;
+      let priorHaccResponsePlanSha256: string | null = null;
       let lastOpportunityId: string | null = null;
       let primaryFailureEvidenceSha256: string | null = null;
       const segmentFinalizations: Lc4DevReplayArtifactReference[] = [];
@@ -1753,6 +1799,13 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
               throw new Error("LC4-DEV control authority body is not retained under its receipt hash");
             }
             mechanismReceipts += 1;
+            const controlAuthorityProjection =
+              await input.dependencies.evidence.resolveJson(
+                retainedControl.evidence,
+              );
+            const controlPreviousExchangeSha256 = priorExchange;
+            const controlPreviousHaccPlanSha256 =
+              priorHaccResponsePlanSha256;
             failureClass = "transport";
             opportunitiesSubmitted += 1;
             await append(
@@ -1768,6 +1821,9 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
             );
             let exchange: Lc4DevExchangeEvidence;
             let exchangeReturned = false;
+            let canonicalTreatmentReplay: Awaited<ReturnType<
+              typeof assertExchangeReplayBinding
+            >>;
             responseGenerationsRequested += 1;
             try {
               exchange = await bounded("opportunity-exchange", LC4_DEV_LIVE_TIMEOUTS.opportunity_exchange_ms, () => session.exchangeCanonical({
@@ -1801,15 +1857,28 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
                 || exchange.assistant_pcm.byteLength % 2 !== 0) {
                 throw new Error("LC4-DEV provider exchange evidence is incomplete");
               }
-              await assertExchangeReplayBinding(exchange, {
+              canonicalTreatmentReplay = await assertExchangeReplayBinding(
+                exchange,
+                {
                 episode,
                 opportunity_id: opportunity.id,
+                opportunity_index: opportunity.index,
                 segment_ordinal: segmentOrdinal,
                 playback_kind: "canonical",
                 caller_pcm_sha256: expectedCallerPcmSha256,
                 caller_pcm_byte_length: callerPcm.byteLength,
                 caller_pcm: callerPcm,
-              });
+                control_authority_projection: controlAuthorityProjection,
+                control_receipt_sha256: control.control_receipt_sha256,
+                repair_decision_projection: null,
+                repair_decision_receipt_sha256: null,
+                canonical_provider_exchange_sha256: null,
+                expected_previous_provider_exchange_sha256:
+                  controlPreviousExchangeSha256,
+                expected_previous_hacc_response_plan_sha256:
+                  controlPreviousHaccPlanSha256,
+                },
+              );
             } catch (error) {
               const failure = isLc4DevFailureEvidenceError(error)
                 ? error.failure
@@ -1885,6 +1954,13 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
             let effectiveAssistantPcmSha256 = assistantReceipt.artifact_sha256;
             let effectiveRepairEvidenceReferences:
               readonly Lc4DevReplayArtifactReference[] = Object.freeze([]);
+            let effectiveTerminalHaccPlanSha256 = episode.arm === "hacc"
+              ? canonicalTreatmentReplay.treatment_binding
+                ?.terminal_response_plan_sha256
+                ?? (control.response_control.kind === "hacc_response_plan"
+                  ? control.response_control.plan.plan_sha256
+                  : null)
+              : null;
             if (repairDecision.playback) {
               const repair = repairDecision.playback;
               const repairCallerReceipt = await bounded("repair-caller-audio-retention", LC4_DEV_LIVE_TIMEOUTS.retention_ms, () => input.dependencies.retention.retain({
@@ -1921,15 +1997,37 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
                   || repairExchange.assistant_pcm.byteLength % 2 !== 0) {
                   throw new Error("LC4-DEV repair exchange evidence is incomplete");
                 }
-                await assertExchangeReplayBinding(repairExchange, {
-                  episode,
-                  opportunity_id: opportunity.id,
-                  segment_ordinal: segmentOrdinal,
-                  playback_kind: "repair",
-                  caller_pcm_sha256: repair.pcm_sha256,
-                  caller_pcm_byte_length: repair.pcm_byte_length,
-                  caller_pcm: repair.pcm,
-                });
+                const repairTreatmentReplay =
+                  await assertExchangeReplayBinding(repairExchange, {
+                    episode,
+                    opportunity_id: opportunity.id,
+                    opportunity_index: opportunity.index,
+                    segment_ordinal: segmentOrdinal,
+                    playback_kind: "repair",
+                    caller_pcm_sha256: repair.pcm_sha256,
+                    caller_pcm_byte_length: repair.pcm.byteLength,
+                    caller_pcm: repair.pcm,
+                    control_authority_projection:
+                      controlAuthorityProjection,
+                    control_receipt_sha256:
+                      control.control_receipt_sha256,
+                    repair_decision_projection:
+                      decisionBody as unknown as JsonValue,
+                    repair_decision_receipt_sha256:
+                      repairDecision.receipt.decision_receipt_sha256,
+                    canonical_provider_exchange_sha256:
+                      exchange.provider_exchange_sha256,
+                    expected_previous_provider_exchange_sha256:
+                      controlPreviousExchangeSha256,
+                    expected_previous_hacc_response_plan_sha256:
+                      controlPreviousHaccPlanSha256,
+                  });
+                if (episode.arm === "hacc") {
+                  effectiveTerminalHaccPlanSha256 =
+                    repairTreatmentReplay.treatment_binding
+                      ?.terminal_response_plan_sha256
+                    ?? effectiveTerminalHaccPlanSha256;
+                }
               } catch (error) {
                 const failure = isLc4DevFailureEvidenceError(error)
                   ? error.failure
@@ -2046,6 +2144,8 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
             }
             opportunitiesCompleted += 1;
             priorExchange = effectiveExchangeSha256;
+            priorHaccResponsePlanSha256 =
+              effectiveTerminalHaccPlanSha256;
             await append("opportunity_completed", episode.episode_id, opportunity.id, {
               canonical_provider_exchange_sha256: exchange.provider_exchange_sha256,
               canonical_listener_evidence_sha256: exchange.listener_evidence_sha256,

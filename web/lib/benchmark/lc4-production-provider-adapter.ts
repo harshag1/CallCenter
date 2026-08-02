@@ -87,6 +87,11 @@ import {
 } from "./production-realtime-provider";
 import type { Lc4DevBudgetLifecycle } from "./lc4-development-budget";
 import { assertHaccResponsePlan, type HaccResponsePlan } from "./response-plan";
+import type { Lc4DevRepairDecisionReceipt } from "./lc4-development-repair-playback";
+import {
+  advanceLc4DevResponsePlanChain,
+  assertLc4ProviderExchangeTreatmentBinding,
+} from "./lc4-provider-exchange-treatment-binding";
 import { trialAudioDeliveryProfileHash, type TrialSessionConfiguration } from "./orchestrator";
 import {
   deliverRealtimePcm16,
@@ -4208,7 +4213,6 @@ export function createLc4FrozenProductionRealtimeAdapter(input: Readonly<{
 }
 
 const LC4_DEV_CREDENTIAL_IDENTITY_DOMAIN = "harshas-amazing-call-center/lc4-dev-credential-identity-set/v1\n";
-const LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-response-plan-chain/v1\n";
 const LC4_DEV_CONFIGURATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-session-configuration/v1\n";
 const LC4_DEV_OPPORTUNITY_CONTRACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-contract/v1\n";
 
@@ -4324,6 +4328,8 @@ function concatenateDevPcm(chunks: readonly Readonly<{ pcm: Uint8Array }>[]): Ui
 type DevEpisodeRuntime = {
   bridge: Lc4RealtimeProviderBridge;
   previous_rotation_receipt_sha256: string | null;
+  previous_exchange_sha256: string | null;
+  terminal_hacc_response_plan_sha256: string | null;
   flow_state_sha256: string;
   response_plan_chain_head_sha256: string;
   conversation_turns: Lc4NativeConversationTurnInput[];
@@ -4529,6 +4535,8 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             )
           ), SYSTEM_REALTIME_AUDIO_DELIVERY_RUNTIME),
           previous_rotation_receipt_sha256: null,
+          previous_exchange_sha256: null,
+          terminal_hacc_response_plan_sha256: null,
           flow_state_sha256: sha256Hex(`lc4-dev-flow-genesis\n${input.preflight.preflight_sha256}\n${episode.episode_id}`),
           response_plan_chain_head_sha256: sha256Hex(`lc4-dev-plan-genesis\n${input.preflight.preflight_sha256}\n${episode.episode_id}`),
           conversation_turns: [],
@@ -4638,6 +4646,11 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         opportunity: Lc4PublicDevOpportunity;
         control_receipt: Lc4DevControlReceipt;
         canonical_exchange_sha256: string;
+        effective_exchange_sha256: string;
+        previous_exchange_sha256: string | null;
+        previous_hacc_response_plan_sha256: string | null;
+        effective_terminal_flow_state_sha256: string;
+        effective_terminal_hacc_response_plan_sha256: string | null;
         repair_played: boolean;
       }> | null = null;
       const exchangePlayback = async (exchangeInput: Readonly<{
@@ -4652,6 +4665,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           pcm_byte_length: number;
           sample_rate_hz: 16_000 | 24_000;
         }>;
+        repair_decision_receipt?: Lc4DevRepairDecisionReceipt;
         caller_branch_binding?: Lc4DevCallerBranchPlaybackBinding;
       }>) => {
         input.budget_authority.assertOperationWindow(
@@ -4685,20 +4699,47 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             }
             await input.evidence.assertResolvable(branchBinding.decision_evidence);
           }
-          runtime!.flow_state_sha256 = exchangeInput.control_receipt.flow_state_sha256;
-          runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
-            previous: runtime!.response_plan_chain_head_sha256,
-            control_receipt_sha256: exchangeInput.control_receipt.control_receipt_sha256,
-            response_plan_sha256: exchangeInput.control_receipt.response_control.kind === "hacc_response_plan"
-              ? exchangeInput.control_receipt.response_control.plan.plan_sha256
-              : exchangeInput.control_receipt.response_control.instructions_sha256,
-          })}`);
         } else if (!pendingOpportunity
           || pendingOpportunity.opportunity.id !== exchangeInput.opportunity.id
           || pendingOpportunity.control_receipt.control_receipt_sha256 !== exchangeInput.control_receipt.control_receipt_sha256
           || pendingOpportunity.repair_played) {
           throw new Error("LC4-DEV repair is not attached to the pending canonical opportunity and control receipt");
         }
+        const expectedPreviousExchangeSha256 =
+          exchangeInput.playback_kind === "canonical"
+            ? runtime!.previous_exchange_sha256
+            : pendingOpportunity!.previous_exchange_sha256;
+        const expectedPreviousHaccPlanSha256 =
+          exchangeInput.playback_kind === "canonical"
+            ? runtime!.terminal_hacc_response_plan_sha256
+            : pendingOpportunity!.previous_hacc_response_plan_sha256;
+        if ((exchangeInput.playback_kind === "repair")
+            !== (exchangeInput.repair_decision_receipt !== undefined)) {
+          throw new Error(
+            "LC4-DEV repair treatment requires exactly one signed decision receipt",
+          );
+        }
+        const controlAuthorityProjection = Object.freeze({
+          schema_version: 1 as const,
+          manifest_sha256: input.preflight.control_plane_manifest_sha256,
+          episode_id: episode.episode_id,
+          arm: episode.arm,
+          opportunity_id: exchangeInput.opportunity.id,
+          opportunity_index: exchangeInput.opportunity.index,
+          previous_exchange_sha256: expectedPreviousExchangeSha256,
+          response_control: exchangeInput.control_receipt.response_control,
+          flow_state_sha256: exchangeInput.control_receipt.flow_state_sha256,
+          gateway_transcript_head_sha256:
+            exchangeInput.control_receipt.gateway_transcript_head_sha256,
+          tool_world_state_sha256:
+            exchangeInput.control_receipt.tool_world_state_sha256,
+          worker_state_sha256:
+            exchangeInput.control_receipt.worker_state_sha256,
+          repair_state_sha256:
+            exchangeInput.control_receipt.repair_state_sha256,
+          native_continuity_state_sha256:
+            exchangeInput.control_receipt.native_continuity_state_sha256,
+        });
         let evidence: Lc4ProviderExchangeEvidence;
         try {
           activeCanonicalOpportunity = exchangeInput.opportunity;
@@ -4723,14 +4764,54 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         } finally {
           activeCanonicalOpportunity = null;
         }
-        if (exchangeInput.playback_kind === "canonical") {
-          runtime!.response_plan_chain_head_sha256 = sha256Hex(`${LC4_DEV_RESPONSE_PLAN_CHAIN_DOMAIN}${canonicalJson({
-            previous: runtime!.response_plan_chain_head_sha256,
-            provider_exchange_sha256: evidence.evidence_sha256,
-            terminal_response_plan_sha256: evidence.terminal_response_plan_sha256,
-            terminal_response_control_sha256: evidence.terminal_response_control_sha256,
-          })}`);
+        let repairDecisionProjection: JsonValue | null = null;
+        let repairDecisionReceiptSha256: string | null = null;
+        if (exchangeInput.repair_decision_receipt) {
+          const {
+            decision_receipt_sha256: receiptSha256,
+            ...decisionBody
+          } = exchangeInput.repair_decision_receipt;
+          repairDecisionProjection = decisionBody as unknown as JsonValue;
+          repairDecisionReceiptSha256 = receiptSha256;
         }
+        const treatmentBinding =
+          assertLc4ProviderExchangeTreatmentBinding({
+            projection: evidence.replay_projection,
+            control_authority:
+              controlAuthorityProjection as unknown as JsonValue,
+            control_receipt_sha256:
+              exchangeInput.control_receipt.control_receipt_sha256,
+            episode_id: episode.episode_id,
+            opportunity_id: exchangeInput.opportunity.id,
+            opportunity_index: exchangeInput.opportunity.index,
+            arm: episode.arm,
+            playback_kind: exchangeInput.playback_kind,
+            repair_decision: repairDecisionProjection,
+            repair_decision_receipt_sha256: repairDecisionReceiptSha256,
+            canonical_provider_exchange_sha256:
+              exchangeInput.playback_kind === "repair"
+                ? pendingOpportunity!.canonical_exchange_sha256
+                : null,
+            expected_previous_provider_exchange_sha256:
+              expectedPreviousExchangeSha256,
+            expected_previous_hacc_response_plan_sha256:
+              expectedPreviousHaccPlanSha256,
+          });
+        runtime!.response_plan_chain_head_sha256 =
+          advanceLc4DevResponsePlanChain({
+            previous_chain_head_sha256:
+              runtime!.response_plan_chain_head_sha256,
+            playback_kind: exchangeInput.playback_kind,
+            control_receipt_sha256:
+              treatmentBinding.control_receipt_sha256,
+            initial_response_plan_sha256:
+              treatmentBinding.initial_response_plan_sha256,
+            provider_exchange_sha256: evidence.evidence_sha256,
+            terminal_response_plan_sha256:
+              treatmentBinding.terminal_response_plan_sha256,
+            terminal_response_control_sha256:
+              treatmentBinding.terminal_response_control_sha256,
+          });
         const listenerResult = evidence.dev_listener_result;
         if (!listenerResult || evidence.playback_kind !== exchangeInput.playback_kind) {
           throw new Error("LC4-DEV exchange completed without phase-bound listener evidence");
@@ -4852,9 +4933,31 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             opportunity: exchangeInput.opportunity,
             control_receipt: exchangeInput.control_receipt,
             canonical_exchange_sha256: evidence.evidence_sha256,
+            effective_exchange_sha256: evidence.evidence_sha256,
+            previous_exchange_sha256: expectedPreviousExchangeSha256,
+            previous_hacc_response_plan_sha256:
+              expectedPreviousHaccPlanSha256,
+            effective_terminal_flow_state_sha256:
+              treatmentBinding.terminal_flow_state_sha256,
+            effective_terminal_hacc_response_plan_sha256:
+              episode.arm === "hacc"
+                ? treatmentBinding.terminal_response_plan_sha256
+                : null,
             repair_played: false,
           });
-        } else pendingOpportunity = Object.freeze({ ...pendingOpportunity!, repair_played: true });
+        } else {
+          pendingOpportunity = Object.freeze({
+            ...pendingOpportunity!,
+            effective_exchange_sha256: evidence.evidence_sha256,
+            effective_terminal_flow_state_sha256:
+              treatmentBinding.terminal_flow_state_sha256,
+            effective_terminal_hacc_response_plan_sha256:
+              episode.arm === "hacc"
+                ? treatmentBinding.terminal_response_plan_sha256
+                : null,
+            repair_played: true,
+          });
+        }
         return Object.freeze({
           playback_kind: exchangeInput.playback_kind,
           opportunity_id: exchangeInput.opportunity.id,
@@ -4892,6 +4995,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             caller_pcm: repair.pcm,
             control_receipt,
             playback_kind: "repair",
+            repair_decision_receipt: decision_receipt,
             repair_binding: {
               decision_receipt_sha256: decision_receipt.decision_receipt_sha256,
               repair_pcm_id: repair.repair_pcm_id,
@@ -4913,6 +5017,12 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             domain_prefix: OPPORTUNITY_FINALIZATION_DOMAIN,
             expected_evidence_sha256: receipt.opportunity_receipt_sha256,
           });
+          runtime!.previous_exchange_sha256 =
+            pendingOpportunity.effective_exchange_sha256;
+          runtime!.flow_state_sha256 =
+            pendingOpportunity.effective_terminal_flow_state_sha256;
+          runtime!.terminal_hacc_response_plan_sha256 =
+            pendingOpportunity.effective_terminal_hacc_response_plan_sha256;
           pendingOpportunity = null;
           return Object.freeze({
             opportunity_receipt_sha256: receipt.opportunity_receipt_sha256,

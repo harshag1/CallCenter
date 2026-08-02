@@ -27,8 +27,14 @@ import {
   createLc4PublicDevelopmentCorpus,
 } from "./lc4-public-development-corpus";
 import {
-  assertLc4ProviderExchangeReplayProjection,
+  assertLc4ProviderExchangeTreatmentReplayProjection,
 } from "./lc4-provider-exchange-replay";
+import {
+  advanceLc4DevResponsePlanChain,
+  assertLc4HaccRotationTreatmentCheckpoint,
+  lc4DevResponsePlanChainGenesis,
+  type Lc4ProviderExchangeTreatmentBinding,
+} from "./lc4-provider-exchange-treatment-binding";
 import {
   createLc4ProviderExecutionProfile,
 } from "./lc4-production-runner-foundation";
@@ -578,6 +584,9 @@ export async function resolveLc4PublicationCanonicalCallerEvidence(
   caller_pcm_sha256: string;
   caller_pcm: Uint8Array;
   caller_reference: Lc4DevReplayArtifactReference;
+  control_receipt_sha256: string;
+  control_authority_projection: JsonValue;
+  control_authority_reference: Lc4DevReplayArtifactReference;
 }>> {
   const callerPcmSha256 = String(
     input.completed_payload.caller_pcm_sha256,
@@ -641,7 +650,10 @@ export async function resolveLc4PublicationCanonicalCallerEvidence(
     );
   }
   const callerReference = callerReferences[0]!;
+  const controlReference = controlReferences[0]!;
   const callerPcm = await input.cas.get(callerPcmSha256);
+  const controlAuthorityProjection =
+    await input.evidence.resolveJson(controlReference);
   if (callerReference.byte_length !== callerPcm.byteLength) {
     throw new Error(
       "LC4 publication retained caller PCM length differs from its audio-submission edge",
@@ -651,6 +663,9 @@ export async function resolveLc4PublicationCanonicalCallerEvidence(
     caller_pcm_sha256: callerPcmSha256,
     caller_pcm: callerPcm,
     caller_reference: callerReference,
+    control_receipt_sha256: controlReceiptSha256,
+    control_authority_projection: controlAuthorityProjection,
+    control_authority_reference: controlReference,
   });
 }
 
@@ -1325,6 +1340,12 @@ async function replayEpisode(input: Readonly<{
   const expected = expectedTransport(input.episode.provider);
   const entries: EpisodeReplayEntry[] = [];
   const reconstructedConversationTurns: Lc4RotationConversationTurn[] = [];
+  let previousEffectiveProviderExchangeSha256: string | null = null;
+  let previousHaccResponsePlanSha256: string | null = null;
+  let responsePlanChainHeadSha256 = lc4DevResponsePlanChainGenesis(
+    input.preflight.preflight_sha256,
+    input.episode.episode_id,
+  );
   for (const event of events) {
     if (event.opportunity_id === null) {
       throw new Error("LC4 publication transport replay found an anonymous completed opportunity");
@@ -1413,9 +1434,11 @@ async function replayEpisode(input: Readonly<{
     });
     const listenerProjection =
       await input.evidence.resolveJson(listenerReference);
-    const providerReplay = assertLc4ProviderExchangeReplayProjection(projection, {
+    const providerReplay =
+      assertLc4ProviderExchangeTreatmentReplayProjection(projection, {
       run_id: input.episode.episode_id,
       opportunity_id: opportunity.id,
+      opportunity_index: opportunity.index,
       segment_ordinal: segmentOrdinal,
       playback_kind: "canonical",
       caller_pcm_sha256: callerPcmSha256,
@@ -1434,7 +1457,34 @@ async function replayEpisode(input: Readonly<{
         input.preflight.listener_evidence_manifest_sha256,
       evaluator_build_sha256:
         input.preflight.asr_evaluator_build_sha256,
+      arm: input.episode.arm,
+      control_authority_projection:
+        callerEvidence.control_authority_projection,
+      control_receipt_sha256: callerEvidence.control_receipt_sha256,
+      repair_decision_projection: null,
+      repair_decision_receipt_sha256: null,
+      canonical_provider_exchange_sha256: null,
+      expected_previous_provider_exchange_sha256:
+        previousEffectiveProviderExchangeSha256,
+      expected_previous_hacc_response_plan_sha256:
+        previousHaccResponsePlanSha256,
     });
+    const canonicalTreatmentBinding = providerReplay.treatment_binding;
+    responsePlanChainHeadSha256 = advanceLc4DevResponsePlanChain({
+      previous_chain_head_sha256: responsePlanChainHeadSha256,
+      playback_kind: "canonical",
+      control_receipt_sha256:
+        canonicalTreatmentBinding.control_receipt_sha256,
+      initial_response_plan_sha256:
+        canonicalTreatmentBinding.initial_response_plan_sha256,
+      provider_exchange_sha256: providerExchangeSha256,
+      terminal_response_plan_sha256:
+        canonicalTreatmentBinding.terminal_response_plan_sha256,
+      terminal_response_control_sha256:
+        canonicalTreatmentBinding.terminal_response_control_sha256,
+    });
+    let effectiveTreatmentBinding: Lc4ProviderExchangeTreatmentBinding =
+      canonicalTreatmentBinding;
     const listener = objectValue(
       listenerProjection,
       "LC4 publication retained listener evidence",
@@ -1806,9 +1856,12 @@ async function replayEpisode(input: Readonly<{
         repairOutputPcmSha256,
       );
       const repairProviderReplay =
-        assertLc4ProviderExchangeReplayProjection(repairProjection, {
+        assertLc4ProviderExchangeTreatmentReplayProjection(
+          repairProjection,
+          {
           run_id: input.episode.episode_id,
           opportunity_id: opportunity.id,
+          opportunity_index: opportunity.index,
           segment_ordinal: segmentOrdinal,
           playback_kind: "repair",
           caller_pcm_sha256: repairCallerPcmSha256,
@@ -1827,7 +1880,35 @@ async function replayEpisode(input: Readonly<{
             input.preflight.listener_evidence_manifest_sha256,
           evaluator_build_sha256:
             input.preflight.asr_evaluator_build_sha256,
-        });
+          arm: input.episode.arm,
+          control_authority_projection:
+            callerEvidence.control_authority_projection,
+          control_receipt_sha256:
+            callerEvidence.control_receipt_sha256,
+          repair_decision_projection: repairDecisionProjection,
+          repair_decision_receipt_sha256: decisionReceiptSha256,
+          canonical_provider_exchange_sha256:
+            providerExchangeSha256,
+          expected_previous_provider_exchange_sha256:
+            previousEffectiveProviderExchangeSha256,
+          expected_previous_hacc_response_plan_sha256:
+            previousHaccResponsePlanSha256,
+          },
+        );
+      effectiveTreatmentBinding = repairProviderReplay.treatment_binding;
+      responsePlanChainHeadSha256 = advanceLc4DevResponsePlanChain({
+        previous_chain_head_sha256: responsePlanChainHeadSha256,
+        playback_kind: "repair",
+        control_receipt_sha256:
+          effectiveTreatmentBinding.control_receipt_sha256,
+        initial_response_plan_sha256:
+          effectiveTreatmentBinding.initial_response_plan_sha256,
+        provider_exchange_sha256: effectiveProviderExchangeSha256,
+        terminal_response_plan_sha256:
+          effectiveTreatmentBinding.terminal_response_plan_sha256,
+        terminal_response_control_sha256:
+          effectiveTreatmentBinding.terminal_response_control_sha256,
+      });
       const repairListener = objectValue(
         repairListenerProjection,
         "LC4 publication retained repair listener evidence",
@@ -1837,7 +1918,10 @@ async function replayEpisode(input: Readonly<{
         "LC4 publication retained repair listener evaluation",
       );
       const selection = objectValue(
-        repairDecision.selection as JsonValue,
+        objectValue(
+          repairDecision.decision as JsonValue,
+          "LC4 publication repair conversational decision",
+        ).selection as JsonValue,
         "LC4 publication repair decision selection",
       );
       const repairSource = corpus.repair_policy.library.find((candidate) =>
@@ -1957,6 +2041,29 @@ async function replayEpisode(input: Readonly<{
         decision_receipt_sha256: decisionReceiptSha256,
         playback_receipt_sha256: playbackReceiptSha256,
       }));
+    }
+    previousEffectiveProviderExchangeSha256 =
+      effectiveProviderExchangeSha256;
+    previousHaccResponsePlanSha256 = input.episode.arm === "hacc"
+      ? effectiveTreatmentBinding.terminal_response_plan_sha256
+      : null;
+    if (input.episode.arm === "hacc"
+      && opportunity.index % LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT === 0
+      && opportunity.index < 60) {
+      const nextSegmentIndex =
+        opportunity.index / LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT;
+      const packet = providerSessionReplay.packets[nextSegmentIndex];
+      if (!packet) {
+        throw new Error(
+          "LC4 publication HACC rotation state lacks its next provider-session packet",
+        );
+      }
+      assertLc4HaccRotationTreatmentCheckpoint({
+        packet: packet as unknown as JsonValue,
+        terminal_flow_state_sha256:
+          effectiveTreatmentBinding.terminal_flow_state_sha256,
+        response_plan_chain_head_sha256: responsePlanChainHeadSha256,
+      });
     }
   }
   entries.sort((left, right) =>

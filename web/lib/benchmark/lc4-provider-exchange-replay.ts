@@ -40,6 +40,10 @@ import {
   LC4_DEV_PRE_DISPATCH_REJECTION_CODES,
 } from "./lc4-development-gateway-bridge";
 import { LOCAL_TOOL_PROXY_FUNCTION_NAME } from "../realtime/client/types";
+import {
+  assertLc4ProviderExchangeTreatmentBinding,
+  type Lc4ProviderExchangeTreatmentBinding,
+} from "./lc4-provider-exchange-treatment-binding";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const WIRE_SET_DOMAIN = "harshas-amazing-call-center/lc4-wire-observation-set/v1\n";
@@ -123,6 +127,24 @@ export type Lc4ProviderExchangeReplayResult = Readonly<{
     | "capture_cas_evaluator_exact_provider_output_wire_completeness_unverified"
     | "client_observed_identity_scoped_wire_pcm_capture_cas_evaluator_exact";
 }>;
+
+export type Lc4ProviderExchangeTreatmentReplayExpectation =
+  Lc4ProviderExchangeReplayExpectation & Readonly<{
+    opportunity_index: number;
+    arm: "native" | "hacc";
+    control_authority_projection: JsonValue;
+    control_receipt_sha256: string;
+    repair_decision_projection: JsonValue | null;
+    repair_decision_receipt_sha256: string | null;
+    canonical_provider_exchange_sha256: string | null;
+    expected_previous_provider_exchange_sha256: string | null;
+    expected_previous_hacc_response_plan_sha256: string | null;
+  }>;
+
+export type Lc4ProviderExchangeTreatmentReplayResult =
+  Lc4ProviderExchangeReplayResult & Readonly<{
+    treatment_binding: Lc4ProviderExchangeTreatmentBinding;
+  }>;
 
 function record(value: unknown, label: string): JsonRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -2896,5 +2918,41 @@ export function assertLc4ProviderExchangeReplayProjection(
   return Object.freeze({
     output_capture: materializeOutputCapture(outputCapture),
     output_audio_lineage_scope: outputAudioLineageScope,
+  });
+}
+
+/**
+ * Complete schema-v5 replay for efficacy/publication paths. Transport replay
+ * alone intentionally cannot establish which model-visible treatment the host
+ * authorized. This wrapper requires the independently retained control edge,
+ * the prior chain heads, and (for repairs) the signed CRP decision.
+ */
+export function assertLc4ProviderExchangeTreatmentReplayProjection(
+  value: JsonValue,
+  expected: Lc4ProviderExchangeTreatmentReplayExpectation,
+): Lc4ProviderExchangeTreatmentReplayResult {
+  const transport = assertLc4ProviderExchangeReplayProjection(value, expected);
+  const treatmentBinding = assertLc4ProviderExchangeTreatmentBinding({
+    projection: value,
+    control_authority: expected.control_authority_projection,
+    control_receipt_sha256: expected.control_receipt_sha256,
+    episode_id: expected.run_id,
+    opportunity_id: expected.opportunity_id,
+    opportunity_index: expected.opportunity_index,
+    arm: expected.arm,
+    playback_kind: expected.playback_kind,
+    repair_decision: expected.repair_decision_projection,
+    repair_decision_receipt_sha256:
+      expected.repair_decision_receipt_sha256,
+    canonical_provider_exchange_sha256:
+      expected.canonical_provider_exchange_sha256,
+    expected_previous_provider_exchange_sha256:
+      expected.expected_previous_provider_exchange_sha256,
+    expected_previous_hacc_response_plan_sha256:
+      expected.expected_previous_hacc_response_plan_sha256,
+  });
+  return Object.freeze({
+    ...transport,
+    treatment_binding: treatmentBinding,
   });
 }
