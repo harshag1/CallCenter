@@ -4936,7 +4936,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             effective_exchange_sha256: evidence.evidence_sha256,
             previous_exchange_sha256: expectedPreviousExchangeSha256,
             previous_hacc_response_plan_sha256:
-              expectedPreviousHaccPlanSha256,
+              treatmentBinding.previous_hacc_response_plan_sha256,
             effective_terminal_flow_state_sha256:
               treatmentBinding.terminal_flow_state_sha256,
             effective_terminal_hacc_response_plan_sha256:
@@ -4949,12 +4949,6 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           pendingOpportunity = Object.freeze({
             ...pendingOpportunity!,
             effective_exchange_sha256: evidence.evidence_sha256,
-            effective_terminal_flow_state_sha256:
-              treatmentBinding.terminal_flow_state_sha256,
-            effective_terminal_hacc_response_plan_sha256:
-              episode.arm === "hacc"
-                ? treatmentBinding.terminal_response_plan_sha256
-                : null,
             repair_played: true,
           });
         }

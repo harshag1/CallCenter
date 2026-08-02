@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { canonicalJson, sha256Hex } from "../artifacts";
 import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/industrial-field-service.v1.json";
 import { AgentFlowSchema } from "../../flow";
 import { deriveFlowActionInvocationId } from "../../flow-runtime";
@@ -202,6 +203,112 @@ function completeAndEnter(harness: Harness, current: string, next: string): void
 }
 
 describe("benchmark gateway kernel", () => {
+  it("persists ordered post-tool response-plan rebounds into the next caller turn", () => {
+    const harness = createHarness(
+      "host-managed-harness",
+      "run-response-plan-rebound",
+    );
+    const firstTurn = harness.kernel.advanceCallerTurn({
+      runId: "run-response-plan-rebound",
+      condition: harness.condition,
+      scenario,
+      turn: 1,
+      turnId: scenario.caller.turns[0]!.id,
+      world: harness.world,
+    });
+    harness.snapshot = firstTurn.capabilitySnapshot;
+    expectOk(invoke(
+      harness,
+      "flow.select_topic",
+      { topic_id: "field_service" },
+      { turn: 1 },
+    ));
+    const firstRebound = harness.kernel.rebindResponsePlanAfterTransition({
+      runId: "run-response-plan-rebound",
+      condition: harness.condition,
+      scenario,
+      world: harness.world,
+      transitionReceiptSha256: "4".repeat(64),
+      previousTransitionBindingSha256: null,
+    });
+    expect(firstRebound.responsePlan.previous_plan_sha256)
+      .toBe(firstTurn.responsePlan.plan_sha256);
+
+    expect(() => harness.kernel.rebindResponsePlanAfterTransition({
+      runId: "run-response-plan-rebound",
+      condition: harness.condition,
+      scenario,
+      world: harness.world,
+      transitionReceiptSha256: "not-a-sha256",
+      previousTransitionBindingSha256:
+        firstRebound.transitionBindingSha256,
+    })).toThrow(/requires a receipt SHA-256/u);
+
+    const secondRebound = harness.kernel.rebindResponsePlanAfterTransition({
+      runId: "run-response-plan-rebound",
+      condition: harness.condition,
+      scenario,
+      world: harness.world,
+      transitionReceiptSha256: "5".repeat(64),
+      previousTransitionBindingSha256:
+        firstRebound.transitionBindingSha256,
+    });
+    expect(secondRebound.responsePlan.previous_plan_sha256)
+      .toBe(firstRebound.responsePlan.plan_sha256);
+
+    const secondTurn = harness.kernel.advanceCallerTurn({
+      runId: "run-response-plan-rebound",
+      condition: harness.condition,
+      scenario,
+      turn: 2,
+      turnId: scenario.caller.turns[1]!.id,
+      world: harness.world,
+    });
+    expect(secondTurn.responsePlan.previous_plan_sha256)
+      .toBe(secondRebound.responsePlan.plan_sha256);
+
+    const encoded = harness.kernel.encodedTranscript();
+    expect(verifyKernelTranscript({ transcript: encoded })).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    const reordered = encoded.trimEnd().split("\n").map((line) =>
+      JSON.parse(line) as Record<string, unknown>
+    );
+    const reboundIndexes = reordered.flatMap((entry, index) =>
+      entry.operation === "response_plan_rebound" ? [index] : []
+    );
+    expect(reboundIndexes).toHaveLength(2);
+    const firstPayload = reordered[reboundIndexes[0]!]!.payload;
+    reordered[reboundIndexes[0]!]!.payload =
+      reordered[reboundIndexes[1]!]!.payload;
+    reordered[reboundIndexes[1]!]!.payload = firstPayload;
+    let previousEntrySha256: string | null = null;
+    for (const [index, entry] of reordered.entries()) {
+      const priorBody = Object.fromEntries(
+        Object.entries(entry).filter(([key]) => key !== "entry_sha256"),
+      );
+      const body = {
+        ...priorBody,
+        sequence: index,
+        previous_entry_sha256: previousEntrySha256,
+      };
+      const entrySha256 = sha256Hex(
+        `harshas-amazing-call-center/benchmark-kernel-transcript-entry/v1\n${canonicalJson(body)}`,
+      );
+      reordered[index] = { ...body, entry_sha256: entrySha256 };
+      previousEntrySha256 = entrySha256;
+    }
+    expect(verifyKernelTranscript({
+      transcript: `${reordered.map((entry) => canonicalJson(entry)).join("\n")}\n`,
+    })).toMatchObject({
+      valid: false,
+      errors: expect.arrayContaining([
+        expect.stringMatching(/response-plan rebound/u),
+      ]),
+    });
+  });
+
   it("compiles designated reconciliation with invocation identity omitted from the HACC schema", () => {
     const flow = structuredClone(INDUSTRIAL_FIELD_SERVICE_FLOW);
     const topic = flow.nodes.find((node) => node.id === "field_service");

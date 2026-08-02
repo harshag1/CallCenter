@@ -33,7 +33,6 @@ import {
   advanceLc4DevResponsePlanChain,
   assertLc4HaccRotationTreatmentCheckpoint,
   lc4DevResponsePlanChainGenesis,
-  type Lc4ProviderExchangeTreatmentBinding,
 } from "./lc4-provider-exchange-treatment-binding";
 import {
   createLc4ProviderExecutionProfile,
@@ -1483,8 +1482,6 @@ async function replayEpisode(input: Readonly<{
       terminal_response_control_sha256:
         canonicalTreatmentBinding.terminal_response_control_sha256,
     });
-    let effectiveTreatmentBinding: Lc4ProviderExchangeTreatmentBinding =
-      canonicalTreatmentBinding;
     const listener = objectValue(
       listenerProjection,
       "LC4 publication retained listener evidence",
@@ -1892,22 +1889,22 @@ async function replayEpisode(input: Readonly<{
           expected_previous_provider_exchange_sha256:
             previousEffectiveProviderExchangeSha256,
           expected_previous_hacc_response_plan_sha256:
-            previousHaccResponsePlanSha256,
+            canonicalTreatmentBinding.previous_hacc_response_plan_sha256,
           },
         );
-      effectiveTreatmentBinding = repairProviderReplay.treatment_binding;
       responsePlanChainHeadSha256 = advanceLc4DevResponsePlanChain({
         previous_chain_head_sha256: responsePlanChainHeadSha256,
         playback_kind: "repair",
         control_receipt_sha256:
-          effectiveTreatmentBinding.control_receipt_sha256,
+          repairProviderReplay.treatment_binding.control_receipt_sha256,
         initial_response_plan_sha256:
-          effectiveTreatmentBinding.initial_response_plan_sha256,
+          repairProviderReplay.treatment_binding.initial_response_plan_sha256,
         provider_exchange_sha256: effectiveProviderExchangeSha256,
         terminal_response_plan_sha256:
-          effectiveTreatmentBinding.terminal_response_plan_sha256,
+          repairProviderReplay.treatment_binding.terminal_response_plan_sha256,
         terminal_response_control_sha256:
-          effectiveTreatmentBinding.terminal_response_control_sha256,
+          repairProviderReplay.treatment_binding
+            .terminal_response_control_sha256,
       });
       const repairListener = objectValue(
         repairListenerProjection,
@@ -2045,7 +2042,7 @@ async function replayEpisode(input: Readonly<{
     previousEffectiveProviderExchangeSha256 =
       effectiveProviderExchangeSha256;
     previousHaccResponsePlanSha256 = input.episode.arm === "hacc"
-      ? effectiveTreatmentBinding.terminal_response_plan_sha256
+      ? canonicalTreatmentBinding.terminal_response_plan_sha256
       : null;
     if (input.episode.arm === "hacc"
       && opportunity.index % LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT === 0
@@ -2061,7 +2058,7 @@ async function replayEpisode(input: Readonly<{
       assertLc4HaccRotationTreatmentCheckpoint({
         packet: packet as unknown as JsonValue,
         terminal_flow_state_sha256:
-          effectiveTreatmentBinding.terminal_flow_state_sha256,
+          canonicalTreatmentBinding.terminal_flow_state_sha256,
         response_plan_chain_head_sha256: responsePlanChainHeadSha256,
       });
     }

@@ -47,6 +47,7 @@ import {
 import {
   appendKernelTranscriptCallerTurn,
   appendKernelTranscriptInvocation,
+  appendKernelTranscriptResponsePlanRebound,
   assertKernelTranscriptDurableMemoryState,
   assertKernelTranscriptContainsNoRawGrants,
   createKernelTranscript,
@@ -788,6 +789,29 @@ export class InMemoryBenchmarkGatewayKernel implements BenchmarkGatewayKernel {
         plan_sha256: responsePlan.plan_sha256,
         capability_epoch: responsePlan.capability_epoch,
       }));
+      if (!run.transcript) {
+        throw new Error(
+          "post-transition response-plan binding lacks its kernel transcript",
+        );
+      }
+      run.transcript = appendKernelTranscriptResponsePlanRebound(
+        run.transcript,
+        {
+          runId: run.runId,
+          turn: run.committedTurn,
+          transitionReceiptSha256: input.transitionReceiptSha256,
+          previousTransitionBindingSha256:
+            input.previousTransitionBindingSha256,
+          responsePlan,
+          transitionBindingSha256,
+        },
+      );
+      // A post-tool rebound is the canonical plan head for both any further
+      // tool calls in this response and the next caller turn. Persist it only
+      // after the full plan and transition binding have been constructed;
+      // the surrounding mutation checkpoint restores the prior head if any
+      // later work in this transaction throws.
+      run.responsePlan = responsePlan;
       return Object.freeze({
         capabilitySnapshot,
         responsePlan,

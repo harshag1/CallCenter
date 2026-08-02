@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+import { createFlowExecutionState } from "../../flow-runtime";
 import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import {
   INDEPENDENT_ASR_RESULT_SCHEMA_SHA256,
@@ -26,6 +27,7 @@ import {
   lc4DevLiveAuthorizationSigningBytes,
   type Lc4DevCallerAudioBinding,
   type Lc4DevControlReceipt,
+  type Lc4DevLiveEpisodePlan,
   type Lc4DevLiveRunnerDependencies,
   type Lc4DevLiveRunArtifact,
   type Lc4DevLiveRunPrefixArtifact,
@@ -47,7 +49,10 @@ import {
   type Lc4DevRepairPlayback,
   type Lc4DevRepairPlaybackReceipt,
 } from "../lc4-development-repair-playback";
-import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import {
+  createLc4PublicDevelopmentCorpus,
+  type Lc4PublicDevOpportunity,
+} from "../lc4-public-development-corpus";
 import {
   LC4_PROVIDER_PROFILE_MANIFEST,
   LC4_XAI_FINITE_PRERECORDED_TRANSPORT_PROFILE,
@@ -73,7 +78,9 @@ import {
   type Lc4SanitizedWireObservation,
 } from "../lc4-xai-manual-turn-causality";
 import {
+  LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN,
   LC4_PRODUCTION_PROVIDER_EXECUTION_FROZEN,
+  createLc4GeminiOutputAttribution,
   createLc4DevelopmentRealtimeAdapter,
   lc4DevCredentialIdentitySetSha256,
 } from "../lc4-production-provider-adapter";
@@ -82,8 +89,24 @@ import {
   LC4_DEV_AUDIO_DELIVERY_PROFILE,
   LC4_DEV_AUDIO_DELIVERY_PROFILE_SHA256,
 } from "../lc4-development-audio-contract";
-import type { Lc4DevGatewayExecutor } from "../lc4-development-gateway-bridge";
-import type { HaccResponsePlan } from "../response-plan";
+import {
+  LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+  appendLc4DevNativeGatewayContract,
+  renderLc4DevHaccResponsePlan,
+  type Lc4DevGatewayExecutor,
+} from "../lc4-development-gateway-bridge";
+import {
+  LC4_DEV_MUNICIPAL_CONDITION_SUITE,
+  LC4_DEV_MUNICIPAL_FLOW,
+} from "../lc4-development-control-plane";
+import { createHaccResponsePlan } from "../response-plan";
+import {
+  createHaccSpeechGuardrailPacket,
+  createInitialHaccSpeechGuardrailState,
+} from "../speech-guardrail-packet";
+import type { AdmissibilityFrontierEvidence } from "../admissibility-frontier";
+import type { ProviderCapabilitySnapshot } from "../capability-gateway";
+import type { JsonValue as ScenarioJsonValue } from "../scenario-schema";
 import {
   createLc4DevReplayEvidenceStore,
   verifyLc4DevReplayLedger,
@@ -118,6 +141,9 @@ import {
   providerQualificationMatrixSha256,
   type ProviderQualificationArtifact,
 } from "../provider-qualification";
+import {
+  realtimeToolFrontierSha256,
+} from "../../realtime/client/openai-compatible";
 import {
   realtimeWireObservationSha256,
   realtimeWireProjectionSha256,
@@ -259,6 +285,10 @@ const LISTENER_EVIDENCE_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-pinned-listener-evidence/v1\n";
 const CAS_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
+const SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN =
+  "harshas-amazing-call-center/lc4-suppressed-unplayed-output/v2\n";
+const GATEWAY_RECEIPT_SET_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 
 type FixtureProvider = "openai" | "gemini" | "xai";
 type FixtureWireRole = Readonly<{
@@ -383,25 +413,6 @@ function fixtureOutputWireRole(
   };
 }
 
-function fixtureGeminiOutputRole(
-  value: Uint8Array,
-  sampleRateHz: number,
-): FixtureWireRole {
-  return {
-    direction: "inbound",
-    wire_type: "serverContent",
-    projection_sha256: realtimeWireProjectionSha256({
-      audio: {
-        direction: "output",
-        chunks: [{
-          ...fixturePcmProjection(value, sampleRateHz),
-          mimeTypeRecognized: true,
-        }],
-      },
-    }),
-  };
-}
-
 function fixtureWireObservations(
   provider: FixtureProvider,
   seed: string,
@@ -436,6 +447,7 @@ function providerExchangeProjection(
   callerPcm: Uint8Array,
   assistantPcm: Uint8Array,
   callerBranchBinding: Lc4DevCallerBranchPlaybackBinding | undefined,
+  controlReceipt: Lc4DevControlReceipt,
   extra: Record<string, unknown> & Readonly<{
     episode_id: string;
     opportunity_id: string;
@@ -472,19 +484,38 @@ function providerExchangeProjection(
     ...capture,
     chunks: capture.chunks.map((chunk) => chunk.receipt),
   };
+  const geminiOutputProjection = {
+    audio: {
+      direction: "output",
+      chunks: [{
+        ...fixturePcmProjection(
+          assistantPcm,
+          profile.output_sample_rate_hz,
+        ),
+        mimeTypeRecognized: true,
+      }],
+    },
+  };
+  const geminiTerminalProjection = {
+    terminal: { status: "completed" },
+  };
   const wireRoles: readonly FixtureWireRole[] = extra.provider === "gemini"
     ? [
         { direction: "outbound", wire_type: "realtimeInput.activityStart" },
         ...inputFrames.map((frame) =>
           fixtureInputWireRole(extra.provider, frame, profile.input_sample_rate_hz)),
         { direction: "outbound", wire_type: "realtimeInput.activityEnd" },
-        fixtureGeminiOutputRole(assistantPcm, profile.output_sample_rate_hz),
         {
           direction: "inbound",
           wire_type: "serverContent",
-          projection_sha256: realtimeWireProjectionSha256({
-            terminal: { status: "completed" },
-          }),
+          projection_sha256:
+            realtimeWireProjectionSha256(geminiOutputProjection),
+        },
+        {
+          direction: "inbound",
+          wire_type: "serverContent",
+          projection_sha256:
+            realtimeWireProjectionSha256(geminiTerminalProjection),
         },
       ]
     : [
@@ -523,6 +554,22 @@ function providerExchangeProjection(
     WIRE_OBSERVATION_SET_DOMAIN,
     wireObservations,
   );
+  const geminiOutputAttribution = extra.provider === "gemini"
+    ? createLc4GeminiOutputAttribution({
+        observations: wireObservations,
+        wire_projections: wireObservations
+          .filter((observation) =>
+            observation.direction === "inbound"
+            && observation.wire_type === "serverContent")
+          .map((observation, index) => ({
+            wire_observation_sha256: observation.observation_sha256,
+            redacted_projection: index === 0
+              ? geminiOutputProjection
+              : geminiTerminalProjection,
+          })),
+        capture,
+      })
+    : null;
   const inputCommit = wireObservations.find((observation) =>
     observation.wire_type === "input_audio_buffer.commit");
   const inputCommitAck = wireObservations.find((observation) =>
@@ -556,11 +603,27 @@ function providerExchangeProjection(
     "assistant_pcm_captured",
     "listener_evidence_handed_off",
   ];
-  const responsePlanSha256 = extra.arm === "hacc"
-    ? sha256Hex(
-        `fixture-response-plan:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
-      )
+  if ((extra.arm === "hacc")
+      !== (controlReceipt.response_control.kind === "hacc_response_plan")) {
+    throw new Error("fixture response control differs from its arm");
+  }
+  const responsePlan = controlReceipt.response_control.kind
+      === "hacc_response_plan"
+    ? controlReceipt.response_control.plan
     : null;
+  const responsePlanSha256 = responsePlan?.plan_sha256 ?? null;
+  const renderedControlContext = responsePlan
+    ? renderLc4DevHaccResponsePlan(responsePlan, playbackKind)
+    : appendLc4DevNativeGatewayContract(
+      controlReceipt.response_control.kind === "native_context"
+        ? controlReceipt.response_control.instructions
+        : "",
+      playbackKind,
+    );
+  const initialResponseControlSha256 = responsePlan?.plan_sha256
+    ?? (controlReceipt.response_control.kind === "native_context"
+      ? controlReceipt.response_control.instructions_sha256
+      : "");
   const listenerRepairProjection = listenerOverrides.repair_projection
     ?? repairProjection(extra.opportunity_id);
   const playbackAuthorityReceiptSha256 =
@@ -648,19 +711,51 @@ function providerExchangeProjection(
     content_encoding: "domain-prefixed-canonical-json" as const,
     domain_prefix: LISTENER_EVIDENCE_DOMAIN as typeof LISTENER_EVIDENCE_DOMAIN,
   };
+  const suppressedChunkSequenceSha256 = sha256Hex(
+    `${LC4_SUPPRESSED_OUTPUT_CHUNK_SEQUENCE_DOMAIN}${canonicalJson({
+      scope: "suppressed_before_listener_admission",
+      format: {
+        encoding: "pcm16",
+        sample_rate_hz: profile.output_sample_rate_hz,
+        channels: 1,
+      },
+      chunks: [],
+    })}`,
+  );
+  const suppressionBody = {
+    schema_version: 2,
+    policy:
+      "exclude_everything_before_the_final_tool_batch_from_listener_evaluation_and_reconnect_history",
+    audio_chunks: [],
+    audio_chunk_count: 0,
+    audio_byte_length: 0,
+    audio_chunk_sequence_sha256: suppressedChunkSequenceSha256,
+    listener_admitted_audio_chunk_count: outputCapture.chunks.length,
+    listener_admitted_audio_byte_length: outputCapture.generated_byte_length,
+    listener_admitted_audio_pcm_sha256: outputCapture.generated_pcm_sha256,
+  };
+  const gatewayReceiptSetBody = {
+    receipts: [],
+    authority_projections: [],
+    pre_dispatch_rejections: [],
+  };
   const projection = {
     ...extra,
-    schema_version: 2,
+    schema_version: 5,
     adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
     run_id: extra.episode_id,
     segment_ordinal: Math.ceil(opportunityOrdinal / 10),
     playback_kind: playbackKind,
     response_control_kind: extra.arm === "hacc" ? "hacc_response_plan" : "native_context",
     response_plan_sha256: responsePlanSha256,
-    terminal_response_plan_sha256: responsePlanSha256
-      ?? sha256Hex(
-        `fixture-native-response-control:${extra.episode_id}:${extra.opportunity_id}:${playbackKind}`,
-      ),
+    response_plan_body: responsePlan,
+    rendered_control_context: renderedControlContext,
+    response_plan_delivery_sha256: sha256Hex(renderedControlContext),
+    terminal_response_plan_sha256: initialResponseControlSha256,
+    terminal_response_control_sha256: initialResponseControlSha256,
+    repair_decision_receipt_sha256: playbackKind === "repair"
+      ? String(extra.repair_decision_receipt_sha256)
+      : null,
     caller_pcm_sha256: sha256Hex(callerPcm),
     caller_pcm_byte_length: callerPcm.byteLength,
     requested_runtime_identity: {
@@ -703,7 +798,9 @@ function providerExchangeProjection(
     transport_parity_sha256: extra.provider === "xai"
       ? sha256Hex("fixture-xai-manual-parity")
       : profile.provider_profile_sha256,
-    tool_frontier_sha256: sha256Hex("fixture-tool-frontier"),
+    tool_frontier_sha256: realtimeToolFrontierSha256([
+      LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+    ]),
     server_vad_setting_sha256: null,
     server_vad_transport_disclosure_sha256: null,
     server_vad_transport_suffix: null,
@@ -719,6 +816,22 @@ function providerExchangeProjection(
     operation_order: operationOrder,
     wire_observations: wireObservations,
     wire_observation_set_sha256: wireObservationSetSha256,
+    gemini_output_attribution: geminiOutputAttribution,
+    suppressed_unplayed_output: {
+      ...suppressionBody,
+      evidence_sha256: domainHash(
+        SUPPRESSED_UNPLAYED_OUTPUT_DOMAIN,
+        suppressionBody,
+      ),
+    },
+    dev_gateway_conversation_tool_batches: [],
+    dev_gateway_receipt_set: {
+      ...gatewayReceiptSetBody,
+      receipt_set_sha256: domainHash(
+        GATEWAY_RECEIPT_SET_DOMAIN,
+        gatewayReceiptSetBody,
+      ),
+    },
     assistant_conversation_transcript_sha256:
       assistantConversationTranscriptSha256,
     assistant_conversation_transcript_source:
@@ -1730,7 +1843,66 @@ async function fixtures() {
   };
 }
 
-function control(arm: "native" | "hacc"): Lc4DevControlReceipt {
+const fixtureHaccCondition =
+  LC4_DEV_MUNICIPAL_CONDITION_SUITE.conditions["host-managed-harness"];
+const fixtureHaccDisclosure = fixtureHaccCondition.disclosures.find(
+  (candidate) => candidate.target.startsWith("step:"),
+)!;
+const fixtureHaccTarget = fixtureHaccDisclosure.target;
+const fixtureHaccStep = fixtureHaccTarget.slice("step:".length);
+const fixtureHaccSnapshot: ProviderCapabilitySnapshot = {
+  gateway_version: 1,
+  scope: fixtureHaccTarget,
+  capability_epoch: 1,
+  actions: fixtureHaccDisclosure.visibleCapabilities.map(
+    (capability, index) => ({
+      name: capability.name,
+      description: capability.description,
+      input_schema: capability.inputSchema as Record<string, ScenarioJsonValue>,
+      semantic_hash: capability.semanticHash,
+      capability_grant: `lc4-live-runner-fixture-grant-${index}`,
+    }),
+  ),
+};
+
+function fixtureHaccPlan(
+  revision: number,
+  previousPlanSha256: string | null,
+) {
+  return createHaccResponsePlan({
+    flow: LC4_DEV_MUNICIPAL_FLOW,
+    state: {
+      ...createFlowExecutionState("2026-07-21T22:00:00.000Z"),
+      status: "active",
+      nodeId: fixtureHaccStep.split(".")[0]!,
+      currentStep: fixtureHaccStep,
+      capabilityEpoch: fixtureHaccSnapshot.capability_epoch,
+      actionReceipts: [],
+      updatedAt: `2026-07-21T22:00:${String(revision % 60).padStart(2, "0")}.000Z`,
+    },
+    conditionSha256: fixtureHaccCondition.conditionHash,
+    target: fixtureHaccTarget,
+    catalogMode: "target",
+    snapshot: fixtureHaccSnapshot,
+    frontierEvidence: {
+      evidence_sha256: sha256Hex(`lc4-live-runner-frontier:${revision}`),
+    } as AdmissibilityFrontierEvidence,
+    quarantines: [],
+    speechGuardrailPacket: createHaccSpeechGuardrailPacket(
+      createInitialHaccSpeechGuardrailState(),
+      null,
+    ),
+    revision,
+    previousPlanSha256,
+  });
+}
+
+function control(input: Readonly<{
+  episode: Lc4DevLiveEpisodePlan;
+  opportunity: Lc4PublicDevOpportunity;
+  previous_exchange_sha256: string | null;
+  previous_hacc_plan_sha256: string | null;
+}>): Lc4DevControlReceipt {
   const common = {
     flow_state_sha256: HASH,
     gateway_transcript_head_sha256: HASH,
@@ -1740,15 +1912,30 @@ function control(arm: "native" | "hacc"): Lc4DevControlReceipt {
     native_continuity_state_sha256: HASH,
   };
   let response_control: Lc4DevControlReceipt["response_control"];
-  if (arm === "native") {
+  if (input.episode.arm === "native") {
     const instructions = "Continue the public development conversation using only information available so far.";
     response_control = { kind: "native_context", instructions, instructions_sha256: sha256Hex(instructions) };
   } else {
-    // The dev adapter owns full HaccResponsePlan validation. This coordinator
-    // test uses an opaque sentinel because it verifies lifecycle, not compiler output.
-    response_control = { kind: "hacc_response_plan", plan: Object.freeze({}) as HaccResponsePlan };
+    response_control = {
+      kind: "hacc_response_plan",
+      plan: fixtureHaccPlan(
+        input.opportunity.index,
+        input.previous_hacc_plan_sha256,
+      ),
+    };
+    common.flow_state_sha256 = response_control.plan.state_sha256;
   }
-  const body = { ...common, response_control };
+  const body = {
+    schema_version: 1 as const,
+    manifest_sha256: "3".repeat(64),
+    episode_id: input.episode.episode_id,
+    arm: input.episode.arm,
+    opportunity_id: input.opportunity.id,
+    opportunity_index: input.opportunity.index,
+    previous_exchange_sha256: input.previous_exchange_sha256,
+    ...common,
+    response_control,
+  };
   return {
     ...body,
     control_receipt_sha256: sha256Hex(`harshas-amazing-call-center/lc4-dev-control-receipt/v1\n${canonicalJson(body)}`),
@@ -1853,6 +2040,7 @@ function retainedDependencies(input: Readonly<{
   repair: Lc4DevLiveRunnerDependencies["repair"];
   branch_outcome?: Lc4DevPriorMutationOutcome;
 }>): Pick<Lc4DevLiveRunnerDependencies, "caller_audio" | "caller_branch" | "retention" | "control" | "repair" | "evidence" | "finalization"> {
+  const previousHaccPlanByEpisode = new Map<string, string>();
   return {
     evidence: input.evidence,
     caller_audio: { async load(binding) { return input.pcm.get(`${binding.provider}:${binding.opportunity_id}`)!; } },
@@ -1874,8 +2062,20 @@ function retainedDependencies(input: Readonly<{
       },
     },
     control: {
-      async next({ episode }) {
-        const receipt = control(episode.arm);
+      async next({ episode, opportunity, previous_exchange_sha256 }) {
+        const receipt = control({
+          episode,
+          opportunity,
+          previous_exchange_sha256,
+          previous_hacc_plan_sha256:
+            previousHaccPlanByEpisode.get(episode.episode_id) ?? null,
+        });
+        if (receipt.response_control.kind === "hacc_response_plan") {
+          previousHaccPlanByEpisode.set(
+            episode.episode_id,
+            receipt.response_control.plan.plan_sha256,
+          );
+        }
         const { control_receipt_sha256: claimed, ...body } = receipt;
         const retained = await input.evidence.retainJson({
           kind: "control_authority",
@@ -2291,7 +2491,7 @@ describe("LC4-DEV live runner", () => {
               expect(opportunity.events.some((event) => event.kind === "authoritative-reconciliation")).toBe(false);
             }
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
-            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, control_receipt, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
               provider: episode.provider,
@@ -2472,7 +2672,7 @@ describe("LC4-DEV live runner", () => {
           let expectedCanonicalOrdinal = ((segment_ordinal - 1) * 10) + 1;
           let pending: Readonly<{ opportunity_id: string; repair_played: boolean }> | null = null;
           return {
-            async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+            async exchangeCanonical({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) {
               expect(pending).toBeNull();
               expect(opportunity.index).toBe(expectedCanonicalOrdinal);
               if (repairedCanonicalOrdinal !== null && episode.episode_id === targetEpisodeId && opportunity.index > repairedCanonicalOrdinal && canonicalAfterRepair === null) {
@@ -2491,7 +2691,7 @@ describe("LC4-DEV live runner", () => {
                 unmet_blocker_codes: shouldRepair ? ["subject_or_goal_unresolved"] : [],
                 final_required_criteria_pass: !shouldRepair,
               });
-              const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+              const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, control_receipt, {
                 kind: "canonical",
                 episode_id: episode.episode_id,
                 opportunity_id: opportunity.id,
@@ -2520,7 +2720,7 @@ describe("LC4-DEV live runner", () => {
                 listener_evidence: listenerEvidence,
               };
             },
-            async exchangeRepair({ opportunity, repair, decision_receipt }) {
+            async exchangeRepair({ opportunity, repair, decision_receipt, control_receipt }) {
               expect(pending).toEqual({ opportunity_id: opportunity.id, repair_played: false });
               expect(opportunity.index).toBe(expectedCanonicalOrdinal);
               expect(repair.canonical_ordinal).toBe(expectedCanonicalOrdinal);
@@ -2532,8 +2732,10 @@ describe("LC4-DEV live runner", () => {
               repairedCanonicalOrdinal = opportunity.index;
               pending = { opportunity_id: opportunity.id, repair_played: true };
               const assistant = Uint8Array.from([opportunity.index, 6, 10, 14]);
-              const projection = providerExchangeProjection(repair.pcm, assistant, undefined, {
+              const projection = providerExchangeProjection(repair.pcm, assistant, undefined, control_receipt, {
                 kind: "repair",
+                repair_decision_receipt_sha256:
+                  decision_receipt.decision_receipt_sha256,
                 episode_id: episode.episode_id,
                 opportunity_id: opportunity.id,
                 provider: episode.provider,
@@ -2857,9 +3059,9 @@ describe("LC4-DEV live runner", () => {
       maximum_total_micro_usd: prepare.maximum_total_micro_usd,
       async openSegment({ episode, segment_ordinal }) {
         return {
-          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+          async exchangeCanonical({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) {
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
-            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+            const projection = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, control_receipt, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
               provider: episode.provider,
@@ -2970,9 +3172,9 @@ describe("LC4-DEV live runner", () => {
       maximum_total_micro_usd: prepare.maximum_total_micro_usd,
       async openSegment({ episode, segment_ordinal }) {
         return {
-          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+          async exchangeCanonical({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) {
             const assistant = Uint8Array.from([2, 4, 8, 16]);
-            const valid = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+            const valid = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, control_receipt, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
               provider: episode.provider,
@@ -3062,9 +3264,9 @@ describe("LC4-DEV live runner", () => {
       maximum_total_micro_usd: prepare.maximum_total_micro_usd,
       async openSegment({ episode, segment_ordinal }) {
         return {
-          async exchangeCanonical({ opportunity, caller_pcm, caller_branch_binding }) {
+          async exchangeCanonical({ opportunity, caller_pcm, control_receipt, caller_branch_binding }) {
             const assistant = Uint8Array.from([opportunity.index, 2, 4, 8]);
-            const correct = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, {
+            const correct = providerExchangeProjection(caller_pcm, assistant, caller_branch_binding, control_receipt, {
               episode_id: episode.episode_id,
               opportunity_id: opportunity.id,
               provider: episode.provider,

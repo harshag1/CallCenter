@@ -344,13 +344,40 @@ export function assertLc4ProviderExchangeTreatmentBinding(input: Readonly<{
   );
   let terminalFlowStateSha256 = initialFlowStateSha256;
   let currentPlan: HaccResponsePlan | null = null;
+  let admittedPreviousHaccPlanSha256 = expectedPreviousHaccPlanSha256;
 
   if (input.arm === "hacc") {
     if (responseControl.kind !== "hacc_response_plan") {
       throw new Error("LC4 HACC authority lacks its response plan");
     }
-    currentPlan = assertHaccResponsePlan(responseControl.plan, {
-      previousPlanSha256: expectedPreviousHaccPlanSha256,
+    if (input.opportunity_index > 1
+      && expectedPreviousHaccPlanSha256 === null) {
+      throw new Error(
+        "LC4 HACC treatment after the first opportunity lacks its prior terminal response plan",
+      );
+    }
+    currentPlan = assertHaccResponsePlan(responseControl.plan);
+    // The HACC controller may perform a signed host-only route transition
+    // before the first provider exchange (for LC4 this is flow.select_topic).
+    // Its resulting predecessor is not yet present in provider runtime state.
+    // Admit it only at the first provider boundary, only when both external
+    // continuity heads are genesis, and only from the exact control authority
+    // already bound to control_receipt_sha256 above. Every later provider
+    // exchange remains chained to the independently retained terminal plan.
+    if (input.playback_kind === "canonical"
+      && input.opportunity_index === 1
+      && expectedPreviousExchangeSha256 === null
+      && expectedPreviousHaccPlanSha256 === null) {
+      admittedPreviousHaccPlanSha256 = currentPlan.previous_plan_sha256;
+    }
+    if (currentPlan.previous_plan_sha256
+      !== admittedPreviousHaccPlanSha256) {
+      throw new Error(
+        `LC4 HACC signed control plan forks from retained terminal plan at opportunity ${input.opportunity_index}: expected ${String(admittedPreviousHaccPlanSha256)}, received ${String(currentPlan.previous_plan_sha256)}`,
+      );
+    }
+    currentPlan = assertHaccResponsePlan(currentPlan, {
+      previousPlanSha256: admittedPreviousHaccPlanSha256,
     });
     initialResponsePlanSha256 = currentPlan.plan_sha256;
     terminalResponsePlanSha256 = currentPlan.plan_sha256;
@@ -469,7 +496,7 @@ export function assertLc4ProviderExchangeTreatmentBinding(input: Readonly<{
     control_receipt_sha256: input.control_receipt_sha256,
     previous_provider_exchange_sha256: expectedPreviousExchangeSha256,
     previous_hacc_response_plan_sha256:
-      expectedPreviousHaccPlanSha256,
+      admittedPreviousHaccPlanSha256,
     initial_response_plan_sha256: initialResponsePlanSha256,
     terminal_response_plan_sha256: terminalResponsePlanSha256,
     terminal_response_control_sha256: terminalResponseControlSha256,

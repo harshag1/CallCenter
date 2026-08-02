@@ -101,15 +101,29 @@ function projection(opportunityId: string, transcript: string) {
 
 function control(index: number): Lc4DevControlReceipt {
   const instructions = `native context ${index}`;
-  return {
-    response_control: { kind: "native_context", instructions, instructions_sha256: sha256Hex(instructions) },
+  const body = {
+    schema_version: 1 as const,
+    manifest_sha256: sha256Hex("repair-playback-control-manifest"),
+    episode_id: "lc4-dev-openai-native",
+    arm: "native" as const,
+    opportunity_id: `lc4-dev-op-${String(index).padStart(2, "0")}`,
+    opportunity_index: index,
+    previous_exchange_sha256: index === 1
+      ? null
+      : sha256Hex(`exchange:${index - 1}`),
+    response_control: { kind: "native_context" as const, instructions, instructions_sha256: sha256Hex(instructions) },
     flow_state_sha256: sha256Hex(`flow:${index}`),
     gateway_transcript_head_sha256: sha256Hex(`gateway:${index}`),
     tool_world_state_sha256: sha256Hex(`world:${index}`),
     worker_state_sha256: sha256Hex(`worker:${index}`),
     repair_state_sha256: sha256Hex(`repair:${index}`),
     native_continuity_state_sha256: sha256Hex(`common:${index}`),
-    control_receipt_sha256: sha256Hex(`control:${index}`),
+  };
+  return {
+    ...body,
+    control_receipt_sha256: sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-control-receipt/v1\n${canonicalJson(body)}`,
+    ),
   };
 }
 

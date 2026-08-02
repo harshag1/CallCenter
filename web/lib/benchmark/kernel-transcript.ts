@@ -264,10 +264,27 @@ export type KernelTranscriptCallerTurnEntry = KernelTranscriptEntryBase & Readon
   payload: KernelTranscriptCallerTurnPayload;
 }>;
 
+export type KernelTranscriptResponsePlanReboundPayload = Readonly<{
+  input: Readonly<{
+    turn: number;
+    transition_receipt_sha256: string;
+    previous_transition_binding_sha256: string | null;
+  }>;
+  response_plan: HaccResponsePlan;
+  transition_binding_sha256: string;
+}>;
+
+export type KernelTranscriptResponsePlanReboundEntry =
+  KernelTranscriptEntryBase & Readonly<{
+    operation: "response_plan_rebound";
+    payload: KernelTranscriptResponsePlanReboundPayload;
+  }>;
+
 export type KernelTranscriptEntry =
   | KernelTranscriptInitializeEntry
   | KernelTranscriptInvokeEntry
-  | KernelTranscriptCallerTurnEntry;
+  | KernelTranscriptCallerTurnEntry
+  | KernelTranscriptResponsePlanReboundEntry;
 
 export type KernelTranscript = Readonly<{
   /** Restricted in-memory recorder. Serialize only through encodeKernelTranscript(). */
@@ -298,7 +315,7 @@ export type PublicKernelTranscriptEntry = Readonly<{
   transcript_type: typeof TRANSCRIPT_TYPE;
   run_id: string;
   sequence: number;
-  operation: "initialize" | "invoke" | "caller_turn";
+  operation: "initialize" | "invoke" | "caller_turn" | "response_plan_rebound";
   payload: JsonValue;
   previous_entry_sha256: string | null;
   entry_sha256: string;
@@ -432,6 +449,12 @@ const CALLER_TURN_PAYLOAD_KEYS = Object.freeze([
   "capability_snapshot", "frontier_evidence", "input", "post_state", "pre_state", "response_plan",
 ].sort());
 const CALLER_TURN_INPUT_KEYS = Object.freeze(["condition_hash", "turn", "turn_id"].sort());
+const RESPONSE_PLAN_REBOUND_PAYLOAD_KEYS = Object.freeze([
+  "input", "response_plan", "transition_binding_sha256",
+].sort());
+const RESPONSE_PLAN_REBOUND_INPUT_KEYS = Object.freeze([
+  "previous_transition_binding_sha256", "transition_receipt_sha256", "turn",
+].sort());
 const STATE_HEAD_KEYS = Object.freeze([
   "capability_head", "durable_memory_head", "flow_state_sha256", "world_head",
 ].sort());
@@ -1149,6 +1172,21 @@ function publicCallerTurnEntry(
   });
 }
 
+function publicResponsePlanReboundEntry(
+  restricted: KernelTranscriptResponsePlanReboundEntry,
+  previousPublicHash: string,
+): PublicKernelTranscriptEntry {
+  return createPublicEntry({
+    schema_version: 1,
+    transcript_type: TRANSCRIPT_TYPE,
+    run_id: restricted.run_id,
+    sequence: restricted.sequence,
+    operation: "response_plan_rebound",
+    payload: restricted.payload as unknown as JsonValue,
+    previous_entry_sha256: previousPublicHash,
+  });
+}
+
 function flowStateHead(state: FlowExecutionState | null): string | null {
   return state === null ? null : domainHash(FLOW_STATE_DOMAIN, state);
 }
@@ -1519,7 +1557,12 @@ export function appendKernelTranscriptInvocation(
     durableMemoryState: postDurableMemoryState,
     durableMemoryRevision: postDurableMemoryRevision,
   });
-  if (canonicalJson(pre) !== canonicalJson(prior.payload.post_state)) {
+  const priorStateEntry = [...entries].reverse().find(
+    (entry) => entry.operation !== "response_plan_rebound",
+  );
+  if (!priorStateEntry
+    || canonicalJson(pre)
+      !== canonicalJson(priorStateEntry.payload.post_state)) {
     throw new Error("invocation pre-state does not continue the prior transcript state");
   }
   const outcome = sanitizeOutcome(input.outcome, input.sensitiveValueSecret);
@@ -1739,7 +1782,12 @@ export function appendKernelTranscriptCallerTurn(
     durableMemoryState: durableMemory,
     durableMemoryRevision: privateState.durableMemoryRevision,
   });
-  if (canonicalJson(pre) !== canonicalJson(prior.payload.post_state)) {
+  const priorStateEntry = [...entries].reverse().find(
+    (entry) => entry.operation !== "response_plan_rebound",
+  );
+  if (!priorStateEntry
+    || canonicalJson(pre)
+      !== canonicalJson(priorStateEntry.payload.post_state)) {
     throw new Error("caller-turn pre-state does not continue the prior transcript state");
   }
   const frontierMode = input.preCapabilityHead.target.startsWith("step:")
@@ -1762,13 +1810,18 @@ export function appendKernelTranscriptCallerTurn(
   }
   const snapshot = sanitizeSnapshot(input.capabilitySnapshot);
   assertSnapshotMatchesHead(snapshot, post.capability_head, "caller-turn response-plan snapshot");
+  const latestPlanEntry = [...entries].reverse().find((entry) =>
+    entry.operation === "caller_turn"
+    || entry.operation === "response_plan_rebound",
+  );
   const responsePlan = assertHaccResponsePlan(input.responsePlan, {
     revision: input.turn,
     capabilityEpoch: snapshot.capability_epoch,
     target: snapshot.scope,
     eligibleActions: snapshot.actions.map((action) => action.name),
     frontierEvidenceSha256: input.frontierEvidence.evidence_sha256,
-    previousPlanSha256: priorTurns.at(-1)?.payload.response_plan.plan_sha256 ?? null,
+    previousPlanSha256: latestPlanEntry?.payload.response_plan.plan_sha256
+      ?? null,
   });
   const entry = appendEntry<KernelTranscriptCallerTurnEntry>({
     schema_version: 1,
@@ -1808,6 +1861,138 @@ export function appendKernelTranscriptCallerTurn(
   TRANSCRIPT_PRIVATE.set(next, Object.freeze({
     ...privateState,
     publicEntries: Object.freeze([...privateState.publicEntries, publicEntry]),
+    publicByteLength,
+  }));
+  return next;
+}
+
+/** Append-only authority for a same-caller-turn post-tool plan rebound. */
+export function appendKernelTranscriptResponsePlanRebound(
+  transcript: KernelTranscript,
+  input: Readonly<{
+    runId: string;
+    turn: number;
+    transitionReceiptSha256: string;
+    previousTransitionBindingSha256: string | null;
+    responsePlan: HaccResponsePlan;
+    transitionBindingSha256: string;
+  }>,
+): KernelTranscript {
+  const entries = transcript.entries;
+  const privateState = TRANSCRIPT_PRIVATE.get(transcript);
+  if (!privateState) {
+    throw new Error("kernel transcript recorder private state is unavailable");
+  }
+  const prior = entries.at(-1);
+  const initialize = entries[0];
+  if (!prior || initialize?.operation !== "initialize"
+    || input.runId !== initialize.run_id) {
+    throw new Error("response-plan rebound differs from its initialized run");
+  }
+  assertPositiveInteger(input.turn, "response-plan rebound turn");
+  assertSha(
+    input.transitionReceiptSha256,
+    "response-plan rebound transition receipt",
+  );
+  if (input.previousTransitionBindingSha256 !== null) {
+    assertSha(
+      input.previousTransitionBindingSha256,
+      "response-plan rebound previous transition binding",
+    );
+  }
+  assertSha(
+    input.transitionBindingSha256,
+    "response-plan rebound transition binding",
+  );
+  const latestCaller = [...entries].reverse().find(
+    (entry): entry is KernelTranscriptCallerTurnEntry =>
+      entry.operation === "caller_turn",
+  );
+  if (!latestCaller || latestCaller.payload.input.turn !== input.turn) {
+    throw new Error(
+      "response-plan rebound is not bound to the current caller turn",
+    );
+  }
+  const latestPlanEntry = [...entries].reverse().find((entry) =>
+    entry.operation === "caller_turn"
+    || entry.operation === "response_plan_rebound",
+  );
+  if (!latestPlanEntry) {
+    throw new Error("response-plan rebound lacks a prior plan head");
+  }
+  const latestRebound = [...entries].reverse().find(
+    (entry): entry is KernelTranscriptResponsePlanReboundEntry =>
+      entry.operation === "response_plan_rebound",
+  );
+  const expectedPreviousTransitionBindingSha256 = latestRebound
+    ?.payload.transition_binding_sha256 ?? null;
+  if (input.previousTransitionBindingSha256
+    !== expectedPreviousTransitionBindingSha256) {
+    throw new Error(
+      "response-plan rebound forks from the retained transition-binding head",
+    );
+  }
+  const previousPlanSha256 = latestPlanEntry.payload.response_plan.plan_sha256;
+  const responsePlan = assertHaccResponsePlan(input.responsePlan, {
+    revision: input.turn,
+    previousPlanSha256,
+  });
+  const expectedTransitionBindingSha256 = sha256Hex(canonicalJson({
+    domain: "harshas-amazing-call-center/post-transition-response-plan/v1",
+    run_id: input.runId,
+    turn: input.turn,
+    previous_transition_binding_sha256:
+      input.previousTransitionBindingSha256,
+    transition_receipt_sha256: input.transitionReceiptSha256,
+    plan_sha256: responsePlan.plan_sha256,
+    capability_epoch: responsePlan.capability_epoch,
+  }));
+  if (input.transitionBindingSha256 !== expectedTransitionBindingSha256) {
+    throw new Error(
+      "response-plan rebound transition binding differs from its exact plan and receipt",
+    );
+  }
+  const entry = appendEntry<KernelTranscriptResponsePlanReboundEntry>({
+    schema_version: 1,
+    transcript_type: RESTRICTED_TRANSCRIPT_TYPE,
+    run_id: input.runId,
+    sequence: entries.length,
+    operation: "response_plan_rebound",
+    payload: {
+      input: {
+        turn: input.turn,
+        transition_receipt_sha256: input.transitionReceiptSha256,
+        previous_transition_binding_sha256:
+          input.previousTransitionBindingSha256,
+      },
+      response_plan: responsePlan,
+      transition_binding_sha256: input.transitionBindingSha256,
+    },
+    previous_entry_sha256: prior.entry_sha256,
+  });
+  const previousPublic = privateState.publicEntries.at(-1);
+  if (!previousPublic) {
+    throw new Error("kernel transcript public chain is unavailable");
+  }
+  const publicEntry = publicResponsePlanReboundEntry(
+    entry,
+    previousPublic.entry_sha256,
+  );
+  const publicByteLength = livePublicEntryBytes(
+    publicEntry,
+    privateState.limits,
+    privateState.publicByteLength,
+    entries.length + 1,
+  );
+  const next = Object.freeze({
+    entries: Object.freeze([...entries, entry]),
+  });
+  TRANSCRIPT_PRIVATE.set(next, Object.freeze({
+    ...privateState,
+    publicEntries: Object.freeze([
+      ...privateState.publicEntries,
+      publicEntry,
+    ]),
     publicByteLength,
   }));
   return next;
@@ -2179,6 +2364,55 @@ function parseEntry(input: unknown, index: number): KernelTranscriptEntry {
     });
     return immutableJson({ ...input, operation: "caller_turn", payload }) as unknown as KernelTranscriptCallerTurnEntry;
   }
+  if (input.operation === "response_plan_rebound") {
+    if (index === 0) {
+      throw new Error("response_plan_rebound cannot initialize a transcript");
+    }
+    exactKeys(
+      input.payload,
+      RESPONSE_PLAN_REBOUND_PAYLOAD_KEYS,
+      `entry[${index}] response_plan_rebound payload`,
+    );
+    exactKeys(
+      input.payload.input,
+      RESPONSE_PLAN_REBOUND_INPUT_KEYS,
+      `entry[${index}] response_plan_rebound input`,
+    );
+    assertPositiveInteger(
+      input.payload.input.turn,
+      `entry[${index}] response-plan rebound turn`,
+    );
+    assertSha(
+      input.payload.input.transition_receipt_sha256,
+      `entry[${index}] response-plan rebound transition receipt`,
+    );
+    if (input.payload.input.previous_transition_binding_sha256 !== null) {
+      assertSha(
+        input.payload.input.previous_transition_binding_sha256,
+        `entry[${index}] response-plan rebound previous binding`,
+      );
+    }
+    assertSha(
+      input.payload.transition_binding_sha256,
+      `entry[${index}] response-plan rebound transition binding`,
+    );
+    const payload: KernelTranscriptResponsePlanReboundPayload = Object.freeze({
+      input: Object.freeze({
+        turn: input.payload.input.turn,
+        transition_receipt_sha256:
+          input.payload.input.transition_receipt_sha256,
+        previous_transition_binding_sha256:
+          input.payload.input.previous_transition_binding_sha256,
+      }),
+      response_plan: assertHaccResponsePlan(input.payload.response_plan),
+      transition_binding_sha256: input.payload.transition_binding_sha256,
+    });
+    return immutableJson({
+      ...input,
+      operation: "response_plan_rebound",
+      payload,
+    }) as unknown as KernelTranscriptResponsePlanReboundEntry;
+  }
   if (input.operation !== "invoke" || index === 0) throw new Error(`entry[${index}].operation is invalid`);
   exactKeys(input.payload, INVOKE_PAYLOAD_KEYS, `entry[${index}] payload`);
   exactKeys(input.payload.input, INVOKE_INPUT_KEYS, `entry[${index}] input`);
@@ -2406,12 +2640,56 @@ export function verifyRestrictedKernelTranscript(input: Readonly<{
   let committedTurn = 0;
   const committedTurnIds = new Set<string>();
   let responsePlanSha256: string | null = null;
+  let transitionBindingSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== runId) errors.push(`entry ${index} changed run_id`);
     if (entry.previous_entry_sha256 !== expectedPrevious) errors.push(`entry ${index} previous hash mismatch`);
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, entryBody(entry)) !== entry.entry_sha256) {
       errors.push(`entry ${index} hash mismatch`);
+    }
+    if (entry.operation === "response_plan_rebound") {
+      try {
+        if (committedTurn < 1
+          || entry.payload.input.turn !== committedTurn) {
+          throw new Error(
+            `entry ${index} response-plan rebound is outside its caller turn`,
+          );
+        }
+        if (entry.payload.input.previous_transition_binding_sha256
+          !== transitionBindingSha256) {
+          throw new Error(
+            `entry ${index} response-plan rebound transition chain is stale`,
+          );
+        }
+        const rebound = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: committedTurn,
+          previousPlanSha256: responsePlanSha256,
+        });
+        const expectedBinding = sha256Hex(canonicalJson({
+          domain:
+            "harshas-amazing-call-center/post-transition-response-plan/v1",
+          run_id: runId,
+          turn: committedTurn,
+          previous_transition_binding_sha256: transitionBindingSha256,
+          transition_receipt_sha256:
+            entry.payload.input.transition_receipt_sha256,
+          plan_sha256: rebound.plan_sha256,
+          capability_epoch: rebound.capability_epoch,
+        }));
+        if (entry.payload.transition_binding_sha256 !== expectedBinding) {
+          throw new Error(
+            `entry ${index} response-plan rebound binding mismatch`,
+          );
+        }
+        responsePlanSha256 = rebound.plan_sha256;
+        transitionBindingSha256 = expectedBinding;
+      } catch (error) {
+        errors.push(error instanceof Error
+          ? error.message
+          : `entry ${index} response-plan rebound replay failed`);
+      }
+      continue;
     }
     if (entry.operation === "caller_turn") {
       try {
@@ -2861,6 +3139,7 @@ function parsePublicEntry(input: unknown, index: number): PublicKernelTranscript
     input.operation !== "initialize"
     && input.operation !== "invoke"
     && input.operation !== "caller_turn"
+    && input.operation !== "response_plan_rebound"
   ) throw new Error(`public entry[${index}] has an invalid operation`);
   const payload = JsonValueSchema.parse(input.payload);
   return immutableJson({ ...input, payload }) as unknown as PublicKernelTranscriptEntry;
@@ -3023,11 +3302,70 @@ export function verifyKernelTranscript(input: Readonly<{
   let committedTurn = 0;
   const committedTurnIds = new Set<string>();
   let responsePlanSha256: string | null = null;
+  let transitionBindingSha256: string | null = null;
   for (const [index, entry] of transcript.entries.entries()) {
     const expectedPrevious = index === 0 ? null : transcript.entries[index - 1].entry_sha256;
     if (entry.run_id !== initialize.run_id) errors.push(`public entry ${index} changed run_id`);
     if (entry.previous_entry_sha256 !== expectedPrevious) errors.push(`public entry ${index} previous hash mismatch`);
     if (domainHash(TRANSCRIPT_ENTRY_DOMAIN, publicEntryBody(entry)) !== entry.entry_sha256) errors.push(`public entry ${index} hash mismatch`);
+    if (entry.operation === "response_plan_rebound") {
+      try {
+        exactKeys(
+          entry.payload,
+          RESPONSE_PLAN_REBOUND_PAYLOAD_KEYS,
+          `public entry ${index} response-plan rebound payload`,
+        );
+        exactKeys(
+          entry.payload.input,
+          RESPONSE_PLAN_REBOUND_INPUT_KEYS,
+          `public entry ${index} response-plan rebound input`,
+        );
+        if (committedTurn < 1
+          || entry.payload.input.turn !== committedTurn) {
+          throw new Error(
+            `public entry ${index} response-plan rebound is outside its caller turn`,
+          );
+        }
+        if (entry.payload.input.previous_transition_binding_sha256
+          !== transitionBindingSha256) {
+          throw new Error(
+            `public entry ${index} response-plan rebound transition chain is stale`,
+          );
+        }
+        const transitionReceiptSha256 = entry.payload.input
+          .transition_receipt_sha256;
+        assertSha(
+          transitionReceiptSha256,
+          `public entry ${index} response-plan rebound receipt`,
+        );
+        const rebound = assertHaccResponsePlan(entry.payload.response_plan, {
+          revision: committedTurn,
+          previousPlanSha256: responsePlanSha256,
+        });
+        const expectedBinding = sha256Hex(canonicalJson({
+          domain:
+            "harshas-amazing-call-center/post-transition-response-plan/v1",
+          run_id: initialize.run_id,
+          turn: committedTurn,
+          previous_transition_binding_sha256: transitionBindingSha256,
+          transition_receipt_sha256: transitionReceiptSha256,
+          plan_sha256: rebound.plan_sha256,
+          capability_epoch: rebound.capability_epoch,
+        }));
+        if (entry.payload.transition_binding_sha256 !== expectedBinding) {
+          throw new Error(
+            `public entry ${index} response-plan rebound binding mismatch`,
+          );
+        }
+        responsePlanSha256 = rebound.plan_sha256;
+        transitionBindingSha256 = expectedBinding;
+      } catch (error) {
+        errors.push(error instanceof Error
+          ? error.message
+          : `public entry ${index} response-plan rebound replay failed`);
+      }
+      continue;
+    }
     if (entry.operation === "caller_turn") {
       try {
         exactKeys(entry.payload, CALLER_TURN_PAYLOAD_KEYS, `public entry ${index} caller payload`);

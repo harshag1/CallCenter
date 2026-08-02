@@ -471,7 +471,7 @@ describe("LC4 provider-exchange treatment authority", () => {
       ...valid,
       expected_previous_hacc_response_plan_sha256:
         sha256Hex("substituted prior plan"),
-    })).toThrow(/chain is stale/u);
+    })).toThrow(/forks from retained terminal plan/u);
   });
 
   it("derives post-tool terminal Flow state from the ordered gateway authority", () => {
@@ -578,5 +578,122 @@ describe("LC4 provider-exchange treatment authority", () => {
         response_plan_chain_head_sha256: canonical,
       })).toThrow(/independently replayed treatment chain/u);
     }
+  });
+
+  it("keeps the post-tool canonical checkpoint through repair, next control, and rotation", () => {
+    const initialPlan = responsePlan();
+    const reboundPlan = responsePlan(
+      2,
+      initialPlan.plan_sha256,
+      "2026-07-21T00:00:01.000Z",
+    );
+    const signed = authority(initialPlan);
+    const receiptSet = reboundGatewayReceiptSet({
+      plan: reboundPlan,
+      transition_binding_sha256: sha256Hex(
+        "combined post-tool transition binding",
+      ),
+    });
+    const reboundControl = receiptSet.authority_projections[0]!
+      .post_transition_response_control;
+    const canonicalProjection = {
+      ...(projection(initialPlan) as unknown as Record<string, JsonValue>),
+      dev_gateway_receipt_set: receiptSet,
+      terminal_response_plan_sha256: reboundPlan.plan_sha256,
+      terminal_response_control_sha256:
+        sha256Hex(canonicalJson(reboundControl)),
+    };
+    const canonicalBinding = assertLc4ProviderExchangeTreatmentBinding({
+      projection: canonicalProjection,
+      control_authority: signed.body as unknown as JsonValue,
+      control_receipt_sha256: signed.receipt,
+      episode_id: EPISODE,
+      opportunity_id: OPPORTUNITY,
+      opportunity_index: 1,
+      arm: "hacc",
+      playback_kind: "canonical",
+      repair_decision: null,
+      repair_decision_receipt_sha256: null,
+      canonical_provider_exchange_sha256: null,
+      expected_previous_provider_exchange_sha256: null,
+      expected_previous_hacc_response_plan_sha256: null,
+    });
+    const canonicalExchange = sha256Hex("combined canonical exchange");
+    const decision = repairDecision({
+      controlReceipt: signed.receipt,
+      canonicalExchange,
+    });
+    const repairProjection = projection(
+      initialPlan,
+      "repair",
+    ) as unknown as Record<string, JsonValue>;
+    repairProjection.repair_decision_receipt_sha256 = decision.receipt;
+    const repairBinding = assertLc4ProviderExchangeTreatmentBinding({
+      projection: repairProjection,
+      control_authority: signed.body as unknown as JsonValue,
+      control_receipt_sha256: signed.receipt,
+      episode_id: EPISODE,
+      opportunity_id: OPPORTUNITY,
+      opportunity_index: 1,
+      arm: "hacc",
+      playback_kind: "repair",
+      repair_decision: decision.body as unknown as JsonValue,
+      repair_decision_receipt_sha256: decision.receipt,
+      canonical_provider_exchange_sha256: canonicalExchange,
+      expected_previous_provider_exchange_sha256: null,
+      expected_previous_hacc_response_plan_sha256:
+        canonicalBinding.previous_hacc_response_plan_sha256,
+    });
+    expect(repairBinding.terminal_response_plan_sha256)
+      .toBe(initialPlan.plan_sha256);
+    expect(canonicalBinding.terminal_response_plan_sha256)
+      .toBe(reboundPlan.plan_sha256);
+
+    const genesis = lc4DevResponsePlanChainGenesis(
+      sha256Hex("combined preflight"),
+      EPISODE,
+    );
+    const canonicalChain = advanceLc4DevResponsePlanChain({
+      previous_chain_head_sha256: genesis,
+      playback_kind: "canonical",
+      control_receipt_sha256: canonicalBinding.control_receipt_sha256,
+      initial_response_plan_sha256:
+        canonicalBinding.initial_response_plan_sha256,
+      provider_exchange_sha256: canonicalExchange,
+      terminal_response_plan_sha256:
+        canonicalBinding.terminal_response_plan_sha256,
+      terminal_response_control_sha256:
+        canonicalBinding.terminal_response_control_sha256,
+    });
+    expect(advanceLc4DevResponsePlanChain({
+      previous_chain_head_sha256: canonicalChain,
+      playback_kind: "repair",
+      control_receipt_sha256: repairBinding.control_receipt_sha256,
+      initial_response_plan_sha256:
+        repairBinding.initial_response_plan_sha256,
+      provider_exchange_sha256: sha256Hex("combined repair exchange"),
+      terminal_response_plan_sha256:
+        repairBinding.terminal_response_plan_sha256,
+      terminal_response_control_sha256:
+        repairBinding.terminal_response_control_sha256,
+    })).toBe(canonicalChain);
+
+    const nextCallerPlan = responsePlan(
+      3,
+      canonicalBinding.terminal_response_plan_sha256,
+      "2026-07-21T00:00:02.000Z",
+    );
+    expect(nextCallerPlan.previous_plan_sha256)
+      .toBe(canonicalBinding.terminal_response_plan_sha256);
+    expect(() => assertLc4HaccRotationTreatmentCheckpoint({
+      packet: {
+        packet_type: "hacc_provider_conversation_plus_structured_state",
+        flow_state_sha256: canonicalBinding.terminal_flow_state_sha256,
+        response_plan_chain_head_sha256: canonicalChain,
+      } as unknown as JsonValue,
+      terminal_flow_state_sha256:
+        canonicalBinding.terminal_flow_state_sha256,
+      response_plan_chain_head_sha256: canonicalChain,
+    })).not.toThrow();
   });
 });

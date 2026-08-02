@@ -60,7 +60,6 @@ import {
 } from "./lc4-development-audio-contract";
 import { createLc4ProviderExecutionProfile } from "./lc4-production-runner-foundation";
 import {
-  assertLc4ProviderExchangeReplayProjection,
   assertLc4ProviderExchangeTreatmentReplayProjection,
   type Lc4ProviderExchangeTreatmentReplayExpectation,
 } from "./lc4-provider-exchange-replay";
@@ -126,6 +125,8 @@ const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-eve
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v3\n";
 const CELL_PREFIX_DOMAIN = "harshas-amazing-call-center/lc4-dev-cell-prefix/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
+const CONTROL_RECEIPT_DOMAIN =
+  "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n";
 const REPAIR_DECISION_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-decision-receipt/v1\n";
 const REPAIR_PLAYBACK_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-playback-receipt/v1\n";
 
@@ -879,6 +880,13 @@ export type Lc4DevResponseControl =
 export type Lc4DevProviderSegmentOrdinal = 1 | 2 | 3 | 4 | 5 | 6;
 
 export type Lc4DevControlReceipt = Readonly<{
+  schema_version: 1;
+  manifest_sha256: string;
+  episode_id: string;
+  arm: Arm;
+  opportunity_id: string;
+  opportunity_index: number;
+  previous_exchange_sha256: string | null;
   response_control: Lc4DevResponseControl;
   flow_state_sha256: string;
   gateway_transcript_head_sha256: string;
@@ -1092,7 +1100,14 @@ function isLocalContinuityCompileFailure(error: unknown): boolean {
     );
 }
 
-function assertControl(receipt: Lc4DevControlReceipt, arm: Arm): void {
+function assertControl(input: Readonly<{
+  receipt: Lc4DevControlReceipt;
+  manifest_sha256: string;
+  episode: Lc4DevLiveEpisodePlan;
+  opportunity: Lc4PublicDevOpportunity;
+  previous_exchange_sha256: string | null;
+}>): void {
+  const { receipt } = input;
   for (const [label, digest] of Object.entries({
     flow_state_sha256: receipt.flow_state_sha256,
     gateway_transcript_head_sha256: receipt.gateway_transcript_head_sha256,
@@ -1102,8 +1117,23 @@ function assertControl(receipt: Lc4DevControlReceipt, arm: Arm): void {
     native_continuity_state_sha256: receipt.native_continuity_state_sha256,
     control_receipt_sha256: receipt.control_receipt_sha256,
   })) requireHash(digest, label);
-  if ((arm === "native" && receipt.response_control.kind !== "native_context")
-    || (arm === "hacc" && receipt.response_control.kind !== "hacc_response_plan")) {
+  if (receipt.schema_version !== 1
+    || receipt.manifest_sha256 !== input.manifest_sha256
+    || receipt.episode_id !== input.episode.episode_id
+    || receipt.arm !== input.episode.arm
+    || receipt.opportunity_id !== input.opportunity.id
+    || receipt.opportunity_index !== input.opportunity.index
+    || receipt.previous_exchange_sha256 !== input.previous_exchange_sha256) {
+    throw new Error(
+      "LC4-DEV control authority differs from its manifest, episode, opportunity, or prior exchange",
+    );
+  }
+  const { control_receipt_sha256: claimedReceipt, ...receiptBody } = receipt;
+  if (claimedReceipt !== hash(CONTROL_RECEIPT_DOMAIN, receiptBody)) {
+    throw new Error("LC4-DEV control authority receipt hash mismatch");
+  }
+  if ((input.episode.arm === "native" && receipt.response_control.kind !== "native_context")
+    || (input.episode.arm === "hacc" && receipt.response_control.kind !== "hacc_response_plan")) {
     throw new Error("LC4-DEV response control differs from randomized arm");
   }
   if (receipt.response_control.kind === "native_context"
@@ -1501,19 +1531,15 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
       ? (retainedProjection as { readonly schema_version?: JsonValue })
         .schema_version
       : null;
-    if (schemaVersion === 5) {
-      return assertLc4ProviderExchangeTreatmentReplayProjection(
-        retainedProjection,
-        replayExpectation,
+    if (schemaVersion !== 5) {
+      throw new Error(
+        "LC4-DEV authorized live exchange requires treatment-bound provider schema v5",
       );
     }
-    return Object.freeze({
-      ...assertLc4ProviderExchangeReplayProjection(
-        retainedProjection,
-        replayExpectation,
-      ),
-      treatment_binding: null,
-    });
+    return assertLc4ProviderExchangeTreatmentReplayProjection(
+      retainedProjection,
+      replayExpectation,
+    );
   };
 
   const retainFailure = async (failure: Lc4DevFailureEvidence) => {
@@ -1802,7 +1828,13 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
               previous_exchange_sha256: priorExchange,
             }));
             const control = retainedControl.receipt;
-            assertControl(control, episode.arm);
+            assertControl({
+              receipt: control,
+              manifest_sha256: input.preflight.control_plane_manifest_sha256,
+              episode,
+              opportunity,
+              previous_exchange_sha256: priorExchange,
+            });
             if (retainedControl.evidence.evidence_sha256 !== control.control_receipt_sha256) {
               throw new Error("LC4-DEV control authority body is not retained under its receipt hash");
             }
@@ -1962,12 +1994,9 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
             let effectiveAssistantPcmSha256 = assistantReceipt.artifact_sha256;
             let effectiveRepairEvidenceReferences:
               readonly Lc4DevReplayArtifactReference[] = Object.freeze([]);
-            let effectiveTerminalHaccPlanSha256 = episode.arm === "hacc"
+            const effectiveTerminalHaccPlanSha256 = episode.arm === "hacc"
               ? canonicalTreatmentReplay.treatment_binding
-                ?.terminal_response_plan_sha256
-                ?? (control.response_control.kind === "hacc_response_plan"
-                  ? control.response_control.plan.plan_sha256
-                  : null)
+                .terminal_response_plan_sha256
               : null;
             if (repairDecision.playback) {
               const repair = repairDecision.playback;
@@ -2005,8 +2034,7 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
                   || repairExchange.assistant_pcm.byteLength % 2 !== 0) {
                   throw new Error("LC4-DEV repair exchange evidence is incomplete");
                 }
-                const repairTreatmentReplay =
-                  await assertExchangeReplayBinding(repairExchange, {
+                await assertExchangeReplayBinding(repairExchange, {
                     episode,
                     opportunity_id: opportunity.id,
                     opportunity_index: opportunity.index,
@@ -2028,14 +2056,12 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
                     expected_previous_provider_exchange_sha256:
                       controlPreviousExchangeSha256,
                     expected_previous_hacc_response_plan_sha256:
-                      controlPreviousHaccPlanSha256,
+                      canonicalTreatmentReplay.treatment_binding
+                        .previous_hacc_response_plan_sha256,
                   });
-                if (episode.arm === "hacc") {
-                  effectiveTerminalHaccPlanSha256 =
-                    repairTreatmentReplay.treatment_binding
-                      ?.terminal_response_plan_sha256
-                    ?? effectiveTerminalHaccPlanSha256;
-                }
+                // Repair may replace caller-heard audio and the effective
+                // provider exchange, but it cannot roll canonical host Flow or
+                // the post-tool response-plan checkpoint backward.
               } catch (error) {
                 const failure = isLc4DevFailureEvidenceError(error)
                   ? error.failure
