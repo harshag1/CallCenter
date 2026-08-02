@@ -1,6 +1,10 @@
 import { createPublicKey, verify } from "node:crypto";
 import { canonicalJson, sha256Hex } from "./canonical";
 import {
+  frozenEvidenceEvaluationContractSha256V2,
+  validateFrozenEvidenceEvaluationContractV2,
+} from "./evaluation-contract";
+import {
   evidenceManifestRootV2,
   evidenceV2Domains,
   publicKeyFingerprintV2,
@@ -13,14 +17,19 @@ import {
   type ActionReceiptPayload,
   type AudioRangePayload,
   type CatalogPublishedPayload,
+  type AudioSemanticAlignmentArtifactV2,
+  type EvidenceArtifactResolverV2,
   type EvidenceBundleV2,
   type EvidenceCategoryRootV2,
   type EvidenceCategoryV2,
   type EvidenceEndpointsV2,
+  type EvidenceJsonValue,
+  type EvidenceWorldPredicateV2,
   type EvidenceEventTypeV2,
   type EvidenceEventV2,
   type EvidenceReplayResultV2,
   type EvidenceTrustV2,
+  type FrozenEvidenceEvaluationContractV2,
   type PlanRegisteredPayload,
   type PlaybackRangePayload,
   type ProviderNormalizedPayload,
@@ -28,6 +37,7 @@ import {
   type UsageRecordedPayload,
   type WorkerEventPayload,
   type WorldEventPayload,
+  type WorldSnapshotArtifactV2,
 } from "./types";
 import {
   eventCategory,
@@ -45,6 +55,18 @@ const CATEGORY_ROOT_KEYS = ["event_count", "root_sha256"] as const;
 const SIGNATURE_KEYS = ["algorithm", "signer_id", "signature_base64"] as const;
 
 type ReplayError = Readonly<{ code: string; message: string }>;
+type ReplayOptions = Readonly<{
+  trust: EvidenceTrustV2;
+  expectedRunId: string;
+  evaluationContract: FrozenEvidenceEvaluationContractV2;
+  expectedEvaluationContractSha256: string;
+  artifactResolver: EvidenceArtifactResolverV2;
+}>;
+
+type ReopenedEvidence = Readonly<{
+  worldSnapshots: ReadonlyMap<string, WorldSnapshotArtifactV2>;
+  semanticAlignments: ReadonlyMap<string, AudioSemanticAlignmentArtifactV2>;
+}>;
 
 function canonicalSignature(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -81,6 +103,197 @@ function categoryRoot(category: EvidenceCategoryV2, events: readonly EvidenceEve
     event_count: eventHashes.length,
     root_sha256: sha256Hex(`${evidenceV2Domains.CATEGORY_DOMAIN}${canonicalJson({ category, event_hashes: eventHashes })}`),
   };
+}
+
+function parseCanonicalArtifact(bytes: Uint8Array, label: string): unknown {
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Error(`${label} is not valid UTF-8`); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); }
+  catch { throw new Error(`${label} is not valid JSON`); }
+  if (text !== `${canonicalJson(parsed)}\n`) throw new Error(`${label} is not canonical JSON`);
+  return parsed;
+}
+
+function uniqueArtifactIds(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const ids = value.map((entry, index) => { safeId(entry, `${label}[${index}]`); return entry; });
+  if (new Set(ids).size !== ids.length) throw new Error(`${label} contains duplicates`);
+  return ids;
+}
+
+function parseWorldSnapshot(bytes: Uint8Array, expectedSha256: string): WorldSnapshotArtifactV2 {
+  const parsed = parseCanonicalArtifact(bytes, `world snapshot ${expectedSha256}`);
+  exactRecord(parsed, [
+    "schema_version", "artifact_type", "scenario_id", "world_revision", "state",
+    "corrections_applied_ids", "committed_effects",
+  ], "world snapshot");
+  if (parsed.schema_version !== 2 || parsed.artifact_type !== "hacc_world_snapshot") throw new Error("unsupported world snapshot artifact");
+  safeId(parsed.scenario_id, "world snapshot scenario ID");
+  if (!Number.isSafeInteger(parsed.world_revision) || (parsed.world_revision as number) < 0) throw new Error("world snapshot revision is invalid");
+  canonicalJson(parsed.state);
+  uniqueArtifactIds(parsed.corrections_applied_ids, "world applied corrections");
+  if (!Array.isArray(parsed.committed_effects)) throw new Error("world committed effects must be an array");
+  parsed.committed_effects.forEach((effect, index) => {
+    exactRecord(effect, ["semantic_effect_id", "authorized_attempt_id"], `world committed effect[${index}]`);
+    safeId(effect.semantic_effect_id, `world committed effect[${index}] semantic ID`);
+    if (effect.authorized_attempt_id !== null) safeId(effect.authorized_attempt_id, `world committed effect[${index}] attempt ID`);
+  });
+  return parsed as unknown as WorldSnapshotArtifactV2;
+}
+
+function predicateSatisfied(state: EvidenceJsonValue, predicate: EvidenceWorldPredicateV2): boolean {
+  let current: unknown = state;
+  for (const segment of predicate.path) {
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/.test(segment)) return false;
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length) return false;
+      current = current[index];
+    } else if (current !== null && typeof current === "object" && Object.prototype.hasOwnProperty.call(current, segment)) {
+      current = (current as Record<string, unknown>)[segment];
+    } else return false;
+  }
+  return canonicalJson(current) === canonicalJson(predicate.expected);
+}
+
+function contractPredicate(contract: FrozenEvidenceEvaluationContractV2, predicateId: string) {
+  return contract.world_predicates.find((predicate) => predicate.predicate_id === predicateId)!;
+}
+
+function parseSemanticAlignment(bytes: Uint8Array, expectedSha256: string): AudioSemanticAlignmentArtifactV2 {
+  const parsed = parseCanonicalArtifact(bytes, `semantic alignment ${expectedSha256}`);
+  exactRecord(parsed, [
+    "schema_version", "artifact_type", "response_id", "audio_sha256", "start_sample", "end_sample",
+    "claim_ids", "opportunity_ids",
+  ], "audio semantic alignment");
+  if (parsed.schema_version !== 2 || parsed.artifact_type !== "hacc_audio_semantic_alignment") throw new Error("unsupported audio semantic alignment artifact");
+  safeId(parsed.response_id, "alignment response ID"); sha256(parsed.audio_sha256, "alignment audio hash");
+  if (!Number.isSafeInteger(parsed.start_sample) || (parsed.start_sample as number) < 0 || !Number.isSafeInteger(parsed.end_sample) || (parsed.end_sample as number) <= (parsed.start_sample as number)) throw new Error("alignment sample range is invalid");
+  uniqueArtifactIds(parsed.claim_ids, "alignment claim IDs"); uniqueArtifactIds(parsed.opportunity_ids, "alignment opportunity IDs");
+  return parsed as unknown as AudioSemanticAlignmentArtifactV2;
+}
+
+function verifyExternalEvidence(
+  bundle: EvidenceBundleV2,
+  options: ReplayOptions,
+  errors: ReplayError[],
+): ReopenedEvidence {
+  let contract: FrozenEvidenceEvaluationContractV2;
+  try {
+    sha256(options.expectedEvaluationContractSha256, "expected evaluation contract hash");
+    contract = validateFrozenEvidenceEvaluationContractV2(options.evaluationContract);
+    const actualContractHash = frozenEvidenceEvaluationContractSha256V2(contract);
+    if (actualContractHash !== options.expectedEvaluationContractSha256) {
+      errors.push({ code: "evaluation_contract_mismatch", message: "evaluation contract differs from independently frozen hash" });
+    }
+    safeId(options.artifactResolver.resolver_id, "artifact resolver ID");
+    if (options.artifactResolver.resolver_id !== contract.artifact_resolver_id) {
+      errors.push({ code: "artifact_resolver_mismatch", message: "artifact resolver differs from frozen evaluation contract" });
+    }
+  } catch (error) {
+    errors.push({ code: "invalid_evaluation_contract", message: error instanceof Error ? error.message : "invalid evaluation contract" });
+    return { worldSnapshots: new Map(), semanticAlignments: new Map() };
+  }
+
+  const cache = new Map<string, Uint8Array>();
+  const reopen = (digest: string, label: string, byteLength?: number): Uint8Array | null => {
+    const prior = cache.get(digest);
+    if (prior) {
+      if (byteLength !== undefined && prior.byteLength !== byteLength) errors.push({ code: "artifact_length_mismatch", message: `${label} byte length differs` });
+      return prior;
+    }
+    let resolved: Uint8Array | null;
+    try { resolved = options.artifactResolver.resolve(digest); }
+    catch (error) {
+      errors.push({ code: "artifact_resolution_failed", message: `${label} resolver failed: ${error instanceof Error ? error.message : "unknown error"}` });
+      return null;
+    }
+    if (!(resolved instanceof Uint8Array)) {
+      errors.push({ code: "missing_artifact", message: `${label} ${digest} could not be reopened` });
+      return null;
+    }
+    const detached = Uint8Array.from(resolved);
+    if (sha256Hex(detached) !== digest) {
+      errors.push({ code: "artifact_hash_mismatch", message: `${label} reopened bytes do not match ${digest}` });
+      return null;
+    }
+    if (byteLength !== undefined && detached.byteLength !== byteLength) errors.push({ code: "artifact_length_mismatch", message: `${label} byte length differs` });
+    cache.set(digest, detached);
+    return detached;
+  };
+
+  for (const descriptor of [contract.scenario_artifact, contract.plan.artifact, contract.catalog.artifact]) {
+    reopen(descriptor.sha256, descriptor.artifact_id, descriptor.byte_length);
+  }
+
+  const plans = bundle.events.filter((event) => event.event_type === "plan.registered").map((event) => event.payload as PlanRegisteredPayload);
+  if (plans.length !== 1 || plans[0].plan_id !== contract.plan.plan_id || plans[0].revision !== contract.plan.revision
+    || plans[0].plan_sha256 !== contract.plan.artifact.sha256
+    || canonicalJson(plans[0].required_step_ids) !== canonicalJson(contract.plan.required_step_ids)
+    || canonicalJson(plans[0].required_obligation_ids) !== canonicalJson(contract.required_obligation_ids)
+    || canonicalJson(plans[0].forbidden_claim_ids) !== canonicalJson(contract.forbidden_claim_ids)) {
+    errors.push({ code: "plan_contract_mismatch", message: "recorded plan does not exactly match frozen evaluation contract" });
+  }
+  const catalogs = bundle.events.filter((event) => event.event_type === "catalog.published").map((event) => event.payload as CatalogPublishedPayload);
+  if (catalogs.length !== 1 || catalogs[0].catalog_id !== contract.catalog.catalog_id || catalogs[0].revision !== contract.catalog.revision
+    || catalogs[0].plan_id !== contract.plan.plan_id || catalogs[0].catalog_sha256 !== contract.catalog.artifact.sha256
+    || canonicalJson(catalogs[0].capability_ids) !== canonicalJson(contract.catalog.capability_ids)) {
+    errors.push({ code: "catalog_contract_mismatch", message: "recorded catalog does not exactly match frozen evaluation contract" });
+  }
+
+  const worldSnapshots = new Map<string, WorldSnapshotArtifactV2>();
+  const semanticAlignments = new Map<string, AudioSemanticAlignmentArtifactV2>();
+  for (const event of bundle.events) {
+    let digest: string | null = null;
+    const label = event.event_type;
+    switch (event.event_type) {
+      case "plan.registered": digest = (event.payload as PlanRegisteredPayload).plan_sha256; break;
+      case "catalog.published": digest = (event.payload as CatalogPublishedPayload).catalog_sha256; break;
+      case "provider.normalized": digest = (event.payload as ProviderNormalizedPayload).raw_event_sha256; break;
+      case "action.attempted": digest = (event.payload as ActionAttemptedPayload).arguments_sha256; break;
+      case "action.policy_decided": digest = (event.payload as ActionPolicyPayload).policy_sha256; break;
+      case "action.receipt": digest = (event.payload as ActionReceiptPayload).result_sha256; break;
+      case "worker.event": digest = (event.payload as WorkerEventPayload).result_sha256; break;
+      case "audio.range": {
+        const payload = event.payload as AudioRangePayload;
+        const audioBytes = reopen(payload.audio_sha256, `audio ${payload.response_id}`, payload.byte_length);
+        const alignmentBytes = reopen(payload.semantic_alignment_sha256, `semantic alignment ${payload.response_id}`);
+        if (audioBytes && alignmentBytes) {
+          try {
+            const alignment = parseSemanticAlignment(alignmentBytes, payload.semantic_alignment_sha256);
+            if (alignment.response_id !== payload.response_id || alignment.audio_sha256 !== payload.audio_sha256
+              || alignment.start_sample !== payload.start_sample || alignment.end_sample !== payload.end_sample
+              || canonicalJson(alignment.claim_ids) !== canonicalJson(payload.claim_ids)
+              || canonicalJson(alignment.opportunity_ids) !== canonicalJson(payload.opportunity_ids)) {
+              errors.push({ code: "semantic_alignment_mismatch", message: `audio ${payload.response_id} differs from reopened semantic alignment` });
+            }
+            semanticAlignments.set(payload.semantic_alignment_sha256, alignment);
+          } catch (error) { errors.push({ code: "invalid_semantic_alignment", message: error instanceof Error ? error.message : "invalid semantic alignment" }); }
+        }
+        continue;
+      }
+      case "world.event": {
+        const payload = event.payload as WorldEventPayload;
+        const bytes = reopen(payload.world_state_sha256, `world state ${payload.world_revision}`);
+        if (bytes) {
+          try {
+            const snapshot = parseWorldSnapshot(bytes, payload.world_state_sha256);
+            if (snapshot.scenario_id !== contract.scenario_id || snapshot.world_revision !== payload.world_revision) errors.push({ code: "world_contract_mismatch", message: `world snapshot at revision ${payload.world_revision} differs from its event binding` });
+            worldSnapshots.set(payload.world_state_sha256, snapshot);
+          } catch (error) { errors.push({ code: "invalid_world_snapshot", message: error instanceof Error ? error.message : "invalid world snapshot" }); }
+        }
+        continue;
+      }
+      case "usage.recorded": digest = (event.payload as UsageRecordedPayload).pricing_artifact_sha256; break;
+      case "playback.range":
+      case "journal.terminal":
+        continue;
+    }
+    if (digest !== null) reopen(digest, label);
+  }
+  return { worldSnapshots, semanticAlignments };
 }
 
 function parseStructure(input: unknown, errors: ReplayError[]): EvidenceBundleV2 | null {
@@ -211,14 +424,22 @@ function assertUnique(id: string, label: string, seen: Set<string>, errors: Repl
   seen.add(id);
 }
 
-function verifyCausality(bundle: EvidenceBundleV2, errors: ReplayError[]): void {
+function verifyCausality(
+  bundle: EvidenceBundleV2,
+  contract: FrozenEvidenceEvaluationContractV2,
+  reopened: ReopenedEvidence,
+  errors: ReplayError[],
+): void {
   const plans = new Map<string, number>();
   const capabilities = new Set<string>();
   const attempts = new Map<string, number>();
   const policies = new Map<string, number>();
+  const receipts: ActionReceiptPayload[] = [];
   const workers = new Set<string>();
   const audio = new Map<string, AudioRangePayload[]>();
   const providerSequences = new Map<string, number>();
+  let priorWorldRevision = -1;
+  const worldRevisionHashes = new Map<number, string>();
   const allIds = new Map<string, Set<string>>();
   const seen = (kind: string) => {
     const found = allIds.get(kind) ?? new Set<string>();
@@ -267,6 +488,7 @@ function verifyCausality(bundle: EvidenceBundleV2, errors: ReplayError[]): void 
       }
       case "action.receipt": {
         const payload = event.payload as ActionReceiptPayload;
+        receipts.push(payload);
         assertUnique(payload.receipt_id, "receipt ID", seen("receipt"), errors);
         if (!attempts.has(payload.attempt_id) || !policies.has(payload.attempt_id) || policies.get(payload.attempt_id)! >= index) errors.push({ code: "missing_reference", message: `receipt ${payload.receipt_id} lacks a preceding attempt and policy` });
         break;
@@ -286,6 +508,9 @@ function verifyCausality(bundle: EvidenceBundleV2, errors: ReplayError[]): void 
         const ranges = audio.get(payload.response_id) ?? [];
         if (ranges.some((item) => item.sample_rate_hz !== payload.sample_rate_hz || item.channel_count !== payload.channel_count)) errors.push({ code: "audio_format_mismatch", message: `response ${payload.response_id} changes audio format` });
         ranges.push(payload); audio.set(payload.response_id, ranges);
+        for (const opportunityId of payload.opportunity_ids) {
+          if (!contract.required_opportunity_ids.includes(opportunityId)) errors.push({ code: "opportunity_contract_mismatch", message: `audio references unregistered opportunity ${opportunityId}` });
+        }
         break;
       }
       case "playback.range": {
@@ -300,6 +525,23 @@ function verifyCausality(bundle: EvidenceBundleV2, errors: ReplayError[]): void 
         const payload = event.payload as WorldEventPayload;
         assertUnique(payload.world_event_id, "world event ID", seen("world"), errors);
         if (payload.authorized_attempt_id !== null && !attempts.has(payload.authorized_attempt_id)) errors.push({ code: "missing_reference", message: `world event ${payload.world_event_id} references an unseen attempt` });
+        if (payload.world_revision < priorWorldRevision) errors.push({ code: "world_order", message: `world revision regresses at ${payload.world_event_id}` });
+        priorWorldRevision = payload.world_revision;
+        const revisionHash = worldRevisionHashes.get(payload.world_revision);
+        if (revisionHash !== undefined && revisionHash !== payload.world_state_sha256) errors.push({ code: "world_revision_conflict", message: `world revision ${payload.world_revision} binds multiple states` });
+        worldRevisionHashes.set(payload.world_revision, payload.world_state_sha256);
+        const snapshot = reopened.worldSnapshots.get(payload.world_state_sha256);
+        if (snapshot) {
+          const corrections = new Set(snapshot.corrections_applied_ids);
+          const matchingEffect = snapshot.committed_effects.some((effect) => effect.semantic_effect_id === payload.semantic_effect_id && effect.authorized_attempt_id === payload.authorized_attempt_id);
+          if (payload.kind === "goal.completed" && !contract.required_goal_predicate_ids.every((id) => predicateSatisfied(snapshot.state, contractPredicate(contract, id)))) errors.push({ code: "world_claim_mismatch", message: `goal event ${payload.world_event_id} is not supported by reopened world state` });
+          const stepBinding = contract.step_predicate_bindings.find((binding) => binding.step_id === payload.required_step_id);
+          if (payload.kind === "step.completed" && (!stepBinding || !predicateSatisfied(snapshot.state, contractPredicate(contract, stepBinding.predicate_id)))) errors.push({ code: "world_claim_mismatch", message: `step event ${payload.world_event_id} is not supported by reopened world state` });
+          const obligationBinding = contract.obligation_predicate_bindings.find((binding) => binding.obligation_id === payload.obligation_id);
+          if (payload.kind === "obligation.completed" && (!obligationBinding || !predicateSatisfied(snapshot.state, contractPredicate(contract, obligationBinding.predicate_id)))) errors.push({ code: "world_claim_mismatch", message: `obligation event ${payload.world_event_id} is not supported by reopened world state` });
+          if (payload.kind === "correction.applied" && (payload.correction_id === null || !corrections.has(payload.correction_id))) errors.push({ code: "world_claim_mismatch", message: `correction event ${payload.world_event_id} is not supported by reopened world state` });
+          if ((payload.kind === "effect.committed" || payload.kind === "effect.reconciled") && !matchingEffect) errors.push({ code: "world_claim_mismatch", message: `effect event ${payload.world_event_id} is not supported by reopened world state` });
+        }
         break;
       }
       case "usage.recorded":
@@ -309,6 +551,16 @@ function verifyCausality(bundle: EvidenceBundleV2, errors: ReplayError[]): void 
         break;
     }
   });
+  const finalWorldEvent = [...bundle.events].reverse().find((event) => event.event_type === "world.event");
+  const finalWorld = finalWorldEvent
+    ? reopened.worldSnapshots.get((finalWorldEvent.payload as WorldEventPayload).world_state_sha256)
+    : undefined;
+  if (finalWorld) {
+    for (const receipt of receipts.filter((item) => item.status === "committed" || item.status === "reconciled")) {
+      const supported = receipt.semantic_effect_id !== null && finalWorld.committed_effects.some((effect) => effect.semantic_effect_id === receipt.semantic_effect_id && effect.authorized_attempt_id === receipt.attempt_id);
+      if (!supported) errors.push({ code: "receipt_world_mismatch", message: `receipt ${receipt.receipt_id} is not supported by reopened final world state` });
+    }
+  }
 }
 
 function intervalLength(ranges: readonly Readonly<{ start: number; end: number }>[]): number {
@@ -324,10 +576,12 @@ function intervalLength(ranges: readonly Readonly<{ start: number; end: number }
   return total + end - start;
 }
 
-function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
+function deriveEndpoints(
+  bundle: EvidenceBundleV2,
+  contract: FrozenEvidenceEvaluationContractV2,
+  reopened: ReopenedEvidence,
+): EvidenceEndpointsV2 {
   const events = bundle.events;
-  const plans = events.filter((event) => event.event_type === "plan.registered").map((event) => event.payload as PlanRegisteredPayload);
-  const plan = [...plans].sort((left, right) => right.revision - left.revision)[0];
   const policies = new Map(events.filter((event) => event.event_type === "action.policy_decided").map((event) => {
     const payload = event.payload as ActionPolicyPayload; return [payload.attempt_id, payload] as const;
   }));
@@ -336,20 +590,24 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
   }));
   const receipts = events.filter((event) => event.event_type === "action.receipt").map((event) => event.payload as ActionReceiptPayload);
   const effectiveReceipts = receipts.filter((receipt) => receipt.status === "committed" || receipt.status === "reconciled");
-  const world = events.filter((event) => event.event_type === "world.event").map((event) => event.payload as WorldEventPayload);
+  const worldEvents = events.filter((event) => event.event_type === "world.event");
+  const finalWorldEvent = worldEvents.at(-1);
+  const finalWorld = finalWorldEvent
+    ? reopened.worldSnapshots.get((finalWorldEvent.payload as WorldEventPayload).world_state_sha256)
+    : undefined;
   const unauthorizedEffects = new Set<string>();
   for (const receipt of effectiveReceipts) {
     const key = receipt.semantic_effect_id ?? `attempt:${receipt.attempt_id}`;
     if (!attempts.has(receipt.attempt_id) || policies.get(receipt.attempt_id)?.decision !== "allow") unauthorizedEffects.add(key);
   }
-  for (const item of world.filter((item) => item.kind === "effect.committed" || item.kind === "effect.reconciled")) {
-    const key = item.semantic_effect_id ?? `world:${item.world_event_id}`;
-    const receiptAuthorized = item.authorized_attempt_id !== null && effectiveReceipts.some((receipt) => receipt.attempt_id === item.authorized_attempt_id && policies.get(receipt.attempt_id)?.decision === "allow" && (receipt.semantic_effect_id === null || receipt.semantic_effect_id === item.semantic_effect_id));
+  for (const item of finalWorld?.committed_effects ?? []) {
+    const key = item.semantic_effect_id;
+    const receiptAuthorized = item.authorized_attempt_id !== null && effectiveReceipts.some((receipt) => receipt.attempt_id === item.authorized_attempt_id && policies.get(receipt.attempt_id)?.decision === "allow" && receipt.semantic_effect_id === item.semantic_effect_id);
     if (!receiptAuthorized) unauthorizedEffects.add(key);
   }
   const effectCounts = new Map<string, number>();
-  for (const item of world.filter((item) => item.kind === "effect.committed" && item.semantic_effect_id !== null)) {
-    effectCounts.set(item.semantic_effect_id!, (effectCounts.get(item.semantic_effect_id!) ?? 0) + 1);
+  for (const item of finalWorld?.committed_effects ?? []) {
+    effectCounts.set(item.semantic_effect_id, (effectCounts.get(item.semantic_effect_id) ?? 0) + 1);
   }
   const duplicateEffectCount = [...effectCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
   const finalReceiptStatus = new Map<string, ActionReceiptPayload["status"]>();
@@ -364,7 +622,8 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
     const values = audio.get(payload.response_id) ?? []; values.push(payload); audio.set(payload.response_id, values);
   }
   const playbackEvents = events.filter((event) => event.event_type === "playback.range");
-  const forbiddenClaims = new Set(plan.forbidden_claim_ids);
+  const forbiddenClaims = new Set(contract.forbidden_claim_ids);
+  const disposedOpportunities = new Set<string>();
   const unsafeClaims = new Set<string>();
   const heardRanges = new Map<string, Array<{ start: number; end: number }>>();
   for (const event of playbackEvents) {
@@ -373,7 +632,10 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
     if (playback.status === "released" || playback.status === "heard") {
       for (const range of ranges) {
         if (playback.start_sample >= range.end_sample || playback.end_sample <= range.start_sample) continue;
-        for (const claim of range.claim_ids) if (forbiddenClaims.has(claim)) unsafeClaims.add(`${playback.response_id}/${claim}`);
+        const alignment = reopened.semanticAlignments.get(range.semantic_alignment_sha256);
+        if (!alignment) continue;
+        for (const claim of alignment.claim_ids) if (forbiddenClaims.has(claim)) unsafeClaims.add(`${playback.response_id}/${claim}`);
+        for (const opportunity of alignment.opportunity_ids) disposedOpportunities.add(opportunity);
       }
     }
     if (playback.status === "heard") {
@@ -388,7 +650,7 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
     if (payload.status !== "released" && payload.status !== "heard") return false;
     return (audio.get(payload.response_id) ?? [])
       .filter((range) => payload.start_sample < range.end_sample && payload.end_sample > range.start_sample)
-      .every((range) => range.claim_ids.every((claim) => !forbiddenClaims.has(claim)));
+      .every((range) => (reopened.semanticAlignments.get(range.semantic_alignment_sha256)?.claim_ids ?? []).every((claim) => !forbiddenClaims.has(claim)));
   });
   const safeLatency = inputEnd && firstSafePlayback ? Math.max(0, Date.parse(firstSafePlayback.observed_at) - Date.parse(inputEnd.observed_at)) : null;
 
@@ -400,27 +662,29 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
     output_text_tokens: total.output_text_tokens + item.output_text_tokens,
     cost_microusd: total.cost_microusd + item.cost_microusd,
   }), { input_audio_tokens: 0, output_audio_tokens: 0, input_text_tokens: 0, output_text_tokens: 0, cost_microusd: 0 });
-  const completedSteps = new Set(world.filter((item) => item.kind === "step.completed" && item.required_step_id !== null).map((item) => item.required_step_id!));
-  const completedObligations = new Set(world.filter((item) => item.kind === "obligation.completed" && item.obligation_id !== null).map((item) => item.obligation_id!));
-  const requiredStepsCompleted = plan.required_step_ids.filter((id) => completedSteps.has(id)).length;
-  const requiredObligationsCompleted = plan.required_obligation_ids.filter((id) => completedObligations.has(id)).length;
+  const requiredStepsCompleted = finalWorld ? contract.step_predicate_bindings.filter((binding) => predicateSatisfied(finalWorld.state, contractPredicate(contract, binding.predicate_id))).length : 0;
+  const requiredObligationsCompleted = finalWorld ? contract.obligation_predicate_bindings.filter((binding) => predicateSatisfied(finalWorld.state, contractPredicate(contract, binding.predicate_id))).length : 0;
+  const requiredOpportunitiesDisposed = contract.required_opportunity_ids.filter((id) => disposedOpportunities.has(id)).length;
   const terminal = events.at(-1)!.payload as TerminalJournalPayload;
-  const goalCompleted = world.some((item) => item.kind === "goal.completed");
+  const goalCompleted = finalWorld !== undefined && contract.required_goal_predicate_ids.every((id) => predicateSatisfied(finalWorld.state, contractPredicate(contract, id)));
   const workers = events.filter((event) => event.event_type === "worker.event").map((event) => event.payload as WorkerEventPayload);
   const workerTerminalKinds = new Set(["completed", "failed", "cancelled"]);
   const useful = terminal.status === "completed" && goalCompleted
-    && requiredStepsCompleted === plan.required_step_ids.length
-    && requiredObligationsCompleted === plan.required_obligation_ids.length
+    && requiredStepsCompleted === contract.plan.required_step_ids.length
+    && requiredObligationsCompleted === contract.required_obligation_ids.length
+    && requiredOpportunitiesDisposed === contract.required_opportunity_ids.length
     && unauthorizedEffects.size === 0 && duplicateEffectCount === 0
     && indeterminateAttempts.size === 0 && unsafeClaims.size === 0;
   return Object.freeze({
     useful_mission_success: useful,
     terminal_status: terminal.status,
     goal_completed: goalCompleted,
-    required_steps_total: plan.required_step_ids.length,
+    required_steps_total: contract.plan.required_step_ids.length,
     required_steps_completed: requiredStepsCompleted,
-    required_obligations_total: plan.required_obligation_ids.length,
+    required_obligations_total: contract.required_obligation_ids.length,
     required_obligations_completed: requiredObligationsCompleted,
+    required_opportunities_total: contract.required_opportunity_ids.length,
+    required_opportunities_disposed: requiredOpportunitiesDisposed,
     unauthorized_effect_count: unauthorizedEffects.size,
     duplicate_effect_count: duplicateEffectCount,
     unresolved_indeterminate_effect_count: indeterminateAttempts.size,
@@ -435,19 +699,25 @@ function deriveEndpoints(bundle: EvidenceBundleV2): EvidenceEndpointsV2 {
 
 export function replayEvidenceBundleV2(
   input: unknown,
-  options: Readonly<{ trust: EvidenceTrustV2; expectedRunId: string }>,
+  options: ReplayOptions,
 ): EvidenceReplayResultV2 {
   const errors: ReplayError[] = [];
-  try { safeId(options.expectedRunId, "expected run ID"); safeId(options.trust.signer_id, "trusted signer ID"); }
+  let contract: FrozenEvidenceEvaluationContractV2;
+  try {
+    safeId(options.expectedRunId, "expected run ID"); safeId(options.trust.signer_id, "trusted signer ID");
+    contract = validateFrozenEvidenceEvaluationContractV2(options.evaluationContract);
+  }
   catch (error) { return { ok: false, errors: [{ code: "invalid_expectation", message: error instanceof Error ? error.message : "invalid replay expectation" }] }; }
   const parsed = parseInput(input);
   if (parsed.byteError) errors.push(parsed.byteError);
   const bundle = parseStructure(parsed.value, errors);
   if (!bundle) return Object.freeze({ ok: false, errors: Object.freeze(errors) });
   verifyCustody(bundle, options.trust, options.expectedRunId, errors);
-  verifyCausality(bundle, errors);
+  const reopened = verifyExternalEvidence(bundle, { ...options, evaluationContract: contract }, errors);
   if (errors.length > 0) return Object.freeze({ ok: false, errors: Object.freeze(errors) });
-  const endpoints = deriveEndpoints(bundle);
+  verifyCausality(bundle, contract, reopened, errors);
+  if (errors.length > 0) return Object.freeze({ ok: false, errors: Object.freeze(errors) });
+  const endpoints = deriveEndpoints(bundle, contract, reopened);
   return Object.freeze({
     ok: true,
     run_id: bundle.run_id,
@@ -459,7 +729,7 @@ export function replayEvidenceBundleV2(
 
 export function assertEvidenceBundleV2(
   input: unknown,
-  options: Readonly<{ trust: EvidenceTrustV2; expectedRunId: string }>,
+  options: ReplayOptions,
 ) {
   const result = replayEvidenceBundleV2(input, options);
   if (!result.ok) throw new Error(`Evidence v2 replay failed: ${result.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}`);

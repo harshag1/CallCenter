@@ -7,4 +7,8 @@ export {
   serializeEvidenceBundleV2,
 } from "./evidence-tap";
 export { assertEvidenceBundleV2, replayEvidenceBundleV2 } from "./replay";
+export {
+  frozenEvidenceEvaluationContractSha256V2,
+  validateFrozenEvidenceEvaluationContractV2,
+} from "./evaluation-contract";
 export type * from "./types";

@@ -51,11 +51,17 @@ const canonicalBytes = serializeEvidenceBundleV2(bundle);
 const result = replayEvidenceBundleV2(canonicalBytes, {
   expectedRunId: "run-001",
   trust: { signer_id: signer.signer_id, public_key_pem: signer.public_key_pem },
+  evaluationContract: independentlyFrozenContract,
+  expectedEvaluationContractSha256: independentlyFrozenContractSha256,
+  artifactResolver: independentContentAddressedStore,
 });
 ```
 
 The signing key is an external authority input. It is never embedded in the
-bundle. Hashes and signatures prove integrity after capture; they do not make a
-dishonest evidence producer truthful. Production integration must therefore
-keep the signing boundary separate from model-controlled data and bind raw
-provider/audio artifacts to the hashes recorded here.
+bundle. Replay requires an independently frozen evaluation-contract digest and
+an independently identified content-addressed resolver. It reopens every
+referenced artifact, evaluates frozen predicates against raw world-state bytes,
+and derives audible semantics from reopened alignment artifacts. Hashes and
+signatures still cannot make a dishonest custody boundary truthful: production
+integration must keep the signer, artifact resolver, semantic evaluator, and
+model-controlled runtime separated.

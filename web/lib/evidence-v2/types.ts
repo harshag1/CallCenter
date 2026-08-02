@@ -104,6 +104,8 @@ export type AudioRangePayload = Readonly<{
   start_sample: number;
   end_sample: number;
   claim_ids: readonly string[];
+  opportunity_ids: readonly string[];
+  semantic_alignment_sha256: string;
 }>;
 
 export type PlaybackRangePayload = Readonly<{
@@ -123,6 +125,8 @@ export type WorldEventPayload = Readonly<{
   correction_id: string | null;
   authorized_attempt_id: string | null;
   semantic_effect_id: string | null;
+  world_revision: number;
+  world_state_sha256: string;
 }>;
 
 export type UsageRecordedPayload = Readonly<{
@@ -134,6 +138,7 @@ export type UsageRecordedPayload = Readonly<{
   input_text_tokens: number;
   output_text_tokens: number;
   cost_microusd: number;
+  pricing_artifact_sha256: string;
 }>;
 
 export type TerminalJournalPayload = Readonly<{
@@ -211,6 +216,83 @@ export type EvidenceTrustV2 = Readonly<{
   public_key_pem: string;
 }>;
 
+export type EvidenceArtifactDescriptorV2 = Readonly<{
+  artifact_id: string;
+  sha256: string;
+  byte_length: number;
+  media_type: string;
+}>;
+
+/** Supplied by a custody boundary independent of the evidence producer. */
+export type EvidenceArtifactResolverV2 = Readonly<{
+  resolver_id: string;
+  resolve(sha256: string): Uint8Array | null;
+}>;
+
+export type FrozenEvidenceEvaluationContractV2 = Readonly<{
+  schema_version: 2;
+  contract_type: "hacc_frozen_evidence_evaluation";
+  contract_id: string;
+  scenario_id: string;
+  artifact_resolver_id: string;
+  scenario_artifact: EvidenceArtifactDescriptorV2;
+  plan: Readonly<{
+    plan_id: string;
+    revision: number;
+    artifact: EvidenceArtifactDescriptorV2;
+    required_step_ids: readonly string[];
+  }>;
+  catalog: Readonly<{
+    catalog_id: string;
+    revision: number;
+    artifact: EvidenceArtifactDescriptorV2;
+    capability_ids: readonly string[];
+  }>;
+  required_goal_predicate_ids: readonly string[];
+  required_obligation_ids: readonly string[];
+  required_opportunity_ids: readonly string[];
+  forbidden_claim_ids: readonly string[];
+  world_predicates: readonly EvidenceWorldPredicateV2[];
+  step_predicate_bindings: readonly Readonly<{ step_id: string; predicate_id: string }>[];
+  obligation_predicate_bindings: readonly Readonly<{ obligation_id: string; predicate_id: string }>[];
+  minimum_inventory: Readonly<{
+    required_steps: number;
+    required_obligations: number;
+    required_opportunities: number;
+    forbidden_claims: number;
+  }>;
+}>;
+
+export type EvidenceWorldPredicateV2 = Readonly<{
+  predicate_id: string;
+  path: readonly string[];
+  expected: EvidenceJsonValue;
+}>;
+
+export type WorldSnapshotArtifactV2 = Readonly<{
+  schema_version: 2;
+  artifact_type: "hacc_world_snapshot";
+  scenario_id: string;
+  world_revision: number;
+  state: EvidenceJsonValue;
+  corrections_applied_ids: readonly string[];
+  committed_effects: readonly Readonly<{
+    semantic_effect_id: string;
+    authorized_attempt_id: string | null;
+  }>[];
+}>;
+
+export type AudioSemanticAlignmentArtifactV2 = Readonly<{
+  schema_version: 2;
+  artifact_type: "hacc_audio_semantic_alignment";
+  response_id: string;
+  audio_sha256: string;
+  start_sample: number;
+  end_sample: number;
+  claim_ids: readonly string[];
+  opportunity_ids: readonly string[];
+}>;
+
 export type EvidenceUsageTotalsV2 = Readonly<{
   input_audio_tokens: number;
   output_audio_tokens: number;
@@ -227,6 +309,8 @@ export type EvidenceEndpointsV2 = Readonly<{
   required_steps_completed: number;
   required_obligations_total: number;
   required_obligations_completed: number;
+  required_opportunities_total: number;
+  required_opportunities_disposed: number;
   unauthorized_effect_count: number;
   duplicate_effect_count: number;
   unresolved_indeterminate_effect_count: number;

@@ -59,10 +59,10 @@ const PAYLOAD_KEYS: Record<EvidenceEventTypeV2, readonly string[]> = {
   "action.policy_decided": ["attempt_id", "decision", "policy_sha256", "reason_code"],
   "action.receipt": ["attempt_id", "receipt_id", "status", "semantic_effect_id", "result_sha256", "world_revision"],
   "worker.event": ["worker_event_id", "worker_id", "parent_worker_id", "call_id", "plan_revision", "kind", "result_sha256"],
-  "audio.range": ["response_id", "audio_sha256", "byte_length", "sample_rate_hz", "channel_count", "start_sample", "end_sample", "claim_ids"],
+  "audio.range": ["response_id", "audio_sha256", "byte_length", "sample_rate_hz", "channel_count", "start_sample", "end_sample", "claim_ids", "opportunity_ids", "semantic_alignment_sha256"],
   "playback.range": ["playback_event_id", "response_id", "start_sample", "end_sample", "status"],
-  "world.event": ["world_event_id", "kind", "required_step_id", "obligation_id", "correction_id", "authorized_attempt_id", "semantic_effect_id"],
-  "usage.recorded": ["usage_id", "provider", "model", "input_audio_tokens", "output_audio_tokens", "input_text_tokens", "output_text_tokens", "cost_microusd"],
+  "world.event": ["world_event_id", "kind", "required_step_id", "obligation_id", "correction_id", "authorized_attempt_id", "semantic_effect_id", "world_revision", "world_state_sha256"],
+  "usage.recorded": ["usage_id", "provider", "model", "input_audio_tokens", "output_audio_tokens", "input_text_tokens", "output_text_tokens", "cost_microusd", "pricing_artifact_sha256"],
   "journal.terminal": ["disposition_id", "status", "reason_code"],
 };
 
@@ -101,6 +101,7 @@ export function validatePayload<T extends EvidenceEventTypeV2>(type: T, input: u
       break;
     case "audio.range":
       safeId(value.response_id, "response ID"); sha256(value.audio_sha256, "audio hash"); integer(value.byte_length, "audio byte length", 1); integer(value.sample_rate_hz, "sample rate", 1); integer(value.channel_count, "channel count", 1); integer(value.start_sample, "audio start sample"); integer(value.end_sample, "audio end sample", 1); idArray(value.claim_ids, "audio claim IDs");
+      idArray(value.opportunity_ids, "audio opportunity IDs"); sha256(value.semantic_alignment_sha256, "semantic alignment hash");
       if ((value.end_sample as number) <= (value.start_sample as number)) throw new Error("audio range must be non-empty");
       break;
     case "playback.range":
@@ -110,10 +111,12 @@ export function validatePayload<T extends EvidenceEventTypeV2>(type: T, input: u
     case "world.event":
       safeId(value.world_event_id, "world event ID"); oneOf(value.kind, ["goal.completed", "step.completed", "obligation.completed", "correction.applied", "effect.committed", "effect.reconciled"], "world event kind");
       nullableId(value.required_step_id, "required step ID"); nullableId(value.obligation_id, "obligation ID"); nullableId(value.correction_id, "correction ID"); nullableId(value.authorized_attempt_id, "authorized attempt ID"); nullableId(value.semantic_effect_id, "world semantic effect ID");
+      integer(value.world_revision, "world revision"); sha256(value.world_state_sha256, "world state hash");
       break;
     case "usage.recorded":
       safeId(value.usage_id, "usage ID"); nonEmpty(value.provider, "usage provider", 128); nonEmpty(value.model, "usage model", 512);
       integer(value.input_audio_tokens, "input audio tokens"); integer(value.output_audio_tokens, "output audio tokens"); integer(value.input_text_tokens, "input text tokens"); integer(value.output_text_tokens, "output text tokens"); integer(value.cost_microusd, "cost in micro-USD");
+      sha256(value.pricing_artifact_sha256, "pricing artifact hash");
       break;
     case "journal.terminal":
       safeId(value.disposition_id, "terminal disposition ID"); oneOf(value.status, ["completed", "failed", "aborted"], "terminal status"); if (value.reason_code !== null) nonEmpty(value.reason_code, "terminal reason code", 256);
