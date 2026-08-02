@@ -53,7 +53,7 @@ function segmentBinding(
     const observationSha256 = sha256Hex(`${episodeId}:segment-${segmentOrdinal}:wire-${opportunityIndex}`);
     const body = {
       schema_version: 5,
-      opportunity_id: `lc4-dev-op-${opportunityIndex}`,
+      opportunity_id: `lc4-dev-op-${String(opportunityIndex).padStart(2, "0")}`,
       opportunity_index: opportunityIndex,
       segment_ordinal: segmentOrdinal,
       playback_kind: "canonical",
@@ -72,14 +72,14 @@ function segmentBinding(
     const providerExchange = reference("provider_exchange", `${episodeId}:exchange-${opportunityIndex}`);
     opportunityRoots.push({
       ordinal: offset + 1,
-      opportunity_id: `lc4-dev-op-${opportunityIndex}`,
+      opportunity_id: `lc4-dev-op-${String(opportunityIndex).padStart(2, "0")}`,
       effective_exchange_sha256: providerExchange.evidence_sha256,
       opportunity_receipt_sha256: opportunityReceiptSha256,
       previous_opportunity_receipt_sha256: previousOpportunityReceiptSha256,
     });
     previousOpportunityReceiptSha256 = opportunityReceiptSha256;
     return {
-      opportunity_id: `lc4-dev-op-${opportunityIndex}`,
+      opportunity_id: `lc4-dev-op-${String(opportunityIndex).padStart(2, "0")}`,
       opportunity_index: opportunityIndex,
       exchange_phase: "canonical" as const,
       opportunity_receipt_sha256: opportunityReceiptSha256,
@@ -176,20 +176,20 @@ describe("LC4-DEV signed terminal authority", () => {
       const providerExchange = reference("provider_exchange", `exchange:${index}`);
       opportunityRoots.push({
         ordinal: offset + 1,
-        opportunity_id: `lc4-dev-op-${index}`,
+        opportunity_id: `lc4-dev-op-${String(index).padStart(2, "0")}`,
         effective_exchange_sha256: providerExchange.evidence_sha256,
         opportunity_receipt_sha256: opportunityReceiptSha256,
         previous_opportunity_receipt_sha256: previousOpportunityReceiptSha256,
       });
       previousOpportunityReceiptSha256 = opportunityReceiptSha256;
       const item = {
-        opportunity_id: `lc4-dev-op-${index}`,
+        opportunity_id: `lc4-dev-op-${String(index).padStart(2, "0")}`,
         opportunity_index: index,
         exchange_phase: "canonical" as const,
         opportunity_receipt_sha256: opportunityReceiptSha256,
         provider_exchange: providerExchange,
         provider_exchange_body: {
-          opportunity_id: `lc4-dev-op-${index}`,
+          opportunity_id: `lc4-dev-op-${String(index).padStart(2, "0")}`,
           opportunity_index: index,
           segment_ordinal: 1,
           playback_kind: "canonical",

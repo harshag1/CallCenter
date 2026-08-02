@@ -174,7 +174,7 @@ export function createLc4DevSegmentTerminalBinding(input: Readonly<{
     const canonical = opportunityExchanges[0]!;
     requireHash(canonical.opportunity_receipt_sha256, "LC4-DEV finalized opportunity receipt");
     if (root.ordinal !== offset + 1
-      || root.opportunity_id !== `lc4-dev-op-${opportunityIndex}`
+      || root.opportunity_id !== `lc4-dev-op-${String(opportunityIndex).padStart(2, "0")}`
       || root.effective_exchange_sha256 !== effective.provider_exchange.evidence_sha256
       || root.opportunity_receipt_sha256 !== canonical.opportunity_receipt_sha256
       || root.previous_opportunity_receipt_sha256 !== previousOpportunityReceiptSha256) {

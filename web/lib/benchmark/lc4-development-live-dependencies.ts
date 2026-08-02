@@ -870,7 +870,7 @@ async function assembleEpisodeSegmentTerminalBindings(input: Readonly<{
     const exchanges: Array<Parameters<typeof createLc4DevSegmentTerminalBinding>[0]["exchanges"][number]> = [];
     for (const [offset, event] of events.entries()) {
       const opportunityIndex = start + offset;
-      if (event.opportunity_id !== `lc4-dev-op-${opportunityIndex}`) {
+      if (event.opportunity_id !== `lc4-dev-op-${String(opportunityIndex).padStart(2, "0")}`) {
         throw new Error("LC4-DEV terminal authority opportunity order differs from the frozen horizon");
       }
       const payload = objectValue(
