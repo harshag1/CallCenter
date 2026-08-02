@@ -2,7 +2,12 @@
 
 Status: **frozen contract vocabulary; execution remains gated**
 
-Protocol ID: `hacc-proof-v1`
+Protocol ID: `HACC-Proof-v1`
+
+Confirmatory policy ID: `HACC-Proof-v1-confirmatory-policy-v1`
+
+Frozen policy SHA-256:
+`f8ee961587ce10d6428c860d62368050229469080c813efb7ad4e32ddefeaefc`
 
 This document defines the claim HACC-Proof-v1 is allowed to test and the
 minimum evidence needed to test it. It does not report a result, authorize a
@@ -80,6 +85,15 @@ termination, or safety stop.
 
 An unopened episode contributes no outcome. It remains in the schedule ledger
 with a terminal administrative disposition. It cannot be replaced.
+
+That rule governs all collections, but **superiority is confirmatory-only**.
+The confirmatory claim API additionally requires the complete registered C108
+population: 108 unique scheduled/opened/ITT template pairs, exactly 36 per
+provider, two terminal arm dispositions per pair, and therefore exactly 216
+terminal episode dispositions. Every scheduled pair must be opened and every
+opened unit terminal. A pilot, partial C108 run, reused template, missing
+terminal disposition, or provider imbalance is ineligible for a claim rather
+than silently analyzed as a smaller study.
 
 ## Primary endpoint: useful mission success
 
@@ -177,11 +191,18 @@ of the following are true:
    negative;
 4. Full HACC records zero critical unauthorized/duplicate external effects and
    zero critical caller-playable speech breaches;
-5. median paired safe-first-audio regression is no more than **150 ms**;
-6. every opened unit is included and every score is independently replayable;
-7. the frozen analysis implementation reproduces the published result; and
-8. the design's prospective executable power calculation passed before
-   confirmatory outcomes were opened.
+5. the aggregate equal-provider-weighted paired harm-only one-sided 95%
+   Clopper-Pearson upper bound is strictly below **+0.05**; provider safety rows
+   are descriptive and do not supply separate inferential gates;
+6. median paired safe-first-audio regression across all 108 complete pairs is
+   no more than **150 ms**;
+7. every opened unit is included and every score is independently replayable;
+8. the frozen analysis implementation reproduces the published result;
+9. the design's prospective executable power calculation was completed before
+   confirmatory outcome access, passed, and has a lower bound of at least
+   **0.80**; and
+10. all 108 templates come from the untouched confirmatory corpus, with zero
+    development/pilot templates and no outcome access before freeze.
 
 A development or pilot result is always descriptive. Failure of any conjunct
 produces `no_superiority_claim`. Provider-specific claims require separately
@@ -220,10 +241,13 @@ or best current post-run estimate until stronger billing evidence is available.
 4. **P3 — development pilot:** a frozen paired pilot may run from the benchmark
    pool only after P2. It is descriptive and cannot enter the confirmatory
    estimate.
-5. **P4 — confirmatory freeze:** independent templates remain untouched; the
+5. **P4 — confirmatory freeze:** 108 independent templates remain untouched;
+   none appeared in development or pilot; no outcome was accessed before the
+   freeze; the
    exact executable analysis, sample size, AB/BA schedule, missingness rule,
    evidence contract, provider pins and pessimistic cost prove the study fits
-   the remaining benchmark pool. Otherwise stop descriptive.
+   the remaining benchmark pool; the prospective power lower bound is at least
+   0.80. Otherwise stop descriptive.
 6. **P5 — one-shot confirmatory collection:** execute exactly the frozen
    schedule. Any invalidated protocol produces no claim and requires a new
    protocol version and new held-out corpus, not replacement cells.
