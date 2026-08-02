@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../artifacts";
+import { inspectFilesystemBudgetLedger } from "../filesystem-budget-ledger";
 import {
   LC4_DEV_BUDGET_MAXIMUM_MICRO_USD,
   LC4_DEV_MAXIMUM_RUN_DURATION_MS,
@@ -159,7 +160,31 @@ describe("LC4-DEV hard aggregate budget authority", () => {
       now: now(),
     })).toThrow("exact plan or hard controls");
 
-    await expect(reserveLc4DevRunBudget({ root, binding: bindingValue, now })).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(reserveLc4DevRunBudget({ root, binding: bindingValue, now })).resolves.toEqual(lease);
+  });
+
+  it("reconstructs the exact lease after full or partial reservation crash windows", async () => {
+    const bindingValue = binding();
+    const now = () => new Date("2026-07-22T23:00:00.000Z");
+    const fullRoot = await mkdtemp(join(tmpdir(), "lc4-dev-budget-"));
+    roots.push(fullRoot);
+    await expect(reserveLc4DevRunBudget(
+      { root: fullRoot, binding: bindingValue, now },
+      { afterFullyReserved: async () => { throw new Error("fault-before-lease-file"); } },
+    )).rejects.toThrow("fault-before-lease-file");
+    const recoveredFull = await reserveLc4DevRunBudget({ root: fullRoot, binding: bindingValue, now });
+    expect(recoveredFull.reservations).toHaveLength(6);
+
+    const partialRoot = await mkdtemp(join(tmpdir(), "lc4-dev-budget-"));
+    roots.push(partialRoot);
+    await expect(reserveLc4DevRunBudget(
+      { root: partialRoot, binding: bindingValue, now },
+      { afterReservation: async (count) => { if (count === 3) throw new Error("fault-partial-reservations"); } },
+    )).rejects.toThrow("fault-partial-reservations");
+    const recoveredPartial = await reserveLc4DevRunBudget({ root: partialRoot, binding: bindingValue, now });
+    expect(recoveredPartial.reservations).toHaveLength(6);
+    await expect(reserveLc4DevRunBudget({ root: partialRoot, binding: bindingValue, now }))
+      .resolves.toEqual(recoveredPartial);
   });
 
   it("admits before preflight expiry, continues planned cells under the consumed lease, and rejects replay/reconnect", async () => {
@@ -240,6 +265,14 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     // Simulate timeout before provider-open acknowledgement: "opening" is
     // charged at the full pessimistic maximum, never treated as free.
     const run = runFixture(bindingValue);
+    await expect(finalizeLc4DevRunBudget(
+      { lease, binding: bindingValue, run, now },
+      { afterRecordTerminal: async () => { throw new Error("fault-before-settle"); } },
+    )).rejects.toThrow("fault-before-settle");
+    const interrupted = await inspectFilesystemBudgetLedger({ ledgerPath: lease.ledger_path, now });
+    expect(interrupted.reservations.find((candidate) =>
+      candidate.reservation_id === lease.reservations[0]!.reservation_id)?.status)
+      .toBe("terminal_unsettled");
     const evidence = await finalizeLc4DevRunBudget({ lease, binding: bindingValue, run, now });
 
     expect(evidence.active_reservations_micro_usd).toBe(0);

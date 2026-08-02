@@ -1670,6 +1670,20 @@ export async function inspectFilesystemBudgetLedger(options: BudgetLedgerStoreOp
   });
 }
 
+/** Verified signed events for exact crash recovery; callers must still validate domain bindings. */
+export async function inspectFilesystemBudgetLedgerEvents(
+  options: BudgetLedgerStoreOptions,
+): Promise<readonly BudgetJournalEvent[]> {
+  return withLock(options, async (paths) => {
+    const loaded = await loadVerified(paths);
+    try {
+      return Object.freeze([...loaded.events]);
+    } finally {
+      await loaded.ledger.handle.close();
+    }
+  });
+}
+
 /**
  * Proves that a previously verified Gate 0 head is an ancestor of the current
  * signed append-only ledger. Matching only `ledger_id` would permit a newly

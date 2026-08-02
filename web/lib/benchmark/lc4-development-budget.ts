@@ -6,6 +6,7 @@ import {
   cancelFilesystemBudgetBeforeOpen,
   initializeFilesystemBudgetLedger,
   inspectFilesystemBudgetLedger,
+  inspectFilesystemBudgetLedgerEvents,
   markBudgetConnectionIntent,
   markBudgetSessionOpened,
   recordBudgetTerminal,
@@ -227,7 +228,7 @@ function envelope(bindingSha256: string, episode: Lc4DevLiveEpisodePlan): Budget
   });
 }
 
-async function initializeFreshLedger(path: string, now: () => Date): Promise<BudgetJournalSnapshot> {
+async function initializeOrRecoverLedger(path: string, now: () => Date): Promise<BudgetJournalSnapshot> {
   await mkdir(resolve(path, ".."), { recursive: true, mode: 0o700 });
   const paths = [path, `${path}.head.json`, `${path}.signing-key.pem`];
   const existing = await Promise.all(paths.map((candidate) => lstat(candidate).catch(missingOnly)));
@@ -241,19 +242,28 @@ async function initializeFreshLedger(path: string, now: () => Date): Promise<Bud
     })).snapshot;
   }
   if (existing.some((entry) => entry === null)) throw new Error("LC4-DEV budget ledger has partial durable state");
-  const prior = await inspectFilesystemBudgetLedger({ ledgerPath: path, now });
-  throw Object.assign(new Error(`LC4-DEV one-shot budget authority already exists at head ${prior.head_sha256}`), { code: "EEXIST" as const });
+  return inspectFilesystemBudgetLedger({ ledgerPath: path, now });
 }
 
 export async function reserveLc4DevRunBudget(input: Readonly<{
   root: string;
   binding: Lc4DevBudgetBinding;
   now: () => Date;
-}>): Promise<Lc4DevRunLease> {
-  const admittedAt = input.now();
-  assertBinding(input.binding, admittedAt);
+}>, hooks: Readonly<{
+  afterReservation?: (count: number) => Promise<void>;
+  afterFullyReserved?: () => Promise<void>;
+}> = {}): Promise<Lc4DevRunLease> {
   const ledgerPath = lc4DevBudgetLedgerPath(input.root);
-  const before = await initializeFreshLedger(ledgerPath, input.now);
+  const before = await initializeOrRecoverLedger(ledgerPath, input.now);
+  const initialEvents = await inspectFilesystemBudgetLedgerEvents({ ledgerPath, now: input.now });
+  const initialized = initialEvents.find((event) => event.event_type === "ledger.initialized");
+  if (!initialized) throw new Error("LC4-DEV budget ledger is missing its signed initialization event");
+  const existingReservations = before.reservations;
+  const recoveredDeadline = existingReservations[0]?.expires_at;
+  const admittedAt = recoveredDeadline
+    ? new Date(Date.parse(recoveredDeadline) - LC4_DEV_MAXIMUM_RUN_DURATION_MS)
+    : new Date(initialized.occurred_at);
+  assertBinding(input.binding, admittedAt);
   const bindingSha256 = lc4DevBudgetBindingSha256(input.binding);
   const episodeSetSha256 = lc4DevBudgetEpisodeSetSha256(input.binding.prepare);
   const hardDeadline = new Date(admittedAt.getTime() + LC4_DEV_MAXIMUM_RUN_DURATION_MS);
@@ -279,9 +289,40 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
     maximumReconnects: LC4_DEV_BUDGET_RECONNECTS,
     maximumRunDurationMs: LC4_DEV_MAXIMUM_RUN_DURATION_MS,
   });
-  const references: Lc4DevBudgetReservationReference[] = [];
-  let consumedHead = "";
+  if (existingReservations.length > LC4_DEV_BUDGET_EPISODES) {
+    throw new Error("LC4-DEV recovered reservation set exceeds the exact six-cell plan");
+  }
+  for (const reservation of existingReservations) {
+    const episode = input.binding.prepare.episodes.find((candidate) =>
+      `lc4dev:${input.binding.prepare.execution_id}:${candidate.episode_id}` === reservation.reservation_id);
+    if (!episode
+      || reservation.reservation_id !== `lc4dev:${input.binding.prepare.execution_id}:${episode.episode_id}`
+      || reservation.run_id !== `lc4dev:${input.binding.prepare.execution_id}:${episode.episode_id}`
+      || reservation.provider !== episode.provider
+      || reservation.model !== episode.model
+      || reservation.condition !== episode.arm
+      || reservation.maximum_micro_usd !== episode.maximum_micro_usd
+      || reservation.expires_at !== hardDeadline.toISOString()
+      || canonicalJson(reservation.envelope) !== canonicalJson(envelope(bindingSha256, episode))) {
+      throw new Error("LC4-DEV recovered reservations do not match the exact authorized prefix");
+    }
+    if (existingReservations.length < LC4_DEV_BUDGET_EPISODES && reservation.status !== "reserved") {
+      throw new Error("LC4-DEV cannot extend a partially materialized reservation set after provider admission");
+    }
+  }
+  const priorCreationEvents = initialEvents.filter((event) => event.event_type === "reservation.created");
+  if (priorCreationEvents.length !== existingReservations.length) {
+    throw new Error("LC4-DEV signed reservation history does not match materialized state");
+  }
+  for (const [index, event] of priorCreationEvents.entries()) {
+    const expectedId = `lc4dev:${input.binding.prepare.execution_id}:${input.binding.prepare.episodes[index]!.episode_id}`;
+    if (!("reservation_id" in event.payload) || event.payload.reservation_id !== expectedId) {
+      throw new Error("LC4-DEV recovered reservations are not the exact authorized prefix");
+    }
+  }
+  let consumedHead = priorCreationEvents[0]?.event_sha256 ?? "";
   for (const [index, episode] of input.binding.prepare.episodes.entries()) {
+    if (index < existingReservations.length) continue;
     const result = await reserveFilesystemBudget({
       ledgerPath,
       operationId: `lc4dev-reserve:${index + 1}:${episode.episode_id}`,
@@ -294,7 +335,7 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
       costEnvelope: envelope(bindingSha256, episode),
       expectedLedgerId: before.ledger_id,
       ...(index === 0 ? {
-        requiredCurrentHeadSha256: before.head_sha256,
+        requiredCurrentHeadSha256: initialized.event_sha256,
         planConsumption: consumption,
       } : {
         requiredAncestorHeadSha256: consumedHead,
@@ -302,15 +343,7 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
       now: input.now,
     });
     if (index === 0) consumedHead = result.snapshot.head_sha256;
-    references.push(Object.freeze({
-      episode_id: episode.episode_id,
-      provider: episode.provider,
-      arm: episode.arm,
-      model: episode.model,
-      reservation_id: `lc4dev:${input.binding.prepare.execution_id}:${episode.episode_id}`,
-      maximum_micro_usd: episode.maximum_micro_usd,
-      reservation_head_sha256: result.snapshot.head_sha256,
-    }));
+    await hooks.afterReservation?.(index + 1);
   }
   const after = await inspectFilesystemBudgetLedger({ ledgerPath, now: input.now });
   if (after.reservations.length !== LC4_DEV_BUDGET_EPISODES
@@ -318,6 +351,22 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
     || after.active_reservations_micro_usd > LC4_DEV_BUDGET_MAXIMUM_MICRO_USD) {
     throw new Error("LC4-DEV aggregate reservation set is incomplete or exceeds $15");
   }
+  const creationEvents = (await inspectFilesystemBudgetLedgerEvents({ ledgerPath, now: input.now }))
+    .filter((event) => event.event_type === "reservation.created");
+  if (creationEvents.length !== LC4_DEV_BUDGET_EPISODES) {
+    throw new Error("LC4-DEV signed reservation history is incomplete");
+  }
+  consumedHead = creationEvents[0]!.event_sha256;
+  const references = input.binding.prepare.episodes.map((episode, index) => Object.freeze({
+    episode_id: episode.episode_id,
+    provider: episode.provider,
+    arm: episode.arm,
+    model: episode.model,
+    reservation_id: `lc4dev:${input.binding.prepare.execution_id}:${episode.episode_id}`,
+    maximum_micro_usd: episode.maximum_micro_usd,
+    reservation_head_sha256: creationEvents[index]!.event_sha256,
+  }));
+  await hooks.afterFullyReserved?.();
   const body = Object.freeze({
     schema_version: 1 as const,
     budget_version: LC4_DEV_BUDGET_VERSION,
@@ -347,7 +396,7 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
     ledger_id: after.ledger_id,
     ledger_public_key_fingerprint_sha256: after.public_key_fingerprint_sha256,
     consumed_open_head_sha256: consumedHead,
-    fully_reserved_head_sha256: after.head_sha256,
+    fully_reserved_head_sha256: creationEvents[creationEvents.length - 1]!.event_sha256,
     reservations: Object.freeze(references),
   });
   return Object.freeze({ ...body, lease_sha256: sha256Hex(`${LEASE_DOMAIN}${canonicalJson(body)}`) });
@@ -505,7 +554,9 @@ export async function finalizeLc4DevRunBudget(input: Readonly<{
   binding: Lc4DevBudgetBinding;
   run: Lc4DevLiveRunArtifact;
   now: () => Date;
-}>): Promise<Lc4DevBudgetEvidence> {
+}>, hooks: Readonly<{
+  afterRecordTerminal?: (episodeId: string) => Promise<void>;
+}> = {}): Promise<Lc4DevBudgetEvidence> {
   assertLc4DevRunLease({ lease: input.lease, binding: input.binding, now: new Date(input.run.started_at) });
   if (input.run.execution_id !== input.lease.execution_id
     || input.run.prepare_sha256 !== input.lease.prepare_sha256
@@ -526,7 +577,7 @@ export async function finalizeLc4DevRunBudget(input: Readonly<{
       });
       continue;
     }
-    if (reservation.status === "opening" || reservation.status === "opened") {
+    if (reservation.status === "opening" || reservation.status === "opened" || reservation.status === "terminal_unsettled") {
       const completed = index < input.run.episodes_completed;
       const usageEventCount = input.run.ledger.filter((event) => event.episode_id === reference.episode_id
         && (event.event_type === "opportunity_completed" || event.event_type === "opportunity_failed")).length;
@@ -537,21 +588,30 @@ export async function finalizeLc4DevRunBudget(input: Readonly<{
         usage_event_count: usageEventCount,
         ledger_head_sha256: input.run.ledger_head_sha256,
       })}`);
-      await recordFilesystemBudgetUsage({
-        ledgerPath: input.lease.ledger_path,
-        operationId: `lc4dev-usage:${reference.episode_id}`,
-        reservationId: reference.reservation_id,
-        usageEventCount,
-        usageEvidenceSha256,
-        now: input.now,
-      });
-      await recordBudgetTerminal({
-        ledgerPath: input.lease.ledger_path,
-        operationId: `lc4dev-terminal:${reference.episode_id}`,
-        reservationId: reference.reservation_id,
-        outcome: completed ? "completed" : "failed",
-        now: input.now,
-      });
+      if (reservation.status === "terminal_unsettled") {
+        if (reservation.terminal_outcome !== (completed ? "completed" : "failed")
+          || reservation.usage_event_count !== usageEventCount
+          || reservation.usage_evidence_sha256 !== usageEvidenceSha256) {
+          throw new Error("LC4-DEV terminal-unsettled reservation differs from the exact run outcome binding");
+        }
+      } else {
+        await recordFilesystemBudgetUsage({
+          ledgerPath: input.lease.ledger_path,
+          operationId: `lc4dev-usage:${reference.episode_id}`,
+          reservationId: reference.reservation_id,
+          usageEventCount,
+          usageEvidenceSha256,
+          now: input.now,
+        });
+        await recordBudgetTerminal({
+          ledgerPath: input.lease.ledger_path,
+          operationId: `lc4dev-terminal:${reference.episode_id}`,
+          reservationId: reference.reservation_id,
+          outcome: completed ? "completed" : "failed",
+          now: input.now,
+        });
+        await hooks.afterRecordTerminal?.(reference.episode_id);
+      }
       await settleFilesystemBudget({
         ledgerPath: input.lease.ledger_path,
         operationId: `lc4dev-settle:${reference.episode_id}`,
