@@ -292,6 +292,20 @@ afterEach(async () => {
 });
 
 describe("LC4-DEV operator custody", () => {
+  it("documents safe cell-boundary continuation without reading an evidence root", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await runLc4DevelopmentOperatorCli(["--help"], {
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      now: () => new Date("2026-07-22T06:00:00.000Z"),
+    });
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toContain("resume-status --evidence-root ABS");
+    expect(stdout.join("\n")).toContain("quarantined and never retried");
+  });
+
   it("publishes the terminal budget evidence and run package as one private immutable pair", async () => {
     const root = await mkdtemp(join(tmpdir(), "lc4-dev-terminal-pair-"));
     roots.push(root);

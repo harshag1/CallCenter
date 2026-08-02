@@ -76,6 +76,7 @@
     "benchmark:lc4:xai-gate-d:report": "tsx scripts/lc4-xai-manual-gate-d.ts report",
     "benchmark:lc4:seal": "tsx scripts/lc4-seal-heldout.ts",
     "flow:package": "tsx scripts/flow-package.ts",
+    "flow:scenario": "tsx scripts/flow-scenario.ts",
     "demo:offline": "tsx scripts/offline-flow-demo.ts"
   },
   "dependencies": {

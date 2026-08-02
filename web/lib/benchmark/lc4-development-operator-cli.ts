@@ -892,6 +892,19 @@ export async function runLc4DevelopmentOperatorCli(
   },
   dependencies: Lc4DevOperatorDependencies = DEFAULT_DEPS,
 ): Promise<number> {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    io.stdout([
+      "HACC LC4 six-cell development benchmark",
+      "",
+      "Commands: status, resume-status, prepare, preflight, run, report",
+      "  resume-status --evidence-root ABS",
+      "",
+      "status, resume-status, prepare, preflight, and report do not open provider sessions.",
+      "run continues only the exact next unopened cell. Completed cells are immutable; an interrupted",
+      "post-network cell is quarantined and never retried, reconnected, replaced, or failed over.",
+    ].join("\n"));
+    return 0;
+  }
   try {
     const command = args[0];
     const parsed = flags(args.slice(1));

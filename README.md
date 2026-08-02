@@ -139,6 +139,8 @@ cd harsha-amazing-call-center
 npm run demo:offline
 ```
 
+Use `npm run demo:offline:check` when you only want to verify prerequisites.
+
 The root command performs a locked, lifecycle-script-free dependency install
 when needed, strips application credentials from its child process, and runs a
 deterministic long-flow trace. It shows the active/completed steps, exact tools
@@ -270,6 +272,18 @@ It admits the complete fake tool catalog, installs the 15-step appointment flow
 in memory, executes a nine-step booking scenario, and proves receipt-backed
 restart recovery and read-after-write reconciliation. The structured output is
 deterministic and fail-closed; it is framework evidence, not an STS benchmark.
+
+Run a custom or checked-in Flow scenario without changing application code:
+
+```bash
+npm run demo:offline -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --scenario examples/scenarios/membership-return-recovery.json
+```
+
+This example visibly crosses a simulated process restart, quarantines the
+in-flight return mutation, admits only proof-backed reconciliation, and resumes
+the exact next step. Add `--json` for its complete deterministic trace.
 
 When authoring a custom flow, generate a non-authoritative implementation
 checklist before writing adapters:

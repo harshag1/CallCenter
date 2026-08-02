@@ -262,6 +262,19 @@ const LIVE_FLAGS = Object.freeze([
   "--repo-env-file",
 ] as const);
 
+const QUALIFICATION_V4_USAGE = [
+  "HACC LC4 three-provider qualification v4",
+  "",
+  "Commands:",
+  "  status",
+  "  inspect  --root ABS --repository-root ABS --authorization ABS --trust-root-fingerprint SHA256 --terminal-private-key ABS --provider-env-file ABS --repo-env-file ABS",
+  "  continue --root ABS --repository-root ABS --authorization ABS --trust-root-fingerprint SHA256 --terminal-private-key ABS --provider-env-file ABS --repo-env-file ABS",
+  "",
+  "status and --help make no provider calls. continue is capped at $3, runs OpenAI/Gemini/xAI serially,",
+  "reuses completed signed shards, and may continue only an unopened shard or retained setup before paid admission.",
+  "An admitted phase without terminal evidence is quarantined permanently: no retry, reconnect, fallback, or replacement.",
+].join("\n");
+
 export async function runLc4QualificationV4OperatorCli(
   args: readonly string[],
   io: Io = {
@@ -270,6 +283,10 @@ export async function runLc4QualificationV4OperatorCli(
     now: () => new Date(),
   },
 ): Promise<number> {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    io.stdout(`${QUALIFICATION_V4_USAGE}\n`);
+    return 0;
+  }
   try {
     const command = args[0];
     const parsed = flags(args.slice(1));

@@ -1,17 +1,52 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const web = join(root, "web");
-const args = new Set(process.argv.slice(2));
-const supportedArgs = new Set(["--check", "--skip-install"]);
+const argv = process.argv.slice(2);
+let checkOnly = false;
+let skipInstall = false;
+let jsonOutput = false;
+let flowPath = null;
+let scenarioPath = null;
 
-if ([...args].some((arg) => !supportedArgs.has(arg))) {
-  process.stderr.write("Usage: npm run demo:offline -- [--check|--skip-install]\n");
+for (let index = 0; index < argv.length; index += 1) {
+  const argument = argv[index];
+  if (argument === "--check") checkOnly = true;
+  else if (argument === "--skip-install") skipInstall = true;
+  else if (argument === "--json") jsonOutput = true;
+  else if (argument === "--flow" || argument === "--scenario") {
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) {
+      process.stderr.write(`${argument} requires one file path\n`);
+      process.exit(2);
+    }
+    if (argument === "--flow") flowPath = resolve(root, value);
+    else scenarioPath = resolve(root, value);
+    index += 1;
+  } else {
+    process.stderr.write(
+      "Usage: npm run demo:offline -- [--check|--skip-install|--json] " +
+      "[--flow FILE --scenario FILE]\n"
+    );
+    process.exit(2);
+  }
+}
+
+if ((flowPath === null) !== (scenarioPath === null)) {
+  process.stderr.write("--flow and --scenario must be supplied together\n");
   process.exit(2);
 }
 
@@ -47,6 +82,88 @@ function run(command, commandArgs) {
   if (outcome.status !== 0) process.exit(outcome.status ?? 1);
 }
 
+const lockfilePath = join(web, "package-lock.json");
+const dependencyFingerprint = createHash("sha256")
+  .update(readFileSync(lockfilePath))
+  .digest("hex");
+const installStampPath = join(web, "node_modules", ".hacc-offline-install.json");
+const installLockPath = join(
+  tmpdir(),
+  `hacc-offline-install-${createHash("sha256").update(root).digest("hex").slice(0, 16)}.lock`
+);
+
+function dependenciesCurrent() {
+  if (!existsSync(join(web, "node_modules", "tsx", "dist", "cli.mjs"))) return false;
+  try {
+    const stamp = JSON.parse(readFileSync(installStampPath, "utf8"));
+    return stamp.package_lock_sha256 === dependencyFingerprint;
+  } catch {
+    return false;
+  }
+}
+
+function ownerAlive() {
+  try {
+    const owner = JSON.parse(readFileSync(join(installLockPath, "owner.json"), "utf8"));
+    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) return true;
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function acquireInstallLock() {
+  const deadline = Date.now() + 5 * 60_000;
+  while (true) {
+    try {
+      mkdirSync(installLockPath, { mode: 0o700 });
+      writeFileSync(
+        join(installLockPath, "owner.json"),
+        `${JSON.stringify({ pid: process.pid })}\n`,
+        { mode: 0o600 }
+      );
+      return;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (!ownerAlive()) {
+        rmSync(installLockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("timed out waiting for another provider-free dependency install");
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
+
+function ensureDependencies() {
+  if (dependenciesCurrent()) {
+    process.stdout.write("Locked web dependencies already ready.\n");
+    return;
+  }
+  process.stdout.write("Waiting for the locked dependency installer…\n");
+  acquireInstallLock();
+  try {
+    if (dependenciesCurrent()) {
+      process.stdout.write("Locked web dependencies became ready.\n");
+      return;
+    }
+    process.stdout.write("Installing locked web dependencies without lifecycle scripts…\n\n");
+    run(process.platform === "win32" ? "npm.cmd" : "npm", [
+      "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+    ]);
+    writeFileSync(
+      installStampPath,
+      `${JSON.stringify({ package_lock_sha256: dependencyFingerprint })}\n`,
+      { mode: 0o600 }
+    );
+  } finally {
+    rmSync(installLockPath, { recursive: true, force: true });
+  }
+}
+
 if (!supportedNode(process.versions.node)) {
   throw new Error(
     `Node ${process.versions.node} is unsupported; install Node 20.19+, 22.13+, or 24+ first`
@@ -74,16 +191,22 @@ process.stdout.write([
   "",
 ].join("\n"));
 
-if (args.has("--check")) {
+if (checkOnly) {
   process.stdout.write("READY: prerequisites and provider-free demo entry point verified.\n");
   process.exit(0);
 }
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-if (!args.has("--skip-install")) {
-  process.stdout.write("Installing locked web dependencies without lifecycle scripts…\n\n");
-  run(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
-}
+if (!skipInstall) ensureDependencies();
 
 process.stdout.write("\nRunning the deterministic developer trace…\n\n");
-run(npm, ["run", "--silent", "demo:offline", "--", "--view"]);
+if (flowPath && scenarioPath) {
+  run(npm, [
+    "run", "--silent", "flow:scenario", "--",
+    "--flow", flowPath,
+    "--scenario", scenarioPath,
+    ...(jsonOutput ? [] : ["--view"]),
+  ]);
+} else {
+  run(npm, ["run", "--silent", "demo:offline", "--", ...(jsonOutput ? [] : ["--view"])]);
+}

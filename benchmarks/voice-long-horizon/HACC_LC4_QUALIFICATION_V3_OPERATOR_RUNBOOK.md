@@ -75,3 +75,37 @@ The paid `run` command re-proves the root is physically outside
 read-only `report` command has no repository argument; it replays artifact
 integrity and requires the same physical, non-symlink `0700` root, but makes no
 independent location claim.
+
+## Resumable v4 release runner
+
+The v3 command above is the strict one-shot legacy path. The current v4 release
+runner preserves the same signed plan and `$3` ceiling but splits execution into
+serial OpenAI, Gemini, and xAI shards. It can continue only at a scientifically
+clean boundary: an unopened provider shard, or a retained setup terminal before
+that shard's paid admission. Completed shards are replayed byte-for-byte. Any
+admission without terminal evidence is quarantined permanently.
+
+Inspect the contract without credentials or provider calls:
+
+```bash
+npm run benchmark:lc4:qualification:v4 -- --help
+npm run benchmark:lc4:qualification:v4 -- status
+```
+
+After the same signed `prepare` and `authorize` steps above, continue or inspect
+the retained v4 attempt with the exact same arguments:
+
+```bash
+npm run benchmark:lc4:qualification:v4 -- continue \
+  --root "$EVIDENCE_ROOT" \
+  --repository-root "$REPOSITORY_ROOT" \
+  --authorization "$KEY_ROOT/authorization.json" \
+  --trust-root-fingerprint "$TRUST_ROOT_FINGERPRINT" \
+  --terminal-private-key "$KEY_ROOT/terminal.pem" \
+  --provider-env-file "$PROVIDER_ENV" \
+  --repo-env-file "$REPO_ENV"
+```
+
+Reissuing `continue` does not authorize a paid retry: it verifies and skips
+completed shards, resumes only the next admitted clean boundary, and stops on
+the first failed or ambiguous shard.

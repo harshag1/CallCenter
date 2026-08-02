@@ -1,0 +1,54 @@
+{
+  "topic": "membership_return",
+  "started_at": "2026-01-01T00:00:00.000Z",
+  "events": [
+    { "type": "enter_step", "path": "membership_return.route" },
+    { "type": "action", "receipt_id": "receipt:route", "tool": "verify_member_and_classify_goals", "arguments": { "member_reference": "M-100", "request": "membership and return" }, "outcome": "succeeded", "result": { "member_id": "member_100", "goals": ["membership", "return"] } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.membership" },
+    { "type": "action", "receipt_id": "receipt:membership", "tool": "read_membership_summary", "arguments": { "member_id": "member_100" }, "outcome": "succeeded", "result": { "status": "active", "goal_complete": true } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.membership.next_goal" },
+    { "type": "action", "receipt_id": "receipt:next-goal", "tool": "select_remaining_goal", "arguments": { "verified_goals": ["membership", "return"], "completed": ["membership"] }, "outcome": "succeeded", "result": { "next_goal": "return" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.return_items" },
+    { "type": "action", "receipt_id": "receipt:order", "tool": "locate_return_order", "arguments": { "member_id": "member_100", "order_reference": "O-100" }, "outcome": "succeeded", "result": { "order_id": "order_100" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.return_items.select_item" },
+    { "type": "action", "receipt_id": "receipt:item", "tool": "select_return_item", "arguments": { "order_id": "order_100", "selection": "first item" }, "outcome": "succeeded", "result": { "line_item_id": "line_100" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.return_items.select_item.item_details" },
+    { "type": "action", "receipt_id": "receipt:details", "tool": "capture_return_item_details", "arguments": { "line_item_id": "line_100", "condition": "unopened", "reason": "not needed" }, "outcome": "succeeded", "result": { "item_details_id": "details_100" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.return_items.select_item.item_details.eligibility" },
+    { "type": "action", "receipt_id": "receipt:eligibility", "tool": "evaluate_return_item", "arguments": { "order_id": "order_100", "line_item_id": "line_100" }, "outcome": "succeeded", "result": { "eligible": true, "reason": "within configured window" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.return_consent" },
+    { "type": "action", "receipt_id": "receipt:consent", "tool": "capture_return_consent", "arguments": { "line_item_id": "line_100", "response": "yes" }, "outcome": "succeeded", "result": { "granted": true } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.create_return" },
+    { "type": "action", "receipt_id": "receipt:create", "tool": "create_return_item", "arguments": { "line_item_id": "line_100", "return_method": "mail" }, "outcome": "reserved", "dispatch_started": true },
+    { "type": "interrupt", "reason": "process_restart" },
+    { "type": "reconcile_action", "receipt_id": "receipt:create", "proof_id": "proof:return-readback:001", "resolution": "committed", "result": { "return_id": "return_100" } },
+    { "type": "complete_step", "outputs": {} },
+    { "type": "enter_step", "path": "membership_return.create_return.notify" },
+    { "type": "action", "receipt_id": "receipt:notification", "tool": "submit_return_label_notification", "arguments": { "return_id": "return_100", "channel": "email" }, "outcome": "succeeded", "result": { "accepted": true } },
+    { "type": "complete_step", "outputs": {} }
+  ],
+  "expect": {
+    "status": "completed",
+    "topic": "membership_return",
+    "current_step": null,
+    "next_steps": [],
+    "checkpoints": [
+      "membership_return.route",
+      "membership_return.membership",
+      "membership_return.return_items",
+      "membership_return.create_return"
+    ],
+    "receipt_statuses": {
+      "receipt:create": { "status": "succeeded", "tool": "create_return_item", "reconciliation_proof_id": "proof:return-readback:001" },
+      "receipt:notification": { "status": "succeeded", "tool": "submit_return_label_notification" }
+    }
+  }
+}

@@ -3,6 +3,20 @@ import { describe, expect, it } from "vitest";
 import { runLc4QualificationV4OperatorCli } from "../lc4-qualification-v4-operator-cli";
 
 describe("LC4 qualification v4 operator", () => {
+  it("prints actionable help without inspecting credentials or providers", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await runLc4QualificationV4OperatorCli(["--help"], {
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      now: () => new Date("2026-08-01T16:00:00.000Z"),
+    });
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toContain("continue --root ABS");
+    expect(stdout.join("")).toContain("no retry, reconnect, fallback, or replacement");
+  });
+
   it("exposes the exact non-default serial resume contract without provider access", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];

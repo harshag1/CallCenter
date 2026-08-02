@@ -23,4 +23,17 @@ describe("root provider-free first run", () => {
     expect(output).toContain("READY:");
     expect(output).not.toContain("must-not-appear");
   });
+
+  it("publishes the generic scenario runner used by the root command", () => {
+    const webPackage = JSON.parse(readFileSync(
+      new URL("../../package.json", import.meta.url),
+      "utf8",
+    )) as { scripts?: Record<string, string> };
+    expect(webPackage.scripts?.["flow:scenario"]).toBe("tsx scripts/flow-scenario.ts");
+
+    const source = readFileSync(firstRunUrl, "utf8");
+    expect(source).toContain("--flow and --scenario must be supplied together");
+    expect(source).toContain("hacc-offline-install-");
+    expect(source).toContain("package_lock_sha256");
+  });
 });

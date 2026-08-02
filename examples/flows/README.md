@@ -86,6 +86,20 @@ For the full example test suite:
 npx vitest run lib/__tests__/deep-flow-examples.test.ts
 ```
 
+Run any checked-in or custom Flow v2 scenario through the same deterministic
+simulator from the repository root:
+
+```bash
+npm run demo:offline -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --scenario examples/scenarios/membership-return-recovery.json
+```
+
+The scenario file is data, not test code. It can enter steps, submit and settle
+actions, simulate a disconnect or process restart, reconcile an indeterminate
+write from a proof, deliver a receipt-backed worker result, and assert the exact
+terminal state. Add `--json` for the complete machine-readable trace.
+
 The test suite:
 
 - parses every JSON file through `validateAgentFlow`;

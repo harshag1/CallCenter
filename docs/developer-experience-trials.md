@@ -15,3 +15,37 @@ The repeated strengths were strict schemas, fast deterministic tests, progressiv
 The follow-up implementation addresses only the repeated, bounded findings: `npm run demo:offline` at the repository root checks prerequisites, installs locked dependencies without lifecycle scripts, strips application credentials from child processes, and runs the existing `$0` simulator; the demo now exposes completed steps, per-step scoped tools, receipts, restart reconciliation, checkpoints, outputs, and terminal state; and `flow:package catalog-skeleton` extracts a visibly non-authoritative implementation checklist. A skeleton remains `not_checked` and cannot be used as an admitted catalog; an invalid flow still fails separately.
 
 These trials establish provider-free mechanism usability. They do not establish realtime speech quality, integration correctness, deployment readiness, regulatory compliance, or superiority over native speech-to-speech models.
+
+## Launch-candidate trial round
+
+Five new fresh-context developers independently evaluated public commit
+`267b7109b9d016f380544b7cb104b235f074991d` on August 1, 2026 as builders of
+an ecommerce return agent, clinic scheduler, field-service dispatcher,
+adaptive tutor, and hospitality concierge. They used only public docs and
+provider-free commands. All five reached a successful stock trace with one
+product command; cold command execution took 6.26–7.00 seconds on the shared
+machine, including 824 locked packages. No trial made a provider, database,
+telephony, or paid call.
+
+The repeated P0/P1 finding was composition, not kernel correctness: each
+developer could prove the appointment example, but could not run a custom
+Flow/scenario file through the readable trace without reverse-engineering the
+builder tool or tests. Concurrent trials also exposed that the root command ran
+`npm ci` every time and could temporarily present a partial `node_modules` tree.
+
+The launch follow-up adds one parameterized root command, a checked-in
+membership/return recovery scenario, and an atomic cross-process install lock
+with a package-lock fingerprint. The example visibly enters ten nested steps,
+uses progressively scoped tools, crosses a simulated process restart,
+quarantines the dispatched return mutation, admits a proof-backed readback,
+and completes the exact next step:
+
+```bash
+npm run demo:offline -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --scenario examples/scenarios/membership-return-recovery.json
+```
+
+This closes the common provider-free Flow/scenario execution gap. It does not
+claim to solve each trial's domain integration, real human transfer, voice
+transport, or cross-process PostgreSQL worker setup.
