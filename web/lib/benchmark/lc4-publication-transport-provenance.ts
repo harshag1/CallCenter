@@ -707,8 +707,11 @@ export async function verifyLc4PublicationTransportProvenance(input: Readonly<{
       !== "transport_qualification_only_not_efficacy_evidence") {
     throw new Error("LC4 publication Gate D receipt crossed its transport-only claim boundary");
   }
+  const qualification = input.preflight.qualification;
   const modelIdentity = deriveLc4PublicationModelIdentityVerification(
-    input.preflight.qualification.setup_qualification.results,
+    "setup_qualifications" in qualification
+      ? qualification.setup_qualifications.flatMap((artifact) => artifact.results)
+      : qualification.setup_qualification.results,
   );
   const qualificationReplaySha256 =
     Object.fromEntries(LC4_PUBLICATION_TRANSPORT_PROVIDERS.map((provider) => {

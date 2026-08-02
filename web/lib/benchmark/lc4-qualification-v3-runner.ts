@@ -1642,6 +1642,11 @@ export function createLc4QualificationV3Targets(): readonly ProviderQualificatio
   }));
 }
 
+/** Exact paid-roundtrip configurations bound into qualification plans/packages. */
+export function createLc4QualificationV3PaidTargets(): readonly ProviderQualificationTarget[] {
+  return paidRoundtripTargets();
+}
+
 export async function inspectLc4QualificationV3GitSource(repositoryRoot: string): Promise<Lc4QualificationV3GitSource> {
   const [{ stdout: status }, { stdout: commit }, { stdout: tree }] = await Promise.all([
     execFileAsync("git", ["-C", resolve(repositoryRoot), "status", "--porcelain=v1", "--untracked-files=all"]),

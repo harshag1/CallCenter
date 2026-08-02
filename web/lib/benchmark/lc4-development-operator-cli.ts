@@ -50,7 +50,7 @@ import {
   type Lc4DevLivePrepareArtifact,
   type Lc4DevLiveRunPrefixArtifact,
   type Lc4DevLiveRunArtifact,
-  type Lc4DevRetainedQualificationReceipt,
+  type Lc4DevQualificationAdmissionReceipt,
 } from "./lc4-development-live-runner";
 import {
   replayLc4DevAuthorityReport,
@@ -62,7 +62,10 @@ import {
 } from "./lc4-qualification-runner";
 import { lc4DevCredentialIdentitySetSha256 } from "./lc4-production-provider-adapter";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
-import { loadLc4DevRetainedQualificationV3 } from "./lc4-development-qualification-v3";
+import {
+  loadLc4DevRetainedQualificationV3,
+  loadLc4DevRetainedQualificationV4,
+} from "./lc4-development-qualification-v3";
 import {
   assertLc4XaiFiniteManualGateDReceipt,
   type Lc4XaiFiniteManualGateDReceipt,
@@ -176,7 +179,7 @@ export type Lc4DevOperatorRuntime = Readonly<{
   }>): Promise<Lc4DevOperatorRuntimeRoots>;
   build(input: Readonly<{
     prepare: Lc4DevLivePrepareArtifact;
-    preflight: Lc4DevLivePreflightArtifact;
+    preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
     audio_manifest: Lc4DevAudioManifest;
     repair_manifest: Lc4DevRepairAudioManifest;
     audio_root: string;
@@ -458,8 +461,24 @@ export async function loadLc4DevRetainedQualification(
   root: string,
   qualificationTrustRootSha256: string,
   now: Date = new Date(),
-): Promise<Lc4DevRetainedQualificationReceipt> {
+): Promise<Lc4DevQualificationAdmissionReceipt> {
   absolute(root, "LC4 qualification root");
+  const attempts = await readdir(resolve(root, "attempts"), { withFileTypes: true });
+  const v4 = attempts.filter((entry) =>
+    entry.isDirectory() && !entry.isSymbolicLink() && entry.name.endsWith(".v4-package.complete"));
+  const v3 = attempts.filter((entry) =>
+    entry.isDirectory() && !entry.isSymbolicLink()
+      && entry.name.endsWith(".complete") && !entry.name.endsWith(".v4-package.complete"));
+  if (v4.length > 0 && v3.length > 0) {
+    throw new Error("LC4 qualification root contains ambiguous v3 and v4 passing packages");
+  }
+  if (v4.length > 0) {
+    return loadLc4DevRetainedQualificationV4({
+      root,
+      qualification_trust_root_sha256: qualificationTrustRootSha256,
+      now,
+    });
+  }
   return loadLc4DevRetainedQualificationV3({
     root,
     qualification_trust_root_sha256: qualificationTrustRootSha256,
@@ -524,7 +543,7 @@ async function loadSigner(source: string): Promise<Lc4DevOperatorSigner> {
 
 function authorization(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Lc4DevQualificationAdmissionReceipt;
   credentials_sha256: string;
   roots: Lc4DevOperatorRuntimeRoots;
   signer: Lc4DevOperatorSigner;
@@ -611,7 +630,7 @@ export function lc4DevOperatorLedgerGenesisSha256(input: Readonly<{
 
 function authorizationBodyWithoutGenesis(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Lc4DevQualificationAdmissionReceipt;
   credentials_sha256: string;
   roots: Lc4DevOperatorRuntimeRoots;
   nonce_sha256: string;
@@ -657,7 +676,7 @@ function authorizationBodyWithoutGenesis(input: Readonly<{
 
 export function createLc4DevOperatorAuthorizationDag(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Lc4DevQualificationAdmissionReceipt;
   credential_identity_set_sha256: string;
   roots: Lc4DevOperatorRuntimeRoots;
   signer: Lc4DevOperatorSigner;
@@ -703,7 +722,7 @@ export function createLc4DevOperatorAuthorizationDag(input: Readonly<{
 }
 
 export function assertLc4DevOperatorAuthorizationDag(input: Readonly<{
-  preflight: Pick<Lc4DevLivePreflightArtifact,
+  preflight: Pick<Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>,
     "execution_id" | "prepare_sha256" | "immutable_ledger_genesis_sha256" | "authority_trust_root_sha256" | "authorization">;
   expected_authority_public_key_fingerprint_sha256: string;
 }>): string {
@@ -785,7 +804,7 @@ async function missingJournalCrossedBoundary(input: Readonly<{
 async function loadLc4DevCompletedPrefix(input: Readonly<{
   evidence_root: string;
   prepare: Lc4DevLivePrepareArtifact;
-  preflight: Lc4DevLivePreflightArtifact;
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
   plan: Lc4CellResumePlan;
   status: Lc4CellResumeStatus;
 }>): Promise<Lc4DevLiveRunPrefixArtifact | undefined> {
@@ -903,7 +922,7 @@ export async function runLc4DevelopmentOperatorCli(
       const reasons: string[] = [];
       let source: Lc4QualificationGitSource | null = null;
       let audio: Awaited<ReturnType<typeof loadAudio>> | null = null;
-      let qualification: Lc4DevRetainedQualificationReceipt | null = null;
+      let qualification: Lc4DevQualificationAdmissionReceipt | null = null;
       let xaiFiniteManualGateD: Lc4XaiFiniteManualGateDReceipt | null = null;
       let credentials: Readonly<Record<LiveStsProvider, string>> | null = null;
       let runtime: Lc4DevOperatorRuntime | null = null;
@@ -954,7 +973,7 @@ export async function runLc4DevelopmentOperatorCli(
             evidence_root: parsed["--evidence-root"]!,
           });
           if (evidenceState === "preflighted" || evidenceState === "terminal") {
-            const preflight = await readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(parsed["--evidence-root"]!, "preflight"), "LC4-DEV preflight artifact");
+            const preflight = await readBoundedJson<Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>>(artifactPath(parsed["--evidence-root"]!, "preflight"), "LC4-DEV preflight artifact");
             if (roots.control_plane_manifest_sha256 !== preflight.control_plane_manifest_sha256
               || roots.listener_evidence_manifest_sha256 !== preflight.listener_evidence_manifest_sha256
               || roots.runtime_config_sha256 !== preflight.runtime_config_sha256
@@ -1172,7 +1191,7 @@ export async function runLc4DevelopmentOperatorCli(
       if (terminalExists) {
         const [prepare, preflight, run, lease] = await Promise.all([
           readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
-          readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+          readBoundedJson<Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
           readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV terminal run artifact"),
           readBoundedJson<Lc4DevRunLease>(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV budget lease"),
         ]);
@@ -1234,7 +1253,7 @@ export async function runLc4DevelopmentOperatorCli(
       if (!runtime) throw new Error("LC4-DEV run requires the executable control/listener/CRP runtime injection");
       const [prepare, preflight, source, audio, qualification, credentials, signer] = await Promise.all([
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
-        readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+        readBoundedJson<Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
         dependencies.inspect_source(repositoryRoot),
         loadAudio(parsed["--audio-root"]!),
         loadLc4DevRetainedQualification(parsed["--qualification-root"]!, parsed["--qualification-trust-root-sha256"]!, io.now()),
@@ -1634,7 +1653,7 @@ export async function runLc4DevelopmentOperatorCli(
       const [prepare, run, preflight, budgetLease, budgetEvidence, runPackage] = await Promise.all([
         readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
         readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV run artifact"),
-        readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
+        readBoundedJson<Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
         readBoundedJson<Lc4DevRunLease>(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV budget lease"),
         readBoundedJson<Lc4DevBudgetEvidence>(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV budget evidence"),
         readBoundedJson<Lc4DevRunPackage>(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),

@@ -100,7 +100,7 @@ function signedTerminal(body: Lc4QualificationV4TerminalBody, privateKeyPem: str
   });
 }
 
-function assertSignedTerminal(
+export function assertLc4QualificationV4TerminalArtifact(
   artifact: Lc4QualificationV4TerminalArtifact,
   expectedFingerprint: string,
 ): void {
@@ -367,7 +367,7 @@ export async function verifySignedLc4QualificationV4Package(input: Readonly<{
     now: new Date(terminal.body.sealed_at),
   });
   assertLc4QualificationBudgetEvidence(budget);
-  assertSignedTerminal(terminal, authorization.body.terminal_public_key_fingerprint_sha256);
+  assertLc4QualificationV4TerminalArtifact(terminal, authorization.body.terminal_public_key_fingerprint_sha256);
   if (canonicalJson(terminal.body.binding) !== canonicalJson(input.expectedBinding)) {
     throw new Error("qualification v4 package terminal binding differs from expected source/auth/credentials");
   }
@@ -403,7 +403,7 @@ export async function verifySignedLc4QualificationV4Package(input: Readonly<{
     expectedAuthorityFingerprintSha256: authorization.body.terminal_public_key_fingerprint_sha256,
     verifyTerminal: (bytes): Lc4QualificationTerminalClaimsV5 => {
       const packaged = JSON.parse(Buffer.from(bytes).toString("utf8")) as Lc4QualificationV4TerminalArtifact;
-      assertSignedTerminal(packaged, authorization.body.terminal_public_key_fingerprint_sha256);
+      assertLc4QualificationV4TerminalArtifact(packaged, authorization.body.terminal_public_key_fingerprint_sha256);
       if (canonicalJson(packaged) !== canonicalJson(terminal)) {
         throw new Error("qualification v4 envelope terminal differs from retained terminal");
       }

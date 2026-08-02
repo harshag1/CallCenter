@@ -28,8 +28,8 @@ import {
 } from "./lc4-development-failure-evidence";
 import {
   LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256,
-  assertLc4DevRetainedQualificationReceipt,
-  type Lc4DevRetainedQualificationReceipt,
+  assertLc4DevQualificationAdmissionReceipt,
+  type Lc4DevQualificationAdmissionReceipt,
 } from "./lc4-development-qualification-v3";
 import {
   assertLc4XaiFiniteManualGateDReceipt,
@@ -65,6 +65,7 @@ import {
   type IndependentAsrContract,
 } from "./audible-evidence";
 import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
+import { PROVIDER_QUALIFICATION_MAX_AGE_MS } from "./provider-qualification";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -407,7 +408,9 @@ export function createLc4DevLivePrepareArtifact(input: Readonly<{
   return freeze({ ...body, prepare_sha256: hash(PREPARE_DOMAIN, body) });
 }
 
-export type Lc4DevLivePreflightArtifact = Readonly<{
+export type Lc4DevLivePreflightArtifact<
+  Qualification extends Lc4DevQualificationAdmissionReceipt = Lc4DevQualificationAdmissionReceipt,
+> = Readonly<{
   schema_version: 4;
   execution_id: string;
   checked_at: string;
@@ -448,7 +451,7 @@ export type Lc4DevLivePreflightArtifact = Readonly<{
   authorization_artifact_sha256: string;
   authority_trust_root_sha256: string;
   authorization: Lc4DevLiveAuthorizationArtifact;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Qualification;
   xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   authorization_verified: true;
   preflight_sha256: string;
@@ -508,16 +511,48 @@ export function lc4DevLiveAuthorizationArtifactSha256(
 }
 
 export {
+  assertLc4DevQualificationAdmissionReceipt,
   assertLc4DevRetainedQualificationReceipt,
   createLc4DevRetainedQualificationReceipt,
+  type Lc4DevQualificationAdmissionReceipt,
   type Lc4DevRetainedQualificationReceipt,
 } from "./lc4-development-qualification-v3";
+
+/** Narrow, provider-free qualification gate used by DEV preflight. */
+export function assertLc4DevPreflightQualificationAdmission(
+  qualification: Lc4DevQualificationAdmissionReceipt,
+  checkedAt: Date,
+): void {
+  assertLc4DevQualificationAdmissionReceipt(qualification);
+  if (!Number.isFinite(checkedAt.getTime())) {
+    throw new Error("LC4-DEV qualification preflight time is invalid");
+  }
+  if (qualification.schema_version !== 4
+    || qualification.protocol_id !== "HACC-LC4-DEV-v1"
+    || qualification.qualification_protocol_id !== "HACC-LC4-v1"
+    || qualification.status !== "passed"
+    || canonicalJson(qualification.providers) !== canonicalJson(["openai", "gemini", "xai"])) {
+    throw new Error("LC4-DEV retained qualification is not a three-provider passing terminal receipt");
+  }
+  if (qualification.transport_qualification_scope_sha256
+    !== LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256) {
+    throw new Error("LC4-DEV retained qualification transport scope is unsupported");
+  }
+  if ("setup_qualifications" in qualification) {
+    const completedAt = Date.parse(qualification.terminal.body.sealed_at);
+    if (!Number.isFinite(completedAt)
+      || completedAt > checkedAt.getTime() + 120_000
+      || checkedAt.getTime() - completedAt > PROVIDER_QUALIFICATION_MAX_AGE_MS) {
+      throw new Error("LC4-DEV retained qualification is stale or future-dated at preflight");
+    }
+  }
+}
 
 function verifyDevAuthorization(input: Readonly<{
   artifact: Lc4DevLiveAuthorizationArtifact;
   expected_authority_public_key_fingerprint_sha256: string;
   prepare: Lc4DevLivePrepareArtifact;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Lc4DevQualificationAdmissionReceipt;
   xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   checked_at: string;
   credential_identity_set_sha256: string;
@@ -532,7 +567,7 @@ function verifyDevAuthorization(input: Readonly<{
   immutable_ledger_genesis_sha256: string;
 }>): void {
   const { artifact, prepare, qualification, xai_finite_manual_gate_d: gateD } = input;
-  assertLc4DevRetainedQualificationReceipt(qualification);
+  assertLc4DevPreflightQualificationAdmission(qualification, new Date(input.checked_at));
   assertLc4XaiFiniteManualGateDReceipt(gateD, {
     expected_plan_trust_root_sha256:
       prepare.xai_finite_manual_gate_d.plan_authority_trust_root_sha256,
@@ -563,17 +598,6 @@ function verifyDevAuthorization(input: Readonly<{
   assertIso(body.expires_at, "LC4-DEV authorization expiry");
   const checked = Date.parse(input.checked_at);
   if (checked < Date.parse(body.not_before) || checked >= Date.parse(body.expires_at)) throw new Error("LC4-DEV authorization is not active");
-  if (qualification.schema_version !== 4
-    || qualification.protocol_id !== "HACC-LC4-DEV-v1"
-    || qualification.qualification_protocol_id !== "HACC-LC4-v1"
-    || qualification.status !== "passed"
-    || canonicalJson(qualification.providers) !== canonicalJson(["openai", "gemini", "xai"])) {
-    throw new Error("LC4-DEV retained qualification is not a three-provider passing terminal receipt");
-  }
-  if (qualification.transport_qualification_scope_sha256
-    !== LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256) {
-    throw new Error("LC4-DEV retained qualification transport scope is unsupported");
-  }
   if (body.execution_id !== prepare.execution_id
     || body.prepare_sha256 !== prepare.prepare_sha256
     || body.maximum_total_micro_usd !== prepare.maximum_total_micro_usd
@@ -639,11 +663,13 @@ function verifyDevAuthorization(input: Readonly<{
   }
 }
 
-export function createLc4DevLivePreflightArtifact(input: Readonly<{
+export function createLc4DevLivePreflightArtifact<
+  Qualification extends Lc4DevQualificationAdmissionReceipt,
+>(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
   checked_at: string;
   qualification_gate_sha256: string;
-  qualification: Lc4DevRetainedQualificationReceipt;
+  qualification: Qualification;
   xai_finite_manual_gate_d: Lc4XaiFiniteManualGateDReceipt;
   credential_identity_set_sha256: string;
   control_plane_manifest_sha256: string;
@@ -658,7 +684,7 @@ export function createLc4DevLivePreflightArtifact(input: Readonly<{
   audio_manifest_sha256: string;
   authorization: Lc4DevLiveAuthorizationArtifact;
   expected_authority_public_key_fingerprint_sha256: string;
-}>): Lc4DevLivePreflightArtifact {
+}>): Lc4DevLivePreflightArtifact<Qualification> {
   assertLc4DevLivePrepareArtifact(input.prepare);
   assertIso(input.checked_at, "LC4-DEV preflight time");
   for (const [label, digest] of Object.entries({
@@ -787,7 +813,9 @@ export function assertLc4DevLivePrepareArtifact(value: Lc4DevLivePrepareArtifact
   if (canonicalJson(rebuilt) !== canonicalJson(value)) throw new Error("LC4-DEV prepare artifact is not canonical or internally consistent");
 }
 
-export function assertLc4DevLivePreflightArtifact(value: Lc4DevLivePreflightArtifact, prepare: Lc4DevLivePrepareArtifact, now: Date): void {
+export function assertLc4DevLivePreflightArtifact<
+  Qualification extends Lc4DevQualificationAdmissionReceipt,
+>(value: Lc4DevLivePreflightArtifact<Qualification>, prepare: Lc4DevLivePrepareArtifact, now: Date): void {
   const { preflight_sha256: claimed, ...body } = value;
   if (hash(PREFLIGHT_DOMAIN, body) !== claimed || value.prepare_sha256 !== prepare.prepare_sha256) {
     throw new Error("LC4-DEV preflight artifact hash or prepare binding mismatch");
@@ -1165,7 +1193,7 @@ function assertCanonicalTimestamp(value: string, label: string): void {
 export function assertLc4DevLiveRunPrefixArtifact(
   prefix: Lc4DevLiveRunPrefixArtifact,
   prepare: Lc4DevLivePrepareArtifact,
-  preflight: Lc4DevLivePreflightArtifact,
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>,
 ): void {
   const { prefix_sha256: claimed, ...body } = prefix;
   if (prefix.schema_version !== 1
@@ -1243,7 +1271,7 @@ export function assertLc4DevLiveRunPrefixArtifact(
 
 function createLc4DevLiveRunPrefixArtifact(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  preflight: Lc4DevLivePreflightArtifact;
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
   started_at: string;
   previous_prefix_sha256: string | null;
   episodes_started: number;
@@ -1302,7 +1330,7 @@ export type Lc4DevLiveRunSliceResult =
 
 export async function executeLc4DevLiveRunSlice(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  preflight: Lc4DevLivePreflightArtifact;
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
   dependencies: Lc4DevLiveRunnerDependencies;
   completed_prefix?: Lc4DevLiveRunPrefixArtifact;
   maximum_new_cells: number;
@@ -2221,7 +2249,7 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
 
 export async function executeLc4DevLiveRun(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  preflight: Lc4DevLivePreflightArtifact;
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
   dependencies: Lc4DevLiveRunnerDependencies;
 }>): Promise<Lc4DevLiveRunArtifact> {
   const result = await executeLc4DevLiveRunSlice({ ...input, maximum_new_cells: 6 });
@@ -2233,7 +2261,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
 
 export function createLc4DevInterruptedTerminalRun(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
-  preflight: Lc4DevLivePreflightArtifact;
+  preflight: Lc4DevLivePreflightArtifact<Lc4DevQualificationAdmissionReceipt>;
   completed_prefix?: Lc4DevLiveRunPrefixArtifact;
   completed_at: string;
   failure_evidence_sha256: string;

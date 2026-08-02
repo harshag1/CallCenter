@@ -1104,6 +1104,8 @@ export async function qualifyProviderTargetShard(input: Readonly<{
   target: ProviderQualificationTarget;
   matrixTargets: readonly ProviderQualificationTarget[];
   credentials: Readonly<Record<LiveStsProvider, string>>;
+  /** Signed plan identity; LC4 uses a distinct cross-provider credential domain. */
+  signedCredentialSetSha256: string;
   createClient: QualifyInput["createClient"];
   now?: () => Date;
   qualificationId: string;
@@ -1116,6 +1118,9 @@ export async function qualifyProviderTargetShard(input: Readonly<{
   const attemptedAt = now().toISOString();
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.qualificationId)) {
     throw new Error("provider qualification shard ID must be a safe opaque identifier");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(input.signedCredentialSetSha256)) {
+    throw new Error("provider qualification shard signed credential-set identity is invalid");
   }
   const result = await qualifyTarget(
     input.target,
@@ -1131,7 +1136,7 @@ export async function qualifyProviderTargetShard(input: Readonly<{
     planSha256: input.planSha256,
     sourceCommit: input.sourceCommit,
     configurationMatrixSha256: providerQualificationMatrixSha256(input.matrixTargets),
-    credentialSetSha256: providerCredentialSetSha256(input.credentials),
+    credentialSetSha256: input.signedCredentialSetSha256,
     probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation" as const,
     attemptedAt,
     completedAt: now().toISOString(),

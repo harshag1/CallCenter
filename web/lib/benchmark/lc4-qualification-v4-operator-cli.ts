@@ -204,6 +204,10 @@ async function replayArtifacts(root: string) {
   const aggregate = await readJson<Lc4QualificationV4Aggregate>(resolve(root, "qualification-v4-aggregate.json"));
   const shards: Lc4QualificationV4ReplayShard[] = [];
   const evidenceFiles: Lc4QualificationPackageFile[] = [];
+  evidenceFiles.push(Object.freeze({
+    path: "v4-invocation.json",
+    bytes: await readFile(resolve(root, "qualification-v4-invocation.json")),
+  }));
   for (const [ordinal, provider] of ["openai", "gemini", "xai"].entries()) {
     const prefix = `${String(ordinal).padStart(2, "0")}-${provider}`;
     const shardRoot = resolve(root, "qualification-v4-shards", `${ordinal}-${provider}`);
@@ -340,6 +344,7 @@ export async function runLc4QualificationV4OperatorCli(
             target,
             matrixTargets: state.setupTargets,
             credentials: state.credentials,
+            signedCredentialSetSha256: state.plan.body.credential_set_sha256,
             qualificationId: `qv4-${context.provider}`,
             createClient: (candidate, apiKey) => createProductionRealtimeClient(
               candidate.provider,

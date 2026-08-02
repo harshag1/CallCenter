@@ -468,16 +468,16 @@ function assertEnvelopeStructure(value: unknown): asserts value is SignedLc4Qual
   assertSha(value.artifact_sha256, "qualification envelope artifact hash");
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  return canonicalJson(left) === canonicalJson(right);
-}
-
-export async function verifySignedLc4QualificationPackageEnvelopeV5(input: Readonly<{
+/**
+ * Revalidates the signed envelope itself without claiming that its referenced
+ * payload files were reopened. Callers projecting already-verified package
+ * evidence can use this to prevent a later, fully rehashed receipt from
+ * substituting its package authority or bindings.
+ */
+export function assertSignedLc4QualificationPackageEnvelopeV5Identity(input: Readonly<{
   envelope: unknown;
-  files: readonly Lc4QualificationPackageFile[];
   expectedAuthorityFingerprintSha256?: string;
-  verifyTerminal: Lc4QualificationTerminalVerifierV5;
-}>): Promise<SignedLc4QualificationPackageEnvelopeV5> {
+}>): SignedLc4QualificationPackageEnvelopeV5 {
   assertEnvelopeStructure(input.envelope);
   const envelope = input.envelope;
   const { artifact_sha256, ...withoutHash } = envelope;
@@ -502,6 +502,23 @@ export async function verifySignedLc4QualificationPackageEnvelopeV5(input: Reado
     )) {
     throw new Error("qualification package envelope signature failed integrity");
   }
+  return envelope;
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+export async function verifySignedLc4QualificationPackageEnvelopeV5(input: Readonly<{
+  envelope: unknown;
+  files: readonly Lc4QualificationPackageFile[];
+  expectedAuthorityFingerprintSha256?: string;
+  verifyTerminal: Lc4QualificationTerminalVerifierV5;
+}>): Promise<SignedLc4QualificationPackageEnvelopeV5> {
+  const envelope = assertSignedLc4QualificationPackageEnvelopeV5Identity({
+    envelope: input.envelope,
+    expectedAuthorityFingerprintSha256: input.expectedAuthorityFingerprintSha256,
+  });
 
   const files = sortedUniqueFiles(input.files);
   if (files.some((file) => file.path === envelope.body.envelope_path)) {
