@@ -1168,3 +1168,29 @@ failure stops before an authorization request or network admission. A proven
 pre-generation credit rejection may preserve the exact unopened shard/cell for
 later continuation; an ambiguous or post-generation failure terminalizes that
 paid unit and cannot be retried under this authority.
+
+## 2026-08-02 — Standing aggregate launch authority
+
+The operator replaced per-stage and per-source chat approval with one standing,
+machine-bounded launch authority. This entry supersedes the approval cadence in
+the 2026-08-01 plan; it does not rewrite historical attempt states or weaken
+their exact-source evidence bindings.
+
+- Cumulative conservative exposure must remain **strictly below $300.00**.
+- The serial LC4 release sequence remains capped at **$19.00**: `$1` Gate D,
+  then `$3` qualification after Gate D passes, then `$15` DEV after
+  qualification and preflight pass.
+- Twilio launch validation remains capped at **$30.00** and counts inside the
+  same `< $300.00` aggregate ceiling.
+- The `$172.50` conservative genesis exposure plus every registered maximum
+  projects to `$221.50`, leaving `$78.50` before the exclusive ceiling.
+- A clean exact commit, source-bound receipts, signed authorization artifacts,
+  and immutable journals remain mandatory scientific and custody evidence.
+  They no longer require a new human approval message when the source changes.
+- No paid retry, reconnect, fallback, replacement cell, or reserve is allowed.
+  Only runner-proven unopened or pre-network continuation is admissible.
+- Stop before any pessimistic reservation that would bring exposure to
+  `$300.00` or more, and stop on every failed or ambiguous gate.
+
+The canonical machine-readable contract is
+[`HACC_STANDING_LAUNCH_AUTHORITY.json`](HACC_STANDING_LAUNCH_AUTHORITY.json).

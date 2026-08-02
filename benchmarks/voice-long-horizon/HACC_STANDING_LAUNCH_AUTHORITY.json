@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "authority_id": "hacc-standing-launch-authority-2026-08-02",
+  "status": "active",
+  "granted_at": "2026-08-02",
+  "approval_cadence": "standing_no_per_stage_or_per_commit_reapproval",
+  "aggregate_conservative_exposure": {
+    "genesis_micro_usd": 172500000,
+    "hard_ceiling_exclusive_micro_usd": 300000000,
+    "projected_after_all_registered_maxima_micro_usd": 221500000
+  },
+  "registered_operations": [
+    {
+      "id": "xai_gate_d",
+      "maximum_micro_usd": 1000000,
+      "admission_order": 1
+    },
+    {
+      "id": "three_provider_qualification",
+      "maximum_micro_usd": 3000000,
+      "admission_order": 2
+    },
+    {
+      "id": "six_cell_lc4_dev",
+      "maximum_micro_usd": 15000000,
+      "admission_order": 3
+    },
+    {
+      "id": "twilio_launch_validation",
+      "maximum_micro_usd": 30000000,
+      "admission_order": 4
+    }
+  ],
+  "invariants": {
+    "exact_source_evidence_binding_required": true,
+    "fresh_human_approval_per_source_commit_required": false,
+    "fresh_human_approval_per_stage_required": false,
+    "serial_stop_on_failed_or_ambiguous_gate": true,
+    "paid_retries_allowed": false,
+    "paid_reconnects_allowed": false,
+    "fallbacks_allowed": false,
+    "replacement_cells_allowed": false,
+    "reserve_allowed": false,
+    "unopened_or_pre_network_continuation_allowed": true,
+    "ambiguous_or_post_admission_unit_quarantined": true,
+    "twilio_subceiling_included_in_aggregate": true,
+    "credentials_may_enter_tracked_files": false
+  }
+}
+
