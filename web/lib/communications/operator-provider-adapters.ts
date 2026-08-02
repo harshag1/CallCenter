@@ -93,6 +93,7 @@ function communicationReceiptSecret(): string {
   if ([
     process.env.RESEND_API_KEY,
     process.env.TWILIO_AUTH_TOKEN,
+    process.env.TWILIO_AUTH_TOKEN_NEXT,
     process.env.TWILIO_API_KEY_SECRET,
     process.env.MCP_GATEWAY_SECRET,
   ].some((credential) => credential && credential === secret)) {

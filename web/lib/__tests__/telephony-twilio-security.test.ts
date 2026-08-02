@@ -18,12 +18,13 @@ vi.mock("@/lib/log", async () => import("../log"));
 
 import { GET as twimlGet, POST as twimlPost } from "../../app/api/telephony/twiml/route";
 import { POST as statusPost } from "../../app/api/telephony/status/route";
-import { verifyTwilioStreamUpgrade } from "../telephony";
+import { verifyTwilioStreamUpgrade, verifyTwilioWebhook } from "../telephony";
 import { signScope, verifyScope } from "../voice";
 
 const PUBLIC_ORIGIN = "https://voice.example.test";
 const SPOOFED_ORIGIN = "https://request-host.attacker.test";
 const AUTH_TOKEN = "test_twilio_auth_token_123456789";
+const NEXT_AUTH_TOKEN = "next_test_twilio_auth_token_987654321";
 const ACCOUNT_SID = `AC${"a".repeat(32)}`;
 const CALL_SID = `CA${"b".repeat(32)}`;
 const CALL_ID = "00000000-0000-4000-8000-000000000011";
@@ -52,11 +53,12 @@ function signedTwilioRequest(options: {
   actualOrigin?: string;
   signingOrigin?: string;
   signature?: string;
+  signingToken?: string;
 }): Request {
   const form = options.form ?? new URLSearchParams();
   const canonicalUrl = `${options.signingOrigin ?? PUBLIC_ORIGIN}${options.path}`;
   const signature = options.signature ?? twilioSdk.getExpectedTwilioSignature(
-    AUTH_TOKEN,
+    options.signingToken ?? AUTH_TOKEN,
     canonicalUrl,
     options.method === "POST" ? objectFromForm(form) : {}
   );
@@ -186,6 +188,39 @@ describe("Twilio callback trust boundary", () => {
     expect(verifyTwilioStreamUpgrade(new Request(`${SPOOFED_ORIGIN}/different-path`, {
       headers: { "X-Twilio-Signature": validSignature },
     }))).toBe(false);
+  });
+
+  it("accepts a distinct staged token across webhook and Media Stream promotion", async () => {
+    vi.stubEnv("TWILIO_AUTH_TOKEN_NEXT", NEXT_AUTH_TOKEN);
+    const form = voiceIdentity();
+    const webhook = signedTwilioRequest({
+      path: "/api/telephony/twiml",
+      method: "POST",
+      form,
+      signingToken: NEXT_AUTH_TOKEN,
+    });
+    await expect(verifyTwilioWebhook(webhook)).resolves.toMatchObject({
+      canonicalUrl: `${PUBLIC_ORIGIN}/api/telephony/twiml`,
+    });
+
+    const bridgeUrl = "wss://bridge.example.test/twilio/media";
+    const nextSignature = twilioSdk.getExpectedTwilioSignature(NEXT_AUTH_TOKEN, bridgeUrl, {});
+    expect(verifyTwilioStreamUpgrade(new Request(`${SPOOFED_ORIGIN}/twilio/media`, {
+      headers: { "X-Twilio-Signature": nextSignature },
+    }))).toBe(true);
+  });
+
+  it("fails closed on malformed or duplicate staged token configuration", async () => {
+    const form = voiceIdentity();
+    const request = () => signedTwilioRequest({
+      path: "/api/telephony/twiml",
+      method: "POST",
+      form,
+    });
+    vi.stubEnv("TWILIO_AUTH_TOKEN_NEXT", "too-short");
+    await expect(verifyTwilioWebhook(request())).resolves.toBeNull();
+    vi.stubEnv("TWILIO_AUTH_TOKEN_NEXT", AUTH_TOKEN);
+    await expect(verifyTwilioWebhook(request())).resolves.toBeNull();
   });
 
   it("rejects unsigned TwiML and status callbacks before any database access", async () => {

@@ -62,6 +62,7 @@ function telephonyReceiptSecret(): string {
   }
   if ([
     process.env.TWILIO_AUTH_TOKEN,
+    process.env.TWILIO_AUTH_TOKEN_NEXT,
     process.env.TWILIO_API_KEY_SECRET,
     process.env.MCP_GATEWAY_SECRET,
   ].some((credential) => credential && credential === secret)) {
@@ -157,6 +158,32 @@ export function twilioAuthToken(): string {
     throw new Error("TWILIO_AUTH_TOKEN is required for webhook verification");
   }
   return token;
+}
+
+function twilioAuthTokenCandidates(): readonly string[] {
+  const primary = twilioAuthToken();
+  const next = process.env.TWILIO_AUTH_TOKEN_NEXT;
+  if (next === undefined || next === "") return Object.freeze([primary]);
+  if (next.length < 16 || next.length > 256 || /[\u0000-\u001f\u007f]/.test(next)) {
+    throw new Error("TWILIO_AUTH_TOKEN_NEXT is malformed");
+  }
+  if (next === primary) throw new Error("TWILIO_AUTH_TOKEN_NEXT must differ from TWILIO_AUTH_TOKEN");
+  return Object.freeze([primary, next]);
+}
+
+function validateTwilioSignature(
+  signature: string,
+  canonicalUrl: string,
+  parameters: Record<string, string | string[]>,
+): boolean {
+  let valid = false;
+  // Always evaluate every configured candidate. This bounded two-token window
+  // spans Twilio's instantaneous secondary-to-primary promotion without making
+  // request contents or token order part of authority.
+  for (const token of twilioAuthTokenCandidates()) {
+    valid = twilioSdk.validateRequest(token, signature, canonicalUrl, parameters) || valid;
+  }
+  return valid;
 }
 
 /**
@@ -275,8 +302,7 @@ export async function verifyTwilioWebhook(req: Request): Promise<VerifiedTwilioR
       form = new URLSearchParams(rawBody);
       if (hasDuplicateParameters(form)) return null;
     }
-    if (!twilioSdk.validateRequest(
-      twilioAuthToken(),
+    if (!validateTwilioSignature(
       signature,
       canonicalUrl,
       req.method === "POST" ? formObject(form) : {}
@@ -300,8 +326,8 @@ export function verifyTwilioStreamUpgrade(req: Request): boolean {
     const received = new URL(req.url);
     if (received.pathname !== expected.pathname || received.search !== expected.search) return false;
     const signature = req.headers.get("x-twilio-signature");
-    return !!signature && signature.length <= 256 && twilioSdk.validateRequest(
-      twilioAuthToken(), signature, configured, {}
+    return !!signature && signature.length <= 256 && validateTwilioSignature(
+      signature, configured, {}
     );
   } catch {
     return false;

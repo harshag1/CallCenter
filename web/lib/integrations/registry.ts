@@ -211,6 +211,7 @@ const BUILT_IN_INTEGRATIONS: readonly IntegrationDefinition[] = [
       "BRIDGE_WS_URL",
       "TELEPHONY_RECEIPT_SECRET",
     ],
+    optionalEnv: ["TWILIO_AUTH_TOKEN_NEXT"],
     capabilities: ["pstn", "media-streams", "sms", "operator-approved-number-assignment"],
   },
   {

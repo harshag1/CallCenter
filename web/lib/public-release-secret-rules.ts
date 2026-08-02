@@ -49,7 +49,7 @@ export const PUBLIC_RELEASE_SECRET_PATTERNS = Object.freeze([
     patternClass: "provider_secret_assignment",
     expression: [
       "^[ \\t]*(export[ \\t]+)?((const|let|var)[ \\t]+)?((ENV|ARG)[ \\t]+)?[ \\t]*[{]?[ \\t]*[\"']?(",
-      "(TWILIO_AUTH_TOKEN|DEEPGRAM_API_KEY|ELEVENLABS_API_KEY)",
+      "(TWILIO_AUTH_TOKEN|TWILIO_AUTH_TOKEN_NEXT|DEEPGRAM_API_KEY|ELEVENLABS_API_KEY)",
       "[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[0-9A-Fa-f]{32,64}[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
       "[\"']?(TWILIO_API_KEY_SECRET|TELEPHONY_RECEIPT_SECRET)",
       "[\"']?[ \\t]*(=|:)[ \\t]*[\"']?[^\"' \\t\\r\\n]{20,256}[\"']?[ \\t]*,?[ \\t]*[}]?[ \\t]*[;]?[ \\t]*$|",
