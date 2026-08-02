@@ -1090,6 +1090,72 @@ export async function qualifyProviders(input: QualifyInput): Promise<ProviderQua
   return artifact;
 }
 
+/**
+ * Runs one provider's setup session while binding its artifact to the frozen
+ * three-provider matrix and credential set. This is intentionally separate
+ * from `qualifyProviders`: LC4 v4 serial provider shards need a terminal after
+ * each setup rather than one all-provider artifact that cannot be resumed.
+ */
+export async function qualifyProviderTargetShard(input: Readonly<{
+  root: string;
+  protocolId: string;
+  planSha256: string;
+  sourceCommit: string;
+  target: ProviderQualificationTarget;
+  matrixTargets: readonly ProviderQualificationTarget[];
+  credentials: Readonly<Record<LiveStsProvider, string>>;
+  createClient: QualifyInput["createClient"];
+  now?: () => Date;
+  qualificationId: string;
+}>): Promise<ProviderQualificationArtifact> {
+  const matching = input.matrixTargets.filter((target) => target.provider === input.target.provider);
+  if (matching.length !== 1 || canonicalJson(matching[0]) !== canonicalJson(input.target)) {
+    throw new Error("provider qualification shard target differs from the frozen full matrix");
+  }
+  const now = input.now ?? (() => new Date());
+  const attemptedAt = now().toISOString();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.qualificationId)) {
+    throw new Error("provider qualification shard ID must be a safe opaque identifier");
+  }
+  const result = await qualifyTarget(
+    input.target,
+    input.credentials[input.target.provider],
+    input.createClient,
+    now,
+  );
+  const results = Object.freeze([result]);
+  const body = Object.freeze({
+    schemaVersion: PROVIDER_QUALIFICATION_SCHEMA_VERSION,
+    qualificationId: input.qualificationId,
+    protocolId: input.protocolId,
+    planSha256: input.planSha256,
+    sourceCommit: input.sourceCommit,
+    configurationMatrixSha256: providerQualificationMatrixSha256(input.matrixTargets),
+    credentialSetSha256: providerCredentialSetSha256(input.credentials),
+    probeScope: "session_handshake_and_configuration_acknowledgement_no_audio_no_generation" as const,
+    attemptedAt,
+    completedAt: now().toISOString(),
+    status: expectedQualificationStatus(results),
+    results,
+  });
+  const artifact: ProviderQualificationArtifact = Object.freeze({
+    ...body,
+    artifactSha256: qualificationArtifactSha256(body),
+  });
+  assertProviderQualificationArtifactIntegrity(artifact);
+  const directory = resolve(input.root, "qualifications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = resolve(directory, `${input.target.provider}-${input.qualificationId}.json`);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${canonicalJson(artifact)}\n`, { flag: "wx", mode: 0o600 });
+  try {
+    await link(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+  return artifact;
+}
+
 export function providerResponseToolCanaryRequirements(targets: readonly ProviderQualificationTarget[]) {
   const requirements = new Map<string, Readonly<{
     provider: LiveStsProvider;

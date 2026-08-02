@@ -264,6 +264,51 @@ export async function reserveLc4QualificationBudget(input: Readonly<{
   });
 }
 
+/** Hydrate the one exact aggregate authority after a process stop. */
+export async function reserveOrResumeLc4QualificationBudget(input: Readonly<{
+  root: string;
+  binding: Lc4QualificationBudgetBinding;
+  now: () => Date;
+}>): Promise<Lc4QualificationBudgetReservation> {
+  const ledgerPath = lc4QualificationBudgetLedgerPath(input.root);
+  const coreExists = await lstat(ledgerPath).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+  if (!coreExists) return reserveLc4QualificationBudget(input);
+  const snapshot = await inspectFilesystemBudgetLedger({ ledgerPath, now: input.now });
+  if (snapshot.state === "open"
+    && snapshot.reservations.length === 0
+    && snapshot.scheduling_exposure_micro_usd === 0) {
+    return reserveLc4QualificationBudget(input);
+  }
+  const reservationId = `lc4qv3:${input.binding.attemptId}`;
+  const bindingSha256 = lc4QualificationBudgetBindingSha256(input.binding);
+  const retained = snapshot.reservations.find((candidate) => candidate.reservation_id === reservationId);
+  if (snapshot.operational_ceiling_micro_usd !== LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD
+    || snapshot.reservations.length !== 1
+    || !retained
+    || retained.maximum_micro_usd !== LC4_QUALIFICATION_BUDGET_MAXIMUM_MICRO_USD
+    || retained.run_id !== `lc4qv3:${input.binding.attemptId}`
+    || retained.provider !== "openai+gemini+xai"
+    || retained.model !== "exact-model-matrix-v3"
+    || retained.condition !== "qualification-v3"
+    || retained.envelope.runner_config_sha256 !== bindingSha256
+    || retained.expires_at !== input.binding.expiresAt
+    || (retained.status !== "opening" && retained.status !== "opened" && retained.status !== "settled")) {
+    throw new Error("LC4 qualification budget cannot resume a changed, partial, or foreign authority");
+  }
+  return Object.freeze({
+    ledgerPath,
+    ledgerId: snapshot.ledger_id,
+    reservationId,
+    requestedHeadSha256: snapshot.head_sha256,
+    startedHeadSha256: snapshot.head_sha256,
+    openedHeadSha256: snapshot.head_sha256,
+    bindingSha256,
+  });
+}
+
 export async function finalizeLc4QualificationBudget(input: Readonly<{
   reservation: Lc4QualificationBudgetReservation;
   attemptId: string;

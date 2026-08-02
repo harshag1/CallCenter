@@ -1443,12 +1443,12 @@ function assertSignedArtifact<Body>(input: Readonly<{
   }
 }
 
-function credentialIdentity(provider: LiveStsProvider, credential: string) {
+export function credentialIdentity(provider: LiveStsProvider, credential: string) {
   if (credential.length < 12) throw new Error(`missing ${provider} credential`);
   return freeze({ provider, credential_sha256: sha256Hex(`${CREDENTIAL_DOMAIN}${credential}`) });
 }
 
-function credentialSetSha256(credentials: Readonly<Record<LiveStsProvider, string>>): string {
+export function credentialSetSha256(credentials: Readonly<Record<LiveStsProvider, string>>): string {
   return sha256Hex(`${CREDENTIAL_SET_DOMAIN}${canonicalJson(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => credentialIdentity(provider, credentials[provider])))}`);
 }
 
@@ -1595,7 +1595,7 @@ function paidRoundtripConfiguration(provider: LiveStsProvider): TrialSessionConf
   });
 }
 
-function paidRoundtripTargets(): readonly ProviderQualificationTarget[] {
+export function paidRoundtripTargets(): readonly ProviderQualificationTarget[] {
   return freeze(LC4_QUALIFICATION_V3_PROVIDER_ORDER.map((provider) => {
     const configuration = paidRoundtripConfiguration(provider);
     return freeze({ provider, model: configuration.model, configuration });
@@ -1609,7 +1609,7 @@ function qualificationTurnBoundary(
   return provider === "gemini" ? "provider_activity_markers" : "manual_commit";
 }
 
-function qualificationClientOptions(
+export function qualificationClientOptions(
   provider: LiveStsProvider,
 ): Readonly<{ xaiTurnBoundary?: XaiRealtimeTurnBoundary }> {
   return provider === "xai"
@@ -1869,7 +1869,7 @@ function assertLc4QualificationV3ProviderAdmission(
   }
 }
 
-async function retainRoundtrip(partial: string, execution: Lc4S2sRoundtripExecution): Promise<void> {
+export async function retainRoundtrip(partial: string, execution: Lc4S2sRoundtripExecution): Promise<void> {
   assertLc4S2sRoundtripExecution(execution);
   const { wire_observations, usage, sanitized_usage, ...summary } = execution;
   await Promise.all([

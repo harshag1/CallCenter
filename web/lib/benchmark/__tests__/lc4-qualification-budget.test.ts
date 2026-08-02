@@ -22,6 +22,7 @@ import {
   finalizeLc4QualificationBudget,
   lc4QualificationBudgetLedgerPath,
   reserveLc4QualificationBudget,
+  reserveOrResumeLc4QualificationBudget,
   type Lc4QualificationBudgetBinding,
 } from "../lc4-qualification-budget";
 
@@ -143,6 +144,27 @@ describe("LC4 qualification v3 budget authority", () => {
       usage_evidence_sha256: "3".repeat(64),
     });
     expect(settled.active_reservations_micro_usd).toBe(0);
+  });
+
+  it("hydrates the same opened reservation after a process restart without reserving again", async () => {
+    const evidenceRoot = await root();
+    const first = await reserveOrResumeLc4QualificationBudget({
+      root: evidenceRoot,
+      binding: binding(),
+      now: () => NOW,
+    });
+    const resumed = await reserveOrResumeLc4QualificationBudget({
+      root: evidenceRoot,
+      binding: binding(),
+      now: () => NOW,
+    });
+    expect(resumed).toMatchObject({
+      ledgerPath: first.ledgerPath,
+      ledgerId: first.ledgerId,
+      reservationId: first.reservationId,
+      bindingSha256: first.bindingSha256,
+    });
+    expect((await inspectFilesystemBudgetLedger({ ledgerPath: first.ledgerPath })).reservations).toHaveLength(1);
   });
 
   it("blocks signed-attempt replay even after the signed ledger triplet is rolled back", async () => {
