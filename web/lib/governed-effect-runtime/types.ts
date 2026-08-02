@@ -120,6 +120,8 @@ export type ReconciliationJob = Readonly<{
   action: string;
   arguments: Readonly<Record<string, Json>>;
   argumentsSha256: string;
+  policy: unknown;
+  preDispatchDecision: PreDispatchDecision & Readonly<{ decision: "allow" }>;
   attempt: 0 | 1;
   status: "queued" | "running" | "completed";
 }>;
@@ -132,6 +134,18 @@ export type ReconciliationClaim = Readonly<{
   job: ReconciliationJob;
   receipt: GovernedEffectReceipt;
 }>;
+
+export type IndeterminateRecoveryResult =
+  | Readonly<{
+      disposition: "indeterminate";
+      receipt: GovernedEffectReceipt;
+      job: ReconciliationJob;
+    }>
+  | Readonly<{
+      /** A prior terminal settlement won the race and must never be rewritten. */
+      disposition: "terminal";
+      receipt: GovernedEffectReceipt;
+    }>;
 
 export interface GovernedEffectStore {
   /** Returns the current authoritative policy and state for this subject. */
@@ -174,8 +188,12 @@ export interface GovernedEffectStore {
     now: string;
   }>): Promise<GovernedEffectReceipt>;
 
-  /** Must be unique on receiptId, so every indeterminate receipt has at most one job. */
-  enqueueReconciliation(input: Readonly<{
+  /**
+   * Atomically changes dispatching -> indeterminate and creates the unique reconciliation job.
+   * It also repairs an already-indeterminate, jobless crash cut. A terminal winner is returned
+   * unchanged and receives no job.
+   */
+  ensureIndeterminateReconciliation(input: Readonly<{
     receiptId: string;
     scope: GovernedEffectScope;
     invocationId: string;
@@ -183,8 +201,12 @@ export interface GovernedEffectStore {
     action: string;
     arguments: Readonly<Record<string, Json>>;
     argumentsSha256: string;
+    policy: unknown;
+    preDispatchDecision: PreDispatchDecision & Readonly<{ decision: "allow" }>;
+    resultSha256?: string;
+    errorCode: string;
     now: string;
-  }>): Promise<ReconciliationJob>;
+  }>): Promise<IndeterminateRecoveryResult>;
 
   /** Claims the single permitted read-only attempt. Completed jobs are never claimable again. */
   claimReconciliation(jobId: string, now: string): Promise<ReconciliationClaim>;
@@ -195,6 +217,7 @@ export interface GovernedEffectStore {
     disposition: "committed" | "absent" | "unknown";
     proofSha256?: string;
     resultSha256?: string;
+    providerVisibleResult?: Readonly<Record<string, Json>>;
     errorCode?: string;
     now: string;
   }>): Promise<Readonly<{ job: ReconciliationJob; receipt: GovernedEffectReceipt }>>;

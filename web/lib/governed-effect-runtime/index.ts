@@ -13,6 +13,7 @@ export type {
   GovernedEffectReceiptStatus,
   GovernedEffectScope,
   GovernedEffectStore,
+  IndeterminateRecoveryResult,
   ReconciliationClaim,
   ReconciliationJob,
   ReconciliationRunResult,

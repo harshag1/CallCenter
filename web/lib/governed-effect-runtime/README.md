@@ -27,7 +27,8 @@ operations transactionally:
   first and only dispatch marker. No provider I/O may occur before this succeeds.
 - `settle` is immutable. An exact terminal replay is allowed; a different terminal outcome is
   rejected.
-- `enqueueReconciliation` has a unique constraint on `receiptId`.
+- `ensureIndeterminateReconciliation` atomically settles uncertainty and creates the job, with a
+  unique constraint on `receiptId`; it also repairs the jobless side of that crash cut.
 - `claimReconciliation` permits one attempt total, not one attempt per worker process.
 - `repairBeforeDispatch` proves that no dispatch marker exists before changing an unopened
   reservation.

@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import {
   evaluatePostDispatch,
   evaluatePreDispatch,
+  type Json,
   type PreDispatchDecision,
 } from "../action-policy-kernel";
 import type {
@@ -45,10 +45,6 @@ function canonicalJson(value: unknown, seen = new Set<object>()): string {
     `${JSON.stringify(key)}:${canonicalJson(record[key], seen)}`).join(",")}}`;
   seen.delete(value);
   return encoded;
-}
-
-function sha256(domain: string, value: unknown): string {
-  return createHash("sha256").update(`${domain}\n${canonicalJson(value)}`, "utf8").digest("hex");
 }
 
 function deepFreezeJson<T>(value: T): T {
@@ -270,12 +266,14 @@ export class GovernedEffectCoordinator {
     if (reservation.disposition === "in_flight_replay") {
       assertReceiptBoundToDecision(reservation.receipt, proposal, allowedDecision);
       if (reservation.receipt.status === "indeterminate") {
-        const job = await this.#enqueueReconciliation(reservation.receipt, proposal, now);
-        return Object.freeze({
-          disposition: "indeterminate",
-          receipt: reservation.receipt,
-          reconciliationJob: job,
-        });
+        return this.#settleIndeterminate(
+          reservation.receipt,
+          proposal,
+          allowedDecision,
+          authority.policy,
+          reservation.receipt.errorCode ?? "dispatch_indeterminate",
+          reservation.receipt.resultSha256,
+        );
       }
       return replayResult(reservation.receipt);
     }
@@ -333,13 +331,16 @@ export class GovernedEffectCoordinator {
     } catch {
       return allowedDecision.effect === "read"
         ? this.#settleReadFailure(boundary.receipt, "dispatch_exception")
-        : this.#settleIndeterminate(boundary.receipt, proposal, "dispatch_exception");
+        : this.#settleIndeterminate(boundary.receipt, proposal, allowedDecision, authority.policy, "dispatch_exception");
     }
+    try {
     if (outcome.disposition === "authoritatively_absent") {
       if (!SHA256.test(outcome.proofSha256)) {
         return allowedDecision.effect === "read"
           ? this.#settleReadFailure(boundary.receipt, "invalid_absence_proof")
-          : this.#settleIndeterminate(boundary.receipt, proposal, "invalid_absence_proof");
+          : this.#settleIndeterminate(
+              boundary.receipt, proposal, allowedDecision, authority.policy, "invalid_absence_proof",
+            );
       }
       const receipt = await this.#store.settle({
         receiptId: boundary.receipt.receiptId,
@@ -353,7 +354,13 @@ export class GovernedEffectCoordinator {
     if (outcome.disposition === "indeterminate") {
       return allowedDecision.effect === "read"
         ? this.#settleReadFailure(boundary.receipt, outcome.errorCode ?? "dispatch_indeterminate")
-        : this.#settleIndeterminate(boundary.receipt, proposal, outcome.errorCode ?? "dispatch_indeterminate");
+        : this.#settleIndeterminate(
+            boundary.receipt,
+            proposal,
+            allowedDecision,
+            authority.policy,
+            outcome.errorCode ?? "dispatch_indeterminate",
+          );
     }
 
     const settledAt = this.#now();
@@ -388,7 +395,21 @@ export class GovernedEffectCoordinator {
     }
     // A write or opaque action has crossed the network boundary. A stale authority or malformed
     // result can never be converted into a safe retry; only read-back may resolve it.
-    return this.#settleIndeterminate(boundary.receipt, proposal, post.reason, post.raw_result_sha256);
+    return this.#settleIndeterminate(
+      boundary.receipt,
+      proposal,
+      allowedDecision,
+      authority.policy,
+      post.reason,
+      post.raw_result_sha256,
+    );
+    } catch {
+      return allowedDecision.effect === "read"
+        ? this.#settleReadFailure(boundary.receipt, "post_dispatch_exception")
+        : this.#settleIndeterminate(
+            boundary.receipt, proposal, allowedDecision, authority.policy, "post_dispatch_exception",
+          );
+    }
   }
 
   async #settleReadFailure(
@@ -409,27 +430,13 @@ export class GovernedEffectCoordinator {
   async #settleIndeterminate(
     receipt: GovernedEffectReceipt,
     proposal: GovernedEffectProposal,
+    decision: PreDispatchDecision & Readonly<{ decision: "allow" }>,
+    policy: unknown,
     errorCode: string,
     resultSha256?: string,
   ): Promise<GovernedEffectExecutionResult> {
     const now = this.#now();
-    const settled = await this.#store.settle({
-      receiptId: receipt.receiptId,
-      status: "indeterminate",
-      resultSha256,
-      errorCode,
-      now,
-    });
-    const job = await this.#enqueueReconciliation(settled, proposal, now);
-    return Object.freeze({ disposition: "indeterminate", receipt: settled, reconciliationJob: job });
-  }
-
-  async #enqueueReconciliation(
-    receipt: GovernedEffectReceipt,
-    proposal: GovernedEffectProposal,
-    now: string,
-  ) {
-    return this.#store.enqueueReconciliation({
+    const recovery = await this.#store.ensureIndeterminateReconciliation({
       receiptId: receipt.receiptId,
       scope: proposal.scope,
       invocationId: receipt.invocationId,
@@ -437,7 +444,17 @@ export class GovernedEffectCoordinator {
       action: proposal.action,
       arguments: proposal.arguments,
       argumentsSha256: receipt.argumentsSha256,
+      policy,
+      preDispatchDecision: decision,
+      resultSha256,
+      errorCode,
       now,
+    });
+    if (recovery.disposition === "terminal") return replayResult(recovery.receipt);
+    return Object.freeze({
+      disposition: "indeterminate",
+      receipt: recovery.receipt,
+      reconciliationJob: recovery.job,
     });
   }
 
@@ -466,21 +483,46 @@ export class GovernedEffectCoordinator {
     } catch {
       outcome = Object.freeze({ disposition: "unknown", errorCode: "reconciliation_exception" } as const);
     }
-    const resultSha256 = outcome.disposition === "committed"
-      ? sha256("hacc/governed-effect-reconciliation-result/v1", outcome.result)
-      : undefined;
     const proofSha256 = outcome.disposition === "unknown" ? undefined : outcome.proofSha256;
     const invalidProof = proofSha256 !== undefined && !SHA256.test(proofSha256);
-    const disposition = invalidProof ? "unknown" as const : outcome.disposition;
+    let disposition: "committed" | "absent" | "unknown" = invalidProof ? "unknown" : outcome.disposition;
+    let resultSha256: string | undefined;
+    let providerVisibleResult: Readonly<Record<string, Json>> | undefined;
+    let resultError: string | undefined;
+    if (disposition === "committed" && outcome.disposition === "committed") {
+      try {
+        const post = evaluatePostDispatch({
+          policy: claim.job.policy,
+          pre_dispatch: claim.job.preDispatchDecision,
+          current_state_head_sha256: claim.job.preDispatchDecision.state_head_sha256,
+          current_state_revision: claim.job.preDispatchDecision.state_revision,
+          current_capability_epoch: claim.job.preDispatchDecision.capability_epoch,
+          result: outcome.result,
+        });
+        if (post.decision !== "accept") {
+          disposition = "unknown";
+          resultError = "reconciliation_result_failed_frozen_policy";
+        } else {
+          resultSha256 = post.raw_result_sha256;
+          providerVisibleResult = post.provider_result ?? {};
+        }
+      } catch {
+        disposition = "unknown";
+        resultError = "invalid_reconciliation_result";
+      }
+    }
     const settled = await this.#store.settleReconciliation({
       jobId: claim.job.jobId,
       receiptId: claim.job.receiptId,
       disposition,
       proofSha256: invalidProof ? undefined : proofSha256,
       resultSha256: disposition === "committed" ? resultSha256 : undefined,
+      providerVisibleResult: disposition === "committed" ? providerVisibleResult : undefined,
       errorCode: invalidProof
         ? "invalid_reconciliation_proof"
-        : outcome.disposition === "unknown" ? outcome.errorCode ?? "reconciliation_unknown" : undefined,
+        : resultError ?? (outcome.disposition === "unknown"
+          ? outcome.errorCode ?? "reconciliation_unknown"
+          : undefined),
       now: this.#now(),
     });
     return Object.freeze({ disposition, job: settled.job, receipt: settled.receipt });

@@ -230,9 +230,25 @@ class FakeStore implements GovernedEffectStore {
     return receipt;
   }
 
-  async enqueueReconciliation(input: Parameters<GovernedEffectStore["enqueueReconciliation"]>[0]): Promise<ReconciliationJob> {
+  async ensureIndeterminateReconciliation(
+    input: Parameters<GovernedEffectStore["ensureIndeterminateReconciliation"]>[0],
+  ): ReturnType<GovernedEffectStore["ensureIndeterminateReconciliation"]> {
+    let receipt = this.mustReceipt(input.receiptId);
+    if (receipt.status === "succeeded" || receipt.status === "failed") {
+      return { disposition: "terminal", receipt };
+    }
+    if (receipt.status !== "indeterminate") {
+      receipt = Object.freeze({
+        ...receipt,
+        status: "indeterminate" as const,
+        ...(input.resultSha256 ? { resultSha256: input.resultSha256 } : {}),
+        errorCode: input.errorCode,
+        settledAt: input.now,
+      });
+      this.receipts.set(receipt.receiptId, receipt);
+    }
     const existingId = this.jobByReceipt.get(input.receiptId);
-    if (existingId) return this.mustJob(existingId);
+    if (existingId) return { disposition: "indeterminate", receipt, job: this.mustJob(existingId) };
     const job: ReconciliationJob = Object.freeze({
       jobId: `job-${this.jobs.size + 1}`,
       receiptId: input.receiptId,
@@ -242,12 +258,14 @@ class FakeStore implements GovernedEffectStore {
       action: input.action,
       arguments: input.arguments,
       argumentsSha256: input.argumentsSha256,
+      policy: input.policy,
+      preDispatchDecision: input.preDispatchDecision,
       attempt: 0,
       status: "queued",
     });
     this.jobs.set(job.jobId, job);
     this.jobByReceipt.set(job.receiptId, job.jobId);
-    return job;
+    return { disposition: "indeterminate", receipt, job };
   }
 
   async claimReconciliation(jobId: string): Promise<ReconciliationClaim> {
@@ -274,6 +292,7 @@ class FakeStore implements GovernedEffectStore {
         : input.disposition === "absent" ? "failed" as const : "indeterminate" as const,
       ...(input.resultSha256 ? { resultSha256: input.resultSha256 } : {}),
       ...(input.proofSha256 ? { proofSha256: input.proofSha256 } : {}),
+      ...(input.providerVisibleResult ? { providerVisibleResult: input.providerVisibleResult } : {}),
       ...(input.errorCode ? { errorCode: input.errorCode } : {}),
       settledAt: input.now,
     });
@@ -544,6 +563,39 @@ describe("GovernedEffectCoordinator", () => {
       disposition: "indeterminate",
       receipt: { errorCode: "authority_advanced_after_decision" },
       reconciliationJob: { status: "queued" },
+    });
+  });
+
+  it("atomically quarantines malformed post-boundary output instead of stranding dispatching", async () => {
+    const store = new FakeStore();
+    const effectAdapter = adapter({
+      dispatch: async () => ({ disposition: "completed", result: undefined as never }),
+    });
+    await expect(coordinator(store, effectAdapter).execute(proposal())).resolves.toMatchObject({
+      disposition: "indeterminate",
+      receipt: { status: "indeterminate", errorCode: "post_dispatch_exception" },
+      reconciliationJob: { status: "queued" },
+    });
+    expect(effectAdapter.dispatch).toHaveBeenCalledTimes(1);
+    expect(store.jobs).toHaveLength(1);
+  });
+
+  it("refuses to promote a reconciliation result that violates the frozen postcondition", async () => {
+    const store = new FakeStore();
+    const effectAdapter = adapter({
+      dispatch: async () => ({ disposition: "indeterminate" }),
+      reconcile: async () => ({
+        disposition: "committed",
+        proofSha256: H("9"),
+        result: { status: "not_applied" },
+      }),
+    });
+    const runtime = coordinator(store, effectAdapter);
+    const execution = await runtime.execute(proposal());
+    if (execution.disposition !== "indeterminate") throw new Error("expected indeterminate execution");
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId)).resolves.toMatchObject({
+      disposition: "unknown",
+      receipt: { status: "indeterminate", errorCode: "reconciliation_result_failed_frozen_policy" },
     });
   });
 
