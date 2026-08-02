@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "scenario_id": "field-service-recovery-v1",
+  "conversation_id": "call-field-042",
+  "work_order_id": "WO-1042",
+  "customer_id": "customer-17",
+  "initial_intent": "repair",
+  "safety": {
+    "initially_safe": false,
+    "clearance_authority": "field-safety-policy",
+    "cleared": true
+  },
+  "detour": {
+    "goal": "schedule_followup",
+    "slot": "2026-08-04T14:00:00-07:00"
+  },
+  "repair": {
+    "part_sku": "FAN-MOTOR-7",
+    "serial_evidence": "SERIAL-8C1A",
+    "caller_close_confirmation": "yes"
+  },
+  "worker": {
+    "capability": "lookup_service_bulletin",
+    "bulletin_id": "SB-FAN-7",
+    "finding": "Torque mounting bolts to 8 Nm."
+  }
+}

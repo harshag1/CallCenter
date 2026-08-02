@@ -7,6 +7,7 @@
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
   "scripts": {
+    "demo:proof": "node scripts/hacc-proof-demo.mjs",
     "demo:offline": "node scripts/provider-free-first-run.mjs",
     "demo:offline:check": "node scripts/provider-free-first-run.mjs --check",
     "flow:visualize": "node scripts/provider-free-first-run.mjs --visualize"
