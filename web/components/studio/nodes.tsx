@@ -126,6 +126,7 @@ export const FallbackNode = memo(function FallbackNode({ data }: NodeProps) {
             className="w-32 rounded-lg border border-neutral-200 px-2 py-1 text-[11px] tabular-nums outline-none focus:border-neutral-500"
           />
           <button
+            aria-label="Save number"
             onClick={async () => { if (await save(value)) setEditing(false); }}
             className="flex h-6 w-6 items-center justify-center rounded-md bg-neutral-900 text-white"
           >

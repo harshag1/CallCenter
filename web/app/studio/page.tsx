@@ -298,12 +298,12 @@ export default function Studio() {
         </div>
         <div className="flex items-center gap-4">
           <Tooltip content="workspace" placement="bottom">
-            <button onClick={() => router.push("/workspace")} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
+            <button aria-label="Open workspace" onClick={() => router.push("/workspace")} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
               <LayoutGrid size={15} />
             </button>
           </Tooltip>
           <Tooltip content="log out" placement="bottom">
-            <button onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
+            <button aria-label="Log out" onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
               <LogOut size={15} />
             </button>
           </Tooltip>

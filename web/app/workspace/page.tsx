@@ -412,7 +412,7 @@ export default function Workspace() {
           <span className="text-sm font-semibold tracking-tight">{PRODUCT_NAME}</span>
         </div>
         <Tooltip content="log out" placement="bottom">
-          <button onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
+          <button aria-label="Log out" onClick={logout} className="text-neutral-400 transition-colors duration-[160ms] hover:text-neutral-900">
             <LogOut size={15} />
           </button>
         </Tooltip>
@@ -424,6 +424,7 @@ export default function Workspace() {
           {railTabs.map(({ id, icon: Icon, title }) => (
             <Tooltip key={id} content={title} placement="right">
               <button
+                aria-label={title}
                 onClick={() => setTab(id)}
                 className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-[160ms] ${
                   tab === id && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
@@ -436,6 +437,7 @@ export default function Workspace() {
           {(hasPending || tab === "scheduled") && (
             <Tooltip content="scheduled" placement="right">
               <button
+                aria-label="Scheduled"
                 onClick={() => setTab("scheduled")}
                 className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-[160ms] ${
                   tab === "scheduled" && !surface ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-900"
@@ -448,6 +450,7 @@ export default function Workspace() {
           <div className="flex-1" />
           <Tooltip content="studio" placement="right">
             <button
+              aria-label="Open Studio"
               onClick={() => router.push("/studio")}
               className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900"
             >
@@ -456,6 +459,7 @@ export default function Workspace() {
           </Tooltip>
           <Tooltip content="log out" placement="right">
             <button
+              aria-label="Log out"
               onClick={logout}
               className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900"
             >
@@ -470,7 +474,7 @@ export default function Workspace() {
             {surface ? (
               <div>
                 <Tooltip content="close" placement="right" className="mb-3">
-                  <button onClick={() => setSurface(null)} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
+                  <button aria-label="Close" onClick={() => setSurface(null)} className="text-neutral-300 transition-colors duration-[160ms] hover:text-neutral-900">
                     <X size={14} />
                   </button>
                 </Tooltip>
