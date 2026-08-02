@@ -4,17 +4,27 @@ import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import {
   LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES,
   LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES,
+  LC4_DEV_MAX_TOOL_CALLS_PER_BATCH,
+  LC4_DEV_ROTATION_REPLAY_MAX_TURNS,
+  LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   LC4_DEV_INTENT_ACTION_MAP,
   LC4_DEV_SEMANTIC_INTENTS,
   Lc4DevGatewayTurnCoordinator,
   assertLc4DevGatewayReceiptSet,
   lc4DevSemanticIntentsForActions,
+  projectLc4DevRotationReplayEnvelopeAdmission,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
+  type Lc4DevRotationReplayEnvelopeAuthority,
+  type Lc4DevRotationReplayEnvelopeSnapshot,
 } from "../lc4-development-gateway-bridge";
 import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
+import {
+  createLc4NativeConversationReplayPacket,
+  type Lc4NativeConversationTurnInput,
+} from "../lc4-production-provider-adapter";
 import type {
   NormalizedRealtimeClient,
   NormalizedRealtimeEvent,
@@ -32,6 +42,13 @@ const CONTINUATION_CONTROL_SHA256 = sha256Hex(CONTINUATION_CONTROL);
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 const opportunity = createLc4PublicDevelopmentCorpus().opportunities[0]!;
+
+type UnsequencedConversationTurn =
+  Lc4NativeConversationTurnInput extends infer Turn
+    ? Turn extends Lc4NativeConversationTurnInput
+      ? Omit<Turn, "turn_id" | "sequence">
+      : never
+    : never;
 
 function episode(provider: "openai" | "gemini" | "xai", arm: "native" | "hacc"): Lc4DevLiveEpisodePlan {
   return Object.freeze({
@@ -228,6 +245,39 @@ function semanticInputAtExactUtf8Bytes(
     throw new Error("test fixture did not produce the requested semantic-input byte length");
   }
   return semanticInput;
+}
+
+function replayEnvelope(
+  snapshot: Lc4DevRotationReplayEnvelopeSnapshot,
+): Lc4DevRotationReplayEnvelopeAuthority {
+  return Object.freeze({ snapshot: () => snapshot });
+}
+
+function geminiBatchEvent(
+  callCount: number,
+  responseId: string,
+): NormalizedRealtimeEvent {
+  return {
+    type: "tool.calls",
+    provider: "gemini",
+    receivedAtMs: 1,
+    wireType: "toolCall",
+    responseId,
+    calls: Array.from({ length: callCount }, (_, index) => ({
+      callId: `${responseId}-call-${index + 1}`,
+      name: "capability_gateway",
+      argumentsText: canonicalJson({
+        tool_name: "complete_current_stage",
+        arguments: {},
+      }),
+      argumentsJson: {
+        tool_name: "complete_current_stage",
+        arguments: {},
+      },
+      responseId,
+      terminalWireType: "toolCall",
+    })),
+  };
 }
 
 describe("LC4-DEV provider-neutral gateway bridge", () => {
@@ -610,7 +660,41 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       .toThrow("rejection receipt hash, version, or order is invalid");
   });
 
-  it("rejects a 64 KiB + 1 model-argument record before execution or provider delivery", async () => {
+  it("uses the same decimal 64,000-byte argument boundary as schema-v6 rotation", () => {
+    const exact = semanticInputAtExactUtf8Bytes(
+      LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES,
+    ) as unknown as Readonly<Record<string, JsonValue>>;
+    const oversized = semanticInputAtExactUtf8Bytes(
+      LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES + 1,
+    ) as unknown as Readonly<Record<string, JsonValue>>;
+    const common = {
+      snapshot: {
+        retained_turn_count: 0,
+        retained_utf8_bytes: 0,
+        current_caller_utf8_bytes: 1,
+        optional_repair_caller_utf8_bytes: 1,
+      },
+      opportunity_index: 1,
+      admitted_tool_call_count: 0,
+      admitted_tool_reserved_utf8_bytes: 0,
+    } as const;
+
+    expect(projectLc4DevRotationReplayEnvelopeAdmission({
+      ...common,
+      candidate_model_arguments: [exact],
+    })).toMatchObject({
+      admitted_tool_call_count: 1,
+      projected_turn_count: 5,
+    });
+    expect(() => projectLc4DevRotationReplayEnvelopeAdmission({
+      ...common,
+      candidate_model_arguments: [oversized],
+    })).toThrow(
+      `exceed ${LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES} UTF-8 bytes`,
+    );
+  });
+
+  it("rejects a decimal 64,001-byte model-argument record before execution or provider delivery", async () => {
     const client = new FakeClient("openai");
     const failures: Error[] = [];
     const inputs: Lc4DevGatewayExecutionInput[] = [];
@@ -646,6 +730,248 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       rejection_count: 0,
       fatal_class: "parse",
     });
+  });
+
+  it("admits exactly 16 calls atomically and rejects 17 before any sibling dispatch", async () => {
+    const acceptedClient = new FakeClient("gemini");
+    const acceptedInputs: Lc4DevGatewayExecutionInput[] = [];
+    const accepted = new Lc4DevGatewayTurnCoordinator({
+      client: acceptedClient,
+      executor: executor(acceptedInputs),
+      onFatal: () => undefined,
+    });
+    accepted.beginOpportunity({
+      episode: episode("gemini", "hacc"),
+      opportunity,
+    });
+    accepted.observe(geminiBatchEvent(
+      LC4_DEV_MAX_TOOL_CALLS_PER_BATCH,
+      "maximum-call-batch",
+    ));
+    const acceptedReplay =
+      await accepted.finishOpportunityWithConversationReplay();
+    expect(acceptedReplay.receipt_set.receipts).toHaveLength(
+      LC4_DEV_MAX_TOOL_CALLS_PER_BATCH,
+    );
+    expect(acceptedInputs).toHaveLength(LC4_DEV_MAX_TOOL_CALLS_PER_BATCH);
+    expect(acceptedClient.submitted[0]?.results).toHaveLength(
+      LC4_DEV_MAX_TOOL_CALLS_PER_BATCH,
+    );
+    const rotationTurns: Lc4NativeConversationTurnInput[] = [];
+    const appendTurn = (
+      turn: UnsequencedConversationTurn,
+    ) => {
+      const sequence = rotationTurns.length + 1;
+      rotationTurns.push(Object.freeze({
+        ...turn,
+        turn_id: `conversation.${String(sequence).padStart(3, "0")}.${turn.speaker}`,
+        sequence,
+      }) as Lc4NativeConversationTurnInput);
+    };
+    for (let opportunityIndex = 1; opportunityIndex <= 10; opportunityIndex += 1) {
+      const common = {
+        available_after_opportunity: opportunityIndex,
+        exchange_phase: "canonical" as const,
+        provider_conversation_source: true as const,
+        oracle_derived: false as const,
+        future_derived: false as const,
+        semantic_evaluator_derived: false as const,
+      };
+      appendTurn({
+        ...common,
+        speaker: "caller",
+        source: "caller_tts_source_bound_to_pcm",
+        text: `Caller ${opportunityIndex}`,
+        provenance_receipt_sha256: sha256Hex(`caller:${opportunityIndex}`),
+      });
+      if (opportunityIndex === 1) {
+        for (const batch of acceptedReplay.conversation_tool_batches) {
+          const batchSha256 = sha256Hex(canonicalJson(batch));
+          for (const call of batch.calls) {
+            appendTurn({
+              ...common,
+              speaker: "tool",
+              source: "canonical_gateway_result",
+              tool_name: call.gateway_tool_name,
+              tool_arguments: call.model_arguments,
+              text: call.provider_output_canonical_json,
+              provenance_receipt_sha256: call.source_sha256,
+              tool_batch_sha256: batchSha256,
+              tool_batch_call_ordinal: call.call_ordinal,
+              tool_batch_call_count: batch.calls.length,
+              tool_disposition: call.disposition,
+              pre_dispatch_rejection_code:
+                call.pre_dispatch_rejection_code,
+            });
+          }
+        }
+      }
+      appendTurn({
+        ...common,
+        speaker: "assistant",
+        source: "listener_exact_captured_pcm_asr",
+        text: `Assistant ${opportunityIndex}`,
+        provenance_receipt_sha256: sha256Hex(`assistant:${opportunityIndex}`),
+      });
+    }
+    expect(() => createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "accepted-gateway-batch-rotates",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256: sha256Hex("prior-segment"),
+      conversation_turns: rotationTurns,
+    })).not.toThrow();
+
+    const rejectedClient = new FakeClient("gemini");
+    const rejectedInputs: Lc4DevGatewayExecutionInput[] = [];
+    const rejected = new Lc4DevGatewayTurnCoordinator({
+      client: rejectedClient,
+      executor: executor(rejectedInputs),
+      onFatal: () => undefined,
+    });
+    rejected.beginOpportunity({
+      episode: episode("gemini", "hacc"),
+      opportunity,
+    });
+    rejected.observe(geminiBatchEvent(
+      LC4_DEV_MAX_TOOL_CALLS_PER_BATCH + 1,
+      "overflow-call-batch",
+    ));
+    await expect(rejected.finishOpportunity()).rejects.toThrow(
+      `exceeds ${LC4_DEV_MAX_TOOL_CALLS_PER_BATCH} calls`,
+    );
+    expect(rejectedInputs).toEqual([]);
+    expect(rejectedClient.operations).toEqual([]);
+    expect(rejectedClient.submitted).toEqual([]);
+  });
+
+  it("enforces the cumulative 128,000-byte envelope before dispatch", async () => {
+    const modelArguments = {
+      tool_name: "complete_current_stage",
+      arguments: {},
+    } as const;
+    const argumentBytes = Buffer.byteLength(
+      canonicalJson(modelArguments),
+      "utf8",
+    );
+    const currentAndRepairReservation = 1 + 4_000 + 1 + 4_000;
+    const candidateReservation = argumentBytes + 4_000;
+    const exactRetainedBytes = LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES
+      - currentAndRepairReservation
+      - candidateReservation;
+    const snapshot = {
+      retained_turn_count: 100,
+      retained_utf8_bytes: exactRetainedBytes,
+      current_caller_utf8_bytes: 1,
+      optional_repair_caller_utf8_bytes: 1,
+    } as const;
+    expect(projectLc4DevRotationReplayEnvelopeAdmission({
+      snapshot,
+      opportunity_index: 60,
+      admitted_tool_call_count: 0,
+      admitted_tool_reserved_utf8_bytes: 0,
+      candidate_model_arguments: [modelArguments],
+    }).projected_utf8_bytes).toBe(
+      LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES,
+    );
+
+    const client = new FakeClient("openai");
+    const inputs: Lc4DevGatewayExecutionInput[] = [];
+    const coordinator = new Lc4DevGatewayTurnCoordinator({
+      client,
+      executor: executor(inputs),
+      onFatal: () => undefined,
+      rotationReplayEnvelope: replayEnvelope({
+        ...snapshot,
+        retained_utf8_bytes: exactRetainedBytes + 1,
+      }),
+    });
+    coordinator.beginOpportunity({
+      episode: episode("openai", "hacc"),
+      opportunity: Object.freeze({
+        ...createLc4PublicDevelopmentCorpus().opportunities[59]!,
+        canonical_caller_text: "x",
+      }),
+    });
+    coordinator.observe(dispatchEvent("openai"));
+    await expect(coordinator.finishOpportunity()).rejects.toThrow(
+      `exceeds ${LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES} UTF-8 bytes`,
+    );
+    expect(inputs).toEqual([]);
+    expect(client.operations).toEqual([]);
+    expect(client.submitted).toEqual([]);
+  });
+
+  it("accounts cumulatively through opportunity 60 and fails the 513th turn before dispatch", async () => {
+    const finalOpportunity = Object.freeze({
+      ...createLc4PublicDevelopmentCorpus().opportunities[59]!,
+      canonical_caller_text: "x",
+    });
+    const acceptedClient = new FakeClient("openai");
+    const acceptedInputs: Lc4DevGatewayExecutionInput[] = [];
+    const accepted = new Lc4DevGatewayTurnCoordinator({
+      client: acceptedClient,
+      executor: executor(acceptedInputs),
+      onFatal: () => undefined,
+      rotationReplayEnvelope: replayEnvelope({
+        retained_turn_count: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 5,
+        retained_utf8_bytes: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 5,
+        current_caller_utf8_bytes: 1,
+        optional_repair_caller_utf8_bytes: 1,
+      }),
+    });
+    accepted.beginOpportunity({
+      episode: episode("openai", "hacc"),
+      opportunity: finalOpportunity,
+    });
+    accepted.observe(dispatchEvent("openai"));
+    await expect(accepted.finishOpportunity()).resolves.toBeDefined();
+    expect(acceptedInputs).toHaveLength(1);
+
+    const rejectedClient = new FakeClient("openai");
+    const rejectedInputs: Lc4DevGatewayExecutionInput[] = [];
+    const rejected = new Lc4DevGatewayTurnCoordinator({
+      client: rejectedClient,
+      executor: executor(rejectedInputs),
+      onFatal: () => undefined,
+      rotationReplayEnvelope: replayEnvelope({
+        retained_turn_count: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 4,
+        retained_utf8_bytes: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 4,
+        current_caller_utf8_bytes: 1,
+        optional_repair_caller_utf8_bytes: 1,
+      }),
+    });
+    rejected.beginOpportunity({
+      episode: episode("openai", "hacc"),
+      opportunity: finalOpportunity,
+    });
+    rejected.observe(dispatchEvent("openai"));
+    await expect(rejected.finishOpportunity()).rejects.toThrow(
+      `exceeds ${LC4_DEV_ROTATION_REPLAY_MAX_TURNS} provider-conversation turns`,
+    );
+    expect(rejectedInputs).toEqual([]);
+    expect(rejectedClient.operations).toEqual([]);
+    expect(rejectedClient.submitted).toEqual([]);
+
+    const horizonOverflow = new Lc4DevGatewayTurnCoordinator({
+      client: new FakeClient("openai"),
+      executor: executor([]),
+      onFatal: () => undefined,
+      rotationReplayEnvelope: replayEnvelope({
+        retained_turn_count: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 3,
+        retained_utf8_bytes: LC4_DEV_ROTATION_REPLAY_MAX_TURNS - 3,
+        current_caller_utf8_bytes: 1,
+        optional_repair_caller_utf8_bytes: 1,
+      }),
+    });
+    expect(() => horizonOverflow.beginOpportunity({
+      episode: episode("openai", "hacc"),
+      opportunity: finalOpportunity,
+    })).toThrow(
+      `exceeds ${LC4_DEV_ROTATION_REPLAY_MAX_TURNS} provider-conversation turns`,
+    );
   });
 
   it("rejects an individually valid but oversized model-argument batch before delivery", async () => {

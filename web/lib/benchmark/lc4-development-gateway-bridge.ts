@@ -23,12 +23,17 @@ import {
 export const LC4_DEV_GATEWAY_BRIDGE_VERSION = "lc4-dev-gateway-bridge-v5" as const;
 
 const HASH = /^[a-f0-9]{64}$/u;
-const MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
+export const LC4_DEV_MAX_TOOL_BATCHES_PER_OPPORTUNITY = 8;
 const MAX_REJECTED_TOOL_BATCHES_PER_OPPORTUNITY = 3;
-const MAX_TOOL_CALLS_PER_BATCH = 16;
-const MAX_PROVIDER_RESULT_BYTES = 4_000;
-export const LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES = 64 * 1_024;
-export const LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES = 256 * 1_024;
+export const LC4_DEV_MAX_TOOL_CALLS_PER_BATCH = 16;
+export const LC4_DEV_MAX_PROVIDER_RESULT_BYTES = 4_000;
+export const LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES = 4_000;
+export const LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES = 64_000;
+export const LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES = 128_000;
+export const LC4_DEV_ROTATION_REPLAY_MAX_TURNS = 512;
+export const LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES =
+  LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES;
+export const LC4_DEV_OPPORTUNITY_HORIZON = 60;
 const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v2\n";
 const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v2\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
@@ -397,6 +402,34 @@ type OpportunityContext = Readonly<{
   phase: "canonical" | "repair";
 }>;
 
+/**
+ * Adapter-owned usage at the instant an exchange begins. The retained values
+ * include every provider-visible caller, tool, result, and assistant turn
+ * from all earlier segments. The current caller and optional repair are
+ * reserved separately because neither has entered retained history yet.
+ */
+export type Lc4DevRotationReplayEnvelopeSnapshot = Readonly<{
+  retained_turn_count: number;
+  retained_utf8_bytes: number;
+  current_caller_utf8_bytes: number;
+  optional_repair_caller_utf8_bytes: number | null;
+}>;
+
+export type Lc4DevRotationReplayEnvelopeAuthority = Readonly<{
+  snapshot(input: Readonly<{
+    episode: Lc4DevLiveEpisodePlan;
+    opportunity: Lc4PublicDevOpportunity;
+    phase: "canonical" | "repair";
+  }>): Lc4DevRotationReplayEnvelopeSnapshot;
+}>;
+
+export type Lc4DevRotationReplayEnvelopeProjection = Readonly<{
+  projected_turn_count: number;
+  projected_utf8_bytes: number;
+  admitted_tool_call_count: number;
+  admitted_tool_reserved_utf8_bytes: number;
+}>;
+
 type ExecutableCall = Readonly<{
   call_id: string;
   response_id: string;
@@ -720,9 +753,9 @@ function providerOutputSnapshot(value: JsonValue): JsonValue {
   const frozen = freeze(value);
   const encoded = canonicalJson(frozen);
   const encodedBytes = Buffer.byteLength(encoded, "utf8");
-  if (encodedBytes > MAX_PROVIDER_RESULT_BYTES) {
+  if (encodedBytes > LC4_DEV_MAX_PROVIDER_RESULT_BYTES) {
     throw new Error(
-      `LC4-DEV gateway provider output exceeds ${MAX_PROVIDER_RESULT_BYTES} UTF-8 bytes: `
+      `LC4-DEV gateway provider output exceeds ${LC4_DEV_MAX_PROVIDER_RESULT_BYTES} UTF-8 bytes: `
       + `actual_bytes=${encodedBytes}`,
     );
   }
@@ -739,9 +772,11 @@ function normalizedModelArguments(
   return normalized as Readonly<Record<string, JsonValue>>;
 }
 
-function assertReplayableModelArgumentBatch(calls: readonly CandidateCall[]): void {
-  const canonicalArguments = calls.map((call, index) => {
-    const encoded = canonicalJson(call.semantic_input);
+function replayableModelArgumentByteLengths(
+  modelArguments: readonly Readonly<Record<string, JsonValue>>[],
+): readonly number[] {
+  const byteLengths = modelArguments.map((argument, index) => {
+    const encoded = canonicalJson(argument);
     const encodedBytes = Buffer.byteLength(encoded, "utf8");
     if (encodedBytes > LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES) {
       throw new Error(
@@ -749,9 +784,9 @@ function assertReplayableModelArgumentBatch(calls: readonly CandidateCall[]): vo
         + `${LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES} UTF-8 bytes: actual_bytes=${encodedBytes}`,
       );
     }
-    return call.semantic_input;
+    return encodedBytes;
   });
-  const aggregateBytes = Buffer.byteLength(canonicalJson(canonicalArguments), "utf8");
+  const aggregateBytes = byteLengths.reduce((sum, bytes) => sum + bytes, 0);
   if (aggregateBytes > LC4_DEV_MAX_REPLAY_BATCH_ARGUMENT_BYTES) {
     throw new Error(
       `LC4-DEV gateway model argument batch exceeds `
@@ -759,6 +794,141 @@ function assertReplayableModelArgumentBatch(calls: readonly CandidateCall[]): vo
       + `actual_bytes=${aggregateBytes}`,
     );
   }
+  return Object.freeze(byteLengths);
+}
+
+function safeEnvelopeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`LC4-DEV rotation replay envelope ${label} is invalid`);
+  }
+  return value;
+}
+
+/**
+ * Projects the exact schema-v6 rotation cost before executable authority is
+ * invoked. Every admitted tool call reserves its canonical argument bytes and
+ * the full 4,000-byte provider-result ceiling. That makes a successful
+ * exchange no larger than the projection even though the result is not known
+ * until after dispatch.
+ */
+export function projectLc4DevRotationReplayEnvelopeAdmission(input: Readonly<{
+  snapshot: Lc4DevRotationReplayEnvelopeSnapshot;
+  opportunity_index: number;
+  admitted_tool_call_count: number;
+  admitted_tool_reserved_utf8_bytes: number;
+  candidate_model_arguments: readonly Readonly<Record<string, JsonValue>>[];
+}>): Lc4DevRotationReplayEnvelopeProjection {
+  const opportunityIndex = safeEnvelopeInteger(
+    input.opportunity_index,
+    "opportunity index",
+  );
+  if (opportunityIndex < 1 || opportunityIndex > LC4_DEV_OPPORTUNITY_HORIZON) {
+    throw new Error(
+      `LC4-DEV rotation replay envelope exceeds its ${LC4_DEV_OPPORTUNITY_HORIZON}-opportunity horizon`,
+    );
+  }
+  const retainedTurnCount = safeEnvelopeInteger(
+    input.snapshot.retained_turn_count,
+    "retained turn count",
+  );
+  const retainedUtf8Bytes = safeEnvelopeInteger(
+    input.snapshot.retained_utf8_bytes,
+    "retained byte count",
+  );
+  const currentCallerUtf8Bytes = safeEnvelopeInteger(
+    input.snapshot.current_caller_utf8_bytes,
+    "current caller byte count",
+  );
+  if (currentCallerUtf8Bytes < 1
+    || currentCallerUtf8Bytes > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES) {
+    throw new Error(
+      "LC4-DEV rotation replay envelope current caller exceeds its turn-text budget",
+    );
+  }
+  const optionalRepairCallerUtf8Bytes =
+    input.snapshot.optional_repair_caller_utf8_bytes;
+  if (optionalRepairCallerUtf8Bytes !== null
+    && (safeEnvelopeInteger(
+      optionalRepairCallerUtf8Bytes,
+      "optional repair caller byte count",
+    ) < 1
+      || optionalRepairCallerUtf8Bytes
+        > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES)) {
+    throw new Error(
+      "LC4-DEV rotation replay envelope optional repair caller exceeds its turn-text budget",
+    );
+  }
+  const admittedToolCallCount = safeEnvelopeInteger(
+    input.admitted_tool_call_count,
+    "admitted tool-call count",
+  );
+  const admittedToolReservedUtf8Bytes = safeEnvelopeInteger(
+    input.admitted_tool_reserved_utf8_bytes,
+    "admitted tool-call byte count",
+  );
+  if (input.candidate_model_arguments.length > LC4_DEV_MAX_TOOL_CALLS_PER_BATCH) {
+    throw new Error(
+      `LC4-DEV provider tool batch exceeds ${LC4_DEV_MAX_TOOL_CALLS_PER_BATCH} calls`,
+    );
+  }
+  const candidateArgumentBytes = replayableModelArgumentByteLengths(
+    input.candidate_model_arguments,
+  );
+  const candidateReservedUtf8Bytes = candidateArgumentBytes.reduce(
+    (sum, bytes) => sum + bytes + LC4_DEV_MAX_PROVIDER_RESULT_BYTES,
+    0,
+  );
+  const projectedToolCallCount =
+    admittedToolCallCount + input.candidate_model_arguments.length;
+  const projectedToolReservedUtf8Bytes =
+    admittedToolReservedUtf8Bytes + candidateReservedUtf8Bytes;
+  const optionalRepairTurns = optionalRepairCallerUtf8Bytes === null ? 0 : 2;
+  const optionalRepairBytes = optionalRepairCallerUtf8Bytes === null
+    ? 0
+    : optionalRepairCallerUtf8Bytes
+      + LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES;
+  const projectedTurnCount = retainedTurnCount
+    + 2
+    + optionalRepairTurns
+    + projectedToolCallCount;
+  const projectedUtf8Bytes = retainedUtf8Bytes
+    + currentCallerUtf8Bytes
+    + LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES
+    + optionalRepairBytes
+    + projectedToolReservedUtf8Bytes;
+  if (projectedTurnCount > LC4_DEV_ROTATION_REPLAY_MAX_TURNS) {
+    throw new Error(
+      `LC4-DEV rotation replay envelope exceeds ${LC4_DEV_ROTATION_REPLAY_MAX_TURNS} provider-conversation turns: `
+      + `projected_turns=${projectedTurnCount}`,
+    );
+  }
+  if (projectedUtf8Bytes > LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES) {
+    throw new Error(
+      `LC4-DEV rotation replay envelope exceeds ${LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES} UTF-8 bytes: `
+      + `projected_bytes=${projectedUtf8Bytes}`,
+    );
+  }
+  return Object.freeze({
+    projected_turn_count: projectedTurnCount,
+    projected_utf8_bytes: projectedUtf8Bytes,
+    admitted_tool_call_count: projectedToolCallCount,
+    admitted_tool_reserved_utf8_bytes: projectedToolReservedUtf8Bytes,
+  });
+}
+
+function defaultRotationReplayEnvelopeSnapshot(
+  context: OpportunityContext,
+): Lc4DevRotationReplayEnvelopeSnapshot {
+  return Object.freeze({
+    retained_turn_count: 0,
+    retained_utf8_bytes: 0,
+    current_caller_utf8_bytes: context.phase === "canonical"
+      ? Buffer.byteLength(context.opportunity.canonical_caller_text, "utf8")
+      : LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES,
+    optional_repair_caller_utf8_bytes: context.phase === "canonical"
+      ? LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES
+      : null,
+  });
 }
 
 function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
@@ -883,6 +1053,7 @@ export class Lc4DevGatewayTurnCoordinator {
   readonly #client: NormalizedRealtimeClient;
   readonly #executor: Lc4DevGatewayExecutor;
   readonly #onFatal: (error: Error) => void;
+  readonly #rotationReplayEnvelope: Lc4DevRotationReplayEnvelopeAuthority;
   #context: OpportunityContext | null = null;
   #queue: Promise<void> = Promise.resolve();
   #fatal: Error | null = null;
@@ -895,16 +1066,24 @@ export class Lc4DevGatewayTurnCoordinator {
   #conversationToolBatches: Lc4DevGatewayConversationToolBatch[] = [];
   #toolResponseIds = new Set<string>();
   #seenCallIds = new Set<string>();
+  #rotationReplayEnvelopeSnapshot:
+    Lc4DevRotationReplayEnvelopeSnapshot | null = null;
+  #admittedToolCallCount = 0;
+  #admittedToolReservedUtf8Bytes = 0;
 
   constructor(input: Readonly<{
     client: NormalizedRealtimeClient;
     executor: Lc4DevGatewayExecutor;
     onFatal(error: Error): void;
+    rotationReplayEnvelope?: Lc4DevRotationReplayEnvelopeAuthority;
   }>) {
     requireHash(input.executor.manifest_sha256, "LC4-DEV gateway executor manifest");
     this.#client = input.client;
     this.#executor = input.executor;
     this.#onFatal = input.onFatal;
+    this.#rotationReplayEnvelope = input.rotationReplayEnvelope ?? Object.freeze({
+      snapshot: defaultRotationReplayEnvelopeSnapshot,
+    });
   }
 
   beginOpportunity(context: Omit<OpportunityContext, "phase"> & Readonly<{
@@ -918,10 +1097,33 @@ export class Lc4DevGatewayTurnCoordinator {
       || this.#authorityProjections.length !== 0
       || this.#preDispatchRejections.length !== 0
       || this.#conversationToolBatches.length !== 0
-      || this.#toolResponseIds.size !== 0) {
+      || this.#toolResponseIds.size !== 0
+      || this.#rotationReplayEnvelopeSnapshot !== null
+      || this.#admittedToolCallCount !== 0
+      || this.#admittedToolReservedUtf8Bytes !== 0) {
       throw new Error("LC4-DEV gateway coordinator state was not sealed after the prior opportunity");
     }
-    this.#context = Object.freeze({ ...context, phase: context.phase ?? "canonical" });
+    const normalizedContext = Object.freeze({
+      ...context,
+      phase: context.phase ?? "canonical",
+    });
+    try {
+      const snapshot = Object.freeze(
+        this.#rotationReplayEnvelope.snapshot(normalizedContext),
+      );
+      projectLc4DevRotationReplayEnvelopeAdmission({
+        snapshot,
+        opportunity_index: normalizedContext.opportunity.index,
+        admitted_tool_call_count: 0,
+        admitted_tool_reserved_utf8_bytes: 0,
+        candidate_model_arguments: Object.freeze([]),
+      });
+      this.#rotationReplayEnvelopeSnapshot = snapshot;
+    } catch (error) {
+      this.#fail(error, "parse");
+      throw this.#fatal!;
+    }
+    this.#context = normalizedContext;
   }
 
   observe(event: NormalizedRealtimeEvent): void {
@@ -943,8 +1145,14 @@ export class Lc4DevGatewayTurnCoordinator {
       this.#fail(new Error("LC4-DEV provider tool batch differs from the active episode"), "provenance");
       return;
     }
-    if (candidates.length === 0 || candidates.length > MAX_TOOL_CALLS_PER_BATCH) {
-      this.#fail(new Error("LC4-DEV provider tool batch is empty or exceeds 16 calls"), "provenance");
+    if (candidates.length === 0
+      || candidates.length > LC4_DEV_MAX_TOOL_CALLS_PER_BATCH) {
+      this.#fail(
+        new Error(
+          `LC4-DEV provider tool batch is empty or exceeds ${LC4_DEV_MAX_TOOL_CALLS_PER_BATCH} calls`,
+        ),
+        "provenance",
+      );
       return;
     }
     const responseIds = new Set(candidates.map((call) => call.response_id));
@@ -952,8 +1160,19 @@ export class Lc4DevGatewayTurnCoordinator {
       this.#fail(new Error("LC4-DEV provider tool batch response provenance is inconsistent"), "provenance");
       return;
     }
+    let replayEnvelopeProjection: Lc4DevRotationReplayEnvelopeProjection;
     try {
-      assertReplayableModelArgumentBatch(candidates);
+      if (!this.#rotationReplayEnvelopeSnapshot) {
+        throw new Error("LC4-DEV rotation replay envelope lacks its opportunity snapshot");
+      }
+      replayEnvelopeProjection = projectLc4DevRotationReplayEnvelopeAdmission({
+        snapshot: this.#rotationReplayEnvelopeSnapshot,
+        opportunity_index: context.opportunity.index,
+        admitted_tool_call_count: this.#admittedToolCallCount,
+        admitted_tool_reserved_utf8_bytes:
+          this.#admittedToolReservedUtf8Bytes,
+        candidate_model_arguments: candidates.map((call) => call.semantic_input),
+      });
     } catch (error) {
       this.#fail(error, "parse");
       return;
@@ -962,7 +1181,7 @@ export class Lc4DevGatewayTurnCoordinator {
       this.#fail(new Error("LC4-DEV provider repeated an executable tool batch response"), "provenance");
       return;
     }
-    if (this.#batchOrdinal >= MAX_TOOL_BATCHES_PER_OPPORTUNITY) {
+    if (this.#batchOrdinal >= LC4_DEV_MAX_TOOL_BATCHES_PER_OPPORTUNITY) {
       this.#fail(new Error("LC4-DEV opportunity exceeded eight provider tool batches"), "provenance");
       return;
     }
@@ -978,6 +1197,10 @@ export class Lc4DevGatewayTurnCoordinator {
     // provider call id is its replay boundary; OpenAI/xAI retain the stricter
     // one-executable-batch-per-response invariant above.
     this.#toolResponseIds.add(batch.response_id);
+    this.#admittedToolCallCount =
+      replayEnvelopeProjection.admitted_tool_call_count;
+    this.#admittedToolReservedUtf8Bytes =
+      replayEnvelopeProjection.admitted_tool_reserved_utf8_bytes;
     const batchOrdinal = ++this.#batchOrdinal;
     const classified = context.phase === "repair"
       ? candidates.map(() => Object.freeze({
@@ -1068,6 +1291,9 @@ export class Lc4DevGatewayTurnCoordinator {
     this.#conversationToolBatches = [];
     this.#toolResponseIds = new Set();
     this.#seenCallIds = new Set();
+    this.#rotationReplayEnvelopeSnapshot = null;
+    this.#admittedToolCallCount = 0;
+    this.#admittedToolReservedUtf8Bytes = 0;
     this.#queue = Promise.resolve();
     this.#fatalClass = "none";
     return Object.freeze({

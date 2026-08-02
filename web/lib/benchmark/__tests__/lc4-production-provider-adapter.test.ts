@@ -37,6 +37,7 @@ import {
   projectGeminiInitialHistoryClientContent,
 } from "../../realtime/client/gemini-live";
 import {
+  LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   type Lc4DevGatewayExecutor,
 } from "../lc4-development-gateway-bridge";
@@ -127,6 +128,22 @@ import {
 function devTestSegment(ordinal: 1 | 2 | 3 | 4 | 5 | 6) {
   return LC4_DEV_PROVIDER_SESSION_SCHEDULE[ordinal - 1]!;
 }
+
+const fixtureRotationReplayEnvelope = Object.freeze({
+  snapshot: ({ opportunity, phase }: Readonly<{
+    opportunity: Readonly<{ canonical_caller_text: string }>;
+    phase: "canonical" | "repair";
+  }>) => Object.freeze({
+    retained_turn_count: 0,
+    retained_utf8_bytes: 0,
+    current_caller_utf8_bytes: phase === "canonical"
+      ? Buffer.byteLength(opportunity.canonical_caller_text, "utf8")
+      : LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES,
+    optional_repair_caller_utf8_bytes: phase === "canonical"
+      ? LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES
+      : null,
+  }),
+});
 
 const HASH = "a".repeat(64);
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
@@ -1955,7 +1972,12 @@ async function openDevFailureFixture(input: Readonly<{
       ? { exact_horizon_receipt_required: true as const }
       : {}),
     listener: { accept: input.listener ?? (async () => listenerResult) },
-    dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
+    dev_gateway: {
+      episode,
+      opportunities: corpus.opportunities,
+      executor: gateway,
+      rotation_replay_envelope: fixtureRotationReplayEnvelope,
+    },
   });
   return Object.freeze({
     session,
@@ -2107,6 +2129,7 @@ async function openCallerBranchPreflight(input: Readonly<{
     episode,
     opportunities: corpus.opportunities,
     executor: gateway,
+    rotation_replay_envelope: fixtureRotationReplayEnvelope,
     caller_branch_authority: {
       matrix: callerBranchMatrix,
       trust: callerBranchTrust,
@@ -4395,7 +4418,12 @@ describe("LC4 production realtime adapter bridge", () => {
           };
         },
       },
-      dev_gateway: { episode, opportunities: corpus.opportunities, executor: gateway },
+      dev_gateway: {
+        episode,
+        opportunities: corpus.opportunities,
+        executor: gateway,
+        rotation_replay_envelope: fixtureRotationReplayEnvelope,
+      },
     });
     const evidence = await session.exchange({
       opportunity_id: corpus.opportunities[0]!.id,

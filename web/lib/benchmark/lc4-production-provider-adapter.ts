@@ -59,7 +59,13 @@ import {
 } from "./lc4-development-caller-branch";
 import {
   appendLc4DevNativeGatewayContract,
+  LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES,
+  LC4_DEV_MAX_TOOL_BATCHES_PER_OPPORTUNITY,
+  LC4_DEV_MAX_TOOL_CALLS_PER_BATCH,
   LC4_DEV_PRE_DISPATCH_REJECTION_CODES,
+  LC4_DEV_ROTATION_REPLAY_MAX_TURNS,
+  LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES,
+  LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
   renderLc4DevHaccResponsePlan,
@@ -67,6 +73,7 @@ import {
   type Lc4DevGatewayConversationToolBatch,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
+  type Lc4DevRotationReplayEnvelopeAuthority,
 } from "./lc4-development-gateway-bridge";
 import {
   createLc4PublicDevelopmentCorpus,
@@ -346,6 +353,31 @@ export type Lc4HaccRotationStatePacket = Readonly<{
   packet_sha256: string;
 }>;
 
+export type Lc4DevRotationReplayEnvelopeUsage = Readonly<{
+  turn_count: number;
+  utf8_bytes: number;
+}>;
+
+/** Exact byte accounting shared by the live gateway and schema-v6 compiler. */
+export function measureLc4DevRotationReplayEnvelopeUsage(
+  turns: readonly Lc4NativeConversationTurnInput[],
+): Lc4DevRotationReplayEnvelopeUsage {
+  let utf8Bytes = 0;
+  for (const turn of turns) {
+    utf8Bytes += Buffer.byteLength(turn.text, "utf8");
+    if (turn.speaker === "tool") {
+      utf8Bytes += Buffer.byteLength(
+        canonicalJson(turn.tool_arguments),
+        "utf8",
+      );
+    }
+  }
+  return Object.freeze({
+    turn_count: turns.length,
+    utf8_bytes: utf8Bytes,
+  });
+}
+
 function hashConversationReplay(turns: readonly Lc4RotationConversationTurn[]): string {
   return sha256Hex(`${ROTATION_CONVERSATION_DOMAIN}${canonicalJson(turns.map((turn) => ({
     turn_id: turn.turn_id,
@@ -403,7 +435,9 @@ function validateConversationTurns(
   if (inputTurns.length < availableThroughOpportunity * 2) {
     throw new Error("LC4 rotation conversation omits an audible caller or assistant turn");
   }
-  const maximumTurns = requireDevChronology ? 512 : 192;
+  const maximumTurns = requireDevChronology
+    ? LC4_DEV_ROTATION_REPLAY_MAX_TURNS
+    : 192;
   if (inputTurns.length > maximumTurns) {
     throw new Error(
       `LC4 rotation conversation exceeds ${maximumTurns} provider-conversation turns`,
@@ -425,7 +459,8 @@ function validateConversationTurns(
       throw new Error("LC4 rotation conversation speaker differs from its provider-conversation source");
     }
     const turnTextBytes = Buffer.byteLength(turn.text, "utf8");
-    if (!turn.text.trim() || turnTextBytes > 4_000) {
+    if (!turn.text.trim()
+      || turnTextBytes > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES) {
       throw new Error("LC4 rotation conversation text is invalid");
     }
     textBytes += turnTextBytes;
@@ -494,8 +529,10 @@ function validateConversationTurns(
         throw new Error("LC4 rotation provider tool arguments are invalid");
       }
       const toolArgumentsBytes = Buffer.byteLength(canonicalJson(toolArguments), "utf8");
-      if (toolArgumentsBytes > 64_000) {
-        throw new Error("LC4 rotation provider tool arguments exceed 64 KiB");
+      if (toolArgumentsBytes > LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES) {
+        throw new Error(
+          `LC4 rotation provider tool arguments exceed ${LC4_DEV_MAX_REPLAY_MODEL_ARGUMENT_BYTES} UTF-8 bytes`,
+        );
       }
       textBytes += toolArgumentsBytes;
       if (requireDevChronology) {
@@ -551,7 +588,11 @@ function validateConversationTurns(
     }
     return Object.freeze(common) as Lc4RotationConversationTurn;
   });
-  if (textBytes > 128_000) throw new Error("LC4 rotation conversation exceeds its text budget");
+  if (textBytes > LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES) {
+    throw new Error(
+      `LC4 rotation conversation exceeds its ${LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES}-byte text budget`,
+    );
+  }
   if (new Set(turns.map((turn) => turn.turn_id)).size !== turns.length) {
     throw new Error("LC4 rotation conversation turn IDs must be unique");
   }
@@ -599,6 +640,7 @@ function validateConversationTurns(
     }
   }
   const seenToolBatchHashes = new Set<string>();
+  const toolBatchCountsByExchange = new Map<string, number>();
   for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index]!;
     if (turn.speaker !== "tool" || turn.tool_batch_sha256 === undefined) continue;
@@ -607,6 +649,24 @@ function validateConversationTurns(
       throw new Error("LC4 rotation provider tool batch does not begin at call ordinal one");
     }
     seenToolBatchHashes.add(turn.tool_batch_sha256);
+    if (requireDevChronology) {
+      if (turn.tool_batch_call_count!
+        > LC4_DEV_MAX_TOOL_CALLS_PER_BATCH) {
+        throw new Error(
+          `LC4 DEV rotation provider tool batch exceeds ${LC4_DEV_MAX_TOOL_CALLS_PER_BATCH} calls`,
+        );
+      }
+      const exchangeKey = `${turn.available_after_opportunity}:${turn.exchange_phase}`;
+      const exchangeBatchCount =
+        (toolBatchCountsByExchange.get(exchangeKey) ?? 0) + 1;
+      if (exchangeBatchCount
+        > LC4_DEV_MAX_TOOL_BATCHES_PER_OPPORTUNITY) {
+        throw new Error(
+          `LC4 DEV rotation exchange exceeds ${LC4_DEV_MAX_TOOL_BATCHES_PER_OPPORTUNITY} provider tool batches`,
+        );
+      }
+      toolBatchCountsByExchange.set(exchangeKey, exchangeBatchCount);
+    }
     const batch = turns.slice(index, index + turn.tool_batch_call_count!);
     if (batch.length !== turn.tool_batch_call_count
       || batch.some((candidate, callIndex) => (
@@ -1671,6 +1731,7 @@ export type Lc4OpenRealtimeSegmentInput = Readonly<{
     episode: Lc4DevLiveEpisodePlan;
     opportunities: readonly Lc4PublicDevOpportunity[];
     executor: Lc4DevGatewayExecutor;
+    rotation_replay_envelope: Lc4DevRotationReplayEnvelopeAuthority;
     caller_branch_authority?: Readonly<{
       matrix: Lc4DevCallerBranchMatrixArtifact;
       trust: Readonly<{ key_id: string; public_key_pem: string }>;
@@ -2542,6 +2603,13 @@ export class Lc4RealtimeProviderBridge {
     if (input.manifest.protocol_id !== "HACC-LC4-DEV-v1" && input.dev_gateway) {
       throw new Error("LC4 confirmatory provider session cannot receive the DEV gateway bridge");
     }
+    if (input.dev_gateway
+      && typeof input.dev_gateway.rotation_replay_envelope?.snapshot
+        !== "function") {
+      throw new Error(
+        "LC4-DEV provider session requires an adapter-owned rotation replay envelope",
+      );
+    }
     if (input.dev_gateway && (
       input.dev_gateway.episode.episode_id !== input.manifest.run_id
       || input.dev_gateway.episode.provider !== input.profile.provider
@@ -2624,6 +2692,8 @@ export class Lc4RealtimeProviderBridge {
       ? new Lc4DevGatewayTurnCoordinator({
           client,
           executor: input.dev_gateway.executor,
+          rotationReplayEnvelope:
+            input.dev_gateway.rotation_replay_envelope,
           onFatal: (error) => {
             terminalError = error;
             waiters.get(currentOpportunity ?? "")?.();
@@ -4407,6 +4477,20 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
   }
   const corpus = createLc4PublicDevelopmentCorpus();
   if (corpus.artifact_sha256 !== input.prepare.corpus_sha256) throw new Error("LC4-DEV adapter corpus drifted from prepare");
+  const maximumRepairCallerUtf8Bytes = corpus.repair_policy.library.reduce(
+    (maximum, repair) => Math.max(
+      maximum,
+      Buffer.byteLength(repair.canonical_caller_text, "utf8"),
+    ),
+    0,
+  );
+  if (maximumRepairCallerUtf8Bytes < 1
+    || maximumRepairCallerUtf8Bytes
+      > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES) {
+    throw new Error(
+      "LC4-DEV repair corpus exceeds the rotation replay turn-text envelope",
+    );
+  }
   const runtimes = new Map<string, DevEpisodeRuntime>();
 
   return Object.freeze({
@@ -4503,6 +4587,35 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           episode,
           opportunities: corpus.opportunities,
           executor: input.gateway_executor,
+          rotation_replay_envelope: Object.freeze({
+            snapshot: ({
+              episode: envelopeEpisode,
+              opportunity,
+              phase,
+            }) => {
+              if (envelopeEpisode.episode_id !== episode.episode_id) {
+                throw new Error(
+                  "LC4-DEV rotation replay envelope crossed episode ownership",
+                );
+              }
+              const retained = measureLc4DevRotationReplayEnvelopeUsage(
+                runtime!.conversation_turns,
+              );
+              return Object.freeze({
+                retained_turn_count: retained.turn_count,
+                retained_utf8_bytes: retained.utf8_bytes,
+                current_caller_utf8_bytes: phase === "canonical"
+                  ? Buffer.byteLength(
+                    opportunity.canonical_caller_text,
+                    "utf8",
+                  )
+                  : maximumRepairCallerUtf8Bytes,
+                optional_repair_caller_utf8_bytes: phase === "canonical"
+                  ? maximumRepairCallerUtf8Bytes
+                  : null,
+              });
+            },
+          }),
           caller_branch_authority: input.caller_branch_authority,
         },
       });
@@ -4631,18 +4744,30 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         await input.evidence.assertResolvable(listenerResult.listener_evidence);
         const assistantTranscript = evidence.dev_assistant_conversation_transcript ?? "";
         const assistantTranscriptSource = evidence.dev_assistant_conversation_transcript_source;
-        if (!assistantTranscript
+        if (!assistantTranscript.trim()
           || evidence.assistant_conversation_transcript_sha256 !== sha256Hex(assistantTranscript)
           || (assistantTranscriptSource !== "listener_exact_captured_pcm_asr"
             && assistantTranscriptSource !== "provider_native_output_transcript")) {
           throw new Error("LC4-DEV raw conversation replay lacks its hash-bound assistant transcript");
+        }
+        if (Buffer.byteLength(assistantTranscript, "utf8")
+          > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES) {
+          throw new Error(
+            "LC4-DEV assistant transcript exceeds the rotation replay turn-text envelope",
+          );
         }
         const callerText = exchangeInput.playback_kind === "canonical"
           ? exchangeInput.opportunity.canonical_caller_text
           : corpus.repair_policy.library.find(
               (repair) => repair.id === exchangeInput.repair_binding?.repair_pcm_id,
             )?.canonical_caller_text;
-        if (!callerText) throw new Error("LC4-DEV raw conversation replay lacks its exact spoken caller source text");
+        if (!callerText?.trim()) throw new Error("LC4-DEV raw conversation replay lacks its exact spoken caller source text");
+        if (Buffer.byteLength(callerText, "utf8")
+          > LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES) {
+          throw new Error(
+            "LC4-DEV caller transcript exceeds the rotation replay turn-text envelope",
+          );
+        }
         const appendConversationTurn = (
           turn: Readonly<
             | {
