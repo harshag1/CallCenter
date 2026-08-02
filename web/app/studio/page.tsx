@@ -371,18 +371,24 @@ export default function Studio() {
           )}
           {flow && !trying && !showFlowInspector && !showLiveTestConfirm && (
             <div className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2">
-              <button
-                onClick={() => setShowFlowInspector(true)}
-                className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-4 py-2 text-[12px] font-medium text-neutral-800 shadow-sm transition-transform duration-[240ms] hover:scale-[1.03]"
-              >
-                <ScanSearch size={12} /> Inspect
-              </button>
-              <button
-                onClick={() => setShowLiveTestConfirm(true)}
-                className="flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
-              >
-                <Play size={11} fill="currentColor" /> Live test
-              </button>
+              <Tooltip content="Inspect" placement="top">
+                <button
+                  aria-label="Inspect flow"
+                  onClick={() => setShowFlowInspector(true)}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-neutral-200 bg-white text-neutral-800 shadow-sm transition-transform duration-[240ms] hover:scale-[1.04]"
+                >
+                  <ScanSearch size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip content="Test" placement="top">
+                <button
+                  aria-label="Test agent"
+                  onClick={() => setShowLiveTestConfirm(true)}
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-950 text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.04]"
+                >
+                  <Play size={12} fill="currentColor" />
+                </button>
+              </Tooltip>
             </div>
           )}
           {showFlowInspector && inspection && (
@@ -430,8 +436,7 @@ export default function Studio() {
               aria-label="Confirm live provider test"
               className="absolute bottom-3 left-1/2 z-20 w-[min(92%,390px)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl"
             >
-              <p className="text-[13px] font-semibold text-neutral-950">Live test</p>
-              <p className="mt-1 text-[11px] leading-4 text-neutral-500">
+              <p className="text-[11px] leading-4 text-neutral-500">
                 Microphone · provider credits
               </p>
               <div className="mt-3 flex items-center justify-end gap-2">
@@ -519,12 +524,13 @@ export default function Studio() {
               </button>
             </div>
           </div>
-          <Tooltip content="Open the dashboard">
+          <Tooltip content="Dashboard">
             <button
+              aria-label="Open dashboard"
               onClick={() => router.push("/workspace")}
-              className="inline-flex h-[50px] shrink-0 items-center gap-1.5 rounded-2xl bg-neutral-950 px-4 text-[13px] font-medium text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800"
+              className="inline-flex h-[50px] w-[50px] shrink-0 items-center justify-center rounded-2xl bg-neutral-950 text-white transition duration-[160ms] hover:-translate-y-px hover:bg-neutral-800"
             >
-              Next <ArrowRight size={14} strokeWidth={2.1} />
+              <ArrowRight size={15} strokeWidth={2.1} />
             </button>
           </Tooltip>
         </div>
