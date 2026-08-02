@@ -39,6 +39,7 @@ import {
 import {
   LC4_DEV_ROTATION_REPLAY_MAX_TURN_TEXT_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
+  lc4DevProviderInvocationId,
   type Lc4DevGatewayExecutor,
 } from "../lc4-development-gateway-bridge";
 import {
@@ -167,6 +168,17 @@ function fixtureContinuationPreparation(): RealtimeResponsePreparation {
     additionalInstructions: FIXTURE_CONTINUATION_CONTROL,
     contextSha256: sha256Hex(FIXTURE_CONTINUATION_CONTROL),
     contextAuthority: "advisory_only_gateway_and_speech_gate_enforced" as const,
+  });
+}
+
+function fixtureExecutionAuthority(controlPlaneManifestSha256: string) {
+  return Object.freeze({
+    prepare_sha256: sha256Hex("fixture-dev-prepare"),
+    preflight_sha256: sha256Hex("fixture-dev-preflight"),
+    execution_id_sha256: sha256Hex("fixture-dev-execution"),
+    control_plane_manifest_sha256: controlPlaneManifestSha256,
+    provider_session_schedule_sha256:
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
   });
 }
 
@@ -708,7 +720,18 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
       : undefined;
   }
 
-  async connect() { this.events.push("connect"); this.state = "ready"; }
+  async connect() {
+    this.events.push("connect");
+    this.state = "ready";
+    this.wire(
+      this.provider === "gemini" ? "setupComplete" : "session.created",
+      {},
+      "inbound",
+      this.provider === "gemini"
+        ? {}
+        : { sessionIdSha256: sha256Hex(`fixture-session-${this.provider}`) },
+    );
+  }
   async hydrateConversationHistory(
     turns: readonly RealtimeConversationHistoryTurn[],
   ): Promise<RealtimeConversationHistoryHydrationAcknowledgement> {
@@ -1996,6 +2019,7 @@ async function openDevFailureFixture(input: Readonly<{
     listener: { accept: input.listener ?? (async () => listenerResult) },
     dev_gateway: {
       episode,
+      execution_authority: fixtureExecutionAuthority(gateway.manifest_sha256),
       opportunities: corpus.opportunities,
       executor: gateway,
       rotation_replay_envelope: fixtureRotationReplayEnvelope,
@@ -2149,6 +2173,7 @@ async function openCallerBranchPreflight(input: Readonly<{
   });
   const devGateway = Object.freeze({
     episode,
+    execution_authority: fixtureExecutionAuthority(gateway.manifest_sha256),
     opportunities: corpus.opportunities,
     executor: gateway,
     rotation_replay_envelope: fixtureRotationReplayEnvelope,
@@ -2781,11 +2806,67 @@ describe("LC4 production realtime adapter bridge", () => {
     });
     const receipt = await fixture.session.close();
     expect(receipt.finalization_body).toMatchObject({
-      schema_version: 6,
+      schema_version: 7,
       run_id: "lc4-dev-openai-hacc-failure-fixture",
       protocol_id: "HACC-LC4-DEV-v1",
       provider_session_schedule_sha256:
         LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+      provider_connection_scope: {
+        schema_version: 2,
+        episode_id: "lc4-dev-openai-hacc-failure-fixture",
+        provider: "openai",
+        arm: "hacc",
+        prepare_sha256: fixtureExecutionAuthority("d".repeat(64)).prepare_sha256,
+        preflight_sha256: fixtureExecutionAuthority("d".repeat(64)).preflight_sha256,
+        execution_id_sha256: fixtureExecutionAuthority("d".repeat(64)).execution_id_sha256,
+        control_plane_manifest_sha256: "d".repeat(64),
+        provider_session_schedule_sha256:
+          LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+        execution_authority_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        segment_ordinal: 1,
+        session_ordinal: 1,
+        opportunity_start: 1,
+        opportunity_end: 10,
+        connection_epoch: 1,
+        previous_rotation_receipt_sha256: null,
+        rotation_context_kind: "none",
+        rotation_packet_sha256: null,
+        rotation_conversation_replay_sha256: null,
+        rotation_context_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        connection_attestation: {
+          schema_version: 1,
+          provider: "openai",
+          connection_epoch: 1,
+          connection_nonce_sha256:
+            expect.stringMatching(/^[a-f0-9]{64}$/u),
+          provider_session_identity_status: "acknowledged",
+          provider_session_id_sha256:
+            sha256Hex("fixture-session-openai"),
+          session_configuration_acknowledgement_sha256: null,
+          connect_wire_observation_count: 1,
+          connect_wire_chain_head_sha256:
+            expect.stringMatching(/^[a-f0-9]{64}$/u),
+          attestation_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+        connection_scope_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+      provider_connection_scope_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      provider_connection_attestation_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      provider_session_identity_status: "acknowledged",
+      provider_session_id_sha256: sha256Hex("fixture-session-openai"),
+      opportunity_root_chain: [
+        {
+          ordinal: 1,
+          opportunity_id: fixture.opportunity_id,
+          effective_exchange_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          opportunity_receipt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          previous_opportunity_receipt_sha256: null,
+        },
+      ],
+      opportunity_root_chain_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
       session_ordinal: 1,
       segment_ordinal: 1,
       opportunity_count: 1,
@@ -2872,13 +2953,77 @@ describe("LC4 production realtime adapter bridge", () => {
     }
     const receipt = await fixture.session.close();
     expect(receipt.finalization_body).toMatchObject({
-      schema_version: 6,
+      schema_version: 7,
       session_ordinal: 1,
       segment_ordinal: 1,
       opportunity_count: 10,
       previous_rotation_receipt_sha256: null,
       rotation_context_packet: null,
       conversation_history_hydration_wire_observations: [],
+      provider_connection_scope: {
+        schema_version: 2,
+        episode_id: "lc4-dev-openai-hacc-failure-fixture",
+        provider: "openai",
+        arm: "hacc",
+        prepare_sha256: fixtureExecutionAuthority("d".repeat(64)).prepare_sha256,
+        preflight_sha256: fixtureExecutionAuthority("d".repeat(64)).preflight_sha256,
+        execution_id_sha256: fixtureExecutionAuthority("d".repeat(64)).execution_id_sha256,
+        control_plane_manifest_sha256: "d".repeat(64),
+        provider_session_schedule_sha256:
+          LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+        execution_authority_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        segment_ordinal: 1,
+        session_ordinal: 1,
+        opportunity_start: 1,
+        opportunity_end: 10,
+        connection_epoch: 1,
+        previous_rotation_receipt_sha256: null,
+        rotation_context_kind: "none",
+        rotation_packet_sha256: null,
+        rotation_conversation_replay_sha256: null,
+        rotation_context_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        connection_attestation: {
+          schema_version: 1,
+          provider: "openai",
+          connection_epoch: 1,
+          connection_nonce_sha256:
+            expect.stringMatching(/^[a-f0-9]{64}$/u),
+          provider_session_identity_status: "acknowledged",
+          provider_session_id_sha256:
+            sha256Hex("fixture-session-openai"),
+          session_configuration_acknowledgement_sha256: null,
+          connect_wire_observation_count: 1,
+          connect_wire_chain_head_sha256:
+            expect.stringMatching(/^[a-f0-9]{64}$/u),
+          attestation_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+        connection_scope_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+      provider_connection_scope_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      provider_connection_attestation_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      provider_session_identity_status: "acknowledged",
+      provider_session_id_sha256: sha256Hex("fixture-session-openai"),
+      opportunity_root_chain: expect.arrayContaining([
+        {
+          ordinal: 1,
+          opportunity_id: corpus.opportunities[0]!.id,
+          previous_opportunity_receipt_sha256: null,
+          effective_exchange_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          opportunity_receipt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+        {
+          ordinal: 10,
+          opportunity_id: corpus.opportunities[9]!.id,
+          previous_opportunity_receipt_sha256:
+            expect.stringMatching(/^[a-f0-9]{64}$/u),
+          effective_exchange_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          opportunity_receipt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+      ]),
+      opportunity_root_chain_sha256:
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
     });
   });
 
@@ -4247,8 +4392,9 @@ describe("LC4 production realtime adapter bridge", () => {
           arm: input.arm,
           semantic_intent: input.semantic_intent,
           target_tool: input.target_tool,
-          provider_call_id_sha256: sha256Hex(input.provider_call_id),
+          provider_call_id_sha256: input.provider_call_id_sha256,
           provider_invocation_id_sha256: sha256Hex(input.provider_invocation_id),
+          provider_connection_scope: input.provider_connection_scope,
           provider_connection_scope_sha256: input.provider_connection_scope_sha256,
           provider_connection_epoch: input.provider_connection_epoch,
           provider_session_id_sha256: input.provider_session_id_sha256,
@@ -4446,6 +4592,7 @@ describe("LC4 production realtime adapter bridge", () => {
       },
       dev_gateway: {
         episode,
+        execution_authority: fixtureExecutionAuthority(gateway.manifest_sha256),
         opportunities: corpus.opportunities,
         executor: gateway,
         rotation_replay_envelope: fixtureRotationReplayEnvelope,
@@ -4468,6 +4615,31 @@ describe("LC4 production realtime adapter bridge", () => {
     expect(fake!.submittedToolResults).toHaveLength(provider === "gemini" ? 2 : 1);
     expect(fake!.submittedToolResults[0]?.createResponse).toBe(false);
     expect(evidence.dev_gateway_receipt_set?.receipts).toHaveLength(provider === "gemini" ? 2 : 1);
+    for (const [index, projection] of (
+      evidence.dev_gateway_receipt_set?.authority_projections ?? []
+    ).entries()) {
+      const nativeCallId = `call-${index + 1}`;
+      expect(projection.provider_call_id_sha256).toBe(sha256Hex(nativeCallId));
+      expect(projection.provider_invocation_id_sha256).toBe(sha256Hex(
+        lc4DevProviderInvocationId(
+          projection.provider_connection_scope,
+          nativeCallId,
+        ),
+      ));
+      expect(projection.provider_invocation_id_sha256)
+        .not.toBe(projection.provider_call_id_sha256);
+      expect(projection.provider_connection_scope.connection_scope_sha256)
+        .toBe(projection.provider_connection_scope_sha256);
+      expect(projection.provider_connection_scope.connection_attestation
+        .provider_session_id_sha256).toBe(provider === "gemini"
+          ? null
+          : sha256Hex(`fixture-session-${provider}`));
+    }
+    for (const receipt of evidence.dev_gateway_receipt_set?.receipts ?? []) {
+      expect(receipt.provider_invocation_id_sha256).toMatch(/^[a-f0-9]{64}$/u);
+      expect(receipt.provider_connection_scope.connection_scope_sha256)
+        .toBe(receipt.provider_connection_scope_sha256);
+    }
     expect(evidence.output_capture).toMatchObject({
       generated_byte_length: 4,
       generated_pcm_sha256: sha256Hex(new Uint8Array([1, 0, 2, 0])),
