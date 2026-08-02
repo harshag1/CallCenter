@@ -2019,6 +2019,48 @@ describe("GeminiLiveClient", () => {
     )).toBe(true);
   });
 
+  it("rejects an exact function-call ID reuse on a later caller turn without resending stale output", async () => {
+    let executions = 0;
+    const test = harness({
+      executeCapabilityGateway: async () => ({ ok: true, execution: ++executions }),
+    });
+    await connectReady(test);
+    const providerCall = {
+      toolCall: {
+        functionCalls: [{
+          id: "cross-turn-stable-id",
+          name: GEMINI_CAPABILITY_GATEWAY_NAME,
+          args: { operation: "lookup", arguments: { id: "A" } },
+        }],
+      },
+    };
+
+    triggerProviderTurn(test);
+    test.socket.receive(providerCall);
+    await settle();
+    expect(executions).toBe(1);
+    expect(test.events.filter((event) => event.type === "tool.calls")).toHaveLength(1);
+    expect(JSON.parse(test.socket.sent.at(-1)!).toolResponse.functionResponses[0])
+      .toMatchObject({ id: "cross-turn-stable-id", response: { ok: true, execution: 1 } });
+
+    test.socket.receive({ serverContent: { turnComplete: true } });
+    await settle();
+    triggerProviderTurn(test);
+    const sentBeforeReuse = test.socket.sent.length;
+    test.socket.receive(structuredClone(providerCall));
+    await settle();
+
+    expect(executions).toBe(1);
+    expect(test.events.filter((event) => event.type === "tool.calls")).toHaveLength(1);
+    expect(test.socket.sent).toHaveLength(sentBeforeReuse);
+    expect(test.client.state).toBe("failed");
+    expect(test.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "duplicate_tool_call_conflict",
+      fatal: true,
+    }));
+  });
+
   it("rejects unbounded function-call identities before they can reach the gateway", async () => {
     let executions = 0;
     const test = harness({

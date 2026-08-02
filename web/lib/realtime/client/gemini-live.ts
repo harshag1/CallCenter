@@ -457,8 +457,13 @@ function canonicalJson(value: JsonValue): string {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
-function functionCallFingerprint(call: FunctionCall): string {
+function functionCallFingerprint(
+  call: FunctionCall,
+  causalTurn: Pick<GeminiGenerationTrigger, "connectionEpoch" | "inputTurn">,
+): string {
   return canonicalJson({
+    connection_epoch: causalTurn.connectionEpoch,
+    input_turn: causalTurn.inputTurn,
     name: typeof call.name === "string" ? call.name : "",
     arguments: jsonValue(call.args),
   });
@@ -2899,7 +2904,6 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       );
       return;
     }
-
     const seen = new Set<string>();
     const calls: FunctionCall[] = [];
     for (const raw of toolCall.functionCalls) {
@@ -2956,8 +2960,25 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
       }
       seen.add(raw.id);
       const call: FunctionCall = { id: raw.id, name: raw.name, args: raw.args, responseId: "" };
-      call.fingerprint = functionCallFingerprint(call);
       calls.push(call);
+    }
+
+    const trigger = this.generationTrigger;
+    if (!trigger
+      || trigger.connectionEpoch !== binding.epoch
+      || trigger.phase === "terminal") {
+      this.failActiveConnection(
+        binding,
+        new Error("Gemini function call has no current causal input turn"),
+        "tool_call_lifecycle_phase_mismatch",
+      );
+      return;
+    }
+    for (const call of calls) {
+      // `localResponseId` changes for tool continuations within one caller turn.
+      // Bind identity to the stable causal turn so exact same-turn retransmits
+      // remain safe while a later caller turn cannot receive a cached result.
+      call.fingerprint = functionCallFingerprint(call, trigger);
     }
 
     const fresh: FunctionCall[] = [];
@@ -3020,7 +3041,6 @@ export class GeminiLiveClient implements NormalizedRealtimeClient {
     }
 
     const responseId = this.ensureResponseStarted();
-    const trigger = this.generationTrigger!;
     if (trigger.phase !== "awaiting_provider" && trigger.phase !== "awaiting_post_tool") {
       this.failActiveConnection(
         binding,
