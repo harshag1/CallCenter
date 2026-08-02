@@ -69,7 +69,7 @@ export interface ProgramActionReservation {
   readonly capabilityEpoch: number;
   readonly authorityRevision: number;
   readonly reservedSequence: number;
-  readonly status: "reserved" | "succeeded" | "failed" | "indeterminate" | "compensated";
+  readonly status: "reserved" | "revoked" | "succeeded" | "failed" | "indeterminate" | "compensated";
   readonly receiptId: string | null;
 }
 
@@ -88,6 +88,7 @@ export interface ProgramWorker {
   readonly purpose: string;
   readonly capabilityEpoch: number;
   readonly dependencies: readonly Readonly<{ key: string; revision: number }>[];
+  readonly requiredForGoalCompletion: boolean;
   readonly spawnedSequence: number;
   readonly status: "running" | "delivered" | "superseded" | "cancelled";
 }
@@ -252,11 +253,32 @@ function requireFocusedGoal(state: MutableProjection, goalId: string, purpose: s
   return goal;
 }
 
+function revokeReservedActions(state: MutableProjection): void {
+  for (const reservation of state.reservations.values()) {
+    if (reservation.status === "reserved") reservation.status = "revoked";
+  }
+}
+
 /** Every focus boundary revokes the previous dynamic frontier before another event can run. */
 function invalidateCapabilityFrontier(state: MutableProjection): void {
+  revokeReservedActions(state);
   state.capabilityEpoch += 1;
   state.capabilityGoalId = null;
   state.capabilities = [];
+}
+
+/** Facts are conservative authority inputs until the capability compiler records dependencies. */
+function invalidateActiveFrontierForFactMutation(state: MutableProjection): void {
+  if (state.capabilityGoalId !== null || state.capabilities.length > 0) invalidateCapabilityFrontier(state);
+}
+
+function supersedeWorkersDependingOnFact(state: MutableProjection, key: string): void {
+  for (const worker of state.workers.values()) {
+    if ((worker.status === "running" || worker.status === "delivered") &&
+        worker.dependencies.some((dependency) => dependency.key === key)) {
+      worker.status = "superseded";
+    }
+  }
 }
 
 function applyEvent(state: MutableProjection, event: ConversationProgramEvent): void {
@@ -270,6 +292,7 @@ function applyEvent(state: MutableProjection, event: ConversationProgramEvent): 
       state.facts.set(payload.key, {
         key: payload.key, value: payload.value, revision: 1, authority: payload.authority, sequence: event.sequence,
       });
+      invalidateActiveFrontierForFactMutation(state);
       return;
     }
     case "fact.corrected": {
@@ -282,6 +305,8 @@ function applyEvent(state: MutableProjection, event: ConversationProgramEvent): 
         key: payload.key, value: payload.value, revision: current.revision + 1,
         authority: payload.authority, sequence: event.sequence,
       });
+      supersedeWorkersDependingOnFact(state, payload.key);
+      invalidateActiveFrontierForFactMutation(state);
       return;
     }
     case "goal.opened": {
@@ -320,9 +345,27 @@ function applyEvent(state: MutableProjection, event: ConversationProgramEvent): 
     case "goal.completed": {
       const goal = requireFocusedGoal(state, payload.goalId, "goal completion");
       const blocker = [...state.obligations.values()].find((obligation) =>
-        obligation.status === "open" && obligation.blocks === "goal_completion" &&
+        obligation.status === "open" &&
         (obligation.goalId === null || obligation.goalId === payload.goalId));
       if (blocker) throw new Error(`goal ${payload.goalId} is blocked by obligation ${blocker.obligationId}`);
+      const checkpoint = state.flowCheckpoints.get(payload.goalId);
+      if (checkpoint && checkpoint.status !== "completed") {
+        throw new Error(`goal ${payload.goalId} has a non-terminal-success flow checkpoint`);
+      }
+      if (checkpoint && checkpoint.capabilityEpoch !== state.capabilityEpoch) {
+        throw new Error(`goal ${payload.goalId} flow checkpoint capability epoch is stale`);
+      }
+      const unresolvedEffect = [...state.reservations.values()].find((reservation) =>
+        reservation.goalId === payload.goalId &&
+        (reservation.status === "reserved" || reservation.status === "indeterminate"));
+      if (unresolvedEffect) {
+        throw new Error(`goal ${payload.goalId} has unresolved effect ${unresolvedEffect.reservationId}`);
+      }
+      const incompleteWorker = [...state.workers.values()].find((worker) =>
+        worker.goalId === payload.goalId && worker.requiredForGoalCompletion && worker.status !== "delivered");
+      if (incompleteWorker) {
+        throw new Error(`goal ${payload.goalId} has incomplete required worker ${incompleteWorker.workerId}`);
+      }
       goal.status = "completed";
       goal.suspensionReason = null;
       state.focusedGoalId = null;
@@ -381,6 +424,7 @@ function applyEvent(state: MutableProjection, event: ConversationProgramEvent): 
       if (payload.expectedEpoch !== state.capabilityEpoch || payload.epoch !== state.capabilityEpoch + 1) {
         throw new Error("capability epoch is stale or non-contiguous");
       }
+      revokeReservedActions(state);
       state.capabilityEpoch = payload.epoch;
       state.capabilityGoalId = state.focusedGoalId;
       state.capabilities = [...payload.capabilities].sort(compareIds);
@@ -435,6 +479,7 @@ function applyEvent(state: MutableProjection, event: ConversationProgramEvent): 
       state.workers.set(payload.workerId, {
         workerId: payload.workerId, goalId: payload.goalId, purpose: payload.purpose,
         capabilityEpoch: payload.capabilityEpoch, dependencies: Object.freeze([...payload.dependencies]),
+        requiredForGoalCompletion: payload.requiredForGoalCompletion,
         spawnedSequence: event.sequence, status: "running",
       });
       return;
@@ -638,6 +683,9 @@ export function foldConversationProgram(log: ConversationProgramLog): Conversati
 }
 
 /** Stable digest used to prove crash/replay convergence of the complete canonical projection. */
-export function conversationProgramDigest(projection: ConversationProgramProjection): string {
+export function conversationProgramDigest(
+  value: ConversationProgramProjection | ConversationProgramLog,
+): string {
+  const projection = "events" in value ? foldConversationProgram(value) : value;
   return sha256("hacc/conversation-program-projection/v1", projection);
 }

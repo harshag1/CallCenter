@@ -70,6 +70,7 @@ describe("ConversationProgram reducer", () => {
         type: "worker.spawned", workerId: "worker-policy", goalId: "return",
         purpose: "Fetch current return policy", capabilityEpoch: 2,
         dependencies: [{ key: "member.tier", revision: 1 }],
+        requiredForGoalCompletion: false,
       }),
       draft("evt-008", 7, {
         type: "worker.delivery_recorded", deliveryId: "delivery-policy", workerId: "worker-policy",
@@ -103,18 +104,25 @@ describe("ConversationProgram reducer", () => {
         heardThroughMs: 1_000, reason: "caller barge-in", evidenceSha256: SHA_C,
       }),
       draft("evt-015", 14, {
+        type: "flow.checkpoint_recorded", goalId: "return", flowId: "commerce-returns",
+        flowVersion: "1.0.0", flowRevision: 2, capabilityEpoch: 2, status: "completed",
+        nodeId: "complete", stepPath: null, completedStepCount: 1, stateSha256: SHA_C,
+      }),
+      draft("evt-016", 15, {
         type: "obligation.settled", obligationId: "ob-confirm",
         disposition: "satisfied", evidenceSha256: SHA_A,
       }),
-      draft("evt-016", 15, { type: "goal.completed", goalId: "return" }),
+      draft("evt-017", 16, { type: "goal.completed", goalId: "return" }),
     ]);
 
     const state = foldConversationProgram(log);
-    expect(state.revision).toBe(16);
+    expect(state.revision).toBe(17);
     expect(state.focusedGoal).toBeNull();
     expect(state.goals).toEqual([expect.objectContaining({ goalId: "return", status: "completed", focusCount: 1 })]);
-    expect(state.flowCheckpoints[0]).toMatchObject({ flowRevision: 1, capabilityEpoch: 2 });
-    expect(state.obligations[0]).toMatchObject({ status: "satisfied", settledSequence: 15 });
+    expect(state.flowCheckpoints[0]).toMatchObject({
+      flowRevision: 2, capabilityEpoch: 2, status: "completed",
+    });
+    expect(state.obligations[0]).toMatchObject({ status: "satisfied", settledSequence: 16 });
     expect(state.capabilityEpoch).toBe(3);
     expect(state.capabilityGoalId).toBeNull();
     expect(state.capabilities).toEqual([]);
@@ -157,6 +165,7 @@ describe("ConversationProgram reducer", () => {
     log = append(log, "worker-spawn", {
       type: "worker.spawned", workerId: "worker-1", goalId: "return", purpose: "Check policy",
       capabilityEpoch: 2, dependencies: [{ key: "member.tier", revision: 1 }],
+      requiredForGoalCompletion: false,
     });
     log = append(log, "caller-correction", {
       type: "fact.corrected", key: "member.tier", value: "gold",
@@ -171,7 +180,7 @@ describe("ConversationProgram reducer", () => {
     const state = foldConversationProgram(log);
     expect(state.facts[0]).toMatchObject({ value: "gold", revision: 2 });
     expect(state.workerDeliveries[0]).toMatchObject({
-      disposition: "rejected", reason: "dependency fact revision changed",
+      disposition: "rejected", reason: "worker is missing or no longer running",
     });
     expect(state.workers[0].status).toBe("superseded");
   });
@@ -199,6 +208,103 @@ describe("ConversationProgram reducer", () => {
     })).toThrow("capability epoch is stale");
   });
 
+  it("requires a quiescent goal before completion", () => {
+    let log = baseProgram();
+    log = append(log, "checkpoint-active", {
+      type: "flow.checkpoint_recorded", goalId: "return", flowId: "return-flow",
+      flowVersion: "1", flowRevision: 1, capabilityEpoch: 2, status: "active",
+      nodeId: "lookup", stepPath: "return.lookup", completedStepCount: 0, stateSha256: SHA_A,
+    });
+    expect(() => append(log, "complete-with-active-flow", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("non-terminal-success flow checkpoint");
+
+    log = append(log, "checkpoint-complete", {
+      type: "flow.checkpoint_recorded", goalId: "return", flowId: "return-flow",
+      flowVersion: "1", flowRevision: 2, capabilityEpoch: 2, status: "completed",
+      nodeId: "done", stepPath: null, completedStepCount: 1, stateSha256: SHA_B,
+    });
+    log = append(log, "irreversible-obligation", {
+      type: "obligation.opened", obligationId: "compensation-ready",
+      obligationType: "compensation", description: "Retain a compensation path",
+      owner: "system", blocks: "irreversible_actions", goalId: "return", sourceId: "policy",
+    });
+    expect(() => append(log, "complete-with-obligation", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("blocked by obligation compensation-ready");
+    log = append(log, "settle-obligation", {
+      type: "obligation.settled", obligationId: "compensation-ready",
+      disposition: "satisfied", evidenceSha256: SHA_A,
+    });
+
+    log = append(log, "required-worker", {
+      type: "worker.spawned", workerId: "fraud-check", goalId: "return",
+      purpose: "Complete the required fraud check", capabilityEpoch: 2,
+      dependencies: [{ key: "member.tier", revision: 1 }], requiredForGoalCompletion: true,
+    });
+    expect(() => append(log, "complete-with-worker", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("incomplete required worker fraud-check");
+    log = append(log, "required-worker-delivery", {
+      type: "worker.delivery_recorded", deliveryId: "fraud-result", workerId: "fraud-check",
+      goalId: "return", capabilityEpoch: 2,
+      dependencyFactRevisions: [{ key: "member.tier", revision: 1 }], resultSha256: SHA_B,
+    });
+
+    log = append(log, "unsettled-effect", {
+      type: "action.reserved", reservationId: "return-effect", goalId: "return",
+      action: "returns.create", argumentsSha256: SHA_A, idempotencyKey: "return-effect",
+      capabilityEpoch: 2, authorityRevision: log.events.length,
+    });
+    expect(() => append(log, "complete-with-reservation", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("unresolved effect return-effect");
+    log = append(log, "indeterminate-effect", {
+      type: "action.receipt_recorded", receiptId: "return-effect-receipt",
+      reservationId: "return-effect", status: "indeterminate",
+      resultSha256: null, evidenceSha256: SHA_C,
+    });
+    expect(() => append(log, "complete-with-indeterminate", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("unresolved effect return-effect");
+  });
+
+  it("revokes fact-sensitive capabilities and unsettled actions on correction", () => {
+    let log = baseProgram();
+    log = append(log, "pre-correction-checkpoint", {
+      type: "flow.checkpoint_recorded", goalId: "return", flowId: "return-flow",
+      flowVersion: "1", flowRevision: 1, capabilityEpoch: 2, status: "completed",
+      nodeId: "done", stepPath: null, completedStepCount: 1, stateSha256: SHA_A,
+    });
+    log = append(log, "pre-correction-reservation", {
+      type: "action.reserved", reservationId: "stale-return", goalId: "return",
+      action: "returns.create", argumentsSha256: SHA_A, idempotencyKey: "stale-return",
+      capabilityEpoch: 2, authorityRevision: 5,
+    });
+    log = append(log, "eligibility-correction", {
+      type: "fact.corrected", key: "member.tier", value: "ineligible",
+      expectedFactRevision: 1, authority: authority("caller"),
+    });
+
+    const state = foldConversationProgram(log);
+    expect(state.capabilityEpoch).toBe(3);
+    expect(state.capabilityGoalId).toBeNull();
+    expect(state.capabilities).toEqual([]);
+    expect(state.actionReservations[0].status).toBe("revoked");
+    expect(() => append(log, "completion-with-stale-flow", {
+      type: "goal.completed", goalId: "return",
+    })).toThrow("flow checkpoint capability epoch is stale");
+    expect(() => append(log, "stale-post-correction-action", {
+      type: "action.reserved", reservationId: "stale-return-2", goalId: "return",
+      action: "returns.create", argumentsSha256: SHA_B, idempotencyKey: "stale-return-2",
+      capabilityEpoch: 2, authorityRevision: log.events.length,
+    })).toThrow("capability epoch is stale");
+    expect(() => append(log, "receipt-for-revoked-action", {
+      type: "action.receipt_recorded", receiptId: "revoked-receipt", reservationId: "stale-return",
+      status: "succeeded", resultSha256: SHA_C, evidenceSha256: SHA_B,
+    })).toThrow("is not unsettled");
+  });
+
   it("converges to the same digest after crash serialization and rejects log tampering", () => {
     let log = baseProgram();
     log = append(log, "fact-corrected", {
@@ -209,6 +315,7 @@ describe("ConversationProgram reducer", () => {
     const recovered = JSON.parse(JSON.stringify(log)) as ConversationProgramLog;
     const afterCrash = foldConversationProgram(recovered);
     expect(conversationProgramDigest(afterCrash)).toBe(conversationProgramDigest(beforeCrash));
+    expect(conversationProgramDigest(recovered)).toBe(conversationProgramDigest(beforeCrash));
     expect(afterCrash).toEqual(beforeCrash);
 
     const retried = appendConversationProgramEvent(recovered, draft("fact-corrected", 4, {

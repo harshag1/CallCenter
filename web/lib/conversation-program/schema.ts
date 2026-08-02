@@ -160,6 +160,7 @@ const WorkerSpawnedSchema = z.object({
   purpose: TextSchema,
   capabilityEpoch: RevisionSchema,
   dependencies: z.array(FactDependencySchema).max(64),
+  requiredForGoalCompletion: z.boolean().default(false),
 }).strict().superRefine((worker, context) => {
   if (new Set(worker.dependencies.map(({ key }) => key)).size !== worker.dependencies.length) {
     context.addIssue({ code: "custom", path: ["dependencies"], message: "worker dependencies must be unique" });
@@ -238,7 +239,8 @@ export const ConversationProgramEventPayloadSchema = z.discriminatedUnion("type"
   AudibilityInterruptedSchema,
 ]);
 
-export type ConversationProgramEventPayload = z.infer<typeof ConversationProgramEventPayloadSchema>;
+/** Authoring input; schema defaults are materialized before hashing and reduction. */
+export type ConversationProgramEventPayload = z.input<typeof ConversationProgramEventPayloadSchema>;
 
 export const ConversationProgramEventDraftSchema = z.object({
   eventId: IdSchema,
