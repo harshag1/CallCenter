@@ -500,7 +500,11 @@ async function verifySourceLedgerBindings(
   controls: readonly ResolvedControl[],
 ): Promise<Readonly<{ ledger_head_sha256: string; replay_sha256: string }>> {
   const evidence = createLc4DevReplayEvidenceStore(cas);
-  const replay = await verifyLc4DevReplayLedger(ledger, evidence);
+  const ledgerGenesisSha256 = ledger[0]?.previous_event_sha256;
+  if (typeof ledgerGenesisSha256 !== "string") {
+    throw new Error("control-stress source ledger is missing its retained genesis anchor");
+  }
+  const replay = await verifyLc4DevReplayLedger(ledger, evidence, ledgerGenesisSha256);
   for (const control of controls) {
     const opened = ledger.filter((event) => event.event_type === "episode_opened"
       && event.episode_id === control.source.episode_id && event.opportunity_id === null);

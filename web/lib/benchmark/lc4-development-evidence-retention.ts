@@ -222,14 +222,17 @@ export function createLc4DevReplayEvidenceStore(cas: Lc4DevReplayCasPort): Lc4De
 export async function verifyLc4DevReplayLedger(
   events: readonly Lc4DevReplayLedgerEvent[],
   evidence: Pick<Lc4DevReplayEvidenceStore, "assertResolvable" | "resolveJson">,
+  expectedGenesisSha256: string,
 ): Promise<Readonly<{
+  ledger_genesis_sha256: string;
   event_count: number;
   evidence_reference_count: number;
   ledger_head_sha256: string;
   replay_sha256: string;
 }>> {
   if (events.length < 1) throw new Error("LC4-DEV replay ledger is empty");
-  let previous: string | null = null;
+  requireHash(expectedGenesisSha256, "LC4-DEV replay ledger genesis");
+  let previous: string | null = expectedGenesisSha256;
   let evidenceReferenceCount = 0;
   const replayedPayloads: Array<Readonly<{ event_sha256: string; payload: JsonValue }>> = [];
   for (const [index, event] of events.entries()) {
@@ -253,6 +256,7 @@ export async function verifyLc4DevReplayLedger(
     previous = event.event_sha256;
   }
   const body = Object.freeze({
+    ledger_genesis_sha256: expectedGenesisSha256,
     event_count: events.length,
     evidence_reference_count: evidenceReferenceCount,
     ledger_head_sha256: previous!,

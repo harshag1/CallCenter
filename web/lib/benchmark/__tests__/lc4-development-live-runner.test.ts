@@ -2358,7 +2358,11 @@ describe("LC4-DEV live runner", () => {
       terminal_wire_type: "none",
     });
     expect(canonicalJson(failureEvidence)).not.toContain(compileFailureMessage);
-    await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+    await expect(verifyLc4DevReplayLedger(
+      run.ledger,
+      evidence,
+      preflight.immutable_ledger_genesis_sha256,
+    )).resolves.toMatchObject({
       event_count: 3,
       ledger_head_sha256: run.ledger_head_sha256,
     });
@@ -2544,7 +2548,9 @@ describe("LC4-DEV live runner", () => {
           ledger: {
             async append(event) {
               expect(event.sequence).toBe(ledger.length + 1);
-              expect(event.previous_event_sha256).toBe(ledger.at(-1) ?? null);
+              expect(event.previous_event_sha256).toBe(
+                ledger.at(-1) ?? preflight.immutable_ledger_genesis_sha256,
+              );
               ledger.push(event.event_sha256);
             },
           },
@@ -2601,7 +2607,11 @@ describe("LC4-DEV live runner", () => {
       (reference) => reference.kind === "assistant_pcm",
     )).toHaveLength(1);
     expect(ledger.at(-1)).toBe(run.ledger_head_sha256);
-    await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+    await expect(verifyLc4DevReplayLedger(
+      run.ledger,
+      evidence,
+      preflight.immutable_ledger_genesis_sha256,
+    )).resolves.toMatchObject({
       event_count: 1_170,
       ledger_head_sha256: run.ledger_head_sha256,
     });
@@ -2899,7 +2909,11 @@ describe("LC4-DEV live runner", () => {
         String(repairPayload.playback_receipt_sha256),
       );
       expect(run.ledger).toHaveLength(1_172);
-      await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+      await expect(verifyLc4DevReplayLedger(
+        run.ledger,
+        evidence,
+        preflight.immutable_ledger_genesis_sha256,
+      )).resolves.toMatchObject({
         event_count: 1_172,
         ledger_head_sha256: run.ledger_head_sha256,
       });
@@ -3004,7 +3018,11 @@ describe("LC4-DEV live runner", () => {
       failure_role: "cleanup",
       secondary_failure_evidence_sha256: failed.evidence_references.find((reference) => reference.kind === "failure_evidence")!.evidence_sha256,
     });
-    await expect(verifyLc4DevReplayLedger(run.ledger, evidence)).resolves.toMatchObject({
+    await expect(verifyLc4DevReplayLedger(
+      run.ledger,
+      evidence,
+      preflight.immutable_ledger_genesis_sha256,
+    )).resolves.toMatchObject({
       event_count: run.ledger.length,
       ledger_head_sha256: run.ledger_head_sha256,
     });

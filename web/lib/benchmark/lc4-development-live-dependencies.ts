@@ -340,7 +340,11 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
     if (actualBytes !== expectedBytes) {
       throw new Error("LC4-DEV resumed ledger bytes differ from the immutable completed-cell prefix");
     }
-    await verifyLc4DevReplayLedger(existing as readonly Lc4DevReplayLedgerEvent[], input.evidence);
+    await verifyLc4DevReplayLedger(
+      existing as readonly Lc4DevReplayLedgerEvent[],
+      input.evidence,
+      input.genesis_sha256,
+    );
     await chmod(path, 0o600);
     handle = await open(path, "a", 0o600);
   } else {
@@ -353,7 +357,7 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
     handle = await open(path, "wx", 0o600);
   }
   let sequence = existing?.length ?? 0;
-  let previous: string | null = existing?.at(-1)?.event_sha256 ?? null;
+  let previous: string | null = existing?.at(-1)?.event_sha256 ?? input.genesis_sha256;
   let closed = false;
   const retainedEvents: Lc4DevReplayLedgerEvent[] = [
     ...((existing ?? []) as readonly Lc4DevReplayLedgerEvent[]),
@@ -974,7 +978,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     assertLc4DevFinalControlHorizon(snapshot, episode);
     requireSha256(snapshot.common_state_sha256, "LC4-DEV final common state");
     requireSha256(snapshot.gateway_transcript_sha256, "LC4-DEV final gateway transcript");
-    const ledgerReplay = await verifyLc4DevReplayLedger(ledger.events(), replayEvidence);
+    const ledgerReplay = await verifyLc4DevReplayLedger(ledger.events(), replayEvidence, genesis);
     if (ledgerReplay.ledger_head_sha256 !== ledger_head_before_terminal_sha256) {
       throw new Error("LC4-DEV authority finalization ledger replay differs from the pre-terminal head");
     }
@@ -1398,7 +1402,11 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
     errors.push("authority_episode_terminal_ids_are_not_unique");
   }
   try {
-    const fullReplay = await verifyLc4DevReplayLedger(input.run.ledger as readonly Lc4DevReplayLedgerEvent[], evidence);
+    const fullReplay = await verifyLc4DevReplayLedger(
+      input.run.ledger as readonly Lc4DevReplayLedgerEvent[],
+      evidence,
+      input.preflight.immutable_ledger_genesis_sha256,
+    );
     if (fullReplay.ledger_head_sha256 !== input.run.ledger_head_sha256) errors.push("authority_full_ledger_head_mismatch");
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
@@ -1419,6 +1427,7 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
       const preterminal = await verifyLc4DevReplayLedger(
         input.run.ledger.slice(0, terminalIndex) as readonly Lc4DevReplayLedgerEvent[],
         evidence,
+        input.preflight.immutable_ledger_genesis_sha256,
       );
       const finalizationReference = terminal.evidence_references.find((reference) => reference.kind === "episode_finalization");
       if (!finalizationReference) throw new Error("authority episode finalization reference missing");

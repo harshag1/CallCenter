@@ -1285,7 +1285,7 @@ export function assertLc4DevLiveRunPrefixArtifact(
     || prefix.listener_evidence_count !== expectedGenerations) {
     throw new Error("LC4-DEV completed-cell prefix generation and retention accounting differs");
   }
-  let previous: string | null = null;
+  let previous: string | null = preflight.immutable_ledger_genesis_sha256;
   const eventCounts = new Map<Lc4DevImmutableLedgerEvent["event_type"], number>();
   const allowedEpisodes = new Set(prefix.completed_episode_ids);
   for (const [index, event] of prefix.ledger.entries()) {
@@ -1405,7 +1405,8 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
   }
   const resumed = input.completed_prefix;
   const startedAt = resumed?.started_at ?? input.dependencies.now().toISOString();
-  let previousEvent: string | null = resumed?.ledger_head_sha256 ?? null;
+  let previousEvent: string | null = resumed?.ledger_head_sha256
+    ?? input.preflight.immutable_ledger_genesis_sha256;
   let sequence = resumed?.ledger.length ?? 0;
   const ledger: Lc4DevImmutableLedgerEvent[] = [...(resumed?.ledger ?? [])];
   let episodesStarted = resumed?.episodes_started ?? 0;

@@ -306,6 +306,7 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
     assignments: subjects.map((episodeSubjectSha256) => ({ episode_subject_sha256: episodeSubjectSha256, manifest_sha256: manifest.manifest_sha256 })),
   });
   const registryReference = await evidence.retainJson({ kind: "authority_obligation_manifest", body: registry as never });
+  const ledgerGenesisSha256 = sha256Hex("authority-report-ledger-genesis");
   const ledger: Lc4DevReplayLedgerEvent[] = [];
   const artifactReferences: Lc4DevReplayArtifactReference[] = [];
   const append = async (eventType: "episode_opened" | "episode_terminal", episodeId: string, payloadBody: Record<string, unknown>, references: readonly Lc4DevReplayArtifactReference[] = []) => {
@@ -319,14 +320,14 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
       payload_sha256: payloadEvidence.evidence_sha256,
       payload_evidence: payloadEvidence,
       evidence_references: Object.freeze([...references]),
-      previous_event_sha256: ledger.at(-1)?.event_sha256 ?? null,
+      previous_event_sha256: ledger.at(-1)?.event_sha256 ?? ledgerGenesisSha256,
     };
     ledger.push(Object.freeze({ ...body, event_sha256: sha256Hex(`${LEDGER_EVENT_DOMAIN}${canonicalJson(body)}`) }));
   };
   for (const [index, episodeSubjectSha256] of subjects.slice(0, terminalCount).entries()) {
     const episodeId = `authority-report-episode-${index + 1}`;
     await append("episode_opened", episodeId, { episode_id: episodeId });
-    const preterminal = await verifyLc4DevReplayLedger(ledger, evidence);
+    const preterminal = await verifyLc4DevReplayLedger(ledger, evidence, ledgerGenesisSha256);
     const authorityEvents = createLc4AuthorityEvents(passingAuthorityEntries(manifest));
     const checkpointReference = await evidence.retainJson({
       kind: "authority_source_checkpoint",
@@ -368,6 +369,7 @@ async function completeAuthorityReportFixture(root: string, terminalCount = 6) {
     ledger_head_sha256: ledger.at(-1)!.event_sha256,
   } as unknown as Lc4DevLiveRunArtifact;
   const preflight = {
+    immutable_ledger_genesis_sha256: ledgerGenesisSha256,
     authority_trust_root_sha256: benchmarkKernelAttestationPublicKeyFingerprint(publicKeyPem),
     authorization: {
       authority_public_key_spki_base64: keys.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
@@ -669,7 +671,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       authority_public_key_fingerprint_sha256: "3".repeat(64),
     });
     const writer = await createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis, evidence });
-    const first = await ledgerEvent(evidence, 1, null);
+    const first = await ledgerEvent(evidence, 1, genesis);
     const second = await ledgerEvent(evidence, 2, first.event_sha256);
     await writer.append(first);
     await expect(ledgerEvent(evidence, 3, first.event_sha256).then((event) => writer.append(event))).rejects.toThrow("forks, repeats, or skips");
@@ -678,7 +680,8 @@ describe("LC4-DEV concrete live dependencies", () => {
     expect(writer.events()).toEqual([first, second]);
     expect(evidence.retainedReferences("ledger_payload")).toHaveLength(3);
     await writer.close();
-    await expect(verifyLc4DevReplayLedger([first, second], evidence)).resolves.toMatchObject({
+    await expect(verifyLc4DevReplayLedger([first, second], evidence, genesis)).resolves.toMatchObject({
+      ledger_genesis_sha256: genesis,
       event_count: 2,
       ledger_head_sha256: second.event_sha256,
     });
@@ -706,6 +709,60 @@ describe("LC4-DEV concrete live dependencies", () => {
     })).rejects.toThrow("bytes differ from the immutable completed-cell prefix");
   });
 
+  it("anchors event one to the exact authorization genesis and rejects substitution, omission, and rollback", async () => {
+    const root = await temporaryDirectory();
+    const cas = await createLc4ImmutableCas(join(root, "cas"));
+    const evidence = createLc4DevReplayEvidenceStore(cas);
+    const currentGenesis = lc4DevLedgerGenesisSha256({
+      execution_id: "lc4-dev-genesis-current",
+      prepare_sha256: "1".repeat(64),
+      authorization_binding_sha256: "2".repeat(64),
+      authority_public_key_fingerprint_sha256: "3".repeat(64),
+    });
+    const priorGenesis = lc4DevLedgerGenesisSha256({
+      execution_id: "lc4-dev-genesis-prior",
+      prepare_sha256: "1".repeat(64),
+      authorization_binding_sha256: "4".repeat(64),
+      authority_public_key_fingerprint_sha256: "3".repeat(64),
+    });
+    const current = await ledgerEvent(evidence, 1, currentGenesis);
+    await expect(verifyLc4DevReplayLedger([current], evidence, currentGenesis)).resolves.toMatchObject({
+      ledger_genesis_sha256: currentGenesis,
+      event_count: 1,
+    });
+    await expect(verifyLc4DevReplayLedger([current], evidence, priorGenesis)).rejects.toThrow(
+      "sequence or hash chain is invalid",
+    );
+
+    const omitted = await ledgerEvent(evidence, 1, null);
+    await expect(verifyLc4DevReplayLedger([omitted], evidence, currentGenesis)).rejects.toThrow(
+      "sequence or hash chain is invalid",
+    );
+    const omittedWriter = await createLc4HashChainedLedgerWriter({
+      path: join(root, "omitted.jsonl"),
+      genesis_sha256: currentGenesis,
+      evidence,
+    });
+    await expect(omittedWriter.append(omitted)).rejects.toThrow("forks, repeats, or skips");
+    await omittedWriter.close();
+
+    const prior = await ledgerEvent(evidence, 1, priorGenesis);
+    const priorPath = join(root, "prior.jsonl");
+    const priorWriter = await createLc4HashChainedLedgerWriter({
+      path: priorPath,
+      genesis_sha256: priorGenesis,
+      evidence,
+    });
+    await priorWriter.append(prior);
+    await priorWriter.close();
+    await expect(createLc4HashChainedLedgerWriter({
+      path: priorPath,
+      genesis_sha256: currentGenesis,
+      evidence,
+      existing_events: [prior],
+    })).rejects.toThrow("sequence or hash chain is invalid");
+  });
+
   it("refuses to append a ledger event when any referenced CAS object is missing or tampered", async () => {
     const root = await temporaryDirectory();
     const cas = await createLc4ImmutableCas(join(root, "cas"));
@@ -721,12 +778,12 @@ describe("LC4-DEV concrete live dependencies", () => {
       genesis_sha256: genesis,
       evidence,
     });
-    const tampered = await ledgerEvent(evidence, 1, null);
+    const tampered = await ledgerEvent(evidence, 1, genesis);
     const retainedPath = join(cas.root_dir, tampered.payload_sha256.slice(0, 2), tampered.payload_sha256);
     await chmod(retainedPath, 0o600);
     await writeFile(retainedPath, Buffer.from("tampered"));
     await expect(tamperedWriter.append(tampered)).rejects.toThrow(/does not match its address|tampered/);
-    await expect(verifyLc4DevReplayLedger([tampered], evidence)).rejects.toThrow(/does not match its address|tampered/);
+    await expect(verifyLc4DevReplayLedger([tampered], evidence, genesis)).rejects.toThrow(/does not match its address|tampered/);
     await tamperedWriter.close();
 
     const healthyCas = await createLc4ImmutableCas(join(root, "healthy-cas"));
@@ -736,7 +793,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       genesis_sha256: genesis,
       evidence: healthyEvidence,
     });
-    const valid = await ledgerEvent(healthyEvidence, 1, null);
+    const valid = await ledgerEvent(healthyEvidence, 1, genesis);
     const missingReference = {
       ...valid.payload_evidence,
       evidence_sha256: "f".repeat(64),
@@ -752,7 +809,7 @@ describe("LC4-DEV concrete live dependencies", () => {
       event_sha256: sha256Hex(`${LEDGER_EVENT_DOMAIN}${canonicalJson(body)}`),
     } as Lc4DevImmutableLedgerEvent;
     await expect(missingWriter.append(missing)).rejects.toThrow(/ENOENT|no such file|missing/i);
-    await expect(verifyLc4DevReplayLedger([missing], healthyEvidence)).rejects.toThrow(/ENOENT|no such file|missing/i);
+    await expect(verifyLc4DevReplayLedger([missing], healthyEvidence, genesis)).rejects.toThrow(/ENOENT|no such file|missing/i);
     await missingWriter.close();
   });
 
