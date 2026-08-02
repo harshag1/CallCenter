@@ -435,6 +435,53 @@ function publicConversationTurnsWithToolBatch(
   }) as Lc4NativeConversationTurnInput));
 }
 
+function reindexConversationTurns(
+  turns: readonly Lc4NativeConversationTurnInput[],
+): readonly Lc4NativeConversationTurnInput[] {
+  return Object.freeze(turns.map((turn, index) => Object.freeze({
+    ...turn,
+    turn_id:
+      `conversation.${String(index + 1).padStart(3, "0")}.${turn.speaker}`,
+    sequence: index + 1,
+  }) as Lc4NativeConversationTurnInput));
+}
+
+function devConversationTurnsWithMultipleToolBatches(): readonly Lc4NativeConversationTurnInput[] {
+  const turns = [...publicConversationTurns(10)];
+  const tool = (
+    batch: string,
+    ordinal: number,
+    count: number,
+    semanticIntent: string,
+  ): Lc4NativeConversationTurnInput => Object.freeze({
+    turn_id: "placeholder.tool",
+    sequence: 0,
+    speaker: "tool",
+    source: "canonical_gateway_result",
+    tool_name: LC4_DEV_SEMANTIC_GATEWAY_FUNCTION.name,
+    tool_arguments: Object.freeze({
+      tool_name: semanticIntent,
+      arguments: Object.freeze({ member_id: "PUBLIC-17" }),
+    }),
+    text: canonicalJson({ ok: true, semantic_intent: semanticIntent }),
+    available_after_opportunity: 1,
+    provenance_receipt_sha256:
+      sha256Hex(`provider-visible-tool:${batch}:${ordinal}`),
+    tool_batch_sha256: sha256Hex(`provider-tool-batch:${batch}`),
+    tool_batch_call_ordinal: ordinal,
+    tool_batch_call_count: count,
+    provider_conversation_source: true,
+    oracle_derived: false,
+    future_derived: false,
+    semantic_evaluator_derived: false,
+  });
+  turns.splice(1, 0,
+    tool("one", 1, 2, "membership.lookup"),
+    tool("one", 2, 2, "membership.quote"),
+    tool("two", 1, 1, "membership.audit"));
+  return reindexConversationTurns(turns);
+}
+
 function publicDeepConversationTurns(): readonly Lc4NativeConversationTurnInput[] {
   const base = publicConversationTurns(40);
   const turns: Lc4NativeConversationTurnInput[] = [];
@@ -2113,6 +2160,110 @@ async function openCallerBranchPreflight(input: Readonly<{
 }
 
 describe("LC4 production realtime adapter bridge", () => {
+  it("accepts exact schema-v6 caller, multi-batch tool, assistant chronology", () => {
+    const conversationTurns = devConversationTurnsWithMultipleToolBatches();
+    const native = createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-multiple-tool-batches-native",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("dev-multiple-tool-batches-previous"),
+      conversation_turns: conversationTurns,
+    });
+    const hacc = createLc4HaccRotationStatePacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-multiple-tool-batches-hacc",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("dev-multiple-tool-batches-previous"),
+      flow_state_sha256: sha256Hex("dev-multiple-tool-batches-flow"),
+      response_plan_chain_head_sha256:
+        sha256Hex("dev-multiple-tool-batches-plan"),
+      conversation_turns: conversationTurns,
+    });
+    expect(native.conversation_turns.slice(0, 5).map((turn) => turn.speaker))
+      .toEqual(["caller", "tool", "tool", "tool", "assistant"]);
+    expect(hacc.conversation_turns).toEqual(native.conversation_turns);
+    expect(projectLc4RotationPacketForReplay(native).provider_history
+      .slice(0, 4).map((turn) => turn.role))
+      .toEqual(["user", "tool_batch", "tool_batch", "assistant"]);
+  });
+
+  it.each([
+    ["assistant before caller", (base: readonly Lc4NativeConversationTurnInput[]) => [
+      base[1]!, base[0]!, ...base.slice(2),
+    ]],
+    ["tool after assistant", () => {
+      const withTools = [...devConversationTurnsWithMultipleToolBatches()];
+      return [
+        withTools[0]!,
+        withTools[4]!,
+        ...withTools.slice(1, 4),
+        ...withTools.slice(5),
+      ];
+    }],
+    ["duplicate caller", (base: readonly Lc4NativeConversationTurnInput[]) => [
+      base[0]!, base[0]!, ...base.slice(1),
+    ]],
+    ["missing caller", (base: readonly Lc4NativeConversationTurnInput[]) => [
+      base[1]!, base[1]!, ...base.slice(2),
+    ]],
+    ["missing assistant", (base: readonly Lc4NativeConversationTurnInput[]) => [
+      base[0]!, base[0]!, ...base.slice(2),
+    ]],
+    ["cross-opportunity interleaving", (base: readonly Lc4NativeConversationTurnInput[]) => [
+      base[0]!, base[2]!, base[1]!, base[3]!, ...base.slice(4),
+    ]],
+  ] as const)("rejects schema-v6 %s chronology", (_label, mutate) => {
+    const conversationTurns = reindexConversationTurns(
+      mutate(publicConversationTurns(10)),
+    );
+    expect(() => createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-invalid-chronology",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("dev-invalid-chronology-previous"),
+      conversation_turns: conversationTurns,
+    })).toThrow(/chronology|future or out-of-order/u);
+  });
+
+  it.each([
+    ["truncated", (turns: Lc4NativeConversationTurnInput[]) => {
+      turns.splice(2, 1);
+      return turns;
+    }],
+    ["interleaved", (turns: Lc4NativeConversationTurnInput[]) => {
+      return [
+        turns[0]!,
+        turns[1]!,
+        turns[3]!,
+        turns[2]!,
+        ...turns.slice(4),
+      ];
+    }],
+  ] as const)("rejects schema-v6 %s tool batches", (_label, mutate) => {
+    const conversationTurns = reindexConversationTurns(
+      mutate([...devConversationTurnsWithMultipleToolBatches()]),
+    );
+    expect(() => createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-invalid-tool-batch",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("dev-invalid-tool-batch-previous"),
+      conversation_turns: conversationTurns,
+    })).toThrow(/tool batch is not exact and contiguous/u);
+  });
+
   it("rejects metadata-free tool turns from DEV session rotation", () => {
     const turns = [...publicConversationTurns(10)];
     turns.splice(1, 0, Object.freeze({

@@ -478,7 +478,22 @@ function validateConversationTurns(
   }
   for (let opportunity = 1; opportunity <= availableThroughOpportunity; opportunity += 1) {
     const opportunityTurns = turns.filter((turn) => turn.available_after_opportunity === opportunity);
-    if (!opportunityTurns.some((turn) => turn.speaker === "caller")
+    if (requireExactToolBatches) {
+      const callerCount = opportunityTurns.filter((turn) =>
+        turn.speaker === "caller").length;
+      const assistantCount = opportunityTurns.filter((turn) =>
+        turn.speaker === "assistant").length;
+      if (callerCount !== 1
+        || assistantCount !== 1
+        || opportunityTurns[0]?.speaker !== "caller"
+        || opportunityTurns.at(-1)?.speaker !== "assistant"
+        || opportunityTurns.slice(1, -1).some((turn) =>
+          turn.speaker !== "tool")) {
+        throw new Error(
+          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} must be caller, complete tool batches, assistant`,
+        );
+      }
+    } else if (!opportunityTurns.some((turn) => turn.speaker === "caller")
       || !opportunityTurns.some((turn) => turn.speaker === "assistant")) {
       throw new Error(`LC4 rotation conversation omits caller/assistant evidence for opportunity ${opportunity}`);
     }
