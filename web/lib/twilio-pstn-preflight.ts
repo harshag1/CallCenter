@@ -51,6 +51,7 @@ export type TwilioPstnPreflightReceipt = Readonly<{
     restricted_key_attested: boolean;
     key_account_binding_attested: boolean;
     inbound_signature_secret_present: boolean;
+    inbound_signature_rotation_staged: boolean;
     domain_specific_receipt_secret_present: boolean;
     bridge_stream_url: string | null;
     bridge_is_standalone: boolean;
@@ -398,6 +399,7 @@ export async function runTwilioPstnPreflight(
   const blockers: TwilioPstnPreflightBlocker[] = [];
   const accountSid = env.TWILIO_ACCOUNT_SID;
   const authToken = env.TWILIO_AUTH_TOKEN;
+  const nextAuthToken = env.TWILIO_AUTH_TOKEN_NEXT;
   const keySid = env.TWILIO_API_KEY_SID;
   const keySecret = env.TWILIO_API_KEY_SECRET;
   const caller = env.TWILIO_PHONE_NUMBER;
@@ -426,6 +428,15 @@ export async function runTwilioPstnPreflight(
       "twilio_inbound_auth_secret_invalid",
       "TWILIO_AUTH_TOKEN is missing or malformed for inbound signature verification.",
       "Configure the account auth token in the private bridge/web secret stores; do not paste it into evidence.",
+    ));
+  }
+  if (nextAuthToken !== undefined && nextAuthToken !== "" && (
+    !isControlFreeSecret(nextAuthToken, 20) || nextAuthToken === authToken
+  )) {
+    blockers.push(blocker(
+      "twilio_rotation_auth_secret_invalid",
+      "TWILIO_AUTH_TOKEN_NEXT is malformed or duplicates the current primary token.",
+      "Stage one distinct Twilio secondary token in both private bridge/web secret stores, or remove TWILIO_AUTH_TOKEN_NEXT outside a rotation window.",
     ));
   }
   if (env.TWILIO_API_KEY_TYPE !== "restricted") {
@@ -464,7 +475,7 @@ export async function runTwilioPstnPreflight(
     ));
   }
   const receiptDistinct = isControlFreeSecret(receiptSecret, 32)
-    && ![authToken, keySecret, env.MCP_GATEWAY_SECRET].some(
+    && ![authToken, nextAuthToken, keySecret, env.MCP_GATEWAY_SECRET].some(
       (credential) => credential && credential === receiptSecret,
     );
   if (!receiptDistinct) {
@@ -554,6 +565,8 @@ export async function runTwilioPstnPreflight(
       restricted_key_attested: env.TWILIO_API_KEY_TYPE === "restricted",
       key_account_binding_attested: Boolean(accountSid && env.TWILIO_API_KEY_ACCOUNT_SID === accountSid),
       inbound_signature_secret_present: isControlFreeSecret(authToken, 20),
+      inbound_signature_rotation_staged: isControlFreeSecret(nextAuthToken, 20)
+        && nextAuthToken !== authToken,
       domain_specific_receipt_secret_present: receiptDistinct,
       bridge_stream_url: bridgeResult.url?.href ?? null,
       bridge_is_standalone: bridgeIsStandalone,

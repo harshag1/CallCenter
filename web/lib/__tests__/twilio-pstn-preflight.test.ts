@@ -105,6 +105,29 @@ describe("Twilio PSTN provider-safe preflight", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("admits only a distinct well-formed staged Twilio rotation token", async () => {
+    const staged = await runTwilioPstnPreflight(baseInput({
+      environment: environment({
+        TWILIO_AUTH_TOKEN_NEXT: "next-inbound-signature-auth-token-987654321",
+      }),
+    }));
+    expect(staged.configuration.inbound_signature_rotation_staged).toBe(true);
+    expect(staged.blockers.map(({ code }) => code)).not.toContain(
+      "twilio_rotation_auth_secret_invalid",
+    );
+
+    for (const invalid of ["too-short", AUTH_TOKEN]) {
+      const receipt = await runTwilioPstnPreflight(baseInput({
+        environment: environment({ TWILIO_AUTH_TOKEN_NEXT: invalid }),
+      }));
+      expect(receipt.ready).toBe(false);
+      expect(receipt.configuration.inbound_signature_rotation_staged).toBe(false);
+      expect(receipt.blockers.map(({ code }) => code)).toContain(
+        "twilio_rotation_auth_secret_invalid",
+      );
+    }
+  });
+
   it("reports missing approved destination and receipt secret without probing", async () => {
     const fetchMock = vi.fn();
     const receipt = await runTwilioPstnPreflight(baseInput({
