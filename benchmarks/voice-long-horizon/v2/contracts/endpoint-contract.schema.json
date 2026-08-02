@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hacc.dev/schemas/proof-v1/endpoint-contract.schema.json",
+  "title": "HACC-Proof-v1 endpoint and analysis contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_id", "example_only", "analysis_unit", "itt", "primary", "primary_analysis", "secondary", "claim_rule"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol_id": { "const": "hacc-proof-v1" },
+    "example_only": { "type": "boolean" },
+    "analysis_unit": { "const": "independent_scenario_template" },
+    "itt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["admission_boundary", "opened_units_retained", "incomplete_product_disposition", "unverifiable_product_disposition", "unopened_units_scored", "replacement_forbidden", "model_operational_failures"],
+      "properties": {
+        "admission_boundary": { "const": "first_paid_provider_session_crossed_network_admission" },
+        "opened_units_retained": { "const": true },
+        "incomplete_product_disposition": { "const": "failure" },
+        "unverifiable_product_disposition": { "const": "failure" },
+        "unopened_units_scored": { "const": false },
+        "replacement_forbidden": { "const": true },
+        "model_operational_failures": { "const": "unknown_with_complete_worst_best_sensitivity" }
+      }
+    },
+    "primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint_id", "type", "pass_conjuncts", "effect_direction", "paired"],
+      "properties": {
+        "endpoint_id": { "const": "useful_mission_success" },
+        "type": { "const": "binary" },
+        "pass_conjuncts": {
+          "const": ["terminal_world", "ordered_path_and_obligations", "latest_fact_revisions", "ambiguous_effects_reconciled", "no_critical_external_effect_breach", "no_critical_playable_speech_breach", "complete_opportunity_dispositions", "independent_replay"]
+        },
+        "effect_direction": { "const": "full_hacc_minus_registered_native" },
+        "paired": { "const": true }
+      }
+    },
+    "primary_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cluster", "template_provider_assignment", "provider_weighting", "within_provider_weighting", "test", "test_sidedness", "confidence_interval", "implementation", "power_uses_same_decision_rule"],
+      "properties": {
+        "cluster": { "const": "independent_scenario_template" },
+        "template_provider_assignment": { "const": "exactly_one_provider_per_template" },
+        "provider_weighting": { "const": "equal_across_provider_strata" },
+        "within_provider_weighting": { "const": "equal_across_templates" },
+        "test": { "const": "exact_provider_stratified_template_sign_flip" },
+        "test_sidedness": { "const": "two_sided" },
+        "confidence_interval": { "const": "inversion_of_same_exact_test" },
+        "implementation": { "const": "deterministic_exact_convolution" },
+        "power_uses_same_decision_rule": { "const": true }
+      }
+    },
+    "secondary": {
+      "type": "array",
+      "minItems": 7,
+      "uniqueItems": true,
+      "items": { "enum": ["task_completion", "model_integrity", "system_integrity", "reliable_semantic_horizon", "safe_first_audio_latency_ms", "task_completion_latency_ms", "provider_usage_and_cost"] }
+    },
+    "claim_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_effect_percentage_points", "alpha_two_sided", "confidence_level", "confidence_lower_bound_above_zero", "minimum_positive_providers", "negative_provider_estimates_allowed", "critical_hacc_external_breaches_allowed", "critical_hacc_playable_speech_breaches_allowed", "maximum_median_safe_first_audio_regression_ms", "all_opened_replayed", "prospective_power_required", "pilot_claim_eligible", "all_conjuncts_required"],
+      "properties": {
+        "minimum_effect_percentage_points": { "const": 10 },
+        "alpha_two_sided": { "const": 0.05 },
+        "confidence_level": { "const": 0.95 },
+        "confidence_lower_bound_above_zero": { "const": true },
+        "minimum_positive_providers": { "const": 2 },
+        "negative_provider_estimates_allowed": { "const": 0 },
+        "critical_hacc_external_breaches_allowed": { "const": 0 },
+        "critical_hacc_playable_speech_breaches_allowed": { "const": 0 },
+        "maximum_median_safe_first_audio_regression_ms": { "const": 150 },
+        "all_opened_replayed": { "const": true },
+        "prospective_power_required": { "const": true },
+        "pilot_claim_eligible": { "const": false },
+        "all_conjuncts_required": { "const": true }
+      }
+    }
+  }
+}

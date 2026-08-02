@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hacc.dev/schemas/proof-v1/treatment-contract.schema.json",
+  "title": "HACC-Proof-v1 treatment contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_id", "example_only", "arms", "pair_parity", "normative_oracle_firewall"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol_id": { "const": "hacc-proof-v1" },
+    "example_only": { "type": "boolean" },
+    "arms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "$ref": "#/$defs/nativeArm" },
+        { "$ref": "#/$defs/haccArm" }
+      ],
+      "items": false
+    },
+    "pair_parity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identical_fields", "content_parity_required", "provider_ack_required", "model_visible_tool_envelope", "benchmark_only_treatment_behavior_forbidden"],
+      "properties": {
+        "identical_fields": {
+          "type": "array",
+          "minItems": 12,
+          "uniqueItems": true,
+          "items": { "enum": ["scenario", "caller_policy", "caller_input_pcm", "provider", "acknowledged_model", "acknowledged_voice", "codec", "transport_settings", "generation_settings", "logical_tools", "tool_world", "deadlines", "repair_budget", "opportunity_contract", "effect_implementations"] }
+        },
+        "content_parity_required": { "const": true },
+        "provider_ack_required": { "const": true },
+        "model_visible_tool_envelope": { "const": "tool_name_arguments_only" },
+        "benchmark_only_treatment_behavior_forbidden": { "const": true }
+      }
+    },
+    "normative_oracle_firewall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forbidden_inputs", "verdicts", "side_effect_free"],
+      "properties": {
+        "forbidden_inputs": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": { "enum": ["arm", "prompt", "disclosed_catalog", "capability_grant", "flow_private_state", "actual_host_admission", "paired_outcome", "evaluator_score"] }
+        },
+        "verdicts": { "const": ["legal", "illegal", "unverifiable"] },
+        "side_effect_free": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "commonArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arm_id", "provider_realtime_api", "chronological_continuity", "common_gateway", "logical_tool_universe_identical", "semantic_reference_corpus_identical", "catalog_delivery", "reference_delivery", "hacc_mechanisms"],
+      "properties": {
+        "arm_id": { "enum": ["registered_native", "full_hacc"] },
+        "provider_realtime_api": { "const": true },
+        "chronological_continuity": { "const": true },
+        "common_gateway": { "const": true },
+        "logical_tool_universe_identical": { "const": true },
+        "semantic_reference_corpus_identical": { "const": true },
+        "catalog_delivery": { "enum": ["complete_initial", "state_conditioned"] },
+        "reference_delivery": { "enum": ["complete_initial", "staged_semantic_parity"] },
+        "hacc_mechanisms": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["staged_context", "scoped_capability_frontier", "revision_bound_leases", "durable_workflow_authority", "effect_receipts", "reconciliation", "revision_bound_workers"] }
+        }
+      }
+    },
+    "nativeArm": {
+      "allOf": [
+        { "$ref": "#/$defs/commonArm" },
+        { "properties": { "arm_id": { "const": "registered_native" }, "catalog_delivery": { "const": "complete_initial" }, "reference_delivery": { "const": "complete_initial" }, "hacc_mechanisms": { "maxItems": 0 } } }
+      ]
+    },
+    "haccArm": {
+      "allOf": [
+        { "$ref": "#/$defs/commonArm" },
+        { "properties": { "arm_id": { "const": "full_hacc" }, "catalog_delivery": { "const": "state_conditioned" }, "reference_delivery": { "const": "staged_semantic_parity" }, "hacc_mechanisms": { "minItems": 7, "maxItems": 7 } } }
+      ]
+    }
+  }
+}

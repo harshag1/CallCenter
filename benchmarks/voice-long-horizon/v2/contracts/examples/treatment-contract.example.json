@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "protocol_id": "hacc-proof-v1",
+  "example_only": true,
+  "arms": [
+    {
+      "arm_id": "registered_native",
+      "provider_realtime_api": true,
+      "chronological_continuity": true,
+      "common_gateway": true,
+      "logical_tool_universe_identical": true,
+      "semantic_reference_corpus_identical": true,
+      "catalog_delivery": "complete_initial",
+      "reference_delivery": "complete_initial",
+      "hacc_mechanisms": []
+    },
+    {
+      "arm_id": "full_hacc",
+      "provider_realtime_api": true,
+      "chronological_continuity": true,
+      "common_gateway": true,
+      "logical_tool_universe_identical": true,
+      "semantic_reference_corpus_identical": true,
+      "catalog_delivery": "state_conditioned",
+      "reference_delivery": "staged_semantic_parity",
+      "hacc_mechanisms": [
+        "staged_context",
+        "scoped_capability_frontier",
+        "revision_bound_leases",
+        "durable_workflow_authority",
+        "effect_receipts",
+        "reconciliation",
+        "revision_bound_workers"
+      ]
+    }
+  ],
+  "pair_parity": {
+    "identical_fields": [
+      "scenario",
+      "caller_policy",
+      "caller_input_pcm",
+      "provider",
+      "acknowledged_model",
+      "acknowledged_voice",
+      "codec",
+      "transport_settings",
+      "generation_settings",
+      "logical_tools",
+      "tool_world",
+      "deadlines",
+      "repair_budget",
+      "opportunity_contract",
+      "effect_implementations"
+    ],
+    "content_parity_required": true,
+    "provider_ack_required": true,
+    "model_visible_tool_envelope": "tool_name_arguments_only",
+    "benchmark_only_treatment_behavior_forbidden": true
+  },
+  "normative_oracle_firewall": {
+    "forbidden_inputs": [
+      "arm",
+      "prompt",
+      "disclosed_catalog",
+      "capability_grant",
+      "flow_private_state",
+      "actual_host_admission",
+      "paired_outcome",
+      "evaluator_score"
+    ],
+    "verdicts": ["legal", "illegal", "unverifiable"],
+    "side_effect_free": true
+  }
+}

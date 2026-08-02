@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hacc.dev/schemas/proof-v1/budget-contract.schema.json",
+  "title": "HACC-Proof-v1 budget contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_id", "example_only", "currency", "pools", "aggregate_registered_maximum_micro_usd", "pools_are_non_fungible", "repository_ceiling_still_applies", "admission", "prohibitions", "settlement"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol_id": { "const": "hacc-proof-v1" },
+    "example_only": { "type": "boolean" },
+    "currency": { "const": "USD" },
+    "pools": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["pool_id", "exclusive_ceiling_micro_usd", "permitted_phases"],
+          "properties": {
+            "pool_id": { "const": "api_testing" },
+            "exclusive_ceiling_micro_usd": { "const": 100000000 },
+            "permitted_phases": { "const": ["P2"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["pool_id", "exclusive_ceiling_micro_usd", "permitted_phases"],
+          "properties": {
+            "pool_id": { "const": "benchmark" },
+            "exclusive_ceiling_micro_usd": { "const": 100000000 },
+            "permitted_phases": { "const": ["P3", "P5"] }
+          }
+        }
+      ],
+      "items": false
+    },
+    "aggregate_registered_maximum_micro_usd": { "const": 200000000 },
+    "pools_are_non_fungible": { "const": true },
+    "repository_ceiling_still_applies": { "const": true },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pessimistic_reservation_required", "pool_total_must_not_exceed_cap", "repository_total_must_be_strictly_below_ceiling", "atomic_ledger_required", "credential_resolution_after_admission"],
+      "properties": {
+        "pessimistic_reservation_required": { "const": true },
+        "pool_total_must_not_exceed_cap": { "const": true },
+        "repository_total_must_be_strictly_below_ceiling": { "const": true },
+        "atomic_ledger_required": { "const": true },
+        "credential_resolution_after_admission": { "const": true }
+      }
+    },
+    "prohibitions": {
+      "const": ["paid_retry", "paid_reconnect", "fallback", "replacement_cell", "reserve_unit", "selective_rerun", "cross_pool_borrowing"]
+    },
+    "settlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opened_unit_charge_rule", "unopened_pre_network_continuation_allowed", "ambiguous_or_post_admission_quarantined"],
+      "properties": {
+        "opened_unit_charge_rule": { "const": "maximum_of_reservation_provider_report_invoice_or_best_estimate" },
+        "unopened_pre_network_continuation_allowed": { "const": true },
+        "ambiguous_or_post_admission_quarantined": { "const": true }
+      }
+    }
+  }
+}

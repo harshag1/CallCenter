@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "protocol_id": "hacc-proof-v1",
+  "example_only": true,
+  "serial": true,
+  "stop_on_failed_or_ambiguous": true,
+  "phases": [
+    {
+      "phase_id": "P0",
+      "name": "contract freeze",
+      "predecessor": null,
+      "paid": false,
+      "budget_pool": "none",
+      "claim_eligible": false,
+      "entry_requirements": ["protocol source available"],
+      "exit_requirements": ["schemas validate", "exact clean source and contract identities pinned"],
+      "failure_disposition": "stop"
+    },
+    {
+      "phase_id": "P1",
+      "name": "provider-free mechanisms",
+      "predecessor": "P0",
+      "paid": false,
+      "budget_pool": "none",
+      "claim_eligible": false,
+      "entry_requirements": ["P0 passed"],
+      "exit_requirements": ["production path replay passes", "fault and mutation suites pass"],
+      "failure_disposition": "stop"
+    },
+    {
+      "phase_id": "P2",
+      "name": "API testing",
+      "predecessor": "P1",
+      "paid": true,
+      "budget_pool": "api_testing",
+      "claim_eligible": false,
+      "entry_requirements": ["P1 passed", "pessimistic reservation admitted"],
+      "exit_requirements": ["all registered provider qualifications terminal and valid", "budget ledger settled"],
+      "failure_disposition": "stop"
+    },
+    {
+      "phase_id": "P3",
+      "name": "development pilot",
+      "predecessor": "P2",
+      "paid": true,
+      "budget_pool": "benchmark",
+      "claim_eligible": false,
+      "entry_requirements": ["P2 passed", "pilot schedule frozen", "pessimistic reservation admitted"],
+      "exit_requirements": ["all opened pilot units dispositioned", "blind evaluation finalized", "budget ledger settled"],
+      "failure_disposition": "stop_descriptive_only"
+    },
+    {
+      "phase_id": "P4",
+      "name": "confirmatory freeze",
+      "predecessor": "P3",
+      "paid": false,
+      "budget_pool": "none",
+      "claim_eligible": false,
+      "entry_requirements": ["P3 terminal and retained", "untouched confirmatory corpus available"],
+      "exit_requirements": ["prospective power passes", "full schedule fits remaining benchmark pool", "all source evaluator schedule and trust hashes frozen"],
+      "failure_disposition": "stop_descriptive_only"
+    },
+    {
+      "phase_id": "P5",
+      "name": "one-shot confirmatory collection",
+      "predecessor": "P4",
+      "paid": true,
+      "budget_pool": "benchmark",
+      "claim_eligible": false,
+      "entry_requirements": ["P4 passed", "one-shot schedule admitted"],
+      "exit_requirements": ["every opened unit retained", "raw manifests finalized", "budget ledger settled"],
+      "failure_disposition": "publish_no_claim"
+    },
+    {
+      "phase_id": "P6",
+      "name": "independent replay and publication",
+      "predecessor": "P5",
+      "paid": false,
+      "budget_pool": "none",
+      "claim_eligible": true,
+      "entry_requirements": ["P5 terminal", "both blind annotations finalized"],
+      "exit_requirements": ["independent replay byte-equal", "claim conjunction evaluated", "all dispositions and costs published"],
+      "failure_disposition": "publish_no_claim"
+    }
+  ]
+}

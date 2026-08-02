@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hacc.dev/schemas/proof-v1/evidence-manifest.schema.json",
+  "title": "HACC-Proof-v1 evidence manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_id", "example_only", "run_id", "pair_id", "schedule_ordinal", "provider", "arm", "network_admission", "terminal_disposition", "raw_manifest_finalized_before_evaluation", "artifacts", "required_artifact_kinds", "manifest_root_sha256"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol_id": { "const": "hacc-proof-v1" },
+    "example_only": { "type": "boolean" },
+    "run_id": { "$ref": "#/$defs/id" },
+    "pair_id": { "$ref": "#/$defs/id" },
+    "schedule_ordinal": { "type": "integer", "minimum": 0 },
+    "provider": { "enum": ["openai", "gemini", "xai"] },
+    "arm": { "enum": ["registered_native", "full_hacc"] },
+    "network_admission": { "enum": ["not_admitted", "admitted", "ambiguous"] },
+    "terminal_disposition": { "enum": ["completed", "failed", "quarantined", "unopened_cancelled", "budget_stopped", "safety_stopped", "custody_invalid"] },
+    "raw_manifest_finalized_before_evaluation": { "const": true },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_identity", "freeze_lock", "scenario", "treatment", "parity", "input_audio_index", "provider_wire", "session_identity", "normalized_events", "caller_selections", "caller_fact_ledger", "output_audio_index", "playback_ranges", "actions", "world_initial", "world_events", "world_final", "kernel_transcript", "kernel_attestation", "usage_pricing", "terminal_journal", "budget_settlement", "blind_package", "sealed_blind_map", "evaluation_contract", "normative_shadow", "audio_alignment", "score_v2", "independent_replay", "trust_pins"],
+      "properties": {
+        "source_identity": { "$ref": "#/$defs/artifact" },
+        "freeze_lock": { "$ref": "#/$defs/artifact" },
+        "scenario": { "$ref": "#/$defs/artifact" },
+        "treatment": { "$ref": "#/$defs/artifact" },
+        "parity": { "$ref": "#/$defs/artifact" },
+        "input_audio_index": { "$ref": "#/$defs/artifact" },
+        "provider_wire": { "$ref": "#/$defs/artifact" },
+        "session_identity": { "$ref": "#/$defs/artifact" },
+        "normalized_events": { "$ref": "#/$defs/artifact" },
+        "caller_selections": { "$ref": "#/$defs/artifact" },
+        "caller_fact_ledger": { "$ref": "#/$defs/artifact" },
+        "output_audio_index": { "$ref": "#/$defs/artifact" },
+        "playback_ranges": { "$ref": "#/$defs/artifact" },
+        "actions": { "$ref": "#/$defs/artifact" },
+        "world_initial": { "$ref": "#/$defs/artifact" },
+        "world_events": { "$ref": "#/$defs/artifact" },
+        "world_final": { "$ref": "#/$defs/artifact" },
+        "kernel_transcript": { "$ref": "#/$defs/artifact" },
+        "kernel_attestation": { "$ref": "#/$defs/artifact" },
+        "usage_pricing": { "$ref": "#/$defs/artifact" },
+        "terminal_journal": { "$ref": "#/$defs/artifact" },
+        "budget_settlement": { "$ref": "#/$defs/artifact" },
+        "blind_package": { "$ref": "#/$defs/artifact" },
+        "sealed_blind_map": { "$ref": "#/$defs/artifact" },
+        "evaluation_contract": { "$ref": "#/$defs/artifact" },
+        "normative_shadow": { "$ref": "#/$defs/artifact" },
+        "audio_alignment": { "$ref": "#/$defs/artifact" },
+        "score_v2": { "$ref": "#/$defs/artifact" },
+        "independent_replay": { "$ref": "#/$defs/artifact" },
+        "trust_pins": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "required_artifact_kinds": {
+      "const": ["source_identity", "freeze_lock", "scenario", "treatment", "parity", "input_audio_index", "provider_wire", "session_identity", "normalized_events", "caller_selections", "caller_fact_ledger", "output_audio_index", "playback_ranges", "actions", "world_initial", "world_events", "world_final", "kernel_transcript", "kernel_attestation", "usage_pricing", "terminal_journal", "budget_settlement", "blind_package", "sealed_blind_map", "evaluation_contract", "normative_shadow", "audio_alignment", "score_v2", "independent_replay", "trust_pins"]
+    },
+    "manifest_root_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "network_admission": { "const": "not_admitted" } }, "required": ["network_admission"] },
+      "then": { "properties": { "terminal_disposition": { "enum": ["unopened_cancelled", "budget_stopped", "custody_invalid"] } } }
+    },
+    {
+      "if": { "properties": { "network_admission": { "const": "ambiguous" } }, "required": ["network_admission"] },
+      "then": { "properties": { "terminal_disposition": { "enum": ["quarantined", "custody_invalid"] } } }
+    },
+    {
+      "if": { "properties": { "network_admission": { "const": "admitted" } }, "required": ["network_admission"] },
+      "then": { "properties": { "terminal_disposition": { "enum": ["completed", "failed", "quarantined", "budget_stopped", "safety_stopped", "custody_invalid"] } } }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_length", "content_addressed", "reopened_and_verified"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "byte_length": { "type": "integer", "minimum": 1 },
+        "content_addressed": { "const": true },
+        "reopened_and_verified": { "const": true }
+      }
+    }
+  }
+}

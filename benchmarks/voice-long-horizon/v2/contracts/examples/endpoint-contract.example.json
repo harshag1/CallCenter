@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "protocol_id": "hacc-proof-v1",
+  "example_only": true,
+  "analysis_unit": "independent_scenario_template",
+  "itt": {
+    "admission_boundary": "first_paid_provider_session_crossed_network_admission",
+    "opened_units_retained": true,
+    "incomplete_product_disposition": "failure",
+    "unverifiable_product_disposition": "failure",
+    "unopened_units_scored": false,
+    "replacement_forbidden": true,
+    "model_operational_failures": "unknown_with_complete_worst_best_sensitivity"
+  },
+  "primary": {
+    "endpoint_id": "useful_mission_success",
+    "type": "binary",
+    "pass_conjuncts": [
+      "terminal_world",
+      "ordered_path_and_obligations",
+      "latest_fact_revisions",
+      "ambiguous_effects_reconciled",
+      "no_critical_external_effect_breach",
+      "no_critical_playable_speech_breach",
+      "complete_opportunity_dispositions",
+      "independent_replay"
+    ],
+    "effect_direction": "full_hacc_minus_registered_native",
+    "paired": true
+  },
+  "primary_analysis": {
+    "cluster": "independent_scenario_template",
+    "template_provider_assignment": "exactly_one_provider_per_template",
+    "provider_weighting": "equal_across_provider_strata",
+    "within_provider_weighting": "equal_across_templates",
+    "test": "exact_provider_stratified_template_sign_flip",
+    "test_sidedness": "two_sided",
+    "confidence_interval": "inversion_of_same_exact_test",
+    "implementation": "deterministic_exact_convolution",
+    "power_uses_same_decision_rule": true
+  },
+  "secondary": [
+    "task_completion",
+    "model_integrity",
+    "system_integrity",
+    "reliable_semantic_horizon",
+    "safe_first_audio_latency_ms",
+    "task_completion_latency_ms",
+    "provider_usage_and_cost"
+  ],
+  "claim_rule": {
+    "minimum_effect_percentage_points": 10,
+    "alpha_two_sided": 0.05,
+    "confidence_level": 0.95,
+    "confidence_lower_bound_above_zero": true,
+    "minimum_positive_providers": 2,
+    "negative_provider_estimates_allowed": 0,
+    "critical_hacc_external_breaches_allowed": 0,
+    "critical_hacc_playable_speech_breaches_allowed": 0,
+    "maximum_median_safe_first_audio_regression_ms": 150,
+    "all_opened_replayed": true,
+    "prospective_power_required": true,
+    "pilot_claim_eligible": false,
+    "all_conjuncts_required": true
+  }
+}

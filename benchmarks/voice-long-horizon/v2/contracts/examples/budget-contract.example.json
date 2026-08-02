@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "protocol_id": "hacc-proof-v1",
+  "example_only": true,
+  "currency": "USD",
+  "pools": [
+    {
+      "pool_id": "api_testing",
+      "exclusive_ceiling_micro_usd": 100000000,
+      "permitted_phases": ["P2"]
+    },
+    {
+      "pool_id": "benchmark",
+      "exclusive_ceiling_micro_usd": 100000000,
+      "permitted_phases": ["P3", "P5"]
+    }
+  ],
+  "aggregate_registered_maximum_micro_usd": 200000000,
+  "pools_are_non_fungible": true,
+  "repository_ceiling_still_applies": true,
+  "admission": {
+    "pessimistic_reservation_required": true,
+    "pool_total_must_not_exceed_cap": true,
+    "repository_total_must_be_strictly_below_ceiling": true,
+    "atomic_ledger_required": true,
+    "credential_resolution_after_admission": true
+  },
+  "prohibitions": [
+    "paid_retry",
+    "paid_reconnect",
+    "fallback",
+    "replacement_cell",
+    "reserve_unit",
+    "selective_rerun",
+    "cross_pool_borrowing"
+  ],
+  "settlement": {
+    "opened_unit_charge_rule": "maximum_of_reservation_provider_report_invoice_or_best_estimate",
+    "unopened_pre_network_continuation_allowed": true,
+    "ambiguous_or_post_admission_quarantined": true
+  }
+}
