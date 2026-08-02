@@ -6,10 +6,15 @@
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
+  "workspaces": [
+    "packages/*",
+    "examples/sdk-consumer"
+  ],
   "scripts": {
     "demo:proof": "node scripts/hacc-proof-demo.mjs",
     "demo:offline": "node scripts/provider-free-first-run.mjs",
     "demo:offline:check": "node scripts/provider-free-first-run.mjs --check",
-    "flow:visualize": "node scripts/provider-free-first-run.mjs --visualize"
+    "flow:visualize": "node scripts/provider-free-first-run.mjs --visualize",
+    "sdk:check": "node scripts/check-public-sdk.mjs"
   }
 }
