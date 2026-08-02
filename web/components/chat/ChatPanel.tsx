@@ -198,7 +198,7 @@ export default function ChatPanel({
               rows={1}
               ref={inputRef}
               value={input}
-              placeholder="Create or modify voice agents"
+              placeholder="Change the agent"
               onChange={(e) => { setInput(e.target.value); autoGrow(); }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }

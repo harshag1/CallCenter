@@ -587,7 +587,7 @@ export default function Workspace() {
                 className="absolute bottom-3 left-1/2 z-20 w-[min(92%,390px)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl"
               >
                 <p className="text-[13px] font-semibold text-neutral-950">Live test</p>
-                <p className="mt-1 text-[11px] leading-4 text-neutral-500">Uses your microphone and realtime provider credits.</p>
+                <p className="mt-1 text-[11px] leading-4 text-neutral-500">Microphone · provider credits</p>
                 <div className="mt-3 flex justify-end gap-2">
                   <button
                     onClick={() => setShowLiveTestConfirm(false)}

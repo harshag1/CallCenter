@@ -27,14 +27,13 @@ import TopPills from "@/components/studio/TopPills";
 import FilesModal from "@/components/studio/FilesModal";
 import CallWidget from "@/components/call/CallWidget";
 import { AgentFlowSchema, type AgentFlow, type FlowNode } from "@/lib/flow";
-import { shortBrand } from "@/lib/brand";
 import NodeEditor from "@/components/studio/NodeEditor";
 import TracePanel, { type TraceEvent } from "@/components/studio/TracePanel";
 import { PRODUCT_NAME } from "@/lib/product";
 import { inspectFlow } from "@/lib/flow-inspector";
 
 type Status = {
-  onboarding: { agent_id?: string; company?: string; number_status?: string; number?: string; flow_ready?: boolean };
+  onboarding: { agent_id?: string; number_status?: string; number?: string; flow_ready?: boolean };
   favicon_url: string | null;
   internet_enabled: boolean;
   allowed_domains: string[];
@@ -288,8 +287,6 @@ export default function Studio() {
     router.push("/login");
   }
 
-  const company = status?.onboarding.company;
-  const brand = shortBrand(company);
   const inspection = flow ? inspectFlow(flow) : null;
 
   return (
@@ -341,7 +338,7 @@ export default function Studio() {
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-neutral-300">
               <Loader2 size={18} className="animate-spin" />
-              <span className="text-xs">{brand ? `Designing the ${brand} Agent…` : "Researching your company…"}</span>
+              <span className="text-xs">Building…</span>
             </div>
           )}
           {editingNode && agentId && (
@@ -420,7 +417,7 @@ export default function Studio() {
               <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[10px] text-neutral-600">
                 <span className="font-medium text-neutral-800">{inspection.toolExposure === "gateway" ? "Gateway" : "Direct"}</span>
                 <span className="text-neutral-300">·</span>
-                <span>{inspection.alwaysTools.length} global tools</span>
+                <span>{inspection.alwaysTools.length} global</span>
                 <span className="text-neutral-300">·</span>
                 <span>{inspection.scopedTools.length} scoped</span>
               </div>
@@ -435,7 +432,7 @@ export default function Studio() {
             >
               <p className="text-[13px] font-semibold text-neutral-950">Live test</p>
               <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-                Uses your microphone and realtime provider credits.
+                Microphone · provider credits
               </p>
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button

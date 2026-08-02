@@ -77,7 +77,7 @@ export default function NodeEditor({
         ) : (
           <input value={label} onChange={(e) => setLabel(e.target.value)} className="mr-2 w-full bg-transparent text-[13px] font-semibold outline-none" />
         )}
-        <button onClick={onClose} className="text-neutral-300 hover:text-neutral-900"><X size={14} /></button>
+        <button aria-label="Close" onClick={onClose} className="text-neutral-300 hover:text-neutral-900"><X size={14} /></button>
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-3">
@@ -162,7 +162,7 @@ export default function NodeEditor({
 
         {node.kind === "fallback" && (
           <p className="text-[12px] leading-relaxed text-neutral-500">
-            Out-of-scope calls offer a transfer to the support line{node.support_number ? ` (${node.support_number})` : ""}.
+            Transfers out-of-scope calls{node.support_number ? ` to ${node.support_number}` : ""}.
           </p>
         )}
       </div>

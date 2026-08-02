@@ -49,11 +49,12 @@ export default function FilesModal({ open, onClose, onCountChange }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-950/20 backdrop-blur-[2px]" onClick={onClose}>
       <div className="w-[440px] rounded-[24px] border border-neutral-200 bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
-          <div className="text-[14px] font-semibold">Upload Files</div>
-          <button onClick={onClose} className="text-neutral-300 hover:text-neutral-900"><X size={16} /></button>
+          <div className="text-[14px] font-semibold">Files</div>
+          <button aria-label="Close" onClick={onClose} className="text-neutral-300 hover:text-neutral-900"><X size={16} /></button>
         </div>
 
         <button
+          aria-label="Upload files"
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={(e) => { e.preventDefault(); setDragging(false); upload(e.dataTransfer.files); }}
@@ -63,7 +64,6 @@ export default function FilesModal({ open, onClose, onCountChange }: {
           }`}
         >
           {uploading ? <Loader2 size={16} className="animate-spin text-neutral-400" /> : <Upload size={16} className="text-neutral-400" />}
-          <span className="text-[11px] text-neutral-400">Anything the agent might find useful</span>
           <input
             ref={fileRef} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.csv,.json,.mp3,.wav,.m4a"
             onChange={(e) => e.target.files?.length && upload(e.target.files)}
