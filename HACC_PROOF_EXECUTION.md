@@ -41,25 +41,25 @@ The existing claim-readiness audit remains authoritative until HACC-Proof-v1 rep
 
 ### Wave 0 — contracts and treatment boundary
 
-- [ ] Freeze HACC-Proof-v1 protocol and machine-readable endpoint contract.
-- [ ] Freeze independent `$100` testing and `$100` benchmark ledgers.
-- [ ] Freeze Native/Full-HACC treatment manifests and parity proof.
-- [ ] Freeze evidence-v2 manifest and offline replay requirements.
-- [ ] Freeze exact paired analysis and claim-decision implementation.
+- [x] Freeze HACC-Proof-v1 protocol and machine-readable endpoint contract.
+- [x] Freeze independent `$100` testing and `$100` benchmark ledgers.
+- [x] Freeze Native/Full-HACC treatment manifests and parity proof.
+- [x] Freeze evidence-v2 manifest and offline replay requirements.
+- [x] Freeze exact paired analysis and claim-decision implementation. A cross-team audit found one bootstrap-unit mismatch; correction is in progress before report integration.
 
 ### Wave 1 — production authority convergence
 
-- [ ] Production state-derived Turn Contract.
-- [ ] Canonical ConversationProgram projection.
-- [ ] Default governed effect admission and reconciliation.
-- [ ] Provider lifecycle/evidence conformance contract.
+- [x] Production state-derived Turn Contract.
+- [x] Canonical ConversationProgram projection.
+- [x] Provider-neutral governed effect coordinator and reconciliation contract.
+- [x] Provider lifecycle/evidence conformance contract.
 - [ ] Production EvidenceTap integration.
 
 ### Wave 2 — falsification before providers
 
-- [ ] Fault matrix for stale/forged authority, races, reconnects, workers, audibility, and tampering.
-- [ ] Provider-free reference vertical demonstrating detour, recovery, worker, and replay.
-- [ ] Clean independent replay from frozen artifacts.
+- [x] Initial 15-case fault matrix for stale/forged authority, races, reconnects, workers, audibility, and tampering: 15/15 passed, zero unauthorized effects and zero forbidden released outputs.
+- [x] Provider-free five-process field-service reference vertical demonstrating detour, indeterminate-effect reconciliation, worker, and replay.
+- [x] Evidence-v2 clean replay and mutation rejection implemented in isolation.
 - [ ] No benchmark-only behavior absent from the production treatment.
 
 ### Wave 3 — paid qualification and development pilot
@@ -87,4 +87,5 @@ No superiority graph or "HACC is better" statement is permitted until the prereg
 | Time (PT) | Envelope | Operation | Reserved | Observed | Status |
 |---|---|---|---:|---:|---|
 | 2026-08-02 | Testing | Program initialization and offline baseline | $0 | $0 | Complete |
+| 2026-08-02 | Testing | Wave 0 contracts, simulation, replay and integration tests | $0 | $0 | Complete |
 | 2026-08-02 | Benchmark | Program initialization | $0 | $0 | Closed pending gates |
