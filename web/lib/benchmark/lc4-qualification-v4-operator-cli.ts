@@ -1,5 +1,5 @@
 import { createPrivateKey, createPublicKey } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import { canonicalJson, sha256Hex } from "./artifacts";
@@ -37,6 +37,16 @@ import {
 } from "./provider-s2s-tool-roundtrip";
 import { createProductionRealtimeClient } from "./production-realtime-provider";
 import { DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE } from "./orchestrator";
+import {
+  createSignedLc4QualificationV4Package,
+  verifySignedLc4QualificationV4Package,
+} from "./lc4-qualification-v4-package";
+import type {
+  Lc4QualificationV4Aggregate,
+  Lc4QualificationV4Manifest,
+  Lc4QualificationV4ReplayShard,
+} from "./lc4-qualification-v4-shards";
+import type { Lc4QualificationPackageFile } from "./lc4-qualification-package-envelope";
 
 const MAXIMUM_JSON_BYTES = 16 * 1024 * 1024;
 
@@ -174,7 +184,55 @@ async function productionState(input: Readonly<{
       });
     })),
   });
-  return Object.freeze({ plan, authorization, source, credentials, setupTargets, paidTargets, binding });
+  return Object.freeze({ plan, authorization, terminalPrivateKeyPem, source, credentials, setupTargets, paidTargets, binding });
+}
+
+async function readJson<T>(path: string): Promise<T> {
+  return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function replayArtifacts(root: string) {
+  const manifest = await readJson<Lc4QualificationV4Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
+  const aggregate = await readJson<Lc4QualificationV4Aggregate>(resolve(root, "qualification-v4-aggregate.json"));
+  const shards: Lc4QualificationV4ReplayShard[] = [];
+  const evidenceFiles: Lc4QualificationPackageFile[] = [];
+  for (const [ordinal, provider] of ["openai", "gemini", "xai"].entries()) {
+    const prefix = `${String(ordinal).padStart(2, "0")}-${provider}`;
+    const shardRoot = resolve(root, "qualification-v4-shards", `${ordinal}-${provider}`);
+    shards.push(Object.freeze({
+      reservation: await readJson(resolve(shardRoot, "reservation.json")),
+      setup_admission: await readJson(resolve(shardRoot, "setup-admission.json")),
+      setup_terminal: await readJson(resolve(shardRoot, "setup-terminal.json")),
+      paid_admission: await readJson(resolve(shardRoot, "paid-admission.json")),
+      paid_terminal: await readJson(resolve(shardRoot, "paid-terminal.json")),
+      shard_terminal: await readJson(resolve(shardRoot, "shard-terminal.json")),
+    }));
+    for (const [source, target] of [
+      [`qualifications/${provider}-qv4-${provider}.json`, `${prefix}-setup-qualification.json`],
+      [`${provider}-spoken-roundtrip.json`, `${prefix}-spoken-roundtrip.json`],
+      [`${provider}-spoken-roundtrip-wire.jsonl`, `${prefix}-spoken-roundtrip-wire.jsonl`],
+      [`${provider}-spoken-roundtrip-usage.jsonl`, `${prefix}-spoken-roundtrip-usage.jsonl`],
+    ] as const) {
+      evidenceFiles.push(Object.freeze({ path: target, bytes: await readFile(resolve(shardRoot, source)) }));
+    }
+  }
+  return Object.freeze({ manifest, aggregate, shards: Object.freeze(shards), evidenceFiles: Object.freeze(evidenceFiles) });
+}
+
+async function retainPackage(root: string, attemptId: string, files: readonly Lc4QualificationPackageFile[], envelope: unknown): Promise<string> {
+  const attempts = resolve(root, "attempts");
+  await mkdir(attempts, { recursive: true, mode: 0o700 });
+  const partial = resolve(attempts, `${attemptId}.v4-package.partial`);
+  const complete = resolve(attempts, `${attemptId}.v4-package.complete`);
+  await mkdir(partial, { mode: 0o700 });
+  for (const file of files) await writeFile(resolve(partial, file.path), file.bytes, { flag: "wx", mode: 0o400 });
+  await writeFile(
+    resolve(partial, "qualification-package-envelope.json"),
+    `${canonicalJson(envelope)}\n`,
+    { flag: "wx", mode: 0o400 },
+  );
+  await rename(partial, complete);
+  return complete;
 }
 
 const LIVE_FLAGS = Object.freeze([
@@ -287,6 +345,8 @@ export async function runLc4QualificationV4OperatorCli(
             failure_class: providerResult.status === "passed" ? "none" : providerResult.code,
             evidence_sha256: artifact.artifactSha256,
             wire_head_sha256: wire.at(-1)?.observationSha256 ?? null,
+            wire_observation_count: wire.length,
+            reconnect_count: wire.filter((observation) => observation.connectionEpoch !== 1).length,
             usage_event_count: 0,
             usage_evidence_sha256: sha256Hex(canonicalJson([])),
             provider_sessions_opened: 1 as const,
@@ -327,6 +387,8 @@ export async function runLc4QualificationV4OperatorCli(
             failure_class: execution.status === "passed" ? "none" : execution.failure_class,
             evidence_sha256: execution.evidence_sha256,
             wire_head_sha256: execution.wire_observations.at(-1)?.observationSha256 ?? null,
+            wire_observation_count: execution.wire_observations.length,
+            reconnect_count: execution.wire_observations.filter((observation) => observation.connectionEpoch !== 1).length,
             usage_event_count: execution.sanitized_usage.length,
             usage_evidence_sha256: sha256Hex(canonicalJson(execution.sanitized_usage)),
             provider_sessions_opened: 1 as const,
@@ -337,7 +399,7 @@ export async function runLc4QualificationV4OperatorCli(
         },
       },
     });
-    await finalizeLc4QualificationBudget({
+    const budgetEvidence = await finalizeLc4QualificationBudget({
       reservation: budget,
       attemptId: state.authorization.body.authorization_id,
       usageEventCount: aggregate.usage_event_count,
@@ -345,12 +407,41 @@ export async function runLc4QualificationV4OperatorCli(
       outcome: aggregate.status === "passed" ? "completed" : "failed",
       now: io.now,
     });
+    const replay = await replayArtifacts(root);
+    const signedPackage = createSignedLc4QualificationV4Package({
+      binding: state.binding,
+      manifest: replay.manifest,
+      aggregate: replay.aggregate,
+      shards: replay.shards,
+      plan: state.plan,
+      authorization: state.authorization,
+      budget: budgetEvidence,
+      budgetBinding,
+      terminalPrivateKeyPem: state.terminalPrivateKeyPem,
+      sealedAt: io.now().toISOString(),
+      evidenceFiles: replay.evidenceFiles,
+    });
+    await verifySignedLc4QualificationV4Package({
+      envelope: signedPackage.envelope,
+      files: signedPackage.files,
+      expectedTrustRootFingerprintSha256: parsed["--trust-root-fingerprint"],
+      expectedBinding: state.binding,
+      budgetBinding,
+    });
+    const packagePath = await retainPackage(
+      root,
+      state.authorization.body.authorization_id,
+      signedPackage.files,
+      signedPackage.envelope,
+    );
     io.stdout(`${canonicalJson({
       action: "lc4-qualification-v4-retained",
       status: aggregate.status,
       aggregate_sha256: aggregate.aggregate_sha256,
       completed_provider_shards: aggregate.shard_terminal_sha256.length,
       paid_retries_attempted: 0,
+      signed_package_path: packagePath,
+      signed_package_envelope_sha256: signedPackage.envelope.artifact_sha256,
     })}\n`);
     return aggregate.status === "passed" ? 0 : 1;
   } catch (error) {

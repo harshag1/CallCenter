@@ -67,6 +67,8 @@ export type Lc4QualificationV4PhaseResult = Readonly<{
   failure_class: string;
   evidence_sha256: string;
   wire_head_sha256: string | null;
+  wire_observation_count: number;
+  reconnect_count: number;
   usage_event_count: number;
   usage_evidence_sha256: string;
   provider_sessions_opened: 0 | 1;
@@ -133,17 +135,17 @@ export type Lc4QualificationV4Aggregate = Readonly<{
   aggregate_sha256: string;
 }>;
 
-type Manifest = Readonly<{
+export type Lc4QualificationV4Manifest = Readonly<{
   schema_version: 1;
   runner_version: typeof LC4_QUALIFICATION_V4_SHARD_RUNNER_VERSION;
   binding: Lc4QualificationV4Binding;
   provider_order: typeof LC4_QUALIFICATION_V4_PROVIDER_ORDER;
   maximum_total_micro_usd: typeof LC4_QUALIFICATION_V4_MAXIMUM_TOTAL_MICRO_USD;
-  reservations: readonly Reservation[];
+  reservations: readonly Lc4QualificationV4Reservation[];
   manifest_sha256: string;
 }>;
 
-type Reservation = Readonly<{
+export type Lc4QualificationV4Reservation = Readonly<{
   schema_version: 1;
   shard_id: string;
   reservation_id: string;
@@ -156,7 +158,7 @@ type Reservation = Readonly<{
   reservation_sha256: string;
 }>;
 
-type PhaseTerminal = Readonly<{
+export type Lc4QualificationV4PhaseTerminal = Readonly<{
   schema_version: 1;
   shard_id: string;
   reservation_id: string;
@@ -320,7 +322,7 @@ async function exists(path: string): Promise<boolean> {
   });
 }
 
-function reservation(binding: Lc4QualificationV4Binding, ordinal: number): Reservation {
+function reservation(binding: Lc4QualificationV4Binding, ordinal: number): Lc4QualificationV4Reservation {
   const provider = binding.providers[ordinal]!;
   const seed = freeze({
     attempt_id: binding.attempt_id,
@@ -348,7 +350,7 @@ function reservation(binding: Lc4QualificationV4Binding, ordinal: number): Reser
   });
 }
 
-function manifest(binding: Lc4QualificationV4Binding): Manifest {
+function manifest(binding: Lc4QualificationV4Binding): Lc4QualificationV4Manifest {
   assertBinding(binding);
   const body = freeze({
     schema_version: 1 as const,
@@ -361,7 +363,7 @@ function manifest(binding: Lc4QualificationV4Binding): Manifest {
   return freeze({ ...body, manifest_sha256: sha256Hex(`${MANIFEST_DOMAIN}${canonicalJson(body)}`) });
 }
 
-function assertManifest(value: Manifest, binding: Lc4QualificationV4Binding): void {
+function assertManifest(value: Lc4QualificationV4Manifest, binding: Lc4QualificationV4Binding): void {
   const expected = manifest(binding);
   if (canonicalJson(value) !== canonicalJson(expected)) {
     throw new Error("qualification shard source, authorization, model, credential, audio, profile, or plan binding changed");
@@ -371,10 +373,18 @@ function assertManifest(value: Manifest, binding: Lc4QualificationV4Binding): vo
 function phaseTerminal(
   context: Lc4QualificationV4PhaseContext,
   result: Lc4QualificationV4PhaseResult,
-): PhaseTerminal {
+): Lc4QualificationV4PhaseTerminal {
   requireSha(result.evidence_sha256, `${context.provider} ${context.phase} evidence`);
   requireSha(result.usage_evidence_sha256, `${context.provider} ${context.phase} usage evidence`);
   if (result.wire_head_sha256 !== null) requireSha(result.wire_head_sha256, `${context.provider} wire head`);
+  if (!Number.isSafeInteger(result.wire_observation_count)
+    || result.wire_observation_count < 0
+    || !Number.isSafeInteger(result.reconnect_count)
+    || result.reconnect_count < 0
+    || result.reconnect_count > result.wire_observation_count
+    || (result.status === "passed" && (result.wire_head_sha256 === null || result.wire_observation_count === 0))) {
+    throw new Error(`${context.provider} ${context.phase} wire counters are invalid`);
+  }
   if (!Number.isSafeInteger(result.usage_event_count) || result.usage_event_count < 0) {
     throw new Error(`${context.provider} ${context.phase} usage count is invalid`);
   }
@@ -421,7 +431,7 @@ function phaseTerminal(
   return freeze({ ...body, phase_terminal_sha256: sha256Hex(`${PHASE_DOMAIN}${canonicalJson(body)}`) });
 }
 
-function assertPhaseTerminal(value: PhaseTerminal, context: Lc4QualificationV4PhaseContext): void {
+function assertPhaseTerminal(value: Lc4QualificationV4PhaseTerminal, context: Lc4QualificationV4PhaseContext): void {
   const expected = phaseTerminal(context, value.result);
   if (canonicalJson(value) !== canonicalJson(expected)) {
     throw new Error(`${context.provider} retained ${context.phase} terminal failed integrity or predecessor binding`);
@@ -429,10 +439,10 @@ function assertPhaseTerminal(value: PhaseTerminal, context: Lc4QualificationV4Ph
 }
 
 function shardTerminal(input: Readonly<{
-  reservation: Reservation;
+  reservation: Lc4QualificationV4Reservation;
   predecessor: string | null;
-  setup: PhaseTerminal | null;
-  paid: PhaseTerminal | null;
+  setup: Lc4QualificationV4PhaseTerminal | null;
+  paid: Lc4QualificationV4PhaseTerminal | null;
   status: "passed" | "failed" | "cancelled";
   failureClass: string;
 }>): Lc4QualificationV4ShardTerminal {
@@ -469,7 +479,7 @@ function shardTerminal(input: Readonly<{
   return freeze({ ...body, terminal_sha256: sha256Hex(`${SHARD_DOMAIN}${canonicalJson(body)}`) });
 }
 
-function assertShardTerminal(value: Lc4QualificationV4ShardTerminal, expected: Omit<Parameters<typeof shardTerminal>[0], "setup" | "paid"> & Readonly<{ setup: PhaseTerminal | null; paid: PhaseTerminal | null }>): void {
+function assertShardTerminal(value: Lc4QualificationV4ShardTerminal, expected: Omit<Parameters<typeof shardTerminal>[0], "setup" | "paid"> & Readonly<{ setup: Lc4QualificationV4PhaseTerminal | null; paid: Lc4QualificationV4PhaseTerminal | null }>): void {
   const rebuilt = shardTerminal(expected);
   if (canonicalJson(value) !== canonicalJson(rebuilt)) {
     throw new Error(`${value.provider} completed shard failed immutable integrity`);
@@ -504,7 +514,7 @@ async function assertAdmission(path: string, context: Lc4QualificationV4PhaseCon
 
 async function quarantine(
   shardPath: string,
-  reservationValue: Reservation,
+  reservationValue: Lc4QualificationV4Reservation,
   phase: "setup" | "paid",
   predecessor: string | null,
   setupTerminalSha256: string | null,
@@ -529,12 +539,12 @@ async function quarantine(
 
 async function runPhase(input: Readonly<{
   shardPath: string;
-  reservation: Reservation;
+  reservation: Lc4QualificationV4Reservation;
   predecessor: string | null;
   setupTerminalSha256: string | null;
   phase: "setup" | "paid";
   execute(context: Lc4QualificationV4PhaseContext): Promise<Lc4QualificationV4PhaseResult>;
-}>): Promise<PhaseTerminal> {
+}>): Promise<Lc4QualificationV4PhaseTerminal> {
   const context = freeze({
     provider: input.reservation.provider,
     model: input.reservation.model,
@@ -552,7 +562,7 @@ async function runPhase(input: Readonly<{
       throw new Error(`${input.reservation.provider} retained ${input.phase} terminal lacks its admission boundary`);
     }
     await assertAdmission(admissionPath, context);
-    const retained = await readJson<PhaseTerminal>(terminalPath);
+    const retained = await readJson<Lc4QualificationV4PhaseTerminal>(terminalPath);
     assertPhaseTerminal(retained, context);
     return retained;
   }
@@ -577,7 +587,7 @@ async function runPhase(input: Readonly<{
       input.setupTerminalSha256,
     );
   }
-  let terminal: PhaseTerminal;
+  let terminal: Lc4QualificationV4PhaseTerminal;
   try {
     const result = await input.execute(context);
     terminal = phaseTerminal(context, freeze(result));
@@ -599,11 +609,11 @@ async function runPhase(input: Readonly<{
 
 async function loadRetainedPhase(input: Readonly<{
   shardPath: string;
-  reservation: Reservation;
+  reservation: Lc4QualificationV4Reservation;
   predecessor: string | null;
   setupTerminalSha256: string | null;
   phase: "setup" | "paid";
-}>): Promise<PhaseTerminal | null> {
+}>): Promise<Lc4QualificationV4PhaseTerminal | null> {
   const terminalPath = resolve(input.shardPath, `${input.phase}-terminal.json`);
   if (!await exists(terminalPath)) return null;
   const context = freeze({
@@ -620,12 +630,12 @@ async function loadRetainedPhase(input: Readonly<{
     throw new Error(`${input.reservation.provider} retained ${input.phase} terminal lacks admission evidence`);
   }
   await assertAdmission(admissionPath, context);
-  const retained = await readJson<PhaseTerminal>(terminalPath);
+  const retained = await readJson<Lc4QualificationV4PhaseTerminal>(terminalPath);
   assertPhaseTerminal(retained, context);
   return retained;
 }
 
-function aggregate(manifestValue: Manifest, shards: readonly Lc4QualificationV4ShardTerminal[]): Lc4QualificationV4Aggregate {
+function aggregate(manifestValue: Lc4QualificationV4Manifest, shards: readonly Lc4QualificationV4ShardTerminal[]): Lc4QualificationV4Aggregate {
   const failure = shards.find((shard) => shard.status === "failed");
   const body = freeze({
     schema_version: 1 as const,
@@ -649,6 +659,85 @@ function aggregate(manifestValue: Manifest, shards: readonly Lc4QualificationV4S
     maximum_total_micro_usd: LC4_QUALIFICATION_V4_MAXIMUM_TOTAL_MICRO_USD,
   });
   return freeze({ ...body, aggregate_sha256: sha256Hex(`${AGGREGATE_DOMAIN}${canonicalJson(body)}`) });
+}
+
+export type Lc4QualificationV4ReplayShard = Readonly<{
+  reservation: Lc4QualificationV4Reservation;
+  setup_admission: unknown;
+  setup_terminal: Lc4QualificationV4PhaseTerminal;
+  paid_admission: unknown;
+  paid_terminal: Lc4QualificationV4PhaseTerminal;
+  shard_terminal: Lc4QualificationV4ShardTerminal;
+}>;
+
+/** Provider-free replay verifier used by the signed package bridge. */
+export function assertLc4QualificationV4CompletedReplay(input: Readonly<{
+  binding: Lc4QualificationV4Binding;
+  manifest: Lc4QualificationV4Manifest;
+  aggregate: Lc4QualificationV4Aggregate;
+  shards: readonly Lc4QualificationV4ReplayShard[];
+}>): void {
+  assertManifest(input.manifest, input.binding);
+  if (input.shards.length !== LC4_QUALIFICATION_V4_PROVIDER_ORDER.length) {
+    throw new Error("qualification v4 replay must contain exactly three provider shards");
+  }
+  const terminals: Lc4QualificationV4ShardTerminal[] = [];
+  let predecessor: string | null = null;
+  for (let ordinal = 0; ordinal < input.shards.length; ordinal += 1) {
+    const shard = input.shards[ordinal]!;
+    const expectedReservation = input.manifest.reservations[ordinal]!;
+    if (canonicalJson(shard.reservation) !== canonicalJson(expectedReservation)) {
+      throw new Error("qualification v4 replay shard reservation was substituted or reordered");
+    }
+    const setupContext = freeze({
+      provider: expectedReservation.provider,
+      model: expectedReservation.model,
+      shard_id: expectedReservation.shard_id,
+      reservation_id: expectedReservation.reservation_id,
+      predecessor_shard_terminal_sha256: predecessor,
+      setup_terminal_sha256: null,
+      phase: "setup" as const,
+    });
+    if (canonicalJson(shard.setup_admission) !== canonicalJson(admissionArtifact(setupContext))) {
+      throw new Error("qualification v4 replay setup admission differs from its shard");
+    }
+    assertPhaseTerminal(shard.setup_terminal, setupContext);
+    if (shard.setup_terminal.result.status !== "passed") {
+      throw new Error("qualification v4 completed release replay contains failed setup");
+    }
+    const paidContext = freeze({
+      ...setupContext,
+      setup_terminal_sha256: shard.setup_terminal.phase_terminal_sha256,
+      phase: "paid" as const,
+    });
+    if (canonicalJson(shard.paid_admission) !== canonicalJson(admissionArtifact(paidContext))) {
+      throw new Error("qualification v4 replay paid admission differs from its shard");
+    }
+    assertPhaseTerminal(shard.paid_terminal, paidContext);
+    if (shard.paid_terminal.result.status !== "passed") {
+      throw new Error("qualification v4 completed release replay contains failed paid phase");
+    }
+    assertShardTerminal(shard.shard_terminal, {
+      reservation: expectedReservation,
+      predecessor,
+      setup: shard.setup_terminal,
+      paid: shard.paid_terminal,
+      status: "passed",
+      failureClass: "none",
+    });
+    terminals.push(shard.shard_terminal);
+    predecessor = shard.shard_terminal.terminal_sha256;
+  }
+  const expectedAggregate = aggregate(input.manifest, freeze(terminals));
+  if (canonicalJson(input.aggregate) !== canonicalJson(expectedAggregate)
+    || input.aggregate.status !== "passed"
+    || input.aggregate.provider_sessions_opened !== 6
+    || input.aggregate.paid_sessions_opened !== 3
+    || input.aggregate.generation_phases_attempted !== 6
+    || input.aggregate.tool_roundtrips_attempted !== 3
+    || input.aggregate.paid_retries_attempted !== 0) {
+    throw new Error("qualification v4 aggregate differs from its ordered completed shard replay");
+  }
 }
 
 /**
@@ -691,7 +780,7 @@ export async function runLc4QualificationV4ProviderShards(input: Readonly<{
     }
   }
   await writeImmutable(resolve(root, "qualification-v4-shard-manifest.json"), expectedManifest);
-  const retainedManifest = await readJson<Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
+  const retainedManifest = await readJson<Lc4QualificationV4Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
   assertManifest(retainedManifest, input.binding);
 
   // All three exact $1 reservation artifacts are fsynced before any callback
@@ -786,7 +875,7 @@ export async function runLc4QualificationV4ProviderShards(input: Readonly<{
       setupTerminalSha256: null,
       execute: input.dependencies.runSetup,
     });
-    let paid: PhaseTerminal | null = null;
+    let paid: Lc4QualificationV4PhaseTerminal | null = null;
     let status: "passed" | "failed" = setup.result.status;
     let failureClass = setup.result.failure_class;
     if (setup.result.status === "passed") {
@@ -846,7 +935,7 @@ export async function inspectLc4QualificationV4ProviderShards(input: Readonly<{
   aggregate: Lc4QualificationV4Aggregate | null;
 }>> {
   const root = await assertRoot(input.root, input.repository_root);
-  const retainedManifest = await readJson<Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
+  const retainedManifest = await readJson<Lc4QualificationV4Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
   assertManifest(retainedManifest, input.binding);
   const completed: LiveStsProvider[] = [];
   let next: LiveStsProvider | null = null;

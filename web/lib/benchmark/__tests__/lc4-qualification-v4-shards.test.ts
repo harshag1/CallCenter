@@ -6,11 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { sha256Hex } from "../artifacts";
 import {
   LC4_QUALIFICATION_V4_PROVIDER_ORDER,
+  assertLc4QualificationV4CompletedReplay,
   inspectLc4QualificationV4ProviderShards,
   runLc4QualificationV4ProviderShards,
   type Lc4QualificationV4Binding,
   type Lc4QualificationV4PhaseContext,
   type Lc4QualificationV4PhaseResult,
+  type Lc4QualificationV4Manifest,
+  type Lc4QualificationV4Aggregate,
+  type Lc4QualificationV4ReplayShard,
 } from "../lc4-qualification-v4-shards";
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -54,6 +58,8 @@ function result(context: Lc4QualificationV4PhaseContext, status: "passed" | "fai
     failure_class: status === "passed" ? "none" : `${context.provider}_${context.phase}_failed`,
     evidence_sha256: hash(`${context.provider}:${context.phase}:evidence`),
     wire_head_sha256: hash(`${context.provider}:${context.phase}:wire`),
+    wire_observation_count: 4,
+    reconnect_count: 0,
     usage_event_count: context.phase === "paid" ? 1 : 0,
     usage_evidence_sha256: hash(`${context.provider}:${context.phase}:usage`),
     provider_sessions_opened: status === "passed" ? 1 : 0,
@@ -342,5 +348,59 @@ describe("LC4 qualification v4 provider shards", () => {
       },
     })).rejects.toThrow(/binding changed|immutable qualification artifact differs/);
     expect(callbacks).toBe(1);
+  });
+
+  it("replay rejects missing, reordered, substituted, and cross-bound source/auth/credential shards", async () => {
+    const { repository, evidence } = await fixture();
+    const exactBinding = binding();
+    await runLc4QualificationV4ProviderShards({
+      root: evidence,
+      repository_root: repository,
+      binding: exactBinding,
+      invoked_at: INVOKED_AT,
+      dependencies: {
+        async runSetup(context) { return result(context); },
+        async runPaid(context) { return result(context); },
+      },
+    });
+    const parse = async <T,>(path: string): Promise<T> => JSON.parse(await readFile(path, "utf8")) as T;
+    const manifest = await parse<Lc4QualificationV4Manifest>(resolve(evidence, "qualification-v4-shard-manifest.json"));
+    const aggregate = await parse<Lc4QualificationV4Aggregate>(resolve(evidence, "qualification-v4-aggregate.json"));
+    const shards: Lc4QualificationV4ReplayShard[] = [];
+    for (const [ordinal, provider] of LC4_QUALIFICATION_V4_PROVIDER_ORDER.entries()) {
+      const root = resolve(evidence, "qualification-v4-shards", `${ordinal}-${provider}`);
+      shards.push({
+        reservation: await parse(resolve(root, "reservation.json")),
+        setup_admission: await parse(resolve(root, "setup-admission.json")),
+        setup_terminal: await parse(resolve(root, "setup-terminal.json")),
+        paid_admission: await parse(resolve(root, "paid-admission.json")),
+        paid_terminal: await parse(resolve(root, "paid-terminal.json")),
+        shard_terminal: await parse(resolve(root, "shard-terminal.json")),
+      });
+    }
+    expect(() => assertLc4QualificationV4CompletedReplay({
+      binding: exactBinding, manifest, aggregate, shards,
+    })).not.toThrow();
+    expect(() => assertLc4QualificationV4CompletedReplay({
+      binding: exactBinding, manifest, aggregate, shards: shards.slice(0, 2),
+    })).toThrow("exactly three");
+    expect(() => assertLc4QualificationV4CompletedReplay({
+      binding: exactBinding, manifest, aggregate, shards: [shards[1]!, shards[0]!, shards[2]!],
+    })).toThrow(/substituted or reordered/);
+    expect(() => assertLc4QualificationV4CompletedReplay({
+      binding: exactBinding,
+      manifest,
+      aggregate,
+      shards: [{ ...shards[0]!, shard_terminal: shards[1]!.shard_terminal }, shards[1]!, shards[2]!],
+    })).toThrow(/immutable integrity/);
+    for (const changed of [
+      binding({ source_tree_sha256: hash("cross-source") }),
+      binding({ authorization_artifact_sha256: hash("cross-auth") }),
+      binding({ credential_set_sha256: hash("cross-credentials") }),
+    ]) {
+      expect(() => assertLc4QualificationV4CompletedReplay({
+        binding: changed, manifest, aggregate, shards,
+      })).toThrow(/source, authorization, model, credential, audio, profile, or plan binding changed/);
+    }
   });
 });
