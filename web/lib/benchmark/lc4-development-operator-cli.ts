@@ -463,6 +463,20 @@ export async function loadLc4DevRetainedQualification(
   now: Date = new Date(),
 ): Promise<Lc4DevQualificationAdmissionReceipt> {
   absolute(root, "LC4 qualification root");
+  const rootEntries = await readdir(root, { withFileTypes: true });
+  const rootNames = new Set(rootEntries.map((entry) => entry.name));
+  const attemptsEntry = rootEntries.find((entry) => entry.name === "attempts");
+  if ((rootNames.has("lc4-qualification-plan.json")
+      && !rootNames.has("lc4-qualification-v3-plan.json"))
+    || !attemptsEntry
+    || !attemptsEntry.isDirectory()
+    || attemptsEntry.isSymbolicLink()) {
+    return loadLc4DevRetainedQualificationV3({
+      root,
+      qualification_trust_root_sha256: qualificationTrustRootSha256,
+      now,
+    });
+  }
   const attempts = await readdir(resolve(root, "attempts"), { withFileTypes: true });
   const v4 = attempts.filter((entry) =>
     entry.isDirectory() && !entry.isSymbolicLink() && entry.name.endsWith(".v4-package.complete"));

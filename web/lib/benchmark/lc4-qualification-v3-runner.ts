@@ -44,6 +44,7 @@ import {
   LC4_S2S_TOOL,
   LC4_S2S_TOOL_SCHEMA_SHA256,
   LC4_S2S_VOICE_SHA256,
+  assertLc4S2sAudioFixtureArtifact,
   assertLc4S2sRoundtripExecution,
   executeLc4S2sToolRoundtrip,
   lc4S2sControlSizeDiagnostic,
@@ -1685,8 +1686,21 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
   assertSignedArtifact({ artifact, expectedFingerprint: trustRootFingerprint, signingDomain: PLAN_DOMAIN, artifactDomain: PLAN_ARTIFACT_DOMAIN });
   const { plan_sha256, ...body } = artifact.body;
   if (planBodySha256(body) !== plan_sha256) throw new Error("LC4 qualification v3 plan body hash mismatch");
+  const credentialIdentities = artifact.body.credential_identities;
+  if (!Array.isArray(credentialIdentities)
+    || credentialIdentities.length !== LC4_QUALIFICATION_V3_PROVIDER_ORDER.length
+    || credentialIdentities.some((identity, index) =>
+      canonicalJson(Object.keys(identity).sort()) !== canonicalJson(["credential_sha256", "provider"])
+      || identity.provider !== LC4_QUALIFICATION_V3_PROVIDER_ORDER[index]
+      || !SHA256.test(identity.credential_sha256))
+    || sha256Hex(`${CREDENTIAL_SET_DOMAIN}${canonicalJson(credentialIdentities)}`)
+      !== artifact.body.credential_set_sha256) {
+    throw new Error("LC4 qualification v3 credential identity set is inconsistent");
+  }
+  assertLc4S2sAudioFixtureArtifact(artifact.body.audio_fixture);
   if (artifact.body.schema_version !== 3
     || artifact.body.runner_version !== LC4_QUALIFICATION_V3_RUNNER_VERSION
+    || artifact.body.provider_profile_manifest_sha256 !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256
     || artifact.body.maximum_total_micro_usd !== LC4_QUALIFICATION_V3_MAXIMUM_TOTAL_MICRO_USD
     || artifact.body.maximum_provider_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PROVIDER_SESSIONS
     || artifact.body.maximum_paid_sessions !== LC4_QUALIFICATION_V3_MAXIMUM_PAID_SESSIONS
@@ -1717,13 +1731,29 @@ export function assertLc4QualificationV3PlanArtifact(artifact: Lc4QualificationV
     const expectedTransportParitySha256 = target.provider === "xai"
       ? expectedXaiTransportParitySha256(expectedPaid.configuration)
       : null;
+    const audio = artifact.body.audio_fixture.provider_renditions[expected.provider];
     if (target.provider !== expected.provider
       || target.model !== expected.model
+      || target.sample_rate_hz !== audio.sample_rate_hz
+      || target.caller_audio_bytes !== audio.byte_length
+      || target.caller_audio_sha256 !== audio.sha256
+      || target.caller_audio_cas_sha256 !== audio.cas_sha256
+      || target.caller_audio_duration_ms !== audio.duration_ms
+      || target.gateway_schema_sha256 !== artifact.body.audio_fixture.tool_schema_sha256
+      || target.voice_sha256 !== artifact.body.audio_fixture.voice_sha256
+      || target.compact_control_sha256 !== LC4_S2S_COMPACT_CONTROL_SHA256
+      || target.packetizer_sha256 !== LC4_S2S_PACKETIZER_SHA256
+      || target.audio_delivery_profile_sha256
+        !== trialAudioDeliveryProfileHash(DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE)
       || target.history_hydration_required !== true
+      || target.setup_sessions !== 1
+      || target.paid_sessions !== 1
+      || target.generation_phases !== 2
+      || target.tool_roundtrips !== 1
       || target.qualification_turn_boundary !== qualificationTurnBoundary(target.provider)
       || target.production_session_payload_sha256 !== expectedPayloadSha256
       || target.xai_transport_parity_sha256 !== expectedTransportParitySha256) {
-      throw new Error("LC4 qualification v3 plan session payload parity differs from production");
+      throw new Error("LC4 qualification v3 plan target differs from its frozen fixture or production session");
     }
   }
 }

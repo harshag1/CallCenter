@@ -542,6 +542,10 @@ export function assertLc4DevPreflightQualificationAdmission(
     !== LC4_DEV_RETAINED_QUALIFICATION_TRANSPORT_SCOPE_SHA256) {
     throw new Error("LC4-DEV retained qualification transport scope is unsupported");
   }
+  if (qualification.provider_profile_manifest_sha256
+    !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256) {
+    throw new Error("LC4-DEV retained qualification provider profile is stale");
+  }
   if ("setup_qualifications" in qualification) {
     const completedAt = Date.parse(qualification.terminal.body.sealed_at);
     if (!Number.isFinite(completedAt)
@@ -802,6 +806,10 @@ export function assertLc4DevLivePrepareArtifact(value: Lc4DevLivePrepareArtifact
       !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
   ) {
     throw new Error("LC4-DEV prepare artifact provider-session schedule drifted");
+  }
+  if (value.provider_profile_manifest_sha256
+    !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256) {
+    throw new Error("LC4-DEV prepare artifact provider profile is stale");
   }
   if (value.maximum_total_micro_usd > LC4_DEV_LIVE_HARD_CEILING_MICRO_USD) throw new Error("LC4-DEV prepare artifact exceeds $15");
   const rebuilt = createLc4DevLivePrepareArtifact({

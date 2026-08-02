@@ -244,6 +244,61 @@ export type Lc4S2sAudioRenderer = Readonly<{
   }>>;
 }>;
 
+/**
+ * Verifies the self-contained, provider-neutral portion of the signed spoken
+ * fixture. Physical PCM bytes are verified separately by `loadLc4S2sPcm`.
+ */
+export function assertLc4S2sAudioFixtureArtifact(
+  artifact: Lc4S2sAudioFixtureArtifact,
+): void {
+  const { artifact_sha256, ...body } = artifact;
+  if (sha256Hex(`${FIXTURE_DOMAIN}${canonicalJson(body)}`) !== artifact_sha256
+    || artifact.schema_version !== 1
+    || artifact.fixture_version !== LC4_S2S_AUDIO_FIXTURE_VERSION
+    || artifact.source_text_sha256 !== LC4_S2S_SOURCE_TEXT_SHA256
+    || canonicalJson(artifact.voice) !== canonicalJson(LC4_S2S_VOICE)
+    || artifact.voice_sha256 !== LC4_S2S_VOICE_SHA256
+    || artifact.tool_schema_sha256 !== LC4_S2S_TOOL_SCHEMA_SHA256
+    || !SHA256.test(artifact.base_fixture_manifest_sha256)
+    || !SHA256.test(artifact.toolchain_sha256)
+    || !SHA256.test(artifact.renderer_identity_sha256)) {
+    throw new Error("LC4 S2S audio fixture artifact failed frozen integrity");
+  }
+  const expectedRates = Object.freeze({
+    openai: 24_000,
+    gemini: 16_000,
+    xai: 24_000,
+  } as const);
+  if (!artifact.provider_renditions
+    || typeof artifact.provider_renditions !== "object"
+    || canonicalJson(Object.keys(artifact.provider_renditions).sort())
+    !== canonicalJson(Object.keys(expectedRates).sort())) {
+    throw new Error("LC4 S2S audio fixture provider set is invalid");
+  }
+  for (const provider of ["openai", "gemini", "xai"] as const) {
+    const rendition = artifact.provider_renditions[provider];
+    const expectedDurationMs = Number(
+      (rendition.byte_length / 2 / rendition.sample_rate_hz * 1_000).toFixed(3),
+    );
+    if (typeof rendition.path !== "string"
+      || rendition.path.length === 0
+      || !SHA256.test(rendition.sha256)
+      || !SHA256.test(rendition.cas_sha256)
+      || !SHA256.test(rendition.cas_receipt_sha256)
+      || !Number.isSafeInteger(rendition.byte_length)
+      || rendition.byte_length <= 0
+      || rendition.byte_length % 2 !== 0
+      || rendition.sample_rate_hz !== expectedRates[provider]
+      || rendition.channels !== 1
+      || rendition.encoding !== "pcm16le"
+      || rendition.duration_ms !== expectedDurationMs
+      || rendition.duration_ms < 1_000
+      || rendition.duration_ms > 2_000) {
+      throw new Error(`LC4 S2S ${provider} audio fixture rendition is invalid`);
+    }
+  }
+}
+
 export type Lc4S2sControlSizeDiagnostic = Readonly<{
   schema_version: 1;
   diagnostic_id: "HACC-LC4-CONTROL-SIZE-DIAGNOSTIC-v1";

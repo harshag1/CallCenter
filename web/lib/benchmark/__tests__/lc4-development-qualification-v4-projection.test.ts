@@ -1126,4 +1126,22 @@ describe("LC4 qualification v4 to DEV admission projection", () => {
       ).toThrow();
     }
   });
+
+  it("rejects a v4 receipt with its discriminator removed even after receipt rehash", async () => {
+    const fixture = await signedV4FilesystemFixture();
+    const receipt = await loadLc4DevRetainedQualificationV4({
+      root: fixture.root,
+      qualification_trust_root_sha256: fixture.trustRoot,
+      now: NOW,
+    });
+    const forged = structuredClone(receipt) as unknown as Record<string, unknown>;
+    delete forged.setup_qualifications;
+    delete forged.receipt_sha256;
+    forged.receipt_sha256 = sha256Hex(
+      `${V4_RECEIPT_DOMAIN}${canonicalJson(forged)}`,
+    );
+    expect(() => assertLc4DevQualificationAdmissionReceipt(
+      forged as unknown as Lc4DevRetainedQualificationV4Receipt,
+    )).toThrow("admission discriminator mismatch");
+  });
 });

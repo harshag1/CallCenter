@@ -107,6 +107,8 @@ const CREDENTIALS = Object.freeze({
   xai: "xai-qualification-secret",
 });
 const NOW = new Date("2026-07-22T20:00:00.000Z");
+const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan/v6\n";
+const PLAN_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-qualification-plan-artifact/v6\n";
 
 function keys() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -117,6 +119,43 @@ function keys() {
     publicSpkiBase64: publicSpki.toString("base64"),
     fingerprint: sha256Hex(publicSpki),
   });
+}
+
+function resignPlan(
+  plan: Lc4QualificationV3PlanArtifact,
+  privateKeyPem: string,
+  mutate: (
+    body: Lc4QualificationV3PlanArtifact["body"],
+  ) => Lc4QualificationV3PlanArtifact["body"],
+): Lc4QualificationV3PlanArtifact {
+  const mutated = mutate(structuredClone(plan.body));
+  const unsignedBody = Object.fromEntries(
+    Object.entries(mutated).filter(([key]) => key !== "plan_sha256"),
+  ) as Omit<Lc4QualificationV3PlanArtifact["body"], "plan_sha256">;
+  const body = {
+    ...unsignedBody,
+    plan_sha256: sha256Hex(`${PLAN_DOMAIN}${canonicalJson(unsignedBody)}`),
+  } as Lc4QualificationV3PlanArtifact["body"];
+  const privateKey = createPrivateKey(privateKeyPem);
+  const publicKey = createPublicKey(privateKey);
+  const publicKeyDer = publicKey.export({ format: "der", type: "spki" });
+  const unsigned = {
+    body,
+    authority_public_key_spki_base64: publicKeyDer.toString("base64"),
+    authority_public_key_fingerprint_sha256: sha256Hex(publicKeyDer),
+    signature_algorithm: "Ed25519" as const,
+    signature_base64: sign(
+      null,
+      Buffer.from(`${PLAN_DOMAIN}${canonicalJson(body)}`),
+      privateKey,
+    ).toString("base64"),
+  };
+  return {
+    ...unsigned,
+    artifact_sha256: sha256Hex(
+      `${PLAN_ARTIFACT_DOMAIN}${canonicalJson(unsigned)}`,
+    ),
+  };
 }
 
 const TEST_TERMINAL_DOMAIN = "harshas-amazing-call-center/lc4-qualification-terminal/v7\n";
@@ -850,6 +889,70 @@ describe("LC4 qualification v3 signed runner", () => {
       ...plan,
       body: { ...plan.body, maximum_paid_sessions: 2 as 3 },
     }, authority.fingerprint)).toThrow("hash mismatch");
+
+    const staleProfile = resignPlan(plan, authority.privatePem, (body) => ({
+      ...body,
+      provider_profile_manifest_sha256: sha256Hex("stale-provider-profile"),
+    }));
+    expect(() => assertLc4QualificationV3PlanArtifact(
+      staleProfile,
+      authority.fingerprint,
+    )).toThrow("weakened a frozen boundary");
+
+    const credentialIdentityMismatch = resignPlan(
+      plan,
+      authority.privatePem,
+      (body) => ({
+        ...body,
+        credential_identities: body.credential_identities.map(
+          (identity, index) => index === 0
+            ? { ...identity, credential_sha256: sha256Hex("other-credential") }
+            : identity,
+        ),
+      }),
+    );
+    expect(() => assertLc4QualificationV3PlanArtifact(
+      credentialIdentityMismatch,
+      authority.fingerprint,
+    )).toThrow("credential identity set is inconsistent");
+
+    const credentialSetMismatch = resignPlan(plan, authority.privatePem, (body) => ({
+      ...body,
+      credential_set_sha256: sha256Hex("other-credential-set"),
+    }));
+    expect(() => assertLc4QualificationV3PlanArtifact(
+      credentialSetMismatch,
+      authority.fingerprint,
+    )).toThrow("credential identity set is inconsistent");
+
+    const audioTargetMismatch = resignPlan(plan, authority.privatePem, (body) => ({
+      ...body,
+      targets: body.targets.map((target, index) => index === 0
+        ? { ...target, caller_audio_sha256: sha256Hex("other-target-audio") }
+        : target),
+    }));
+    expect(() => assertLc4QualificationV3PlanArtifact(
+      audioTargetMismatch,
+      authority.fingerprint,
+    )).toThrow("differs from its frozen fixture");
+
+    const fixtureIntegrityMismatch = resignPlan(plan, authority.privatePem, (body) => ({
+      ...body,
+      audio_fixture: {
+        ...body.audio_fixture,
+        provider_renditions: {
+          ...body.audio_fixture.provider_renditions,
+          openai: {
+            ...body.audio_fixture.provider_renditions.openai,
+            sha256: sha256Hex("other-fixture-audio"),
+          },
+        },
+      },
+    }));
+    expect(() => assertLc4QualificationV3PlanArtifact(
+      fixtureIntegrityMismatch,
+      authority.fingerprint,
+    )).toThrow("audio fixture artifact failed frozen integrity");
   });
 
   it("creates only a fresh outside-repository 0700 evidence root", async () => {

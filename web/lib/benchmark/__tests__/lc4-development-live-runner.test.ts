@@ -13,6 +13,7 @@ import {
 import {
   LC4_DEV_ADAPTER_BOUNDARY,
   LC4_DEV_LIVE_TIMEOUTS,
+  assertLc4DevQualificationAdmissionReceipt,
   assertLc4DevLivePrepareArtifact,
   assertLc4DevRepairPlaybackReceiptBinding,
   createLc4DevLivePreflightArtifact,
@@ -3242,6 +3243,19 @@ describe("LC4-DEV live runner", () => {
   it("rejects authorization, trust-root, qualification, credential, and audio mutations", async () => {
     const { prepare, gateD } = await fixtures();
     const valid = await authorizedPreflight(prepare, undefined, gateD);
+    const prepareBody = Object.fromEntries(
+      Object.entries(prepare).filter(([key]) => key !== "prepare_sha256"),
+    ) as Omit<typeof prepare, "prepare_sha256">;
+    const stalePrepareBody = {
+      ...prepareBody,
+      provider_profile_manifest_sha256: sha256Hex("stale-provider-profile"),
+    };
+    expect(() => assertLc4DevLivePrepareArtifact({
+      ...stalePrepareBody,
+      prepare_sha256: sha256Hex(
+        `harshas-amazing-call-center/lc4-dev-live-prepare/v5\n${canonicalJson(stalePrepareBody)}`,
+      ),
+    })).toThrow("prepare artifact provider profile is stale");
     expect(valid).toMatchObject({
       qualification_transport_scope_sha256: prepare.qualification_transport_scope_sha256,
       qualification_claim_boundary: "retained_gate_b_transports_only_xai_finite_manual_not_qualified",
@@ -3457,5 +3471,17 @@ describe("LC4-DEV live runner", () => {
         },
       },
     })).toThrow(/package omits a required admission artifact/);
+
+    const v3DiscriminatorSpoof = structuredClone(
+      valid.qualification,
+    ) as unknown as Record<string, unknown>;
+    v3DiscriminatorSpoof.setup_qualifications = [];
+    delete v3DiscriminatorSpoof.receipt_sha256;
+    v3DiscriminatorSpoof.receipt_sha256 = sha256Hex(
+      `harshas-amazing-call-center/lc4-dev-retained-qualification-v3/v3\n${canonicalJson(v3DiscriminatorSpoof)}`,
+    );
+    expect(() => assertLc4DevQualificationAdmissionReceipt(
+      v3DiscriminatorSpoof as unknown as typeof valid.qualification,
+    )).toThrow("admission discriminator mismatch");
   });
 });

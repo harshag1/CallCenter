@@ -1744,9 +1744,29 @@ export function assertLc4DevRetainedQualificationReceipt(receipt: Lc4DevRetained
 }
 
 export function assertLc4DevQualificationAdmissionReceipt(receipt: Lc4DevQualificationAdmissionReceipt): void {
-  if ("setup_qualifications" in receipt) {
-    assertLc4DevRetainedQualificationV4Receipt(receipt);
-    return;
+  const hasV4Discriminator = Object.prototype.hasOwnProperty.call(
+    receipt,
+    "setup_qualifications",
+  );
+  if (receipt.qualification_runner_version === LC4_QUALIFICATION_V4_SHARD_RUNNER_VERSION) {
+    if (!hasV4Discriminator) {
+      throw new Error("LC4-DEV qualification admission discriminator mismatch");
+    }
+    assertLc4DevRetainedQualificationV4Receipt(
+      receipt as Lc4DevRetainedQualificationV4Receipt,
+    );
+  } else if (receipt.qualification_runner_version === LC4_QUALIFICATION_V3_RUNNER_VERSION) {
+    if (hasV4Discriminator) {
+      throw new Error("LC4-DEV qualification admission discriminator mismatch");
+    }
+    assertLc4DevRetainedQualificationV3Receipt(
+      receipt as Lc4DevRetainedQualificationV3Receipt,
+    );
+  } else {
+    throw new Error("LC4-DEV qualification admission runner version is unsupported");
   }
-  assertLc4DevRetainedQualificationV3Receipt(receipt);
+  if (receipt.provider_profile_manifest_sha256
+    !== LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256) {
+    throw new Error("LC4-DEV qualification admission provider profile is stale");
+  }
 }
