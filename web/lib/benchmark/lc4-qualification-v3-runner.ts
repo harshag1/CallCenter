@@ -737,7 +737,7 @@ type RetainedRoundtripSummary = Omit<Lc4S2sRoundtripExecution, "wire_observation
   usage_event_count: number;
 }>;
 
-function createXaiServerVadGateARiskArtifact(input: Readonly<{
+export function createXaiServerVadGateARiskArtifact(input: Readonly<{
   setup: ProviderQualificationArtifact["results"][number];
   sourceCommit: string;
   planSha256: string;
@@ -820,7 +820,7 @@ function createXaiServerVadGateARiskArtifact(input: Readonly<{
   });
 }
 
-function assertXaiServerVadGateARiskArtifact(
+export function assertXaiServerVadGateARiskArtifact(
   artifact: Lc4XaiServerVadGateARiskArtifact,
   expectedProviderProfileManifestSha256 = LC4_PROVIDER_PROFILE_MANIFEST.manifest_sha256,
 ): void {
@@ -872,7 +872,7 @@ function assertXaiServerVadGateARiskArtifact(
   }
 }
 
-function createXaiServerVadGateBBindingArtifact(input: Readonly<{
+export function createXaiServerVadGateBBindingArtifact(input: Readonly<{
   risk: Lc4XaiServerVadGateARiskArtifact;
   execution: Lc4S2sRoundtripExecution;
   sourceCommit: string;
@@ -974,7 +974,7 @@ function createXaiServerVadGateBBindingArtifact(input: Readonly<{
   });
 }
 
-function assertXaiServerVadGateBBindingArtifact(input: Readonly<{
+export function assertXaiServerVadGateBBindingArtifact(input: Readonly<{
   artifact: Lc4XaiServerVadGateBBindingArtifact;
   risk: Lc4XaiServerVadGateARiskArtifact;
   execution: Lc4S2sRoundtripExecution;

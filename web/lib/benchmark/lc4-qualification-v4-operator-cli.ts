@@ -6,6 +6,10 @@ import { canonicalJson, sha256Hex } from "./artifacts";
 import {
   assertLc4QualificationV3Authorization,
   assertLc4QualificationV3PlanArtifact,
+  assertXaiServerVadGateARiskArtifact,
+  assertXaiServerVadGateBBindingArtifact,
+  createXaiServerVadGateARiskArtifact,
+  createXaiServerVadGateBBindingArtifact,
   createLc4QualificationV3Targets,
   credentialIdentity,
   credentialSetSha256,
@@ -17,6 +21,7 @@ import {
   qualificationClientOptions,
   retainRoundtrip,
   type Lc4QualificationV3PlanArtifact,
+  type Lc4XaiServerVadGateARiskArtifact,
 } from "./lc4-qualification-v3-runner";
 import {
   finalizeLc4QualificationBudget,
@@ -218,6 +223,11 @@ async function replayArtifacts(root: string) {
     ] as const) {
       evidenceFiles.push(Object.freeze({ path: target, bytes: await readFile(resolve(shardRoot, source)) }));
     }
+    if (provider === "xai") {
+      for (const name of ["xai-server-vad-gate-a-risk.json", "xai-server-vad-gate-b-binding.json"] as const) {
+        evidenceFiles.push(Object.freeze({ path: name, bytes: await readFile(resolve(shardRoot, name)) }));
+      }
+    }
   }
   return Object.freeze({ manifest, aggregate, shards: Object.freeze(shards), evidenceFiles: Object.freeze(evidenceFiles) });
 }
@@ -343,6 +353,23 @@ export async function runLc4QualificationV4OperatorCli(
           const wire = providerResult.setupWireEvidence?.observations
             ?? providerResult.setupFailureEvidence?.observations
             ?? [];
+          if (context.provider === "xai") {
+            const planned = state.plan.body.targets.find((candidate) => candidate.provider === "xai")!;
+            const risk = createXaiServerVadGateARiskArtifact({
+              setup: providerResult,
+              sourceCommit: state.source.source_commit,
+              planSha256: state.plan.body.plan_sha256,
+              configurationMatrixSha256: state.plan.body.setup_configuration_matrix_sha256,
+              providerProfileManifestSha256: state.plan.body.provider_profile_manifest_sha256,
+              productionSessionPayloadSha256: planned.production_session_payload_sha256!,
+            });
+            assertXaiServerVadGateARiskArtifact(risk);
+            await writeFile(
+              resolve(shardRoot, "xai-server-vad-gate-a-risk.json"),
+              `${canonicalJson(risk)}\n`,
+              { flag: "wx", mode: 0o400 },
+            );
+          }
           return Object.freeze({
             status: providerResult.status,
             failure_class: providerResult.status === "passed" ? "none" : providerResult.code,
@@ -385,6 +412,33 @@ export async function runLc4QualificationV4OperatorCli(
           }
           const shardRoot = resolve(root, "qualification-v4-shards", `${LC4_QUALIFICATION_V4_PROVIDER_ORDINAL[context.provider]}-${context.provider}`);
           await retainRoundtrip(shardRoot, execution);
+          if (context.provider === "xai" && execution.status === "passed") {
+            const risk = await readJson<Lc4XaiServerVadGateARiskArtifact>(
+              resolve(shardRoot, "xai-server-vad-gate-a-risk.json"),
+            );
+            const expectedTransportParitySha256 = state.plan.body.targets.find(
+              (candidate) => candidate.provider === "xai",
+            )!.xai_transport_parity_sha256!;
+            const gateB = createXaiServerVadGateBBindingArtifact({
+              risk,
+              execution,
+              sourceCommit: state.source.source_commit,
+              planSha256: state.plan.body.plan_sha256,
+              providerProfileManifestSha256: state.plan.body.provider_profile_manifest_sha256,
+              expectedTransportParitySha256,
+            });
+            assertXaiServerVadGateBBindingArtifact({
+              artifact: gateB,
+              risk,
+              execution,
+              expectedTransportParitySha256,
+            });
+            await writeFile(
+              resolve(shardRoot, "xai-server-vad-gate-b-binding.json"),
+              `${canonicalJson(gateB)}\n`,
+              { flag: "wx", mode: 0o400 },
+            );
+          }
           return Object.freeze({
             status: execution.status,
             failure_class: execution.status === "passed" ? "none" : execution.failure_class,
