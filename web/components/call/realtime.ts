@@ -18,6 +18,10 @@ import {
   createBrowserSpeechGuardrail,
   type BrowserSpeechGuardrailStatus,
 } from "./browser-speech-guardrail";
+import {
+  browserOutboundSpeechGateRejection,
+  sanitizeBrowserOutboundSpeechGateEvidence,
+} from "@/lib/realtime/browser-outbound-speech-evidence";
 
 type Handlers = {
   onTranscript: (who: "caller" | "agent", text: string) => void;
@@ -227,7 +231,11 @@ export class RealtimeCall {
           outboundSpeechGate: {
             ...outboundSpeechGate,
             onEvidence: (evidence) => {
-              this.queueEvent("outbound_speech_gate", evidence);
+              const sanitized = sanitizeBrowserOutboundSpeechGateEvidence(evidence);
+              this.queueEvent(
+                sanitized ? "outbound_speech_gate" : "outbound_speech_gate_rejected",
+                sanitized ?? browserOutboundSpeechGateRejection("client_validation"),
+              );
               outboundSpeechGate.onEvidence(evidence);
             },
           },

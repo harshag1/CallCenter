@@ -381,4 +381,99 @@ describe("remaining private browser mutation boundaries", () => {
     expect(mocks.qOne).not.toHaveBeenCalled();
     expect(mocks.q).not.toHaveBeenCalled();
   });
+
+  it("durably ingests exact speech-gate evidence in browser event order", async () => {
+    mocks.getSession.mockResolvedValueOnce({ email: "owner@example.test", orgId: RESOURCE_ID });
+    mocks.qOne.mockResolvedValueOnce({ id: RESOURCE_ID });
+    const evidence = {
+      schemaVersion: 1,
+      provider: "openai",
+      responseId: "response-1",
+      decision: {
+        schemaVersion: 1,
+        responseId: "response-1",
+        provider: "openai",
+        action: "release",
+        reason: "policy_pass",
+        evidenceCoverage: "exact_buffered_pcm",
+        audioSha256: "a".repeat(64),
+        audioBytes: 4,
+        audioDurationMs: 1,
+        providerTranscriptSha256: null,
+        independentAsrTranscriptSha256: "b".repeat(64),
+        independentAsrReceiptSha256: "c".repeat(64),
+        violations: [],
+        collectionLatencyMs: 2,
+        decisionLatencyMs: 3,
+      },
+      playout: {
+        status: "released_to_audio_context",
+        evidenceLevel: "audio_context_schedule",
+        audioSha256: "a".repeat(64),
+        audioBytes: 4,
+        ranges: [{
+          byteStart: 0,
+          byteEnd: 4,
+          sampleRateHz: 24_000,
+          audioContextStartSeconds: 1,
+          audioContextEndSeconds: 1.001,
+        }],
+      },
+    };
+    const response = await appendCallEvents(jsonRequest({
+      label: "call events",
+      path: `/api/calls/${RESOURCE_ID}/events`,
+      body: { events: [
+        { type: "agent_said", payload: { text: "before" } },
+        { type: "outbound_speech_gate", payload: evidence },
+        { type: "user_said", payload: { text: "after" } },
+      ] },
+      invoke: (request) => appendCallEvents(request, context),
+    }), context);
+
+    expect(response.status).toBe(200);
+    expect(mocks.q.mock.calls.map(([, params]) => params?.[1])).toEqual([
+      "agent_said",
+      "outbound_speech_gate",
+      "user_said",
+    ]);
+    expect(JSON.parse(String(mocks.q.mock.calls[1][1][2]))).toEqual(evidence);
+  });
+
+  it("terminally quarantines malformed speech evidence and admits later events without PII", async () => {
+    mocks.getSession.mockResolvedValueOnce({ email: "owner@example.test", orgId: RESOURCE_ID });
+    mocks.qOne.mockResolvedValueOnce({ id: RESOURCE_ID });
+    const response = await appendCallEvents(jsonRequest({
+      label: "call events",
+      path: `/api/calls/${RESOURCE_ID}/events`,
+      body: { events: [
+        {
+          type: "outbound_speech_gate",
+          payload: {
+            schemaVersion: 1,
+            responseId: "malformed",
+            rawTranscript: "alice@example.test",
+            token: "Bearer provider-live-secret",
+          },
+        },
+        { type: "user_said", payload: { text: "later transcript" } },
+      ] },
+      invoke: (request) => appendCallEvents(request, context),
+    }), context);
+
+    expect(response.status).toBe(200);
+    expect(mocks.q.mock.calls.map(([, params]) => params?.[1])).toEqual([
+      "outbound_speech_gate_rejected",
+      "user_said",
+    ]);
+    expect(JSON.parse(String(mocks.q.mock.calls[0][1][2]))).toEqual({
+      schemaVersion: 1,
+      reason: "malformed_or_unsupported",
+      stage: "server_validation",
+    });
+    const durableParameters = JSON.stringify(mocks.q.mock.calls);
+    expect(durableParameters).not.toContain("alice@example.test");
+    expect(durableParameters).not.toContain("provider-live-secret");
+    expect(JSON.parse(String(mocks.q.mock.calls[1][1][2]))).toEqual({ text: "later transcript" });
+  });
 });

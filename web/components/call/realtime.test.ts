@@ -247,6 +247,50 @@ describe("browser realtime call privacy and lifecycle", () => {
     expect(events).toContainEqual({ type: "outbound_speech_gate", payload: evidence });
   });
 
+  it("terminally quarantines malformed speech evidence without retaining later transcripts", async () => {
+    const eventBatches: { type: string; payload: unknown }[][] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === "/api/voice/token") return Response.json({ callId: CALL_ID, connection });
+      if (String(input).endsWith("/events")) {
+        eventBatches.push((JSON.parse(String(init?.body)) as {
+          events: { type: string; payload: unknown }[];
+        }).events);
+      }
+      return Response.json({ ok: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const gate = new OutboundSpeechGate({
+      policy: createOutboundSpeechGatePolicy({ evidencePolicy: "provider_transcript_allowed" }),
+    });
+    const call = new RealtimeCall({ onTranscript: vi.fn(), onState: vi.fn() });
+    await call.start("agent-id", { outboundSpeechGate: { gate, onEvidence: vi.fn() } });
+    const start = mocks.transport.start.mock.calls[0][0] as RealtimeTransportStart;
+
+    start.outboundSpeechGate?.onEvidence({
+      schemaVersion: 1,
+      provider: "openai",
+      responseId: "malformed",
+      decision: { rawTranscript: "alice@example.test", token: "Bearer provider-secret" },
+      playout: { status: "released_to_audio_context" },
+    } as never);
+    start.handlers.onTranscript("caller", "the message after malformed evidence");
+    await call.stop();
+
+    const events = eventBatches.flat();
+    const rejectionIndex = events.findIndex((event) => event.type === "outbound_speech_gate_rejected");
+    const transcriptIndex = events.findIndex((event) => event.type === "user_said");
+    expect(rejectionIndex).toBeGreaterThanOrEqual(0);
+    expect(transcriptIndex).toBeGreaterThan(rejectionIndex);
+    expect(events[rejectionIndex]).toEqual({
+      type: "outbound_speech_gate_rejected",
+      payload: { schemaVersion: 1, reason: "malformed_or_unsupported", stage: "client_validation" },
+    });
+    const serialized = JSON.stringify(eventBatches);
+    expect(serialized).not.toContain("alice@example.test");
+    expect(serialized).not.toContain("provider-secret");
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/events"))).toHaveLength(1);
+  });
+
   it("automatically composes the server-authored exact-PCM guardrail on the stock call path", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/voice/token") {

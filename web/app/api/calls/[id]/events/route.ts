@@ -11,6 +11,11 @@ import {
   PrivateRequestError,
   readPrivateJsonObject,
 } from "@/lib/private-json-request";
+import {
+  browserOutboundSpeechGateRejection,
+  sanitizeBrowserOutboundSpeechGateEvidence,
+  sanitizeBrowserOutboundSpeechGateRejection,
+} from "@/lib/realtime/browser-outbound-speech-evidence";
 
 function json(body: Record<string, unknown>, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: PRIVATE_NO_STORE_HEADERS });
@@ -120,6 +125,21 @@ function sanitizeBrowserEvent(value: unknown): SanitizedBrowserEvent | null {
       return null;
     }
     return { type: "client_persistence_loss", payload: { stage, reason, pendingEvents } };
+  }
+
+  if (event.type === "outbound_speech_gate") {
+    const evidence = sanitizeBrowserOutboundSpeechGateEvidence(payload);
+    return evidence
+      ? { type: "outbound_speech_gate", payload: evidence }
+      : {
+        type: "outbound_speech_gate_rejected",
+        payload: browserOutboundSpeechGateRejection("server_validation"),
+      };
+  }
+
+  if (event.type === "outbound_speech_gate_rejected") {
+    const rejection = sanitizeBrowserOutboundSpeechGateRejection(payload);
+    return rejection ? { type: "outbound_speech_gate_rejected", payload: rejection } : null;
   }
 
   return null;
