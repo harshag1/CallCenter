@@ -8,6 +8,7 @@
   },
   "scripts": {
     "demo:offline": "node scripts/provider-free-first-run.mjs",
-    "demo:offline:check": "node scripts/provider-free-first-run.mjs --check"
+    "demo:offline:check": "node scripts/provider-free-first-run.mjs --check",
+    "flow:visualize": "node scripts/provider-free-first-run.mjs --visualize"
   }
 }

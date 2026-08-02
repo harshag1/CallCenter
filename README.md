@@ -148,6 +148,24 @@ available at each step, receipts, checkpoints, durable outputs, a simulated
 process restart, indeterminate-write reconciliation, and the terminal state.
 It opens zero provider sessions and expects $0 spend.
 
+Run a custom scenario with the same readable trace, or render its complete
+nested topology into a private, script-free HTML file:
+
+```bash
+npm run demo:offline -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --scenario examples/scenarios/membership-return-recovery.json
+
+npm run flow:visualize -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --out /tmp/membership-return-flow.html
+```
+
+The visualizer shows every absolute step path, nesting depth, scoped tool,
+checkpoint, branch, failure route, and coarse node route. It refuses to
+overwrite an existing artifact, writes mode `0600`, embeds no JavaScript or
+external asset, and strips provider credentials from its child process.
+
 ## Full local Studio
 
 Prerequisites: Node.js 22.13.0 (pinned in `.node-version` and `.nvmrc`). Supported runtimes are Node.js 20.19.x, 22.13.x or newer 22.x releases, and Node.js 24+. You also need npm, Docker, a key for the configured builder/server-inference provider, and a key for the realtime provider you want to call.

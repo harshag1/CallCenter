@@ -100,6 +100,21 @@ actions, simulate a disconnect or process restart, reconcile an indeterminate
 write from a proof, deliver a receipt-backed worker result, and assert the exact
 terminal state. Add `--json` for the complete machine-readable trace.
 
+Render any valid Flow v2 definition as a standalone offline topology:
+
+```bash
+npm run flow:visualize -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --out /tmp/membership-return-flow.html
+```
+
+The private HTML artifact expands all four levels of the example, links every
+transition and failure route to its target, and lists the tools disclosed at
+each node and step. It contains no instructions, context copy, JavaScript,
+remote fonts, or network dependencies. The renderer validates structure but
+does not claim that referenced tool implementations exist; catalog admission
+remains a separate explicit gate.
+
 The test suite:
 
 - parses every JSON file through `validateAgentFlow`;

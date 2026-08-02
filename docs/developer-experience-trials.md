@@ -1,6 +1,6 @@
 # Provider-free developer-experience trials
 
-Five independent clean-room developers evaluated public commit `70d5b515c787b868690a9038e6c29606a9c2b973` on August 1, 2026. Each began from a fresh detached clone, used public repository material, and made zero provider or paid calls. These are small onboarding trials, not a population study or evidence of live voice quality.
+Five fresh-context AI evaluation agents evaluated public commit `70d5b515c787b868690a9038e6c29606a9c2b973` on August 1, 2026. Each began from a fresh detached clone, used public repository material, and made zero provider or paid calls. These are small AI-agent onboarding trials, not human usability research, a population study, or evidence of live voice quality.
 
 | Trial | Provider-free outcome | Time | Setup | Mental model | Authoring | Testing | Confidence |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -18,7 +18,7 @@ These trials establish provider-free mechanism usability. They do not establish 
 
 ## Launch-candidate trial round
 
-Five new fresh-context developers independently evaluated public commit
+Five new fresh-context AI evaluation agents independently evaluated public commit
 `267b7109b9d016f380544b7cb104b235f074991d` on August 1, 2026 as builders of
 an ecommerce return agent, clinic scheduler, field-service dispatcher,
 adaptive tutor, and hospitality concierge. They used only public docs and
@@ -28,7 +28,7 @@ machine, including 824 locked packages. No trial made a provider, database,
 telephony, or paid call.
 
 The repeated P0/P1 finding was composition, not kernel correctness: each
-developer could prove the appointment example, but could not run a custom
+agent could prove the appointment example, but could not run a custom
 Flow/scenario file through the readable trace without reverse-engineering the
 builder tool or tests. Concurrent trials also exposed that the root command ran
 `npm ci` every time and could temporarily present a partial `node_modules` tree.
@@ -49,3 +49,19 @@ npm run demo:offline -- \
 This closes the common provider-free Flow/scenario execution gap. It does not
 claim to solve each trial's domain integration, real human transfer, voice
 transport, or cross-process PostgreSQL worker setup.
+
+The same trials repeatedly found that large Flow definitions were inspectable
+only as raw JSON or through the authenticated Studio. The final provider-free
+follow-up adds a one-command, script-free HTML renderer:
+
+```bash
+npm run flow:visualize -- \
+  --flow examples/flows/membership-return-resolution.json \
+  --out /tmp/membership-return-flow.html
+```
+
+It renders all 13 steps and four nesting levels, scoped tools, checkpoints,
+transitions, and failure routes without loading an environment file or opening
+a provider, database, or network connection. This is a deterministic
+structural-inspection artifact, not evidence that a tool integration or voice
+provider works.

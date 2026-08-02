@@ -21,32 +21,45 @@ let skipInstall = false;
 let jsonOutput = false;
 let flowPath = null;
 let scenarioPath = null;
+let visualizationMode = false;
+let outPath = null;
 
 for (let index = 0; index < argv.length; index += 1) {
   const argument = argv[index];
   if (argument === "--check") checkOnly = true;
   else if (argument === "--skip-install") skipInstall = true;
   else if (argument === "--json") jsonOutput = true;
-  else if (argument === "--flow" || argument === "--scenario") {
+  else if (argument === "--visualize") visualizationMode = true;
+  else if (argument === "--flow" || argument === "--scenario" || argument === "--out") {
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) {
       process.stderr.write(`${argument} requires one file path\n`);
       process.exit(2);
     }
     if (argument === "--flow") flowPath = resolve(root, value);
-    else scenarioPath = resolve(root, value);
+    else if (argument === "--scenario") scenarioPath = resolve(root, value);
+    else outPath = resolve(root, value);
     index += 1;
   } else {
     process.stderr.write(
       "Usage: npm run demo:offline -- [--check|--skip-install|--json] " +
-      "[--flow FILE --scenario FILE]\n"
+      "[--flow FILE --scenario FILE]\n" +
+      "   or: npm run flow:visualize -- --flow FILE --out NEW.html\n"
     );
     process.exit(2);
   }
 }
 
-if ((flowPath === null) !== (scenarioPath === null)) {
+if (!visualizationMode && (flowPath === null) !== (scenarioPath === null)) {
   process.stderr.write("--flow and --scenario must be supplied together\n");
+  process.exit(2);
+}
+if (visualizationMode && (!flowPath || !outPath || scenarioPath || jsonOutput || checkOnly)) {
+  process.stderr.write("visualization requires --flow FILE and --out NEW.html only\n");
+  process.exit(2);
+}
+if (!visualizationMode && outPath) {
+  process.stderr.write("--out is only valid with flow:visualize\n");
   process.exit(2);
 }
 
@@ -181,6 +194,9 @@ const webPackage = JSON.parse(readFileSync(join(web, "package.json"), "utf8"));
 if (webPackage.scripts?.["demo:offline"] !== "tsx scripts/offline-flow-demo.ts") {
   throw new Error("web demo:offline entry point is missing or unexpected");
 }
+if (webPackage.scripts?.["flow:visualize"] !== "tsx scripts/flow-visualize.ts") {
+  throw new Error("web flow:visualize entry point is missing or unexpected");
+}
 
 process.stdout.write([
   "Harsha's Amazing Call Center — provider-free first run",
@@ -199,8 +215,15 @@ if (checkOnly) {
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 if (!skipInstall) ensureDependencies();
 
-process.stdout.write("\nRunning the deterministic developer trace…\n\n");
-if (flowPath && scenarioPath) {
+if (visualizationMode) {
+  process.stdout.write("\nRendering the offline flow view…\n\n");
+  run(npm, [
+    "run", "--silent", "flow:visualize", "--",
+    "--flow", flowPath,
+    "--out", outPath,
+  ]);
+} else if (flowPath && scenarioPath) {
+  process.stdout.write("\nRunning the deterministic developer trace…\n\n");
   run(npm, [
     "run", "--silent", "flow:scenario", "--",
     "--flow", flowPath,
@@ -208,5 +231,6 @@ if (flowPath && scenarioPath) {
     ...(jsonOutput ? [] : ["--view"]),
   ]);
 } else {
+  process.stdout.write("\nRunning the deterministic developer trace…\n\n");
   run(npm, ["run", "--silent", "demo:offline", "--", ...(jsonOutput ? [] : ["--view"])]);
 }
