@@ -30,7 +30,14 @@ import {
   assertLc4PublicationTransportReplay,
   createLc4PublicationTransportReplay,
   reconstructLc4PublicationConversationExchange,
+  resolveLc4PublicationCanonicalCallerEvidence,
 } from "../lc4-publication-transport-replay";
+import {
+  createLc4DevReplayEvidenceStore,
+} from "../lc4-development-evidence-retention";
+import {
+  createLc4ImmutableCas,
+} from "../lc4-development-live-dependencies";
 import {
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
 } from "../lc4-development-gateway-bridge";
@@ -420,6 +427,102 @@ function custody(
 }
 
 describe("LC4 publication transport provenance custody", () => {
+  it("joins completed opportunities to the prior canonical caller-audio CAS edge", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "hacc-publication-caller-"));
+    roots.push(root);
+    const cas = await createLc4ImmutableCas(resolve(root, "cas"));
+    const evidence = createLc4DevReplayEvidenceStore(cas);
+    const callerPcm = Uint8Array.from([1, 0, 2, 0, 3, 0, 4, 0]);
+    const callerReference = await evidence.retainBytes({
+      kind: "caller_pcm",
+      bytes: callerPcm,
+      expected_evidence_sha256: H(callerPcm),
+      media_type: "audio/pcm",
+    });
+    const controlReference = await evidence.retainJson({
+      kind: "control_authority",
+      body: { fixture: "response control" },
+    });
+    const branchReference = await evidence.retainJson({
+      kind: "caller_branch_decision",
+      body: { fixture: "branch decision" },
+    });
+    const branchDecisionSha256 = branchReference.evidence_sha256;
+    const submittedPayload = {
+      caller_pcm_sha256: callerReference.evidence_sha256,
+      control_receipt_sha256: controlReference.evidence_sha256,
+      caller_branch_decision_sha256: branchDecisionSha256,
+    };
+    const submittedPayloadReference = await evidence.retainJson({
+      kind: "ledger_payload",
+      body: submittedPayload,
+    });
+    const submittedEvent = {
+      sequence: 10,
+      observed_at: "2026-07-28T23:30:00.000Z",
+      event_type: "audio_submitted" as const,
+      episode_id: "lc4-dev-openai-native",
+      opportunity_id: "lc4-dev-op-42",
+      payload_sha256: submittedPayloadReference.evidence_sha256,
+      payload_evidence: submittedPayloadReference,
+      evidence_references: [
+        callerReference,
+        controlReference,
+        branchReference,
+      ],
+      previous_event_sha256: H("prior-ledger-event"),
+      event_sha256: H("submitted-ledger-event"),
+    };
+    const completedPayload = {
+      caller_pcm_sha256: callerReference.evidence_sha256,
+      caller_branch_decision_sha256: branchDecisionSha256,
+    };
+    const completedEvent = {
+      ...submittedEvent,
+      sequence: 11,
+      event_type: "opportunity_completed" as const,
+      evidence_references: [branchReference],
+      previous_event_sha256: submittedEvent.event_sha256,
+      event_sha256: H("completed-ledger-event"),
+    };
+    const input = {
+      ledger: [submittedEvent, completedEvent],
+      completed_event: completedEvent,
+      completed_payload: completedPayload,
+      episode_id: completedEvent.episode_id,
+      opportunity_id: completedEvent.opportunity_id,
+      evidence,
+      cas,
+    };
+
+    const resolved = await resolveLc4PublicationCanonicalCallerEvidence(input);
+    expect(resolved.caller_pcm_sha256).toBe(H(callerPcm));
+    expect(resolved.caller_pcm).toEqual(callerPcm);
+
+    await expect(resolveLc4PublicationCanonicalCallerEvidence({
+      ...input,
+      completed_payload: {
+        ...completedPayload,
+        caller_pcm_sha256: H("substituted-caller-pcm"),
+      },
+    })).rejects.toThrow(/differs from its prior audio submission/u);
+    await expect(resolveLc4PublicationCanonicalCallerEvidence({
+      ...input,
+      ledger: [{ ...submittedEvent, sequence: 12 }, completedEvent],
+    })).rejects.toThrow(/prior canonical audio submission/u);
+    await expect(resolveLc4PublicationCanonicalCallerEvidence({
+      ...input,
+      ledger: [{
+        ...submittedEvent,
+        evidence_references: [
+          { ...callerReference, byte_length: callerPcm.byteLength + 2 },
+          controlReference,
+          branchReference,
+        ],
+      }, completedEvent],
+    })).rejects.toThrow(/length differs/u);
+  });
+
   it("reconstructs current schema-v2 accepted and rejected tool batches", () => {
     const providerOutput = canonicalJson({ ok: true });
     const rejectionReceiptSha256 = H("rejection-receipt");
@@ -485,13 +588,7 @@ describe("LC4 publication transport provenance custody", () => {
           rejectedBatch as never,
         ],
       },
-      listener: {
-        listener_observation: {
-          status: "verified",
-          transcript: "The archive stage is complete.",
-          transcript_sha256: H("The archive stage is complete."),
-        },
-      },
+      verified_assistant_transcript: "The archive stage is complete.",
       assistant_pcm_sha256: H("assistant-pcm"),
     });
     expect(turns.map((turn) => turn.speaker)).toEqual([
@@ -527,13 +624,7 @@ describe("LC4 publication transport provenance custody", () => {
           schema_version: 1,
         } as never],
       },
-      listener: {
-        listener_observation: {
-          status: "verified",
-          transcript: "The archive stage is complete.",
-          transcript_sha256: H("The archive stage is complete."),
-        },
-      },
+      verified_assistant_transcript: "The archive stage is complete.",
       assistant_pcm_sha256: H("assistant-pcm"),
     })).toThrow(/incomplete or out of order/u);
     expect(() => reconstructLc4PublicationConversationExchange({
@@ -547,37 +638,80 @@ describe("LC4 publication transport provenance custody", () => {
           bridge_version: "lc4-dev-gateway-bridge-stale",
         } as never],
       },
-      listener: {
-        listener_observation: {
-          status: "verified",
-          transcript: "The archive stage is complete.",
-          transcript_sha256: H("The archive stage is complete."),
-        },
-      },
+      verified_assistant_transcript: "The archive stage is complete.",
       assistant_pcm_sha256: H("assistant-pcm"),
     })).toThrow(/incomplete or out of order/u);
 
+    const repairRejectedBatch = {
+      ...rejectedBatch,
+      batch_ordinal: 1,
+      calls: rejectedBatch.calls.map((call) => ({
+        ...call,
+        provider_output_canonical_json: canonicalJson({
+          ok: false,
+          code: "capability_request_rejected",
+          reason: "tool_calls_forbidden_during_repair",
+          retriable: true,
+          executed: false,
+          rejection_receipt_sha256: H("repair-rejection-receipt"),
+        }),
+        pre_dispatch_rejection_code:
+          "tool_calls_forbidden_during_repair",
+      })),
+    };
     const repairTurns = reconstructLc4PublicationConversationExchange({
       exchange_phase: "repair",
       opportunity_index: 7,
       caller_text: "Please repeat that result.",
       caller_pcm_sha256: H("repair-caller-pcm"),
       exchange: {
-        // Repair evidence may retain rejected gateway attempts, but none are
-        // replayed between the repair caller and assistant turns.
-        dev_gateway_conversation_tool_batches: [rejectedBatch as never],
+        // Provider-visible repair rejections are part of the exact replay.
+        dev_gateway_conversation_tool_batches: [repairRejectedBatch as never],
       },
-      listener: {
-        listener_observation: {
-          status: "verified",
-          transcript: "The archive stage is complete.",
-          transcript_sha256: H("The archive stage is complete."),
-        },
-      },
+      verified_assistant_transcript: "The archive stage is complete.",
       assistant_pcm_sha256: H("repair-assistant-pcm"),
     });
     expect(repairTurns.map((turn) => [turn.exchange_phase, turn.speaker]))
-      .toEqual([["repair", "caller"], ["repair", "assistant"]]);
+      .toEqual([
+        ["repair", "caller"],
+        ["repair", "tool"],
+        ["repair", "assistant"],
+      ]);
+    for (const mutate of [
+      (batch: typeof repairRejectedBatch) => ({
+        ...batch,
+        calls: batch.calls.map((call) => ({
+          ...call,
+          disposition: "executed",
+          pre_dispatch_rejection_code: null,
+        })),
+      }),
+      (batch: typeof repairRejectedBatch) => ({
+        ...batch,
+        calls: batch.calls.map((call) => ({
+          ...call,
+          pre_dispatch_rejection_code: "model_arguments_forbidden",
+        })),
+      }),
+      (batch: typeof repairRejectedBatch) => ({
+        ...batch,
+        batch_ordinal: 2,
+      }),
+    ]) {
+      expect(() => reconstructLc4PublicationConversationExchange({
+        exchange_phase: "repair",
+        opportunity_index: 7,
+        caller_text: "Please repeat that result.",
+        caller_pcm_sha256: H("repair-caller-pcm"),
+        exchange: {
+          dev_gateway_conversation_tool_batches: [
+            mutate(repairRejectedBatch) as never,
+          ],
+        },
+        verified_assistant_transcript: "The archive stage is complete.",
+        assistant_pcm_sha256: H("repair-assistant-pcm"),
+      })).toThrow(/incomplete or out of order|not exact canonical/u);
+    }
   });
 
   it("replays one signed exact-source Gate D receipt and derives public cells", async () => {

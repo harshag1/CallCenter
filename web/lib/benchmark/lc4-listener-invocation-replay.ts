@@ -128,7 +128,7 @@ function projectedRequest(
  * The caller must supply the runner key ID/fingerprint that was signed into
  * preflight. A self-asserted key inside the receipt is never accepted as trust.
  */
-export function replayLc4ListenerInvocation(input: Readonly<{
+export type Lc4ListenerInvocationReplayInput = Readonly<{
   artifact_bytes: Uint8Array;
   signed_invocation_artifact_cas_sha256: string;
   signed_invocation_artifact_byte_length: number;
@@ -143,7 +143,16 @@ export function replayLc4ListenerInvocation(input: Readonly<{
   runner_trust: BenchmarkKernelAttestationTrust;
   expected_runner_key_id: string;
   expected_runner_public_key_sha256: string;
-}>): Lc4ListenerInvocationReplay {
+}>;
+
+export type Lc4VerifiedListenerInvocation = Readonly<{
+  replay: Lc4ListenerInvocationReplay;
+  transcript: string;
+}>;
+
+export function verifyLc4ListenerInvocation(
+  input: Lc4ListenerInvocationReplayInput,
+): Lc4VerifiedListenerInvocation {
   const artifactSha256 = hash(
     input.signed_invocation_artifact_cas_sha256,
     "LC4 signed invocation artifact CAS address",
@@ -324,8 +333,18 @@ export function replayLc4ListenerInvocation(input: Readonly<{
     runner_key_id: expectedRunnerKeyId,
     runner_public_key_sha256: expectedRunnerPublicKeySha256,
   }) as Omit<Lc4ListenerInvocationReplay, "replay_sha256">;
-  return immutableJson({
+  const replay = immutableJson({
     ...body,
     replay_sha256: sha256Hex(`${REPLAY_DOMAIN}${canonicalJson(body)}`),
   }) as Lc4ListenerInvocationReplay;
+  return Object.freeze({
+    replay,
+    transcript: invocation.result.transcript,
+  });
+}
+
+export function replayLc4ListenerInvocation(
+  input: Lc4ListenerInvocationReplayInput,
+): Lc4ListenerInvocationReplay {
+  return verifyLc4ListenerInvocation(input).replay;
 }

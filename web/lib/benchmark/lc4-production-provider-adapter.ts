@@ -59,9 +59,11 @@ import {
 } from "./lc4-development-caller-branch";
 import {
   appendLc4DevNativeGatewayContract,
+  LC4_DEV_PRE_DISPATCH_REJECTION_CODES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
   renderLc4DevHaccResponsePlan,
+  type Lc4DevGatewayConversationToolCall,
   type Lc4DevGatewayConversationToolBatch,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
@@ -236,6 +238,9 @@ export type Lc4NativeConversationTurnInput =
       tool_batch_sha256?: string;
       tool_batch_call_ordinal?: number;
       tool_batch_call_count?: number;
+      tool_disposition?: Lc4DevGatewayConversationToolCall["disposition"];
+      pre_dispatch_rejection_code?:
+        Lc4DevGatewayConversationToolCall["pre_dispatch_rejection_code"];
     }>);
 
 export type Lc4RotationConversationTurn =
@@ -275,6 +280,9 @@ export type Lc4RotationConversationTurn =
       tool_batch_sha256?: string;
       tool_batch_call_ordinal?: number;
       tool_batch_call_count?: number;
+      tool_disposition?: Lc4DevGatewayConversationToolCall["disposition"];
+      pre_dispatch_rejection_code?:
+        Lc4DevGatewayConversationToolCall["pre_dispatch_rejection_code"];
       exchange_phase?: Lc4ConversationExchangePhase;
     }>;
 
@@ -305,6 +313,9 @@ type Lc4ConversationReplayHashTurn = Readonly<{
   tool_batch_sha256?: string;
   tool_batch_call_ordinal?: number;
   tool_batch_call_count?: number;
+  tool_disposition?: Lc4DevGatewayConversationToolCall["disposition"];
+  pre_dispatch_rejection_code?:
+    Lc4DevGatewayConversationToolCall["pre_dispatch_rejection_code"];
 }>;
 
 export type Lc4NativeConversationReplayPacket = Readonly<{
@@ -355,6 +366,13 @@ function hashConversationReplay(turns: readonly Lc4RotationConversationTurn[]): 
                 tool_batch_sha256: turn.tool_batch_sha256,
                 tool_batch_call_ordinal: turn.tool_batch_call_ordinal,
                 tool_batch_call_count: turn.tool_batch_call_count,
+                ...(turn.tool_disposition === undefined
+                  ? {}
+                  : {
+                      tool_disposition: turn.tool_disposition,
+                      pre_dispatch_rejection_code:
+                        turn.pre_dispatch_rejection_code ?? null,
+                    }),
               }
             : {}),
         }
@@ -454,9 +472,18 @@ function validateConversationTurns(
       if (requireDevChronology
         && (turn.tool_batch_sha256 === undefined
           || turn.tool_batch_call_ordinal === undefined
-          || turn.tool_batch_call_count === undefined)) {
+          || turn.tool_batch_call_count === undefined
+          || turn.tool_disposition === undefined
+          || turn.pre_dispatch_rejection_code === undefined)) {
         throw new Error(
-          "LC4 DEV rotation provider tool turn omits exact batch metadata",
+          "LC4 DEV rotation provider tool turn omits exact batch metadata or disposition metadata",
+        );
+      }
+      if (!requireDevChronology
+        && (turn.tool_disposition !== undefined
+          || turn.pre_dispatch_rejection_code !== undefined)) {
+        throw new Error(
+          "LC4 schema-v4 rotation provider tool turn forbids schema-v6 disposition metadata",
         );
       }
       safeId(turn.tool_name, "LC4 rotation provider tool name");
@@ -471,6 +498,20 @@ function validateConversationTurns(
         throw new Error("LC4 rotation provider tool arguments exceed 64 KiB");
       }
       textBytes += toolArgumentsBytes;
+      if (requireDevChronology) {
+        const rejected = turn.tool_disposition === "pre_dispatch_rejected";
+        const rejectionCode = turn.pre_dispatch_rejection_code;
+        if (rejectionCode === undefined
+          || rejected !== (rejectionCode !== null)
+          || (rejectionCode !== null
+            && !LC4_DEV_PRE_DISPATCH_REJECTION_CODES.includes(
+              rejectionCode,
+            ))) {
+          throw new Error(
+            "LC4 DEV rotation provider tool disposition metadata is invalid",
+          );
+        }
+      }
       return Object.freeze({
         ...common,
         speaker: "tool" as const,
@@ -495,6 +536,13 @@ function validateConversationTurns(
                 tool_batch_call_count: turn.tool_batch_call_count!,
               };
             })()
+          : {}),
+        ...(requireDevChronology
+          ? {
+              tool_disposition: turn.tool_disposition!,
+              pre_dispatch_rejection_code:
+                turn.pre_dispatch_rejection_code!,
+            }
           : {}),
       });
     }
@@ -532,11 +580,17 @@ function validateConversationTurns(
         );
       }
       if (repairTurns.length > 0
-        && (repairTurns.length !== 2
-          || repairTurns[0]?.speaker !== "caller"
-          || repairTurns[1]?.speaker !== "assistant")) {
+        && (repairTurns[0]?.speaker !== "caller"
+          || repairTurns.at(-1)?.speaker !== "assistant"
+          || repairTurns.filter((turn) => turn.speaker === "caller").length !== 1
+          || repairTurns.filter((turn) => turn.speaker === "assistant").length !== 1
+          || repairTurns.slice(1, -1).some((turn) =>
+            turn.speaker !== "tool"
+            || turn.tool_disposition !== "pre_dispatch_rejected"
+            || turn.pre_dispatch_rejection_code
+              !== "tool_calls_forbidden_during_repair"))) {
         throw new Error(
-          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} permits at most one tool-free repair caller, assistant exchange after canonical`,
+          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} permits at most one repair caller, complete tool_calls_forbidden_during_repair rejection batches, assistant exchange after canonical`,
         );
       }
     } else if (!opportunityTurns.some((turn) => turn.speaker === "caller")
@@ -693,6 +747,13 @@ function rotationTurnToInput(
             tool_batch_call_count: turn.tool_batch_call_count,
           }
         : {}),
+      ...(turn.tool_disposition === undefined
+        ? {}
+        : {
+            tool_disposition: turn.tool_disposition,
+            pre_dispatch_rejection_code:
+              turn.pre_dispatch_rejection_code!,
+          }),
     });
   }
   if (turn.speaker === "caller") {
@@ -4606,6 +4667,12 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
                 tool_batch_sha256?: string;
                 tool_batch_call_ordinal?: number;
                 tool_batch_call_count?: number;
+                tool_disposition?:
+                  Lc4DevGatewayConversationToolCall["disposition"];
+                pre_dispatch_rejection_code?:
+                  Lc4DevGatewayConversationToolCall[
+                    "pre_dispatch_rejection_code"
+                  ];
               }
           >,
         ) => {
@@ -4628,24 +4695,25 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           text: callerText,
           provenance_receipt_sha256: sha256Hex(exchangeInput.caller_pcm),
         });
-        if (exchangeInput.playback_kind === "canonical") {
-          for (const batch of evidence.dev_gateway_conversation_tool_batches ?? []) {
-            const batchSha256 = sha256Hex(
-              `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch as unknown as JsonValue)}`,
-            );
-            for (const call of batch.calls) {
-              appendConversationTurn({
-                speaker: "tool",
-                source: "canonical_gateway_result",
-                tool_name: call.gateway_tool_name,
-                tool_arguments: call.model_arguments,
-                text: call.provider_output_canonical_json,
-                provenance_receipt_sha256: call.source_sha256,
-                tool_batch_sha256: batchSha256,
-                tool_batch_call_ordinal: call.call_ordinal,
-                tool_batch_call_count: batch.calls.length,
-              });
-            }
+        for (const batch of evidence.dev_gateway_conversation_tool_batches ?? []) {
+          const batchSha256 = sha256Hex(
+            `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch as unknown as JsonValue)}`,
+          );
+          for (const call of batch.calls) {
+            appendConversationTurn({
+              speaker: "tool",
+              source: "canonical_gateway_result",
+              tool_name: call.gateway_tool_name,
+              tool_arguments: call.model_arguments,
+              text: call.provider_output_canonical_json,
+              provenance_receipt_sha256: call.source_sha256,
+              tool_batch_sha256: batchSha256,
+              tool_batch_call_ordinal: call.call_ordinal,
+              tool_batch_call_count: batch.calls.length,
+              tool_disposition: call.disposition,
+              pre_dispatch_rejection_code:
+                call.pre_dispatch_rejection_code,
+            });
           }
         }
         appendConversationTurn({

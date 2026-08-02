@@ -480,6 +480,8 @@ function devConversationTurnsWithMultipleToolBatches(): readonly Lc4NativeConver
     tool_batch_sha256: sha256Hex(`provider-tool-batch:${batch}`),
     tool_batch_call_ordinal: ordinal,
     tool_batch_call_count: count,
+    tool_disposition: "executed",
+    pre_dispatch_rejection_code: null,
     exchange_phase: "canonical",
     provider_conversation_source: true,
     oracle_derived: false,
@@ -497,6 +499,8 @@ function devConversationTurnsWithRepair(): readonly Lc4NativeConversationTurnInp
   const turns = [...devConversationTurnsWithMultipleToolBatches()];
   const canonicalCaller = turns[0]!;
   const canonicalAssistant = turns[4]!;
+  const canonicalTool = turns[1]!;
+  if (canonicalTool.speaker !== "tool") throw new Error("missing tool fixture");
   turns.splice(5, 0,
     Object.freeze({
       ...canonicalCaller,
@@ -504,6 +508,27 @@ function devConversationTurnsWithRepair(): readonly Lc4NativeConversationTurnInp
       sequence: 0,
       text: "Please repeat only the verified result.",
       provenance_receipt_sha256: sha256Hex("repair-caller-pcm:1"),
+      exchange_phase: "repair" as const,
+    }),
+    Object.freeze({
+      ...canonicalTool,
+      turn_id: "placeholder.repair.tool",
+      sequence: 0,
+      text: canonicalJson({
+        ok: false,
+        code: "capability_request_rejected",
+        reason: "tool_calls_forbidden_during_repair",
+        retriable: true,
+        executed: false,
+        rejection_receipt_sha256: sha256Hex("repair-tool-rejection:1"),
+      }),
+      provenance_receipt_sha256: sha256Hex("repair-tool-rejection:1"),
+      tool_batch_sha256: sha256Hex("repair-tool-batch:1"),
+      tool_batch_call_ordinal: 1,
+      tool_batch_call_count: 1,
+      tool_disposition: "pre_dispatch_rejected" as const,
+      pre_dispatch_rejection_code:
+        "tool_calls_forbidden_during_repair" as const,
       exchange_phase: "repair" as const,
     }),
     Object.freeze({
@@ -2196,7 +2221,7 @@ async function openCallerBranchPreflight(input: Readonly<{
 }
 
 describe("LC4 production realtime adapter bridge", () => {
-  it("accepts and signs canonical tool batches followed by one tool-free repair", () => {
+  it("accepts and signs canonical tool batches followed by one rejected repair batch", () => {
     const conversationTurns = devConversationTurnsWithRepair();
     const native = createLc4NativeConversationReplayPacket({
       protocol_id: "HACC-LC4-DEV-v1",
@@ -2221,7 +2246,7 @@ describe("LC4 production realtime adapter bridge", () => {
         sha256Hex("dev-multiple-tool-batches-plan"),
       conversation_turns: conversationTurns,
     });
-    expect(native.conversation_turns.slice(0, 7).map((turn) => [
+    expect(native.conversation_turns.slice(0, 8).map((turn) => [
       turn.exchange_phase,
       turn.speaker,
     ])).toEqual([
@@ -2231,13 +2256,15 @@ describe("LC4 production realtime adapter bridge", () => {
       ["canonical", "tool"],
       ["canonical", "assistant"],
       ["repair", "caller"],
+      ["repair", "tool"],
       ["repair", "assistant"],
     ]);
     expect(hacc.conversation_turns).toEqual(native.conversation_turns);
     expect(projectLc4RotationPacketForReplay(native).provider_history
-      .slice(0, 6).map((turn) => turn.role))
+      .slice(0, 7).map((turn) => turn.role))
       .toEqual([
-        "user", "tool_batch", "tool_batch", "assistant", "user", "assistant",
+        "user", "tool_batch", "tool_batch", "assistant", "user",
+        "tool_batch", "assistant",
       ]);
     const changedPhase = {
       ...native,
@@ -2302,8 +2329,9 @@ describe("LC4 production realtime adapter bridge", () => {
         turns[0]!,
         turns[5]!,
         turns[6]!,
+        turns[7]!,
         ...turns.slice(1, 5),
-        ...turns.slice(7),
+        ...turns.slice(8),
       ];
     }],
     ["duplicate canonical exchange", () => {
@@ -2313,20 +2341,50 @@ describe("LC4 production realtime adapter bridge", () => {
     }],
     ["duplicate repair exchange", () => {
       const turns = [...devConversationTurnsWithRepair()];
-      turns.splice(7, 0, turns[5]!, turns[6]!);
+      turns.splice(8, 0, turns[5]!, turns[6]!, turns[7]!);
       return turns;
     }],
-    ["tool in repair", () => {
+    ["executed tool in repair", () => {
       const turns = [...devConversationTurnsWithRepair()];
-      turns.splice(6, 0, Object.freeze({
-        ...turns[1]!,
-        exchange_phase: "repair" as const,
-      }));
+      turns[6] = Object.freeze({
+        ...turns[6]!,
+        tool_disposition: "executed" as const,
+        pre_dispatch_rejection_code: null,
+      }) as Lc4NativeConversationTurnInput;
+      return turns;
+    }],
+    ["relabeled tool rejection in repair", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      turns[6] = Object.freeze({
+        ...turns[6]!,
+        pre_dispatch_rejection_code:
+          "model_arguments_forbidden" as const,
+      }) as Lc4NativeConversationTurnInput;
+      return turns;
+    }],
+    ["reordered rejection batch in repair", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      const repairTool = turns[6]!;
+      const batchSha256 = sha256Hex("reordered-repair-tool-batch");
+      turns.splice(6, 1,
+        Object.freeze({
+          ...repairTool,
+          tool_batch_sha256: batchSha256,
+          tool_batch_call_ordinal: 2,
+          tool_batch_call_count: 2,
+        }) as Lc4NativeConversationTurnInput,
+        Object.freeze({
+          ...repairTool,
+          tool_batch_sha256: batchSha256,
+          tool_batch_call_ordinal: 1,
+          tool_batch_call_count: 2,
+        }) as Lc4NativeConversationTurnInput,
+      );
       return turns;
     }],
     ["missing repair endpoint", () => {
       const turns = [...devConversationTurnsWithRepair()];
-      turns.splice(6, 1);
+      turns.splice(7, 1);
       return turns;
     }],
   ] as const)("rejects schema-v6 %s", (_label, makeTurns) => {
@@ -2339,7 +2397,7 @@ describe("LC4 production realtime adapter bridge", () => {
       previous_session_rotation_receipt_sha256:
         sha256Hex("dev-invalid-phase-chronology-previous"),
       conversation_turns: reindexConversationTurns(makeTurns()),
-    })).toThrow(/phase identity|chronology/u);
+    })).toThrow(/phase identity|chronology|tool batch/u);
   });
 
   it("keeps legacy schema-v4 conversation bytes phase-free", () => {

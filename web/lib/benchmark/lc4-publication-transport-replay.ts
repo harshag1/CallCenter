@@ -5,6 +5,7 @@ import { independentAsrContractSha256 } from "./audible-evidence";
 import {
   createLc4DevReplayEvidenceStore,
   type Lc4DevReplayArtifactReference,
+  type Lc4DevReplayEvidenceStore,
 } from "./lc4-development-evidence-retention";
 import {
   createLc4ImmutableCas,
@@ -17,6 +18,7 @@ import {
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   type Lc4DevLiveEpisodePlan,
+  type Lc4DevImmutableLedgerEvent,
   type Lc4DevLivePreflightArtifact,
   type Lc4DevLivePrepareArtifact,
   type Lc4DevLiveRunArtifact,
@@ -47,6 +49,7 @@ import {
 } from "./lc4-development-caller-branch";
 import {
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
+  type Lc4DevGatewayConversationToolCall,
 } from "./lc4-development-gateway-bridge";
 import type {
   RealtimeConversationHistoryHydrationAcknowledgement,
@@ -58,7 +61,7 @@ import {
   replayLc4DevelopmentListenerAuthority,
 } from "./lc4-development-listener-authority-replay";
 import {
-  replayLc4ListenerInvocation,
+  verifyLc4ListenerInvocation,
 } from "./lc4-listener-invocation-replay";
 import type { BenchmarkKernelAttestationTrust } from "./kernel-attestation";
 import {
@@ -370,7 +373,7 @@ function appendReconstructedConversationExchange(input: Readonly<{
   caller_text: string;
   caller_pcm_sha256: string;
   exchange: Record<string, JsonValue>;
-  listener: Record<string, JsonValue>;
+  verified_assistant_transcript: string;
   assistant_pcm_sha256: string;
 }>): void {
   type ReconstructedTurnInput =
@@ -396,6 +399,12 @@ function appendReconstructedConversationExchange(input: Readonly<{
         tool_batch_sha256: string;
         tool_batch_call_ordinal: number;
         tool_batch_call_count: number;
+        tool_disposition:
+          Lc4DevGatewayConversationToolCall["disposition"];
+        pre_dispatch_rejection_code:
+          Lc4DevGatewayConversationToolCall[
+            "pre_dispatch_rejection_code"
+          ];
       }>;
   const append = (
     turn: ReconstructedTurnInput,
@@ -423,9 +432,7 @@ function appendReconstructedConversationExchange(input: Readonly<{
       "LC4 publication provider exchange lacks retained conversation tool batches",
     );
   }
-  for (const [batchIndex, batchValue] of (
-    input.exchange_phase === "canonical" ? batches : []
-  ).entries()) {
+  for (const [batchIndex, batchValue] of batches.entries()) {
     const batch = objectValue(
       batchValue,
       "LC4 publication retained conversation tool batch",
@@ -483,6 +490,11 @@ function appendReconstructedConversationExchange(input: Readonly<{
         || (call.source_kind === "pre_dispatch_rejection"
           && (call.disposition !== "pre_dispatch_rejected"
             || typeof call.pre_dispatch_rejection_code !== "string"))
+        || (input.exchange_phase === "repair"
+          && (call.source_kind !== "pre_dispatch_rejection"
+            || call.disposition !== "pre_dispatch_rejected"
+            || call.pre_dispatch_rejection_code
+              !== "tool_calls_forbidden_during_repair"))
         || typeof call.source_sha256 !== "string"
         || !HASH.test(call.source_sha256)) {
         throw new Error(
@@ -500,25 +512,25 @@ function appendReconstructedConversationExchange(input: Readonly<{
         tool_batch_sha256: batchSha256,
         tool_batch_call_ordinal: callIndex + 1,
         tool_batch_call_count: batch.calls.length,
+        tool_disposition: call.disposition as
+          Lc4DevGatewayConversationToolCall["disposition"],
+        pre_dispatch_rejection_code:
+          call.pre_dispatch_rejection_code as
+            Lc4DevGatewayConversationToolCall[
+              "pre_dispatch_rejection_code"
+            ],
       });
     }
   }
-  const listenerObservation = objectValue(
-    input.listener.listener_observation as JsonValue,
-    "LC4 publication exact listener observation",
-  );
-  const transcript = String(listenerObservation.transcript);
-  if (listenerObservation.status !== "verified"
-    || !transcript
-    || listenerObservation.transcript_sha256 !== sha256Hex(transcript)) {
+  if (!input.verified_assistant_transcript.trim()) {
     throw new Error(
-      "LC4 publication provider conversation assistant turn lacks its exact listener transcript",
+      "LC4 publication provider conversation assistant turn lacks its verified signed-invocation transcript",
     );
   }
   append({
     speaker: "assistant",
     source: "listener_exact_captured_pcm_asr",
-    text: transcript,
+    text: input.verified_assistant_transcript,
     provenance_receipt_sha256: input.assistant_pcm_sha256,
   });
 }
@@ -535,7 +547,7 @@ export function reconstructLc4PublicationConversationExchange(input: Readonly<{
   caller_text: string;
   caller_pcm_sha256: string;
   exchange: Record<string, JsonValue>;
-  listener: Record<string, JsonValue>;
+  verified_assistant_transcript: string;
   assistant_pcm_sha256: string;
 }>): readonly Lc4RotationConversationTurn[] {
   const turns: Lc4RotationConversationTurn[] = [];
@@ -544,6 +556,102 @@ export function reconstructLc4PublicationConversationExchange(input: Readonly<{
     ...input,
   });
   return Object.freeze([...turns]);
+}
+
+/**
+ * Resolves the canonical caller audio from the event that actually retained it.
+ * The completed event commits the digest, while the earlier audio-submitted
+ * event carries the immutable CAS edge. Publication requires both halves and
+ * their ordering to agree; neither event is accepted as self-authoritative.
+ */
+export async function resolveLc4PublicationCanonicalCallerEvidence(
+  input: Readonly<{
+    ledger: readonly Lc4DevImmutableLedgerEvent[];
+    completed_event: Lc4DevImmutableLedgerEvent;
+    completed_payload: Record<string, JsonValue>;
+    episode_id: string;
+    opportunity_id: string;
+    evidence: Lc4DevReplayEvidenceStore;
+    cas: Lc4ImmutableCas;
+  }>,
+): Promise<Readonly<{
+  caller_pcm_sha256: string;
+  caller_pcm: Uint8Array;
+  caller_reference: Lc4DevReplayArtifactReference;
+}>> {
+  const callerPcmSha256 = String(
+    input.completed_payload.caller_pcm_sha256,
+  );
+  requireHash(
+    callerPcmSha256,
+    "LC4 publication completed-opportunity caller PCM",
+  );
+  const submittedEvents = input.ledger.filter((candidate) =>
+    candidate.episode_id === input.episode_id
+    && candidate.opportunity_id === input.opportunity_id
+    && candidate.event_type === "audio_submitted");
+  if (submittedEvents.length !== 1
+    || submittedEvents[0]!.sequence >= input.completed_event.sequence) {
+    throw new Error(
+      "LC4 publication completed opportunity lacks one prior canonical audio submission",
+    );
+  }
+  const submittedEvent = submittedEvents[0]!;
+  const submittedPayload = objectValue(
+    await input.evidence.resolveJson(submittedEvent.payload_evidence),
+    "LC4 publication audio-submitted payload",
+  );
+  const controlReceiptSha256 = String(
+    submittedPayload.control_receipt_sha256,
+  );
+  requireHash(
+    controlReceiptSha256,
+    "LC4 publication submitted response control",
+  );
+  if (submittedPayload.caller_pcm_sha256 !== callerPcmSha256
+    || submittedPayload.caller_branch_decision_sha256
+      !== input.completed_payload.caller_branch_decision_sha256) {
+    throw new Error(
+      "LC4 publication completed opportunity differs from its prior audio submission",
+    );
+  }
+  const callerReferences = submittedEvent.evidence_references.filter((candidate) =>
+    candidate.kind === "caller_pcm"
+    && candidate.evidence_sha256 === callerPcmSha256);
+  const controlReferences = submittedEvent.evidence_references.filter((candidate) =>
+    candidate.kind === "control_authority"
+    && candidate.evidence_sha256 === controlReceiptSha256);
+  if (callerReferences.length !== 1 || controlReferences.length !== 1) {
+    throw new Error(
+      "LC4 publication audio submission lacks exact caller PCM and response-control edges",
+    );
+  }
+  const branchDecisionSha256 =
+    input.completed_payload.caller_branch_decision_sha256;
+  const branchReferences = submittedEvent.evidence_references.filter((candidate) =>
+    candidate.kind === "caller_branch_decision");
+  if ((branchDecisionSha256 === null && branchReferences.length !== 0)
+    || (typeof branchDecisionSha256 === "string"
+      && (!HASH.test(branchDecisionSha256)
+        || branchReferences.length !== 1
+        || branchReferences[0]!.evidence_sha256
+          !== branchDecisionSha256))) {
+    throw new Error(
+      "LC4 publication audio submission differs from its caller-branch authority edge",
+    );
+  }
+  const callerReference = callerReferences[0]!;
+  const callerPcm = await input.cas.get(callerPcmSha256);
+  if (callerReference.byte_length !== callerPcm.byteLength) {
+    throw new Error(
+      "LC4 publication retained caller PCM length differs from its audio-submission edge",
+    );
+  }
+  return Object.freeze({
+    caller_pcm_sha256: callerPcmSha256,
+    caller_pcm: callerPcm,
+    caller_reference: callerReference,
+  });
 }
 
 function preflightAsrRunnerTrust(
@@ -1249,20 +1357,18 @@ async function replayEpisode(input: Readonly<{
       event,
       evidenceSha256: providerExchangeSha256,
     });
-    const callerPcmSha256 = String(payload.caller_pcm_sha256);
-    requireHash(
-      callerPcmSha256,
-      "LC4 publication completed-opportunity caller PCM",
-    );
-    const callerReferences = event.evidence_references.filter((candidate) =>
-      candidate.kind === "caller_pcm"
-      && candidate.evidence_sha256 === callerPcmSha256);
-    if (callerReferences.length !== 1) {
-      throw new Error(
-        "LC4 publication completed opportunity lacks one exact caller PCM edge",
-      );
-    }
-    const callerReference = callerReferences[0]!;
+    const callerEvidence =
+      await resolveLc4PublicationCanonicalCallerEvidence({
+        ledger: input.run.ledger,
+        completed_event: event,
+        completed_payload: payload,
+        episode_id: input.episode.episode_id,
+        opportunity_id: opportunity.id,
+        evidence: input.evidence,
+        cas: input.cas,
+      });
+    const callerPcmSha256 = callerEvidence.caller_pcm_sha256;
+    const callerPcm = callerEvidence.caller_pcm;
     const projection = await input.evidence.resolveJson(reference);
     const exchange = objectValue(
       projection,
@@ -1294,12 +1400,6 @@ async function replayEpisode(input: Readonly<{
     );
     const outputPcmSha256 = String(outputCapture.generated_pcm_sha256);
     requireHash(outputPcmSha256, "LC4 publication output PCM");
-    const callerPcm = await input.cas.get(callerPcmSha256);
-    if (callerReference.byte_length !== callerPcm.byteLength) {
-      throw new Error(
-        "LC4 publication retained caller PCM length differs from its ledger edge",
-      );
-    }
     const listenerPcm = await input.cas.get(outputPcmSha256);
     const listenerEvidenceSha256 =
       String(payload.canonical_listener_evidence_sha256);
@@ -1371,16 +1471,6 @@ async function replayEpisode(input: Readonly<{
         "LC4 publication non-branch caller PCM differs from its prepared audio binding",
       );
     }
-    appendReconstructedConversationExchange({
-      turns: reconstructedConversationTurns,
-      exchange_phase: "canonical",
-      opportunity_index: opportunity.index,
-      caller_text: callerText,
-      caller_pcm_sha256: callerPcmSha256,
-      exchange,
-      listener,
-      assistant_pcm_sha256: outputPcmSha256,
-    });
     const listenerAuthorityReplay =
       await replayLc4DevelopmentListenerAuthority({
         cas: input.cas,
@@ -1423,7 +1513,7 @@ async function replayEpisode(input: Readonly<{
     const invocationArtifactBytes = await input.cas.get(
       invocationArtifactCasSha256,
     );
-    const listenerInvocationReplay = replayLc4ListenerInvocation({
+    const verifiedListenerInvocation = verifyLc4ListenerInvocation({
       artifact_bytes: invocationArtifactBytes,
       signed_invocation_artifact_cas_sha256:
         invocationArtifactCasSha256,
@@ -1445,6 +1535,18 @@ async function replayEpisode(input: Readonly<{
         input.preflight.asr_runner_trust
           .public_key_fingerprint_sha256,
     });
+    const listenerInvocationReplay = verifiedListenerInvocation.replay;
+    appendReconstructedConversationExchange({
+      turns: reconstructedConversationTurns,
+      exchange_phase: "canonical",
+      opportunity_index: opportunity.index,
+      caller_text: callerText,
+      caller_pcm_sha256: callerPcmSha256,
+      exchange,
+      verified_assistant_transcript:
+        verifiedListenerInvocation.transcript,
+      assistant_pcm_sha256: outputPcmSha256,
+    });
     if (exchange.transport_purpose !== expected.transport_purpose
       || exchange.transport_mode !== expected.transport_mode
       || exchange.transport_profile_sha256
@@ -1463,7 +1565,7 @@ async function replayEpisode(input: Readonly<{
       opportunity_id: opportunity.id,
       opportunity_index: opportunity.index,
       playback_kind: "canonical" as const,
-      caller_pcm_sha256: binding.pcm_sha256,
+      caller_pcm_sha256: callerPcmSha256,
       provider_exchange_sha256: providerExchangeSha256,
       wire_observation_set_sha256: wireObservationSetSha256,
       listener_evidence_sha256: listenerEvidenceSha256,
@@ -1747,16 +1849,6 @@ async function replayEpisode(input: Readonly<{
           "LC4 publication repair caller text differs from its frozen repair library",
         );
       }
-      appendReconstructedConversationExchange({
-        turns: reconstructedConversationTurns,
-        exchange_phase: "repair",
-        opportunity_index: opportunity.index,
-        caller_text: repairSource.canonical_caller_text,
-        caller_pcm_sha256: repairCallerPcmSha256,
-        exchange: repairExchange,
-        listener: repairListener,
-        assistant_pcm_sha256: repairOutputPcmSha256,
-      });
       const repairAuthorityReplay =
         await replayLc4DevelopmentListenerAuthority({
           cas: input.cas,
@@ -1801,7 +1893,7 @@ async function replayEpisode(input: Readonly<{
       const repairInvocationBytes = await input.cas.get(
         repairInvocationCasSha256,
       );
-      const repairInvocationReplay = replayLc4ListenerInvocation({
+      const verifiedRepairInvocation = verifyLc4ListenerInvocation({
         artifact_bytes: repairInvocationBytes,
         signed_invocation_artifact_cas_sha256:
           repairInvocationCasSha256,
@@ -1825,6 +1917,18 @@ async function replayEpisode(input: Readonly<{
         expected_runner_public_key_sha256:
           input.preflight.asr_runner_trust
             .public_key_fingerprint_sha256,
+      });
+      const repairInvocationReplay = verifiedRepairInvocation.replay;
+      appendReconstructedConversationExchange({
+        turns: reconstructedConversationTurns,
+        exchange_phase: "repair",
+        opportunity_index: opportunity.index,
+        caller_text: repairSource.canonical_caller_text,
+        caller_pcm_sha256: repairCallerPcmSha256,
+        exchange: repairExchange,
+        verified_assistant_transcript:
+          verifiedRepairInvocation.transcript,
+        assistant_pcm_sha256: repairOutputPcmSha256,
       });
       const repairWireObservationSetSha256 = String(
         repairExchange.wire_observation_set_sha256,
@@ -1950,7 +2054,6 @@ async function replayEpisode(input: Readonly<{
         })),
       )}`,
     ),
-    entries: Object.freeze([...entries]),
   });
 }
 

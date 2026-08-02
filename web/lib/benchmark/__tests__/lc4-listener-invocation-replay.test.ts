@@ -21,6 +21,7 @@ import {
 } from "../lc4-development-listener-semantics";
 import {
   replayLc4ListenerInvocation,
+  verifyLc4ListenerInvocation,
 } from "../lc4-listener-invocation-replay";
 
 const RUN_ID = "lc4-dev-openai-native";
@@ -209,8 +210,11 @@ function replayInput(
 describe("LC4 listener signed invocation replay", () => {
   it("replays exact CAS bytes through the preflight-bound runner trust root", async () => {
     const retained = await fixture();
-    const replay = replayLc4ListenerInvocation(replayInput(retained));
+    const verified = verifyLc4ListenerInvocation(replayInput(retained));
+    const replay = verified.replay;
 
+    expect(verified.transcript).toBe(TRANSCRIPT);
+    expect(replayLc4ListenerInvocation(replayInput(retained))).toEqual(replay);
     expect(replay.source_pcm_sha256).toBe(sha256Hex(PCM));
     expect(replay.source_sample_rate_hz).toBe(24_000);
     expect(replay.transcript_sha256).toBe(TRANSCRIPT_SHA256);
