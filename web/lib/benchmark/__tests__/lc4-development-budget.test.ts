@@ -185,6 +185,18 @@ describe("LC4-DEV hard aggregate budget authority", () => {
     expect(recoveredPartial.reservations).toHaveLength(6);
     await expect(reserveLc4DevRunBudget({ root: partialRoot, binding: bindingValue, now }))
       .resolves.toEqual(recoveredPartial);
+
+    const expiredRecoveryRoot = await mkdtemp(join(tmpdir(), "lc4-dev-budget-"));
+    roots.push(expiredRecoveryRoot);
+    await expect(reserveLc4DevRunBudget(
+      { root: expiredRecoveryRoot, binding: bindingValue, now },
+      { afterFullyReserved: async () => { throw new Error("fault-before-expired-recovery"); } },
+    )).rejects.toThrow("fault-before-expired-recovery");
+    const afterPreflightExpiry = () => new Date("2026-07-23T02:00:00.000Z");
+    const recoveredExpired = await reserveLc4DevRunBudget({
+      root: expiredRecoveryRoot, binding: bindingValue, now: afterPreflightExpiry,
+    });
+    expect(recoveredExpired.reservations).toHaveLength(6);
   });
 
   it("admits before preflight expiry, continues planned cells under the consumed lease, and rejects replay/reconnect", async () => {

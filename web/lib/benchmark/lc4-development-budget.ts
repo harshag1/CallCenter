@@ -253,12 +253,17 @@ export async function reserveLc4DevRunBudget(input: Readonly<{
   afterReservation?: (count: number) => Promise<void>;
   afterFullyReserved?: () => Promise<void>;
 }> = {}): Promise<Lc4DevRunLease> {
+  const requestedAt = input.now();
   const ledgerPath = lc4DevBudgetLedgerPath(input.root);
   const before = await initializeOrRecoverLedger(ledgerPath, input.now);
   const initialEvents = await inspectFilesystemBudgetLedgerEvents({ ledgerPath, now: input.now });
   const initialized = initialEvents.find((event) => event.event_type === "ledger.initialized");
   if (!initialized) throw new Error("LC4-DEV budget ledger is missing its signed initialization event");
   const existingReservations = before.reservations;
+  if (existingReservations.length === 0
+    && requestedAt.getTime() >= Date.parse(input.binding.preflight.expires_at)) {
+    throw new Error("LC4-DEV cannot create reservations after preflight expiry");
+  }
   const recoveredDeadline = existingReservations[0]?.expires_at;
   const admittedAt = recoveredDeadline
     ? new Date(Date.parse(recoveredDeadline) - LC4_DEV_MAXIMUM_RUN_DURATION_MS)

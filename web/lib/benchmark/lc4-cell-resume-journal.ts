@@ -7,13 +7,16 @@ import {
   readFile,
   rename,
   rm,
+  writeFile,
 } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { canonicalJson, sha256Hex } from "./artifacts";
 import {
   inspectFilesystemBudgetLedger,
+  inspectFilesystemBudgetLedgerEvents,
   setFilesystemBudgetPaused,
 } from "./filesystem-budget-ledger";
 import type { LiveStsProvider } from "./live-sts-development-experiment";
@@ -32,6 +35,7 @@ const EVENT_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-event/v1\n";
 const SNAPSHOT_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-snapshot/v1\n";
 const CREDIT_DOMAIN = "harshas-amazing-call-center/lc4-provider-credit-rejection/v1\n";
 const CUSTODY_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-custody/v1\n";
+const TAKEOVER_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-takeover/v1\n";
 const HASH = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
@@ -508,14 +512,36 @@ async function writeJournal(path: string, file: JournalFile, create: boolean): P
 
 async function withLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${path}.lock`;
+  const ownerPath = resolve(lockPath, "owner.json");
+  const nonce = randomUUID();
+  const owner = Object.freeze({ schema_version: 1, hostname: hostname(), pid: process.pid, nonce });
   let acquired = false;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       await mkdir(lockPath, { mode: 0o700 });
+      await writeFile(ownerPath, `${canonicalJson(owner)}\n`, { flag: "wx", mode: PRIVATE_MODE });
       acquired = true;
       break;
     } catch (error) {
       if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+      const lockInfo = await lstat(lockPath).catch(() => null);
+      if (lockInfo && (!lockInfo.isDirectory() || lockInfo.isSymbolicLink())) fail("journal lock path is unsafe");
+      const prior = await readFile(ownerPath, "utf8").then((bytes) => JSON.parse(bytes) as {
+        schema_version?: unknown; hostname?: unknown; pid?: unknown; nonce?: unknown;
+      }).catch(() => null);
+      if (prior?.schema_version === 1 && prior.hostname === hostname()
+        && Number.isSafeInteger(prior.pid) && (prior.pid as number) > 0
+        && typeof prior.nonce === "string") {
+        let live = true;
+        try { process.kill(prior.pid as number, 0); } catch (probe) {
+          if (probe && typeof probe === "object" && "code" in probe && probe.code === "ESRCH") live = false;
+        }
+        if (!live) {
+          const confirm = await readFile(ownerPath, "utf8").then((bytes) => JSON.parse(bytes) as { nonce?: unknown }).catch(() => null);
+          if (confirm?.nonce === prior.nonce) await rm(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      }
       await new Promise((resolveWait) => setTimeout(resolveWait, 2));
     }
   }
@@ -523,7 +549,9 @@ async function withLock<T>(path: string, operation: () => Promise<T>): Promise<T
   try {
     return await operation();
   } finally {
-    await rm(lockPath, { recursive: true, force: true });
+    const current = await readFile(ownerPath, "utf8").then((bytes) => JSON.parse(bytes) as { nonce?: unknown }).catch(() => null);
+    if (current?.nonce !== nonce) fail("journal ownership lock changed before release");
+    await rm(lockPath, { recursive: true, force: false });
   }
 }
 
@@ -719,7 +747,7 @@ export async function recoverExpiredLc4CellBeforeNetwork(input: Readonly<{
   expected_plan: Lc4CellResumePlan;
   evidence_sha256: string;
   now: () => Date;
-}>): Promise<Lc4CellResumeStatus> {
+}>, hooks: Readonly<{ afterBudgetMutation?: () => Promise<void> }> = {}): Promise<Lc4CellResumeStatus> {
   requireHash(input.evidence_sha256, "evidence_sha256");
   return mutateJournal({ ...input, event: async (file) => {
     const last = file.events.at(-1);
@@ -730,19 +758,33 @@ export async function recoverExpiredLc4CellBeforeNetwork(input: Readonly<{
       fail("pre-network owner lease has not expired");
     }
     const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
-    if (ledger.paused || ledger.ledger_id !== file.plan.budget_ledger_id) {
-      fail("expired-owner recovery requires the exact open budget ledger");
+    if (ledger.ledger_id !== file.plan.budget_ledger_id) fail("expired-owner recovery requires the exact budget ledger");
+    const operationId = `lc4cell-expired-owner-pause:${last.cell_id}:${file.sequence + 1}`;
+    let pauseHead: string;
+    if (ledger.paused) {
+      const event = (await inspectFilesystemBudgetLedgerEvents({ ledgerPath: file.plan.budget_ledger_path, now: input.now })).at(-1);
+      if (!event || event.event_type !== "ledger.paused" || event.operation_id !== operationId
+        || event.previous_event_sha256 !== last.budget_ledger_head_sha256
+        || event.event_sha256 !== ledger.head_sha256
+        || !("reason_code" in event.payload) || event.payload.reason_code !== "expired_pre_network_owner_recovery"
+        || !("evidence_sha256" in event.payload) || event.payload.evidence_sha256 !== input.evidence_sha256) {
+        fail("paused budget ledger does not match the exact interrupted expired-owner recovery");
+      }
+      pauseHead = event.event_sha256;
+    } else {
+      const pause = await setFilesystemBudgetPaused({
+        ledgerPath: file.plan.budget_ledger_path,
+        operationId,
+        paused: true,
+        reasonCode: "expired_pre_network_owner_recovery",
+        evidenceSha256: input.evidence_sha256,
+        expectedLedgerId: file.plan.budget_ledger_id,
+        expectedHeadSha256: ledger.head_sha256,
+        now: input.now,
+      });
+      pauseHead = pause.snapshot.head_sha256;
+      await hooks.afterBudgetMutation?.();
     }
-    const pause = await setFilesystemBudgetPaused({
-      ledgerPath: file.plan.budget_ledger_path,
-      operationId: `lc4cell-expired-owner-pause:${last.cell_id}:${file.sequence + 1}`,
-      paused: true,
-      reasonCode: "expired_pre_network_owner_recovery",
-      evidenceSha256: input.evidence_sha256,
-      expectedLedgerId: file.plan.budget_ledger_id,
-      expectedHeadSha256: ledger.head_sha256,
-      now: input.now,
-    });
     return appendEvent(file, {
       occurred_at: input.now().toISOString(),
       event_type: "cell.paused_before_network",
@@ -751,7 +793,7 @@ export async function recoverExpiredLc4CellBeforeNetwork(input: Readonly<{
       owner_token_sha256: last.owner_token_sha256,
       owner_expires_at: last.owner_expires_at,
       evidence_sha256: input.evidence_sha256,
-      budget_ledger_head_sha256: pause.snapshot.head_sha256,
+      budget_ledger_head_sha256: pauseHead,
     });
   }});
 }
@@ -792,7 +834,7 @@ export async function claimLc4PausedCell(input: Readonly<{
   owner_token_sha256: string;
   owner_expires_at: string;
   now: () => Date;
-}>): Promise<Lc4CellResumeStatus> {
+}>, hooks: Readonly<{ afterBudgetMutation?: () => Promise<void> }> = {}): Promise<Lc4CellResumeStatus> {
   requireId(input.owner_id, "owner_id");
   requireHash(input.owner_token_sha256, "owner_token_sha256");
   requireTimestamp(input.owner_expires_at, "owner_expires_at");
@@ -804,19 +846,42 @@ export async function claimLc4PausedCell(input: Readonly<{
       || last?.event_type !== "cell.paused_before_network") fail("cell is not paused before network emission");
     if (now.getTime() >= Date.parse(file.plan.lease_hard_deadline_at)
       || now.getTime() >= Date.parse(input.owner_expires_at)) fail("authorization or owner lease expired before resume");
+    const takeoverEvidenceSha256 = sha256Hex(`${TAKEOVER_DOMAIN}${canonicalJson({
+      cell_id: input.cell_id,
+      owner_id: input.owner_id,
+      owner_token_sha256: input.owner_token_sha256,
+      owner_expires_at: input.owner_expires_at,
+      paused_evidence_sha256: last.evidence_sha256,
+    })}`);
     const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
-    if (!ledger.paused || ledger.ledger_id !== file.plan.budget_ledger_id
-      || ledger.head_sha256 !== last.budget_ledger_head_sha256) fail("paused budget ledger head differs from journal custody");
-    const resumed = await setFilesystemBudgetPaused({
-      ledgerPath: file.plan.budget_ledger_path,
-      operationId: `lc4cell-resume:${input.cell_id}:${file.sequence + 1}`,
-      paused: false,
-      reasonCode: "credit_restored_exact_cell",
-      evidenceSha256: last.evidence_sha256,
-      expectedLedgerId: file.plan.budget_ledger_id,
-      expectedHeadSha256: ledger.head_sha256,
-      now: input.now,
-    });
+    if (ledger.ledger_id !== file.plan.budget_ledger_id) fail("paused budget ledger differs from journal custody");
+    const operationId = `lc4cell-resume:${input.cell_id}:${file.sequence + 1}`;
+    let resumedHead: string;
+    if (!ledger.paused) {
+      const event = (await inspectFilesystemBudgetLedgerEvents({ ledgerPath: file.plan.budget_ledger_path, now: input.now })).at(-1);
+      if (!event || event.event_type !== "ledger.resumed" || event.operation_id !== operationId
+        || event.previous_event_sha256 !== last.budget_ledger_head_sha256
+        || event.event_sha256 !== ledger.head_sha256
+        || !("reason_code" in event.payload) || event.payload.reason_code !== "credit_restored_exact_cell"
+        || !("evidence_sha256" in event.payload) || event.payload.evidence_sha256 !== takeoverEvidenceSha256) {
+        fail("open budget ledger does not match the exact interrupted owner takeover");
+      }
+      resumedHead = event.event_sha256;
+    } else {
+      if (ledger.head_sha256 !== last.budget_ledger_head_sha256) fail("paused budget ledger head differs from journal custody");
+      const resumed = await setFilesystemBudgetPaused({
+        ledgerPath: file.plan.budget_ledger_path,
+        operationId,
+        paused: false,
+        reasonCode: "credit_restored_exact_cell",
+        evidenceSha256: takeoverEvidenceSha256,
+        expectedLedgerId: file.plan.budget_ledger_id,
+        expectedHeadSha256: ledger.head_sha256,
+        now: input.now,
+      });
+      resumedHead = resumed.snapshot.head_sha256;
+      await hooks.afterBudgetMutation?.();
+    }
     return appendEvent(file, {
       occurred_at: now.toISOString(),
       event_type: "cell.resume_claimed",
@@ -825,7 +890,7 @@ export async function claimLc4PausedCell(input: Readonly<{
       owner_token_sha256: input.owner_token_sha256,
       owner_expires_at: input.owner_expires_at,
       evidence_sha256: last.evidence_sha256,
-      budget_ledger_head_sha256: resumed.snapshot.head_sha256,
+      budget_ledger_head_sha256: resumedHead,
     });
   }});
 }

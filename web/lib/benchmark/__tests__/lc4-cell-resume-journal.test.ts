@@ -1,6 +1,7 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -29,6 +30,31 @@ afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recur
 
 const BASE_TIME = Date.parse("2026-08-01T18:00:00.000Z");
 const hash = (value: string) => sha256Hex(`lc4-cell-resume-test\n${value}`);
+
+async function killAfterBudgetMutation(mode: "recover" | "claim", payload: object): Promise<void> {
+  const helper = resolve(process.cwd(), "lib/benchmark/__tests__/helpers/lc4-cell-resume-crash-worker.ts");
+  await new Promise<void>((resolveWorker, rejectWorker) => {
+    const child = spawn(process.execPath, ["--import", "tsx", helper, mode, JSON.stringify(payload)], {
+      cwd: process.cwd(), env: { ...process.env, NODE_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let errors = "";
+    let killed = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+      if (!killed && output.includes("BUDGET_MUTATED")) {
+        killed = true;
+        child.kill("SIGKILL");
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => { errors += chunk.toString("utf8"); });
+    child.on("error", rejectWorker);
+    child.on("close", (_code, signal) => {
+      if (killed && signal === "SIGKILL") resolveWorker();
+      else rejectWorker(new Error(`crash worker did not reach mutation boundary: ${output}${errors}`));
+    });
+  });
+}
 
 async function fixture(): Promise<Readonly<{
   root: string;
@@ -281,6 +307,57 @@ describe("LC4 whole-cell paid resume journal", () => {
       now: afterExpiry,
     })).resolves.toMatchObject({ state: "owned_before_network" });
   });
+
+  it("reconciles child-process death after budget pause but before the journal pause append", async () => {
+    const value = await fixture();
+    let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    status = await begin(value, status.head_sha256, 0);
+    const now = new Date(BASE_TIME + 6 * 60_000);
+    const evidence = hash("process-kill-after-budget-pause");
+    const recovery = {
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      evidence_sha256: evidence,
+      now: now.toISOString(),
+    };
+    await killAfterBudgetMutation("recover", recovery);
+    expect((await inspectLc4CellResumeJournal({ journal_path: value.journalPath })).state).toBe("owned_before_network");
+    await expect(recoverExpiredLc4CellBeforeNetwork({
+      ...recovery, evidence_sha256: hash("drifted-recovery"), now: () => now,
+    })).rejects.toThrow("exact interrupted expired-owner recovery");
+    await expect(recoverExpiredLc4CellBeforeNetwork({
+      ...recovery, now: () => now,
+    })).resolves.toMatchObject({ state: "paused_before_network" });
+  }, 30_000);
+
+  it("reconciles child-process death after budget unpause but before owner-takeover append", async () => {
+    const value = await fixture();
+    let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    status = await begin(value, status.head_sha256, 0);
+    status = await pauseLc4CellBeforeNetwork({
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      cell_id: value.plan.cells[0]!.cell_id,
+      ...owner(1), reason_code: "operator_interruption",
+      evidence_sha256: hash("process-kill-before-takeover"), now: value.now,
+    });
+    const takeover = {
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      cell_id: value.plan.cells[0]!.cell_id,
+      ...owner(9), owner_expires_at: new Date(BASE_TIME + 10 * 60_000).toISOString(),
+      now: new Date(BASE_TIME).toISOString(),
+    };
+    await killAfterBudgetMutation("claim", takeover);
+    expect((await inspectLc4CellResumeJournal({ journal_path: value.journalPath })).state).toBe("paused_before_network");
+    await expect(claimLc4PausedCell({ ...takeover, ...owner(8), now: value.now }))
+      .rejects.toThrow("exact interrupted owner takeover");
+    await expect(claimLc4PausedCell({ ...takeover, now: value.now }))
+      .resolves.toMatchObject({ state: "owned_before_network" });
+  }, 30_000);
 
   it("creates an explicit absorbing custody quarantine for an unsafe missing-journal reconstruction", async () => {
     const value = await fixture();

@@ -78,6 +78,7 @@ import {
   assertLc4DevRunPackage,
   createLc4DevRunPackage,
   finalizeLc4DevRunBudget,
+  lc4DevBudgetLedgerPath,
   replayLc4DevBudgetEvidence,
   reserveLc4DevRunBudget,
   type Lc4DevBudgetEvidence,
@@ -1207,6 +1208,12 @@ export async function runLc4DevelopmentOperatorCli(
         if (error.code === "ENOENT") return false;
         throw error;
       });
+      const recoveringConsumedLease = !existingLease && await lstat(lc4DevBudgetLedgerPath(evidenceRoot))
+        .then(() => true)
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        });
       const xaiFiniteManualGateD = await loadLc4XaiFiniteManualGateDReceipt({
         receipt_path: parsed["--xai-gate-d-receipt"]!,
         plan_trust_root_sha256:
@@ -1219,7 +1226,7 @@ export async function runLc4DevelopmentOperatorCli(
       assertLc4DevLivePreflightArtifact(
         preflight,
         prepare,
-        existingLease ? new Date(preflight.checked_at) : io.now(),
+        existingLease || recoveringConsumedLease ? new Date(preflight.checked_at) : io.now(),
       );
       if (source.source_commit !== prepare.source_commit || source.source_tree_sha256 !== prepare.source_tree_sha256) throw new Error("LC4-DEV run source differs from prepare");
       if (qualification.receipt_sha256 !== preflight.qualification.receipt_sha256) throw new Error("LC4-DEV run qualification differs from preflight");
@@ -1251,7 +1258,7 @@ export async function runLc4DevelopmentOperatorCli(
       assertLc4DevRunLease({
         lease: budgetLease,
         binding: { prepare, preflight },
-        now: existingLease ? new Date(budgetLease.admitted_at) : io.now(),
+        now: existingLease || recoveringConsumedLease ? new Date(budgetLease.admitted_at) : io.now(),
         admission: true,
       });
       if (!existingLease) await writeImmutableJson(leasePath, budgetLease);
