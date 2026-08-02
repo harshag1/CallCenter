@@ -18,6 +18,10 @@ that the provider accepted those values. `client_request` evidence is present in
 the input union solely so the validator can identify and quarantine that error
 as `request_only_acknowledgement`.
 
+Model, voice, and canonical settings digest parity are exact paid-readiness
+requirements. A provider-resolved alias is retained as useful diagnostic
+evidence but fails conformance when it differs from the registered request.
+
 ## Adapter integration
 
 Provider adapters should translate already-observed wire events into

@@ -497,6 +497,16 @@ export class RealtimeLifecycleConformanceValidator {
         this.violate(index, event, "feature_negotiation_incomplete", `unsupported feature ${outcome.id} omitted reasonCode`);
       }
     }
+    // Paid benchmark parity is exact: provider-resolved aliases are useful
+    // evidence, but they do not prove that the registered treatment ran on the
+    // requested model or voice. Adapters must retain the actual acknowledged
+    // identities and fail readiness rather than copying request values here.
+    if (requested.model !== acknowledged.model) {
+      this.violate(index, event, "configuration_mismatch", "provider-acknowledged model differs from the request");
+    }
+    if (requested.voice !== acknowledged.voice) {
+      this.violate(index, event, "configuration_mismatch", "provider-acknowledged voice differs from the request");
+    }
     if (requested.settingsSha256 !== acknowledged.settingsSha256) {
       this.violate(index, event, "configuration_mismatch", "provider-acknowledged settings differ from the request");
     }

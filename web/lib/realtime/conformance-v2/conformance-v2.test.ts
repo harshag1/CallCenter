@@ -65,6 +65,101 @@ describe("realtime provider lifecycle evidence conformance v2", () => {
     ]));
   });
 
+  it.each(TRACES)("rejects a fake %s trace when the provider acknowledges a different model", (_, trace) => {
+    const event = trace[2];
+    if (event.type !== "session.configuration.acknowledged") throw new Error("fixture drift");
+    const hostile = {
+      ...event,
+      acknowledged: { ...event.acknowledged, model: "different-model" },
+    } satisfies RealtimeLifecycleEvent;
+
+    const report = validateRealtimeLifecycleTrace(replace(trace, 2, hostile));
+    expect(report.passed).toBe(false);
+    expect(report.snapshot.providerSessionId).toBeNull();
+    expect(report.snapshot.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "configuration_mismatch",
+        eventType: "session.configuration.acknowledged",
+        message: "provider-acknowledged model differs from the request",
+      }),
+    ]));
+  });
+
+  it.each(TRACES)("rejects a fake %s trace when the provider acknowledges a different voice", (_, trace) => {
+    const event = trace[2];
+    if (event.type !== "session.configuration.acknowledged") throw new Error("fixture drift");
+    const hostile = {
+      ...event,
+      acknowledged: { ...event.acknowledged, voice: "different-voice" },
+    } satisfies RealtimeLifecycleEvent;
+
+    const report = validateRealtimeLifecycleTrace(replace(trace, 2, hostile));
+    expect(report.passed).toBe(false);
+    expect(report.snapshot.providerSessionId).toBeNull();
+    expect(report.snapshot.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "configuration_mismatch",
+        eventType: "session.configuration.acknowledged",
+        message: "provider-acknowledged voice differs from the request",
+      }),
+    ]));
+  });
+
+  it.each(TRACES)("rejects a fake %s trace when acknowledged model identity is unverifiable", (_, trace) => {
+    const event = trace[2];
+    if (event.type !== "session.configuration.acknowledged") throw new Error("fixture drift");
+    const hostile = {
+      ...event,
+      acknowledged: { ...event.acknowledged, model: "" },
+    } as RealtimeLifecycleEvent;
+
+    const report = validateRealtimeLifecycleTrace(replace(trace, 2, hostile));
+    expect(report.passed).toBe(false);
+    expect(report.snapshot.providerSessionId).toBeNull();
+    expect(report.snapshot.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "invalid_event", eventType: "session.configuration.acknowledged" }),
+    ]));
+  });
+
+  it.each(TRACES)("rejects a fake %s trace when acknowledged settings differ", (_, trace) => {
+    const event = trace[2];
+    if (event.type !== "session.configuration.acknowledged") throw new Error("fixture drift");
+    const hostile = {
+      ...event,
+      acknowledged: { ...event.acknowledged, settingsSha256: "9".repeat(64) },
+    } satisfies RealtimeLifecycleEvent;
+
+    const report = validateRealtimeLifecycleTrace(replace(trace, 2, hostile));
+    expect(report.passed).toBe(false);
+    expect(report.snapshot.providerSessionId).toBeNull();
+    expect(report.snapshot.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "configuration_mismatch",
+        eventType: "session.configuration.acknowledged",
+        message: "provider-acknowledged settings differ from the request",
+      }),
+    ]));
+  });
+
+  it.each(TRACES)("rejects a fake %s resume when provider-acknowledged identity changes", (_, trace) => {
+    const event = trace[16];
+    if (event.type !== "session.resume.acknowledged") throw new Error("fixture drift");
+    const hostile = {
+      ...event,
+      acknowledged: { ...event.acknowledged, model: "different-model-after-reconnect" },
+    } satisfies RealtimeLifecycleEvent;
+
+    const report = validateRealtimeLifecycleTrace(replace(trace, 16, hostile));
+    expect(report.passed).toBe(false);
+    expect(report.snapshot.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "configuration_mismatch",
+        eventType: "session.resume.acknowledged",
+        message: "provider-acknowledged model differs from the request",
+      }),
+    ]));
+  });
+
   it("rejects response audio before a provider-identified response", () => {
     const trace = [...FAKE_GEMINI_LIFECYCLE_TRACE];
     const audio = trace[5];
