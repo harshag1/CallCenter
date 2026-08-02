@@ -99,13 +99,35 @@ conjunct below:
 Any false, missing, unknown or unverifiable conjunct is a primary failure.
 The paired effect is `full_hacc - registered_native` in percentage points.
 The three provider strata receive equal aggregate weight. Templates receive
-equal weight within their assigned provider stratum. The primary test is the
-two-sided exact provider-stratified template sign-flip test; its confidence
-interval is obtained by inversion of the same test. The analysis implementation
-must use deterministic exact convolution over template-pair contrasts and may
-not treat arms, turns, opportunities, speakers or reconnects as independent.
-The prospective power program must execute this same test and every conjunct
-of the claim rule under frozen provider heterogeneity, outage and missingness
+equal weight within their assigned provider stratum.
+
+The primary p-value is the **two-sided exact provider-stratified paired-template
+sign-flip test**. Its statistic is the equal-provider-weighted mean paired risk
+difference. The exact implementation uses deterministic integer convolution
+over the 108 template-pair contrasts under within-pair arm-label
+exchangeability.
+
+The 95% risk-difference confidence interval is a separate **balanced
+provider-stratified paired-template percentile bootstrap**:
+
+- resample with replacement exactly 36 complete template-pair contrasts from
+  the 36 assigned templates inside each provider stratum;
+- calculate each provider mean, then give OpenAI, Gemini and xAI means weight
+  `1/3` each;
+- repeat exactly **100,000** draws in provider order
+  `["openai", "gemini", "xai"]`;
+- seed the implementation with the exact UTF-8 string
+  `hacc-proof-v1:c108:primary-rd-ci:v1`;
+- derive the pseudorandom stream by FNV-1a-32 hashing of the implementation's
+  `string:`-prefixed seed followed by Mulberry32; and
+- calculate the 2.5th and 97.5th percentiles by sorting draws and linearly
+  interpolating at position `(n - 1) * p`.
+
+The percentile interval is not described as exact and is not obtained by
+inverting the sharp-null sign-flip test. Neither analysis may treat arms,
+turns, opportunities, speakers or reconnects as independent. The prospective
+power program must execute these same procedures and every conjunct of the
+claim rule under frozen provider heterogeneity, outage and missingness
 assumptions.
 
 ## Secondary endpoints
