@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import { canonicalJson, sha256Hex } from "./artifacts";
 import type { JsonValue } from "./artifacts";
 import type { Lc4DevReplayEvidenceStore } from "./lc4-development-evidence-retention";
@@ -68,12 +70,15 @@ import {
   LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
+  createLc4DevProviderConnectionAttestation,
   createLc4DevProviderConnectionScope,
+  lc4DevProviderExecutionAuthoritySha256,
   renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayConversationToolCall,
   type Lc4DevGatewayConversationToolBatch,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayReceiptSet,
+  type Lc4DevProviderConnectionScope,
   type Lc4DevRotationReplayEnvelopeAuthority,
 } from "./lc4-development-gateway-bridge";
 import {
@@ -196,7 +201,8 @@ export const LC4_GEMINI_OUTPUT_CHUNK_SEQUENCE_DOMAIN =
   "harshas-amazing-call-center/lc4-gemini-output-chunk-sequence/v1\n";
 const OPPORTUNITY_FINALIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n";
 const SEGMENT_FINALIZATION_DOMAIN_V2 = "harshas-amazing-call-center/lc4-provider-session-rotation/v2\n";
-const SEGMENT_FINALIZATION_DOMAIN_V6 = "harshas-amazing-call-center/lc4-provider-session-rotation/v6\n";
+const SEGMENT_FINALIZATION_DOMAIN_V7 = "harshas-amazing-call-center/lc4-provider-session-rotation/v7\n";
+const OPPORTUNITY_ROOT_CHAIN_DOMAIN = "harshas-amazing-call-center/lc4-dev-segment-opportunity-root-chain/v1\n";
 const MAX_HYDRATION_SETUP_WIRE_OBSERVATIONS = 768;
 const MAX_HYDRATION_SETUP_WIRE_BYTES = 4 * 1024 * 1024;
 const CONVERSATION_TURN_SOURCES = new Set([
@@ -1547,6 +1553,9 @@ export type Lc4ProviderExchangeEvidence = Readonly<{
    * retains raw provider call/response IDs or credentials.
    */
   dev_gateway_receipt_set: Lc4DevGatewayReceiptSet | null;
+  provider_connection_scope?: Lc4DevProviderConnectionScope;
+  provider_connection_scope_sha256?: string;
+  provider_connection_attestation_sha256?: string;
   /**
    * DEV-only retained canonical gateway replay. This preserves exact provider
    * batch boundaries and the sanitized model-call/result history that can be
@@ -1699,6 +1708,7 @@ export type Lc4RealtimeSegmentSession = Readonly<{
     opportunity_id: string;
     decision_receipt_sha256: string;
     repair_played: boolean;
+    effective_exchange_sha256?: string;
   }>): Promise<Readonly<{ opportunity_receipt_sha256: string; finalization_body: JsonValue }>>;
   close(): Promise<Readonly<{
     session_ordinal: number;
@@ -1735,6 +1745,14 @@ export type Lc4OpenRealtimeSegmentInput = Readonly<{
   listener: Lc4ListenerEvidenceHandoff;
   dev_gateway?: Readonly<{
     episode: Lc4DevLiveEpisodePlan;
+    execution_authority: Readonly<{
+      prepare_sha256: string;
+      preflight_sha256: string;
+      execution_id_sha256: string;
+      control_plane_manifest_sha256: string;
+      provider_session_schedule_sha256:
+        typeof LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256;
+    }>;
     opportunities: readonly Lc4PublicDevOpportunity[];
     executor: Lc4DevGatewayExecutor;
     rotation_replay_envelope: Lc4DevRotationReplayEnvelopeAuthority;
@@ -2620,6 +2638,10 @@ export class Lc4RealtimeProviderBridge {
       input.dev_gateway.episode.episode_id !== input.manifest.run_id
       || input.dev_gateway.episode.provider !== input.profile.provider
       || input.dev_gateway.episode.arm !== input.manifest.episode_shape.arm
+      || input.dev_gateway.execution_authority.control_plane_manifest_sha256
+        !== input.dev_gateway.executor.manifest_sha256
+      || input.dev_gateway.execution_authority.provider_session_schedule_sha256
+        !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
     )) throw new Error("LC4-DEV gateway context differs from the provider manifest");
     if (input.segment.ordinal !== this.#sessionOrdinal + 1) throw new Error("LC4 provider sessions must rotate in segment order");
     const rotationContext = validateRotationContext(input, this.#previousRotationReceiptSha256);
@@ -2694,26 +2716,20 @@ export class Lc4RealtimeProviderBridge {
     let terminalFailureCode: "provider_fatal" | "provider_connection_closed" | "provider_terminal_failed" | "provider_output_limit_exceeded" | "invalid_output_audio" | "server_vad_protocol_failure" | null = null;
     let opportunityOutputByteLength = 0;
     let hostCloseInitiated = false;
+    const expectedGatewayExecutionAuthoritySha256 = input.dev_gateway
+      ? lc4DevProviderExecutionAuthoritySha256({
+          episode_id: input.dev_gateway.episode.episode_id,
+          provider: input.dev_gateway.episode.provider,
+          arm: input.dev_gateway.episode.arm,
+          ...input.dev_gateway.execution_authority,
+        })
+      : null;
     const devGateway = input.dev_gateway
       ? new Lc4DevGatewayTurnCoordinator({
           client,
           executor: input.dev_gateway.executor,
-          connectionScope: createLc4DevProviderConnectionScope({
-            episode_id: input.dev_gateway.episode.episode_id,
-            provider: input.dev_gateway.episode.provider,
-            arm: input.dev_gateway.episode.arm,
-            segment_ordinal: input.segment.ordinal,
-            session_ordinal: this.#sessionOrdinal + 1,
-            // A new normalized client is constructed for every planned segment.
-            connection_epoch: 1,
-            previous_rotation_receipt_sha256: this.#previousRotationReceiptSha256,
-            rotation_context_sha256: sha256Hex(canonicalJson({
-              kind: rotationContext.kind,
-              packet_sha256: rotationContext.packet_sha256,
-              conversation_replay_sha256: rotationContext.conversation_replay_sha256,
-              provider_visible_history_sha256: rotationContext.provider_visible_history_sha256,
-            })),
-          }),
+          expectedExecutionAuthoritySha256:
+            expectedGatewayExecutionAuthoritySha256!,
           rotationReplayEnvelope:
             input.dev_gateway.rotation_replay_envelope,
           onFatal: (error) => {
@@ -3038,6 +3054,71 @@ export class Lc4RealtimeProviderBridge {
           throw new Error("LC4 provider session lost readiness during conversation history hydration");
         }
       }
+      if (devGateway && input.dev_gateway) {
+        const observedConnectionEpochs = new Set(
+          wire.map((observation) => observation.connection_epoch),
+        );
+        if (observedConnectionEpochs.size > 1) {
+          throw new Error("LC4 provider setup crossed physical connection epochs");
+        }
+        const connectionEpoch = observedConnectionEpochs.values().next().value ?? 1;
+        const providerSessionIdSha256s = new Set(
+          wire.flatMap((observation) => {
+            const sessionIdSha256 = observation.identity_hashes.sessionIdSha256;
+            return sessionIdSha256 === undefined ? [] : [sessionIdSha256];
+          }),
+        );
+        if (providerSessionIdSha256s.size > 1) {
+          throw new Error("LC4 provider setup crossed acknowledged session identities");
+        }
+        const providerSessionIdSha256 =
+          providerSessionIdSha256s.values().next().value ?? null;
+        if (input.profile.provider !== "gemini"
+          && input.exact_horizon_receipt_required === true
+          && (providerSessionIdSha256 === null
+            || !SHA256.test(providerSessionIdSha256))) {
+          throw new Error("LC4 provider setup omitted its acknowledged session identity");
+        }
+        const connectionAttestation = createLc4DevProviderConnectionAttestation({
+          provider: input.profile.provider,
+          connection_epoch: connectionEpoch,
+          connection_nonce_sha256: sha256Hex(randomBytes(32)),
+          provider_session_id_sha256: providerSessionIdSha256,
+          session_configuration_acknowledgement_sha256:
+            client.sessionConfigurationAcknowledgement
+              ? sha256Hex(canonicalJson(client.sessionConfigurationAcknowledgement))
+              : null,
+          connect_wire_observation_count: wire.length,
+          connect_wire_chain_head_sha256:
+            wire.at(-1)?.observation_sha256 ?? null,
+        });
+        devGateway.bindConnectionScope(createLc4DevProviderConnectionScope({
+          episode_id: input.dev_gateway.episode.episode_id,
+          provider: input.dev_gateway.episode.provider,
+          arm: input.dev_gateway.episode.arm,
+          ...input.dev_gateway.execution_authority,
+          segment_ordinal: input.segment.ordinal,
+          session_ordinal: this.#sessionOrdinal + 1,
+          opportunity_start: input.segment.opportunity_start,
+          opportunity_end: input.segment.opportunity_end,
+          connection_epoch: connectionEpoch,
+          previous_rotation_receipt_sha256:
+            this.#previousRotationReceiptSha256,
+          rotation_context_kind: rotationContext.kind,
+          rotation_packet_sha256: rotationContext.packet_sha256,
+          rotation_conversation_replay_sha256:
+            rotationContext.conversation_replay_sha256,
+          rotation_context_sha256: sha256Hex(canonicalJson({
+            kind: rotationContext.kind,
+            packet_sha256: rotationContext.packet_sha256,
+            conversation_replay_sha256:
+              rotationContext.conversation_replay_sha256,
+            provider_visible_history_sha256:
+              rotationContext.provider_visible_history_sha256,
+          })),
+          connection_attestation: connectionAttestation,
+        }));
+      }
     } catch (error) {
       unsubscribeEvent();
       unsubscribeWire?.();
@@ -3056,6 +3137,14 @@ export class Lc4RealtimeProviderBridge {
     let closed = false;
     let poisoned = false;
     let opportunityOrdinal = 0;
+    let previousOpportunityReceiptSha256: string | null = null;
+    const finalizedOpportunityRoots: Array<Readonly<{
+      ordinal: number;
+      opportunity_id: string;
+      effective_exchange_sha256: string;
+      opportunity_receipt_sha256: string;
+      previous_opportunity_receipt_sha256: string | null;
+    }>> = [];
     let pendingDevOpportunity: Readonly<{
       opportunity_id: string;
       canonical_evidence_sha256: string;
@@ -3987,6 +4076,11 @@ export class Lc4RealtimeProviderBridge {
             xai_manual_turn_causality: xaiManualTurnCausality,
             operation_order: Object.freeze(operationOrder) as Lc4ProviderExchangeEvidence["operation_order"],
             ...(isDevelopmentProtocol ? {
+              provider_connection_scope: devGateway!.connectionScopeSnapshot(),
+              provider_connection_scope_sha256:
+                devGateway!.connectionScopeSnapshot().connection_scope_sha256,
+              provider_connection_attestation_sha256:
+                devGateway!.connectionScopeSnapshot().connection_attestation.attestation_sha256,
               playback_kind: playbackKind,
               caller_branch_authority: callerBranchAuthority,
               caller_branch_decision_sha256: callerBranchAuthority?.decision_sha256 ?? null,
@@ -4067,17 +4161,38 @@ export class Lc4RealtimeProviderBridge {
         if (!pendingDevOpportunity || pendingDevOpportunity.opportunity_id !== finalizeInput.opportunity_id) {
           throw new Error("LC4-DEV opportunity finalize has no matching canonical exchange");
         }
+        const effectiveExchangeSha256 = finalizeInput.effective_exchange_sha256
+          ?? pendingDevOpportunity.canonical_evidence_sha256;
         if (!SHA256.test(finalizeInput.decision_receipt_sha256)
+          || !SHA256.test(effectiveExchangeSha256)
           || finalizeInput.repair_played !== pendingDevOpportunity.repair_played) {
           throw new Error("LC4-DEV opportunity finalize differs from the repair decision or playback phase");
         }
+        const providerConnectionScope = devGateway!.connectionScopeSnapshot();
         const finalizationBody = Object.freeze({
+          ordinal: opportunityOrdinal + 1,
           opportunity_id: finalizeInput.opportunity_id,
           canonical_evidence_sha256: pendingDevOpportunity.canonical_evidence_sha256,
+          effective_exchange_sha256: effectiveExchangeSha256,
           decision_receipt_sha256: finalizeInput.decision_receipt_sha256,
           repair_played: finalizeInput.repair_played,
+          provider_connection_scope_sha256:
+            providerConnectionScope.connection_scope_sha256,
+          provider_connection_attestation_sha256:
+            providerConnectionScope.connection_attestation.attestation_sha256,
+          previous_opportunity_receipt_sha256:
+            previousOpportunityReceiptSha256,
         });
         const opportunityReceiptSha256 = sha256Hex(`harshas-amazing-call-center/lc4-dev-opportunity-finalize/v1\n${canonicalJson(finalizationBody)}`);
+        finalizedOpportunityRoots.push(Object.freeze({
+          ordinal: opportunityOrdinal + 1,
+          opportunity_id: finalizeInput.opportunity_id,
+          effective_exchange_sha256: effectiveExchangeSha256,
+          opportunity_receipt_sha256: opportunityReceiptSha256,
+          previous_opportunity_receipt_sha256:
+            previousOpportunityReceiptSha256,
+        }));
+        previousOpportunityReceiptSha256 = opportunityReceiptSha256;
         opportunityOrdinal += 1;
         pendingDevOpportunity = null;
         return Object.freeze({
@@ -4153,10 +4268,12 @@ export class Lc4RealtimeProviderBridge {
         }
         const isDevelopmentProtocol =
           input.manifest.protocol_id === "HACC-LC4-DEV-v1";
+        const providerConnectionScope = devGateway?.connectionScopeSnapshot() ?? null;
+        const opportunityRootChain = Object.freeze([...finalizedOpportunityRoots]);
         const body = Object.freeze({
           ...(isDevelopmentProtocol
             ? {
-                schema_version: 6 as const,
+                schema_version: 7 as const,
                 run_id: input.manifest.run_id,
                 protocol_id: input.manifest.protocol_id,
                 provider_session_schedule_sha256:
@@ -4164,6 +4281,27 @@ export class Lc4RealtimeProviderBridge {
                 rotation_context_packet: rotationContext.packet,
                 conversation_history_hydration_wire_observations:
                   conversationHistoryHydrationWireObservations,
+                provider_connection_scope: providerConnectionScope!,
+                provider_connection_scope_sha256:
+                  providerConnectionScope!.connection_scope_sha256,
+                provider_connection_attestation_sha256:
+                  providerConnectionScope!.connection_attestation.attestation_sha256,
+                provider_session_identity_status:
+                  providerConnectionScope!.connection_attestation
+                    .provider_session_identity_status,
+                provider_session_id_sha256:
+                  providerConnectionScope!.connection_attestation
+                    .provider_session_id_sha256,
+                opportunity_root_chain: opportunityRootChain,
+                opportunity_root_chain_sha256: sha256Hex(
+                  `${OPPORTUNITY_ROOT_CHAIN_DOMAIN}${canonicalJson({
+                    run_id: input.manifest.run_id,
+                    segment_ordinal: input.segment.ordinal,
+                    provider_connection_scope_sha256:
+                      providerConnectionScope!.connection_scope_sha256,
+                    roots: opportunityRootChain,
+                  })}`,
+                ),
               }
             : {}),
           adapter_version: LC4_PRODUCTION_PROVIDER_ADAPTER_VERSION,
@@ -4173,6 +4311,7 @@ export class Lc4RealtimeProviderBridge {
           provider: input.profile.provider,
           model: input.profile.model,
           opened_wire_index: openedWireIndex,
+          wire_observation_count: wire.length - openedWireIndex,
           terminal_wire_observation_sha256: wire.at(-1)?.observation_sha256 ?? null,
           previous_rotation_receipt_sha256: this.#previousRotationReceiptSha256,
           rotation_context_kind: rotationContext.kind,
@@ -4181,7 +4320,7 @@ export class Lc4RealtimeProviderBridge {
           conversation_history_hydration: historyHydrationEvidence,
         });
         const finalizationDomain = isDevelopmentProtocol
-          ? SEGMENT_FINALIZATION_DOMAIN_V6
+          ? SEGMENT_FINALIZATION_DOMAIN_V7
           : SEGMENT_FINALIZATION_DOMAIN_V2;
         const receipt = sha256Hex(`${finalizationDomain}${canonicalJson(body)}`);
         this.#previousRotationReceiptSha256 = receipt;
@@ -4610,6 +4749,15 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
         },
         dev_gateway: {
           episode,
+          execution_authority: Object.freeze({
+            prepare_sha256: input.prepare.prepare_sha256,
+            preflight_sha256: input.preflight.preflight_sha256,
+            execution_id_sha256: sha256Hex(input.prepare.execution_id),
+            control_plane_manifest_sha256:
+              input.preflight.control_plane_manifest_sha256,
+            provider_session_schedule_sha256:
+              input.prepare.provider_session_schedule_sha256,
+          }),
           opportunities: corpus.opportunities,
           executor: input.gateway_executor,
           rotation_replay_envelope: Object.freeze({
@@ -5021,7 +5169,13 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           if (!pendingOpportunity || pendingOpportunity.opportunity.id !== opportunity_id || pendingOpportunity.repair_played !== repair_played) {
             throw new Error("LC4-DEV opportunity finalize differs from the adapter FSM");
           }
-          const receipt = await bridgeSession.finalizeOpportunity!({ opportunity_id, decision_receipt_sha256, repair_played });
+          const receipt = await bridgeSession.finalizeOpportunity!({
+            opportunity_id,
+            decision_receipt_sha256,
+            repair_played,
+            effective_exchange_sha256:
+              pendingOpportunity.effective_exchange_sha256,
+          });
           const opportunityFinalization = await input.evidence.retainJson({
             kind: "opportunity_finalization",
             body: receipt.finalization_body,
@@ -5060,7 +5214,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           const segmentFinalization = await input.evidence.retainJson({
             kind: "segment_finalization",
             body: receipt.finalization_body,
-            domain_prefix: SEGMENT_FINALIZATION_DOMAIN_V6,
+            domain_prefix: SEGMENT_FINALIZATION_DOMAIN_V7,
             expected_evidence_sha256: receipt.rotation_receipt_sha256,
           });
           runtime!.previous_rotation_receipt_sha256 = receipt.rotation_receipt_sha256;
@@ -5340,15 +5494,29 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
           return;
         }
         const dispatch = event.dispatches[0]!;
+        toolCallObservation = lc4GateDObservedAttribution(
+          event.wireObservation,
+          wire,
+          {
+            direction: "inbound",
+            wire_type: "response.done",
+            label: "capability-gateway executable call batch",
+          },
+        );
         const expectedArguments = {
           tool_name: "transport.probe",
           arguments: {},
         };
         const expectedProvenance = Object.freeze({
-          schemaVersion: 1 as const,
+          schemaVersion: 2 as const,
           provider: "xai" as const,
           nativeCallId: dispatch.callId,
           nativeResponseId: event.responseId,
+          connectionEpoch: toolCallObservation.connection_epoch,
+          providerSessionIdSha256:
+            dispatch.provenance.schemaVersion === 2
+              ? dispatch.provenance.providerSessionIdSha256
+              : null,
           terminalWireType: event.wireType,
           ...(dispatch.provenance.nativeItemId === undefined
             ? {}
@@ -5364,6 +5532,11 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
             !== canonicalJson(expectedArguments.arguments)
           || dispatch.request.params._meta[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]
             !== dispatch.callId
+          || dispatch.provenance.schemaVersion !== 2
+          || dispatch.provenance.connectionEpoch
+            !== toolCallObservation.connection_epoch
+          || dispatch.provenance.providerSessionIdSha256 === null
+          || !SHA256.test(dispatch.provenance.providerSessionIdSha256)
           || canonicalJson(
             dispatch.request.params._meta[PROVIDER_PROVENANCE_META_KEY],
           ) !== canonicalJson(expectedProvenance)
@@ -5372,15 +5545,6 @@ async function executeLc4XaiGateDWithClientFactory(input: Readonly<{
           fail("Gate D provider requested a tool outside the harmless closed probe");
           return;
         }
-        toolCallObservation = lc4GateDObservedAttribution(
-          event.wireObservation,
-          wire,
-          {
-            direction: "inbound",
-            wire_type: "response.done",
-            label: "capability-gateway executable call batch",
-          },
-        );
         const rootResponseIdSha256 =
           lc4XaiManualResponseWireIdentitySha256(event.responseId);
         capabilityGatewayCallIdSha256 =

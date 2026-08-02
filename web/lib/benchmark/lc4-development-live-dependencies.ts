@@ -77,6 +77,14 @@ import {
   lc4DevSharedAuthorizationBindingSha256,
   lc4DevSharedLedgerGenesisSha256,
 } from "./lc4-development-operator-contract";
+import {
+  assertLc4DevRunTerminalAuthorityArtifact,
+  createLc4DevRunTerminalAuthorityArtifact,
+  createLc4DevSegmentTerminalBinding,
+  lc4DevSegmentTerminalBindingSetSha256,
+  type Lc4DevRunTerminalAuthorityArtifact,
+  type Lc4DevSegmentTerminalBinding,
+} from "./lc4-development-terminal-authority";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const CAS_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-cas-receipt/v1\n";
@@ -840,6 +848,73 @@ function authorityToolOutcome(projection: Record<string, JsonValue>): Lc4Authori
  * controller and a listener whose roots were signed into preflight. Merely
  * passing the current prose-only public corpus is intentionally impossible.
  */
+async function assembleEpisodeSegmentTerminalBindings(input: Readonly<{
+  episode_id: string;
+  ledger: readonly Lc4DevReplayLedgerEvent[];
+  segment_finalizations: readonly Lc4DevReplayArtifactReference[];
+  evidence: Lc4DevReplayEvidenceStore;
+}>): Promise<readonly Lc4DevSegmentTerminalBinding[]> {
+  if (input.segment_finalizations.length !== 6) {
+    throw new Error("LC4-DEV terminal authority requires six ordered segment finalizations");
+  }
+  const completed = input.ledger.filter((event) =>
+    event.episode_id === input.episode_id && event.event_type === "opportunity_completed");
+  if (completed.length !== 60) {
+    throw new Error("LC4-DEV terminal authority requires 60 completed canonical opportunities");
+  }
+  const bindings: Lc4DevSegmentTerminalBinding[] = [];
+  for (let segmentIndex = 0; segmentIndex < 6; segmentIndex += 1) {
+    const segmentOrdinal = (segmentIndex + 1) as 1 | 2 | 3 | 4 | 5 | 6;
+    const start = segmentIndex * 10 + 1;
+    const events = completed.slice(segmentIndex * 10, segmentIndex * 10 + 10);
+    const exchanges: Array<Parameters<typeof createLc4DevSegmentTerminalBinding>[0]["exchanges"][number]> = [];
+    for (const [offset, event] of events.entries()) {
+      const opportunityIndex = start + offset;
+      if (event.opportunity_id !== `lc4-dev-op-${opportunityIndex}`) {
+        throw new Error("LC4-DEV terminal authority opportunity order differs from the frozen horizon");
+      }
+      const payload = objectValue(
+        await input.evidence.resolveJson(event.payload_evidence),
+        "LC4-DEV terminal authority opportunity payload",
+      );
+      const canonicalSha256 = String(payload.canonical_provider_exchange_sha256);
+      const effectiveSha256 = String(payload.effective_provider_exchange_sha256);
+      const opportunityReceiptSha256 = String(payload.opportunity_receipt_sha256);
+      requireSha256(canonicalSha256, "LC4-DEV terminal canonical exchange");
+      requireSha256(effectiveSha256, "LC4-DEV terminal effective exchange");
+      requireSha256(opportunityReceiptSha256, "LC4-DEV terminal opportunity receipt");
+      const ordered = effectiveSha256 === canonicalSha256
+        ? [["canonical", canonicalSha256] as const]
+        : [["canonical", canonicalSha256] as const, ["repair", effectiveSha256] as const];
+      for (const [phase, exchangeSha256] of ordered) {
+        const matches = event.evidence_references.filter((reference) =>
+          reference.kind === "provider_exchange" && reference.evidence_sha256 === exchangeSha256);
+        if (matches.length !== 1) {
+          throw new Error("LC4-DEV terminal authority cannot resolve exactly one ordered provider exchange");
+        }
+        exchanges.push({
+          opportunity_id: event.opportunity_id,
+          opportunity_index: opportunityIndex,
+          exchange_phase: phase,
+          opportunity_receipt_sha256: phase === "canonical" ? opportunityReceiptSha256 : null,
+          provider_exchange: matches[0]!,
+          provider_exchange_body: await input.evidence.resolveJson(matches[0]!),
+        });
+      }
+    }
+    const segmentFinalization = input.segment_finalizations[segmentIndex]!;
+    bindings.push(createLc4DevSegmentTerminalBinding({
+      episode_id: input.episode_id,
+      segment_ordinal: segmentOrdinal,
+      segment_finalization: segmentFinalization,
+      segment_finalization_body: await input.evidence.resolveJson(segmentFinalization),
+      exchanges,
+    }));
+  }
+  lc4DevSegmentTerminalBindingSetSha256(bindings);
+  return Object.freeze(bindings);
+}
+
 export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
   preflight: Lc4DevLivePreflightArtifact;
@@ -982,6 +1057,13 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     if (ledgerReplay.ledger_head_sha256 !== ledger_head_before_terminal_sha256) {
       throw new Error("LC4-DEV authority finalization ledger replay differs from the pre-terminal head");
     }
+    const segmentTerminalBindings = await assembleEpisodeSegmentTerminalBindings({
+      episode_id: episode.episode_id,
+      ledger: ledger.events(),
+      segment_finalizations,
+      evidence: replayEvidence,
+    });
+    const segmentTerminalBindingSetSha256 = lc4DevSegmentTerminalBindingSetSha256(segmentTerminalBindings);
     const entries: Array<{
       event_type: Lc4AuthorityEventType;
       subject_id: string;
@@ -1189,6 +1271,8 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
         ledger_replay_sha256: ledgerReplay.replay_sha256,
         normalized_events: authorityEvents,
         normalized_event_set_sha256: sha256Hex(canonicalJson(authorityEvents)),
+        segment_terminal_bindings: segmentTerminalBindings,
+        segment_terminal_binding_set_sha256: segmentTerminalBindingSetSha256,
       },
       domain_prefix: AUTHORITY_SOURCE_DOMAIN,
     });
@@ -1209,6 +1293,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
         source_checkpoint_evidence_sha256: sourceCheckpoint.evidence_sha256,
         manifest_registry_sha256: authorityRegistry.registry_sha256,
         episode_subject_assignment_sha256: authorityRegistry.assignment_sha256,
+        segment_terminal_binding_set_sha256: segmentTerminalBindingSetSha256,
       },
     });
     const authorityEvidence = await replayEvidence.retainJson({
@@ -1232,6 +1317,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
         source_checkpoint_evidence_sha256: sourceCheckpoint.evidence_sha256,
         manifest_registry_sha256: authorityRegistry.registry_sha256,
         episode_subject_assignment_sha256: authorityRegistry.assignment_sha256,
+        segment_terminal_binding_set_sha256: segmentTerminalBindingSetSha256,
       },
     });
     if (authorityReplay.verdict === "evidence_invalid") {
@@ -1259,6 +1345,8 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       repair_playbacks,
       ledger_head_before_terminal_sha256,
       segment_finalizations,
+      segment_terminal_bindings: segmentTerminalBindings,
+      segment_terminal_binding_set_sha256: segmentTerminalBindingSetSha256,
       final_control_snapshot: snapshot,
       final_world: snapshot.world,
       pending_obligations: snapshot.pending_gateway_obligations,
@@ -1274,6 +1362,59 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
       kind: "episode_finalization",
       body: body as unknown as JsonValue,
       domain_prefix: EPISODE_FINALIZATION_DOMAIN,
+    });
+  };
+  const finalizeRun: NonNullable<Lc4DevLiveRunnerDependencies["finalization"]["finalizeRun"]> = async ({
+    ledger_head_before_run_terminal_sha256,
+    episode_finalizations,
+  }) => {
+    requireSha256(ledger_head_before_run_terminal_sha256, "LC4-DEV run pre-terminal ledger head");
+    if (episode_finalizations.length !== 6) {
+      throw new Error("LC4-DEV signed run terminal requires six ordered episode finalizations");
+    }
+    const episodeAuthoritySha256s: string[] = [];
+    const segmentBindings: Lc4DevSegmentTerminalBinding[] = [];
+    for (const [episodeIndex, reference] of episode_finalizations.entries()) {
+      if (reference.kind !== "episode_finalization") {
+        throw new Error("LC4-DEV signed run terminal has a mistyped episode finalization edge");
+      }
+      const finalization = objectValue(
+        await replayEvidence.resolveJson(reference),
+        "LC4-DEV signed run terminal episode finalization",
+      );
+      const episode = objectValue(finalization.episode, "LC4-DEV signed run terminal episode");
+      if (episode.episode_id !== input.prepare.episodes[episodeIndex]?.episode_id) {
+        throw new Error("LC4-DEV signed run terminal episode order differs from prepare");
+      }
+      const authorityReference = finalization.authority_episode_artifact as unknown as Lc4DevReplayArtifactReference;
+      if (authorityReference?.kind !== "authority_episode_artifact") {
+        throw new Error("LC4-DEV signed run terminal is missing an episode authority edge");
+      }
+      await replayEvidence.assertResolvable(authorityReference);
+      episodeAuthoritySha256s.push(authorityReference.evidence_sha256);
+      if (!Array.isArray(finalization.segment_terminal_bindings) || finalization.segment_terminal_bindings.length !== 6) {
+        throw new Error("LC4-DEV signed run terminal is missing six episode segment bindings");
+      }
+      const episodeBindings = finalization.segment_terminal_bindings as unknown as Lc4DevSegmentTerminalBinding[];
+      if (lc4DevSegmentTerminalBindingSetSha256(episodeBindings)
+        !== finalization.segment_terminal_binding_set_sha256) {
+        throw new Error("LC4-DEV signed run terminal episode segment-binding root mismatch");
+      }
+      segmentBindings.push(...episodeBindings);
+    }
+    const artifact = createLc4DevRunTerminalAuthorityArtifact({
+      execution_id: input.prepare.execution_id,
+      prepare_sha256: input.prepare.prepare_sha256,
+      preflight_sha256: input.preflight.preflight_sha256,
+      ledger_head_before_run_terminal_sha256,
+      ordered_episode_finalization_sha256s: episode_finalizations.map((reference) => reference.evidence_sha256),
+      ordered_episode_authority_sha256s: episodeAuthoritySha256s,
+      ordered_segment_bindings: segmentBindings,
+      signer: input.authority_signer,
+    });
+    return replayEvidence.retainJson({
+      kind: "run_terminal_authority",
+      body: artifact as unknown as JsonValue,
     });
   };
   const dependencies: Lc4DevLiveRunnerDependencies = Object.freeze({
@@ -1358,7 +1499,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     repair: input.repair,
     ledger,
     evidence: replayEvidence,
-    finalization: Object.freeze({ finalizeEpisode }),
+    finalization: Object.freeze({ finalizeEpisode, finalizeRun }),
     now: input.now ?? (() => new Date()),
   });
   return Object.freeze({
@@ -1454,6 +1595,30 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
       const checkpoint = objectValue(await evidence.resolveJson(checkpointReference), "LC4-DEV authority source checkpoint");
       const artifactJson = await evidence.resolveJson(artifactReference);
       const artifact = artifactJson as unknown as Lc4AuthoritativeObligationEpisodeArtifact;
+      if (input.run.status === "completed") {
+        if (!Array.isArray(finalization.segment_terminal_bindings)
+          || finalization.segment_terminal_bindings.length !== 6) {
+          throw new Error("authority finalization is missing six ordered segment terminal bindings");
+        }
+        const segmentTerminalBindings = finalization.segment_terminal_bindings as unknown as Lc4DevSegmentTerminalBinding[];
+        const segmentFinalizationReferences = terminal.evidence_references.filter(
+          (reference) => reference.kind === "segment_finalization",
+        );
+        const reconstructedSegmentBindings = await assembleEpisodeSegmentTerminalBindings({
+          episode_id: terminal.episode_id,
+          ledger: input.run.ledger,
+          segment_finalizations: segmentFinalizationReferences,
+          evidence,
+        });
+        const segmentTerminalBindingSetSha256 = lc4DevSegmentTerminalBindingSetSha256(segmentTerminalBindings);
+        if (canonicalJson(segmentTerminalBindings) !== canonicalJson(reconstructedSegmentBindings)
+          || segmentTerminalBindingSetSha256 !== finalization.segment_terminal_binding_set_sha256
+          || segmentTerminalBindingSetSha256 !== artifact.authority_roots.segment_terminal_binding_set_sha256
+          || segmentTerminalBindingSetSha256 !== checkpoint.segment_terminal_binding_set_sha256
+          || canonicalJson(checkpoint.segment_terminal_bindings) !== canonicalJson(segmentTerminalBindings)) {
+          throw new Error("authority signed segment terminal set differs from the exact retained episode transport DAG");
+        }
+      }
       if (registry.assignments.length !== 6 || checkpoint.episode_subject_sha256 !== artifact.episode_subject_sha256) {
         throw new Error("authority registry or checkpoint episode assignment mismatch");
       }
@@ -1479,6 +1644,71 @@ export async function replayLc4DevAuthorityReport(input: Readonly<{
       if (reportReplay.derivation.authorityVerdict === "pass") passed += 1;
     } catch (error) {
       invalidEpisodes.add(terminal.episode_id);
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  if (input.run.status === "completed") {
+    try {
+      const runTerminalEvents = input.run.ledger.filter((event) => event.event_type === "run_terminal");
+      if (runTerminalEvents.length !== 1 || input.run.ledger.at(-1)?.event_sha256 !== runTerminalEvents[0]!.event_sha256) {
+        throw new Error("authority completed run requires one final signed terminal as the ledger tail");
+      }
+      const runTerminal = runTerminalEvents[0]!;
+      const runTerminalIndex = input.run.ledger.findIndex((event) => event.event_sha256 === runTerminal.event_sha256);
+      const preterminal = await verifyLc4DevReplayLedger(
+        input.run.ledger.slice(0, runTerminalIndex) as readonly Lc4DevReplayLedgerEvent[],
+        evidence,
+        input.preflight.immutable_ledger_genesis_sha256,
+      );
+      const authorityReferences = runTerminal.evidence_references.filter(
+        (reference) => reference.kind === "run_terminal_authority",
+      );
+      if (authorityReferences.length !== 1) throw new Error("authority run terminal reference missing or duplicated");
+      const runTerminalPayload = objectValue(
+        await evidence.resolveJson(runTerminal.payload_evidence),
+        "LC4-DEV run terminal payload",
+      );
+      if (runTerminalPayload.run_terminal_authority_sha256 !== authorityReferences[0]!.evidence_sha256) {
+        throw new Error("authority run terminal payload differs from its signed authority edge");
+      }
+      const episodeFinalizationReferences = terminalEvents.map((terminal) => {
+        const references = terminal.evidence_references.filter((reference) => reference.kind === "episode_finalization");
+        if (references.length !== 1) throw new Error("authority run terminal episode finalization edge missing or duplicated");
+        return references[0]!;
+      });
+      const episodeAuthoritySha256s: string[] = [];
+      const segmentBindings: Lc4DevSegmentTerminalBinding[] = [];
+      for (const reference of episodeFinalizationReferences) {
+        const finalization = objectValue(await evidence.resolveJson(reference), "LC4-DEV run terminal episode finalization");
+        const authorityReference = finalization.authority_episode_artifact as unknown as Lc4DevReplayArtifactReference;
+        if (authorityReference?.kind !== "authority_episode_artifact") {
+          throw new Error("authority run terminal episode authority edge missing");
+        }
+        episodeAuthoritySha256s.push(authorityReference.evidence_sha256);
+        if (!Array.isArray(finalization.segment_terminal_bindings)) {
+          throw new Error("authority run terminal segment bindings missing");
+        }
+        segmentBindings.push(...finalization.segment_terminal_bindings as unknown as Lc4DevSegmentTerminalBinding[]);
+      }
+      const artifact = await evidence.resolveJson(authorityReferences[0]!) as unknown as Lc4DevRunTerminalAuthorityArtifact;
+      assertLc4DevRunTerminalAuthorityArtifact({
+        artifact,
+        trust: {
+          keyId: artifact.signature.key_id,
+          publicKeySha256: input.preflight.authority_trust_root_sha256,
+          publicKeyPem,
+        },
+        expected: {
+          execution_id: input.run.execution_id,
+          prepare_sha256: input.run.prepare_sha256,
+          preflight_sha256: input.run.preflight_sha256,
+          ledger_head_before_run_terminal_sha256: preterminal.ledger_head_sha256,
+          ordered_episode_finalization_sha256s: episodeFinalizationReferences.map((reference) => reference.evidence_sha256),
+          ordered_episode_authority_sha256s: episodeAuthoritySha256s,
+          ordered_segment_bindings: segmentBindings,
+        },
+      });
+    } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }

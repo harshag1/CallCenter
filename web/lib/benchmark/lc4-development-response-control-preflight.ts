@@ -1,8 +1,12 @@
 import { canonicalJson, immutableJson, sha256Hex } from "./artifacts";
 import type { Lc4DevMunicipalControlPlane } from "./lc4-development-control-plane";
-import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  type Lc4DevLiveEpisodePlan,
+} from "./lc4-development-live-runner";
 import {
   appendLc4DevNativeGatewayContract,
+  createLc4DevProviderConnectionAttestation,
   createLc4DevProviderConnectionScope,
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
   lc4DevProviderInvocationId,
@@ -141,13 +145,38 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         episode_id: input.episode.episode_id,
         provider: input.episode.provider,
         arm: input.episode.arm,
+        prepare_sha256: sha256Hex("response-control-preflight-prepare"),
+        preflight_sha256: sha256Hex("response-control-preflight-authority"),
+        execution_id_sha256: sha256Hex("response-control-preflight-execution"),
+        control_plane_manifest_sha256:
+          input.control.gateway_executor.manifest_sha256,
+        provider_session_schedule_sha256:
+          LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
         segment_ordinal: segmentOrdinal,
         session_ordinal: segmentOrdinal,
+        opportunity_start: ((segmentOrdinal - 1) * 10) + 1,
+        opportunity_end: segmentOrdinal * 10,
         connection_epoch: 1,
         previous_rotation_receipt_sha256: segmentOrdinal === 1
           ? null
           : sha256Hex(`preflight-rotation-${input.episode.episode_id}-${segmentOrdinal - 1}`),
+        rotation_context_kind: segmentOrdinal === 1 ? "none" : "hacc_structured_state",
+        rotation_packet_sha256: segmentOrdinal === 1
+          ? null
+          : sha256Hex(`preflight-packet-${segmentOrdinal}`),
+        rotation_conversation_replay_sha256: segmentOrdinal === 1
+          ? null
+          : sha256Hex(`preflight-replay-${segmentOrdinal}`),
         rotation_context_sha256: sha256Hex(`preflight-rotation-context-${input.episode.episode_id}-${segmentOrdinal}`),
+        connection_attestation: createLc4DevProviderConnectionAttestation({
+          provider: input.episode.provider,
+          connection_epoch: 1,
+          connection_nonce_sha256: sha256Hex(`${requestLabel}:nonce`),
+          provider_session_id_sha256: null,
+          session_configuration_acknowledgement_sha256: null,
+          connect_wire_observation_count: 0,
+          connect_wire_chain_head_sha256: null,
+        }),
       });
       const result = await input.control.gateway_executor.execute({
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
@@ -156,7 +185,7 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         opportunity_index: input.opportunity_index,
         provider: input.episode.provider,
         arm: input.episode.arm,
-        provider_call_id: providerCallId,
+        provider_call_id_sha256: sha256Hex(providerCallId),
         provider_invocation_id: lc4DevProviderInvocationId(connectionScope, providerCallId),
         provider_connection_scope: connectionScope,
         provider_connection_scope_sha256: connectionScope.connection_scope_sha256,

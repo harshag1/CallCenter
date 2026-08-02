@@ -374,10 +374,12 @@ class GateDProductionClientFixture implements NormalizedRealtimeClient {
       callId: wireCallId,
     });
     const provenance = Object.freeze({
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       provider: "xai" as const,
       nativeCallId: GATEWAY_CALL_ID,
       nativeResponseId: eventResponseId,
+      connectionEpoch: 1,
+      providerSessionIdSha256: sha256Hex("gate-d-fixture-xai-session"),
       terminalWireType: observation.wireType,
     });
     const event = Object.freeze({

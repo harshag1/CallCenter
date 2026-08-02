@@ -69,6 +69,14 @@ import {
 } from "./audible-evidence";
 import { LC4_DEV_TIMEOUT_CONTRACT } from "./lc4-development-timeout-contract";
 import { PROVIDER_QUALIFICATION_MAX_AGE_MS } from "./provider-qualification";
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+} from "./lc4-provider-session-schedule";
+
+export {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE,
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+} from "./lc4-provider-session-schedule";
 
 export type {
   Lc4DevExchangeEvidence,
@@ -95,26 +103,6 @@ export const LC4_DEV_LIVE_TIMEOUTS = Object.freeze({
 });
 
 const HASH = /^[a-f0-9]{64}$/u;
-const PROVIDER_SESSION_SCHEDULE_DOMAIN =
-  "harshas-amazing-call-center/lc4-dev-provider-session-schedule/v2\n";
-
-export const LC4_DEV_PROVIDER_SESSION_SCHEDULE = Object.freeze(
-  ([1, 2, 3, 4, 5, 6] as const).map((ordinal) => Object.freeze({
-    ordinal,
-    opportunity_start:
-      (ordinal - 1) * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT + 1,
-    opportunity_end:
-      ordinal * LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
-    opportunity_count: LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
-    provider_session_rotation_required_after:
-      ordinal < LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
-  })),
-);
-export const LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256 = sha256Hex(
-  `${PROVIDER_SESSION_SCHEDULE_DOMAIN}${canonicalJson(
-    LC4_DEV_PROVIDER_SESSION_SCHEDULE,
-  )}`,
-);
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/u;
 const PREPARE_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-prepare/v5\n";
@@ -900,7 +888,7 @@ export type Lc4DevControlReceipt = Readonly<{
 export type Lc4DevImmutableLedgerEvent = Readonly<{
   sequence: number;
   observed_at: string;
-  event_type: "episode_opened" | "segment_open_intent" | "segment_opened" | "caller_branch_selected" | "audio_submitted" | "opportunity_failed" | "segment_failed" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal";
+  event_type: "episode_opened" | "segment_open_intent" | "segment_opened" | "caller_branch_selected" | "audio_submitted" | "opportunity_failed" | "segment_failed" | "repair_decided" | "repair_audio_submitted" | "repair_completed" | "opportunity_completed" | "episode_terminal" | "run_terminal";
   episode_id: string;
   opportunity_id: string | null;
   payload_sha256: string;
@@ -1014,6 +1002,10 @@ export type Lc4DevLiveRunnerDependencies = Readonly<{
       repair_playbacks: number;
       ledger_head_before_terminal_sha256: string;
       segment_finalizations: readonly Lc4DevReplayArtifactReference[];
+    }>): Promise<Lc4DevReplayArtifactReference>;
+    finalizeRun?(input: Readonly<{
+      ledger_head_before_run_terminal_sha256: string;
+      episode_finalizations: readonly Lc4DevReplayArtifactReference[];
     }>): Promise<Lc4DevReplayArtifactReference>;
   }>;
   cell_checkpoint?: Readonly<{
@@ -2332,6 +2324,41 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
         break;
       }
     }
+    if (!sliceStopped
+      && episodesCompleted === 6
+      && opportunitiesCompleted === 360
+      && episodeFinalizations === 6
+      && providerSegmentIntents === 36
+      && providerSegmentsOpened === 36) {
+      if (!input.dependencies.finalization.finalizeRun) {
+        throw new Error("LC4-DEV completed horizon requires signed run-terminal authority");
+      }
+      if (previousEvent === null) throw new Error("LC4-DEV run terminal cannot finalize without a ledger head");
+      const terminalEvents = ledger.filter((event) => event.event_type === "episode_terminal");
+      const episodeFinalizationReferences = terminalEvents.map((event) => {
+        const references = event.evidence_references.filter((reference) => reference.kind === "episode_finalization");
+        if (references.length !== 1) {
+          throw new Error("LC4-DEV signed run terminal requires one finalization edge per episode");
+        }
+        return references[0]!;
+      });
+      const runTerminalAuthority = await input.dependencies.finalization.finalizeRun({
+        ledger_head_before_run_terminal_sha256: previousEvent,
+        episode_finalizations: episodeFinalizationReferences,
+      });
+      await append(
+        "run_terminal",
+        input.prepare.execution_id,
+        null,
+        {
+          status: "completed",
+          episode_finalization_count: 6,
+          segment_finalization_count: 36,
+          run_terminal_authority_sha256: runTerminalAuthority.evidence_sha256,
+        },
+        [runTerminalAuthority, ...episodeFinalizationReferences],
+      );
+    }
   } catch (error) {
     failureMessage = error instanceof Error ? error.message : "LC4-DEV live run failed";
     if (failureMessage.startsWith("timeout:")) failureClass = "timeout";
@@ -2341,11 +2368,15 @@ export async function executeLc4DevLiveRunSlice(input: Readonly<{
     return freeze({ kind: "completed_prefix" as const, prefix: lastCompletedPrefix });
   }
   const completedAt = input.dependencies.now().toISOString();
-  const completed = episodesCompleted === 6
+  const runTerminalEvents = ledger.filter((event) => event.event_type === "run_terminal");
+  const completed = failureMessage === null
+    && episodesCompleted === 6
     && opportunitiesCompleted === 360
     && episodeFinalizations === 6
     && providerSegmentIntents === 36
-    && providerSegmentsOpened === 36;
+    && providerSegmentsOpened === 36
+    && runTerminalEvents.length === 1
+    && ledger.at(-1)?.event_sha256 === runTerminalEvents[0]!.event_sha256;
   const body = {
     schema_version: 3 as const,
     execution_id: input.prepare.execution_id,

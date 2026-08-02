@@ -7,12 +7,16 @@ import {
 import {
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
   Lc4DevGatewayTurnCoordinator,
+  createLc4DevProviderConnectionAttestation,
   createLc4DevProviderConnectionScope,
   type Lc4DevGatewayAuthorityProjection,
   type Lc4DevGatewayExecutionInput,
   type Lc4DevGatewayExecutor,
 } from "./lc4-development-gateway-bridge";
-import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  type Lc4DevLiveEpisodePlan,
+} from "./lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "./lc4-public-development-corpus";
 import type {
   NormalizedRealtimeClient,
@@ -226,10 +230,10 @@ function createExecutor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExe
         mechanism_control: true,
       });
       const authoritativeReceiptSha256 = sha256Hex(
-        `lc4-gateway-fault-authority:${input.provider}:${input.provider_call_id}`,
+        `lc4-gateway-fault-authority:${input.provider}:${input.provider_call_id_sha256}`,
       );
       const controlPlaneHeadSha256 = sha256Hex(
-        `lc4-gateway-fault-head:${input.provider}:${input.provider_call_id}`,
+        `lc4-gateway-fault-head:${input.provider}:${input.provider_call_id_sha256}`,
       );
       const body = {
         schema_version: 2 as const,
@@ -243,8 +247,9 @@ function createExecutor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExe
         arm: input.arm,
         semantic_intent: input.semantic_intent,
         target_tool: input.target_tool,
-        provider_call_id_sha256: sha256Hex(input.provider_call_id),
+        provider_call_id_sha256: input.provider_call_id_sha256,
         provider_invocation_id_sha256: sha256Hex(input.provider_invocation_id),
+        provider_connection_scope: input.provider_connection_scope,
         provider_connection_scope_sha256: input.provider_connection_scope_sha256,
         provider_connection_epoch: input.provider_connection_epoch,
         provider_session_id_sha256: input.provider_session_id_sha256,
@@ -405,11 +410,35 @@ function coordinatorRun(
       episode_id: episode(provider).episode_id,
       provider,
       arm: "hacc",
+      prepare_sha256: sha256Hex("fault-prepare"),
+      preflight_sha256: sha256Hex("fault-preflight"),
+      execution_id_sha256: sha256Hex("fault-execution"),
+      control_plane_manifest_sha256:
+        sha256Hex("lc4-gateway-fault-injection-executor-v1"),
+      provider_session_schedule_sha256:
+        LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
       segment_ordinal: 1,
       session_ordinal: 1,
+      opportunity_start: 1,
+      opportunity_end: 10,
       connection_epoch: 1,
       previous_rotation_receipt_sha256: null,
+      rotation_context_kind: "none",
+      rotation_packet_sha256: null,
+      rotation_conversation_replay_sha256: null,
       rotation_context_sha256: sha256Hex("lc4-gateway-fault-injection-rotation-context"),
+      connection_attestation: createLc4DevProviderConnectionAttestation({
+        provider,
+        connection_epoch: 1,
+        connection_nonce_sha256: sha256Hex(`fault-nonce-${provider}`),
+        provider_session_id_sha256: provider === "gemini"
+          ? null
+          : sha256Hex(`fault-session-${provider}`),
+        session_configuration_acknowledgement_sha256:
+          sha256Hex(`fault-ack-${provider}`),
+        connect_wire_observation_count: 1,
+        connect_wire_chain_head_sha256: sha256Hex(`fault-wire-${provider}`),
+      }),
     }),
     onFatal: (error) => fatalErrors.push(error),
   });

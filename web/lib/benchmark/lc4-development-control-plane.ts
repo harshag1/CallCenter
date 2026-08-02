@@ -38,16 +38,16 @@ import {
   appendLc4DevNativeGatewayContract,
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
   LC4_DEV_INTENT_ACTION_MAP,
-  lc4DevProviderInvocationId,
   lc4DevSemanticIntentForAction,
   renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayExecutor,
   type Lc4DevGatewayExecutionInput,
   type Lc4DevSemanticIntent,
 } from "./lc4-development-gateway-bridge";
-import type {
-  Lc4DevControlReceipt,
-  Lc4DevLiveEpisodePlan,
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  type Lc4DevControlReceipt,
+  type Lc4DevLiveEpisodePlan,
 } from "./lc4-development-live-runner";
 import {
   assertLc4PublicDevelopmentCorpus,
@@ -1118,16 +1118,32 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       if (request.provider_connection_scope.episode_id !== request.episode_id
         || request.provider_connection_scope.provider !== request.provider
         || request.provider_connection_scope.arm !== request.arm
+        || request.provider_connection_scope.control_plane_manifest_sha256
+          !== manifest.manifest_sha256
+        || request.provider_connection_scope.provider_session_schedule_sha256
+          !== LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256
+        || request.provider_connection_scope.segment_ordinal
+          !== Math.ceil(request.opportunity_index / 10)
+        || request.provider_connection_scope.session_ordinal
+          !== request.provider_connection_scope.segment_ordinal
+        || request.provider_connection_scope.opportunity_start
+          !== ((request.provider_connection_scope.segment_ordinal - 1) * 10) + 1
+        || request.provider_connection_scope.opportunity_end
+          !== request.provider_connection_scope.segment_ordinal * 10
+        || request.opportunity_index
+          < request.provider_connection_scope.opportunity_start
+        || request.opportunity_index
+          > request.provider_connection_scope.opportunity_end
+        || (request.provider_connection_scope.segment_ordinal === 1)
+          !== (request.provider_connection_scope.previous_rotation_receipt_sha256 === null)
         || request.provider_connection_scope.connection_scope_sha256
           !== request.provider_connection_scope_sha256
         || request.provider_connection_scope.connection_epoch
           !== request.provider_connection_epoch
         || (request.provider_session_id_sha256 !== null
           && !/^[a-f0-9]{64}$/u.test(request.provider_session_id_sha256))
-        || lc4DevProviderInvocationId(
-          request.provider_connection_scope,
-          request.provider_call_id,
-        ) !== request.provider_invocation_id) {
+        || !/^pcall\.[a-f0-9]{64}$/u.test(request.provider_invocation_id)
+        || !/^[a-f0-9]{64}$/u.test(request.provider_call_id_sha256)) {
         throw new Error("LC4-DEV gateway scoped provider invocation identity is invalid");
       }
       const targetArguments = valueJson(request.target_arguments) as Record<string, JsonValue>;
@@ -1217,7 +1233,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         state.nativeTranscriptHead = hash(NATIVE_TRANSCRIPT_DOMAIN, {
           previous_head_sha256: state.nativeTranscriptHead,
           opportunity_id: opportunity.id,
-          provider_call_id_sha256: sha256Hex(request.provider_call_id),
+          provider_call_id_sha256: request.provider_call_id_sha256,
           provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
           provider_connection_scope_sha256: request.provider_connection_scope_sha256,
           request_sha256: request.request_sha256,
@@ -1334,8 +1350,9 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       const authoritativeReceiptSha256 = hash(GATEWAY_EXECUTION_RECEIPT_DOMAIN, {
         episode_id: state.episode.episode_id,
         opportunity_id: opportunity.id,
-        provider_call_id_sha256: sha256Hex(request.provider_call_id),
+        provider_call_id_sha256: request.provider_call_id_sha256,
         provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
+        provider_connection_scope: request.provider_connection_scope,
         provider_connection_scope_sha256: request.provider_connection_scope_sha256,
         provider_connection_epoch: request.provider_connection_epoch,
         provider_session_id_sha256: request.provider_session_id_sha256,
@@ -1369,8 +1386,9 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         arm: state.episode.arm,
         semantic_intent: request.semantic_intent,
         target_tool: request.target_tool,
-        provider_call_id_sha256: sha256Hex(request.provider_call_id),
+        provider_call_id_sha256: request.provider_call_id_sha256,
         provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
+        provider_connection_scope: request.provider_connection_scope,
         provider_connection_scope_sha256: request.provider_connection_scope_sha256,
         provider_connection_epoch: request.provider_connection_epoch,
         provider_session_id_sha256: request.provider_session_id_sha256,

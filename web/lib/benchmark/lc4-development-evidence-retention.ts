@@ -23,6 +23,7 @@ export type Lc4DevReplayArtifactKind =
   | "opportunity_finalization"
   | "segment_finalization"
   | "episode_finalization"
+  | "run_terminal_authority"
   | "failure_evidence";
 
 export type Lc4DevReplayArtifactReference = Readonly<{

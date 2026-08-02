@@ -2094,6 +2094,12 @@ function retainedDependencies(input: Readonly<{
           segment_finalizations,
         });
       },
+      async finalizeRun({ ledger_head_before_run_terminal_sha256, episode_finalizations }) {
+        return testJsonEvidence(input.evidence, "run_terminal_authority", {
+          ledger_head_before_run_terminal_sha256,
+          ordered_episode_finalization_sha256s: episode_finalizations.map((entry) => entry.evidence_sha256),
+        });
+      },
     },
   };
 }
@@ -2535,6 +2541,7 @@ describe("LC4-DEV live runner", () => {
     let prefix: Lc4DevLiveRunPrefixArtifact | undefined;
     let run: Lc4DevLiveRunArtifact | undefined;
     for (let processOrdinal = 1; processOrdinal <= 6; processOrdinal += 1) {
+      const retained = retainedDependencies({ evidence, pcm, repair: noRepairDependencies(), branch_outcome: "no_call" });
       const result = await executeLc4DevLiveRunSlice({
         prepare,
         preflight,
@@ -2544,7 +2551,18 @@ describe("LC4-DEV live runner", () => {
         // process hydrating only the immutable completed prefix.
         dependencies: {
           adapter,
-          ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies(), branch_outcome: "no_call" }),
+          ...retained,
+          finalization: {
+            ...retained.finalization,
+            async finalizeRun({ ledger_head_before_run_terminal_sha256, episode_finalizations }) {
+              expect(ledger_head_before_run_terminal_sha256).toBe(ledger.at(-1));
+              expect(episode_finalizations).toHaveLength(6);
+              return testJsonEvidence(evidence, "run_terminal_authority", {
+                fixture: "signed-run-terminal-authority",
+                ordered_episode_finalization_sha256s: episode_finalizations.map((entry) => entry.evidence_sha256),
+              });
+            },
+          },
           ledger: {
             async append(event) {
               expect(event.sequence).toBe(ledger.length + 1);
@@ -2584,7 +2602,16 @@ describe("LC4-DEV live runner", () => {
     expect(run.repair_playbacks).toBe(0);
     expect(run.episode_finalization_count).toBe(6);
     expect(run.replay_evidence_reference_count).toBeGreaterThan(run.ledger.length);
-    expect(run.ledger).toHaveLength(1_170); // 6 episode opens + 36 intents + 36 opens + 6 op42 branches + 360 submitted + 360 repair decisions + 360 completed + 6 terminal
+    expect(run.ledger).toHaveLength(1_171); // Prior 1,170-event horizon plus one signed run-terminal authority tail.
+    expect(run.ledger.at(-1)).toMatchObject({
+      event_type: "run_terminal",
+      episode_id: prepare.execution_id,
+      opportunity_id: null,
+    });
+    expect(run.ledger.at(-1)!.evidence_references.map((reference) => reference.kind)).toEqual([
+      "run_terminal_authority",
+      ...Array.from({ length: 6 }, () => "episode_finalization"),
+    ]);
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")).toHaveLength(6);
     expect(run.ledger.filter((event) => event.event_type === "caller_branch_selected")
       .every((event) => event.payload_sha256.length === 64)).toBe(true);
@@ -2612,7 +2639,7 @@ describe("LC4-DEV live runner", () => {
       evidence,
       preflight.immutable_ledger_genesis_sha256,
     )).resolves.toMatchObject({
-      event_count: 1_170,
+      event_count: 1_171,
       ledger_head_sha256: run.ledger_head_sha256,
     });
     expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({
@@ -2908,13 +2935,13 @@ describe("LC4-DEV live runner", () => {
       expect(repairPlaybackReference?.evidence_sha256).toBe(
         String(repairPayload.playback_receipt_sha256),
       );
-      expect(run.ledger).toHaveLength(1_172);
+      expect(run.ledger).toHaveLength(1_173);
       await expect(verifyLc4DevReplayLedger(
         run.ledger,
         evidence,
         preflight.immutable_ledger_genesis_sha256,
       )).resolves.toMatchObject({
-        event_count: 1_172,
+        event_count: 1_173,
         ledger_head_sha256: run.ledger_head_sha256,
       });
       expect(createLc4DevLiveReportArtifact(run, COMPLETE_AUTHORITY, COMPLETE_RUN_BUDGET)).toMatchObject({

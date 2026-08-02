@@ -134,6 +134,8 @@ export type Lc4AuthorityUpstreamRoots = Readonly<{
   source_checkpoint_evidence_sha256: string;
   manifest_registry_sha256: string;
   episode_subject_assignment_sha256: string;
+  /** Present for LC4-DEV: ordered six-segment socket/finalization authority. */
+  segment_terminal_binding_set_sha256?: string;
 }>;
 
 export type Lc4AuthorityManifestRegistry = Readonly<{

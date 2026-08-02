@@ -12,6 +12,7 @@ import {
   LC4_DEV_SEMANTIC_INTENTS,
   Lc4DevGatewayTurnCoordinator,
   assertLc4DevGatewayReceiptSet,
+  createLc4DevProviderConnectionAttestation,
   createLc4DevProviderConnectionScope,
   lc4DevProviderInvocationId,
   lc4DevSemanticIntentsForActions,
@@ -21,7 +22,10 @@ import {
   type Lc4DevRotationReplayEnvelopeAuthority,
   type Lc4DevRotationReplayEnvelopeSnapshot,
 } from "../lc4-development-gateway-bridge";
-import type { Lc4DevLiveEpisodePlan } from "../lc4-development-live-runner";
+import {
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  type Lc4DevLiveEpisodePlan,
+} from "../lc4-development-live-runner";
 import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import {
   createLc4NativeConversationReplayPacket,
@@ -70,26 +74,50 @@ function connectionScope(
   provider: "openai" | "gemini" | "xai",
   arm: "native" | "hacc" = "hacc",
   segmentOrdinal = 1,
+  authoritySalt = "default",
 ) {
   return createLc4DevProviderConnectionScope({
     episode_id: episode(provider, arm).episode_id,
     provider,
     arm,
+    prepare_sha256: sha256Hex(`test-prepare-${authoritySalt}`),
+    preflight_sha256: sha256Hex(`test-preflight-${authoritySalt}`),
+    execution_id_sha256: sha256Hex(`test-execution-${authoritySalt}`),
+    control_plane_manifest_sha256: "b".repeat(64),
+    provider_session_schedule_sha256:
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
     segment_ordinal: segmentOrdinal,
     session_ordinal: segmentOrdinal,
+    opportunity_start: ((segmentOrdinal - 1) * 10) + 1,
+    opportunity_end: segmentOrdinal * 10,
     connection_epoch: 1,
     previous_rotation_receipt_sha256: segmentOrdinal === 1 ? null : sha256Hex(`rotation-${segmentOrdinal - 1}`),
+    rotation_context_kind: segmentOrdinal === 1 ? "none" : "hacc_structured_state",
+    rotation_packet_sha256: segmentOrdinal === 1 ? null : sha256Hex(`rotation-packet-${segmentOrdinal}`),
+    rotation_conversation_replay_sha256: segmentOrdinal === 1 ? null : sha256Hex(`rotation-replay-${segmentOrdinal}`),
     rotation_context_sha256: sha256Hex(`rotation-context-${segmentOrdinal}`),
+    connection_attestation: createLc4DevProviderConnectionAttestation({
+      provider,
+      connection_epoch: 1,
+      connection_nonce_sha256: sha256Hex(`nonce-${segmentOrdinal}`),
+      provider_session_id_sha256: provider === "gemini"
+        ? null
+        : sha256Hex(`session-${provider}`),
+      session_configuration_acknowledgement_sha256: sha256Hex(`ack-${provider}`),
+      connect_wire_observation_count: 1,
+      connect_wire_chain_head_sha256: sha256Hex(`wire-${provider}-${segmentOrdinal}`),
+    }),
   });
 }
 
 function gatewayCoordinator(
   input: Omit<ConstructorParameters<typeof Lc4DevGatewayTurnCoordinator>[0], "connectionScope">,
   arm: "native" | "hacc" = "hacc",
+  segmentOrdinal = 1,
 ) {
   const coordinator = new Lc4DevGatewayTurnCoordinator({
     ...input,
-    connectionScope: connectionScope(input.client.provider, arm),
+    connectionScope: connectionScope(input.client.provider, arm, segmentOrdinal),
   });
   const observe = coordinator.observe.bind(coordinator);
   coordinator.observe = (event) => observe(
@@ -187,8 +215,9 @@ function executor(
         arm: input.arm,
         semantic_intent: input.semantic_intent,
         target_tool: input.target_tool,
-        provider_call_id_sha256: sha256Hex(input.provider_call_id),
+        provider_call_id_sha256: input.provider_call_id_sha256,
         provider_invocation_id_sha256: sha256Hex(input.provider_invocation_id),
+        provider_connection_scope: input.provider_connection_scope,
         provider_connection_scope_sha256: input.provider_connection_scope_sha256,
         provider_connection_epoch: input.provider_connection_epoch,
         provider_session_id_sha256: input.provider_session_id_sha256,
@@ -540,7 +569,10 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
 
     const evidence = await coordinator.finishOpportunity();
     expect(failures).toEqual([]);
-    expect(inputs.map((input) => input.provider_call_id)).toEqual(["gemini-call-1", "gemini-call-2"]);
+    expect(inputs.map((input) => input.provider_call_id_sha256)).toEqual([
+      sha256Hex("gemini-call-1"),
+      sha256Hex("gemini-call-2"),
+    ]);
     expect(client.operations).toEqual([
       `prepare:${CONTINUATION_CONTROL_SHA256}`,
       "submit:false",
@@ -982,7 +1014,7 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         ...snapshot,
         retained_utf8_bytes: exactRetainedBytes + 1,
       }),
-    });
+    }, "hacc", 6);
     coordinator.beginOpportunity({
       episode: episode("openai", "hacc"),
       opportunity: Object.freeze({
@@ -1016,7 +1048,7 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         current_caller_utf8_bytes: 1,
         optional_repair_caller_utf8_bytes: 1,
       }),
-    });
+    }, "hacc", 6);
     accepted.beginOpportunity({
       episode: episode("openai", "hacc"),
       opportunity: finalOpportunity,
@@ -1037,7 +1069,7 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         current_caller_utf8_bytes: 1,
         optional_repair_caller_utf8_bytes: 1,
       }),
-    });
+    }, "hacc", 6);
     rejected.beginOpportunity({
       episode: episode("openai", "hacc"),
       opportunity: finalOpportunity,
@@ -1060,7 +1092,7 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
         current_caller_utf8_bytes: 1,
         optional_repair_caller_utf8_bytes: 1,
       }),
-    });
+    }, "hacc", 6);
     expect(() => horizonOverflow.beginOpportunity({
       episode: episode("openai", "hacc"),
       opportunity: finalOpportunity,
@@ -1175,6 +1207,43 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
   });
 
   it.each(["openai", "gemini", "xai"] as const)(
+    "retains the %s native call-ID shield across opportunities for the full segment",
+    async (provider) => {
+      const client = new FakeClient(provider);
+      const inputs: Lc4DevGatewayExecutionInput[] = [];
+      const failures: Error[] = [];
+      const coordinator = gatewayCoordinator({
+        client,
+        executor: executor(inputs),
+        onFatal: (error) => failures.push(error),
+      });
+      coordinator.beginOpportunity({ episode: episode(provider, "hacc"), opportunity });
+      coordinator.observe(providerToolEvent(
+        provider,
+        "response-1",
+        "segment-call-id",
+        "complete_current_stage",
+      ));
+      await coordinator.finishOpportunity();
+
+      const nextOpportunity = createLc4PublicDevelopmentCorpus().opportunities[1]!;
+      coordinator.beginOpportunity({
+        episode: episode(provider, "hacc"),
+        opportunity: nextOpportunity,
+      });
+      coordinator.observe(providerToolEvent(
+        provider,
+        "response-2",
+        "segment-call-id",
+        "complete_current_stage",
+      ));
+      await expect(coordinator.finishOpportunity()).rejects.toThrow("reused a tool call identity");
+      expect(inputs).toHaveLength(1);
+      expect(failures).toHaveLength(1);
+    },
+  );
+
+  it.each(["openai", "gemini", "xai"] as const)(
     "scopes the same raw %s call ID independently across planned provider segments",
     async (provider) => {
       const inputs: Lc4DevGatewayExecutionInput[] = [];
@@ -1188,7 +1257,12 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       }));
       const intents = ["complete_current_stage", "reserve_archive_room"] as const;
       for (const [index, coordinator] of coordinators.entries()) {
-        coordinator.beginOpportunity({ episode: episode(provider, "hacc"), opportunity });
+        const segmentOpportunity = createLc4PublicDevelopmentCorpus()
+          .opportunities[index * 10]!;
+        coordinator.beginOpportunity({
+          episode: episode(provider, "hacc"),
+          opportunity: segmentOpportunity,
+        });
         coordinator.observe(providerToolEvent(
           provider,
           `response-segment-${index + 1}`,
@@ -1199,7 +1273,8 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
       }
 
       expect(inputs).toHaveLength(2);
-      expect(inputs[0]!.provider_call_id).toBe(inputs[1]!.provider_call_id);
+      expect(inputs[0]!.provider_call_id_sha256)
+        .toBe(inputs[1]!.provider_call_id_sha256);
       expect(inputs[0]!.provider_invocation_id).not.toBe(inputs[1]!.provider_invocation_id);
       expect(inputs.map((input) => input.provider_connection_scope_sha256))
         .toEqual(scopes.map((scope) => scope.connection_scope_sha256));
@@ -1280,11 +1355,30 @@ describe("LC4-DEV provider-neutral gateway bridge", () => {
     expect(() => new Lc4DevGatewayTurnCoordinator({
       client: new FakeClient("openai"),
       executor: executor([]),
-      connectionScope: { ...scope, segment_ordinal: 2 },
+      connectionScope: {
+        ...scope,
+        rotation_context_sha256: sha256Hex("tampered-rotation-context"),
+      },
       onFatal: () => undefined,
     })).toThrow("connection scope is hash-invalid");
     expect(lc4DevProviderInvocationId(connectionScope("openai", "hacc", 2), "stable-native-call"))
       .not.toBe(first);
+    expect(lc4DevProviderInvocationId(
+      connectionScope("openai", "hacc", 1, "second-execution"),
+      "stable-native-call",
+    )).not.toBe(first);
+    expect(() => new Lc4DevGatewayTurnCoordinator({
+      client: new FakeClient("openai"),
+      executor: executor([]),
+      connectionScope: {
+        ...scope,
+        connection_attestation: {
+          ...scope.connection_attestation,
+          connection_nonce_sha256: sha256Hex("tampered-nonce"),
+        },
+      },
+      onFatal: () => undefined,
+    })).toThrow("attestation is hash-invalid");
   });
 
   it("fails closed when OpenAI or xAI repeats a response identity with a fresh call", async () => {
