@@ -18,6 +18,13 @@ worker payloads, or fixture answers. Strict schemas reject those fields. The
 provider receives public identifiers, status, and commitments only; the host
 gateway and speech-release gate remain the enforcing authorities.
 
+Success speech is receipt-bound, not inferred from tool transport success. The
+claim template, action identity and semantic hash, registered outcome
+predicate, capability epoch, and satisfied outcome must all match. Terminal
+success additionally requires an outcome-defining non-read effect receipt;
+lookup, compensated, stale, unrelated, and unverified receipts cannot support
+it.
+
 Creation requires a separately read current-authority tuple. Any conversation,
 Flow, Mission, or capability-epoch mismatch throws `turn_contract_stale`.
 Indeterminate effects require an explicit quarantine. While quarantined, the

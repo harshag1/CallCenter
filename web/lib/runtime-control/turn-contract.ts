@@ -54,13 +54,23 @@ const ReceiptSchema = z.object({
   receipt_id: PublicIdSchema,
   action_id: PublicIdSchema,
   action_semantic_sha256: HashSchema,
+  effect: z.enum(["read", "write", "opaque"]),
   capability_epoch: RevisionSchema,
   status: z.enum(["reserved", "succeeded", "failed", "indeterminate", "compensated"]),
+  outcome_authority: z.enum(["informational", "effect", "terminal"]),
+  outcome_predicate_sha256: HashSchema,
+  outcome_status: z.enum(["satisfied", "not_satisfied", "unverified"]),
   settled_revision: RevisionSchema.nullable(),
   receipt_sha256: HashSchema,
 }).strict().superRefine((receipt, ctx) => {
   if ((receipt.status === "reserved") === (receipt.settled_revision !== null)) {
     ctx.addIssue({ code: "custom", message: "receipt status and settlement revision disagree" });
+  }
+  if (receipt.effect === "read" && receipt.outcome_authority !== "informational") {
+    ctx.addIssue({ code: "custom", message: "read-only receipts cannot define effect or terminal outcomes" });
+  }
+  if (receipt.status !== "succeeded" && receipt.outcome_status === "satisfied") {
+    ctx.addIssue({ code: "custom", message: "only succeeded receipts can satisfy an outcome predicate" });
   }
 });
 
@@ -96,6 +106,8 @@ const AllowedClaimSchema = z.object({
   claim_class: z.enum(["progress", "clarification", "handoff", "effect_success", "terminal_success"]),
   supporting_receipt_id: PublicIdSchema.nullable(),
   supporting_action_id: PublicIdSchema.nullable(),
+  required_action_semantic_sha256: HashSchema.nullable(),
+  required_outcome_predicate_sha256: HashSchema.nullable(),
   claim_semantic_sha256: HashSchema,
 }).strict();
 
@@ -316,14 +328,38 @@ function validateSemantics(source: TurnContractSource): void {
       if (claim.supporting_action_id === null || receipt.action_id !== claim.supporting_action_id) {
         throw new TurnContractError("turn_contract_ambiguous", "success claim receipt belongs to a different action");
       }
+      if (claim.required_action_semantic_sha256 === null
+          || receipt.action_semantic_sha256 !== claim.required_action_semantic_sha256) {
+        throw new TurnContractError("turn_contract_ambiguous", "success claim action semantics differ from its receipt");
+      }
+      if (claim.required_outcome_predicate_sha256 === null
+          || receipt.outcome_predicate_sha256 !== claim.required_outcome_predicate_sha256
+          || receipt.outcome_status !== "satisfied") {
+        throw new TurnContractError("turn_contract_ambiguous", "success claim outcome predicate is not authoritatively satisfied");
+      }
       if (receipt.capability_epoch !== source.capability_epoch) {
         throw new TurnContractError("turn_contract_stale", "success claim receipt belongs to a stale capability epoch");
+      }
+      const frontierAction = actionById.get(receipt.action_id);
+      if (frontierAction && frontierAction.semantic_sha256 !== receipt.action_semantic_sha256) {
+        throw new TurnContractError("turn_contract_stale", "success claim receipt differs from the registered action semantics");
       }
       if (claim.claim_class === "terminal_success" && source.lifecycle.status !== "completed") {
         throw new TurnContractError("turn_contract_ambiguous", "terminal success claim requires a completed lifecycle");
       }
-    } else if (claim.supporting_receipt_id !== null || claim.supporting_action_id !== null) {
-      throw new TurnContractError("turn_contract_ambiguous", "non-success claims cannot cite an effect receipt or action");
+      if (claim.claim_class === "terminal_success"
+          && (receipt.outcome_authority !== "terminal" || receipt.effect === "read")) {
+        throw new TurnContractError("turn_contract_ambiguous", "terminal success requires an outcome-defining effect receipt");
+      }
+      if (claim.claim_class === "effect_success"
+          && (receipt.outcome_authority === "informational" || receipt.effect === "read")) {
+        throw new TurnContractError("turn_contract_ambiguous", "effect success requires an effect-defining mutation receipt");
+      }
+    } else if (claim.supporting_receipt_id !== null
+        || claim.supporting_action_id !== null
+        || claim.required_action_semantic_sha256 !== null
+        || claim.required_outcome_predicate_sha256 !== null) {
+      throw new TurnContractError("turn_contract_ambiguous", "non-success claims cannot cite effect or outcome authority");
     }
   }
   const ambiguityReceiptIds = new Set(source.ambiguities.flatMap((ambiguity) => ambiguity.receipt_id ?? []));

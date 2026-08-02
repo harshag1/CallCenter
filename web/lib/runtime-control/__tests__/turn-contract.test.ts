@@ -39,22 +39,26 @@ function source(): TurnContractSource {
     ],
     claims: {
       allowed: [
-        { claim_id: "return.lookup.complete", claim_class: "effect_success", supporting_receipt_id: "receipt.lookup", supporting_action_id: "return.lookup", claim_semantic_sha256: hash("claim.return.lookup.complete") },
-        { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
+        { claim_id: "return.submit.complete", claim_class: "effect_success", supporting_receipt_id: "receipt.submit", supporting_action_id: "return.submit", required_action_semantic_sha256: hash("return.submit.v1"), required_outcome_predicate_sha256: hash("outcome.return.created"), claim_semantic_sha256: hash("claim.return.submit.complete") },
+        { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, required_action_semantic_sha256: null, required_outcome_predicate_sha256: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
       ],
       prohibited: [
-        { claim_id: "return.submit.complete", claim_class: "terminal_success", reason_code: "missing_authoritative_receipt" },
+        { claim_id: "return.submit.unsupported", claim_class: "terminal_success", reason_code: "missing_authoritative_receipt" },
         { claim_id: "verification.repeat", claim_class: "private_value", reason_code: "private_value_never_provider_visible" },
       ],
     },
     receipts: [{
-      receipt_id: "receipt.lookup",
-      action_id: "return.lookup",
-      action_semantic_sha256: hash("return.lookup.v1"),
+      receipt_id: "receipt.submit",
+      action_id: "return.submit",
+      action_semantic_sha256: hash("return.submit.v1"),
+      effect: "write",
       capability_epoch: 9,
       status: "succeeded",
+      outcome_authority: "terminal",
+      outcome_predicate_sha256: hash("outcome.return.created"),
+      outcome_status: "satisfied",
       settled_revision: 40,
-      receipt_sha256: hash("receipt.lookup"),
+      receipt_sha256: hash("receipt.submit"),
     }],
     workers: [{
       worker_id: "worker.policy",
@@ -166,18 +170,22 @@ describe("production state-derived Turn Contract", () => {
     const ambiguous: TurnContractSource = {
       ...current,
       receipts: [...current.receipts, {
-        receipt_id: "receipt.submit",
+        receipt_id: "receipt.submit.uncertain",
         action_id: "return.submit",
         action_semantic_sha256: hash("return.submit.v1"),
+        effect: "write",
         capability_epoch: 9,
         status: "indeterminate",
+        outcome_authority: "terminal",
+        outcome_predicate_sha256: hash("outcome.return.created"),
+        outcome_status: "unverified",
         settled_revision: 41,
         receipt_sha256: hash("receipt.submit.indeterminate"),
       }],
       ambiguities: [{
         ambiguity_id: "ambiguity.submit",
         reason_code: "connection_lost_after_dispatch",
-        receipt_id: "receipt.submit",
+        receipt_id: "receipt.submit.uncertain",
         designated_reconciliation_actions: ["return.lookup"],
       }],
     };
@@ -185,7 +193,7 @@ describe("production state-derived Turn Contract", () => {
     expect(contract.response_mode).toBe("reconcile");
     expect(contract.eligible_actions.map((action) => action.action_id)).toEqual(["return.lookup"]);
     expect(contract.allowed_claims).toEqual([
-      { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
+      { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, required_action_semantic_sha256: null, required_outcome_predicate_sha256: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
     ]);
 
     const noRepair: TurnContractSource = {
@@ -201,17 +209,17 @@ describe("production state-derived Turn Contract", () => {
     const current = source();
     expect(() => createProductionTurnContract({
       ...current,
-      receipts: [{ ...current.receipts[0]!, status: "indeterminate" }],
+      receipts: [{ ...current.receipts[0]!, status: "indeterminate", outcome_status: "unverified" }],
       claims: {
         ...current.claims,
-        allowed: [{ claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, claim_semantic_sha256: hash("claim.return.reason.ask") }],
+        allowed: [{ claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, required_action_semantic_sha256: null, required_outcome_predicate_sha256: null, claim_semantic_sha256: hash("claim.return.reason.ask") }],
       },
     }, freshness(current))).toThrow(/lacks an ambiguity quarantine/);
     expect(() => createProductionTurnContract({
       ...current,
       claims: {
         ...current.claims,
-        allowed: [{ claim_id: "return.done", claim_class: "terminal_success", supporting_receipt_id: null, supporting_action_id: null, claim_semantic_sha256: hash("claim.return.done") }],
+        allowed: [{ claim_id: "return.done", claim_class: "terminal_success", supporting_receipt_id: null, supporting_action_id: null, required_action_semantic_sha256: null, required_outcome_predicate_sha256: null, claim_semantic_sha256: hash("claim.return.done") }],
       },
     }, freshness(current))).toThrow(/success claims require an authoritative settled receipt/);
 
@@ -219,23 +227,27 @@ describe("production state-derived Turn Contract", () => {
       ...current,
       claims: { ...current.claims, allowed: [{
         ...current.claims.allowed[0]!,
-        supporting_action_id: "return.submit",
+        supporting_action_id: "return.lookup",
       }] },
     }, freshness(current))).toThrow(/belongs to a different action/);
     expect(() => createProductionTurnContract({
       ...current,
-      receipts: [{ ...current.receipts[0]!, status: "compensated" }],
+      receipts: [{ ...current.receipts[0]!, status: "compensated", outcome_status: "unverified" }],
     }, freshness(current))).toThrow(/success claims require an authoritative settled receipt/);
   });
 
   it("rejects mutating reconciliation capabilities and epoch-stale receipts or workers", () => {
     const current = source();
     const ambiguousReceipt = {
-      receipt_id: "receipt.submit",
+      receipt_id: "receipt.submit.uncertain",
       action_id: "return.submit",
       action_semantic_sha256: hash("return.submit.v1"),
+      effect: "write" as const,
       capability_epoch: 9,
       status: "indeterminate" as const,
+      outcome_authority: "terminal" as const,
+      outcome_predicate_sha256: hash("outcome.return.created"),
+      outcome_status: "unverified" as const,
       settled_revision: 41,
       receipt_sha256: hash("receipt.submit.indeterminate"),
     };
@@ -244,7 +256,7 @@ describe("production state-derived Turn Contract", () => {
       receipts: [...current.receipts, ambiguousReceipt],
       ambiguities: [{
         ambiguity_id: "ambiguity.submit", reason_code: "lost_after_dispatch",
-        receipt_id: "receipt.submit", designated_reconciliation_actions: ["return.submit"],
+        receipt_id: "receipt.submit.uncertain", designated_reconciliation_actions: ["return.submit"],
       }],
     }, freshness(current))).toThrow(/not a read-only repair capability/);
     expect(() => createProductionTurnContract({
@@ -255,6 +267,56 @@ describe("production state-derived Turn Contract", () => {
       ...current,
       workers: [{ ...current.workers[0]!, capability_epoch: 8 }],
     }, freshness(current))).toThrow(/worker authority/);
+  });
+
+  it("rejects an unrelated read receipt even when a terminal claim names and hashes it consistently", () => {
+    const current = source();
+    const terminalWithLookup: TurnContractSource = {
+      ...current,
+      lifecycle: { status: "completed", refresh_required: false, preferred_response_mode: "terminal" },
+      claims: {
+        prohibited: current.claims.prohibited,
+        allowed: [{
+          claim_id: "order.complete",
+          claim_class: "terminal_success",
+          supporting_receipt_id: "receipt.account.lookup",
+          supporting_action_id: "return.lookup",
+          required_action_semantic_sha256: hash("return.lookup.v1"),
+          required_outcome_predicate_sha256: hash("outcome.account.exists"),
+          claim_semantic_sha256: hash("claim.order.complete"),
+        }],
+      },
+      receipts: [{
+        receipt_id: "receipt.account.lookup",
+        action_id: "return.lookup",
+        action_semantic_sha256: hash("return.lookup.v1"),
+        effect: "read",
+        capability_epoch: 9,
+        status: "succeeded",
+        outcome_authority: "informational",
+        outcome_predicate_sha256: hash("outcome.account.exists"),
+        outcome_status: "satisfied",
+        settled_revision: 40,
+        receipt_sha256: hash("receipt.account.lookup"),
+      }],
+    };
+    expect(() => createProductionTurnContract(terminalWithLookup, freshness(terminalWithLookup)))
+      .toThrow(/terminal success requires an outcome-defining effect receipt/);
+
+    expect(() => createProductionTurnContract({
+      ...current,
+      claims: { ...current.claims, allowed: [{
+        ...current.claims.allowed[0]!,
+        required_action_semantic_sha256: hash("return.submit.stale"),
+      }] },
+    }, freshness(current))).toThrow(/action semantics differ/);
+    expect(() => createProductionTurnContract({
+      ...current,
+      claims: { ...current.claims, allowed: [{
+        ...current.claims.allowed[0]!,
+        required_outcome_predicate_sha256: hash("outcome.unrelated"),
+      }] },
+    }, freshness(current))).toThrow(/outcome predicate is not authoritatively satisfied/);
   });
 
   it("refuses terminal contracts with unresolved effects or workers", () => {
@@ -277,7 +339,7 @@ describe("production state-derived Turn Contract", () => {
     expect(recovery.response_mode).toBe("recover");
     expect(recovery.eligible_actions).toEqual([]);
     expect(recovery.allowed_claims).toEqual([
-      { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
+      { claim_id: "return.reason.ask", claim_class: "clarification", supporting_receipt_id: null, supporting_action_id: null, required_action_semantic_sha256: null, required_outcome_predicate_sha256: null, claim_semantic_sha256: hash("claim.return.reason.ask") },
     ]);
     expect(recovery.prohibited_claims).toContainEqual(expect.objectContaining({
       claim_id: "system.effect_success.stale_authority",
@@ -291,8 +353,10 @@ describe("production state-derived Turn Contract", () => {
         allowed: [{
           claim_id: "return.complete",
           claim_class: "terminal_success",
-          supporting_receipt_id: "receipt.lookup",
-          supporting_action_id: "return.lookup",
+          supporting_receipt_id: "receipt.submit",
+          supporting_action_id: "return.submit",
+          required_action_semantic_sha256: hash("return.submit.v1"),
+          required_outcome_predicate_sha256: hash("outcome.return.created"),
           claim_semantic_sha256: hash("claim.return.complete"),
         }],
       },
