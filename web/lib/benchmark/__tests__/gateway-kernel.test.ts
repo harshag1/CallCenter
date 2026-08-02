@@ -904,6 +904,26 @@ describe("benchmark gateway kernel", () => {
     });
   });
 
+  it("rejects one raw provider call ID reused for a different action in the same capability epoch", () => {
+    const raw = createHarness("raw-full");
+    const providerCallId = "same-connection-provider-call";
+    const initialEpoch = raw.snapshot.capability_epoch;
+
+    expectOk(invoke(raw, "lookup_work_order", { work_order_id: "WO-2048" }, {
+      providerCallId,
+    }));
+    expect(raw.snapshot.capability_epoch).toBe(initialEpoch);
+
+    const conflict = invoke(raw, "get_work_order_status", {}, { providerCallId });
+    expect(conflict.result).toMatchObject({
+      ok: false,
+      code: "provider_call_id_conflict",
+      current_capability_epoch: initialEpoch,
+    });
+    expect(raw.snapshot.capability_epoch).toBe(initialEpoch);
+    expect(raw.world.receipts.filter((receipt) => receipt.tool === "lookup_work_order")).toHaveLength(1);
+  });
+
   it("derives a run-scoped transcript HMAC key without exposing sensitive preimages", () => {
     const first = createHarness("raw-full", "run-transcript-secret-a");
     const second = createHarness("raw-full", "run-transcript-secret-b");
