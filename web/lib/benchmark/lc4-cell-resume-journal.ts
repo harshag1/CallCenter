@@ -523,7 +523,8 @@ async function withLock<T>(path: string, operation: () => Promise<T>): Promise<T
   const nonce = randomUUID();
   const owner = Object.freeze({ schema_version: 1, hostname: hostname(), pid: process.pid, nonce });
   let acquired = false;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     try {
       await mkdir(lockPath, { mode: 0o700 });
       await writeFile(ownerPath, `${canonicalJson(owner)}\n`, { flag: "wx", mode: PRIVATE_MODE });
@@ -549,7 +550,7 @@ async function withLock<T>(path: string, operation: () => Promise<T>): Promise<T
           continue;
         }
       }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 2));
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
     }
   }
   if (!acquired) fail("journal ownership lock timed out");
