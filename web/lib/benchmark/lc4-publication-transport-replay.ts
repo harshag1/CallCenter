@@ -33,6 +33,7 @@ import {
 import {
   projectLc4RotationPacketForReplay,
   validateConversationHistoryHydrationAcknowledgement,
+  type Lc4ConversationExchangePhase,
   type Lc4HaccRotationStatePacket,
   type Lc4NativeConversationReplayPacket,
   type Lc4RotationConversationTurn,
@@ -364,6 +365,7 @@ function assertHydrationItemsMatchProviderHistory(input: Readonly<{
 
 function appendReconstructedConversationExchange(input: Readonly<{
   turns: Lc4RotationConversationTurn[];
+  exchange_phase: Lc4ConversationExchangePhase;
   opportunity_index: number;
   caller_text: string;
   caller_pcm_sha256: string;
@@ -406,6 +408,7 @@ function appendReconstructedConversationExchange(input: Readonly<{
       ...turn,
       transcript_sha256: sha256Hex(turn.text),
       available_after_opportunity: input.opportunity_index,
+      exchange_phase: input.exchange_phase,
     }) as Lc4RotationConversationTurn);
   };
   append({
@@ -420,7 +423,9 @@ function appendReconstructedConversationExchange(input: Readonly<{
       "LC4 publication provider exchange lacks retained conversation tool batches",
     );
   }
-  for (const [batchIndex, batchValue] of batches.entries()) {
+  for (const [batchIndex, batchValue] of (
+    input.exchange_phase === "canonical" ? batches : []
+  ).entries()) {
     const batch = objectValue(
       batchValue,
       "LC4 publication retained conversation tool batch",
@@ -525,6 +530,7 @@ function appendReconstructedConversationExchange(input: Readonly<{
  * directly regression-testable without a paid provider run.
  */
 export function reconstructLc4PublicationConversationExchange(input: Readonly<{
+  exchange_phase: Lc4ConversationExchangePhase;
   opportunity_index: number;
   caller_text: string;
   caller_pcm_sha256: string;
@@ -1367,6 +1373,7 @@ async function replayEpisode(input: Readonly<{
     }
     appendReconstructedConversationExchange({
       turns: reconstructedConversationTurns,
+      exchange_phase: "canonical",
       opportunity_index: opportunity.index,
       caller_text: callerText,
       caller_pcm_sha256: callerPcmSha256,
@@ -1742,6 +1749,7 @@ async function replayEpisode(input: Readonly<{
       }
       appendReconstructedConversationExchange({
         turns: reconstructedConversationTurns,
+        exchange_phase: "repair",
         opportunity_index: opportunity.index,
         caller_text: repairSource.canonical_caller_text,
         caller_pcm_sha256: repairCallerPcmSha256,

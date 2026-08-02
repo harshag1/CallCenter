@@ -370,6 +370,16 @@ function publicConversationTurns(
   ).flat());
 }
 
+function devCanonicalConversationTurns(
+  availableThroughOpportunity: 10 | 20 | 30 | 40 | 50,
+): readonly Lc4NativeConversationTurnInput[] {
+  return Object.freeze(publicConversationTurns(availableThroughOpportunity)
+    .map((turn) => Object.freeze({
+      ...turn,
+      exchange_phase: "canonical" as const,
+    })));
+}
+
 function publicConversationTurnsWithTool(
   output: string,
 ): readonly Lc4NativeConversationTurnInput[] {
@@ -447,7 +457,7 @@ function reindexConversationTurns(
 }
 
 function devConversationTurnsWithMultipleToolBatches(): readonly Lc4NativeConversationTurnInput[] {
-  const turns = [...publicConversationTurns(10)];
+  const turns = [...devCanonicalConversationTurns(10)];
   const tool = (
     batch: string,
     ordinal: number,
@@ -470,6 +480,7 @@ function devConversationTurnsWithMultipleToolBatches(): readonly Lc4NativeConver
     tool_batch_sha256: sha256Hex(`provider-tool-batch:${batch}`),
     tool_batch_call_ordinal: ordinal,
     tool_batch_call_count: count,
+    exchange_phase: "canonical",
     provider_conversation_source: true,
     oracle_derived: false,
     future_derived: false,
@@ -479,6 +490,31 @@ function devConversationTurnsWithMultipleToolBatches(): readonly Lc4NativeConver
     tool("one", 1, 2, "membership.lookup"),
     tool("one", 2, 2, "membership.quote"),
     tool("two", 1, 1, "membership.audit"));
+  return reindexConversationTurns(turns);
+}
+
+function devConversationTurnsWithRepair(): readonly Lc4NativeConversationTurnInput[] {
+  const turns = [...devConversationTurnsWithMultipleToolBatches()];
+  const canonicalCaller = turns[0]!;
+  const canonicalAssistant = turns[4]!;
+  turns.splice(5, 0,
+    Object.freeze({
+      ...canonicalCaller,
+      turn_id: "placeholder.repair.caller",
+      sequence: 0,
+      text: "Please repeat only the verified result.",
+      provenance_receipt_sha256: sha256Hex("repair-caller-pcm:1"),
+      exchange_phase: "repair" as const,
+    }),
+    Object.freeze({
+      ...canonicalAssistant,
+      turn_id: "placeholder.repair.assistant",
+      sequence: 0,
+      text: "The verified result is unchanged.",
+      provenance_receipt_sha256: sha256Hex("repair-assistant-pcm:1"),
+      exchange_phase: "repair" as const,
+    }),
+  );
   return reindexConversationTurns(turns);
 }
 
@@ -2103,7 +2139,7 @@ async function openCallerBranchPreflight(input: Readonly<{
       previous_session_rotation_receipt_sha256: previousReceipt,
       flow_state_sha256: sha256Hex(`branch-preflight-flow:${input.provider}:${input.outcome}:${from}`),
       response_plan_chain_head_sha256: sha256Hex(`branch-preflight-plan:${input.provider}:${input.outcome}:${from}`),
-      conversation_turns: publicConversationTurns((from * 10) as 10 | 20 | 30 | 40 | 50),
+      conversation_turns: devCanonicalConversationTurns((from * 10) as 10 | 20 | 30 | 40 | 50),
     }),
   });
   let previousReceipt: string | null = null;
@@ -2160,8 +2196,8 @@ async function openCallerBranchPreflight(input: Readonly<{
 }
 
 describe("LC4 production realtime adapter bridge", () => {
-  it("accepts exact schema-v6 caller, multi-batch tool, assistant chronology", () => {
-    const conversationTurns = devConversationTurnsWithMultipleToolBatches();
+  it("accepts and signs canonical tool batches followed by one tool-free repair", () => {
+    const conversationTurns = devConversationTurnsWithRepair();
     const native = createLc4NativeConversationReplayPacket({
       protocol_id: "HACC-LC4-DEV-v1",
       run_id: "dev-multiple-tool-batches-native",
@@ -2185,12 +2221,31 @@ describe("LC4 production realtime adapter bridge", () => {
         sha256Hex("dev-multiple-tool-batches-plan"),
       conversation_turns: conversationTurns,
     });
-    expect(native.conversation_turns.slice(0, 5).map((turn) => turn.speaker))
-      .toEqual(["caller", "tool", "tool", "tool", "assistant"]);
+    expect(native.conversation_turns.slice(0, 7).map((turn) => [
+      turn.exchange_phase,
+      turn.speaker,
+    ])).toEqual([
+      ["canonical", "caller"],
+      ["canonical", "tool"],
+      ["canonical", "tool"],
+      ["canonical", "tool"],
+      ["canonical", "assistant"],
+      ["repair", "caller"],
+      ["repair", "assistant"],
+    ]);
     expect(hacc.conversation_turns).toEqual(native.conversation_turns);
     expect(projectLc4RotationPacketForReplay(native).provider_history
-      .slice(0, 4).map((turn) => turn.role))
-      .toEqual(["user", "tool_batch", "tool_batch", "assistant"]);
+      .slice(0, 6).map((turn) => turn.role))
+      .toEqual([
+        "user", "tool_batch", "tool_batch", "assistant", "user", "assistant",
+      ]);
+    const changedPhase = {
+      ...native,
+      conversation_turns: native.conversation_turns.map((turn, index) =>
+        index === 5 ? { ...turn, exchange_phase: "canonical" as const } : turn),
+    } as Lc4NativeConversationReplayPacket;
+    expect(() => projectLc4RotationPacketForReplay(changedPhase))
+      .toThrow(/chronology|integrity/u);
   });
 
   it.each([
@@ -2220,7 +2275,7 @@ describe("LC4 production realtime adapter bridge", () => {
     ]],
   ] as const)("rejects schema-v6 %s chronology", (_label, mutate) => {
     const conversationTurns = reindexConversationTurns(
-      mutate(publicConversationTurns(10)),
+      mutate(devCanonicalConversationTurns(10)),
     );
     expect(() => createLc4NativeConversationReplayPacket({
       protocol_id: "HACC-LC4-DEV-v1",
@@ -2232,6 +2287,80 @@ describe("LC4 production realtime adapter bridge", () => {
         sha256Hex("dev-invalid-chronology-previous"),
       conversation_turns: conversationTurns,
     })).toThrow(/chronology|future or out-of-order/u);
+  });
+
+  it.each([
+    ["missing phase", () => publicConversationTurns(10)],
+    ["repair before canonical", () => {
+      const turns = [...devCanonicalConversationTurns(10)];
+      turns[0] = Object.freeze({ ...turns[0]!, exchange_phase: "repair" });
+      return turns;
+    }],
+    ["canonical after repair", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      return [
+        turns[0]!,
+        turns[5]!,
+        turns[6]!,
+        ...turns.slice(1, 5),
+        ...turns.slice(7),
+      ];
+    }],
+    ["duplicate canonical exchange", () => {
+      const turns = [...devCanonicalConversationTurns(10)];
+      turns.splice(2, 0, turns[0]!, turns[1]!);
+      return turns;
+    }],
+    ["duplicate repair exchange", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      turns.splice(7, 0, turns[5]!, turns[6]!);
+      return turns;
+    }],
+    ["tool in repair", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      turns.splice(6, 0, Object.freeze({
+        ...turns[1]!,
+        exchange_phase: "repair" as const,
+      }));
+      return turns;
+    }],
+    ["missing repair endpoint", () => {
+      const turns = [...devConversationTurnsWithRepair()];
+      turns.splice(6, 1);
+      return turns;
+    }],
+  ] as const)("rejects schema-v6 %s", (_label, makeTurns) => {
+    expect(() => createLc4NativeConversationReplayPacket({
+      protocol_id: "HACC-LC4-DEV-v1",
+      run_id: "dev-invalid-phase-chronology",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 10,
+      previous_session_rotation_receipt_sha256:
+        sha256Hex("dev-invalid-phase-chronology-previous"),
+      conversation_turns: reindexConversationTurns(makeTurns()),
+    })).toThrow(/phase identity|chronology/u);
+  });
+
+  it("keeps legacy schema-v4 conversation bytes phase-free", () => {
+    const legacy = createLc4NativeConversationReplayPacket({
+      run_id: "legacy-phase-free",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: sha256Hex("legacy-previous"),
+      conversation_turns: publicConversationTurns(20),
+    });
+    expect(legacy.schema_version).toBe(4);
+    expect(canonicalJson(legacy)).not.toContain("exchange_phase");
+    expect(() => createLc4NativeConversationReplayPacket({
+      run_id: "legacy-rejects-dev-phase",
+      from_segment_ordinal: 1,
+      to_segment_ordinal: 2,
+      available_through_opportunity: 20,
+      previous_session_rotation_receipt_sha256: sha256Hex("legacy-previous"),
+      conversation_turns: devCanonicalConversationTurns(20),
+    })).toThrow(/schema-v4.*forbids/u);
   });
 
   it.each([
@@ -2265,7 +2394,7 @@ describe("LC4 production realtime adapter bridge", () => {
   });
 
   it("rejects metadata-free tool turns from DEV session rotation", () => {
-    const turns = [...publicConversationTurns(10)];
+    const turns = [...devCanonicalConversationTurns(10)];
     turns.splice(1, 0, Object.freeze({
       turn_id: "placeholder.tool",
       sequence: 0,
@@ -2279,6 +2408,7 @@ describe("LC4 production realtime adapter bridge", () => {
       text: canonicalJson({ ok: true }),
       available_after_opportunity: 1,
       provenance_receipt_sha256: sha256Hex("metadata-free-tool"),
+      exchange_phase: "canonical" as const,
       provider_conversation_source: true as const,
       oracle_derived: false as const,
       future_derived: false as const,
@@ -4717,7 +4847,7 @@ describe("LC4 production realtime adapter bridge", () => {
           flow_state_sha256: sha256Hex(`${arm}:flow:${segmentOrdinal}`),
           response_plan_chain_head_sha256:
             sha256Hex(`${arm}:plan:${segmentOrdinal}`),
-          conversation_turns: publicConversationTurns(boundary),
+          conversation_turns: devCanonicalConversationTurns(boundary),
         });
         expect(context.kind).toBe(
           arm === "native"
@@ -4758,6 +4888,7 @@ describe("LC4 production realtime adapter bridge", () => {
         text,
         available_after_opportunity: opportunity,
         provenance_receipt_sha256: sha256Hex(`${speaker}-pcm:${opportunity}`),
+        exchange_phase: "canonical" as const,
         provider_conversation_source: true as const,
         oracle_derived: false as const,
         future_derived: false as const,

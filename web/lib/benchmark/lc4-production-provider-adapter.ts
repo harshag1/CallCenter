@@ -195,6 +195,8 @@ export type Lc4AssistantConversationTranscriptSource =
   | "listener_exact_captured_pcm_asr"
   | "provider_native_output_transcript";
 
+export type Lc4ConversationExchangePhase = "canonical" | "repair";
+
 type Lc4NativeConversationTurnCommon = Readonly<{
   turn_id: string;
   sequence: number;
@@ -204,6 +206,8 @@ type Lc4NativeConversationTurnCommon = Readonly<{
   oracle_derived: false;
   future_derived: false;
   semantic_evaluator_derived: false;
+  /** Required and hash-bound only for schema-v6 DEV rotation packets. */
+  exchange_phase?: Lc4ConversationExchangePhase;
 }>;
 
 export type Lc4NativeConversationTurnInput =
@@ -244,6 +248,7 @@ export type Lc4RotationConversationTurn =
       transcript_sha256: string;
       available_after_opportunity: number;
       provenance_receipt_sha256: string;
+      exchange_phase?: Lc4ConversationExchangePhase;
     }>
   | Readonly<{
       turn_id: string;
@@ -254,6 +259,7 @@ export type Lc4RotationConversationTurn =
       transcript_sha256: string;
       available_after_opportunity: number;
       provenance_receipt_sha256: string;
+      exchange_phase?: Lc4ConversationExchangePhase;
     }>
   | Readonly<{
       turn_id: string;
@@ -269,6 +275,7 @@ export type Lc4RotationConversationTurn =
       tool_batch_sha256?: string;
       tool_batch_call_ordinal?: number;
       tool_batch_call_count?: number;
+      exchange_phase?: Lc4ConversationExchangePhase;
     }>;
 
 export type Lc4ConversationHistoryHydrationEvidence = Readonly<{
@@ -292,6 +299,7 @@ type Lc4ConversationReplayHashTurn = Readonly<{
   source: Lc4NativeConversationTurnInput["source"];
   transcript_sha256: string;
   available_after_opportunity: number;
+  exchange_phase?: Lc4ConversationExchangePhase;
   tool_name?: string;
   tool_arguments_sha256?: string;
   tool_batch_sha256?: string;
@@ -335,6 +343,9 @@ function hashConversationReplay(turns: readonly Lc4RotationConversationTurn[]): 
     source: turn.source,
     transcript_sha256: turn.transcript_sha256,
     available_after_opportunity: turn.available_after_opportunity,
+    ...(turn.exchange_phase === undefined
+      ? {}
+      : { exchange_phase: turn.exchange_phase }),
     ...(turn.speaker === "tool"
       ? {
           tool_name: turn.tool_name,
@@ -369,12 +380,17 @@ function assertRotationBoundary(
 function validateConversationTurns(
   inputTurns: readonly Lc4NativeConversationTurnInput[],
   availableThroughOpportunity: 10 | 20 | 30 | 40 | 50,
-  requireExactToolBatches: boolean,
+  requireDevChronology: boolean,
 ): readonly Lc4RotationConversationTurn[] {
   if (inputTurns.length < availableThroughOpportunity * 2) {
     throw new Error("LC4 rotation conversation omits an audible caller or assistant turn");
   }
-  if (inputTurns.length > 192) throw new Error("LC4 rotation conversation exceeds 192 provider-conversation turns");
+  const maximumTurns = requireDevChronology ? 512 : 192;
+  if (inputTurns.length > maximumTurns) {
+    throw new Error(
+      `LC4 rotation conversation exceeds ${maximumTurns} provider-conversation turns`,
+    );
+  }
   let textBytes = 0;
   let priorOpportunity = 0;
   const turns = inputTurns.map((turn, index) => {
@@ -409,6 +425,18 @@ function validateConversationTurns(
       || turn.semantic_evaluator_derived !== false) {
       throw new Error("LC4 rotation conversation forbids oracle, semantic-evaluator, future, or non-conversation state");
     }
+    if (requireDevChronology) {
+      if (turn.exchange_phase !== "canonical"
+        && turn.exchange_phase !== "repair") {
+        throw new Error(
+          "LC4 DEV rotation conversation turn lacks exact canonical/repair phase identity",
+        );
+      }
+    } else if (turn.exchange_phase !== undefined) {
+      throw new Error(
+        "LC4 schema-v4 rotation conversation forbids schema-v6 exchange phase identity",
+      );
+    }
     const common = {
       turn_id: turn.turn_id,
       sequence: turn.sequence,
@@ -418,9 +446,12 @@ function validateConversationTurns(
       transcript_sha256: sha256Hex(turn.text),
       available_after_opportunity: turn.available_after_opportunity,
       provenance_receipt_sha256: turn.provenance_receipt_sha256,
+      ...(requireDevChronology
+        ? { exchange_phase: turn.exchange_phase! }
+        : {}),
     };
     if (turn.speaker === "tool") {
-      if (requireExactToolBatches
+      if (requireDevChronology
         && (turn.tool_batch_sha256 === undefined
           || turn.tool_batch_call_ordinal === undefined
           || turn.tool_batch_call_count === undefined)) {
@@ -478,19 +509,34 @@ function validateConversationTurns(
   }
   for (let opportunity = 1; opportunity <= availableThroughOpportunity; opportunity += 1) {
     const opportunityTurns = turns.filter((turn) => turn.available_after_opportunity === opportunity);
-    if (requireExactToolBatches) {
-      const callerCount = opportunityTurns.filter((turn) =>
-        turn.speaker === "caller").length;
-      const assistantCount = opportunityTurns.filter((turn) =>
-        turn.speaker === "assistant").length;
-      if (callerCount !== 1
-        || assistantCount !== 1
-        || opportunityTurns[0]?.speaker !== "caller"
-        || opportunityTurns.at(-1)?.speaker !== "assistant"
-        || opportunityTurns.slice(1, -1).some((turn) =>
+    if (requireDevChronology) {
+      const repairStart = opportunityTurns.findIndex((turn) =>
+        turn.exchange_phase === "repair");
+      const canonicalTurns = repairStart < 0
+        ? opportunityTurns
+        : opportunityTurns.slice(0, repairStart);
+      const repairTurns = repairStart < 0
+        ? []
+        : opportunityTurns.slice(repairStart);
+      if (canonicalTurns.some((turn) =>
+        turn.exchange_phase !== "canonical")
+        || repairTurns.some((turn) => turn.exchange_phase !== "repair")
+        || canonicalTurns[0]?.speaker !== "caller"
+        || canonicalTurns.at(-1)?.speaker !== "assistant"
+        || canonicalTurns.filter((turn) => turn.speaker === "caller").length !== 1
+        || canonicalTurns.filter((turn) => turn.speaker === "assistant").length !== 1
+        || canonicalTurns.slice(1, -1).some((turn) =>
           turn.speaker !== "tool")) {
         throw new Error(
-          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} must be caller, complete tool batches, assistant`,
+          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} must begin with exactly one canonical caller, complete tool batches, assistant exchange`,
+        );
+      }
+      if (repairTurns.length > 0
+        && (repairTurns.length !== 2
+          || repairTurns[0]?.speaker !== "caller"
+          || repairTurns[1]?.speaker !== "assistant")) {
+        throw new Error(
+          `LC4 DEV rotation conversation chronology for opportunity ${opportunity} permits at most one tool-free repair caller, assistant exchange after canonical`,
         );
       }
     } else if (!opportunityTurns.some((turn) => turn.speaker === "caller")
@@ -629,6 +675,9 @@ function rotationTurnToInput(
     oracle_derived: false as const,
     future_derived: false as const,
     semantic_evaluator_derived: false as const,
+    ...(turn.exchange_phase === undefined
+      ? {}
+      : { exchange_phase: turn.exchange_phase }),
   };
   if (turn.speaker === "tool") {
     return Object.freeze({
@@ -4566,6 +4615,7 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
             sequence,
             ...turn,
             available_after_opportunity: exchangeInput.opportunity.index,
+            exchange_phase: exchangeInput.playback_kind,
             provider_conversation_source: true as const,
             oracle_derived: false as const,
             future_derived: false as const,
@@ -4578,22 +4628,24 @@ export function createLc4DevelopmentRealtimeAdapter(input: Readonly<{
           text: callerText,
           provenance_receipt_sha256: sha256Hex(exchangeInput.caller_pcm),
         });
-        for (const batch of evidence.dev_gateway_conversation_tool_batches ?? []) {
-          const batchSha256 = sha256Hex(
-            `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch as unknown as JsonValue)}`,
-          );
-          for (const call of batch.calls) {
-            appendConversationTurn({
-              speaker: "tool",
-              source: "canonical_gateway_result",
-              tool_name: call.gateway_tool_name,
-              tool_arguments: call.model_arguments,
-              text: call.provider_output_canonical_json,
-              provenance_receipt_sha256: call.source_sha256,
-              tool_batch_sha256: batchSha256,
-              tool_batch_call_ordinal: call.call_ordinal,
-              tool_batch_call_count: batch.calls.length,
-            });
+        if (exchangeInput.playback_kind === "canonical") {
+          for (const batch of evidence.dev_gateway_conversation_tool_batches ?? []) {
+            const batchSha256 = sha256Hex(
+              `${ROTATION_TOOL_BATCH_DOMAIN}${canonicalJson(batch as unknown as JsonValue)}`,
+            );
+            for (const call of batch.calls) {
+              appendConversationTurn({
+                speaker: "tool",
+                source: "canonical_gateway_result",
+                tool_name: call.gateway_tool_name,
+                tool_arguments: call.model_arguments,
+                text: call.provider_output_canonical_json,
+                provenance_receipt_sha256: call.source_sha256,
+                tool_batch_sha256: batchSha256,
+                tool_batch_call_ordinal: call.call_ordinal,
+                tool_batch_call_count: batch.calls.length,
+              });
+            }
           }
         }
         appendConversationTurn({

@@ -475,6 +475,7 @@ describe("LC4 publication transport provenance custody", () => {
       ],
     };
     const turns = reconstructLc4PublicationConversationExchange({
+      exchange_phase: "canonical",
       opportunity_index: 7,
       caller_text: "Please finish the archive stage.",
       caller_pcm_sha256: H("caller-pcm"),
@@ -499,6 +500,8 @@ describe("LC4 publication transport provenance custody", () => {
       "tool",
       "assistant",
     ]);
+    expect(turns.every((turn) => turn.exchange_phase === "canonical"))
+      .toBe(true);
     expect(turns.slice(1, 3)).toEqual([
       expect.objectContaining({
         tool_batch_call_ordinal: 1,
@@ -514,6 +517,7 @@ describe("LC4 publication transport provenance custody", () => {
     expect((turns[1] as { tool_batch_sha256?: string }).tool_batch_sha256)
       .not.toBe((turns[2] as { tool_batch_sha256?: string }).tool_batch_sha256);
     expect(() => reconstructLc4PublicationConversationExchange({
+      exchange_phase: "canonical",
       opportunity_index: 7,
       caller_text: "Please finish the archive stage.",
       caller_pcm_sha256: H("caller-pcm"),
@@ -533,6 +537,7 @@ describe("LC4 publication transport provenance custody", () => {
       assistant_pcm_sha256: H("assistant-pcm"),
     })).toThrow(/incomplete or out of order/u);
     expect(() => reconstructLc4PublicationConversationExchange({
+      exchange_phase: "canonical",
       opportunity_index: 7,
       caller_text: "Please finish the archive stage.",
       caller_pcm_sha256: H("caller-pcm"),
@@ -551,6 +556,28 @@ describe("LC4 publication transport provenance custody", () => {
       },
       assistant_pcm_sha256: H("assistant-pcm"),
     })).toThrow(/incomplete or out of order/u);
+
+    const repairTurns = reconstructLc4PublicationConversationExchange({
+      exchange_phase: "repair",
+      opportunity_index: 7,
+      caller_text: "Please repeat that result.",
+      caller_pcm_sha256: H("repair-caller-pcm"),
+      exchange: {
+        // Repair evidence may retain rejected gateway attempts, but none are
+        // replayed between the repair caller and assistant turns.
+        dev_gateway_conversation_tool_batches: [rejectedBatch as never],
+      },
+      listener: {
+        listener_observation: {
+          status: "verified",
+          transcript: "The archive stage is complete.",
+          transcript_sha256: H("The archive stage is complete."),
+        },
+      },
+      assistant_pcm_sha256: H("repair-assistant-pcm"),
+    });
+    expect(repairTurns.map((turn) => [turn.exchange_phase, turn.speaker]))
+      .toEqual([["repair", "caller"], ["repair", "assistant"]]);
   });
 
   it("replays one signed exact-source Gate D receipt and derives public cells", async () => {
