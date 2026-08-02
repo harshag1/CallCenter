@@ -25,6 +25,8 @@ action frontier collapses to designated reconciliation actions and success
 claims are removed; without a repair action it becomes `fail_closed`.
 
 Before a live route uses a contract it should call
-`assertProductionTurnContract(contract, currentFreshness)` immediately before
-tool admission and again before speech release. A subsequent authority change
-invalidates the contract rather than mutating it.
+`assertProductionTurnContract(contract, { ...currentFreshness,
+expected_contract_sha256 })` immediately before tool admission and again
+before speech release. The expected digest must come from host-retained state,
+never from provider-returned content. A subsequent authority change invalidates
+the contract rather than mutating it.
