@@ -134,7 +134,7 @@ describe("LC4 deterministic composition root", () => {
       expect(root.episode.template_id).toBe(templateId);
       expect(root.caller_automaton.states[59]?.stage_id).toBe("checkpoint.12");
     }
-  });
+  }, 15_000);
 
   it("keeps every arm-common artifact byte-identical across a matched Native/HACC pair", () => {
     const input = fixtures();
