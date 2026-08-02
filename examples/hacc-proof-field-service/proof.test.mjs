@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { digest, evaluateProofEvidence } from "./proof-runtime.mjs";
+import { appendEvent, digest, evaluateProofEvidence, governedMutation, readWorld, reconcileMutation } from "./proof-runtime.mjs";
 import { runProof } from "./run-proof.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,6 +69,74 @@ test("negative evidence mutations cannot preserve a passing result", () => {
   missingGoalPredicate.completed_goals = missingGoalPredicate.completed_goals.filter((goal) => goal !== "repair");
   assert.equal(evaluate(missingGoalPredicate).passed, false);
   assert.equal(evaluate(missingGoalPredicate).assertions.registered_goal_predicates_satisfied, false);
+});
+
+test("exact and conflicting ambiguous replays are quarantined before redispatch", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hacc-proof-replay-test-"));
+  const journalPath = join(directory, "journal.jsonl");
+  const worldPath = join(directory, "world.json");
+  const scenario = JSON.parse(readFileSync(join(here, "scenario.json"), "utf8"));
+  const originalArguments = { work_order_id: scenario.work_order_id, sku: scenario.repair.part_sku };
+  try {
+    appendEvent(journalPath, "conversation.opened", { conversation_id: scenario.conversation_id });
+    appendEvent(journalPath, "intent.classified", { goal: "repair", confidence_basis: "test" });
+    appendEvent(journalPath, "fact.recorded", { fact_id: "safe_to_work", value: true, authority: "policy" });
+
+    const dispatched = governedMutation({
+      journalPath,
+      worldPath,
+      scenario,
+      action: "reserve_part",
+      arguments: originalArguments,
+      loseResponse: true,
+    });
+    assert.equal(dispatched.status, "indeterminate");
+
+    const exactReplay = governedMutation({
+      journalPath,
+      worldPath,
+      scenario,
+      action: "reserve_part",
+      arguments: originalArguments,
+    });
+    assert.deepEqual(exactReplay, {
+      receiptId: dispatched.receiptId,
+      status: "quarantined",
+      reason: "reconciliation_required",
+    });
+
+    const conflictingReplay = governedMutation({
+      journalPath,
+      worldPath,
+      scenario,
+      action: "reserve_part",
+      arguments: { ...originalArguments, sku: "CONFLICTING-SKU" },
+    });
+    assert.deepEqual(conflictingReplay, {
+      receiptId: dispatched.receiptId,
+      status: "quarantined",
+      reason: "conflicting_replay",
+    });
+
+    let world = readWorld(worldPath);
+    assert.deepEqual(Object.values(world.dispatch_count), [1]);
+    assert.equal(Object.keys(world.effects).length, 1);
+
+    reconcileMutation({ journalPath, worldPath, receiptId: dispatched.receiptId });
+    const settledReplay = governedMutation({
+      journalPath,
+      worldPath,
+      scenario,
+      action: "reserve_part",
+      arguments: originalArguments,
+    });
+    assert.equal(settledReplay.status, "succeeded");
+    assert.equal(settledReplay.replayed, true);
+    world = readWorld(worldPath);
+    assert.deepEqual(Object.values(world.dispatch_count), [1]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("proof implementation has no network, provider, database, or secret access surface", () => {

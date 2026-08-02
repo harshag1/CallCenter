@@ -65,6 +65,7 @@ function initialState() {
     facts: {},
     receipts: {},
     admission_denials: [],
+    replay_quarantines: [],
     workers: {},
     trace: [],
   };
@@ -107,6 +108,9 @@ export function replay(path) {
         break;
       case "action.admission.denied":
         state.admission_denials.push(payload);
+        break;
+      case "action.replay.quarantined":
+        state.replay_quarantines.push(payload);
         break;
       case "action.receipt.reconciled":
         state.receipts[payload.receipt_id] = {
@@ -170,13 +174,15 @@ function successfulReceipt(state, action) {
 
 export function governedMutation({ journalPath, worldPath, scenario, action, arguments: args, loseResponse = false, confirmation, probe = false }) {
   const { state, head_hash: authorityHead } = replay(journalPath);
+  const operationId = stableId("op", scenario.conversation_id, state.active_goal, action);
+  const argumentsHash = digest(args);
   // Invocation identity is bound to the exact durable authority snapshot. A
   // denied attempt and a later authorized attempt therefore cannot collapse
   // into one receipt, while the semantic idempotency key below still protects
   // the external effect across ambiguous delivery and replay.
   const invocationId = stableId("inv", scenario.conversation_id, action, canonicalJson(args), authorityHead);
   const receiptId = stableId("rcpt", invocationId);
-  const idempotencyKey = stableId("idem", scenario.conversation_id, action, canonicalJson(args));
+  const idempotencyKey = stableId("idem", operationId);
   const deniedReason = actionAllowed(state, action, confirmation);
   if (deniedReason) {
     appendEvent(journalPath, "action.admission.denied", {
@@ -189,6 +195,43 @@ export function governedMutation({ journalPath, worldPath, scenario, action, arg
       effect_count: 0,
     });
     return { receiptId: null, status: "denied" };
+  }
+
+  const operationReceipts = Object.values(state.receipts).filter((receipt) => receipt.operation_id === operationId);
+  if (operationReceipts.length > 1) {
+    appendEvent(journalPath, "action.replay.quarantined", {
+      operation_id: operationId,
+      action,
+      reason: "ambiguous_operation_history",
+      effect_count: 0,
+    });
+    return { receiptId: null, status: "quarantined", reason: "ambiguous_operation_history" };
+  }
+  const prior = operationReceipts[0];
+  if (prior) {
+    const exactReplay = prior.arguments_hash === argumentsHash;
+    if (!exactReplay || prior.status === "indeterminate") {
+      const reason = exactReplay ? "reconciliation_required" : "conflicting_replay";
+      appendEvent(journalPath, "action.replay.quarantined", {
+        operation_id: operationId,
+        prior_receipt_id: prior.receipt_id,
+        action,
+        reason,
+        effect_count: 0,
+      });
+      return { receiptId: prior.receipt_id, status: "quarantined", reason };
+    }
+    if (prior.status === "succeeded") {
+      return { receiptId: prior.receipt_id, status: "succeeded", replayed: true, result: prior.result };
+    }
+    appendEvent(journalPath, "action.replay.quarantined", {
+      operation_id: operationId,
+      prior_receipt_id: prior.receipt_id,
+      action,
+      reason: "terminal_operation_not_reusable",
+      effect_count: 0,
+    });
+    return { receiptId: prior.receipt_id, status: "quarantined", reason: "terminal_operation_not_reusable" };
   }
 
   const world = readWorld(worldPath);
@@ -204,6 +247,8 @@ export function governedMutation({ journalPath, worldPath, scenario, action, arg
   appendEvent(journalPath, "action.receipt.recorded", {
     receipt_id: receiptId,
     invocation_id: invocationId,
+    operation_id: operationId,
+    arguments_hash: argumentsHash,
     idempotency_key: idempotencyKey,
     action,
     status: loseResponse ? "indeterminate" : "succeeded",
