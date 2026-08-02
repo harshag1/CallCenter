@@ -8,10 +8,14 @@ import { canonicalJson, sha256Hex, type JsonValue } from "../artifacts";
 import { compileConditionSuite } from "../condition-compiler";
 import { industrialFieldServiceCompilerInput } from "../industrial-field-service-source";
 import {
+  createLc4DevProviderConnectionAttestation,
+  createLc4DevProviderConnectionScope,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
+  lc4DevProviderInvocationId,
   renderLc4DevHaccResponsePlan,
 } from "../lc4-development-gateway-bridge";
+import { LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256 } from "../lc4-provider-session-schedule";
 import {
   advanceLc4DevResponsePlanChain,
   assertLc4HaccRotationTreatmentCheckpoint,
@@ -45,6 +49,42 @@ const GATEWAY_RECEIPT_DOMAIN =
   "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt/v2\n";
 const EPISODE = "lc4-treatment-binding-episode";
 const OPPORTUNITY = "lc4-dev-op-1";
+
+function providerConnectionScope() {
+  const connectionAttestation = createLc4DevProviderConnectionAttestation({
+    provider: "openai",
+    connection_epoch: 1,
+    connection_nonce_sha256: sha256Hex("treatment provider connection nonce"),
+    provider_session_id_sha256: sha256Hex("treatment provider session"),
+    session_configuration_acknowledgement_sha256:
+      sha256Hex("treatment provider configuration acknowledgement"),
+    connect_wire_observation_count: 1,
+    connect_wire_chain_head_sha256:
+      sha256Hex("treatment provider connect wire head"),
+  });
+  return createLc4DevProviderConnectionScope({
+    episode_id: EPISODE,
+    provider: "openai",
+    arm: "hacc",
+    prepare_sha256: sha256Hex("treatment prepare"),
+    preflight_sha256: sha256Hex("treatment preflight"),
+    execution_id_sha256: sha256Hex("treatment execution"),
+    control_plane_manifest_sha256: sha256Hex("treatment control manifest"),
+    provider_session_schedule_sha256:
+      LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+    segment_ordinal: 1,
+    session_ordinal: 1,
+    opportunity_start: 1,
+    opportunity_end: 10,
+    connection_epoch: 1,
+    previous_rotation_receipt_sha256: null,
+    rotation_context_kind: "none",
+    rotation_packet_sha256: null,
+    rotation_conversation_replay_sha256: null,
+    rotation_context_sha256: sha256Hex("treatment empty rotation context"),
+    connection_attestation: connectionAttestation,
+  });
+}
 
 const scenario = BenchmarkScenarioSchema.parse(scenarioJson);
 const compilerInput = industrialFieldServiceCompilerInput(scenario);
@@ -117,6 +157,12 @@ function reboundGatewayReceiptSet(input: Readonly<{
   };
   const responseControlSha256 = sha256Hex(canonicalJson(responseControl));
   const providerOutput = { ok: true, stage_completed: true };
+  const connectionScope = providerConnectionScope();
+  const providerCallId = "provider call";
+  const providerInvocationId = lc4DevProviderInvocationId(
+    connectionScope,
+    providerCallId,
+  );
   const authorityBody = {
     schema_version: 2,
     bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
@@ -128,7 +174,14 @@ function reboundGatewayReceiptSet(input: Readonly<{
     arm: "hacc",
     semantic_intent: "complete_current_stage",
     target_tool: "archive.complete_stage",
-    provider_call_id_sha256: sha256Hex("provider call"),
+    provider_call_id_sha256: sha256Hex(providerCallId),
+    provider_invocation_id_sha256: sha256Hex(providerInvocationId),
+    provider_connection_scope: connectionScope,
+    provider_connection_scope_sha256:
+      connectionScope.connection_scope_sha256,
+    provider_connection_epoch: connectionScope.connection_epoch,
+    provider_session_id_sha256:
+      connectionScope.connection_attestation.provider_session_id_sha256,
     provider_response_id_sha256: sha256Hex("provider response"),
     request_sha256: sha256Hex("gateway request"),
     provider_provenance_sha256: sha256Hex("provider provenance"),
@@ -163,6 +216,12 @@ function reboundGatewayReceiptSet(input: Readonly<{
     semantic_intent: authority.semantic_intent,
     target_tool: authority.target_tool,
     provider_call_id_sha256: authority.provider_call_id_sha256,
+    provider_invocation_id_sha256: authority.provider_invocation_id_sha256,
+    provider_connection_scope: authority.provider_connection_scope,
+    provider_connection_scope_sha256:
+      authority.provider_connection_scope_sha256,
+    provider_connection_epoch: authority.provider_connection_epoch,
+    provider_session_id_sha256: authority.provider_session_id_sha256,
     provider_response_id_sha256: authority.provider_response_id_sha256,
     request_sha256: authority.request_sha256,
     provider_provenance_sha256: authority.provider_provenance_sha256,
