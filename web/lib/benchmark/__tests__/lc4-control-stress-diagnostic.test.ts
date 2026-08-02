@@ -43,6 +43,7 @@ import scenarioJson from "../../../../benchmarks/voice-long-horizon/scenarios/in
 const CONTROL_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-control-receipt/v1\n";
 const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-control-stress-plan/v1\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
+const SOURCE_LEDGER_GENESIS_SHA256 = sha256Hex("lc4-control-stress-retained-source-genesis-v1");
 
 function memoryCas(): Lc4DevReplayCasPort & Readonly<{ bytes: Map<string, Uint8Array> }> {
   const bytes = new Map<string, Uint8Array>();
@@ -261,7 +262,7 @@ async function sourceLedger(
   sources: readonly Lc4ControlStressSource[],
 ): Promise<readonly Lc4DevReplayLedgerEvent[]> {
   const events: Lc4DevReplayLedgerEvent[] = [];
-  let previous: string | null = null;
+  let previous: string | null = SOURCE_LEDGER_GENESIS_SHA256;
   const append = async (
     eventType: string,
     episodeId: string,
