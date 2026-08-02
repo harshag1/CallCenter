@@ -44,7 +44,10 @@ import {
 import type {
   Lc4QualificationV4Aggregate,
   Lc4QualificationV4Manifest,
+  Lc4QualificationV4PhaseTerminal,
   Lc4QualificationV4ReplayShard,
+  Lc4QualificationV4Reservation,
+  Lc4QualificationV4ShardTerminal,
 } from "./lc4-qualification-v4-shards";
 import type { Lc4QualificationPackageFile } from "./lc4-qualification-package-envelope";
 
@@ -200,12 +203,12 @@ async function replayArtifacts(root: string) {
     const prefix = `${String(ordinal).padStart(2, "0")}-${provider}`;
     const shardRoot = resolve(root, "qualification-v4-shards", `${ordinal}-${provider}`);
     shards.push(Object.freeze({
-      reservation: await readJson(resolve(shardRoot, "reservation.json")),
-      setup_admission: await readJson(resolve(shardRoot, "setup-admission.json")),
-      setup_terminal: await readJson(resolve(shardRoot, "setup-terminal.json")),
-      paid_admission: await readJson(resolve(shardRoot, "paid-admission.json")),
-      paid_terminal: await readJson(resolve(shardRoot, "paid-terminal.json")),
-      shard_terminal: await readJson(resolve(shardRoot, "shard-terminal.json")),
+      reservation: await readJson<Lc4QualificationV4Reservation>(resolve(shardRoot, "reservation.json")),
+      setup_admission: await readJson<unknown>(resolve(shardRoot, "setup-admission.json")),
+      setup_terminal: await readJson<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "setup-terminal.json")),
+      paid_admission: await readJson<unknown>(resolve(shardRoot, "paid-admission.json")),
+      paid_terminal: await readJson<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "paid-terminal.json")),
+      shard_terminal: await readJson<Lc4QualificationV4ShardTerminal>(resolve(shardRoot, "shard-terminal.json")),
     }));
     for (const [source, target] of [
       [`qualifications/${provider}-qv4-${provider}.json`, `${prefix}-setup-qualification.json`],
