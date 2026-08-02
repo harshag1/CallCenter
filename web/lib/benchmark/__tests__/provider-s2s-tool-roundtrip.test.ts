@@ -128,6 +128,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
   readonly #wire = new Set<RealtimeWireObservationListener>();
   readonly observations: RealtimeWireObservation[] = [];
   readonly speechBeforeTool: boolean;
+  readonly omitToolAfterPreToolAudio: boolean;
+  readonly forgePreToolAudioResponseId: boolean;
+  readonly geminiObservedPreToolOrder: boolean;
   readonly preToolTranscript: string | null;
   readonly omitDynamicControl: boolean;
   readonly omitToolResultEvent: boolean;
@@ -161,6 +164,9 @@ class RoundtripClient implements NormalizedRealtimeClient {
 
   constructor(provider: LiveStsProvider, options: Readonly<{
     speechBeforeTool?: boolean;
+    omitToolAfterPreToolAudio?: boolean;
+    forgePreToolAudioResponseId?: boolean;
+    geminiObservedPreToolOrder?: boolean;
     preToolTranscript?: string;
     omitDynamicControl?: boolean;
     omitToolResultEvent?: boolean;
@@ -187,6 +193,12 @@ class RoundtripClient implements NormalizedRealtimeClient {
   }> = {}) {
     this.provider = provider;
     this.speechBeforeTool = options.speechBeforeTool === true;
+    this.omitToolAfterPreToolAudio =
+      options.omitToolAfterPreToolAudio === true;
+    this.forgePreToolAudioResponseId =
+      options.forgePreToolAudioResponseId === true;
+    this.geminiObservedPreToolOrder =
+      options.geminiObservedPreToolOrder === true;
     this.preToolTranscript = options.preToolTranscript ?? null;
     this.omitDynamicControl = options.omitDynamicControl === true;
     this.omitToolResultEvent = options.omitToolResultEvent === true;
@@ -285,12 +297,27 @@ class RoundtripClient implements NormalizedRealtimeClient {
       });
       return;
     }
+    if (this.provider === "gemini" && this.geminiObservedPreToolOrder) {
+      const inputTranscript = "Please complete the current stage.";
+      this.#observe("inbound", "serverContent", {}, {
+        text: [{
+          kind: "input_transcript",
+          sha256: sha256Hex(inputTranscript),
+          byteLength: Buffer.byteLength(inputTranscript, "utf8"),
+        }],
+      });
+      this.#observe("inbound", "serverContent", {}, {
+        terminal: { status: "completed" },
+      });
+    }
     if (this.speechBeforeTool) {
       const audio = new Uint8Array([1, 0]);
       const audioObservation = this.#observe(
         "inbound",
-        "response.audio.delta",
-        { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+        this.provider === "gemini" ? "serverContent" : "response.audio.delta",
+        this.provider === "gemini"
+          ? {}
+          : { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
         {
           audio: {
             direction: "output",
@@ -302,8 +329,12 @@ class RoundtripClient implements NormalizedRealtimeClient {
         },
       );
       this.#emit({
-        type: "output.audio", provider: this.provider, receivedAtMs: 2, wireType: "response.audio.delta",
-        responseId, audio, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+        type: "output.audio", provider: this.provider, receivedAtMs: 2,
+        wireType: audioObservation.wireType,
+        responseId: this.forgePreToolAudioResponseId
+          ? `${responseId}-forged`
+          : responseId,
+        audio, format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
         wireObservation: {
           availability: "observed", connectionEpoch: 1, sequence: audioObservation.sequence,
           observationSha256: audioObservation.observationSha256,
@@ -311,14 +342,16 @@ class RoundtripClient implements NormalizedRealtimeClient {
           projectionSha256: audioObservation.projectionSha256,
         },
       });
-      if (this.provider !== "xai") return;
+      if (this.provider === "openai" || this.omitToolAfterPreToolAudio) return;
     }
     if (this.preToolTranscript !== null) {
       const transcript = this.preToolTranscript;
       const transcriptObservation = this.#observe(
         "inbound",
         "serverContent",
-        { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
+        this.provider === "gemini"
+          ? {}
+          : { responseIdSha256: realtimeWireIdentitySha256("response", responseId) },
         {
           text: [{
             kind: "output_transcript",
@@ -1377,6 +1410,165 @@ describe("LC4 qualification v3 spoken S2S roundtrip", () => {
       "post_tool_continuation_observed",
     ]));
     expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+  });
+
+  it("quarantines Gemini's observed input-transcript, terminal-metadata, output, then tool-call order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini",
+      model: "gemini-model",
+      client: new RoundtripClient("gemini", {
+        speechBeforeTool: true,
+        preToolTranscript: "I will complete that now.",
+        geminiObservedPreToolOrder: true,
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(),
+      timeoutMs: 1_000,
+    });
+
+    const quarantineReplay = execution.replay_summary === null
+      || execution.replay_causal_binding === null
+      ? null
+      : replayProviderToolRoundtrip({
+          expected: { provider: execution.provider, model: execution.model },
+          summary: execution.replay_summary,
+          wire_observations: execution.wire_observations,
+          sanitized_usage: execution.sanitized_usage,
+          causal_binding: execution.replay_causal_binding,
+        });
+    expect(execution, canonicalJson({
+      failure: execution.failure_class,
+      operations: execution.operation_order,
+      replay_errors: quarantineReplay?.errors ?? null,
+    })).toMatchObject({
+      status: "passed",
+      failure_class: "none",
+      pre_tool_output_quarantine: {
+        disposition: "suppressed_never_caller_playable",
+        audio_bytes: 2,
+        audio_chunk_count: 1,
+        released_audio_bytes: 0,
+      },
+      output_audio_evidence: { audio_bytes: 2, chunk_count: 1 },
+    });
+    expect(execution.pre_tool_output_quarantine?.response_started_observation_sha256)
+      .toBe(execution.replay_causal_binding?.trigger_observation_sha256);
+    expect(execution.pre_tool_output_quarantine?.terminal_observation_sha256)
+      .toBe(execution.replay_causal_binding?.call_observation_sha256);
+    expect(execution.pre_tool_output_quarantine?.response_id_sha256)
+      .toBe(execution.replay_summary?.call.response_id_sha256);
+    expect(execution.pre_tool_output_quarantine?.response_id_sha256)
+      .not.toBe(execution.output_audio_evidence?.response_id_sha256);
+    const inputTranscript = execution.wire_observations.find((observation) => (
+      Array.isArray(observation.projection.text)
+      && observation.projection.text.some((entry) => (
+        typeof entry === "object" && entry !== null
+        && "kind" in entry && entry.kind === "input_transcript"
+      ))
+    ));
+    const preToolTerminalMetadata = execution.wire_observations.find((observation) => (
+      observation.wireType === "serverContent"
+      && observation.projection.terminal !== undefined
+      && observation.observationSha256
+        !== execution.replay_summary?.terminal.observation_sha256
+    ));
+    expect(
+      execution.pre_tool_output_quarantine?.observation_sha256s,
+      canonicalJson(execution.wire_observations
+        .filter((observation) => (
+          observation.wireType === "serverContent"
+          || observation.wireType === "toolCall"
+          || observation.wireType === "realtimeInput.activityEnd"
+        ))
+        .map((observation) => ({
+        hash: observation.observationSha256,
+        type: observation.wireType,
+        text: observation.projection.text ?? null,
+        audio: observation.projection.audio ?? null,
+      }))),
+    ).toHaveLength(2);
+    expect(execution.pre_tool_output_quarantine?.observation_sha256s)
+      .not.toContain(inputTranscript?.observationSha256);
+    expect(execution.pre_tool_output_quarantine?.observation_sha256s)
+      .not.toContain(preToolTerminalMetadata?.observationSha256);
+    const wireIndex = (hash: string | undefined) => execution.wire_observations
+      .findIndex((observation) => observation.observationSha256 === hash);
+    const quarantined = execution.pre_tool_output_quarantine!.observation_sha256s;
+    const observedOrder = [
+      wireIndex(inputTranscript?.observationSha256),
+      wireIndex(preToolTerminalMetadata?.observationSha256),
+      wireIndex(quarantined[0]),
+      wireIndex(quarantined[1]),
+      wireIndex(execution.replay_causal_binding?.call_observation_sha256),
+    ];
+    expect(observedOrder.every((index) => index >= 0)).toBe(true);
+    expect(observedOrder).toEqual(
+      [...observedOrder].sort((left, right) => left - right),
+    );
+    expect(execution.operation_order.indexOf("pre_tool_output_quarantined"))
+      .toBeLessThan(execution.operation_order.indexOf("exact_tool_call_observed"));
+    expect(() => assertLc4S2sRoundtripExecution(execution)).not.toThrow();
+  });
+
+  it("rejects Gemini pre-tool audio without a subsequent exact tool call", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini",
+      model: "gemini-model",
+      client: new RoundtripClient("gemini", {
+        speechBeforeTool: true,
+        omitToolAfterPreToolAudio: true,
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(),
+      timeoutMs: 1_000,
+    });
+
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "timeout",
+      tool_call_observed: false,
+      tool_result_submitted: false,
+      pre_tool_output_quarantine: null,
+    });
+  });
+
+  it("rejects Gemini pre-tool audio rebound to a different client-local response", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-lc4-s2s-fixture-"));
+    roots.push(root);
+    const artifact = await materializeLc4S2sAudioFixture({ root, renderer });
+    const audio = await loadLc4S2sPcm({ root, artifact, provider: "gemini" });
+    const execution = await executeLc4S2sToolRoundtrip({
+      provider: "gemini",
+      model: "gemini-model",
+      client: new RoundtripClient("gemini", {
+        speechBeforeTool: true,
+        forgePreToolAudioResponseId: true,
+      }),
+      audio,
+      audioObject: artifact.provider_renditions.gemini,
+      profile: DEFAULT_TRIAL_AUDIO_DELIVERY_PROFILE,
+      runtime: advancingRealtimeRuntime(),
+      timeoutMs: 1_000,
+    });
+
+    expect(execution).toMatchObject({
+      status: "failed",
+      failure_class: "provider_error",
+      tool_call_observed: true,
+      tool_result_submitted: false,
+    });
   });
 
   it("accepts an exact zero-PCM suffix prefix when native xAI VAD owns the stop boundary", async () => {

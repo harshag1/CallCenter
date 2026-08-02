@@ -4,9 +4,11 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { sha256Hex } from "../artifacts";
+import { loadLc4QualificationV4ReplayArtifacts } from "../lc4-qualification-v4-operator-cli";
 import {
   LC4_QUALIFICATION_V4_PROVIDER_ORDER,
   assertLc4QualificationV4CompletedReplay,
+  assertLc4QualificationV4TerminalReplay,
   inspectLc4QualificationV4ProviderShards,
   runLc4QualificationV4ProviderShards,
   type Lc4QualificationV4Binding,
@@ -218,6 +220,34 @@ describe("LC4 qualification v4 provider shards", () => {
     expect(status.quarantined_provider).toBe("openai");
   });
 
+  it("rejects invalid runtime setup and paid status discriminators", async () => {
+    for (const invalidPhase of ["setup", "paid"] as const) {
+      const { repository, evidence } = await fixture();
+      await expect(runLc4QualificationV4ProviderShards({
+        root: evidence,
+        repository_root: repository,
+        binding: binding({ attempt_id: `invalid-${invalidPhase}-status` }),
+        invoked_at: INVOKED_AT,
+        dependencies: {
+          async runSetup(context) {
+            if (invalidPhase !== "setup") return result(context);
+            return {
+              ...result(context, "failed"),
+              status: "cancelled",
+            } as unknown as Lc4QualificationV4PhaseResult;
+          },
+          async runPaid(context) {
+            if (invalidPhase !== "paid") return result(context);
+            return {
+              ...result(context, "failed"),
+              status: "unexpected",
+            } as unknown as Lc4QualificationV4PhaseResult;
+          },
+        },
+      })).rejects.toThrow("quarantined");
+    }
+  });
+
   it("atomically admits only one process and never duplicates a provider callback", async () => {
     const { repository, evidence } = await fixture();
     let setupCalls = 0;
@@ -298,6 +328,34 @@ describe("LC4 qualification v4 provider shards", () => {
       provider_sessions_opened: 0,
       paid_sessions_opened: 0,
     });
+    const loaded = await loadLc4QualificationV4ReplayArtifacts(evidence);
+    expect(loaded.shards[2]).toMatchObject({
+      setup_admission: null,
+      setup_terminal: null,
+      paid_admission: null,
+      paid_terminal: null,
+      shard_terminal: { status: "cancelled" },
+    });
+
+    const { manifest, shards } = loaded;
+    expect(assertLc4QualificationV4TerminalReplay({
+      binding: binding(), manifest, aggregate, shards,
+    })).toBe("failed");
+    expect(() => assertLc4QualificationV4CompletedReplay({
+      binding: binding(), manifest, aggregate, shards,
+    })).toThrow(/not one completed publication-eligible replay/);
+    expect(() => assertLc4QualificationV4TerminalReplay({
+      binding: binding(),
+      manifest,
+      aggregate,
+      shards: [shards[0]!, shards[1]!, { ...shards[2]!, setup_admission: {} }],
+    })).toThrow(/cancelled replay shard/);
+    expect(() => assertLc4QualificationV4TerminalReplay({
+      binding: binding(),
+      manifest,
+      aggregate: { ...aggregate, primary_failure_class: "forged_failure" },
+      shards,
+    })).toThrow(/ordered terminal shard replay/);
   });
 
   it("rejects changed source, auth, model, credential, audio, profile, and predecessor before callbacks", async () => {

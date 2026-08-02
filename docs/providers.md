@@ -109,6 +109,8 @@ Gemini Live and ephemeral tokens are preview APIs. This release has no tenant-sc
 
 Gemini Live does not expose provider response IDs on this path. The adapter records that absence explicitly and creates deterministic client-local identities only for host-side causal bookkeeping. The outbound `toolResponse` is the exact boundary that closes the call phase and arms a distinct continuation identity; the next provider content, terminal, and usage events must bind to it on the same connection epoch and input turn. Usage is admissible only with provider-reported provenance and its exact wire observation. Missing continuation attribution or untrusted usage provenance fails closed instead of borrowing the initial response's local identity.
 
+Gemini may emit meaningful audio before its required tool call. HACC never releases those bytes: it binds them to the exact local input-turn identity and `activityEnd -> toolCall` wire window, retains only output audio/output-transcript observations in a quarantine receipt, and requires `released_audio_bytes: 0`. Input transcripts and early turn-complete metadata are not misclassified as model output. The exact tool call must still arrive on the same connection before its result and a distinct post-tool continuation; missing, reordered, terminal-frame-only, cross-response, or released audio fails replay and cannot produce publishable execution evidence. This does not inject an unsupported Gemini forced-tool setting. OpenAI retains its stricter fail-on-pre-tool-speech policy.
+
 ## Selecting a provider
 
 Provider settings live on an immutable agent version:

@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -89,6 +89,8 @@ import {
 import { assertLc4DevPreflightQualificationAdmission } from "../lc4-development-live-runner";
 import {
   createSignedLc4QualificationV4Package,
+  verifySignedLc4QualificationV4Package,
+  verifySignedLc4QualificationV4PackageCustody,
 } from "../lc4-qualification-v4-package";
 import {
   LC4_QUALIFICATION_V4_PROVIDER_ORDER,
@@ -805,7 +807,9 @@ async function json<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-async function signedV4FilesystemFixture() {
+async function signedV4FilesystemFixture(options: Readonly<{
+  failPaidProvider?: LiveStsProvider;
+}> = {}) {
   const root = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-v4-projection-"));
   const repositoryRoot = await mkdtemp(join(tmpdir(), "hacc-lc4-dev-v4-repository-"));
   roots.push(root, repositoryRoot);
@@ -957,9 +961,10 @@ async function signedV4FilesystemFixture() {
           });
           await writeFile(resolve(shardRoot, "xai-server-vad-gate-b-binding.json"), `${canonicalJson(gateB)}\n`, { flag: "wx", mode: 0o400 });
         }
+        const failed = options.failPaidProvider === context.provider;
         return Object.freeze({
-          status: "passed" as const,
-          failure_class: "none",
+          status: failed ? "failed" as const : "passed" as const,
+          failure_class: failed ? `${context.provider}_paid_failed` : "none",
           evidence_sha256: execution.evidence_sha256,
           wire_head_sha256: execution.wire_observations.at(-1)!.observationSha256,
           wire_observation_count: execution.wire_observations.length,
@@ -979,7 +984,7 @@ async function signedV4FilesystemFixture() {
     attemptId: authorization.body.authorization_id,
     usageEventCount: aggregate.usage_event_count,
     usageEvidenceSha256: aggregate.usage_evidence_sha256,
-    outcome: "completed",
+    outcome: aggregate.status === "passed" ? "completed" : "failed",
     now: () => NOW,
   });
   const manifest = await json<Lc4QualificationV4Manifest>(resolve(root, "qualification-v4-shard-manifest.json"));
@@ -992,23 +997,40 @@ async function signedV4FilesystemFixture() {
   for (const [index, provider] of LC4_QUALIFICATION_V4_PROVIDER_ORDER.entries()) {
     const prefix = `${String(index).padStart(2, "0")}-${provider}`;
     const shardRoot = resolve(root, "qualification-v4-shards", `${index}-${provider}`);
+    const shardTerminal = await json<Lc4QualificationV4ShardTerminal>(resolve(shardRoot, "shard-terminal.json"));
     shards.push(Object.freeze({
       reservation: await json<Lc4QualificationV4Reservation>(resolve(shardRoot, "reservation.json")),
-      setup_admission: await json<never>(resolve(shardRoot, "setup-admission.json")),
-      setup_terminal: await json<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "setup-terminal.json")),
-      paid_admission: await json<never>(resolve(shardRoot, "paid-admission.json")),
-      paid_terminal: await json<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "paid-terminal.json")),
-      shard_terminal: await json<Lc4QualificationV4ShardTerminal>(resolve(shardRoot, "shard-terminal.json")),
+      setup_admission: shardTerminal.setup_terminal_sha256 === null
+        ? null
+        : await json<never>(resolve(shardRoot, "setup-admission.json")),
+      setup_terminal: shardTerminal.setup_terminal_sha256 === null
+        ? null
+        : await json<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "setup-terminal.json")),
+      paid_admission: shardTerminal.paid_terminal_sha256 === null
+        ? null
+        : await json<never>(resolve(shardRoot, "paid-admission.json")),
+      paid_terminal: shardTerminal.paid_terminal_sha256 === null
+        ? null
+        : await json<Lc4QualificationV4PhaseTerminal>(resolve(shardRoot, "paid-terminal.json")),
+      shard_terminal: shardTerminal,
     }));
     for (const [source, target] of [
       [`qualifications/${provider}-qv4-${provider}.json`, `${prefix}-setup-qualification.json`],
       [`${provider}-spoken-roundtrip.json`, `${prefix}-spoken-roundtrip.json`],
       [`${provider}-spoken-roundtrip-wire.jsonl`, `${prefix}-spoken-roundtrip-wire.jsonl`],
       [`${provider}-spoken-roundtrip-usage.jsonl`, `${prefix}-spoken-roundtrip-usage.jsonl`],
-    ] as const) evidenceFiles.push({ path: target, bytes: await readFile(resolve(shardRoot, source)) });
+    ] as const) {
+      const path = resolve(shardRoot, source);
+      if (await lstat(path).then(() => true, () => false)) {
+        evidenceFiles.push({ path: target, bytes: await readFile(path) });
+      }
+    }
     if (provider === "xai") {
       for (const name of ["xai-server-vad-gate-a-risk.json", "xai-server-vad-gate-b-binding.json"] as const) {
-        evidenceFiles.push({ path: name, bytes: await readFile(resolve(shardRoot, name)) });
+        const path = resolve(shardRoot, name);
+        if (await lstat(path).then(() => true, () => false)) {
+          evidenceFiles.push({ path: name, bytes: await readFile(path) });
+        }
       }
     }
   }
@@ -1027,13 +1049,26 @@ async function signedV4FilesystemFixture() {
   });
   const attempts = resolve(root, "attempts");
   await mkdir(attempts, { recursive: true, mode: 0o700 });
-  const complete = resolve(attempts, `${authorization.body.authorization_id}.v4-package.complete`);
-  await mkdir(complete, { mode: 0o700 });
+  const retained = resolve(attempts, aggregate.status === "passed"
+    ? `${authorization.body.authorization_id}.v4-package.complete`
+    : `${authorization.body.authorization_id}.v4-package.sealed-failure`);
+  await mkdir(retained, { mode: 0o700 });
   for (const file of signedPackage.files) {
-    await writeFile(resolve(complete, file.path), file.bytes, { flag: "wx", mode: 0o400 });
+    await writeFile(resolve(retained, file.path), file.bytes, { flag: "wx", mode: 0o400 });
   }
-  await writeFile(resolve(complete, "qualification-package-envelope.json"), `${canonicalJson(signedPackage.envelope)}\n`, { flag: "wx", mode: 0o400 });
-  return Object.freeze({ root, complete, trustRoot: authority.fingerprint, plan, authorization, executions });
+  await writeFile(resolve(retained, "qualification-package-envelope.json"), `${canonicalJson(signedPackage.envelope)}\n`, { flag: "wx", mode: 0o400 });
+  return Object.freeze({
+    root,
+    complete: retained,
+    trustRoot: authority.fingerprint,
+    plan,
+    authorization,
+    executions,
+    aggregate,
+    binding,
+    budgetBinding,
+    signedPackage,
+  });
 }
 
 function rehashForgedReceipt(receipt: Lc4DevRetainedQualificationV4Receipt, mutation: Record<string, unknown>) {
@@ -1046,6 +1081,60 @@ function rehashForgedReceipt(receipt: Lc4DevRetainedQualificationV4Receipt, muta
 }
 
 describe("LC4 qualification v4 to DEV admission projection", () => {
+  it("seals a passed/failed/cancelled qualification as custody evidence without completion eligibility", async () => {
+    const fixture = await signedV4FilesystemFixture({ failPaidProvider: "gemini" });
+    expect(fixture.aggregate).toMatchObject({
+      status: "failed",
+      primary_failure_class: "gemini_paid_failed",
+    });
+    expect(fixture.complete).toContain(".v4-package.sealed-failure");
+    expect(fixture.signedPackage.terminal.body.status).toBe("failed");
+    const paths = fixture.signedPackage.files.map((file) => file.path);
+    expect(paths).toContain("02-xai-shard-terminal.json");
+    expect(paths).not.toContain("02-xai-setup-admission.json");
+    expect(paths).not.toContain("02-xai-setup-terminal.json");
+    expect(paths).not.toContain("02-xai-paid-admission.json");
+    expect(paths).not.toContain("02-xai-paid-terminal.json");
+
+    const custody = await verifySignedLc4QualificationV4PackageCustody({
+      envelope: fixture.signedPackage.envelope,
+      files: fixture.signedPackage.files,
+      expectedTrustRootFingerprintSha256: fixture.trustRoot,
+      expectedBinding: fixture.binding,
+      budgetBinding: fixture.budgetBinding,
+    });
+    expect(custody).toMatchObject({
+      publication_eligible: false,
+      aggregate: { status: "failed" },
+      terminal: { body: { status: "failed" } },
+    });
+    await expect(verifySignedLc4QualificationV4Package({
+      envelope: fixture.signedPackage.envelope,
+      files: fixture.signedPackage.files,
+      expectedTrustRootFingerprintSha256: fixture.trustRoot,
+      expectedBinding: fixture.binding,
+      budgetBinding: fixture.budgetBinding,
+    })).rejects.toThrow(/not completed or publication eligible/);
+    await expect(loadLc4DevRetainedQualificationV4({
+      root: fixture.root,
+      qualification_trust_root_sha256: fixture.trustRoot,
+      now: NOW,
+    })).rejects.toThrow(/exactly one signed package/);
+
+    const tamperedFiles = fixture.signedPackage.files.map((file) => (
+      file.path === "01-gemini-paid-terminal.json"
+        ? { ...file, bytes: Buffer.from(Buffer.from(file.bytes).toString("utf8").replace("gemini_paid_failed", "forged_paid_failure")) }
+        : file
+    ));
+    await expect(verifySignedLc4QualificationV4PackageCustody({
+      envelope: fixture.signedPackage.envelope,
+      files: tamperedFiles,
+      expectedTrustRootFingerprintSha256: fixture.trustRoot,
+      expectedBinding: fixture.binding,
+      budgetBinding: fixture.budgetBinding,
+    })).rejects.toThrow();
+  });
+
   it("loads one fully signed replay-valid filesystem package into the common DEV admission contract", async () => {
     const fixture = await signedV4FilesystemFixture();
     const receipt = await loadLc4DevRetainedQualificationV4({

@@ -1166,6 +1166,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
   let rootResponseId: string | null = null;
   let rootResponseStartedObservationSha256: string | null = null;
   let rootResponseTerminalObservationSha256: string | null = null;
+  let geminiPreToolAudioObserved = false;
   let toolSubmissionQueued = false;
   const toolFrontierSha256 = realtimeToolFrontierSha256([LC4_S2S_TOOL]);
   const transportParitySha256 = input.provider === "xai"
@@ -1313,6 +1314,42 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
         }
         return;
       }
+      if (input.provider === "gemini" && toolCall === null
+        && (event.type === "output.audio" || geminiPreToolAudioObserved)) {
+        const eventWireObservation = event.wireObservation;
+        const eventObservation = eventWireObservation?.availability === "observed"
+          ? wire.find((observation) => (
+              observation.observationSha256
+                === eventWireObservation.observationSha256
+            ))
+          : undefined;
+        const triggerObservation = wire.find((observation) => (
+          observation.observationSha256 === triggerObservationSha256
+        ));
+        const exactGeminiPreToolBinding = triggerObservation !== undefined
+          && eventObservation !== undefined
+          && triggerObservation.direction === "outbound"
+          && triggerObservation.wireType === "realtimeInput.activityEnd"
+          && triggerObservation.connectionEpoch === 1
+          && eventObservation.direction === "inbound"
+          && eventObservation.connectionEpoch === triggerObservation.connectionEpoch
+          && eventObservation.sequence > triggerObservation.sequence
+          && event.responseId.length > 0
+          && (rootResponseId === null || rootResponseId === event.responseId)
+          && verifyRealtimeWireObservationChain(wire).valid;
+        if (!exactGeminiPreToolBinding) {
+          failure = "provider_error";
+          finish();
+          return;
+        }
+        rootResponseId ??= event.responseId;
+        rootResponseStartedObservationSha256 ??= triggerObservationSha256;
+        if (event.type === "output.audio") geminiPreToolAudioObserved = true;
+        if (!operations.includes("pre_tool_output_quarantined")) {
+          operations.push("pre_tool_output_quarantined");
+        }
+        return;
+      }
       if (toolCall === null) {
         failure = "speech_before_tool";
         finish();
@@ -1396,9 +1433,14 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
       const callIndex = wire.findIndex((item) => item.observationSha256 === candidate.observationSha256);
       const providerCausalityValid = input.provider === "gemini"
         ? candidate.call.responseIdSource === "client_local"
+          && candidate.call.causalBinding?.connectionEpoch === 1
+          && candidate.call.causalBinding.inputTurn === 1
+          && candidate.call.causalBinding.clientMessageOrdinal === 1
           && candidate.call.causalBinding?.providerCallId === candidate.call.callId
           && candidate.call.causalBinding.triggerObservationSha256 === triggerObservationSha256
           && candidate.call.causalBinding.trigger === "audio_activity_end"
+          && candidate.call.causalBinding.localResponseId === candidate.call.responseId
+          && (rootResponseId === null || rootResponseId === candidate.call.responseId)
         : input.provider === "xai"
           ? candidate.call.responseIdSource === "provider"
             && speechStopObservationSha256 !== null
@@ -1436,6 +1478,9 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
             ? "server_vad_speech_stop_then_native_response_and_call_ids"
             : "response_create_then_native_response_and_call_ids",
       }));
+      if (input.provider === "gemini" && geminiPreToolAudioObserved) {
+        rootResponseTerminalObservationSha256 = candidate.observationSha256;
+      }
       scheduleToolResultSubmission();
     }
     if (event.type === "response.completed") {
@@ -1832,7 +1877,7 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     unsubscribeWire?.();
   }
 
-  if (input.provider === "xai"
+  if ((input.provider === "xai" || input.provider === "gemini")
     && rootResponseId !== null
     && rootResponseStartedObservationSha256 !== null
     && rootResponseTerminalObservationSha256 !== null) {
@@ -1871,12 +1916,17 @@ export async function executeLc4S2sToolRoundtrip(input: Readonly<{
     && preToolOutputQuarantine === null) {
     failure = "causal_replay_evidence_invalid";
   }
+  if (failure === "none" && input.provider === "gemini"
+    && geminiPreToolAudioObserved && preToolOutputQuarantine === null) {
+    failure = "causal_replay_evidence_invalid";
+  }
 
   const protocolPassed = failure === "none"
     && historyHydrationEvidence !== null
     && inputAudioEvidence !== null
     && outputAudioEvidence !== null
     && (input.provider !== "xai" || preToolOutputQuarantine !== null)
+    && (!geminiPreToolAudioObserved || preToolOutputQuarantine !== null)
     && toolCall !== null
     && toolResultSubmitted
     && toolResultWireObservationSha256 !== null
@@ -2177,7 +2227,9 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
     || execution.output_audio_evidence === null
     || (execution.provider === "xai"
       ? execution.pre_tool_output_quarantine === null
-      : execution.pre_tool_output_quarantine !== null)
+      : execution.provider === "openai"
+        ? execution.pre_tool_output_quarantine !== null
+        : false)
     || (execution.provider === "xai"
       ? !execution.provider_auto_response_observed || execution.response_generation_requested
       : !execution.response_generation_requested || execution.provider_auto_response_observed)
@@ -2280,7 +2332,14 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
         || suffixFirstObservation <= callerLastObservation) {
         throw new Error("passing xAI LC4 S2S roundtrip lacks the frozen server-VAD silence tail");
       }
-      const quarantine = execution.pre_tool_output_quarantine!;
+    } else if (suffix !== undefined) {
+      throw new Error("non-xAI LC4 S2S roundtrip cannot contain a server-VAD silence tail");
+    }
+    const quarantine = execution.pre_tool_output_quarantine;
+    if (quarantine !== null) {
+      if (execution.provider !== "xai" && execution.provider !== "gemini") {
+        throw new Error("passing LC4 S2S roundtrip has a forbidden pre-tool quarantine");
+      }
       const projectedQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
         provider: execution.provider,
         wire: execution.wire_observations,
@@ -2288,17 +2347,23 @@ export function assertLc4S2sRoundtripExecution(execution: Lc4S2sRoundtripExecuti
         terminal_observation_sha256: quarantine.terminal_observation_sha256,
         response_id_sha256: quarantine.response_id_sha256,
       });
+      const geminiBoundaryValid = execution.provider !== "gemini"
+        || (quarantine.response_started_observation_sha256
+            === execution.replay_causal_binding!.trigger_observation_sha256
+          && quarantine.terminal_observation_sha256
+            === execution.replay_causal_binding!.call_observation_sha256
+          && quarantine.response_id_sha256
+            === execution.replay_causal_binding!.call_response_id_sha256);
       if (quarantine.disposition !== "suppressed_never_caller_playable"
         || quarantine.released_audio_bytes !== 0
         || projectedQuarantine === null
         || canonicalJson(projectedQuarantine) !== canonicalJson(quarantine)
+        || !geminiBoundaryValid
         || execution.replay_summary!.pre_tool_output_quarantine === undefined
         || canonicalJson(execution.replay_summary!.pre_tool_output_quarantine)
           !== canonicalJson(quarantine)) {
-        throw new Error("passing xAI LC4 S2S roundtrip lacks exact pre-tool quarantine evidence");
+        throw new Error("passing LC4 S2S roundtrip lacks exact pre-tool quarantine evidence");
       }
-    } else if (suffix !== undefined) {
-      throw new Error("non-xAI LC4 S2S roundtrip cannot contain a server-VAD silence tail");
     }
     const replay = replayProviderToolRoundtrip({
       expected: { provider: execution.provider, model: execution.model },

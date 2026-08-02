@@ -113,9 +113,11 @@ export type RoundtripOutputAudioEvidence = Readonly<{
 }>;
 
 /**
- * xAI can place the terminal function call in response.done after streaming the
- * root response's audio. The host retains this content-free receipt while
- * suppressing every byte; it is never continuation or caller-playable output.
+ * A provider can emit audio before the required function call. The host keeps
+ * only this content-free receipt and suppresses every byte; it is never
+ * continuation or caller-playable output. xAI binds the quarantine to its
+ * provider response lifecycle. Gemini binds it to one client-local input turn,
+ * from activityEnd through the subsequent native toolCall.
  */
 export type RoundtripPreToolOutputQuarantineEvidence = Readonly<{
   schema_version: 1;
@@ -324,6 +326,23 @@ function records(value: unknown): readonly Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((entry): entry is Record<string, unknown> => record(entry) !== null)
     : [];
+}
+
+function projectedOutputTextEntries(
+  observation: RealtimeWireObservation,
+): readonly Record<string, unknown>[] | null {
+  if (!Array.isArray(observation.projection.text)) return [];
+  const output = records(observation.projection.text).filter((entry) => (
+    entry.kind === "output_text" || entry.kind === "output_transcript"
+  ));
+  if (output.some((entry) => (
+    typeof entry.sha256 !== "string"
+    || !SHA256.test(entry.sha256)
+    || typeof entry.byteLength !== "number"
+    || !Number.isSafeInteger(entry.byteLength)
+    || entry.byteLength < 0
+  ))) return null;
+  return output;
 }
 
 function usageProjection(observation: RealtimeWireObservation): Record<string, number> | null {
@@ -655,7 +674,8 @@ export function projectRoundtripPreToolOutputQuarantineEvidence(input: Readonly<
   terminal_observation_sha256: string;
   response_id_sha256: string;
 }>): RoundtripPreToolOutputQuarantineEvidence | null {
-  if (input.provider !== "xai" || !SHA256.test(input.response_id_sha256)) return null;
+  if ((input.provider !== "xai" && input.provider !== "gemini")
+    || !SHA256.test(input.response_id_sha256)) return null;
   const startIndex = input.wire.findIndex(({ observationSha256 }) => (
     observationSha256 === input.response_started_observation_sha256
   ));
@@ -664,20 +684,43 @@ export function projectRoundtripPreToolOutputQuarantineEvidence(input: Readonly<
   ));
   const start = input.wire[startIndex];
   const terminal = input.wire[terminalIndex];
+  const xaiBoundaryValid = input.provider === "xai"
+    && start?.direction === "inbound"
+    && start.wireType === "response.created"
+    && start.identities.responseIdSha256 === input.response_id_sha256
+    && terminal?.direction === "inbound"
+    && terminal.identities.responseIdSha256 === input.response_id_sha256
+    && record(terminal.projection.terminal)?.status === "completed";
+  const geminiGatewayCalls = input.provider === "gemini"
+    && terminal !== undefined
+    && Array.isArray(terminal.projection.gatewayCalls)
+    ? terminal.projection.gatewayCalls
+    : [];
+  const geminiBoundaryValid = input.provider === "gemini"
+    && start?.direction === "outbound"
+    && start.wireType === "realtimeInput.activityEnd"
+    && start.connectionEpoch === 1
+    && start.identities.responseIdSha256 === undefined
+    && terminal?.direction === "inbound"
+    && terminal.wireType === "toolCall"
+    && terminal.connectionEpoch === start.connectionEpoch
+    && terminal.identities.responseIdSha256 === undefined
+    && typeof terminal.identities.callIdSha256 === "string"
+    && SHA256.test(terminal.identities.callIdSha256)
+    && geminiGatewayCalls.length === 1;
   if (startIndex < 0 || terminalIndex <= startIndex
-    || start?.direction !== "inbound" || start.wireType !== "response.created"
-    || start.identities.responseIdSha256 !== input.response_id_sha256
-    || terminal?.direction !== "inbound"
-    || terminal.identities.responseIdSha256 !== input.response_id_sha256
-    || record(terminal.projection.terminal)?.status !== "completed") return null;
+    || (!xaiBoundaryValid && !geminiBoundaryValid)) return null;
   const candidates = input.wire
     .map((observation, index) => ({ observation, index }))
     .filter(({ observation, index }) => (
       index > startIndex && index < terminalIndex
       && observation.direction === "inbound"
-      && observation.identities.responseIdSha256 === input.response_id_sha256
+      && (input.provider === "xai"
+        ? observation.identities.responseIdSha256 === input.response_id_sha256
+        : observation.connectionEpoch === start!.connectionEpoch
+          && observation.identities.responseIdSha256 === undefined)
       && (record(observation.projection.audio) !== null
-        || Array.isArray(observation.projection.text))
+        || (projectedOutputTextEntries(observation)?.length ?? 0) > 0)
     ));
   const audioContent: Array<Readonly<{
     observation_sha256: string;
@@ -688,6 +731,7 @@ export function projectRoundtripPreToolOutputQuarantineEvidence(input: Readonly<
   let audioChunkCount = 0;
   let sampleRateHz: number | null = null;
   for (const { observation } of candidates) {
+    if (projectedOutputTextEntries(observation) === null) return null;
     if (record(observation.projection.audio) === null) continue;
     const chunks = projectedPcmChunks(observation, "output");
     if (!chunks) return null;
@@ -702,6 +746,9 @@ export function projectRoundtripPreToolOutputQuarantineEvidence(input: Readonly<
       projection_sha256: observation.projectionSha256,
       chunks,
     });
+  }
+  if (input.provider === "gemini" && (audioBytes <= 0 || audioChunkCount <= 0)) {
+    return null;
   }
   const observationSha256s = candidates.map(({ observation }) => observation.observationSha256);
   const body = deepFreeze({
@@ -1062,36 +1109,39 @@ export function replayProviderToolRoundtrip(
       pushHashError(errors, hash, "summary_output_audio_observation_invalid");
     }
     const preToolQuarantine = summary.pre_tool_output_quarantine;
-    if (summary.provider === "xai") {
-      if (preToolQuarantine === undefined) {
-        errors.push("xai_pre_tool_quarantine_missing");
-      } else {
-        for (const [value, code] of [
-          [preToolQuarantine.response_id_sha256, "pre_tool_quarantine_response_id_invalid"],
-          [preToolQuarantine.response_started_observation_sha256, "pre_tool_quarantine_start_invalid"],
-          [preToolQuarantine.terminal_observation_sha256, "pre_tool_quarantine_terminal_invalid"],
-          [preToolQuarantine.observation_list_sha256, "pre_tool_quarantine_observation_list_invalid"],
-          [preToolQuarantine.audio_content_sha256, "pre_tool_quarantine_audio_content_invalid"],
-          [preToolQuarantine.evidence_sha256, "pre_tool_quarantine_evidence_invalid"],
-        ] as const) pushHashError(errors, value, code);
-        for (const hash of preToolQuarantine.observation_sha256s) {
-          pushHashError(errors, hash, "pre_tool_quarantine_observation_invalid");
-        }
-        if (preToolQuarantine.schema_version !== 1
-          || preToolQuarantine.disposition !== "suppressed_never_caller_playable"
-          || preToolQuarantine.released_audio_bytes !== 0
-          || !Number.isSafeInteger(preToolQuarantine.audio_bytes)
-          || preToolQuarantine.audio_bytes < 0
-          || !Number.isSafeInteger(preToolQuarantine.audio_chunk_count)
-          || preToolQuarantine.audio_chunk_count < 0
-          || (preToolQuarantine.sample_rate_hz !== null
-            && (!Number.isSafeInteger(preToolQuarantine.sample_rate_hz)
-              || preToolQuarantine.sample_rate_hz <= 0))) {
-          errors.push("pre_tool_quarantine_contract_invalid");
-        }
+    if (summary.provider === "xai" && preToolQuarantine === undefined) {
+      errors.push("xai_pre_tool_quarantine_missing");
+    }
+    if (preToolQuarantine !== undefined) {
+      if (summary.provider !== "xai" && summary.provider !== "gemini") {
+        errors.push("provider_pre_tool_quarantine_forbidden");
       }
-    } else if (preToolQuarantine !== undefined) {
-      errors.push("non_xai_pre_tool_quarantine_forbidden");
+      for (const [value, code] of [
+        [preToolQuarantine.response_id_sha256, "pre_tool_quarantine_response_id_invalid"],
+        [preToolQuarantine.response_started_observation_sha256, "pre_tool_quarantine_start_invalid"],
+        [preToolQuarantine.terminal_observation_sha256, "pre_tool_quarantine_terminal_invalid"],
+        [preToolQuarantine.observation_list_sha256, "pre_tool_quarantine_observation_list_invalid"],
+        [preToolQuarantine.audio_content_sha256, "pre_tool_quarantine_audio_content_invalid"],
+        [preToolQuarantine.evidence_sha256, "pre_tool_quarantine_evidence_invalid"],
+      ] as const) pushHashError(errors, value, code);
+      for (const hash of preToolQuarantine.observation_sha256s) {
+        pushHashError(errors, hash, "pre_tool_quarantine_observation_invalid");
+      }
+      if (preToolQuarantine.schema_version !== 1
+        || preToolQuarantine.disposition !== "suppressed_never_caller_playable"
+        || preToolQuarantine.released_audio_bytes !== 0
+        || !Number.isSafeInteger(preToolQuarantine.audio_bytes)
+        || preToolQuarantine.audio_bytes < 0
+        || !Number.isSafeInteger(preToolQuarantine.audio_chunk_count)
+        || preToolQuarantine.audio_chunk_count < 0
+        || (summary.provider === "gemini"
+          && (preToolQuarantine.audio_bytes <= 0
+            || preToolQuarantine.audio_chunk_count <= 0))
+        || (preToolQuarantine.sample_rate_hz !== null
+          && (!Number.isSafeInteger(preToolQuarantine.sample_rate_hz)
+            || preToolQuarantine.sample_rate_hz <= 0))) {
+        errors.push("pre_tool_quarantine_contract_invalid");
+      }
     }
     if (summary.call.call_id_sha256 !== summary.result.call_id_sha256) {
       errors.push("call_result_id_mismatch");
@@ -1183,7 +1233,8 @@ export function replayProviderToolRoundtrip(
       || canonicalJson(projectedOutputAudio) !== canonicalJson(summary.output_audio)) {
       errors.push("output_audio_continuation_replay_mismatch");
     }
-    if (summary.provider === "xai" && preToolQuarantine !== undefined) {
+    if ((summary.provider === "xai" || summary.provider === "gemini")
+      && preToolQuarantine !== undefined) {
       const projectedQuarantine = projectRoundtripPreToolOutputQuarantineEvidence({
         provider: summary.provider,
         wire,
@@ -1199,11 +1250,36 @@ export function replayProviderToolRoundtrip(
       const quarantineTerminal = byHash.get(preToolQuarantine.terminal_observation_sha256);
       const callObservation = byHash.get(summary.call.observation_sha256);
       const continuationStart = byHash.get(summary.continuation.started_observation_sha256);
+      const triggerObservation = input.causal_binding == null
+        ? undefined
+        : byHash.get(input.causal_binding.trigger_observation_sha256);
+      const lifecycleValid = summary.provider === "gemini"
+        ? triggerObservation !== undefined
+          && quarantineTerminal?.observation.observationSha256
+            === summary.call.observation_sha256
+          && preToolQuarantine.response_started_observation_sha256
+            === input.causal_binding?.trigger_observation_sha256
+          && triggerObservation.index < quarantineTerminal.index
+          && quarantineTerminal.index < (continuationStart?.index ?? -1)
+        : callObservation !== undefined
+          && quarantineTerminal !== undefined
+          && callObservation.index <= quarantineTerminal.index
+          && quarantineTerminal.index < (continuationStart?.index ?? -1);
       if (!quarantineTerminal || !callObservation || !continuationStart
-        || callObservation.index > quarantineTerminal.index
-        || quarantineTerminal.index >= continuationStart.index) {
+        || !lifecycleValid) {
         errors.push("pre_tool_quarantine_lifecycle_order_invalid");
       }
+    }
+
+    const summaryCallFact = byHash.get(summary.call.observation_sha256);
+    const geminiPreCallAudio = summary.provider === "gemini"
+      && summaryCallFact !== undefined
+      && wire.slice(0, summaryCallFact.index).some((observation) => (
+        observation.direction === "inbound"
+        && projectedPcmChunks(observation, "output") !== null
+      ));
+    if (geminiPreCallAudio && preToolQuarantine === undefined) {
+      errors.push("gemini_pre_tool_quarantine_missing");
     }
 
     const calls = factsWithProjectionArray(wire, "gatewayCalls");
@@ -1337,8 +1413,34 @@ export function replayProviderToolRoundtrip(
       !isInputTranscriptTerminal(observation)
     ));
     if (summary.provider === "gemini") {
-      if (terminalFacts.length !== 1
-        || terminalFacts[0]?.observation.observationSha256 !== summary.terminal.observation_sha256) {
+      const quarantineStartIndex = preToolQuarantine === undefined
+        ? -1
+        : byHash.get(preToolQuarantine.response_started_observation_sha256)?.index ?? -1;
+      const callIndex = byHash.get(summary.call.observation_sha256)?.index ?? -1;
+      const firstQuarantinedOutputIndex = preToolQuarantine === undefined
+        ? -1
+        : Math.min(...preToolQuarantine.observation_sha256s.map((hash) => (
+            byHash.get(hash)?.index ?? Number.POSITIVE_INFINITY
+          )));
+      const quarantinedPreToolTerminalFacts = terminalFacts.filter(({ observation, index }) => (
+        preToolQuarantine !== undefined
+        && observation.wireType === "serverContent"
+        && observation.identities.responseIdSha256 === undefined
+        && observation.connectionEpoch === 1
+        && quarantineStartIndex >= 0
+        && quarantineStartIndex < index
+        && index < firstQuarantinedOutputIndex
+        && index < callIndex
+      ));
+      const responseTerminalFacts = terminalFacts.filter(({ observation }) => (
+        !quarantinedPreToolTerminalFacts.some((candidate) => (
+          candidate.observation.observationSha256 === observation.observationSha256
+        ))
+      ));
+      if (quarantinedPreToolTerminalFacts.length > 1
+        || responseTerminalFacts.length !== 1
+        || responseTerminalFacts[0]?.observation.observationSha256
+          !== summary.terminal.observation_sha256) {
         errors.push("gemini_terminal_count_or_binding_invalid");
       }
     } else {

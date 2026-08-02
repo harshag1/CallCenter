@@ -24,6 +24,7 @@ import {
 } from "./lc4-qualification-package-envelope";
 import {
   assertLc4QualificationV4CompletedReplay,
+  assertLc4QualificationV4TerminalReplay,
   type Lc4QualificationV4Aggregate,
   type Lc4QualificationV4Binding,
   type Lc4QualificationV4Manifest,
@@ -52,7 +53,7 @@ export type Lc4QualificationV4TerminalBody = Readonly<{
   terminal_version: typeof LC4_QUALIFICATION_V4_TERMINAL_VERSION;
   attempt_id: string;
   sealed_at: string;
-  status: "passed";
+  status: "passed" | "failed";
   binding: Lc4QualificationV4Binding;
   manifest_sha256: string;
   aggregate_sha256: string;
@@ -107,7 +108,7 @@ export function assertLc4QualificationV4TerminalArtifact(
   const { artifact_sha256, ...withoutArtifact } = artifact;
   if (artifact.body.schema_version !== 1
     || artifact.body.terminal_version !== LC4_QUALIFICATION_V4_TERMINAL_VERSION
-    || artifact.body.status !== "passed"
+    || (artifact.body.status !== "passed" && artifact.body.status !== "failed")
     || artifact.signature_algorithm !== "Ed25519"
     || artifact.authority_public_key_fingerprint_sha256 !== expectedFingerprint
     || sha256Hex(Buffer.from(artifact.authority_public_key_spki_base64, "base64")) !== expectedFingerprint
@@ -153,14 +154,20 @@ function coreFiles(input: Readonly<{
   ];
   input.shards.forEach((shard, index) => {
     const prefix = shardPrefix(index, shard.reservation.provider);
-    files.push(
-      jsonFile(`${prefix}-reservation.json`, shard.reservation),
-      jsonFile(`${prefix}-setup-admission.json`, shard.setup_admission),
-      jsonFile(`${prefix}-setup-terminal.json`, shard.setup_terminal),
-      jsonFile(`${prefix}-paid-admission.json`, shard.paid_admission),
-      jsonFile(`${prefix}-paid-terminal.json`, shard.paid_terminal),
-      jsonFile(`${prefix}-shard-terminal.json`, shard.shard_terminal),
-    );
+    files.push(jsonFile(`${prefix}-reservation.json`, shard.reservation));
+    if (shard.setup_admission !== null) {
+      files.push(jsonFile(`${prefix}-setup-admission.json`, shard.setup_admission));
+    }
+    if (shard.setup_terminal !== null) {
+      files.push(jsonFile(`${prefix}-setup-terminal.json`, shard.setup_terminal));
+    }
+    if (shard.paid_admission !== null) {
+      files.push(jsonFile(`${prefix}-paid-admission.json`, shard.paid_admission));
+    }
+    if (shard.paid_terminal !== null) {
+      files.push(jsonFile(`${prefix}-paid-terminal.json`, shard.paid_terminal));
+    }
+    files.push(jsonFile(`${prefix}-shard-terminal.json`, shard.shard_terminal));
   });
   return freeze(files);
 }
@@ -189,13 +196,23 @@ function packageBindings(input: Readonly<{
   aggregate: Lc4QualificationV4Aggregate;
   shards: readonly Lc4QualificationV4ReplayShard[];
 }>): Lc4QualificationPackageBindingsV5 {
-  const setupEvidence = input.shards.map((shard) => shard.setup_terminal.result.evidence_sha256);
-  const paidEvidence = input.shards.map((shard) => shard.paid_terminal.result.evidence_sha256);
-  const heads = input.shards.flatMap((shard) => [
-    shard.setup_terminal.result.wire_head_sha256,
-    shard.paid_terminal.result.wire_head_sha256,
-  ]);
-  if (heads.some((head) => head === null)) throw new Error("passing v4 package has a missing replay chain head");
+  const expectedBudgetOutcome = input.aggregate.status === "passed" ? "completed" : "failed";
+  if (input.budget.terminal_outcome !== expectedBudgetOutcome
+    || input.budget.usage_event_count !== input.aggregate.usage_event_count
+    || input.budget.usage_evidence_sha256 !== input.aggregate.usage_evidence_sha256) {
+    throw new Error("qualification v4 budget settlement differs from terminal aggregate outcome or usage");
+  }
+  const setupEvidence = input.shards.flatMap((shard) => (
+    shard.setup_terminal === null ? [] : [shard.setup_terminal.result.evidence_sha256]
+  ));
+  const paidEvidence = input.shards.flatMap((shard) => (
+    shard.paid_terminal === null ? [] : [shard.paid_terminal.result.evidence_sha256]
+  ));
+  const phaseTerminals = input.shards.flatMap((shard) => [shard.setup_terminal, shard.paid_terminal]
+    .filter((phase): phase is NonNullable<typeof phase> => phase !== null));
+  const heads = phaseTerminals.flatMap((phase) => (
+    phase.result.wire_head_sha256 === null ? [] : [phase.result.wire_head_sha256]
+  ));
   return freeze({
     attempt_id: input.authorization.body.authorization_id,
     source_commit: input.plan.body.source.source_commit,
@@ -212,15 +229,12 @@ function packageBindings(input: Readonly<{
     generation_phase_count: input.aggregate.generation_phases_attempted,
     tool_roundtrip_count: input.aggregate.tool_roundtrips_attempted,
     retry_count: input.aggregate.paid_retries_attempted,
-    reconnect_count: input.shards.reduce((sum, shard) => (
-      sum + shard.setup_terminal.result.reconnect_count + shard.paid_terminal.result.reconnect_count
-    ), 0),
+    reconnect_count: phaseTerminals.reduce((sum, phase) => sum + phase.result.reconnect_count, 0),
     replay_artifact_sha256: sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(paidEvidence)}`),
-    replay_event_count: input.shards.reduce((sum, shard) => (
-      sum + shard.setup_terminal.result.wire_observation_count
-        + shard.paid_terminal.result.wire_observation_count
-    ), 0),
-    replay_chain_head_sha256: sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(heads)}`),
+    replay_event_count: phaseTerminals.reduce((sum, phase) => sum + phase.result.wire_observation_count, 0),
+    replay_chain_head_sha256: heads.length === 0
+      ? null
+      : sha256Hex(`${REPLAY_AGGREGATE_DOMAIN}${canonicalJson(heads)}`),
   });
 }
 
@@ -265,7 +279,7 @@ export function createSignedLc4QualificationV4Package(input: Readonly<{
   sealedAt: string;
   evidenceFiles?: readonly Lc4QualificationPackageFile[];
 }>): Lc4QualificationV4SignedPackage {
-  assertLc4QualificationV4CompletedReplay(input);
+  assertLc4QualificationV4TerminalReplay(input);
   assertLc4QualificationBudgetEvidence(input.budget);
   const privateKey = createPrivateKey(input.terminalPrivateKeyPem);
   const terminalFingerprint = sha256Hex(createPublicKey(privateKey).export({ format: "der", type: "spki" }));
@@ -289,7 +303,7 @@ export function createSignedLc4QualificationV4Package(input: Readonly<{
     terminal_version: LC4_QUALIFICATION_V4_TERMINAL_VERSION,
     attempt_id: input.binding.attempt_id,
     sealed_at: input.sealedAt,
-    status: "passed" as const,
+    status: input.aggregate.status,
     binding: input.binding,
     manifest_sha256: input.manifest.manifest_sha256,
     aggregate_sha256: input.aggregate.aggregate_sha256,
@@ -336,7 +350,7 @@ function fileMap(files: readonly Lc4QualificationPackageFile[]): Map<string, Lc4
   return map;
 }
 
-export async function verifySignedLc4QualificationV4Package(input: Readonly<{
+export async function verifySignedLc4QualificationV4PackageCustody(input: Readonly<{
   envelope: unknown;
   files: readonly Lc4QualificationPackageFile[];
   expectedTrustRootFingerprintSha256: string;
@@ -346,6 +360,7 @@ export async function verifySignedLc4QualificationV4Package(input: Readonly<{
   terminal: Lc4QualificationV4TerminalArtifact;
   aggregate: Lc4QualificationV4Aggregate;
   package_manifest_sha256: string;
+  publication_eligible: false;
 }>> {
   const files = fileMap(input.files);
   const required = (path: string) => {
@@ -374,25 +389,43 @@ export async function verifySignedLc4QualificationV4Package(input: Readonly<{
   assertCrossBindings({ binding: input.expectedBinding, plan, authorization, budget, budgetBinding: input.budgetBinding });
   const shards = manifest.reservations.map((reservation, index): Lc4QualificationV4ReplayShard => {
     const prefix = shardPrefix(index, reservation.provider);
+    const shardTerminal = parseJson<Lc4QualificationV4ReplayShard["shard_terminal"]>(
+      required(`${prefix}-shard-terminal.json`),
+      `${prefix} shard terminal`,
+    );
+    const optional = <T,>(path: string, label: string): T | null => {
+      const file = files.get(path);
+      return file === undefined ? null : parseJson<T>(file, label);
+    };
     return freeze({
       reservation: parseJson(required(`${prefix}-reservation.json`), `${prefix} reservation`),
-      setup_admission: parseJson(required(`${prefix}-setup-admission.json`), `${prefix} setup admission`),
-      setup_terminal: parseJson(required(`${prefix}-setup-terminal.json`), `${prefix} setup terminal`),
-      paid_admission: parseJson(required(`${prefix}-paid-admission.json`), `${prefix} paid admission`),
-      paid_terminal: parseJson(required(`${prefix}-paid-terminal.json`), `${prefix} paid terminal`),
-      shard_terminal: parseJson(required(`${prefix}-shard-terminal.json`), `${prefix} shard terminal`),
+      setup_admission: optional(`${prefix}-setup-admission.json`, `${prefix} setup admission`),
+      setup_terminal: optional(`${prefix}-setup-terminal.json`, `${prefix} setup terminal`),
+      paid_admission: optional(`${prefix}-paid-admission.json`, `${prefix} paid admission`),
+      paid_terminal: optional(`${prefix}-paid-terminal.json`, `${prefix} paid terminal`),
+      shard_terminal: shardTerminal,
     });
   });
-  assertLc4QualificationV4CompletedReplay({
+  const replayStatus = assertLc4QualificationV4TerminalReplay({
     binding: input.expectedBinding,
     manifest,
     aggregate,
     shards,
   });
+  if (replayStatus === "passed") {
+    assertLc4QualificationV4CompletedReplay({
+      binding: input.expectedBinding,
+      manifest,
+      aggregate,
+      shards,
+    });
+  }
   const expectedBindings = packageBindings({ plan, authorization, budget, aggregate, shards });
   if (canonicalJson(terminal.body.package_bindings) !== canonicalJson(expectedBindings)
     || terminal.body.manifest_sha256 !== manifest.manifest_sha256
     || terminal.body.aggregate_sha256 !== aggregate.aggregate_sha256
+    || terminal.body.status !== aggregate.status
+    || terminal.body.status !== replayStatus
     || canonicalJson(terminal.body.ordered_shard_terminal_sha256)
       !== canonicalJson(shards.map((shard) => shard.shard_terminal.terminal_sha256))) {
     throw new Error("qualification v4 terminal differs from replay-derived package bindings");
@@ -417,5 +450,36 @@ export async function verifySignedLc4QualificationV4Package(input: Readonly<{
   if (!SHA256.test(packageManifest.artifact_sha256)) {
     throw new Error("qualification v4 package manifest hash is invalid");
   }
-  return freeze({ terminal, aggregate, package_manifest_sha256: packageManifest.artifact_sha256 });
+  return freeze({
+    terminal,
+    aggregate,
+    package_manifest_sha256: packageManifest.artifact_sha256,
+    publication_eligible: false as const,
+  });
+}
+
+/**
+ * Strict release verifier retained for DEV admission. A signed failure package
+ * may be custody-valid, but it can never satisfy this publication gate.
+ */
+export async function verifySignedLc4QualificationV4Package(input: Readonly<{
+  envelope: unknown;
+  files: readonly Lc4QualificationPackageFile[];
+  expectedTrustRootFingerprintSha256: string;
+  expectedBinding: Lc4QualificationV4Binding;
+  budgetBinding: Lc4QualificationBudgetBinding;
+}>): Promise<Readonly<{
+  terminal: Lc4QualificationV4TerminalArtifact;
+  aggregate: Lc4QualificationV4Aggregate;
+  package_manifest_sha256: string;
+}>> {
+  const verified = await verifySignedLc4QualificationV4PackageCustody(input);
+  if (verified.terminal.body.status !== "passed" || verified.aggregate.status !== "passed") {
+    throw new Error("qualification v4 signed package is not completed or publication eligible");
+  }
+  return freeze({
+    terminal: verified.terminal,
+    aggregate: verified.aggregate,
+    package_manifest_sha256: verified.package_manifest_sha256,
+  });
 }

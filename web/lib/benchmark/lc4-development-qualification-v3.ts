@@ -231,7 +231,7 @@ export function lc4DevPreToolOutputIsExactlyQuarantined(input: Readonly<{
   if (input.pre_call_output_observation_sha256s.length === 0) return true;
   const retained = input.retained_quarantine;
   const replayed = input.replayed_quarantine;
-  return input.provider === "xai"
+  return (input.provider === "xai" || input.provider === "gemini")
     && retained !== null
     && replayed !== null
     && retained.disposition === "suppressed_never_caller_playable"
@@ -1657,6 +1657,7 @@ export function assertLc4DevRetainedQualificationV4Receipt(receipt: Lc4DevRetain
   if (receipt.qualification_runner_version !== LC4_QUALIFICATION_V4_SHARD_RUNNER_VERSION
     || receipt.schema_version !== 4
     || receipt.status !== "passed"
+    || receipt.terminal.body.status !== "passed"
     || canonicalJson(receipt.providers) !== canonicalJson(LC4_QUALIFICATION_V3_PROVIDER_ORDER)
     || receipt.setup_qualifications.length !== 3
     || receipt.spoken_gate_summaries.length !== 3

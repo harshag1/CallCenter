@@ -509,10 +509,57 @@ function xaiPacket(): ProviderRoundtripReplayInput {
   };
 }
 
-function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
+function geminiPacket(
+  withBinding = true,
+  withPreToolOutput = false,
+): ProviderRoundtripReplayInput {
   const callId = realtimeWireIdentitySha256("call", "call-gemini-1");
   const initialResponse = realtimeWireIdentitySha256("response", "gemini-local-response-1-1");
   const continuationResponse = realtimeWireIdentitySha256("response", "gemini-local-response-1-2");
+  const preToolOutputSeeds: WireSeed[] = withPreToolOutput ? [
+    {
+      direction: "inbound",
+      wireType: "serverContent",
+      projection: {
+        text: [{
+          kind: "input_transcript",
+          sha256: sha256Hex("Please complete the current stage."),
+          byteLength: Buffer.byteLength("Please complete the current stage.", "utf8"),
+        }],
+      },
+    },
+    {
+      direction: "inbound",
+      wireType: "serverContent",
+      projection: { terminal: { status: "completed" } },
+    },
+    {
+      direction: "inbound",
+      wireType: "serverContent",
+      projection: {
+        audio: {
+          direction: "output",
+          chunks: [{
+            validCanonicalBase64: true,
+            sha256: H("7"),
+            byteLength: 2,
+            format: { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 },
+          }],
+        },
+      },
+    },
+    {
+      direction: "inbound",
+      wireType: "serverContent",
+      projection: {
+        text: [{
+          kind: "output_transcript",
+          sha256: sha256Hex("I will complete that now."),
+          byteLength: Buffer.byteLength("I will complete that now.", "utf8"),
+        }],
+      },
+    },
+  ] : [];
   const observations = wire("gemini", [
     {
       direction: "outbound",
@@ -532,6 +579,7 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
       wireType: "realtimeInput.activityEnd",
       projection: { audio: { direction: "input", activity: "end" } },
     },
+    ...preToolOutputSeeds,
     {
       direction: "inbound",
       wireType: "toolCall",
@@ -565,7 +613,15 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
       projection: { terminal: { status: "completed" }, usage: { totalTokens: 12 } },
     },
   ]);
-  const usage = providerReportedUsage(continuationResponse, observations[5]!, { totalTokens: 12 });
+  const callIndex = 2 + preToolOutputSeeds.length;
+  const resultIndex = callIndex + 1;
+  const continuationStartIndex = callIndex + 2;
+  const terminalIndex = callIndex + 3;
+  const usage = providerReportedUsage(
+    continuationResponse,
+    observations[terminalIndex]!,
+    { totalTokens: 12 },
+  );
   const inputAudio = projectRoundtripInputAudioEvidence(observations, {
     chunk_sha256s: [H("9")], chunk_list_sha256: roundtripInputAudioChunkListSha256([H("9")]),
     audio_sha256: H("7"), delivery_profile_sha256: H("6"), packetizer_sha256: H("5"),
@@ -573,8 +629,8 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
   })!;
   const outputAudio = projectRoundtripOutputAudioEvidence({
     provider: "gemini", wire: observations,
-    continuation_start_observation_sha256: observations[4]!.observationSha256,
-    terminal_observation_sha256: observations[5]!.observationSha256,
+    continuation_start_observation_sha256: observations[continuationStartIndex]!.observationSha256,
+    terminal_observation_sha256: observations[terminalIndex]!.observationSha256,
     continuation_response_id_sha256: continuationResponse,
   })!;
   const summary: RoundtripReplaySummary = {
@@ -583,19 +639,19 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
     model: "gemini-2.5-flash-native-audio-preview-12-2025",
     connection_epoch: 1,
     call: {
-      observation_sha256: observations[2]!.observationSha256,
+      observation_sha256: observations[callIndex]!.observationSha256,
       call_id_sha256: callId,
       response_id_sha256: initialResponse,
     },
-    result: { observation_sha256: observations[3]!.observationSha256, call_id_sha256: callId },
+    result: { observation_sha256: observations[resultIndex]!.observationSha256, call_id_sha256: callId },
     continuation: {
-      request_observation_sha256: observations[3]!.observationSha256,
+      request_observation_sha256: observations[resultIndex]!.observationSha256,
       origin_response_id_sha256: initialResponse,
-      started_observation_sha256: observations[4]!.observationSha256,
+      started_observation_sha256: observations[continuationStartIndex]!.observationSha256,
       response_id_sha256: continuationResponse,
     },
     terminal: {
-      observation_sha256: observations[5]!.observationSha256,
+      observation_sha256: observations[terminalIndex]!.observationSha256,
       response_id_sha256: continuationResponse,
       status: "completed",
     },
@@ -605,6 +661,15 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
     },
     input_audio: inputAudio,
     output_audio: outputAudio,
+    ...(withPreToolOutput ? {
+      pre_tool_output_quarantine: projectRoundtripPreToolOutputQuarantineEvidence({
+        provider: "gemini",
+        wire: observations,
+        response_id_sha256: initialResponse,
+        response_started_observation_sha256: observations[1]!.observationSha256,
+        terminal_observation_sha256: observations[callIndex]!.observationSha256,
+      })!,
+    } : {}),
   };
   const bindingBody: Omit<RoundtripCausalBinding, "evidence_sha256"> = {
     schema_version: 1,
@@ -616,13 +681,13 @@ function geminiPacket(withBinding = true): ProviderRoundtripReplayInput {
     initial_response_id_sha256: initialResponse,
     call_id_sha256: callId,
     call_response_id_sha256: initialResponse,
-    call_observation_sha256: observations[2]!.observationSha256,
-    result_observation_sha256: observations[3]!.observationSha256,
-    continuation_request_observation_sha256: observations[3]!.observationSha256,
+    call_observation_sha256: observations[callIndex]!.observationSha256,
+    result_observation_sha256: observations[resultIndex]!.observationSha256,
+    continuation_request_observation_sha256: observations[resultIndex]!.observationSha256,
     continuation_response_id_sha256: continuationResponse,
-    continuation_start_observation_sha256: observations[4]!.observationSha256,
-    terminal_observation_sha256: observations[5]!.observationSha256,
-    usage_observation_sha256: observations[5]!.observationSha256,
+    continuation_start_observation_sha256: observations[continuationStartIndex]!.observationSha256,
+    terminal_observation_sha256: observations[terminalIndex]!.observationSha256,
+    usage_observation_sha256: observations[terminalIndex]!.observationSha256,
     usage_response_id_sha256: continuationResponse,
   };
   return {
@@ -699,6 +764,145 @@ describe("provider tool roundtrip offline replay", () => {
     });
     expect(replay.public_execution?.pre_tool_quarantine_evidence_sha256)
       .toBe(input.summary.pre_tool_output_quarantine?.evidence_sha256);
+  });
+
+  it("binds Gemini pre-tool audio and output transcript to the exact activity-end/tool-call window", () => {
+    const input = geminiPacket(true, true);
+    const replay = replayProviderToolRoundtrip(input);
+    const quarantine = input.summary.pre_tool_output_quarantine;
+
+    expect(replay.valid).toBe(true);
+    expect(replay.errors).toEqual([]);
+    expect(quarantine).toMatchObject({
+      disposition: "suppressed_never_caller_playable",
+      response_started_observation_sha256:
+        input.causal_binding?.trigger_observation_sha256,
+      terminal_observation_sha256: input.summary.call.observation_sha256,
+      response_id_sha256: input.summary.call.response_id_sha256,
+      audio_bytes: 2,
+      audio_chunk_count: 1,
+      released_audio_bytes: 0,
+    });
+    expect(quarantine?.observation_sha256s).toHaveLength(2);
+    expect(replay.public_execution).toMatchObject({
+      pre_tool_quarantine_audio_bytes: 2,
+      pre_tool_quarantine_released_audio_bytes: 0,
+      pre_tool_quarantine_evidence_sha256: quarantine?.evidence_sha256,
+    });
+
+    const retainedKinds = input.wire_observations
+      .filter((observation) => quarantine?.observation_sha256s.includes(
+        observation.observationSha256,
+      ))
+      .flatMap((observation) => Array.isArray(observation.projection.text)
+        ? observation.projection.text
+        : [])
+      .flatMap((entry) => typeof entry === "object" && entry !== null && "kind" in entry
+        ? [entry.kind]
+        : []);
+    expect(retainedKinds).toEqual(["output_transcript"]);
+  });
+
+  it("rejects a missing or caller-released Gemini quarantine receipt", () => {
+    const input = geminiPacket(true, true);
+    const quarantine = input.summary.pre_tool_output_quarantine!;
+    const withoutQuarantine = { ...input.summary };
+    Reflect.deleteProperty(withoutQuarantine, "pre_tool_output_quarantine");
+
+    const missing = replayProviderToolRoundtrip({
+      ...input,
+      summary: withoutQuarantine,
+    });
+    expect(missing.valid).toBe(false);
+    expect(missing.errors).toContain("gemini_pre_tool_quarantine_missing");
+
+    const released = replayProviderToolRoundtrip({
+      ...input,
+      summary: {
+        ...input.summary,
+        pre_tool_output_quarantine: {
+          ...quarantine,
+          released_audio_bytes: 1 as 0,
+        },
+      },
+    });
+    expect(released.valid).toBe(false);
+    expect(released.errors).toContain("pre_tool_quarantine_contract_invalid");
+    expect(released.public_execution).toBeNull();
+  });
+
+  it("refuses to project reordered or tool-call-frame-only Gemini audio", () => {
+    const input = geminiPacket(true, true);
+    const originalSeeds = seeds(input.wire_observations);
+    const audioSeedIndex = originalSeeds.findIndex((seed, index) => (
+      index > 1
+      && typeof seed.projection?.audio === "object"
+      && seed.projection.audio !== null
+      && !Array.isArray(seed.projection.audio)
+      && "direction" in seed.projection.audio
+      && seed.projection.audio.direction === "output"
+    ));
+    const outputTranscriptIndex = originalSeeds.findIndex((seed) => (
+      Array.isArray(seed.projection?.text)
+      && seed.projection.text.some((entry) => (
+        typeof entry === "object" && entry !== null
+        && "kind" in entry && entry.kind === "output_transcript"
+      ))
+    ));
+    const preToolAudio = originalSeeds[audioSeedIndex]!;
+
+    const terminalOnlySeeds = originalSeeds
+      .filter((_, index) => index !== audioSeedIndex && index !== outputTranscriptIndex)
+      .map((seed) => seed.wireType === "toolCall"
+        ? {
+            ...seed,
+            projection: {
+              ...seed.projection,
+              audio: preToolAudio.projection?.audio,
+            },
+          }
+        : seed);
+    const terminalOnlyWire = wire("gemini", terminalOnlySeeds);
+    const terminalOnlyCallIndex = terminalOnlyWire.findIndex((observation) => (
+      observation.wireType === "toolCall"
+    ));
+    expect(projectRoundtripPreToolOutputQuarantineEvidence({
+      provider: "gemini",
+      wire: terminalOnlyWire,
+      response_id_sha256: input.summary.call.response_id_sha256,
+      response_started_observation_sha256: terminalOnlyWire[1]!.observationSha256,
+      terminal_observation_sha256: terminalOnlyWire[terminalOnlyCallIndex]!.observationSha256,
+    })).toBeNull();
+
+    const reorderedSeeds = originalSeeds.filter((_, index) => index !== audioSeedIndex);
+    const reorderedCallIndex = reorderedSeeds.findIndex((seed) => seed.wireType === "toolCall");
+    reorderedSeeds.splice(reorderedCallIndex + 1, 0, preToolAudio);
+    const reorderedWire = wire("gemini", reorderedSeeds);
+    const reorderedTerminalIndex = reorderedWire.findIndex((observation) => (
+      observation.wireType === "toolCall"
+    ));
+    expect(projectRoundtripPreToolOutputQuarantineEvidence({
+      provider: "gemini",
+      wire: reorderedWire,
+      response_id_sha256: input.summary.call.response_id_sha256,
+      response_started_observation_sha256: reorderedWire[1]!.observationSha256,
+      terminal_observation_sha256: reorderedWire[reorderedTerminalIndex]!.observationSha256,
+    })).toBeNull();
+  });
+
+  it("keeps OpenAI on the fail-before-tool policy when a quarantine is injected", () => {
+    const openai = openAiPacket();
+    const gemini = geminiPacket(true, true);
+    const replay = replayProviderToolRoundtrip({
+      ...openai,
+      summary: {
+        ...openai.summary,
+        pre_tool_output_quarantine: gemini.summary.pre_tool_output_quarantine,
+      },
+    });
+
+    expect(replay.valid).toBe(false);
+    expect(replay.errors).toContain("provider_pre_tool_quarantine_forbidden");
   });
 
   it("replays the retained xAI lifecycle shape with an independent transcript terminal and implicit audio direction", () => {

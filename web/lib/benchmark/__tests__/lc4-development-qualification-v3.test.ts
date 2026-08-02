@@ -241,7 +241,7 @@ describe("LC4-DEV pre-tool assistant-output detection", () => {
   });
 });
 
-describe("LC4-DEV xAI pre-tool output quarantine", () => {
+describe("LC4-DEV provider pre-tool output quarantine", () => {
   const observationHashes = ["1".repeat(64), "2".repeat(64)];
   const quarantine = {
     schema_version: 1 as const,
@@ -259,18 +259,22 @@ describe("LC4-DEV xAI pre-tool output quarantine", () => {
     evidence_sha256: "8".repeat(64),
   };
 
-  it("accepts only the exact replayed xAI suppression receipt", () => {
-    expect(lc4DevPreToolOutputIsExactlyQuarantined({
-      provider: "xai",
-      pre_call_output_observation_sha256s: observationHashes,
-      retained_quarantine: quarantine,
-      replayed_quarantine: quarantine,
-    })).toBe(true);
+  it("accepts exact replayed xAI and Gemini suppression receipts", () => {
+    for (const provider of ["xai", "gemini"] as const) {
+      expect(lc4DevPreToolOutputIsExactlyQuarantined({
+        provider,
+        pre_call_output_observation_sha256s: observationHashes,
+        retained_quarantine: quarantine,
+        replayed_quarantine: quarantine,
+      })).toBe(true);
+    }
   });
 
   it("rejects unbound, partial, mutated, cross-provider, or released output", () => {
     for (const candidate of [
       { provider: "openai" as const, hashes: observationHashes, retained: quarantine, replayed: quarantine },
+      { provider: "gemini" as const, hashes: observationHashes.slice(0, 1), retained: quarantine, replayed: quarantine },
+      { provider: "gemini" as const, hashes: observationHashes, retained: null, replayed: quarantine },
       { provider: "xai" as const, hashes: observationHashes.slice(0, 1), retained: quarantine, replayed: quarantine },
       { provider: "xai" as const, hashes: observationHashes, retained: null, replayed: quarantine },
       { provider: "xai" as const, hashes: observationHashes, retained: quarantine, replayed: { ...quarantine, evidence_sha256: "9".repeat(64) } },

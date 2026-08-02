@@ -374,6 +374,9 @@ function phaseTerminal(
   context: Lc4QualificationV4PhaseContext,
   result: Lc4QualificationV4PhaseResult,
 ): Lc4QualificationV4PhaseTerminal {
+  if (result.status !== "passed" && result.status !== "failed") {
+    throw new Error(`${context.provider} ${context.phase} status is invalid`);
+  }
   requireSha(result.evidence_sha256, `${context.provider} ${context.phase} evidence`);
   requireSha(result.usage_evidence_sha256, `${context.provider} ${context.phase} usage evidence`);
   if (result.wire_head_sha256 !== null) requireSha(result.wire_head_sha256, `${context.provider} wire head`);
@@ -663,31 +666,64 @@ function aggregate(manifestValue: Lc4QualificationV4Manifest, shards: readonly L
 
 export type Lc4QualificationV4ReplayShard = Readonly<{
   reservation: Lc4QualificationV4Reservation;
-  setup_admission: unknown;
-  setup_terminal: Lc4QualificationV4PhaseTerminal;
-  paid_admission: unknown;
-  paid_terminal: Lc4QualificationV4PhaseTerminal;
+  setup_admission: unknown | null;
+  setup_terminal: Lc4QualificationV4PhaseTerminal | null;
+  paid_admission: unknown | null;
+  paid_terminal: Lc4QualificationV4PhaseTerminal | null;
   shard_terminal: Lc4QualificationV4ShardTerminal;
 }>;
 
-/** Provider-free replay verifier used by the signed package bridge. */
-export function assertLc4QualificationV4CompletedReplay(input: Readonly<{
+/**
+ * Provider-free custody replay for a terminalized qualification attempt.
+ *
+ * This accepts the exact all-pass union or the exact failed-prefix followed by
+ * zero-session cancellations. It proves what happened; it does not confer
+ * release or publication eligibility.
+ */
+export function assertLc4QualificationV4TerminalReplay(input: Readonly<{
   binding: Lc4QualificationV4Binding;
   manifest: Lc4QualificationV4Manifest;
   aggregate: Lc4QualificationV4Aggregate;
   shards: readonly Lc4QualificationV4ReplayShard[];
-}>): void {
+}>): "passed" | "failed" {
   assertManifest(input.manifest, input.binding);
   if (input.shards.length !== LC4_QUALIFICATION_V4_PROVIDER_ORDER.length) {
     throw new Error("qualification v4 replay must contain exactly three provider shards");
   }
   const terminals: Lc4QualificationV4ShardTerminal[] = [];
   let predecessor: string | null = null;
+  let stopped = false;
   for (let ordinal = 0; ordinal < input.shards.length; ordinal += 1) {
     const shard = input.shards[ordinal]!;
     const expectedReservation = input.manifest.reservations[ordinal]!;
     if (canonicalJson(shard.reservation) !== canonicalJson(expectedReservation)) {
       throw new Error("qualification v4 replay shard reservation was substituted or reordered");
+    }
+    if (shard.shard_terminal.status === "cancelled") {
+      if (!stopped
+        || shard.setup_admission !== null
+        || shard.setup_terminal !== null
+        || shard.paid_admission !== null
+        || shard.paid_terminal !== null) {
+        throw new Error("qualification v4 cancelled replay shard lacks a failed predecessor or contains phase evidence");
+      }
+      assertShardTerminal(shard.shard_terminal, {
+        reservation: expectedReservation,
+        predecessor,
+        setup: null,
+        paid: null,
+        status: "cancelled",
+        failureClass: "predecessor_failed",
+      });
+      terminals.push(shard.shard_terminal);
+      predecessor = shard.shard_terminal.terminal_sha256;
+      continue;
+    }
+    if (stopped) {
+      throw new Error("qualification v4 replay contains a non-cancelled shard after failure");
+    }
+    if (shard.setup_admission === null || shard.setup_terminal === null) {
+      throw new Error("qualification v4 replay non-cancelled shard lacks setup evidence");
     }
     const setupContext = freeze({
       provider: expectedReservation.provider,
@@ -702,8 +738,25 @@ export function assertLc4QualificationV4CompletedReplay(input: Readonly<{
       throw new Error("qualification v4 replay setup admission differs from its shard");
     }
     assertPhaseTerminal(shard.setup_terminal, setupContext);
-    if (shard.setup_terminal.result.status !== "passed") {
-      throw new Error("qualification v4 completed release replay contains failed setup");
+    if (shard.setup_terminal.result.status === "failed") {
+      if (shard.paid_admission !== null || shard.paid_terminal !== null) {
+        throw new Error("qualification v4 replay ran paid phase after failed setup");
+      }
+      assertShardTerminal(shard.shard_terminal, {
+        reservation: expectedReservation,
+        predecessor,
+        setup: shard.setup_terminal,
+        paid: null,
+        status: "failed",
+        failureClass: shard.setup_terminal.result.failure_class,
+      });
+      terminals.push(shard.shard_terminal);
+      predecessor = shard.shard_terminal.terminal_sha256;
+      stopped = true;
+      continue;
+    }
+    if (shard.paid_admission === null || shard.paid_terminal === null) {
+      throw new Error("qualification v4 replay setup-passed shard lacks paid evidence");
     }
     const paidContext = freeze({
       ...setupContext,
@@ -714,29 +767,41 @@ export function assertLc4QualificationV4CompletedReplay(input: Readonly<{
       throw new Error("qualification v4 replay paid admission differs from its shard");
     }
     assertPhaseTerminal(shard.paid_terminal, paidContext);
-    if (shard.paid_terminal.result.status !== "passed") {
-      throw new Error("qualification v4 completed release replay contains failed paid phase");
-    }
+    const status = shard.paid_terminal.result.status;
     assertShardTerminal(shard.shard_terminal, {
       reservation: expectedReservation,
       predecessor,
       setup: shard.setup_terminal,
       paid: shard.paid_terminal,
-      status: "passed",
-      failureClass: "none",
+      status,
+      failureClass: shard.paid_terminal.result.failure_class,
     });
     terminals.push(shard.shard_terminal);
     predecessor = shard.shard_terminal.terminal_sha256;
+    stopped = status === "failed";
   }
   const expectedAggregate = aggregate(input.manifest, freeze(terminals));
-  if (canonicalJson(input.aggregate) !== canonicalJson(expectedAggregate)
-    || input.aggregate.status !== "passed"
+  if (canonicalJson(input.aggregate) !== canonicalJson(expectedAggregate)) {
+    throw new Error("qualification v4 aggregate differs from its ordered terminal shard replay");
+  }
+  return input.aggregate.status;
+}
+
+/** Strict release gate: custody-valid failures remain ineligible. */
+export function assertLc4QualificationV4CompletedReplay(input: Readonly<{
+  binding: Lc4QualificationV4Binding;
+  manifest: Lc4QualificationV4Manifest;
+  aggregate: Lc4QualificationV4Aggregate;
+  shards: readonly Lc4QualificationV4ReplayShard[];
+}>): void {
+  const status = assertLc4QualificationV4TerminalReplay(input);
+  if (status !== "passed"
     || input.aggregate.provider_sessions_opened !== 6
     || input.aggregate.paid_sessions_opened !== 3
     || input.aggregate.generation_phases_attempted !== 6
     || input.aggregate.tool_roundtrips_attempted !== 3
     || input.aggregate.paid_retries_attempted !== 0) {
-    throw new Error("qualification v4 aggregate differs from its ordered completed shard replay");
+    throw new Error("qualification v4 aggregate is not one completed publication-eligible replay");
   }
 }
 
