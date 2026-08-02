@@ -4,6 +4,7 @@ import { canonicalJson, immutableJson, sha256Hex, type JsonValue } from "./artif
 import { independentAsrContractSha256 } from "./audible-evidence";
 import {
   createLc4DevReplayEvidenceStore,
+  verifyLc4DevReplayLedger,
   type Lc4DevReplayArtifactReference,
   type Lc4DevReplayEvidenceStore,
 } from "./lc4-development-evidence-retention";
@@ -15,6 +16,7 @@ import {
   LC4_DEV_OPPORTUNITIES_PER_PROVIDER_SEGMENT,
   LC4_DEV_PROVIDER_SESSION_SCHEDULE,
   LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+  assertLc4DevLiveRunArtifact,
   assertLc4DevLivePreflightArtifact,
   assertLc4DevLivePrepareArtifact,
   type Lc4DevLiveEpisodePlan,
@@ -2434,6 +2436,7 @@ export async function replayLc4PublicationTransportEvidence(input: Readonly<{
     expected_authority_public_key_fingerprint_sha256:
       input.expected_authority_trust_root_sha256,
   });
+  assertLc4DevLiveRunArtifact(input.run);
   if (input.run.execution_id !== input.prepare.execution_id
     || input.run.prepare_sha256 !== input.prepare.prepare_sha256
     || input.run.preflight_sha256 !== input.preflight.preflight_sha256) {
@@ -2443,6 +2446,16 @@ export async function replayLc4PublicationTransportEvidence(input: Readonly<{
   }
   const cas = await createLc4ImmutableCas(input.cas_root_dir);
   const evidence = createLc4DevReplayEvidenceStore(cas);
+  const ledgerReplay = await verifyLc4DevReplayLedger(
+    input.run.ledger,
+    evidence,
+    input.preflight.immutable_ledger_genesis_sha256,
+  );
+  if (ledgerReplay.ledger_head_sha256 !== input.run.ledger_head_sha256) {
+    throw new Error(
+      "LC4 publication transport ledger replay differs from the retained run head",
+    );
+  }
   const asrRunnerTrust = preflightAsrRunnerTrust(input.preflight);
   const episodes = await Promise.all(input.prepare.episodes.map((episode) =>
     replayEpisode({

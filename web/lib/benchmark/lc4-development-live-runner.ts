@@ -2522,6 +2522,15 @@ export type Lc4DevBudgetReportInput = Readonly<{
   budget_replay_verified: true;
 }>;
 
+export function assertLc4DevLiveRunArtifact(
+  run: Lc4DevLiveRunArtifact,
+): void {
+  const { run_sha256: claimed, ...runBody } = run;
+  if (hash(RUN_DOMAIN, runBody) !== claimed) {
+    throw new Error("LC4-DEV run artifact hash mismatch");
+  }
+}
+
 export function createLc4DevLiveReportArtifact(
   run: Lc4DevLiveRunArtifact,
   authority: Lc4DevAuthorityReportInput = Object.freeze({
@@ -2533,8 +2542,7 @@ export function createLc4DevLiveReportArtifact(
   }),
   budget: Lc4DevBudgetReportInput | null = null,
 ): Lc4DevLiveReportArtifact {
-  const { run_sha256: claimed, ...runBody } = run;
-  if (hash(RUN_DOMAIN, runBody) !== claimed) throw new Error("LC4-DEV run artifact hash mismatch");
+  assertLc4DevLiveRunArtifact(run);
   const replayHashesValid = authority.episode_replay_sha256s.every((digest) => HASH.test(digest))
     && new Set(authority.episode_replay_sha256s).size === authority.episode_replay_sha256s.length;
   const scorableShapeValid = authority.status === "scorable"
