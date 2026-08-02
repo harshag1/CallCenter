@@ -147,26 +147,45 @@ export function exactProviderStratifiedRandomizationTest(
   });
 }
 
-function validateBalancedClusters(
+function validateIndependentProviderStrata(
   rows: readonly IttPairedBinaryObservation[],
   providers: readonly string[],
-): readonly string[] {
+): Readonly<{
+  clusters: readonly string[];
+  pairsPerProvider: number;
+}> {
   const clusters = [...new Set(rows.map((row) => row.cluster_id))].sort();
+  if (clusters.length !== rows.length) {
+    const duplicate = clusters.find(
+      (cluster) => rows.filter((row) => row.cluster_id === cluster).length !== 1,
+    );
+    throw new Error(
+      `Independent template ${duplicate ?? "unknown"} appears more than once; provider-rendered pseudoreplication is forbidden`,
+    );
+  }
+  const counts = providers.map((provider) => rows.filter((row) => row.provider === provider).length);
+  if (new Set(counts).size !== 1) {
+    throw new Error(
+      `Provider strata must contain the same number of independent templates: ${providers
+        .map((provider, index) => `${provider}=${counts[index]}`)
+        .join(", ")}`,
+    );
+  }
   for (const cluster of clusters) {
     const selected = rows.filter((row) => row.cluster_id === cluster);
-    for (const provider of providers) {
-      if (selected.filter((row) => row.provider === provider).length !== 1) {
-        throw new Error(`Cluster ${cluster} must contain exactly one pair for provider ${provider}`);
-      }
-    }
-    if (selected.length !== providers.length) {
-      throw new Error(`Cluster ${cluster} contains an unregistered or duplicate provider row`);
+    if (selected.length !== 1) {
+      throw new Error(`Independent template ${cluster} must contribute exactly one Native/HACC pair`);
     }
   }
-  return Object.freeze(clusters);
+  return Object.freeze({ clusters: Object.freeze(clusters), pairsPerProvider: counts[0] });
 }
 
-/** Resamples whole scenario-template clusters while preserving all providers. */
+/**
+ * Resamples independent templates within their assigned provider stratum,
+ * then gives every provider-stratum mean equal aggregate weight. A template
+ * may appear only once across the entire analysis population; rendering one
+ * template through multiple providers is rejected as pseudoreplication.
+ */
 export function pairedClusterBootstrapConfidenceInterval(
   scheduled: readonly ScheduledPairedBinaryObservation[],
   options: Readonly<{
@@ -178,37 +197,45 @@ export function pairedClusterBootstrapConfidenceInterval(
 ): ProviderClusterBootstrapResult {
   const rows = normalizeEfficacyItt(scheduled);
   const providers = validateProviderSet(rows, options.providers);
-  const clusters = validateBalancedClusters(rows, providers);
+  const strata = validateIndependentProviderStrata(rows, providers);
   assertSafePositiveInteger(options.iterations, "iterations");
   if (options.iterations < 100) throw new Error("iterations must be at least 100");
   const confidenceLevel = options.confidence_level ?? 0.95;
   assertProbability(confidenceLevel, "confidence_level");
   const estimate = estimateNormalized(rows, providers).estimate;
-  const clusterEffects = new Map(clusters.map((cluster) => {
-    const selected = rows.filter((row) => row.cluster_id === cluster);
-    return [cluster, estimateNormalized(selected, providers).estimate] as const;
-  }));
+  const differencesByProvider = new Map(providers.map((provider) => [
+    provider,
+    rows
+      .filter((row) => row.provider === provider)
+      .map((row) => Number(row.hacc_value) - Number(row.native_value)),
+  ] as const));
   const rng = createSeededRng(options.seed);
   const draws = new Array<number>(options.iterations);
   for (let iteration = 0; iteration < options.iterations; iteration += 1) {
-    let total = 0;
-    for (let index = 0; index < clusters.length; index += 1) {
-      total += clusterEffects.get(clusters[Math.floor(draw(rng) * clusters.length)])!;
+    let providerTotal = 0;
+    for (const provider of providers) {
+      const differences = differencesByProvider.get(provider)!;
+      let stratumTotal = 0;
+      for (let index = 0; index < differences.length; index += 1) {
+        stratumTotal += differences[Math.floor(draw(rng) * differences.length)];
+      }
+      providerTotal += stratumTotal / differences.length;
     }
-    draws[iteration] = total / clusters.length;
+    draws[iteration] = providerTotal / providers.length;
   }
   const tail = (1 - confidenceLevel) / 2;
   return Object.freeze({
-    method: "paired_cluster_bootstrap_equal_provider_weighted" as const,
+    method: "provider_stratified_template_bootstrap_equal_provider_weighted" as const,
     estimate,
     interval: Object.freeze({
       confidence_level: confidenceLevel,
       lower: percentile(draws, tail),
       upper: percentile(draws, 1 - tail),
     }),
-    clusters: clusters.length,
+    clusters: strata.clusters.length,
     providers,
-    providers_per_cluster: providers.length,
+    providers_per_cluster: 1 as const,
+    pairs_per_provider: strata.pairsPerProvider,
     iterations: options.iterations,
     seed: options.seed,
   });

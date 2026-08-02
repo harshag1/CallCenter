@@ -126,7 +126,7 @@ function simulatedEndpoint(
       rows.push(Object.freeze({
         pair_id: `${profile.provider}:pair-${index + 1}`,
         provider: profile.provider,
-        cluster_id: `cluster-${index + 1}`,
+        cluster_id: `${profile.provider}:cluster-${index + 1}`,
         native: possiblyMissing(native, missing.native, rng),
         hacc: possiblyMissing(hacc, missing.hacc, rng),
       }));

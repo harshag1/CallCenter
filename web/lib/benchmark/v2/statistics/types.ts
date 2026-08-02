@@ -84,12 +84,13 @@ export type ProviderStratifiedRandomizationResult = Readonly<{
 }>;
 
 export type ProviderClusterBootstrapResult = Readonly<{
-  method: "paired_cluster_bootstrap_equal_provider_weighted";
+  method: "provider_stratified_template_bootstrap_equal_provider_weighted";
   estimate: number;
   interval: ConfidenceInterval;
   clusters: number;
   providers: readonly string[];
-  providers_per_cluster: number;
+  providers_per_cluster: 1;
+  pairs_per_provider: number;
   iterations: number;
   seed: string | number;
 }>;

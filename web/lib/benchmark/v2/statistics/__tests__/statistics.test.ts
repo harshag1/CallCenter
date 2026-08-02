@@ -32,7 +32,7 @@ function balancedRows(
     return Object.freeze({
       pair_id: `${provider}:pair-${index + 1}`,
       provider,
-      cluster_id: `cluster-${index + 1}`,
+      cluster_id: `${provider}:cluster-${index + 1}`,
       native,
       hacc,
     });
@@ -171,6 +171,38 @@ describe("HACC-Proof-v1 statistical core", () => {
     expect(result.estimate).toBe(0);
     expect(result.provider_weight).toBe(0.5);
     expect(result.provider_rows.map((row) => row.paired_risk_difference)).toEqual([1, -1]);
+  });
+
+  it("rejects provider-rendered template pseudoreplication", () => {
+    const repeatedTemplate = PROVIDERS.map((provider) => Object.freeze({
+      pair_id: `${provider}:repeated`,
+      provider,
+      cluster_id: "same-independent-template",
+      native: observed(false),
+      hacc: observed(true),
+    }));
+    expect(() => pairedClusterBootstrapConfidenceInterval(repeatedTemplate, {
+      providers: PROVIDERS,
+      iterations: 100,
+      seed: "pseudoreplication",
+    })).toThrow("provider-rendered pseudoreplication is forbidden");
+  });
+
+  it("fails closed on unequal or missing frozen provider strata", () => {
+    const balanced = balancedRows(3, () => [observed(false), observed(true)]);
+    expect(() => pairedClusterBootstrapConfidenceInterval(balanced.slice(0, -1), {
+      providers: PROVIDERS,
+      iterations: 100,
+      seed: "unequal-strata",
+    })).toThrow("Provider strata must contain the same number");
+    expect(() => pairedClusterBootstrapConfidenceInterval(
+      balanced.filter((row) => row.provider !== "xai"),
+      {
+        providers: PROVIDERS,
+        iterations: 100,
+        seed: "missing-stratum",
+      },
+    )).toThrow("Frozen provider has no scheduled pairs: xai");
   });
 
   it("uses exact harm-only safety bounds and requires strict non-inferiority", () => {
