@@ -1832,3 +1832,43 @@ The immutable DEV root remains **120/360**, incomplete, unscorable, and
 ineligible for a comparison or graph. The authorized sequence conservatively
 settled **$11.50**, active liability is **$0.00**, and no paid retry or further
 sequence is authorized.
+
+## 2026-08-02 — `84e3cf9` Gate D pass and qualification stop
+
+The standing launch authority admitted one exact-source sequence from clean
+commit `84e3cf945d59c30a8cab275252e081f26c8348f6`. The source-bound real-ASR
+receipt passed **3/3** tests with zero provider sessions. xAI finite-manual Gate
+D then passed with one session, two generation phases, one gateway roundtrip,
+and zero retries, reconnects, or fallbacks. Its receipt is
+`851ffc686d8618b211bd06f8d2d93c36a2d65e21a1d665e739121c7ec12edd89`.
+
+The serial qualification opened OpenAI first. OpenAI setup and paid phases
+passed, retaining one closed-loop spoken tool roundtrip and 149 wire
+observations. Gemini setup passed, but its paid turn emitted 11,550 bytes of
+24 kHz assistant PCM plus a non-empty transcript before any tool call. The
+runner terminalized the shard as `speech_before_tool`; xAI remained unopened
+and was cancelled after the failed predecessor. The aggregate is
+`42810c80ec98f6b4776a777a2b29a70727d7799bf22876011a2bbbdbe4eacca8`.
+
+The failed qualification retained four provider sessions, two paid sessions,
+four generation phases, two attempted tool roundtrips, one usage event, and
+zero retries. It conservatively settled **$3.00**. Together with Gate D, the
+sequence settled **$4.00**, left **$0.00** active, and never admitted the
+six-cell DEV run.
+
+Provider-free forensics confirmed intact 53,506-byte caller-audio delivery,
+the exact expected input transcript, ordered dynamic control and activity-end
+frames, no transport error, and real assistant output before the tool. The
+Live API exposes tools but no forced function-call setting in its
+[Live session configuration](https://googleapis.github.io/js-genai/release_docs/interfaces/types.LiveConnectConfig.html);
+Google's [Live tool guide](https://ai.google.dev/gemini-api/docs/live-api/tools)
+likewise documents declarations and manual responses without a Live
+`toolConfig`. The source hardening therefore preserves AUTO behavior while
+quarantining causally bound pre-tool Gemini audio at zero released bytes and
+continuing only toward the exact required call; it does not reinterpret the
+failed attempt or create a score.
+
+The release boundary remains unchanged: this is compatibility and fail-closed
+mechanism evidence from one attempt. It is not three-provider readiness, a
+Native-versus-HACC comparison, a model score, or authorization for a launch
+benchmark graph.

@@ -1544,3 +1544,50 @@ The failed report is
 `621c3fcaf268f5b282486522466f68ba4fd42d442bbeefcfb36f39dd68595aba`).
 It is incomplete, unscorable, and efficacy-claim ineligible. Nothing from
 this root may populate a comparative score or graph.
+
+## 2026-08-02 qualification stop at `84e3cf9`
+
+**Retained compatibility/fail-closed evidence only. No comparative score is
+admissible.**
+
+The standing launch authority admitted one serial release sequence from clean
+source commit `84e3cf945d59c30a8cab275252e081f26c8348f6`. Its xAI finite-manual Gate D
+passed. Qualification v4 then produced these immutable shard outcomes:
+
+| Provider | Setup | Paid spoken roundtrip | Disposition |
+|---|---|---|---|
+| OpenAI `gpt-realtime-2.1` | passed | passed | closed-loop tool roundtrip retained |
+| Gemini `gemini-3.1-flash-live-preview` | passed | failed `speech_before_tool` | terminal failure, no retry |
+| xAI `grok-voice-think-fast-1.0` | not opened | not opened | cancelled after predecessor failure |
+
+Gemini received the registered 53,506-byte, 16 kHz mono caller PCM in 84
+20-millisecond-paced chunks and the compact dynamic control before its exact
+activity-end trigger. It returned the matching 34-byte input transcript, then
+11,550 bytes of 24 kHz assistant PCM plus a non-empty nine-byte output
+transcript before any tool call. The runner classified that causal order as
+`speech_before_tool`, released no successful roundtrip, opened no xAI shard,
+and admitted no DEV cell.
+
+The aggregate records four provider sessions, two paid sessions, four
+generation phases, two attempted tool roundtrips, one usage event, zero paid
+retries, and a conservative **$3.00** qualification settlement. Together with
+the passing **$1.00** Gate D, this source settled **$4.00** and left **$0.00**
+active.
+
+Evidence commitments:
+
+- qualification manifest:
+  `7c39641eb5f79d0dcc3db87a8630b684202d9b9b240c2d15cbfd1caaa542baa6`;
+- qualification aggregate:
+  `42810c80ec98f6b4776a777a2b29a70727d7799bf22876011a2bbbdbe4eacca8`;
+- OpenAI paid terminal:
+  `21de31e35d65fea2614a314cab22aa58e137df8986f5ddafab504a6531b9f47c`;
+- Gemini paid terminal:
+  `12269457912a8464b837fd7e3e1d32ba148cda8a22069f5aa302779ac3898222`;
+- Gemini wire head:
+  `a6b66aca96cf25e480d60f2464db331e7ffbb8273c1d024058785b3077b24244`.
+
+This result proves neither that Gemini is generally worse nor that HACC is
+generally better. It proves that the exact registered Gemini session violated
+the tool-first qualification contract and that the runner detected and stopped
+the violation without a retry or downstream paid continuation.

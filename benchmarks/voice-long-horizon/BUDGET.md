@@ -3,15 +3,15 @@
 <!-- markdownlint-disable MD013 MD060 -->
 
 - Current cumulative ceiling (raised 2026-08-01): **$300.00 USD**
-- Next proposed paid sequence: **$19.00 maximum**, requiring fresh authority
-  bound to the final clean source after every provider-free scientific and
-  release gate passes
-- Post-baseline conservative paid-provider exposure: **$172.50 USD**
-- Post-baseline maximum after the proposed sequence: **$191.50 USD**
-- Ultra-conservative post-baseline maximum including frozen authority:
+- Next proposed paid benchmark sequence: **none**; the registered LC4 sequence
+  stopped at Gemini qualification and its unopened units were cancelled
+- Post-baseline conservative paid-provider exposure: **$176.50 USD**
+- Post-baseline maximum after remaining registered Twilio validation:
   **$206.50 USD**
+- Ultra-conservative post-baseline maximum including the separate frozen
+  authority and remaining Twilio envelope: **$221.50 USD**
 - Retained estimated voice-provider cost before HACC-LC3: **$6.878733 USD**
-- LC4 conservative filesystem-ledger settlements: **$242.50 USD**
+- LC4 conservative filesystem-ledger settlements: **$246.50 USD**
 - Quarantined nonterminal LC4 reservation authority: **$15.00 USD maximum**
 - Provider-billed voice spend: **unreconciled**
 - Recorded auxiliary review spend: **$4.379655 USD**, including the separate
@@ -25,19 +25,20 @@ maximum** quarantined authority recorded below. Admission requires
 
 `post_baseline_charged_spend + active_post_baseline_reservations + pessimistic_max_cost(proposed_run) <= $300.00`
 
-Immutable roots have now conservatively charged **$172.50** after that
-baseline, with **$0.00** active. One further sequence is proposed at a
-**$19.00** maximum but is neither authorized nor admissible for the changed
-source until every provider-free gate passes and the user binds authority to
-the final clean commit. Even
-adding the separate, frozen, non-reusable **$15.00** authority produces an
-ultra-conservative **$206.50**, below the current ceiling.
+Immutable roots have now conservatively charged **$176.50** after that
+baseline, with **$0.00** active. The 2026-08-02 LC4 sequence stopped at its
+failed Gemini qualification shard, so its unopened xAI qualification shard
+and all six DEV cells are cancelled rather than reusable. The remaining
+registered maximum is the separate **$30.00** Twilio validation envelope;
+fully settling it would produce **$206.50** of post-baseline conservative
+exposure, below the current ceiling.
 The frozen authority cannot fund a run and is not a settlement or invoice.
 
-No paid session in the next sequence may open until a new clean source commit,
-fresh source-bound ASR receipt, complete resumable-qualification-to-DEV
-admission, provider-free crash/restart and evidence regressions, the full test
-suite, claims verifier, build, and public audits all pass.
+No further paid benchmark session may open under the consumed sequence. Any
+future benchmark operation requires a separately registered, machine-bounded
+operation plus a new clean source commit, fresh source-bound ASR receipt,
+provider-free crash/restart and evidence regressions, the full test suite,
+claims verifier, build, and public audits.
 No other provider session may be scheduled without a new dated authorization
 entry. The prior `$1,000 / $900 / $100 / $270` program ceilings are historical,
 superseded planning authority; they do not authorize current work. Auxiliary
@@ -1194,3 +1195,43 @@ their exact-source evidence bindings.
 
 The canonical machine-readable contract is
 [`HACC_STANDING_LAUNCH_AUTHORITY.json`](HACC_STANDING_LAUNCH_AUTHORITY.json).
+
+## 2026-08-02 — Exact source `84e3cf9` stopped at Gemini qualification
+
+The standing authority admitted one exact-source LC4 sequence from clean commit
+`84e3cf945d59c30a8cab275252e081f26c8348f6`. The source-bound xAI finite-manual
+Gate D passed. The serial three-provider qualification then passed OpenAI and
+failed closed during Gemini's paid roundtrip when meaningful assistant audio
+arrived before the required tool call. The xAI qualification shard and every
+DEV cell remained unopened.
+
+| Source-bound operation | Conservative settlement | Outcome |
+|---|---:|---|
+| xAI finite-manual Gate D v4 | **$1.00** | passed; no retry, reconnect, fallback, or replacement |
+| Three-provider qualification v4 | **$3.00** | OpenAI passed; Gemini failed `speech_before_tool`; xAI cancelled |
+| Six-cell DEV | **$0.00** | never admitted after the failed qualification gate |
+| **Sequence total** | **$4.00** | terminal; no continuation or replacement is authorized |
+
+Qualification evidence recorded four provider sessions, two paid sessions,
+four generation phases, two attempted tool roundtrips, one usage event, and
+zero paid retries. OpenAI `gpt-realtime-2.1` completed its closed-loop spoken
+tool roundtrip. Gemini `gemini-3.1-flash-live-preview` completed setup, then
+emitted 11,550 bytes of assistant PCM and a non-empty nine-byte output
+transcript before any tool call; the runner retained the wire commitment and
+stopped. This is fail-closed mechanism evidence, not a Native-versus-HACC
+efficacy result or a provider score.
+
+Retained commitments:
+
+- Gate D receipt: `851ffc686d8618b211bd06f8d2d93c36a2d65e21a1d665e739121c7ec12edd89`
+- Qualification plan: `3d6718ba9e51fe0cca356b9f7991422b859664771c1ab35a4ab5ae89e747948a`
+- Qualification authorization: `b392fe3cbc1329d052399493c636f170c25dd35cbe15853ed99da793807011c8`
+- Qualification manifest: `7c39641eb5f79d0dcc3db87a8630b684202d9b9b240c2d15cbfd1caaa542baa6`
+- Qualification aggregate: `42810c80ec98f6b4776a777a2b29a70727d7799bf22876011a2bbbdbe4eacca8`
+
+The qualification root is retained privately at
+`/private/tmp/hacc-lc4-paid-sequence-84e3cf9-20260802T180200Z/qualification`.
+It contains no publishable comparative score and cannot be retried or resumed.
+Current post-baseline conservative exposure is **$176.50**, current LC4
+filesystem-ledger settlements are **$246.50**, active reservations are
+**$0.00**, and provider-billed cash spend remains unreconciled.

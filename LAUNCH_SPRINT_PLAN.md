@@ -1,10 +1,25 @@
 # HACC bounded open-source launch sprint
 
-Status: active  
+Status: developer-preview release reconciliation
 Frozen starting source: `5def6f6398e1a99160674eff0a81a13846b0f87e`  
 Branch: `open-source`  
 Sprint date: 2026-08-01  
 Time box: 1-2 focused hours of parallel execution, followed only by already-started verification or paid calls  
+
+## 2026-08-02 terminal outcome
+
+- The provider-free developer and mechanism gates remain the release basis.
+- xAI Gate D passed from exact source `84e3cf9`; the serial qualification then
+  passed OpenAI and failed closed on Gemini `speech_before_tool`. The unopened
+  xAI qualification shard and all six DEV cells were cancelled.
+- The sequence is terminal: there is no three-provider score, comparative
+  efficacy result, or benchmark graph to publish.
+- Twilio restricted-key setup is complete. Live telephony remains blocked only
+  on an explicitly approved E.164 destination and a named bridge-hosting GCP
+  project; no destination will be inferred and no unrelated cloud project will
+  be mutated.
+- Release wording must say **developer preview** and distinguish deterministic
+  framework evidence from realtime-model efficacy.
 
 ## Launch decision this plan must produce
 
@@ -208,4 +223,3 @@ Stop paid work immediately when:
 - the benchmark cannot preserve Native/HACC parity.
 
 Provider-free work may continue while waiting for credits, but the sprint may not invent a score, replace a failed cell, widen the benchmark, add a provider, or extend into general platform redesign.
-
