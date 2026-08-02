@@ -12,8 +12,13 @@ import {
   recordDualEnvelopeTerminal,
   settleDualEnvelopeSession,
 } from "../dual-envelope-budget";
+import {
+  initializeStandingAggregateBudgetLedger,
+  inspectStandingAggregateBudgetLedger,
+} from "../standing-aggregate-budget";
 
 const roots: string[] = [];
+const aggregatePaths = new Map<string, string>();
 const NOW = () => new Date("2026-08-02T12:00:00.000Z");
 const H = "a".repeat(64);
 
@@ -24,7 +29,11 @@ afterEach(async () => {
 async function pathFor(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hacc-v2-dual-budget-"));
   roots.push(root);
-  return join(root, "budget.json");
+  const ledgerPath = join(root, "budget.json");
+  const aggregateLedgerPath = join(root, "standing-aggregate.json");
+  await initializeStandingAggregateBudgetLedger({ aggregateLedgerPath, now: NOW });
+  aggregatePaths.set(ledgerPath, aggregateLedgerPath);
+  return ledgerPath;
 }
 
 function admission(
@@ -35,6 +44,7 @@ function admission(
 ) {
   return {
     ledgerPath,
+    standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
     operationId: `admit-${suffix}`,
     sessionId: `session-${suffix}`,
     trialId: `trial-${suffix}`,
@@ -52,7 +62,12 @@ function admission(
 }
 
 async function initialize(ledgerPath: string) {
-  return initializeDualEnvelopeBudgetLedger({ ledgerPath, ledgerId: "dual-budget-test", now: NOW });
+  return initializeDualEnvelopeBudgetLedger({
+    ledgerPath,
+    ledgerId: "dual-budget-test",
+    standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
+    now: NOW,
+  });
 }
 
 async function expectCode(promise: Promise<unknown>, code: DualEnvelopeBudgetError["code"]): Promise<void> {
@@ -106,9 +121,9 @@ describe("dual-envelope paid admission", () => {
       admitDualEnvelopeSession(admission(ledgerPath, "api-over", "api_testing", 1)),
       "envelope_exhausted"
     );
-    const benchmark = await admitDualEnvelopeSession(admission(ledgerPath, "bench", "benchmark", 100_000_000));
+    const benchmark = await admitDualEnvelopeSession(admission(ledgerPath, "bench", "benchmark", 20_000_000));
     expect(benchmark.snapshot.envelopes.api_testing.state).toBe("closed");
-    expect(benchmark.snapshot.envelopes.benchmark.state).toBe("closed");
+    expect(benchmark.snapshot.envelopes.benchmark.conservative_exposure_micro_usd).toBe(20_000_000);
   });
 
   it("serializes concurrent admissions without oversubscribing either envelope", async () => {
@@ -116,26 +131,70 @@ describe("dual-envelope paid admission", () => {
     await initialize(ledgerPath);
     const results = await Promise.allSettled([
       ...Array.from({ length: 30 }, (_, index) => admitDualEnvelopeSession({
-        ...admission(ledgerPath, `api-${index}`, "api_testing", 5_000_000),
+        ...admission(ledgerPath, `api-${index}`, "api_testing", 2_500_000),
         lockTimeoutMs: 30_000,
       })),
       ...Array.from({ length: 30 }, (_, index) => admitDualEnvelopeSession({
-        ...admission(ledgerPath, `bench-${index}`, "benchmark", 5_000_000),
+        ...admission(ledgerPath, `bench-${index}`, "benchmark", 2_500_000),
         lockTimeoutMs: 30_000,
       })),
     ]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(40);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(50);
     const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    expect(rejected).toHaveLength(20);
-    expect(rejected.every((result) => result.reason instanceof DualEnvelopeBudgetError
-      && result.reason.code === "envelope_exhausted")).toBe(true);
+    expect(rejected).toHaveLength(10);
 
     const snapshot = await inspectDualEnvelopeBudgetLedger({ ledgerPath });
-    expect(snapshot.envelopes.api_testing.conservative_exposure_micro_usd).toBe(100_000_000);
-    expect(snapshot.envelopes.benchmark.conservative_exposure_micro_usd).toBe(100_000_000);
-    expect(snapshot.envelopes.api_testing.opened_sessions_itt).toBe(20);
-    expect(snapshot.envelopes.benchmark.opened_sessions_itt).toBe(20);
+    expect(snapshot.envelopes.api_testing.conservative_exposure_micro_usd).toBeLessThanOrEqual(100_000_000);
+    expect(snapshot.envelopes.benchmark.conservative_exposure_micro_usd).toBeLessThanOrEqual(100_000_000);
+    expect(snapshot.envelopes.api_testing.opened_sessions_itt
+      + snapshot.envelopes.benchmark.opened_sessions_itt).toBe(50);
+    expect((await inspectStandingAggregateBudgetLedger({
+      aggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
+    })).aggregate_conservative_micro_usd).toBe(297_500_000);
   }, 60_000);
+
+  it("atomically enforces the standing aggregate across concurrent child ledgers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hacc-v2-standing-race-"));
+    roots.push(root);
+    const aggregateLedgerPath = join(root, "standing-aggregate.json");
+    const leftPath = join(root, "left-budget.json");
+    const rightPath = join(root, "right-budget.json");
+    await initializeStandingAggregateBudgetLedger({ aggregateLedgerPath, now: NOW });
+    aggregatePaths.set(leftPath, aggregateLedgerPath);
+    aggregatePaths.set(rightPath, aggregateLedgerPath);
+    await initializeDualEnvelopeBudgetLedger({
+      ledgerPath: leftPath,
+      ledgerId: "left-child",
+      standingAggregateLedgerPath: aggregateLedgerPath,
+      now: NOW,
+    });
+    await initializeDualEnvelopeBudgetLedger({
+      ledgerPath: rightPath,
+      ledgerId: "right-child",
+      standingAggregateLedgerPath: aggregateLedgerPath,
+      now: NOW,
+    });
+
+    // Genesis is $172.50 and the standing ceiling is exclusive $300. Two
+    // simultaneous $70 reservations cannot both fit the remaining $127.50.
+    const results = await Promise.allSettled([
+      admitDualEnvelopeSession({ ...admission(leftPath, "left-race", "api_testing", 70_000_000), lockTimeoutMs: 30_000 }),
+      admitDualEnvelopeSession({ ...admission(rightPath, "right-race", "benchmark", 70_000_000), lockTimeoutMs: 30_000 }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const aggregate = await inspectStandingAggregateBudgetLedger({ aggregateLedgerPath });
+    expect(aggregate).toMatchObject({
+      genesis_micro_usd: 172_500_000,
+      registered_conservative_micro_usd: 70_000_000,
+      aggregate_conservative_micro_usd: 242_500_000,
+      reservation_count: 1,
+      state: "open",
+    });
+    const openedAcrossChildren = (await inspectDualEnvelopeBudgetLedger({ ledgerPath: leftPath })).opened_session_ids_itt.length
+      + (await inspectDualEnvelopeBudgetLedger({ ledgerPath: rightPath })).opened_session_ids_itt.length;
+    expect(openedAcrossChildren).toBe(1);
+  });
 
   it("prohibits retries, replacements, fallbacks, and renamed cross-envelope replacements", async () => {
     const ledgerPath = await pathFor();
@@ -178,6 +237,7 @@ describe("dual-envelope paid admission", () => {
     expect(beforeSettlement.envelopes.benchmark.unsettled_reservations_micro_usd).toBe(9_000_000);
     await settleDualEnvelopeSession({
       ledgerPath,
+      standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
       operationId: "settle-failed",
       sessionId: "session-failed",
       estimatedMicroUsd: 2_000_000,
@@ -190,6 +250,48 @@ describe("dual-envelope paid admission", () => {
     expect(settled.envelopes.benchmark.opened_sessions_itt).toBe(1);
     expect(settled.opened_session_ids_itt).toEqual(["session-failed"]);
     expect(settled.envelopes.benchmark.reconciled_spend_micro_usd).toBe(3_000_000);
+    expect(settled.envelopes.benchmark.conservative_settled_micro_usd).toBe(9_000_000);
+    expect(settled.envelopes.benchmark.conservative_exposure_micro_usd).toBe(9_000_000);
+  });
+
+  it("never frees an opened maximum when settlement evidence claims zero cost", async () => {
+    const ledgerPath = await pathFor();
+    await initialize(ledgerPath);
+    await admitDualEnvelopeSession(admission(ledgerPath, "full", "api_testing", 100_000_000));
+    await recordDualEnvelopeTerminal({
+      ledgerPath,
+      operationId: "terminal-full",
+      sessionId: "session-full",
+      outcome: "completed",
+      now: NOW,
+    });
+    const forgedLow = await settleDualEnvelopeSession({
+      ledgerPath,
+      standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
+      operationId: "settle-full",
+      sessionId: "session-full",
+      estimatedMicroUsd: 0,
+      providerReportedMicroUsd: 0,
+      reconciledMicroUsd: 0,
+      reconciliationEvidenceSha256: H,
+      now: NOW,
+    });
+    expect(forgedLow.snapshot.envelopes.api_testing).toMatchObject({
+      reconciled_spend_micro_usd: 0,
+      conservative_settled_micro_usd: 100_000_000,
+      conservative_exposure_micro_usd: 100_000_000,
+      state: "closed",
+    });
+    expect(await inspectStandingAggregateBudgetLedger({
+      aggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
+    })).toMatchObject({
+      registered_conservative_micro_usd: 100_000_000,
+      aggregate_conservative_micro_usd: 272_500_000,
+    });
+    await expectCode(
+      admitDualEnvelopeSession(admission(ledgerPath, "second-full", "api_testing", 100_000_000)),
+      "envelope_exhausted"
+    );
   });
 
   it("makes local operation replay idempotent without creating a paid retry", async () => {
@@ -227,6 +329,7 @@ describe("dual-envelope paid admission", () => {
 
     const settlementInput = {
       ledgerPath,
+      standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
       operationId: "settle-same",
       sessionId: "session-same",
       estimatedMicroUsd: 500_000,
@@ -278,6 +381,7 @@ describe("dual-envelope paid admission", () => {
     await admitDualEnvelopeSession(admission(ledgerPath, "open", "api_testing"));
     await expectCode(settleDualEnvelopeSession({
       ledgerPath,
+      standingAggregateLedgerPath: aggregatePaths.get(ledgerPath)!,
       operationId: "settle-open",
       sessionId: "session-open",
       estimatedMicroUsd: 1,

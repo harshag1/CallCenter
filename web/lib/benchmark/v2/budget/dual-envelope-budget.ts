@@ -14,6 +14,14 @@ import {
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { canonicalJson, sha256Hex } from "../../artifacts";
 import { microUsdToDecimal } from "../../budget";
+import {
+  STANDING_GENESIS_MICRO_USD,
+  STANDING_HARD_CEILING_EXCLUSIVE_MICRO_USD,
+  inspectStandingAggregateBudgetLedger,
+  reserveStandingAggregateBudget,
+  settleStandingAggregateBudget,
+  standingAggregatePathSha256,
+} from "./standing-aggregate-budget";
 
 const LEDGER_KIND = "hacc_dual_envelope_budget_ledger" as const;
 const INTEGRITY_DOMAIN = "harshas-amazing-call-center/dual-envelope-budget-ledger/v1\n";
@@ -95,6 +103,12 @@ export type DualEnvelopeBudgetLedger = Readonly<{
   ledger_id: string;
   currency: "USD";
   ceilings_micro_usd: Readonly<Record<SpendPurpose, number>>;
+  standing_aggregate: Readonly<{
+    authority_id: "hacc-standing-launch-authority-2026-08-02";
+    ledger_path_sha256: string;
+    genesis_micro_usd: typeof STANDING_GENESIS_MICRO_USD;
+    hard_ceiling_exclusive_micro_usd: typeof STANDING_HARD_CEILING_EXCLUSIVE_MICRO_USD;
+  }>;
   sequence: number;
   created_at: string;
   updated_at: string;
@@ -108,6 +122,7 @@ export type EnvelopeSnapshot = Readonly<{
   ceiling_micro_usd: number;
   unsettled_reservations_micro_usd: number;
   reconciled_spend_micro_usd: number;
+  conservative_settled_micro_usd: number;
   conservative_exposure_micro_usd: number;
   remaining_micro_usd: number;
   opened_sessions_itt: number;
@@ -150,10 +165,12 @@ export type LedgerStoreOptions = Readonly<{
 
 export type InitializeDualEnvelopeBudgetInput = LedgerStoreOptions & Readonly<{
   ledgerId: string;
+  standingAggregateLedgerPath: string;
   now?: () => Date;
 }>;
 
 export type AdmitDualEnvelopeSessionInput = LedgerStoreOptions & Readonly<{
+  standingAggregateLedgerPath: string;
   operationId: string;
   sessionId: string;
   trialId: string;
@@ -177,6 +194,7 @@ export type RecordDualEnvelopeTerminalInput = LedgerStoreOptions & Readonly<{
 }>;
 
 export type SettleDualEnvelopeSessionInput = LedgerStoreOptions & Readonly<{
+  standingAggregateLedgerPath: string;
   operationId: string;
   sessionId: string;
   estimatedMicroUsd: number;
@@ -188,7 +206,7 @@ export type SettleDualEnvelopeSessionInput = LedgerStoreOptions & Readonly<{
 
 const LEDGER_KEYS = Object.freeze([
   "ceilings_micro_usd", "created_at", "currency", "integrity_sha256", "kind",
-  "ledger_id", "operations", "schema_version", "sequence", "sessions", "updated_at",
+  "ledger_id", "operations", "schema_version", "sequence", "sessions", "standing_aggregate", "updated_at",
 ].sort());
 const SESSION_KEYS = Object.freeze([
   "admission_id", "admission_operation_id", "admitted_at", "attempt", "costs",
@@ -204,6 +222,9 @@ const OPERATION_KEYS = Object.freeze([
   "applied_sequence", "operation_id", "operation_kind", "request_sha256",
 ].sort());
 const CEILING_KEYS = Object.freeze(["api_testing", "benchmark"]);
+const STANDING_AGGREGATE_KEYS = Object.freeze([
+  "authority_id", "genesis_micro_usd", "hard_ceiling_exclusive_micro_usd", "ledger_path_sha256",
+].sort());
 
 function fail(code: DualEnvelopeBudgetErrorCode, message: string, cause?: unknown): never {
   throw new DualEnvelopeBudgetError(code, message, cause === undefined ? undefined : { cause });
@@ -258,6 +279,7 @@ function ledgerWithoutIntegrity(ledger: DualEnvelopeBudgetLedger): Omit<DualEnve
     ledger_id: ledger.ledger_id,
     currency: ledger.currency,
     ceilings_micro_usd: ledger.ceilings_micro_usd,
+    standing_aggregate: ledger.standing_aggregate,
     sequence: ledger.sequence,
     created_at: ledger.created_at,
     updated_at: ledger.updated_at,
@@ -312,6 +334,13 @@ export function assertValidDualEnvelopeBudgetLedger(value: unknown): asserts val
     || value.ceilings_micro_usd.api_testing !== API_TESTING_CEILING_MICRO_USD
     || value.ceilings_micro_usd.benchmark !== BENCHMARK_CEILING_MICRO_USD) {
     fail("corrupt_ledger", "Both non-transferable envelope ceilings must be exactly $100");
+  }
+  if (!isRecord(value.standing_aggregate) || !hasExactlyKeys(value.standing_aggregate, STANDING_AGGREGATE_KEYS)
+    || value.standing_aggregate.authority_id !== "hacc-standing-launch-authority-2026-08-02"
+    || !SHA256.test(String(value.standing_aggregate.ledger_path_sha256))
+    || value.standing_aggregate.genesis_micro_usd !== STANDING_GENESIS_MICRO_USD
+    || value.standing_aggregate.hard_ceiling_exclusive_micro_usd !== STANDING_HARD_CEILING_EXCLUSIVE_MICRO_USD) {
+    fail("corrupt_ledger", "Standing aggregate authority binding is invalid");
   }
   if (!Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1) {
     fail("corrupt_ledger", "Ledger sequence is invalid");
@@ -412,7 +441,16 @@ function envelopeSnapshot(ledger: DualEnvelopeBudgetLedger, purpose: SpendPurpos
     sessions.filter((session) => session.status === "settled").map((session) => session.costs.reconciled_micro_usd!),
     `${purpose} reconciled spend`
   );
-  const exposure = safeSum([unsettled, reconciled], `${purpose} conservative exposure`);
+  const conservativeSettled = safeSum(
+    sessions.filter((session) => session.status === "settled").map((session) => Math.max(
+      session.maximum_micro_usd,
+      session.costs.estimated_micro_usd!,
+      session.costs.provider_reported_micro_usd!,
+      session.costs.reconciled_micro_usd!
+    )),
+    `${purpose} conservative settled spend`
+  );
+  const exposure = safeSum([unsettled, conservativeSettled], `${purpose} conservative exposure`);
   const ceiling = ledger.ceilings_micro_usd[purpose];
   const remaining = Math.max(0, ceiling - exposure);
   return Object.freeze({
@@ -420,6 +458,7 @@ function envelopeSnapshot(ledger: DualEnvelopeBudgetLedger, purpose: SpendPurpos
     ceiling_micro_usd: ceiling,
     unsettled_reservations_micro_usd: unsettled,
     reconciled_spend_micro_usd: reconciled,
+    conservative_settled_micro_usd: conservativeSettled,
     conservative_exposure_micro_usd: exposure,
     remaining_micro_usd: remaining,
     opened_sessions_itt: sessions.length,
@@ -547,6 +586,11 @@ export async function initializeDualEnvelopeBudgetLedger(
 ): Promise<DualEnvelopeBudgetSnapshot> {
   assertStorePath(input.ledgerPath);
   assertIdentifier(input.ledgerId, "ledgerId");
+  const aggregate = await inspectStandingAggregateBudgetLedger({
+    aggregateLedgerPath: input.standingAggregateLedgerPath,
+    lockTimeoutMs: input.lockTimeoutMs,
+    lockRetryMs: input.lockRetryMs,
+  });
   await mkdir(dirname(input.ledgerPath), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   return withLock(input, async () => {
     try {
@@ -565,6 +609,12 @@ export async function initializeDualEnvelopeBudgetLedger(
       ceilings_micro_usd: Object.freeze({
         api_testing: API_TESTING_CEILING_MICRO_USD,
         benchmark: BENCHMARK_CEILING_MICRO_USD,
+      }),
+      standing_aggregate: Object.freeze({
+        authority_id: aggregate.authority_id,
+        ledger_path_sha256: standingAggregatePathSha256(input.standingAggregateLedgerPath),
+        genesis_micro_usd: STANDING_GENESIS_MICRO_USD,
+        hard_ceiling_exclusive_micro_usd: STANDING_HARD_CEILING_EXCLUSIVE_MICRO_USD,
       }),
       sequence: 1,
       created_at: timestamp,
@@ -671,8 +721,46 @@ export async function admitDualEnvelopeSession(
     replacement_for: input.replacementFor,
     fallback_from: input.fallbackFrom,
   } as const;
+  const before = await readLedger(input.ledgerPath);
+  if (before.standing_aggregate.ledger_path_sha256 !== standingAggregatePathSha256(input.standingAggregateLedgerPath)) {
+    fail("invalid_request", "Admission does not use the child ledger's pinned standing aggregate");
+  }
+  const priorOperation = before.operations.find((operation) => operation.operation_id === input.operationId);
+  if (priorOperation && (priorOperation.operation_kind !== "session.admitted"
+    || priorOperation.request_sha256 !== requestHash("session.admitted", payload))) {
+    fail("operation_conflict", `Operation ${input.operationId} was already used with different inputs`);
+  }
+  if (before.sessions.some((session) => session.session_id === input.sessionId)) {
+    // Exact operation replay is resolved by mutate after the standing receipt
+    // is verified; any other operation is a prohibited duplicate.
+    if (!priorOperation) fail("duplicate_session", `Session ${input.sessionId} has already been admitted`);
+  }
+  if (!priorOperation
+    && before.sessions.some((session) => session.trial_id === input.trialId)) {
+    fail("duplicate_trial", "A logical trial may be opened only once across both envelopes");
+  }
+  const localEnvelope = envelopeSnapshot(before, input.purpose);
+  if (!priorOperation
+    && (localEnvelope.state !== "open"
+      || localEnvelope.conservative_exposure_micro_usd + input.maximumMicroUsd > localEnvelope.ceiling_micro_usd)) {
+    fail("envelope_exhausted", `${input.purpose} cannot spend capacity from the other envelope`);
+  }
+  const admittedAt = nowIso(input.now);
+  await reserveStandingAggregateBudget({
+    aggregateLedgerPath: input.standingAggregateLedgerPath,
+    lockTimeoutMs: input.lockTimeoutMs,
+    lockRetryMs: input.lockRetryMs,
+    childLedgerId: before.ledger_id,
+    sessionId: input.sessionId,
+    trialId: input.trialId,
+    purpose: input.purpose,
+    operationId: aggregateOperationId(before.ledger_id, input.operationId, "admit"),
+    maximumMicroUsd: input.maximumMicroUsd,
+    admittedAt,
+  });
   return mutate({
     ...input,
+    now: () => new Date(admittedAt),
     kind: "session.admitted",
     payload,
     // A replay proves the first operation committed but cannot prove whether
@@ -807,8 +895,32 @@ export async function settleDualEnvelopeSession(
     reconciled_micro_usd: input.reconciledMicroUsd,
     reconciliation_evidence_sha256: input.reconciliationEvidenceSha256,
   } as const;
+  const before = await readLedger(input.ledgerPath);
+  if (before.standing_aggregate.ledger_path_sha256 !== standingAggregatePathSha256(input.standingAggregateLedgerPath)) {
+    fail("invalid_request", "Settlement does not use the child ledger's pinned standing aggregate");
+  }
+  const sessionBefore = before.sessions.find((session) => session.session_id === input.sessionId);
+  if (!sessionBefore) fail("unknown_session", `Unknown session ${input.sessionId}`);
+  if (sessionBefore.status !== "terminal" && sessionBefore.status !== "settled") {
+    fail("invalid_transition", "Only a terminal session can be settled");
+  }
+  const settledAt = nowIso(input.now);
+  await settleStandingAggregateBudget({
+    aggregateLedgerPath: input.standingAggregateLedgerPath,
+    lockTimeoutMs: input.lockTimeoutMs,
+    lockRetryMs: input.lockRetryMs,
+    childLedgerId: before.ledger_id,
+    sessionId: input.sessionId,
+    operationId: aggregateOperationId(before.ledger_id, input.operationId, "settle"),
+    estimatedMicroUsd: input.estimatedMicroUsd,
+    providerReportedMicroUsd: input.providerReportedMicroUsd,
+    reconciledMicroUsd: input.reconciledMicroUsd,
+    reconciliationEvidenceSha256: input.reconciliationEvidenceSha256,
+    settledAt,
+  });
   return mutate({
     ...input,
+    now: () => new Date(settledAt),
     kind: "session.settled",
     payload,
     replayValue: (ledger) => {
@@ -833,4 +945,8 @@ export async function settleDualEnvelopeSession(
       value: (current) => current.sessions.find((session) => session.session_id === input.sessionId)!,
     }),
   });
+}
+
+function aggregateOperationId(childLedgerId: string, operationId: string, kind: "admit" | "settle"): string {
+  return `aggregate-${kind}-${sha256Hex(`${childLedgerId}\n${operationId}`).slice(0, 48)}`;
 }
