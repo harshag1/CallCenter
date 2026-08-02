@@ -15,6 +15,7 @@ import {
   markLc4CellNetworkEmissionStarted,
   pauseLc4CellBeforeNetwork,
   quarantineLc4CellAfterNetwork,
+  quarantineLc4InterruptedNetworkCell,
   type Lc4CellResumePlan,
   type Lc4ProviderCreditFailure,
 } from "../lc4-cell-resume-journal";
@@ -280,6 +281,33 @@ describe("LC4 whole-cell paid resume journal", () => {
     })).rejects.toThrow("not paused before network emission");
   });
 
+  it("turns a process-restarted network admission into an absorbing quarantine", async () => {
+    const value = await fixture();
+    let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    status = await begin(value, status.head_sha256, 0);
+    await emit(value, status.head_sha256, 0);
+
+    const restarted = await inspectLc4CellResumeJournal({
+      journal_path: value.journalPath,
+      expected_plan: value.plan,
+    });
+    const quarantined = await quarantineLc4InterruptedNetworkCell({
+      journal_path: value.journalPath,
+      expected_head_sha256: restarted.head_sha256,
+      expected_plan: value.plan,
+      failure_evidence_sha256: hash("process-ended-after-network-admission"),
+      now: value.now,
+    });
+    expect(quarantined).toMatchObject({
+      state: "network_ambiguous",
+      active_cell_id: null,
+      quarantined_cell_ids: [value.plan.cells[0]!.cell_id],
+      all_cells_completed: false,
+      scoring_available: false,
+    });
+    await expect(begin(value, quarantined.head_sha256, 1)).rejects.toThrow("exact next unopened cell");
+  });
+
   it("fails closed on stale head and changed source, model, corpus, schedule, credentials, or authorization", async () => {
     const value = await fixture();
     const status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
@@ -345,6 +373,10 @@ describe("LC4 whole-cell paid resume journal", () => {
     await complete(value, status.head_sha256, 0);
     const restarted = await inspectLc4CellResumeJournal({ journal_path: value.journalPath, expected_plan: value.plan });
     expect(restarted.completed_cell_ids).toEqual([value.plan.cells[0]!.cell_id]);
+    expect(restarted.completed_cells).toEqual([{
+      cell_id: value.plan.cells[0]!.cell_id,
+      artifact_sha256: hash("cell-artifact-0"),
+    }]);
     expect(restarted.next_cell_id).toBe(value.plan.cells[1]!.cell_id);
     await expect(begin(value, restarted.head_sha256, 0)).rejects.toThrow("exact next unopened cell");
   });

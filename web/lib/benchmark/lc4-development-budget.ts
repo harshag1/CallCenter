@@ -22,7 +22,10 @@ import type {
   Lc4DevLivePrepareArtifact,
   Lc4DevLiveRunArtifact,
 } from "./lc4-development-live-runner";
-import { LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256 } from "./lc4-development-live-runner";
+import {
+  LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+  LC4_DEV_PROVIDER_SESSION_SCHEDULE_SHA256,
+} from "./lc4-development-live-runner";
 
 export const LC4_DEV_BUDGET_VERSION = "HACC-LC4-DEV-BUDGET-v3" as const;
 export const LC4_DEV_BUDGET_MAXIMUM_MICRO_USD = 15_000_000 as const;
@@ -392,11 +395,33 @@ export class Lc4DevBudgetLifecycle {
   readonly #openedSegments = new Set<string>();
   readonly #nextSegmentByEpisode = new Map<string, number>();
 
-  constructor(input: Readonly<{ lease: Lc4DevRunLease; binding: Lc4DevBudgetBinding; now: () => Date }>) {
+  constructor(input: Readonly<{
+    lease: Lc4DevRunLease;
+    binding: Lc4DevBudgetBinding;
+    now: () => Date;
+    completed_episode_ids?: readonly string[];
+  }>) {
     assertLc4DevRunLease({ ...input, now: input.now(), admission: true });
     this.#lease = input.lease;
     this.#binding = input.binding;
     this.#now = input.now;
+    const completed = input.completed_episode_ids ?? [];
+    if (canonicalJson(completed) !== canonicalJson(
+      input.binding.prepare.episodes.slice(0, completed.length).map((episode) => episode.episode_id),
+    )) {
+      throw new Error("LC4-DEV budget continuation is not the exact completed leading episode prefix");
+    }
+    for (const episodeId of completed) {
+      if (!this.#lease.reservations.some((reservation) => reservation.episode_id === episodeId)) {
+        throw new Error("LC4-DEV budget continuation includes an unreserved episode");
+      }
+      for (let ordinal = 1; ordinal <= LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE; ordinal += 1) {
+        const segmentKey = `${episodeId}:segment:${ordinal}`;
+        this.#intendedSegments.add(segmentKey);
+        this.#openedSegments.add(segmentKey);
+      }
+      this.#nextSegmentByEpisode.set(episodeId, LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE + 1);
+    }
   }
 
   assertProviderConstructionAuthorized(): void {

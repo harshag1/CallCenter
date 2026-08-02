@@ -139,6 +139,7 @@ export type Lc4CellResumeStatus = Readonly<{
   next_cell_id: string | null;
   active_cell_id: string | null;
   completed_cell_ids: readonly string[];
+  completed_cells: readonly Readonly<{ cell_id: string; artifact_sha256: string }>[];
   quarantined_cell_ids: readonly string[];
   automatic_resume_available: boolean;
   all_cells_completed: boolean;
@@ -496,6 +497,12 @@ function stateFor(file: JournalFile): Lc4CellResumeStatus {
   const latest = new Map<string, JournalEvent>();
   for (const event of file.events) latest.set(event.cell_id, event);
   const completed = file.plan.cells.filter((cell) => latest.get(cell.cell_id)?.event_type === "cell.completed").map((cell) => cell.cell_id);
+  const completedCells = file.plan.cells.flatMap((cell) => {
+    const event = latest.get(cell.cell_id);
+    return event?.event_type === "cell.completed"
+      ? [Object.freeze({ cell_id: cell.cell_id, artifact_sha256: event.evidence_sha256 })]
+      : [];
+  });
   const quarantined = file.plan.cells.filter((cell) => latest.get(cell.cell_id)?.event_type === "cell.ambiguous_quarantined").map((cell) => cell.cell_id);
   const active = file.plan.cells.find((cell) => {
     const event = latest.get(cell.cell_id)?.event_type;
@@ -522,6 +529,7 @@ function stateFor(file: JournalFile): Lc4CellResumeStatus {
     next_cell_id: next?.cell_id ?? null,
     active_cell_id: active?.cell_id ?? null,
     completed_cell_ids: Object.freeze(completed),
+    completed_cells: Object.freeze(completedCells),
     quarantined_cell_ids: Object.freeze(quarantined),
     automatic_resume_available: state === "paused_before_network",
     all_cells_completed: completed.length === 6 && quarantined.length === 0,
@@ -798,6 +806,40 @@ export async function quarantineLc4CellAfterNetwork(input: Readonly<{
       cell_id: input.cell_id,
       owner_id: input.owner_id,
       owner_token_sha256: input.owner_token_sha256,
+      owner_expires_at: last.owner_expires_at,
+      evidence_sha256: input.failure_evidence_sha256,
+      budget_ledger_head_sha256: ledger.head_sha256,
+    });
+  }});
+}
+
+/**
+ * Converts a network-admitted orphan observed by a later process into an
+ * absorbing quarantine. It never reclaims or retries that cell.
+ */
+export async function quarantineLc4InterruptedNetworkCell(input: Readonly<{
+  journal_path: string;
+  expected_head_sha256: string;
+  expected_plan: Lc4CellResumePlan;
+  failure_evidence_sha256: string;
+  now: () => Date;
+}>): Promise<Lc4CellResumeStatus> {
+  requireHash(input.failure_evidence_sha256, "failure_evidence_sha256");
+  return mutateJournal({ ...input, event: async (file) => {
+    const last = file.events.at(-1);
+    if (!last || last.event_type !== "cell.network_emission_started") {
+      fail("interrupted cell is not an unclosed network admission");
+    }
+    const ledger = await inspectFilesystemBudgetLedger({
+      ledgerPath: file.plan.budget_ledger_path,
+      now: input.now,
+    });
+    return appendEvent(file, {
+      occurred_at: input.now().toISOString(),
+      event_type: "cell.ambiguous_quarantined",
+      cell_id: last.cell_id,
+      owner_id: last.owner_id,
+      owner_token_sha256: last.owner_token_sha256,
       owner_expires_at: last.owner_expires_at,
       evidence_sha256: input.failure_evidence_sha256,
       budget_ledger_head_sha256: ledger.head_sha256,

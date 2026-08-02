@@ -18,9 +18,11 @@ import type {
   Lc4DevLiveEpisodePlan,
   Lc4DevLivePreflightArtifact,
   Lc4DevLivePrepareArtifact,
+  Lc4DevLiveRunPrefixArtifact,
   Lc4DevLiveRunArtifact,
   Lc4DevLiveRunnerDependencies,
 } from "./lc4-development-live-runner";
+import { assertLc4DevLiveRunPrefixArtifact } from "./lc4-development-live-runner";
 import type {
   Lc4DevelopmentListenerSink,
   Lc4DevelopmentRealtimeAdapter,
@@ -270,6 +272,7 @@ async function writeLedgerIntent(input: Readonly<{
   preflight: Lc4DevLivePreflightArtifact;
   authorization_binding_sha256: string;
   genesis_sha256: string;
+  allow_existing_exact?: boolean;
 }>): Promise<void> {
   const body = {
     schema_version: 1 as const,
@@ -284,7 +287,19 @@ async function writeLedgerIntent(input: Readonly<{
   const intent = freeze({ ...body, intent_sha256: hash(LEDGER_INTENT_DOMAIN, body) });
   const path = resolve(input.path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const handle = await open(path, "wx", 0o400);
+  let handle;
+  try {
+    handle = await open(path, "wx", 0o400);
+  } catch (error) {
+    if (!input.allow_existing_exact || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const metadata = await lstat(path);
+    const expected = `${canonicalJson(intent)}\n`;
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+      || await readFile(path, "utf8") !== expected) {
+      throw new Error("LC4-DEV resumed ledger intent differs from frozen authorization");
+    }
+    return;
+  }
   try {
     await handle.writeFile(`${canonicalJson(intent)}\n`);
     await handle.sync();
@@ -307,21 +322,42 @@ export async function createLc4HashChainedLedgerWriter(input: Readonly<{
   path: string;
   genesis_sha256: string;
   evidence: Lc4DevReplayEvidenceStore;
+  existing_events?: readonly Lc4DevImmutableLedgerEvent[];
 }>): Promise<Lc4HashChainedLedgerWriter> {
   requireSha256(input.genesis_sha256, "LC4-DEV ledger genesis");
   const path = resolve(input.path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  try {
-    await access(path, constants.F_OK);
-    throw new Error("LC4-DEV ledger path already exists; resume and overwrite are forbidden");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  const existing = input.existing_events;
+  let handle;
+  if (existing) {
+    if (existing.length === 0) throw new Error("LC4-DEV resumed ledger requires a nonempty completed prefix");
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+      throw new Error("LC4-DEV resumed ledger must be one regular private file");
+    }
+    const expectedBytes = existing.map((event) => `${canonicalJson(event)}\n`).join("");
+    const actualBytes = await readFile(path, "utf8");
+    if (actualBytes !== expectedBytes) {
+      throw new Error("LC4-DEV resumed ledger bytes differ from the immutable completed-cell prefix");
+    }
+    await verifyLc4DevReplayLedger(existing as readonly Lc4DevReplayLedgerEvent[], input.evidence);
+    await chmod(path, 0o600);
+    handle = await open(path, "a", 0o600);
+  } else {
+    try {
+      await access(path, constants.F_OK);
+      throw new Error("LC4-DEV ledger path already exists; continuation requires an exact completed-cell prefix");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    handle = await open(path, "wx", 0o600);
   }
-  const handle = await open(path, "wx", 0o600);
-  let sequence = 0;
-  let previous: string | null = null;
+  let sequence = existing?.length ?? 0;
+  let previous: string | null = existing?.at(-1)?.event_sha256 ?? null;
   let closed = false;
-  const retainedEvents: Lc4DevReplayLedgerEvent[] = [];
+  const retainedEvents: Lc4DevReplayLedgerEvent[] = [
+    ...((existing ?? []) as readonly Lc4DevReplayLedgerEvent[]),
+  ];
   let queue = Promise.resolve();
 
   const append = async (event: Lc4DevImmutableLedgerEvent): Promise<void> => {
@@ -806,6 +842,7 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
   corpus?: Lc4PublicDevelopmentCorpus;
   cas_root_dir: string;
   ledger_path: string;
+  completed_prefix?: Lc4DevLiveRunPrefixArtifact;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
   caller_branch: Readonly<{
     matrix: Lc4DevCallerBranchMatrixArtifact;
@@ -844,6 +881,9 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
 }>): Promise<Lc4DevLiveDependencyBundle> {
   const corpus = input.corpus ?? createLc4PublicDevelopmentCorpus();
   assertLc4PublicDevelopmentCorpus(corpus);
+  if (input.completed_prefix) {
+    assertLc4DevLiveRunPrefixArtifact(input.completed_prefix, input.prepare, input.preflight);
+  }
   if (corpus.artifact_sha256 !== input.prepare.corpus_sha256) throw new Error("LC4-DEV dependency corpus differs from prepare");
   if (input.control.kind !== "gateway-flow-toolworld-crp-workers-v1"
     || input.control.manifest_sha256 !== input.preflight.control_plane_manifest_sha256) {
@@ -899,11 +939,13 @@ export async function createLc4DevelopmentLiveDependencies(input: Readonly<{
     preflight: input.preflight,
     authorization_binding_sha256: authorizationBinding,
     genesis_sha256: genesis,
+    allow_existing_exact: input.completed_prefix !== undefined,
   });
   const ledger = await createLc4HashChainedLedgerWriter({
     path: input.ledger_path,
     genesis_sha256: genesis,
     evidence: replayEvidence,
+    existing_events: input.completed_prefix?.ledger,
   });
   const listener = createLc4PinnedListenerSink({
     corpus,

@@ -20,11 +20,14 @@ import {
   createLc4DevRetainedQualificationReceipt,
   createLc4DevLiveReportArtifact,
   executeLc4DevLiveRun,
+  executeLc4DevLiveRunSlice,
   lc4DevLiveAuthorizationArtifactSha256,
   lc4DevLiveAuthorizationSigningBytes,
   type Lc4DevCallerAudioBinding,
   type Lc4DevControlReceipt,
   type Lc4DevLiveRunnerDependencies,
+  type Lc4DevLiveRunArtifact,
+  type Lc4DevLiveRunPrefixArtifact,
   type Lc4DevelopmentRealtimeAdapter,
 } from "../lc4-development-live-runner";
 import {
@@ -2324,16 +2327,43 @@ describe("LC4-DEV live runner", () => {
       },
     };
     const ledger: string[] = [];
-    const run = await executeLc4DevLiveRun({
-      prepare,
-      preflight,
-      dependencies: {
-        adapter,
-        ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies(), branch_outcome: "no_call" }),
-        ledger: { async append(event) { ledger.push(event.event_sha256); } },
-        now: () => new Date(NOW),
-      },
-    });
+    let prefix: Lc4DevLiveRunPrefixArtifact | undefined;
+    let run: Lc4DevLiveRunArtifact | undefined;
+    for (let processOrdinal = 1; processOrdinal <= 6; processOrdinal += 1) {
+      const result = await executeLc4DevLiveRunSlice({
+        prepare,
+        preflight,
+        completed_prefix: prefix,
+        maximum_new_cells: 1,
+        // Recreate the dependency object for every cell to model a new
+        // process hydrating only the immutable completed prefix.
+        dependencies: {
+          adapter,
+          ...retainedDependencies({ evidence, pcm, repair: noRepairDependencies(), branch_outcome: "no_call" }),
+          ledger: {
+            async append(event) {
+              expect(event.sequence).toBe(ledger.length + 1);
+              expect(event.previous_event_sha256).toBe(ledger.at(-1) ?? null);
+              ledger.push(event.event_sha256);
+            },
+          },
+          now: () => new Date(NOW),
+        },
+      });
+      if (processOrdinal < 6) {
+        expect(result.kind).toBe("completed_prefix");
+        if (result.kind !== "completed_prefix") throw new Error("expected process-cell prefix");
+        prefix = JSON.parse(canonicalJson(result.prefix)) as Lc4DevLiveRunPrefixArtifact;
+        expect(prefix.completed_episode_ids).toEqual(
+          prepare.episodes.slice(0, processOrdinal).map((episode) => episode.episode_id),
+        );
+      } else {
+        expect(result.kind).toBe("terminal_run");
+        if (result.kind !== "terminal_run") throw new Error("expected terminal six-cell run");
+        run = result.run;
+      }
+    }
+    if (!run) throw new Error("process-style LC4 run did not complete");
     expect(opens).toBe(36);
     expect(exchanges).toBe(360);
     expect(run.status).toBe("completed");

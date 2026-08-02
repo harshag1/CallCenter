@@ -119,6 +119,7 @@ const AUTHORIZATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authoriza
 const AUTHORIZATION_ARTIFACT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-authorization-artifact/v4\n";
 const LEDGER_EVENT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-ledger-event/v1\n";
 const RUN_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-run/v3\n";
+const CELL_PREFIX_DOMAIN = "harshas-amazing-call-center/lc4-dev-cell-prefix/v1\n";
 const REPORT_DOMAIN = "harshas-amazing-call-center/lc4-dev-live-report/v1\n";
 const REPAIR_DECISION_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-decision-receipt/v1\n";
 const REPAIR_PLAYBACK_DOMAIN = "harshas-amazing-call-center/lc4-dev-repair-playback-receipt/v1\n";
@@ -903,6 +904,39 @@ export type Lc4DevLiveRunArtifact = Readonly<{
   run_sha256: string;
 }>;
 
+/**
+ * Immutable cumulative custody after one or more complete cells. It contains
+ * only terminal episode prefixes, so a later process can append the next
+ * frozen cell without synthesizing or replaying a provider session.
+ */
+export type Lc4DevLiveRunPrefixArtifact = Readonly<{
+  schema_version: 1;
+  execution_id: string;
+  prepare_sha256: string;
+  preflight_sha256: string;
+  started_at: string;
+  completed_episode_ids: readonly string[];
+  previous_prefix_sha256: string | null;
+  episodes_started: number;
+  episodes_completed: number;
+  provider_segment_intent_count: number;
+  provider_segment_opened_count: number;
+  opportunities_submitted: number;
+  opportunities_completed: number;
+  response_generations_requested: number;
+  provider_calls_started: number;
+  response_generations_completed: number;
+  repair_playbacks: number;
+  retained_caller_audio: number;
+  retained_assistant_audio: number;
+  listener_evidence_count: number;
+  mechanism_receipt_count: number;
+  episode_finalization_count: number;
+  ledger: readonly Lc4DevImmutableLedgerEvent[];
+  ledger_head_sha256: string;
+  prefix_sha256: string;
+}>;
+
 export type Lc4DevLiveRunnerDependencies = Readonly<{
   adapter: Lc4DevelopmentRealtimeAdapter;
   caller_audio: Readonly<{ load(binding: Lc4DevCallerAudioBinding): Promise<Uint8Array> }>;
@@ -937,12 +971,13 @@ export type Lc4DevLiveRunnerDependencies = Readonly<{
   cell_checkpoint?: Readonly<{
     beforeFirstNetworkEmission(input: Readonly<{
       episode: Lc4DevLiveEpisodePlan;
-      prior_run_ledger_head_sha256: string;
+      prior_run_ledger_head_sha256: string | null;
     }>): Promise<void>;
     afterEpisodeTerminal(input: Readonly<{
       episode: Lc4DevLiveEpisodePlan;
       episode_finalization_sha256: string;
       terminal_run_ledger_head_sha256: string;
+      completed_prefix: Lc4DevLiveRunPrefixArtifact;
     }>): Promise<void>;
   }>;
   now(): Date;
@@ -1121,11 +1156,157 @@ function assertCallerBranchExchangeAuthority(input: Readonly<{
   }
 }
 
-export async function executeLc4DevLiveRun(input: Readonly<{
+function assertCanonicalTimestamp(value: string, label: string): void {
+  if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new Error(`${label} must be one canonical ISO timestamp`);
+  }
+}
+
+export function assertLc4DevLiveRunPrefixArtifact(
+  prefix: Lc4DevLiveRunPrefixArtifact,
+  prepare: Lc4DevLivePrepareArtifact,
+  preflight: Lc4DevLivePreflightArtifact,
+): void {
+  const { prefix_sha256: claimed, ...body } = prefix;
+  if (prefix.schema_version !== 1
+    || claimed !== hash(CELL_PREFIX_DOMAIN, body)
+    || prefix.execution_id !== prepare.execution_id
+    || prefix.prepare_sha256 !== prepare.prepare_sha256
+    || prefix.preflight_sha256 !== preflight.preflight_sha256) {
+    throw new Error("LC4-DEV completed-cell prefix identity or hash is invalid");
+  }
+  assertCanonicalTimestamp(prefix.started_at, "LC4-DEV completed-cell prefix started_at");
+  const count = prefix.completed_episode_ids.length;
+  if (count < 1 || count > LC4_DEV_LIVE_EPISODES
+    || canonicalJson(prefix.completed_episode_ids)
+      !== canonicalJson(prepare.episodes.slice(0, count).map((episode) => episode.episode_id))) {
+    throw new Error("LC4-DEV completed cells are not the exact frozen leading schedule");
+  }
+  if ((count === 1) !== (prefix.previous_prefix_sha256 === null)) {
+    throw new Error("LC4-DEV completed-cell prefix chain boundary is invalid");
+  }
+  if (prefix.previous_prefix_sha256 !== null) {
+    requireHash(prefix.previous_prefix_sha256, "LC4-DEV previous completed-cell prefix");
+  }
+  const exact = {
+    episodes_started: count,
+    episodes_completed: count,
+    provider_segment_intent_count: count * LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+    provider_segment_opened_count: count * LC4_DEV_PROVIDER_SEGMENTS_PER_EPISODE,
+    opportunities_submitted: count * LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE,
+    opportunities_completed: count * LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE,
+    mechanism_receipt_count: count * LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE,
+    episode_finalization_count: count,
+  } as const;
+  for (const [key, expected] of Object.entries(exact)) {
+    if (prefix[key as keyof typeof exact] !== expected) {
+      throw new Error(`LC4-DEV completed-cell prefix ${key} is not exact`);
+    }
+  }
+  const expectedGenerations = count * LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE
+    + prefix.repair_playbacks;
+  if (!Number.isSafeInteger(prefix.repair_playbacks) || prefix.repair_playbacks < 0
+    || prefix.repair_playbacks > count * LC4_DEV_LIVE_OPPORTUNITIES_PER_EPISODE
+    || prefix.response_generations_requested !== expectedGenerations
+    || prefix.provider_calls_started !== expectedGenerations
+    || prefix.response_generations_completed !== expectedGenerations
+    || prefix.retained_caller_audio !== expectedGenerations
+    || prefix.retained_assistant_audio !== expectedGenerations
+    || prefix.listener_evidence_count !== expectedGenerations) {
+    throw new Error("LC4-DEV completed-cell prefix generation and retention accounting differs");
+  }
+  let previous: string | null = null;
+  const eventCounts = new Map<Lc4DevImmutableLedgerEvent["event_type"], number>();
+  const allowedEpisodes = new Set(prefix.completed_episode_ids);
+  for (const [index, event] of prefix.ledger.entries()) {
+    const { event_sha256: eventClaim, ...eventBody } = event;
+    if (event.sequence !== index + 1 || event.previous_event_sha256 !== previous
+      || eventClaim !== hash(LEDGER_EVENT_DOMAIN, eventBody)
+      || !allowedEpisodes.has(event.episode_id)) {
+      throw new Error("LC4-DEV completed-cell prefix ledger is forked, mutated, or out of horizon");
+    }
+    eventCounts.set(event.event_type, (eventCounts.get(event.event_type) ?? 0) + 1);
+    previous = event.event_sha256;
+  }
+  if (prefix.ledger.length === 0 || previous !== prefix.ledger_head_sha256
+    || eventCounts.get("episode_opened") !== count
+    || eventCounts.get("episode_terminal") !== count
+    || eventCounts.get("segment_open_intent") !== count * 6
+    || eventCounts.get("segment_opened") !== count * 6
+    || eventCounts.get("opportunity_completed") !== count * 60
+    || eventCounts.get("repair_decided") !== count * 60
+    || (eventCounts.get("repair_audio_submitted") ?? 0) !== prefix.repair_playbacks
+    || (eventCounts.get("repair_completed") ?? 0) !== prefix.repair_playbacks) {
+    throw new Error("LC4-DEV completed-cell prefix ledger horizon or terminal head is incomplete");
+  }
+}
+
+function createLc4DevLiveRunPrefixArtifact(input: Readonly<{
+  prepare: Lc4DevLivePrepareArtifact;
+  preflight: Lc4DevLivePreflightArtifact;
+  started_at: string;
+  previous_prefix_sha256: string | null;
+  episodes_started: number;
+  episodes_completed: number;
+  provider_segment_intent_count: number;
+  provider_segment_opened_count: number;
+  opportunities_submitted: number;
+  opportunities_completed: number;
+  response_generations_requested: number;
+  provider_calls_started: number;
+  response_generations_completed: number;
+  repair_playbacks: number;
+  retained_caller_audio: number;
+  retained_assistant_audio: number;
+  listener_evidence_count: number;
+  mechanism_receipt_count: number;
+  episode_finalization_count: number;
+  ledger: readonly Lc4DevImmutableLedgerEvent[];
+  ledger_head_sha256: string;
+}>): Lc4DevLiveRunPrefixArtifact {
+  const body = freeze({
+    schema_version: 1 as const,
+    execution_id: input.prepare.execution_id,
+    prepare_sha256: input.prepare.prepare_sha256,
+    preflight_sha256: input.preflight.preflight_sha256,
+    started_at: input.started_at,
+    completed_episode_ids: input.prepare.episodes
+      .slice(0, input.episodes_completed).map((episode) => episode.episode_id),
+    previous_prefix_sha256: input.previous_prefix_sha256,
+    episodes_started: input.episodes_started,
+    episodes_completed: input.episodes_completed,
+    provider_segment_intent_count: input.provider_segment_intent_count,
+    provider_segment_opened_count: input.provider_segment_opened_count,
+    opportunities_submitted: input.opportunities_submitted,
+    opportunities_completed: input.opportunities_completed,
+    response_generations_requested: input.response_generations_requested,
+    provider_calls_started: input.provider_calls_started,
+    response_generations_completed: input.response_generations_completed,
+    repair_playbacks: input.repair_playbacks,
+    retained_caller_audio: input.retained_caller_audio,
+    retained_assistant_audio: input.retained_assistant_audio,
+    listener_evidence_count: input.listener_evidence_count,
+    mechanism_receipt_count: input.mechanism_receipt_count,
+    episode_finalization_count: input.episode_finalization_count,
+    ledger: input.ledger,
+    ledger_head_sha256: input.ledger_head_sha256,
+  });
+  const artifact = freeze({ ...body, prefix_sha256: hash(CELL_PREFIX_DOMAIN, body) });
+  assertLc4DevLiveRunPrefixArtifact(artifact, input.prepare, input.preflight);
+  return artifact;
+}
+
+export type Lc4DevLiveRunSliceResult =
+  | Readonly<{ kind: "completed_prefix"; prefix: Lc4DevLiveRunPrefixArtifact }>
+  | Readonly<{ kind: "terminal_run"; run: Lc4DevLiveRunArtifact }>;
+
+export async function executeLc4DevLiveRunSlice(input: Readonly<{
   prepare: Lc4DevLivePrepareArtifact;
   preflight: Lc4DevLivePreflightArtifact;
   dependencies: Lc4DevLiveRunnerDependencies;
-}>): Promise<Lc4DevLiveRunArtifact> {
+  completed_prefix?: Lc4DevLiveRunPrefixArtifact;
+  maximum_new_cells: number;
+}>): Promise<Lc4DevLiveRunSliceResult> {
   assertLc4DevLivePrepareArtifact(input.prepare);
   assertLc4DevLivePreflightArtifact(input.preflight, input.prepare, input.dependencies.now());
   if (input.dependencies.adapter.kind !== "lc4-development-realtime-v1"
@@ -1145,25 +1326,37 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   }
   const corpus = createLc4PublicDevelopmentCorpus();
   if (corpus.artifact_sha256 !== input.prepare.corpus_sha256) throw new Error("LC4-DEV prepared corpus differs from runtime corpus");
-  const startedAt = input.dependencies.now().toISOString();
-  let previousEvent: string | null = null;
-  let sequence = 0;
-  const ledger: Lc4DevImmutableLedgerEvent[] = [];
-  let episodesStarted = 0;
-  let episodesCompleted = 0;
-  let providerSegmentIntents = 0;
-  let providerSegmentsOpened = 0;
-  let opportunitiesSubmitted = 0;
-  let opportunitiesCompleted = 0;
-  let retainedCaller = 0;
-  let retainedAssistant = 0;
-  let listenerEvidence = 0;
-  let mechanismReceipts = 0;
-  let repairPlaybacks = 0;
-  let episodeFinalizations = 0;
-  let responseGenerationsRequested = 0;
-  let providerCallsStarted = 0;
-  let responseGenerationsCompleted = 0;
+  if (!Number.isSafeInteger(input.maximum_new_cells) || input.maximum_new_cells < 1
+    || input.maximum_new_cells > LC4_DEV_LIVE_EPISODES) {
+    throw new Error("LC4-DEV run slice must admit from one through six new cells");
+  }
+  if (input.completed_prefix) {
+    assertLc4DevLiveRunPrefixArtifact(input.completed_prefix, input.prepare, input.preflight);
+  }
+  const resumed = input.completed_prefix;
+  const startedAt = resumed?.started_at ?? input.dependencies.now().toISOString();
+  let previousEvent: string | null = resumed?.ledger_head_sha256 ?? null;
+  let sequence = resumed?.ledger.length ?? 0;
+  const ledger: Lc4DevImmutableLedgerEvent[] = [...(resumed?.ledger ?? [])];
+  let episodesStarted = resumed?.episodes_started ?? 0;
+  let episodesCompleted = resumed?.episodes_completed ?? 0;
+  let providerSegmentIntents = resumed?.provider_segment_intent_count ?? 0;
+  let providerSegmentsOpened = resumed?.provider_segment_opened_count ?? 0;
+  let opportunitiesSubmitted = resumed?.opportunities_submitted ?? 0;
+  let opportunitiesCompleted = resumed?.opportunities_completed ?? 0;
+  let retainedCaller = resumed?.retained_caller_audio ?? 0;
+  let retainedAssistant = resumed?.retained_assistant_audio ?? 0;
+  let listenerEvidence = resumed?.listener_evidence_count ?? 0;
+  let mechanismReceipts = resumed?.mechanism_receipt_count ?? 0;
+  let repairPlaybacks = resumed?.repair_playbacks ?? 0;
+  let episodeFinalizations = resumed?.episode_finalization_count ?? 0;
+  let responseGenerationsRequested = resumed?.response_generations_requested ?? 0;
+  let providerCallsStarted = resumed?.provider_calls_started ?? 0;
+  let responseGenerationsCompleted = resumed?.response_generations_completed ?? 0;
+  let priorPrefixSha256 = resumed?.prefix_sha256 ?? null;
+  let lastCompletedPrefix: Lc4DevLiveRunPrefixArtifact | null = null;
+  const initialEpisodesCompleted = episodesCompleted;
+  let sliceStopped = false;
   let failureClass: Lc4DevLiveRunArtifact["failure_class"] = null;
   let failureMessage: string | null = null;
 
@@ -1377,7 +1570,7 @@ export async function executeLc4DevLiveRun(input: Readonly<{
   };
 
   try {
-    for (const episode of input.prepare.episodes) {
+    for (const episode of input.prepare.episodes.slice(episodesCompleted)) {
       const providerBindings = input.prepare.audio_bindings.filter((binding) => binding.provider === episode.provider);
       let previousRotationReceipt: string | null = null;
       let priorExchange: string | null = null;
@@ -1387,6 +1580,12 @@ export async function executeLc4DevLiveRun(input: Readonly<{
       const episodeOpportunityStart = opportunitiesCompleted;
       const episodeResponseStart = responseGenerationsCompleted;
       const episodeRepairStart = repairPlaybacks;
+      if (input.dependencies.cell_checkpoint) {
+        await input.dependencies.cell_checkpoint.beforeFirstNetworkEmission({
+          episode,
+          prior_run_ledger_head_sha256: previousEvent,
+        });
+      }
       episodesStarted += 1;
       await append("episode_opened", episode.episode_id, null, { provider: episode.provider, arm: episode.arm, model: episode.model });
       for (const segmentOrdinal of [1, 2, 3, 4, 5, 6] as const) {
@@ -1404,12 +1603,6 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         });
         providerSegmentIntents += 1;
         try {
-          if (segmentOrdinal === 1 && input.dependencies.cell_checkpoint) {
-            await input.dependencies.cell_checkpoint.beforeFirstNetworkEmission({
-              episode,
-              prior_run_ledger_head_sha256: previousEvent!,
-            });
-          }
           session = await boundedSegmentOpen(LC4_DEV_LIVE_TIMEOUTS.segment_open_ms, (signal) => input.dependencies.adapter.openSegment({
             episode,
             segment_ordinal: segmentOrdinal,
@@ -1938,16 +2131,51 @@ export async function executeLc4DevLiveRun(input: Readonly<{
         { status: "completed", canonical_opportunities: 60, episode_finalization_sha256: episodeFinalization.evidence_sha256 },
         [episodeFinalization, ...segmentFinalizations],
       );
+      episodesCompleted += 1;
+      const completedPrefix = createLc4DevLiveRunPrefixArtifact({
+        prepare: input.prepare,
+        preflight: input.preflight,
+        started_at: startedAt,
+        previous_prefix_sha256: priorPrefixSha256,
+        episodes_started: episodesStarted,
+        episodes_completed: episodesCompleted,
+        provider_segment_intent_count: providerSegmentIntents,
+        provider_segment_opened_count: providerSegmentsOpened,
+        opportunities_submitted: opportunitiesSubmitted,
+        opportunities_completed: opportunitiesCompleted,
+        response_generations_requested: responseGenerationsRequested,
+        provider_calls_started: providerCallsStarted,
+        response_generations_completed: responseGenerationsCompleted,
+        repair_playbacks: repairPlaybacks,
+        retained_caller_audio: retainedCaller,
+        retained_assistant_audio: retainedAssistant,
+        listener_evidence_count: listenerEvidence,
+        mechanism_receipt_count: mechanismReceipts,
+        episode_finalization_count: episodeFinalizations,
+        ledger: Object.freeze([...ledger]),
+        ledger_head_sha256: previousEvent!,
+      });
       await input.dependencies.cell_checkpoint?.afterEpisodeTerminal({
         episode,
         episode_finalization_sha256: episodeFinalization.evidence_sha256,
         terminal_run_ledger_head_sha256: previousEvent!,
+        completed_prefix: completedPrefix,
       });
-      episodesCompleted += 1;
+      priorPrefixSha256 = completedPrefix.prefix_sha256;
+      lastCompletedPrefix = completedPrefix;
+      if (episodesCompleted < LC4_DEV_LIVE_EPISODES
+        && episodesCompleted - initialEpisodesCompleted >= input.maximum_new_cells) {
+        sliceStopped = true;
+        break;
+      }
     }
   } catch (error) {
     failureMessage = error instanceof Error ? error.message : "LC4-DEV live run failed";
     if (failureMessage.startsWith("timeout:")) failureClass = "timeout";
+  }
+  if (sliceStopped) {
+    if (!lastCompletedPrefix) throw new Error("LC4-DEV slice stopped without a completed-cell prefix");
+    return freeze({ kind: "completed_prefix" as const, prefix: lastCompletedPrefix });
   }
   const completedAt = input.dependencies.now().toISOString();
   const completed = episodesCompleted === 6
@@ -1988,7 +2216,19 @@ export async function executeLc4DevLiveRun(input: Readonly<{
     ledger: Object.freeze(ledger),
     ledger_head_sha256: previousEvent,
   };
-  return freeze({ ...body, run_sha256: hash(RUN_DOMAIN, body) });
+  return freeze({ kind: "terminal_run" as const, run: freeze({ ...body, run_sha256: hash(RUN_DOMAIN, body) }) });
+}
+
+export async function executeLc4DevLiveRun(input: Readonly<{
+  prepare: Lc4DevLivePrepareArtifact;
+  preflight: Lc4DevLivePreflightArtifact;
+  dependencies: Lc4DevLiveRunnerDependencies;
+}>): Promise<Lc4DevLiveRunArtifact> {
+  const result = await executeLc4DevLiveRunSlice({ ...input, maximum_new_cells: 6 });
+  if (result.kind !== "terminal_run") {
+    throw new Error("LC4-DEV full runner unexpectedly returned a partial cell prefix");
+  }
+  return result.run;
 }
 
 export type Lc4DevLiveReportArtifact = Readonly<{

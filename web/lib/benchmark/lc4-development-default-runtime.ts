@@ -394,6 +394,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
       credentials,
       signer,
       budget_authority,
+      completed_prefix,
     }) => {
       if (resolve(audio_root) !== audioRoot) throw new Error("LC4-DEV build audio root differs from the inspected runtime root");
       const built = mechanism({ audio_manifest, repair_manifest, signer });
@@ -441,6 +442,7 @@ export async function createLc4DevelopmentDefaultOperatorRuntime(
         preflight,
         cas_root_dir: casRoot,
         ledger_path: resolve(evidence_root, "ledger.jsonl"),
+        completed_prefix,
         caller_audio: callerAudio,
         caller_branch: Object.freeze({
           ...built.caller_branch,

@@ -684,6 +684,26 @@ describe("LC4-DEV concrete live dependencies", () => {
     });
     expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(2);
     await expect(createLc4HashChainedLedgerWriter({ path, genesis_sha256: genesis, evidence })).rejects.toThrow("already exists");
+
+    const reopened = await createLc4HashChainedLedgerWriter({
+      path,
+      genesis_sha256: genesis,
+      evidence,
+      existing_events: JSON.parse(JSON.stringify([first, second])),
+    });
+    const third = await ledgerEvent(evidence, 3, second.event_sha256);
+    await reopened.append(third);
+    await reopened.close();
+    expect(reopened.events()).toEqual([first, second, third]);
+
+    await chmod(path, 0o600);
+    await writeFile(path, `${await readFile(path, "utf8")} `);
+    await expect(createLc4HashChainedLedgerWriter({
+      path,
+      genesis_sha256: genesis,
+      evidence,
+      existing_events: [first, second, third],
+    })).rejects.toThrow("bytes differ from the immutable completed-cell prefix");
   });
 
   it("refuses to append a ledger event when any referenced CAS object is missing or tampered", async () => {
