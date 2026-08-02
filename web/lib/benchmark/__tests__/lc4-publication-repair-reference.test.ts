@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { sha256Hex } from "../artifacts";
+import { createLc4PublicDevelopmentCorpus } from "../lc4-public-development-corpus";
 import {
   LC4_DEV_REPLAY_EVIDENCE_VERSION,
   type Lc4DevReplayArtifactKind,
   type Lc4DevReplayArtifactReference,
 } from "../lc4-development-evidence-retention";
 import {
+  assertLc4PublicationRepairSelectionBinding,
   resolveLc4PublicationRepairPcmReference,
 } from "../lc4-publication-transport-replay";
 
@@ -59,6 +61,37 @@ describe("LC4 publication repair PCM ledger edge", () => {
       evidence_references: [retained, { ...retained }],
     }, repairPcmSha256)).toThrow(
       "LC4 publication repair lacks one exact caller PCM ledger edge",
+    );
+  });
+});
+
+describe("LC4 publication frozen repair selection binding", () => {
+  const repairSource = createLc4PublicDevelopmentCorpus()
+    .repair_policy.library[0]!;
+  const repairPcmSha256 = sha256Hex("repair PCM");
+  const validSelection = Object.freeze({
+    repair_pcm_id: repairSource.id,
+    pcm_sha256: repairPcmSha256,
+    byte_length: 4,
+  });
+
+  it("accepts the canonical byte_length field for the frozen repair item", () => {
+    expect(() => assertLc4PublicationRepairSelectionBinding({
+      selection: validSelection,
+      repair_source: repairSource,
+      repair_pcm_sha256: repairPcmSha256,
+      repair_pcm_byte_length: 4,
+    })).not.toThrow();
+  });
+
+  it("rejects a retained selection whose byte length differs from CAS", () => {
+    expect(() => assertLc4PublicationRepairSelectionBinding({
+      selection: { ...validSelection, byte_length: 6 },
+      repair_source: repairSource,
+      repair_pcm_sha256: repairPcmSha256,
+      repair_pcm_byte_length: 4,
+    })).toThrow(
+      "LC4 publication repair caller text differs from its frozen repair library",
     );
   });
 });

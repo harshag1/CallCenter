@@ -219,6 +219,30 @@ export function resolveLc4PublicationRepairPcmReference(
   return matches[0]!;
 }
 
+/**
+ * Binds a retained conversational-repair selection to the frozen repair
+ * library entry and the exact PCM recovered from CAS. The repair selection
+ * schema names its byte count `byte_length`.
+ */
+export function assertLc4PublicationRepairSelectionBinding<
+  T extends Readonly<{ id: string }>,
+>(input: Readonly<{
+  selection: Record<string, JsonValue>;
+  repair_source: T | undefined;
+  repair_pcm_sha256: string;
+  repair_pcm_byte_length: number;
+}>): T {
+  if (!input.repair_source
+    || input.selection.repair_pcm_id !== input.repair_source.id
+    || input.selection.pcm_sha256 !== input.repair_pcm_sha256
+    || input.selection.byte_length !== input.repair_pcm_byte_length) {
+    throw new Error(
+      "LC4 publication repair caller text differs from its frozen repair library",
+    );
+  }
+  return input.repair_source;
+}
+
 function exactKeys(
   value: object,
   expected: readonly string[],
@@ -1949,13 +1973,13 @@ async function replayEpisode(input: Readonly<{
       );
       const repairSource = corpus.repair_policy.library.find((candidate) =>
         candidate.id === selection.repair_pcm_id);
-      if (!repairSource
-        || selection.pcm_sha256 !== repairCallerPcmSha256
-        || selection.pcm_byte_length !== repairCallerPcm.byteLength) {
-        throw new Error(
-          "LC4 publication repair caller text differs from its frozen repair library",
-        );
-      }
+      const validatedRepairSource =
+        assertLc4PublicationRepairSelectionBinding({
+          selection,
+          repair_source: repairSource,
+          repair_pcm_sha256: repairCallerPcmSha256,
+          repair_pcm_byte_length: repairCallerPcm.byteLength,
+        });
       const repairAuthorityReplay =
         await replayLc4DevelopmentListenerAuthority({
           cas: input.cas,
@@ -2030,7 +2054,7 @@ async function replayEpisode(input: Readonly<{
         turns: reconstructedConversationTurns,
         exchange_phase: "repair",
         opportunity_index: opportunity.index,
-        caller_text: repairSource.canonical_caller_text,
+        caller_text: validatedRepairSource.canonical_caller_text,
         caller_pcm_sha256: repairCallerPcmSha256,
         exchange: repairExchange,
         verified_assistant_transcript:
