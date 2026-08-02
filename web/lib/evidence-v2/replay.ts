@@ -18,7 +18,6 @@ import {
   type AudioRangePayload,
   type CatalogPublishedPayload,
   type AudioSemanticAlignmentArtifactV2,
-  type EvidenceArtifactResolverV2,
   type EvidenceBundleV2,
   type EvidenceCategoryRootV2,
   type EvidenceCategoryV2,
@@ -28,6 +27,7 @@ import {
   type EvidenceEventTypeV2,
   type EvidenceEventV2,
   type EvidenceReplayResultV2,
+  type EvidenceReplayOptionsV2,
   type EvidenceTrustV2,
   type FrozenEvidenceEvaluationContractV2,
   type PlanRegisteredPayload,
@@ -55,14 +55,6 @@ const CATEGORY_ROOT_KEYS = ["event_count", "root_sha256"] as const;
 const SIGNATURE_KEYS = ["algorithm", "signer_id", "signature_base64"] as const;
 
 type ReplayError = Readonly<{ code: string; message: string }>;
-type ReplayOptions = Readonly<{
-  trust: EvidenceTrustV2;
-  expectedRunId: string;
-  evaluationContract: FrozenEvidenceEvaluationContractV2;
-  expectedEvaluationContractSha256: string;
-  artifactResolver: EvidenceArtifactResolverV2;
-}>;
-
 type ReopenedEvidence = Readonly<{
   worldSnapshots: ReadonlyMap<string, WorldSnapshotArtifactV2>;
   semanticAlignments: ReadonlyMap<string, AudioSemanticAlignmentArtifactV2>;
@@ -177,7 +169,7 @@ function parseSemanticAlignment(bytes: Uint8Array, expectedSha256: string): Audi
 
 function verifyExternalEvidence(
   bundle: EvidenceBundleV2,
-  options: ReplayOptions,
+  options: EvidenceReplayOptionsV2,
   errors: ReplayError[],
 ): ReopenedEvidence {
   let contract: FrozenEvidenceEvaluationContractV2;
@@ -699,7 +691,7 @@ function deriveEndpoints(
 
 export function replayEvidenceBundleV2(
   input: unknown,
-  options: ReplayOptions,
+  options: EvidenceReplayOptionsV2,
 ): EvidenceReplayResultV2 {
   const errors: ReplayError[] = [];
   let contract: FrozenEvidenceEvaluationContractV2;
@@ -729,7 +721,7 @@ export function replayEvidenceBundleV2(
 
 export function assertEvidenceBundleV2(
   input: unknown,
-  options: ReplayOptions,
+  options: EvidenceReplayOptionsV2,
 ) {
   const result = replayEvidenceBundleV2(input, options);
   if (!result.ok) throw new Error(`Evidence v2 replay failed: ${result.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}`);

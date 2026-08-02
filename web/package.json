@@ -30,6 +30,8 @@
     "benchmark:voice": "tsx scripts/voice-benchmark.ts",
     "benchmark:canary:operator": "tsx scripts/voice-canary-operator.ts",
     "benchmark:voice:offline": "tsx scripts/voice-benchmark-offline.ts",
+    "benchmark:proof:offline-stress": "tsx scripts/hacc-proof-offline-stress.ts",
+    "benchmark:proof:offline-stress:ci": "tsx scripts/hacc-proof-offline-stress.ts --ci",
     "benchmark:voice:offline:imports": "tsx scripts/check-offline-benchmark-imports.ts",
     "benchmark:precanary:imports": "tsx scripts/check-pre-canary-imports.ts",
     "benchmark:precanary:packet": "tsx scripts/pre-canary-proof.ts",

@@ -229,6 +229,14 @@ export type EvidenceArtifactResolverV2 = Readonly<{
   resolve(sha256: string): Uint8Array | null;
 }>;
 
+export type EvidenceReplayOptionsV2 = Readonly<{
+  trust: EvidenceTrustV2;
+  expectedRunId: string;
+  evaluationContract: FrozenEvidenceEvaluationContractV2;
+  expectedEvaluationContractSha256: string;
+  artifactResolver: EvidenceArtifactResolverV2;
+}>;
+
 export type FrozenEvidenceEvaluationContractV2 = Readonly<{
   schema_version: 2;
   contract_type: "hacc_frozen_evidence_evaluation";
