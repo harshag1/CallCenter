@@ -13,6 +13,13 @@ The validator proves that a trace has:
   causal order; and
 - explicit fail-closed negotiation when a required feature is unsupported.
 
+Every provider observation is bound to an inbound physical connection, a
+strictly increasing frame sequence, canonical exact frame bytes, verified byte
+length and SHA-256 digest,
+provider event identity, wire type, timestamp, and semantic claim. A provider
+cancellation is a terminal cancellation; it is never accepted as a successful
+tool-result acknowledgement.
+
 An outbound `session.update`, `setup`, or equivalent request is never evidence
 that the provider accepted those values. `client_request` evidence is present in
 the input union solely so the validator can identify and quarantine that error
@@ -34,3 +41,17 @@ they contain no credentials, customer data, SDK calls, or network behavior.
 This layer intentionally does not infer provider support. Unsupported and
 disabled features must be explicit in the acknowledged feature vector, and
 every requested feature must have exactly one result.
+
+## Evidence modes
+
+- `configuration_only` proves only provider-acknowledged configuration. It is
+  useful for adapter development and can never support a paid-readiness claim.
+- `transport_media` additionally requires every enabled audio-input,
+  audio-output, and interruption capability to be exercised.
+- `paid_readiness` is the default. Every enabled negotiated capability must be
+  exercised, including a successful tool round trip, provider usage evidence,
+  and session resumption. Every completed tool call must be acknowledged or
+  explicitly cancelled before the session may become terminal.
+
+Reports expose both mode-relative `passed` and the stricter `paidReady` flag;
+the latter is structurally false for either weaker mode.

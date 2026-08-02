@@ -22,11 +22,38 @@ export type NegotiatedFeature = Readonly<{
   reasonCode?: string;
 }>;
 
+export type ProviderWireSemantic =
+  | "session_acknowledgement"
+  | "turn_observation"
+  | "response_start"
+  | "audio_delta"
+  | "tool_call"
+  | "tool_result_acknowledgement"
+  | "tool_call_cancellation"
+  | "usage"
+  | "response_terminal"
+  | "resume_acknowledgement"
+  | "turn_terminal"
+  | "connection_terminal"
+  | "session_terminal";
+
 export type ProviderWireEvidence = Readonly<{
   authority: "provider_wire";
   providerEventId: string;
   wireType: string;
   observedAtMs: number;
+  /** Exact physical socket/peer-connection identity for this connection epoch. */
+  socketId: string;
+  direction: "provider_to_client";
+  /** Strictly increasing over observed provider frames on one socket. */
+  frameSequence: number;
+  /** Exact observed frame bytes, retained as canonical padded base64. */
+  frameBytesBase64: string;
+  frameByteLength: number;
+  /** SHA-256 over the exact provider frame bytes before parsing. */
+  frameSha256: string;
+  /** Adapter classification; validators bind each lifecycle event to one meaning. */
+  proves: ProviderWireSemantic;
 }>;
 
 /**
@@ -143,6 +170,14 @@ export type ToolResultAcknowledgedEvent = BaseEvent<"tool.result.acknowledged"> 
   evidence: LifecycleEvidence;
 }>;
 
+export type ToolCallCancelledEvent = BaseEvent<"tool.call.cancelled"> & Readonly<{
+  turnId: string;
+  responseId: string;
+  toolCallId: string;
+  reasonCode: string;
+  evidence: LifecycleEvidence;
+}>;
+
 export type UsageReportedEvent = BaseEvent<"usage.reported"> & Readonly<{
   scope: "session" | "response";
   responseId?: string;
@@ -209,6 +244,7 @@ export type RealtimeLifecycleEvent =
   | ToolCallCompletedEvent
   | ToolResultSubmittedEvent
   | ToolResultAcknowledgedEvent
+  | ToolCallCancelledEvent
   | UsageReportedEvent
   | ResponseTerminalEvent
   | TurnTerminalEvent
@@ -228,7 +264,29 @@ export type RealtimeLifecycleViolationCode =
   | "configuration_mismatch"
   | "stale_connection_epoch"
   | "non_monotonic_usage"
-  | "invalid_interruption_evidence";
+  | "invalid_interruption_evidence"
+  | "wire_evidence_invalid"
+  | "wire_causality_violation"
+  | "unresolved_tool_call"
+  | "required_exercise_missing";
+
+export type RealtimeLifecycleConformanceMode =
+  | "configuration_only"
+  | "transport_media"
+  | "paid_readiness";
+
+export type RealtimeLifecycleExercise =
+  | "audio_input"
+  | "audio_output"
+  | "tool_round_trip"
+  | "interruption"
+  | "session_resumption"
+  | "provider_usage";
+
+export type RealtimeLifecycleConformanceOptions = Readonly<{
+  /** Defaults to paid_readiness. Weaker modes can never support paid claims. */
+  mode?: RealtimeLifecycleConformanceMode;
+}>;
 
 export type RealtimeLifecycleViolation = Readonly<{
   index: number;
@@ -250,6 +308,9 @@ export type RealtimeLifecycleSnapshot = Readonly<{
   openResponseIds: readonly string[];
   completedToolCallIds: readonly string[];
   acknowledgedToolResultIds: readonly string[];
+  conformanceMode: RealtimeLifecycleConformanceMode;
+  observedExercises: readonly RealtimeLifecycleExercise[];
+  missingExercises: readonly RealtimeLifecycleExercise[];
   violations: readonly RealtimeLifecycleViolation[];
 }>;
 
@@ -258,6 +319,8 @@ export type RealtimeLifecycleConformanceReport = Readonly<{
   providerId: ConformanceProviderId;
   logicalSessionId: string;
   passed: boolean;
+  /** Cannot be true for configuration_only or transport_media reports. */
+  paidReady: boolean;
   eventCount: number;
   snapshot: RealtimeLifecycleSnapshot;
 }>;
