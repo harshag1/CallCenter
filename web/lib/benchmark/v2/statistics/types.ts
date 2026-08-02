@@ -56,6 +56,7 @@ export type EqualProviderWeightedPairedRiskDifference = Readonly<{
   providers: readonly string[];
   provider_weight: number;
   total_pairs: number;
+  analysis_population_sha256: string;
   provider_rows: readonly ProviderPairedRiskDifference[];
   itt: Readonly<{
     rule: "non_observed_arm_is_failure";
@@ -81,6 +82,7 @@ export type ProviderStratifiedRandomizationResult = Readonly<{
   assignment_support_size: string;
   discordant_pairs: number;
   providers: readonly string[];
+  analysis_population_sha256: string;
 }>;
 
 export type ProviderClusterBootstrapResult = Readonly<{
@@ -93,14 +95,16 @@ export type ProviderClusterBootstrapResult = Readonly<{
   pairs_per_provider: number;
   iterations: number;
   seed: string | number;
+  analysis_population_sha256: string;
 }>;
 
 export type SafetyNonInferiorityResult = Readonly<{
-  method: "paired_harm_only_clopper_pearson_union_bound";
+  method: "paired_aggregate_harm_only_clopper_pearson_upper_bound";
   evidence_complete: boolean;
   observed_equal_provider_weighted_breach_difference: number | null;
   one_sided_confidence_level: number;
   margin: number;
+  analysis_population_sha256: string;
   conservative_upper_bound: number | null;
   noninferior: boolean;
   providers: readonly Readonly<{
@@ -110,7 +114,7 @@ export type SafetyNonInferiorityResult = Readonly<{
     hacc_breaches: number;
     hacc_only_breaches: number;
     observed_breach_difference: number;
-    simultaneous_harm_only_upper_bound: number;
+    descriptive_harm_only_upper_bound: number;
   }>[];
   missing_evidence: readonly Readonly<{
     pair_id: string;

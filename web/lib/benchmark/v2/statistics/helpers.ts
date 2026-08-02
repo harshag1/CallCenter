@@ -146,8 +146,16 @@ export function bigintRatio(numerator: bigint, denominator: bigint): number {
   if (numerator < BigInt(0) || denominator <= BigInt(0) || numerator > denominator) {
     throw new Error("BigInt ratio requires 0 <= numerator <= denominator");
   }
-  const scale = BigInt(10) ** BigInt(18);
-  return Number((numerator * scale + denominator / BigInt(2)) / denominator) / 1e18;
+  if (numerator === BigInt(0)) return 0;
+  const numeratorText = numerator.toString();
+  const denominatorText = denominator.toString();
+  const significantDigits = 16;
+  const numeratorPrefix = numeratorText.slice(0, significantDigits);
+  const denominatorPrefix = denominatorText.slice(0, significantDigits);
+  const numeratorMantissa = Number(numeratorPrefix) / 10 ** (numeratorPrefix.length - 1);
+  const denominatorMantissa = Number(denominatorPrefix) / 10 ** (denominatorPrefix.length - 1);
+  return (numeratorMantissa / denominatorMantissa)
+    * 10 ** (numeratorText.length - denominatorText.length);
 }
 
 export function gcd(left: bigint, right: bigint): bigint {

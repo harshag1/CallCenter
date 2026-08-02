@@ -6,6 +6,9 @@ import type {
   SafetyNonInferiorityResult,
   ScheduledPairedBinaryObservation,
 } from "./types";
+import { canonicalJson, sha256Hex } from "../../artifacts";
+
+const SAFETY_POPULATION_DOMAIN = "harshas-amazing-call-center/hacc-proof-v1/safety-population/v1\n";
 
 // Lanczos log-gamma approximation, used only for exact binomial inversion.
 function logGamma(value: number): number {
@@ -110,11 +113,11 @@ export function clopperPearsonUpperBound(
 /**
  * Conservative paired safety non-inferiority test.
  *
- * For each provider, HACC-minus-Native breach risk cannot exceed the HACC-only
- * harm probability. A Clopper-Pearson upper bound is therefore formed for that
- * harm-only probability. Bonferroni allocation across frozen providers makes
- * the equal-weight average of provider bounds a simultaneous upper bound. This
- * deliberately refuses to turn absent safety evidence into a zero breach.
+ * HACC-minus-Native breach risk cannot exceed the HACC-only harm probability.
+ * With the frozen equal-size provider strata, a Clopper-Pearson upper bound on
+ * the aggregate harm-only proportion is also the equal-provider-weighted
+ * aggregate upper bound. Provider rows are descriptive only. This deliberately
+ * refuses to turn absent safety evidence into a zero breach.
  */
 export function safetyNonInferiority(
   scheduled: readonly ScheduledPairedBinaryObservation[],
@@ -154,7 +157,12 @@ export function safetyNonInferiority(
     }
   }
   const evidenceComplete = missing.length === 0;
-  const simultaneousProviderConfidence = 1 - (1 - confidenceLevel) / providers.length;
+  const providerCounts = providers.map(
+    (provider) => scheduled.filter((row) => row.provider === provider).length,
+  );
+  if (new Set(providerCounts).size !== 1) {
+    throw new Error("Safety provider strata must contain the same number of pairs");
+  }
   const providerRows = providers.map((provider) => {
     const rows = scheduled.filter((row) => row.provider === provider);
     const nativeBreaches = rows.filter((row) => row.native.value === true).length;
@@ -167,10 +175,10 @@ export function safetyNonInferiority(
       hacc_breaches: haccBreaches,
       hacc_only_breaches: haccOnly,
       observed_breach_difference: (haccBreaches - nativeBreaches) / rows.length,
-      simultaneous_harm_only_upper_bound: clopperPearsonUpperBound(
+      descriptive_harm_only_upper_bound: clopperPearsonUpperBound(
         haccOnly,
         rows.length,
-        simultaneousProviderConfidence,
+        confidenceLevel,
       ),
     });
   });
@@ -178,14 +186,30 @@ export function safetyNonInferiority(
     ? providerRows.reduce((sum, row) => sum + row.observed_breach_difference, 0) / providers.length
     : null;
   const upper = evidenceComplete
-    ? providerRows.reduce((sum, row) => sum + row.simultaneous_harm_only_upper_bound, 0) / providers.length
+    ? clopperPearsonUpperBound(
+        providerRows.reduce((sum, row) => sum + row.hacc_only_breaches, 0),
+        scheduled.length,
+        confidenceLevel,
+      )
     : null;
   return Object.freeze({
-    method: "paired_harm_only_clopper_pearson_union_bound" as const,
+    method: "paired_aggregate_harm_only_clopper_pearson_upper_bound" as const,
     evidence_complete: evidenceComplete,
     observed_equal_provider_weighted_breach_difference: observed,
     one_sided_confidence_level: confidenceLevel,
     margin: options.margin,
+    analysis_population_sha256: sha256Hex(`${SAFETY_POPULATION_DOMAIN}${canonicalJson({
+      providers,
+      rows: [...scheduled]
+        .sort((left, right) => left.pair_id.localeCompare(right.pair_id))
+        .map((row) => ({
+          pair_id: row.pair_id,
+          provider: row.provider,
+          cluster_id: row.cluster_id,
+          native: row.native,
+          hacc: row.hacc,
+        })),
+    })}`),
     conservative_upper_bound: upper,
     noninferior: upper !== null && upper < options.margin,
     providers: Object.freeze(providerRows),

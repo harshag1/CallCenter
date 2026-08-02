@@ -1,4 +1,9 @@
-import { decideSuperiorityClaim, type ClaimDecisionPolicy } from "./decision";
+import {
+  HACC_PROOF_V1_CONFIRMATORY_POLICY,
+  decideSuperiorityClaim,
+  type ClaimDecisionPolicy,
+  type ConfirmatoryClaimArtifacts,
+} from "./decision";
 import {
   equalProviderWeightedPairedRiskDifference,
   exactProviderStratifiedRandomizationTest,
@@ -15,6 +20,7 @@ import {
 } from "./helpers";
 import { safetyNonInferiority } from "./safety";
 import type { BinaryArmObservation, ScheduledPairedBinaryObservation } from "./types";
+import { sha256Hex } from "../../artifacts";
 
 export type PairedJointProbabilities = Readonly<{
   neither: number;
@@ -147,6 +153,112 @@ function wilson95(successes: number, total: number): Readonly<{ lower: number; u
   return Object.freeze({ lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) });
 }
 
+function powerSimulationArtifacts(
+  efficacyPopulationSha256: string,
+  safetyPopulationSha256: string,
+  seed: Seed,
+  simulation: number,
+): ConfirmatoryClaimArtifacts {
+  const h = (label: string) => sha256Hex(`hacc-proof-v1-power-simulation:${String(seed)}:${simulation}:${label}`);
+  const common = Object.freeze({
+    protocol_id: "HACC-Proof-v1" as const,
+    policy_sha256: HACC_PROOF_V1_CONFIRMATORY_POLICY.policy_sha256,
+    verified: true as const,
+  });
+  const receiptHashes = Object.freeze({
+    schedule: h("schedule"), endpoint: h("endpoint"), power: h("power"),
+    corpus: h("corpus"), latency: h("latency"), safety: h("safety"),
+  });
+  return Object.freeze({
+    signed_policy: Object.freeze({
+      ...common,
+      artifact_type: "signed_policy_identity_receipt" as const,
+      receipt_sha256: h("signed-policy"),
+      freeze_commit_sha256: h("freeze-commit"),
+      signer_key_id: "prospective-power-simulation-only",
+      signature_sha256: h("signature"),
+      signature_verifier_sha256: h("signature-verifier"),
+      signature_verified: true as const,
+      bindings: Object.freeze({
+        schedule_itt_receipt_sha256: receiptHashes.schedule,
+        endpoint_contract_receipt_sha256: receiptHashes.endpoint,
+        powered_design_receipt_sha256: receiptHashes.power,
+        phase_corpus_receipt_sha256: receiptHashes.corpus,
+        latency_receipt_sha256: receiptHashes.latency,
+        safety_receipt_sha256: receiptHashes.safety,
+      }),
+    }),
+    schedule_itt: Object.freeze({
+      ...common,
+      artifact_type: "confirmatory_schedule_itt_receipt" as const,
+      receipt_sha256: receiptHashes.schedule,
+      phase: "confirmatory" as const,
+      scheduled_template_pairs: 108 as const,
+      opened_template_pairs: 108 as const,
+      itt_template_pairs: 108 as const,
+      terminal_episode_dispositions: 216 as const,
+      all_scheduled_pairs_opened: true as const,
+      all_opened_units_terminal: true as const,
+      provider_template_counts: Object.freeze({ openai: 36 as const, gemini: 36 as const, xai: 36 as const }),
+      analysis_population_sha256: efficacyPopulationSha256,
+    }),
+    endpoint_contract: Object.freeze({
+      ...common,
+      artifact_type: "endpoint_contract_receipt" as const,
+      receipt_sha256: receiptHashes.endpoint,
+      endpoint_id: "useful_mission_success" as const,
+      endpoint_contract_sha256: h("endpoint-contract"),
+      evaluator_sha256: h("evaluator"),
+      all_conjuncts_replayed: true as const,
+    }),
+    powered_design: Object.freeze({
+      ...common,
+      artifact_type: "powered_design_receipt" as const,
+      receipt_sha256: receiptHashes.power,
+      computed_before_confirmatory_outcomes: true as const,
+      design_template_pairs: 108 as const,
+      templates_per_provider: 36 as const,
+      target_power: 0.8,
+      prospective_power_lower_bound: 1,
+      passed: true as const,
+      analysis_implementation_sha256: h("analysis-implementation"),
+    }),
+    phase_corpus: Object.freeze({
+      ...common,
+      artifact_type: "confirmatory_phase_corpus_receipt" as const,
+      receipt_sha256: receiptHashes.corpus,
+      phase: "confirmatory" as const,
+      corpus_role: "untouched_confirmatory" as const,
+      template_pairs: 108 as const,
+      provider_template_counts: Object.freeze({ openai: 36 as const, gemini: 36 as const, xai: 36 as const }),
+      development_or_pilot_templates_included: false as const,
+      outcome_access_before_freeze: false as const,
+      corpus_manifest_sha256: h("corpus-manifest"),
+    }),
+    latency: Object.freeze({
+      ...common,
+      artifact_type: "paired_safe_first_audio_latency_receipt" as const,
+      receipt_sha256: receiptHashes.latency,
+      metric: "median_paired_safe_first_audio_regression_ms" as const,
+      complete_pairs: 108 as const,
+      missing_pairs: 0 as const,
+      median_regression_ms: 0,
+      analysis_population_sha256: efficacyPopulationSha256,
+    }),
+    safety: Object.freeze({
+      ...common,
+      artifact_type: "critical_safety_receipt" as const,
+      receipt_sha256: receiptHashes.safety,
+      complete_pairs: 108 as const,
+      missing_pairs: 0 as const,
+      hacc_critical_unauthorized_or_duplicate_external_effects: 0,
+      hacc_critical_caller_playable_speech_breaches: 0,
+      analysis_population_sha256: safetyPopulationSha256,
+      all_events_replayed: true as const,
+    }),
+  });
+}
+
 /** Simulates the complete frozen claim conjunction, not merely a McNemar test. */
 export function simulateClaimPower(input: Readonly<{
   design: PowerDesign;
@@ -186,6 +298,12 @@ export function simulateClaimPower(input: Readonly<{
     });
     const decision = decideSuperiorityClaim({
       policy: input.policy,
+      artifacts: powerSimulationArtifacts(
+        efficacy.analysis_population_sha256,
+        safety.analysis_population_sha256,
+        input.seed,
+        simulation,
+      ),
       evidence_integrity_valid: true,
       efficacy,
       interval,

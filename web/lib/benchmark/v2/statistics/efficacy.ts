@@ -18,6 +18,29 @@ import type {
   ProviderStratifiedRandomizationResult,
   ScheduledPairedBinaryObservation,
 } from "./types";
+import { canonicalJson, sha256Hex } from "../../artifacts";
+
+const ANALYSIS_POPULATION_DOMAIN = "harshas-amazing-call-center/hacc-proof-v1/analysis-population/v1\n";
+
+function analysisPopulationSha256(
+  rows: readonly IttPairedBinaryObservation[],
+  providers: readonly string[],
+): string {
+  return sha256Hex(`${ANALYSIS_POPULATION_DOMAIN}${canonicalJson({
+    providers,
+    rows: [...rows]
+      .sort((left, right) => left.pair_id.localeCompare(right.pair_id))
+      .map((row) => ({
+        pair_id: row.pair_id,
+        provider: row.provider,
+        cluster_id: row.cluster_id,
+        native_value: row.native_value,
+        hacc_value: row.hacc_value,
+        native_status: row.native_status,
+        hacc_status: row.hacc_status,
+      })),
+  })}`);
+}
 
 function providerRow(
   provider: string,
@@ -54,6 +77,7 @@ function estimateNormalized(
     providers: frozenProviders,
     provider_weight: 1 / frozenProviders.length,
     total_pairs: rows.length,
+    analysis_population_sha256: analysisPopulationSha256(rows, frozenProviders),
     provider_rows: Object.freeze(providerRows),
     itt: Object.freeze({
       rule: "non_observed_arm_is_failure" as const,
@@ -144,6 +168,7 @@ export function exactProviderStratifiedRandomizationTest(
     assignment_support_size: total.toString(),
     discordant_pairs: distribution.discordantPairs,
     providers: frozenProviders,
+    analysis_population_sha256: estimate.analysis_population_sha256,
   });
 }
 
@@ -238,5 +263,6 @@ export function pairedClusterBootstrapConfidenceInterval(
     pairs_per_provider: strata.pairsPerProvider,
     iterations: options.iterations,
     seed: options.seed,
+    analysis_population_sha256: analysisPopulationSha256(rows, providers),
   });
 }
