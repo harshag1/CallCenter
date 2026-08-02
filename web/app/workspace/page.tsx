@@ -572,12 +572,17 @@ export default function Workspace() {
               />
             )}
             {!focus && !testing && !showLiveTestConfirm && panelFlow && testTarget && (
-              <button
-                onClick={() => setShowLiveTestConfirm(true)}
-                className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-[12px] font-medium text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.03]"
-              >
-                <Play size={11} fill="currentColor" /> Live test
-              </button>
+              <div className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2">
+                <Tooltip content="Test" placement="top">
+                  <button
+                    aria-label="Test agent"
+                    onClick={() => setShowLiveTestConfirm(true)}
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-950 text-white shadow-lg transition-transform duration-[240ms] hover:scale-[1.04]"
+                  >
+                    <Play size={12} fill="currentColor" />
+                  </button>
+                </Tooltip>
+              </div>
             )}
             {showLiveTestConfirm && (
               <div
@@ -586,8 +591,7 @@ export default function Workspace() {
                 aria-label="Confirm live provider test"
                 className="absolute bottom-3 left-1/2 z-20 w-[min(92%,390px)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl"
               >
-                <p className="text-[13px] font-semibold text-neutral-950">Live test</p>
-                <p className="mt-1 text-[11px] leading-4 text-neutral-500">Microphone · provider credits</p>
+                <p className="text-[11px] leading-4 text-neutral-500">Microphone · provider credits</p>
                 <div className="mt-3 flex justify-end gap-2">
                   <button
                     onClick={() => setShowLiveTestConfirm(false)}
