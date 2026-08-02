@@ -12,6 +12,10 @@ This program does not claim improved ASR, voice naturalness, or underlying model
 
 - API/provider implementation testing: hard aggregate maximum **$100 USD**.
 - Comparative benchmarking: separate hard aggregate maximum **$100 USD**.
+- Standing repository exposure at this program's start remains **$172.50 USD**; the
+  strict repository-wide total must remain **below $300 USD**. The two program
+  envelopes therefore cannot both be exhausted, and admission uses the lower of
+  the per-envelope remainder and aggregate remaining headroom.
 - Offline development, simulation, replay, static analysis, and provider-fake tests: **$0 expected provider spend**.
 - Paid sessions remain closed until protocol, parity, evidence, runner, and budget admission gates pass.
 - No paid retry, fallback, replacement episode, or outcome-adaptive extension is allowed.
@@ -53,6 +57,9 @@ The existing claim-readiness audit remains authoritative until HACC-Proof-v1 rep
 - [x] Canonical ConversationProgram projection.
 - [x] Provider-neutral governed effect coordinator and reconciliation contract.
 - [x] Provider lifecycle/evidence conformance contract.
+- [x] RuntimeCoordinatorV2 composition with hash-bound effect and speech admission.
+- [ ] Replace the generic async store callback with explicit atomic reserve/settle
+  operations before any production persistence adapter is admitted.
 - [ ] Production EvidenceTap integration.
 
 ### Wave 2 — falsification before providers
@@ -88,4 +95,9 @@ No superiority graph or "HACC is better" statement is permitted until the prereg
 |---|---|---|---:|---:|---|
 | 2026-08-02 | Testing | Program initialization and offline baseline | $0 | $0 | Complete |
 | 2026-08-02 | Testing | Wave 0 contracts, simulation, replay and integration tests | $0 | $0 | Complete |
+| 2026-08-02 | Testing | Advisory Fable persistence review (unverified peer review; not benchmark evidence) | $0.453048 | $0.453048 | Complete |
 | 2026-08-02 | Benchmark | Program initialization | $0 | $0 | Closed pending gates |
+
+Testing-envelope observed spend is **$0.453048**; nominal testing remainder is
+**$99.546952**. Comparative-benchmark observed spend remains **$0**. Every paid
+admission must also preserve the strict repository-wide `<$300` exposure ceiling.
