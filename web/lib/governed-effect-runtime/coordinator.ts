@@ -20,6 +20,8 @@ import type {
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_IDEMPOTENCY_KEY_BYTES = 512;
 const MAX_LEASE_TTL_MS = 60_000;
+const MAX_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
+const MAX_RECONCILIATION_CLAIMS = 10;
 
 function canonicalJson(value: unknown, seen = new Set<object>()): string {
   if (value === undefined) throw new Error("undefined is not valid canonical JSON");
@@ -139,12 +141,16 @@ export class GovernedEffectCoordinator {
   readonly #adapters: ReadonlyMap<string, GovernedEffectAdapter>;
   readonly #now: () => string;
   readonly #leaseTtlMs: number;
+  readonly #reconciliationClaimTtlMs: number;
+  readonly #maxReconciliationClaims: number;
 
   constructor(input: Readonly<{
     store: GovernedEffectStore;
     adapters: readonly GovernedEffectAdapter[];
     now?: () => string;
     leaseTtlMs?: number;
+    reconciliationClaimTtlMs?: number;
+    maxReconciliationClaims?: number;
   }>) {
     const adapters = new Map<string, GovernedEffectAdapter>();
     for (const adapter of input.adapters) {
@@ -162,6 +168,18 @@ export class GovernedEffectCoordinator {
     this.#adapters = adapters;
     this.#now = input.now ?? (() => new Date().toISOString());
     this.#leaseTtlMs = leaseTtlMs;
+    const reconciliationClaimTtlMs = input.reconciliationClaimTtlMs ?? 30_000;
+    if (!Number.isSafeInteger(reconciliationClaimTtlMs) || reconciliationClaimTtlMs < 1 ||
+        reconciliationClaimTtlMs > MAX_RECONCILIATION_CLAIM_TTL_MS) {
+      throw new Error("reconciliation claim TTL is invalid");
+    }
+    const maxReconciliationClaims = input.maxReconciliationClaims ?? 3;
+    if (!Number.isSafeInteger(maxReconciliationClaims) || maxReconciliationClaims < 1 ||
+        maxReconciliationClaims > MAX_RECONCILIATION_CLAIMS) {
+      throw new Error("maximum reconciliation claims is invalid");
+    }
+    this.#reconciliationClaimTtlMs = reconciliationClaimTtlMs;
+    this.#maxReconciliationClaims = maxReconciliationClaims;
   }
 
   async execute(inputProposal: GovernedEffectProposal): Promise<GovernedEffectExecutionResult> {
@@ -448,6 +466,7 @@ export class GovernedEffectCoordinator {
       preDispatchDecision: decision,
       resultSha256,
       errorCode,
+      maxClaimAttempts: this.#maxReconciliationClaims,
       now,
     });
     if (recovery.disposition === "terminal") return replayResult(recovery.receipt);
@@ -460,20 +479,24 @@ export class GovernedEffectCoordinator {
 
   async runReconciliation(jobId: string): Promise<ReconciliationRunResult> {
     const now = this.#now();
-    const claim = await this.#store.claimReconciliation(jobId, now);
-    if (claim.disposition === "not_claimable") {
+    const nowMs = assertCanonicalTime(now, "reconciliation claim time");
+    const claim = await this.#store.claimReconciliation({
+      jobId,
+      now,
+      leaseExpiresAt: new Date(nowMs + this.#reconciliationClaimTtlMs).toISOString(),
+    });
+    if (claim.disposition !== "claimed") {
       return Object.freeze({
-        disposition: "not_claimable",
+        disposition: claim.disposition,
         job: claim.job,
         receipt: claim.receipt,
       });
     }
     const adapter = this.#adapters.get(claim.job.action);
-    if (!adapter || adapter.reconciliationEffect !== "read") {
-      throw new Error("reconciliation adapter is missing or is not read-only");
-    }
     let outcome;
-    try {
+    if (!adapter || adapter.reconciliationEffect !== "read") {
+      outcome = Object.freeze({ disposition: "unknown", errorCode: "reconciliation_adapter_unavailable" } as const);
+    } else try {
       outcome = await adapter.reconcile({
         receiptId: claim.job.receiptId,
         invocationId: claim.job.invocationId,
@@ -514,6 +537,8 @@ export class GovernedEffectCoordinator {
     const settled = await this.#store.settleReconciliation({
       jobId: claim.job.jobId,
       receiptId: claim.job.receiptId,
+      claimId: claim.claim.claimId,
+      claimOrdinal: claim.claim.ordinal,
       disposition,
       proofSha256: invalidProof ? undefined : proofSha256,
       resultSha256: disposition === "committed" ? resultSha256 : undefined,
@@ -525,6 +550,13 @@ export class GovernedEffectCoordinator {
           : undefined),
       now: this.#now(),
     });
+    if (settled.disposition !== "settled") {
+      return Object.freeze({
+        disposition: settled.disposition,
+        job: settled.job,
+        receipt: settled.receipt,
+      });
+    }
     return Object.freeze({ disposition, job: settled.job, receipt: settled.receipt });
   }
 }

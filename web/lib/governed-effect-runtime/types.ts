@@ -122,15 +122,26 @@ export type ReconciliationJob = Readonly<{
   argumentsSha256: string;
   policy: unknown;
   preDispatchDecision: PreDispatchDecision & Readonly<{ decision: "allow" }>;
-  attempt: 0 | 1;
+  /** Monotonic claim lineage for this one semantic read-only job. */
+  attempt: number;
+  maxAttempts: number;
+  activeClaim?: ReconciliationClaimLease;
   status: "queued" | "running" | "completed";
+}>;
+
+export type ReconciliationClaimLease = Readonly<{
+  claimId: string;
+  ordinal: number;
+  claimedAt: string;
+  expiresAt: string;
 }>;
 
 export type ReconciliationClaim = Readonly<{
   disposition: "claimed";
-  job: ReconciliationJob & Readonly<{ attempt: 1; status: "running" }>;
+  job: ReconciliationJob & Readonly<{ status: "running"; activeClaim: ReconciliationClaimLease }>;
+  claim: ReconciliationClaimLease;
 }> | Readonly<{
-  disposition: "not_claimable";
+  disposition: "not_claimable" | "exhausted";
   job: ReconciliationJob;
   receipt: GovernedEffectReceipt;
 }>;
@@ -205,22 +216,36 @@ export interface GovernedEffectStore {
     preDispatchDecision: PreDispatchDecision & Readonly<{ decision: "allow" }>;
     resultSha256?: string;
     errorCode: string;
+    maxClaimAttempts: number;
     now: string;
   }>): Promise<IndeterminateRecoveryResult>;
 
-  /** Claims the single permitted read-only attempt. Completed jobs are never claimable again. */
-  claimReconciliation(jobId: string, now: string): Promise<ReconciliationClaim>;
+  /**
+   * Claims or reclaims the same semantic read-only job. An unexpired claim cannot be stolen;
+   * an expired claim advances the bounded ordinal. Exhaustion terminalizes the job unknown.
+   */
+  claimReconciliation(input: Readonly<{
+    jobId: string;
+    now: string;
+    leaseExpiresAt: string;
+  }>): Promise<ReconciliationClaim>;
 
   settleReconciliation(input: Readonly<{
     jobId: string;
     receiptId: string;
+    claimId: string;
+    claimOrdinal: number;
     disposition: "committed" | "absent" | "unknown";
     proofSha256?: string;
     resultSha256?: string;
     providerVisibleResult?: Readonly<Record<string, Json>>;
     errorCode?: string;
     now: string;
-  }>): Promise<Readonly<{ job: ReconciliationJob; receipt: GovernedEffectReceipt }>>;
+  }>): Promise<Readonly<{
+    disposition: "settled" | "stale_claim" | "terminal";
+    job: ReconciliationJob;
+    receipt: GovernedEffectReceipt;
+  }>>;
 }
 
 export type EffectDispatchOutcome =
@@ -270,7 +295,7 @@ export type GovernedEffectExecutionResult =
     }>;
 
 export type ReconciliationRunResult = Readonly<{
-  disposition: "committed" | "absent" | "unknown" | "not_claimable";
+  disposition: "committed" | "absent" | "unknown" | "not_claimable" | "exhausted" | "stale_claim" | "terminal";
   job: ReconciliationJob;
   receipt: GovernedEffectReceipt;
 }>;

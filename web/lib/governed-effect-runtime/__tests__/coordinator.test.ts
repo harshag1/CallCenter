@@ -103,6 +103,8 @@ class FakeStore implements GovernedEffectStore {
   settleCalls = 0;
   forceRepairResponses = 0;
   advanceAtBoundary = false;
+  throwAfterClaimOnce = false;
+  throwAfterReconciliationSettlementOnce = false;
 
   async readAuthority(): Promise<GovernedEffectAuthority> {
     return this.currentAuthority;
@@ -261,6 +263,7 @@ class FakeStore implements GovernedEffectStore {
       policy: input.policy,
       preDispatchDecision: input.preDispatchDecision,
       attempt: 0,
+      maxAttempts: input.maxClaimAttempts,
       status: "queued",
     });
     this.jobs.set(job.jobId, job);
@@ -268,24 +271,63 @@ class FakeStore implements GovernedEffectStore {
     return { disposition: "indeterminate", receipt, job };
   }
 
-  async claimReconciliation(jobId: string): Promise<ReconciliationClaim> {
-    const job = this.mustJob(jobId);
+  async claimReconciliation(
+    input: Parameters<GovernedEffectStore["claimReconciliation"]>[0],
+  ): Promise<ReconciliationClaim> {
+    let job = this.mustJob(input.jobId);
     const receipt = this.mustReceipt(job.receiptId);
-    if (job.status !== "queued" || job.attempt !== 0) {
+    if (job.status === "completed") {
       return { disposition: "not_claimable", job, receipt };
     }
-    const claimed = Object.freeze({ ...job, attempt: 1 as const, status: "running" as const });
-    this.jobs.set(jobId, claimed);
-    return { disposition: "claimed", job: claimed };
+    if (job.status === "running" && job.activeClaim &&
+        Date.parse(input.now) < Date.parse(job.activeClaim.expiresAt)) {
+      return { disposition: "not_claimable", job, receipt };
+    }
+    if (job.attempt >= job.maxAttempts) {
+      job = Object.freeze({ ...job, status: "completed" as const, activeClaim: undefined });
+      const exhaustedReceipt = Object.freeze({
+        ...receipt,
+        errorCode: "reconciliation_claims_exhausted",
+        settledAt: input.now,
+      });
+      this.jobs.set(job.jobId, job);
+      this.receipts.set(receipt.receiptId, exhaustedReceipt);
+      return { disposition: "exhausted", job, receipt: exhaustedReceipt };
+    }
+    const ordinal = job.attempt + 1;
+    const claim = Object.freeze({
+      claimId: `${job.jobId}:claim:${ordinal}`,
+      ordinal,
+      claimedAt: input.now,
+      expiresAt: input.leaseExpiresAt,
+    });
+    const claimed = Object.freeze({
+      ...job,
+      attempt: ordinal,
+      activeClaim: claim,
+      status: "running" as const,
+    });
+    this.jobs.set(job.jobId, claimed);
+    if (this.throwAfterClaimOnce) {
+      this.throwAfterClaimOnce = false;
+      throw new Error("simulated crash after durable claim");
+    }
+    return { disposition: "claimed", job: claimed, claim };
   }
 
   async settleReconciliation(
     input: Parameters<GovernedEffectStore["settleReconciliation"]>[0],
-  ): Promise<Readonly<{ job: ReconciliationJob; receipt: GovernedEffectReceipt }>> {
+  ): ReturnType<GovernedEffectStore["settleReconciliation"]> {
     const job = this.mustJob(input.jobId);
-    if (job.status !== "running" || job.attempt !== 1) throw new Error("job is not running");
     const current = this.mustReceipt(input.receiptId);
-    if (current.status !== "indeterminate") throw new Error("receipt is not indeterminate");
+    if (current.status === "succeeded" || current.status === "failed") {
+      return { disposition: "terminal", job, receipt: current };
+    }
+    if (job.status !== "running" || !job.activeClaim ||
+        job.activeClaim.claimId !== input.claimId ||
+        job.activeClaim.ordinal !== input.claimOrdinal) {
+      return { disposition: "stale_claim", job, receipt: current };
+    }
     const receipt = Object.freeze({
       ...current,
       status: input.disposition === "committed" ? "succeeded" as const
@@ -296,10 +338,14 @@ class FakeStore implements GovernedEffectStore {
       ...(input.errorCode ? { errorCode: input.errorCode } : {}),
       settledAt: input.now,
     });
-    const completed = Object.freeze({ ...job, status: "completed" as const });
+    const completed = Object.freeze({ ...job, status: "completed" as const, activeClaim: undefined });
     this.receipts.set(receipt.receiptId, receipt);
     this.jobs.set(job.jobId, completed);
-    return { job: completed, receipt };
+    if (this.throwAfterReconciliationSettlementOnce) {
+      this.throwAfterReconciliationSettlementOnce = false;
+      throw new Error("simulated crash after durable reconciliation settlement");
+    }
+    return { disposition: "settled", job: completed, receipt };
   }
 
   private mustReceipt(receiptId: string): GovernedEffectReceipt {
@@ -550,6 +596,127 @@ describe("GovernedEffectCoordinator", () => {
     expect(effectAdapter.reconcile).toHaveBeenCalledTimes(1);
   });
 
+  it("reclaims an expired durable read claim with monotonic lineage and rejects the stale winner", async () => {
+    const store = new FakeStore();
+    let currentTime = AT;
+    const effectAdapter = adapter({
+      dispatch: async () => ({ disposition: "indeterminate" }),
+      reconcile: async () => ({
+        disposition: "committed",
+        proofSha256: H("7"),
+        result: { status: "applied" },
+      }),
+    });
+    const runtime = new GovernedEffectCoordinator({
+      store,
+      adapters: [effectAdapter],
+      now: () => currentTime,
+      reconciliationClaimTtlMs: 1_000,
+      maxReconciliationClaims: 3,
+    });
+    const execution = await runtime.execute(proposal());
+    if (execution.disposition !== "indeterminate") throw new Error("expected indeterminate execution");
+    store.throwAfterClaimOnce = true;
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId))
+      .rejects.toThrow("simulated crash after durable claim");
+
+    currentTime = "2026-08-02T18:00:02.000Z";
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId)).resolves.toMatchObject({
+      disposition: "committed",
+      job: { jobId: execution.reconciliationJob.jobId, attempt: 2, status: "completed" },
+      receipt: { status: "succeeded" },
+    });
+    const stale = await store.settleReconciliation({
+      jobId: execution.reconciliationJob.jobId,
+      receiptId: execution.receipt.receiptId,
+      claimId: `${execution.reconciliationJob.jobId}:claim:1`,
+      claimOrdinal: 1,
+      disposition: "absent",
+      proofSha256: H("8"),
+      now: currentTime,
+    });
+    expect(stale).toMatchObject({ disposition: "terminal", receipt: { status: "succeeded" } });
+    expect(effectAdapter.dispatch).toHaveBeenCalledTimes(1);
+    expect(effectAdapter.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not steal an unexpired reconciliation claim", async () => {
+    const store = new FakeStore();
+    const effectAdapter = adapter({ dispatch: async () => ({ disposition: "indeterminate" }) });
+    const runtime = new GovernedEffectCoordinator({
+      store,
+      adapters: [effectAdapter],
+      now: () => AT,
+      reconciliationClaimTtlMs: 1_000,
+    });
+    const execution = await runtime.execute(proposal());
+    if (execution.disposition !== "indeterminate") throw new Error("expected indeterminate execution");
+    const first = await store.claimReconciliation({
+      jobId: execution.reconciliationJob.jobId,
+      now: AT,
+      leaseExpiresAt: "2026-08-02T18:00:01.000Z",
+    });
+    expect(first).toMatchObject({ disposition: "claimed", claim: { ordinal: 1 } });
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId)).resolves.toMatchObject({
+      disposition: "not_claimable",
+      job: { attempt: 1, status: "running" },
+    });
+    expect(effectAdapter.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("recovers a lost settlement acknowledgement without rerunning the read", async () => {
+    const store = new FakeStore();
+    const effectAdapter = adapter({
+      dispatch: async () => ({ disposition: "indeterminate" }),
+      reconcile: async () => ({ disposition: "absent", proofSha256: H("6") }),
+    });
+    const runtime = coordinator(store, effectAdapter);
+    const execution = await runtime.execute(proposal());
+    if (execution.disposition !== "indeterminate") throw new Error("expected indeterminate execution");
+    store.throwAfterReconciliationSettlementOnce = true;
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId))
+      .rejects.toThrow("simulated crash after durable reconciliation settlement");
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId)).resolves.toMatchObject({
+      disposition: "not_claimable",
+      job: { status: "completed" },
+      receipt: { status: "failed" },
+    });
+    expect(effectAdapter.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds expired claim recovery and terminalizes exhaustion", async () => {
+    const store = new FakeStore();
+    let currentTime = AT;
+    const effectAdapter = adapter({ dispatch: async () => ({ disposition: "indeterminate" }) });
+    const runtime = new GovernedEffectCoordinator({
+      store,
+      adapters: [effectAdapter],
+      now: () => currentTime,
+      reconciliationClaimTtlMs: 1_000,
+      maxReconciliationClaims: 2,
+    });
+    const execution = await runtime.execute(proposal());
+    if (execution.disposition !== "indeterminate") throw new Error("expected indeterminate execution");
+    await store.claimReconciliation({
+      jobId: execution.reconciliationJob.jobId,
+      now: currentTime,
+      leaseExpiresAt: "2026-08-02T18:00:01.000Z",
+    });
+    currentTime = "2026-08-02T18:00:02.000Z";
+    await store.claimReconciliation({
+      jobId: execution.reconciliationJob.jobId,
+      now: currentTime,
+      leaseExpiresAt: "2026-08-02T18:00:03.000Z",
+    });
+    currentTime = "2026-08-02T18:00:04.000Z";
+    await expect(runtime.runReconciliation(execution.reconciliationJob.jobId)).resolves.toMatchObject({
+      disposition: "exhausted",
+      job: { attempt: 2, maxAttempts: 2, status: "completed" },
+      receipt: { status: "indeterminate", errorCode: "reconciliation_claims_exhausted" },
+    });
+    expect(effectAdapter.reconcile).not.toHaveBeenCalled();
+  });
+
   it("quarantines a completed write when authority advances while it is in flight", async () => {
     const store = new FakeStore();
     const effectAdapter = adapter({
@@ -614,4 +781,91 @@ describe("GovernedEffectCoordinator", () => {
     expect(store.jobs).toHaveLength(0);
     expect(readAdapter.dispatch).toHaveBeenCalledTimes(1);
   });
+
+  it("proves 10,000 seeded crash-cut schedules preserve one effect and one semantic job", async () => {
+    let seed = 0x5eed1234;
+    const next = (): number => {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+      return seed;
+    };
+    for (let schedule = 0; schedule < 10_000; schedule += 1) {
+      const store = new FakeStore();
+      let nowMs = Date.parse(AT);
+      let effectDispatches = 0;
+      let readQueries = 0;
+      const effectAdapter: GovernedEffectAdapter = {
+        action: "update_address",
+        reconciliationEffect: "read",
+        async dispatch() {
+          effectDispatches += 1;
+          return { disposition: "indeterminate" };
+        },
+        async reconcile() {
+          readQueries += 1;
+          return { disposition: "committed", proofSha256: H("5"), result: { status: "applied" } };
+        },
+      };
+      const runtime = new GovernedEffectCoordinator({
+        store,
+        adapters: [effectAdapter],
+        now: () => new Date(nowMs).toISOString(),
+        reconciliationClaimTtlMs: 10,
+        maxReconciliationClaims: 2,
+      });
+      const execution = await runtime.execute(proposal({ idempotencyKey: `schedule-${schedule}` }));
+      if (execution.disposition !== "indeterminate") throw new Error(`schedule ${schedule}: admission failed`);
+      const jobId = execution.reconciliationJob.jobId;
+      const cut = next() % 5;
+      if (cut === 0) {
+        await runtime.runReconciliation(jobId);
+      } else if (cut === 1) {
+        store.throwAfterClaimOnce = true;
+        await runtime.runReconciliation(jobId).catch(() => undefined);
+        nowMs += 11;
+        await runtime.runReconciliation(jobId);
+      } else if (cut === 2) {
+        const claimed = await store.claimReconciliation({
+          jobId,
+          now: new Date(nowMs).toISOString(),
+          leaseExpiresAt: new Date(nowMs + 10).toISOString(),
+        });
+        if (claimed.disposition !== "claimed") throw new Error(`schedule ${schedule}: initial claim failed`);
+        // The read finished, then the process died before durable settlement. Repeating this
+        // query after lease expiry is safe because the adapter has read-only authority.
+        await effectAdapter.reconcile({
+          receiptId: claimed.job.receiptId,
+          invocationId: claimed.job.invocationId,
+          idempotencyKey: claimed.job.idempotencyKey,
+          arguments: claimed.job.arguments,
+        });
+        nowMs += 11;
+        await runtime.runReconciliation(jobId);
+      } else if (cut === 3) {
+        store.throwAfterReconciliationSettlementOnce = true;
+        await runtime.runReconciliation(jobId).catch(() => undefined);
+        await runtime.runReconciliation(jobId);
+      } else {
+        await store.claimReconciliation({
+          jobId,
+          now: new Date(nowMs).toISOString(),
+          leaseExpiresAt: new Date(nowMs + 10).toISOString(),
+        });
+        nowMs += 11;
+        await store.claimReconciliation({
+          jobId,
+          now: new Date(nowMs).toISOString(),
+          leaseExpiresAt: new Date(nowMs + 10).toISOString(),
+        });
+        nowMs += 11;
+        await runtime.runReconciliation(jobId);
+      }
+      const jobs = [...store.jobs.values()];
+      const receipts = [...store.receipts.values()];
+      if (effectDispatches !== 1 || jobs.length !== 1 || jobs[0].jobId !== jobId ||
+          jobs[0].status !== "completed" || jobs[0].attempt > jobs[0].maxAttempts ||
+          receipts.length !== 1 || readQueries > 2) {
+        throw new Error(`schedule ${schedule}: crash invariant failed at cut ${cut}`);
+      }
+    }
+  }, 30_000);
 });

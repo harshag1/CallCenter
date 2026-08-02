@@ -15,6 +15,7 @@ export type {
   GovernedEffectStore,
   IndeterminateRecoveryResult,
   ReconciliationClaim,
+  ReconciliationClaimLease,
   ReconciliationJob,
   ReconciliationRunResult,
   ReserveAllowedInput,

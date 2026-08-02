@@ -29,7 +29,12 @@ operations transactionally:
   rejected.
 - `ensureIndeterminateReconciliation` atomically settles uncertainty and creates the job, with a
   unique constraint on `receiptId`; it also repairs the jobless side of that crash cut.
-- `claimReconciliation` permits one attempt total, not one attempt per worker process.
+- `claimReconciliation` leases the one semantic job. A live lease cannot be stolen; an expired
+  lease advances a persisted claim ordinal up to the pinned bound. This can repeat a read-only
+  query after a process crash, but can never repeat the original mutation.
+- `settleReconciliation` binds settlement to the current claim ID and ordinal. A late claimant
+  cannot overwrite a reclaimed or terminal result, and claim exhaustion terminalizes the job as
+  unresolved.
 - `repairBeforeDispatch` proves that no dispatch marker exists before changing an unopened
   reservation.
 
@@ -52,3 +57,8 @@ raw private results must not be placed in public receipts.
 `runReconciliation` invokes only adapters declaring `reconciliationEffect: "read"`. The adapter is
 responsible for translating a pinned authoritative read-back contract into `committed`, `absent`,
 or `unknown`; the model never supplies that disposition.
+
+The deterministic crash matrix covers 10,000 schedules across the three reconciliation await
+cuts: durable claim before query, completed query before settlement, and durable settlement before
+acknowledgement. It asserts one original dispatch, one semantic job, monotonic bounded claim
+lineage, immutable terminal winners, and no more than the bounded number of read-only queries.
