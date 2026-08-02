@@ -191,6 +191,34 @@ function requireHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new Error(`${label} must be one lowercase SHA-256`);
 }
 
+/**
+ * Resolves the caller audio for a registered repair from its exact ledger
+ * edge. Repair caller audio is retained under its own evidence kind so it
+ * cannot be substituted with canonical caller PCM (or any other CAS object)
+ * that happens to carry the same digest.
+ */
+export function resolveLc4PublicationRepairPcmReference(
+  event: Pick<
+    Lc4DevLiveRunArtifact["ledger"][number],
+    "evidence_references"
+  >,
+  repairPcmSha256: string,
+): Lc4DevReplayArtifactReference {
+  requireHash(
+    repairPcmSha256,
+    "LC4 publication repair caller PCM",
+  );
+  const matches = event.evidence_references.filter((candidate) =>
+    candidate.kind === "repair_pcm"
+    && candidate.evidence_sha256 === repairPcmSha256);
+  if (matches.length !== 1) {
+    throw new Error(
+      "LC4 publication repair lacks one exact caller PCM ledger edge",
+    );
+  }
+  return matches[0]!;
+}
+
 function exactKeys(
   value: object,
   expected: readonly string[],
@@ -1752,11 +1780,9 @@ async function replayEpisode(input: Readonly<{
         effectiveListenerEvidenceSha256,
         "listener evidence",
       );
-      const repairCallerReference = exactReference(
+      const repairCallerReference = resolveLc4PublicationRepairPcmReference(
         repairAudioEvent,
-        "caller_pcm",
         repairCallerPcmSha256,
-        "caller PCM",
       );
       const repairDecisionReference = exactReference(
         repairEvent,
