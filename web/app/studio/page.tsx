@@ -81,6 +81,7 @@ export default function Studio() {
     const tick = async () => {
       const res = await fetch("/api/onboarding/status");
       if (res.status === 401) return router.push("/login");
+      if (!res.ok) return;
       const j: Status = await res.json();
       if (!live) return;
       setStatus(j);
