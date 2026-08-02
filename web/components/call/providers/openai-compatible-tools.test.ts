@@ -77,6 +77,14 @@ function harness(provider: "openai" | "xai" = "openai") {
           protocolVersion: "2025-11-25",
           capabilities: {},
           serverInfo: {},
+          _meta: {
+            "com.harsha.callcenter/provider-connection": {
+              schemaVersion: 2,
+              connectionId: `hacc.pc.v2.${"1".repeat(64)}.${"E".repeat(43)}`,
+              connectionEpoch: 1,
+              providerSessionIdSha256: null,
+            },
+          },
         },
       }), { headers: { "MCP-Session-Id": SESSION } });
     }

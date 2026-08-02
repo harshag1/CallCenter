@@ -14,6 +14,14 @@ const URL = `${ORIGIN}/api/mcp`;
 const TOKEN = `scope.${"a".repeat(96)}`;
 const SESSION_A = `hacc.v1.${"A".repeat(22)}.${"B".repeat(43)}`;
 const SESSION_B = `hacc.v1.${"C".repeat(22)}.${"D".repeat(43)}`;
+const PROVIDER_CONNECTION_META = {
+  "com.harsha.callcenter/provider-connection": {
+    schemaVersion: 2,
+    connectionId: `hacc.pc.v2.${"1".repeat(64)}.${"E".repeat(43)}`,
+    connectionEpoch: 1,
+    providerSessionIdSha256: null,
+  },
+};
 const RUNTIME_DIGEST = "e".repeat(64);
 const CATALOG_A = "a".repeat(64);
 const ROTATION = {
@@ -99,6 +107,7 @@ function successfulGateway(options: { sessions?: string[] } = {}) {
         protocolVersion: "2025-11-25",
         capabilities: { tools: {} },
         serverInfo: { name: "callcenter-gateway", version: "1.0.0" },
+        _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": session } });
     }
     if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -156,6 +165,14 @@ describe("browser capability gateway", () => {
         protocolVersion: "2025-11-25",
         capabilities: {},
         clientInfo: { name: "hacc-browser-realtime", version: "1.0.0" },
+        _meta: {
+          "com.harsha.callcenter/provider-connection": {
+            schemaVersion: 2,
+            connectionNonce: expect.stringMatching(/^[a-f0-9]{64}$/),
+            connectionEpoch: 1,
+            providerSessionIdSha256: null,
+          },
+        },
       },
     });
     expect(test.requests[1]?.headers.get("mcp-session-id")).toBe(SESSION_A);
@@ -168,8 +185,11 @@ describe("browser capability gateway", () => {
       _meta: {
         [MCP_PROVIDER_TOOL_CALL_ID_META_KEY]: "call-native-1",
         [PROVIDER_PROVENANCE_META_KEY]: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           provider: "xai",
+          providerConnectionId: PROVIDER_CONNECTION_META["com.harsha.callcenter/provider-connection"].connectionId,
+          providerConnectionEpoch: 1,
+          providerSessionIdSha256: null,
           nativeCallId: "call-native-1",
           nativeResponseId: "response-native-1",
           nativeItemId: "item-native-1",
@@ -235,6 +255,7 @@ describe("browser capability gateway", () => {
           protocolVersion: "2025-11-25",
           capabilities: { tools: {} },
           serverInfo: { name: "callcenter-gateway", version: "1.0.0" },
+          _meta: PROVIDER_CONNECTION_META,
         }, { headers: { "MCP-Session-Id": priorInitializes === 1 ? SESSION_A : SESSION_B } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -265,6 +286,43 @@ describe("browser capability gateway", () => {
     expect(toolCalls.map((request) => request.headers.get("mcp-session-id"))).toEqual([SESSION_A, SESSION_B]);
   });
 
+  it("rejects a changed provider-connection attestation during MCP reconnect", async () => {
+    let initializes = 0;
+    let toolCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body.method === "initialize") {
+        initializes += 1;
+        const connection = initializes === 1
+          ? PROVIDER_CONNECTION_META
+          : {
+              "com.harsha.callcenter/provider-connection": {
+                ...PROVIDER_CONNECTION_META["com.harsha.callcenter/provider-connection"],
+                connectionId: `hacc.pc.v2.${"2".repeat(64)}.${"F".repeat(43)}`,
+              },
+            };
+        return rpcResult(body.id, {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          serverInfo: {},
+          _meta: connection,
+        }, { headers: { "MCP-Session-Id": initializes === 1 ? SESSION_A : SESSION_B } });
+      }
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      toolCalls += 1;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        error: { code: -32002, message: "invalid MCP session" },
+      }), { status: 404 });
+    });
+
+    await expect(client(fetchImpl).executeBatch([call()]))
+      .rejects.toThrow("changed provider connection identity");
+    expect(initializes).toBe(2);
+    expect(toolCalls).toBe(1);
+  });
+
   it("dispatches a provider batch strictly in order and refuses partial or oversized protocol results", async () => {
     const order: string[] = [];
     const test = successfulGateway();
@@ -276,6 +334,7 @@ describe("browser capability gateway", () => {
         protocolVersion: "2025-11-25",
         capabilities: {},
         serverInfo: {},
+        _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       const id = ((body.params as Record<string, unknown>)._meta as Record<string, unknown>)[MCP_PROVIDER_TOOL_CALL_ID_META_KEY];
@@ -297,7 +356,7 @@ describe("browser capability gateway", () => {
     malformed.fetchImpl.mockImplementation(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       return rpcResult(body.id, { content: [], isError: false });
@@ -316,7 +375,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       const meta = ((body.params as Record<string, unknown>)._meta as Record<string, unknown>);
@@ -356,7 +415,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       toolCalls += 1;
@@ -390,7 +449,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       toolCalls += 1;
@@ -423,7 +482,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       return rpcResult(body.id, {
@@ -441,7 +500,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       response += 1;
@@ -470,7 +529,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       toolCalls += 1;
@@ -518,7 +577,7 @@ describe("browser capability gateway", () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") return rpcResult(body.id, {
-        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {},
+        protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
       }, { headers: { "MCP-Session-Id": SESSION_A } });
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
       return new Promise<Response>((_resolve, reject) => {
@@ -636,6 +695,7 @@ describe("browser capability rotation", () => {
           protocolVersion: "2025-11-25",
           capabilities: { tools: {} },
           serverInfo: { name: "callcenter-gateway", version: "1.0.0" },
+          _meta: PROVIDER_CONNECTION_META,
         }, { headers: { "MCP-Session-Id": initialize === 1 ? SESSION_A : SESSION_B } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -690,6 +750,7 @@ describe("browser capability rotation", () => {
           protocolVersion: "2025-11-25",
           capabilities: { tools: {} },
           serverInfo: { name: "callcenter-gateway", version: "1.0.0" },
+          _meta: PROVIDER_CONNECTION_META,
         }, { headers: { "MCP-Session-Id": initialize === 1 ? SESSION_A : SESSION_B } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -733,7 +794,7 @@ describe("browser capability rotation", () => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === "initialize") {
         return rpcResult(body.id, {
-          protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: {},
+          protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: {}, _meta: PROVIDER_CONNECTION_META,
         }, { headers: { "MCP-Session-Id": SESSION_B } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });

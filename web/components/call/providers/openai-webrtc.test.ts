@@ -162,7 +162,19 @@ function installFetch(sdp: () => Promise<Response>) {
       return new Response(JSON.stringify({
         jsonrpc: "2.0",
         id: body.id,
-        result: { protocolVersion: "2025-11-25", capabilities: {}, serverInfo: {} },
+        result: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          serverInfo: {},
+          _meta: {
+            "com.harsha.callcenter/provider-connection": {
+              schemaVersion: 2,
+              connectionId: `hacc.pc.v2.${"1".repeat(64)}.${"E".repeat(43)}`,
+              connectionEpoch: 1,
+              providerSessionIdSha256: null,
+            },
+          },
+        },
       }), { headers: { "MCP-Session-Id": `hacc.v1.${"A".repeat(22)}.${"B".repeat(43)}` } });
     }
     if (body.method === "notifications/initialized") return new Response(null, { status: 202 });

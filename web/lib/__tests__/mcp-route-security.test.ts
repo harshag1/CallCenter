@@ -115,6 +115,8 @@ const EXPECTED_CATALOG = Object.freeze({
   catalog_digest: CATALOG_DIGEST,
   capability_epoch: 7,
 });
+const PROVIDER_CONNECTION_NONCE = "9".repeat(64);
+const providerConnectionIds = new Map<string, string>();
 const REALTIME_CONTEXT_PACKET = Object.freeze({
   schemaVersion: 1,
   authority: {
@@ -166,23 +168,52 @@ function rawRequest(body: string, authorization = "Bearer valid-token") {
   });
 }
 
-async function initialize(token = "valid-token"): Promise<string> {
+async function initialize(
+  token = "valid-token",
+  connectionNonce = PROVIDER_CONNECTION_NONCE,
+): Promise<string> {
   const response = await POST(request({
     jsonrpc: "2.0",
     id: `initialize-${token}`,
     method: "initialize",
-    params: { protocolVersion: "2025-11-25" },
+    params: {
+      protocolVersion: "2025-11-25",
+      _meta: {
+        "com.harsha.callcenter/provider-connection": {
+          schemaVersion: 2,
+          connectionNonce,
+          connectionEpoch: 1,
+          providerSessionIdSha256: null,
+        },
+      },
+    },
   }, { authorization: `Bearer ${token}` }));
   expect(response.status).toBe(200);
   const sessionId = response.headers.get("mcp-session-id");
   expect(sessionId).toMatch(/^hacc\.v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+  const body = await response.json();
+  const connection = body.result?._meta?.["com.harsha.callcenter/provider-connection"];
+  expect(connection).toMatchObject({
+    schemaVersion: 2,
+    connectionId: expect.stringMatching(/^hacc\.pc\.v2\.[a-f0-9]{64}\.[A-Za-z0-9_-]{43}$/),
+    connectionEpoch: 1,
+    providerSessionIdSha256: null,
+  });
+  providerConnectionIds.set(token, connection.connectionId);
   return sessionId!;
 }
 
 function toolCall(
   persistentProviderToolCallId: string,
-  options: { id?: string | number; argumentIdentity?: string } = {}
+  options: {
+    id?: string | number;
+    argumentIdentity?: string;
+    token?: string;
+    providerConnectionId?: string;
+  } = {}
 ) {
+  const token = options.token ?? "valid-token";
+  const provider = token === "other-token" ? "openai" : "gemini";
   return {
     jsonrpc: "2.0",
     id: options.id ?? "transport-request-1",
@@ -197,6 +228,18 @@ function toolCall(
       },
       _meta: {
         "hacc/provider_tool_call_id": persistentProviderToolCallId,
+        "com.harsha.callcenter/provider-provenance": {
+          schemaVersion: 2,
+          provider,
+          providerConnectionId: options.providerConnectionId
+            ?? providerConnectionIds.get(token)
+            ?? "missing-provider-connection",
+          providerConnectionEpoch: 1,
+          providerSessionIdSha256: null,
+          nativeCallId: persistentProviderToolCallId,
+          nativeResponseId: `response:${persistentProviderToolCallId}`,
+          terminalWireType: "response.done",
+        },
         "com.harsha.callcenter/active-catalog": EXPECTED_CATALOG,
       },
     },
@@ -206,6 +249,7 @@ function toolCall(
 describe("MCP gateway request boundary", () => {
   beforeEach(() => {
     process.env.MCP_GATEWAY_SECRET = "test-mcp-gateway-secret-that-is-at-least-32-bytes";
+    providerConnectionIds.clear();
     vi.clearAllMocks();
     mocks.verifyScope.mockImplementation((token, expected) => {
       const isDirectExpectation =
@@ -621,7 +665,7 @@ describe("MCP gateway request boundary", () => {
         _meta: { "hacc/provider_tool_call_id": "attacker-controlled" },
       },
       {
-        invocationId: expect.stringMatching(/^mcp-provider:v1:[a-f0-9]{64}$/),
+        invocationId: expect.stringMatching(/^mcp-provider:v2:[a-f0-9]{64}$/),
         expectedCatalog: EXPECTED_CATALOG,
       }
     );
@@ -749,6 +793,59 @@ describe("MCP gateway request boundary", () => {
     expect(invocationIds[0]).toBe(invocationIds[1]);
   });
 
+  it("separates one recycled native ID across physical provider connections", async () => {
+    const firstSession = await initialize("valid-token", "1".repeat(64));
+    const firstConnectionId = providerConnectionIds.get("valid-token")!;
+    const secondSession = await initialize("valid-token", "2".repeat(64));
+    const secondConnectionId = providerConnectionIds.get("valid-token")!;
+    expect(secondConnectionId).not.toBe(firstConnectionId);
+
+    await POST(request(toolCall("provider-local-call-1", {
+      providerConnectionId: firstConnectionId,
+    }), {
+      authorization: "Bearer valid-token",
+      sessionId: firstSession,
+    }));
+    await POST(request(toolCall("provider-local-call-1", {
+      providerConnectionId: secondConnectionId,
+    }), {
+      authorization: "Bearer valid-token",
+      sessionId: secondSession,
+    }));
+
+    const invocationIds = mocks.callActiveCapability.mock.calls.map((call) => call[3].invocationId);
+    expect(invocationIds).toHaveLength(2);
+    expect(invocationIds[0]).toMatch(/^mcp-provider:v2:[a-f0-9]{64}$/);
+    expect(invocationIds[1]).toMatch(/^mcp-provider:v2:[a-f0-9]{64}$/);
+    expect(invocationIds[0]).not.toBe(invocationIds[1]);
+  });
+
+  it("rejects provider-connection provenance downgrade and attestation tamper", async () => {
+    const sessionId = await initialize();
+    const candidates = [
+      { schemaVersion: 1 },
+      { providerConnectionEpoch: 2 },
+      { providerSessionIdSha256: "f".repeat(64) },
+      { provider: "openai" },
+      { providerConnectionId: `${providerConnectionIds.get("valid-token")!.slice(0, -1)}!` },
+    ];
+    for (const override of candidates) {
+      const candidate = toolCall("provider-provenance-tamper");
+      const metadata = candidate.params._meta as Record<string, unknown>;
+      metadata["com.harsha.callcenter/provider-provenance"] = {
+        ...(metadata["com.harsha.callcenter/provider-provenance"] as Record<string, unknown>),
+        ...override,
+      };
+      const response = await POST(request(candidate, {
+        authorization: "Bearer valid-token",
+        sessionId,
+      }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: -32602 } });
+    }
+    expect(mocks.callActiveCapability).not.toHaveBeenCalled();
+  });
+
   it("keeps durable identity stable across bearer rotation while reauthorizing the session", async () => {
     const firstSession = await initialize("valid-token");
     const rotatedSession = await initialize("rotated-token");
@@ -756,7 +853,7 @@ describe("MCP gateway request boundary", () => {
       authorization: "Bearer valid-token",
       sessionId: firstSession,
     }));
-    await POST(request(toolCall("persistent-provider-call"), {
+    await POST(request(toolCall("persistent-provider-call", { token: "rotated-token" }), {
       authorization: "Bearer rotated-token",
       sessionId: rotatedSession,
     }));
@@ -785,7 +882,7 @@ describe("MCP gateway request boundary", () => {
       authorization: "Bearer valid-token",
       sessionId: firstSession,
     }));
-    await POST(request(toolCall("same-provider-call"), {
+    await POST(request(toolCall("same-provider-call", { token: "other-token" }), {
       authorization: "Bearer other-token",
       sessionId: secondSession,
     }));

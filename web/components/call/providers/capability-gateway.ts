@@ -9,6 +9,7 @@ export const CAPABILITY_GATEWAY_FUNCTION_NAME = "capability_gateway" as const;
 export const MCP_PROVIDER_TOOL_CALL_ID_META_KEY = "hacc/provider_tool_call_id" as const;
 export const PROVIDER_PROVENANCE_META_KEY = "com.harsha.callcenter/provider-provenance" as const;
 export const ACTIVE_CATALOG_META_KEY = "com.harsha.callcenter/active-catalog" as const;
+export const PROVIDER_CONNECTION_META_KEY = "com.harsha.callcenter/provider-connection" as const;
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 const MCP_SESSION_ID = /^hacc\.v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
@@ -29,6 +30,7 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_ACTIVE_CATALOG_BYTES = 96 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
+const PROVIDER_CONNECTION_ID = /^hacc\.pc\.v2\.[a-f0-9]{64}\.[A-Za-z0-9_-]{43}$/;
 const ACTIVE_OUTCOMES = new Set(["completed", "pending", "rejected", "indeterminate"]);
 const FLOW_STATUSES = new Set(["routing", "active", "completed", "failed", "direct"]);
 const IDEMPOTENCY_POLICIES = new Set(["none", "per_step", "per_arguments", "per_call", "per_call_arguments"]);
@@ -385,6 +387,8 @@ export class BrowserCapabilityGateway {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly randomId: () => string;
+  private providerConnectionNonce: string;
+  private providerConnectionId: string | null = null;
   private readonly abortControllers = new Set<AbortController>();
   private readonly callFingerprints = new Map<string, string>();
   private readonly inFlightCalls = new Map<string, Promise<BrowserCapabilityGatewayResult>>();
@@ -427,6 +431,14 @@ export class BrowserCapabilityGateway {
     }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.randomId = options.randomId ?? (() => crypto.randomUUID());
+    // One gateway instance is owned by one physical provider transport. MCP
+    // sessions and bearer capabilities can rotate beneath it, but a provider
+    // reconnect constructs a fresh gateway and therefore a fresh 256-bit nonce.
+    const providerConnectionNonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(providerConnectionNonceBytes);
+    this.providerConnectionNonce = [...providerConnectionNonceBytes]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
     this.now = options.now ?? Date.now;
     if (typeof this.now !== "function" || !Number.isFinite(this.now())) {
       throw new Error("tool capability rotation clock is invalid");
@@ -545,6 +557,8 @@ export class BrowserCapabilityGateway {
     this.abortControllers.clear();
     this.inFlightCalls.clear();
     this.completedCalls.clear();
+    this.providerConnectionId = null;
+    this.providerConnectionNonce = "";
     this.renewalToken = "";
     this.token = "";
   }
@@ -716,6 +730,14 @@ export class BrowserCapabilityGateway {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: "hacc-browser-realtime", version: "1.0.0" },
+      _meta: {
+        [PROVIDER_CONNECTION_META_KEY]: {
+          schemaVersion: 2,
+          connectionNonce: this.providerConnectionNonce,
+          connectionEpoch: 1,
+          providerSessionIdSha256: null,
+        },
+      },
     });
     if (!isRecord(initialized.result)
       || initialized.result.protocolVersion !== MCP_PROTOCOL_VERSION
@@ -723,6 +745,24 @@ export class BrowserCapabilityGateway {
       || !isRecord(initialized.result.serverInfo)) {
       throw new GatewayProtocolError("tool gateway returned an invalid initialize result");
     }
+    const resultMeta = initialized.result._meta;
+    const providerConnection = isRecord(resultMeta)
+      ? resultMeta[PROVIDER_CONNECTION_META_KEY]
+      : undefined;
+    if (!isRecord(providerConnection) || !exactKeys(providerConnection, [
+      "schemaVersion", "connectionId", "connectionEpoch", "providerSessionIdSha256",
+    ]) || providerConnection.schemaVersion !== 2
+      || typeof providerConnection.connectionId !== "string"
+      || !PROVIDER_CONNECTION_ID.test(providerConnection.connectionId)
+      || providerConnection.connectionEpoch !== 1
+      || providerConnection.providerSessionIdSha256 !== null) {
+      throw new GatewayProtocolError("tool gateway did not attest the provider connection");
+    }
+    if (this.providerConnectionId !== null
+      && this.providerConnectionId !== providerConnection.connectionId) {
+      throw new GatewayProtocolError("tool gateway changed provider connection identity during MCP reconnect");
+    }
+    this.providerConnectionId = providerConnection.connectionId;
     const sessionId = boundedSessionId(initialized.sessionId);
     await this.initializedNotification(sessionId);
     this.assertRunning();
@@ -825,9 +865,15 @@ export class BrowserCapabilityGateway {
     }
     assertStrictJson(call.arguments.arguments, "capability_gateway.arguments");
     const targetArguments = JSON.parse(canonicalJson(call.arguments.arguments)) as Record<string, unknown>;
+    if (!this.providerConnectionId) {
+      throw new GatewayProtocolError("tool gateway provider connection is not initialized");
+    }
     const provenance = Object.freeze({
-      schemaVersion: 1,
+      schemaVersion: 2,
       provider: this.provider,
+      providerConnectionId: this.providerConnectionId,
+      providerConnectionEpoch: 1,
+      providerSessionIdSha256: null,
       nativeCallId,
       nativeResponseId,
       ...(nativeItemId ? { nativeItemId } : {}),
@@ -903,7 +949,8 @@ export class BrowserCapabilityGateway {
       if (!(error instanceof GatewayProtocolError)
         || (error.status !== 404 && error.rpcCode !== -32002)) throw error;
       // MCP sessions are transport continuity only. Reuse the exact provider
-      // call ID so the durable server-side invocation receipt remains identical.
+      // connection attestation and call ID so the durable receipt remains
+      // identical without aliasing a later physical provider connection.
       await this.initialize(true);
       return invoke();
     }

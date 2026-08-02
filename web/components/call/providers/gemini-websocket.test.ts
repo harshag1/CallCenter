@@ -190,6 +190,14 @@ function installGatewayFetch(options: { errorTargets?: ReadonlySet<string> } = {
         protocolVersion: "2025-11-25",
         capabilities: {},
         serverInfo: { name: "hacc", version: "1.0.0" },
+        _meta: {
+          "com.harsha.callcenter/provider-connection": {
+            schemaVersion: 2,
+            connectionId: `hacc.pc.v2.${"1".repeat(64)}.${"E".repeat(43)}`,
+            connectionEpoch: 1,
+            providerSessionIdSha256: null,
+          },
+        },
       }, MCP_SESSION_ID);
     }
     if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -323,7 +331,7 @@ describe("Gemini browser capability gateway transport", () => {
         _meta: {
           "hacc/provider_tool_call_id": "provider-call-1",
           "com.harsha.callcenter/provider-provenance": {
-            schemaVersion: 1,
+            schemaVersion: 2,
             provider: "gemini",
             nativeCallId: "provider-call-1",
             nativeResponseId: "gemini-toolCall:provider-call-1",

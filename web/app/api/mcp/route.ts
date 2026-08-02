@@ -40,8 +40,13 @@ const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RPC_ID_BYTES = 256;
 const MCP_SESSION_DOMAIN = "harshas-amazing-call-center/mcp-session/v1\n";
 const PROVIDER_INVOCATION_DOMAIN = "harshas-amazing-call-center/provider-tool-call/v1\n";
+const PROVIDER_INVOCATION_V2_DOMAIN = "harshas-amazing-call-center/provider-tool-call/v2\n";
+const PROVIDER_CONNECTION_DOMAIN = "harshas-amazing-call-center/provider-connection/v2\n";
 const ACTIVE_CATALOG_META_KEY = "com.harsha.callcenter/active-catalog";
+const PROVIDER_PROVENANCE_META_KEY = "com.harsha.callcenter/provider-provenance";
+const PROVIDER_CONNECTION_META_KEY = "com.harsha.callcenter/provider-connection";
 const MCP_SESSION_ID_PATTERN = /^hacc\.v1\.([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/;
+const PROVIDER_CONNECTION_ID_PATTERN = /^hacc\.pc\.v2\.([a-f0-9]{64})\.([A-Za-z0-9_-]{43})$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const SECURITY_HEADERS = {
   "Cache-Control": "no-store",
@@ -133,6 +138,146 @@ function validMcpSessionId(value: string | null, scope: ScopeClaims): boolean {
   return timingSafeEqual(supplied, sessionAuthenticator(scope, nonce));
 }
 
+type ProviderConnectionRequest = Readonly<{
+  connectionNonce: string;
+  connectionEpoch: 1;
+  providerSessionIdSha256: string | null;
+}>;
+
+type ProviderProvenanceV2 = Readonly<{
+  providerConnectionId: string;
+  providerConnectionEpoch: 1;
+  providerSessionIdSha256: string | null;
+}>;
+
+function providerConnectionRequest(
+  params: Record<string, unknown> | undefined
+): ProviderConnectionRequest | null {
+  const metadata = params?._meta;
+  const value = isRecord(metadata) ? metadata[PROVIDER_CONNECTION_META_KEY] : undefined;
+  if (!isRecord(value) || Object.keys(value).length !== 4
+    || value.schemaVersion !== 2
+    || typeof value.connectionNonce !== "string" || !SHA256_PATTERN.test(value.connectionNonce)
+    || value.connectionEpoch !== 1
+    || !(value.providerSessionIdSha256 === null
+      || (typeof value.providerSessionIdSha256 === "string"
+        && SHA256_PATTERN.test(value.providerSessionIdSha256)))) {
+    return null;
+  }
+  return Object.freeze({
+    connectionNonce: value.connectionNonce,
+    connectionEpoch: 1,
+    providerSessionIdSha256: value.providerSessionIdSha256 as string | null,
+  });
+}
+
+function providerConnectionAuthenticator(
+  scope: ScopeClaims,
+  nonce: string,
+  connectionEpoch: 1,
+  providerSessionIdSha256: string | null,
+): Buffer {
+  return createHmac("sha256", sessionSecret())
+    .update(PROVIDER_CONNECTION_DOMAIN, "utf8")
+    .update(JSON.stringify([
+      scope.aud,
+      scope.orgId,
+      scope.callId,
+      scope.agentId,
+      scope.provider,
+      scope.providerCallId ?? null,
+      scope.providerAccountId ?? null,
+      scope.providerTo ?? null,
+      scope.providerStreamId ?? null,
+      scope.transportProvider ?? null,
+      connectionEpoch,
+      providerSessionIdSha256,
+      nonce,
+    ]), "utf8")
+    .digest();
+}
+
+function mintProviderConnectionId(
+  scope: ScopeClaims,
+  request: ProviderConnectionRequest,
+): string {
+  const tag = providerConnectionAuthenticator(
+    scope,
+    request.connectionNonce,
+    request.connectionEpoch,
+    request.providerSessionIdSha256,
+  );
+  return `hacc.pc.v2.${request.connectionNonce}.${tag.toString("base64url")}`;
+}
+
+function validProviderConnectionId(
+  value: string,
+  scope: ScopeClaims,
+  connectionEpoch: 1,
+  providerSessionIdSha256: string | null,
+): boolean {
+  const match = value.match(PROVIDER_CONNECTION_ID_PATTERN);
+  if (!match) return false;
+  const [, nonce, suppliedTag] = match;
+  const supplied = Buffer.from(suppliedTag, "base64url");
+  if (supplied.byteLength !== 32 || supplied.toString("base64url") !== suppliedTag) return false;
+  return timingSafeEqual(
+    supplied,
+    providerConnectionAuthenticator(scope, nonce, connectionEpoch, providerSessionIdSha256),
+  );
+}
+
+function providerProvenanceV2(
+  params: Record<string, unknown> | undefined,
+  scope: ScopeClaims,
+  providerToolCallId: string,
+): ProviderProvenanceV2 | null {
+  const metadata = params?._meta;
+  const value = isRecord(metadata) ? metadata[PROVIDER_PROVENANCE_META_KEY] : undefined;
+  if (!isRecord(value)) return null;
+  const required = [
+    "schemaVersion", "provider", "providerConnectionId", "providerConnectionEpoch",
+    "providerSessionIdSha256", "nativeCallId", "nativeResponseId", "terminalWireType",
+  ];
+  const optional = new Set(["nativeItemId", "terminalEventId"]);
+  if (!required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    || !Object.keys(value).every((key) => required.includes(key) || optional.has(key))
+    || value.schemaVersion !== 2 || value.provider !== scope.provider
+    || value.nativeCallId !== providerToolCallId
+    || value.providerConnectionEpoch !== 1
+    || !(value.providerSessionIdSha256 === null
+      || (typeof value.providerSessionIdSha256 === "string"
+        && SHA256_PATTERN.test(value.providerSessionIdSha256)))
+    || typeof value.nativeResponseId !== "string" || value.nativeResponseId.length === 0
+    || Buffer.byteLength(value.nativeResponseId, "utf8") > 512
+    || /[\u0000-\u001f\u007f]/.test(value.nativeResponseId)
+    || typeof value.terminalWireType !== "string" || value.terminalWireType.length === 0
+    || Buffer.byteLength(value.terminalWireType, "utf8") > 128
+    || /[\u0000-\u001f\u007f]/.test(value.terminalWireType)
+    || typeof value.providerConnectionId !== "string"
+    || !validProviderConnectionId(
+      value.providerConnectionId,
+      scope,
+      1,
+      value.providerSessionIdSha256 as string | null,
+    )) {
+    return null;
+  }
+  for (const key of optional) {
+    if (Object.prototype.hasOwnProperty.call(value, key)
+      && (typeof value[key] !== "string" || (value[key] as string).length === 0
+        || Buffer.byteLength(value[key] as string, "utf8") > 512
+        || /[\u0000-\u001f\u007f]/.test(value[key] as string))) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    providerConnectionId: value.providerConnectionId,
+    providerConnectionEpoch: 1,
+    providerSessionIdSha256: value.providerSessionIdSha256 as string | null,
+  });
+}
+
 function persistentProviderToolCallId(params: Record<string, unknown> | undefined): string | null {
   const metadata = params?._meta;
   if (!isRecord(metadata) ||
@@ -188,6 +333,29 @@ function providerInvocationId(scope: ScopeClaims, persistentProviderId: string):
     ]), "utf8")
     .digest("hex");
   return `mcp-provider:v1:${digest}`;
+}
+
+function providerInvocationIdV2(
+  scope: ScopeClaims,
+  persistentProviderId: string,
+  provenance: ProviderProvenanceV2,
+): string {
+  // The provider's native ID is connection-local on multiple realtime APIs.
+  // Namespace it by the server-attested physical connection before it reaches
+  // the durable receipt store; never truncate the resulting SHA-256 identity.
+  const digest = createHash("sha256")
+    .update(PROVIDER_INVOCATION_V2_DOMAIN, "utf8")
+    .update(JSON.stringify([
+      scope.orgId,
+      scope.callId,
+      scope.provider,
+      provenance.providerConnectionId,
+      provenance.providerConnectionEpoch,
+      provenance.providerSessionIdSha256,
+      persistentProviderId,
+    ]), "utf8")
+    .digest("hex");
+  return `mcp-provider:v2:${digest}`;
 }
 
 export async function POST(req: Request) {
@@ -304,12 +472,23 @@ export async function POST(req: Request) {
         (MCP_SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
         ? requested
         : MCP_LATEST_PROTOCOL_VERSION;
+      const connectionRequest = providerConnectionRequest(rpc.params);
       return rpcResult(
         rpc.id,
         {
           protocolVersion,
           capabilities: { tools: {} },
           serverInfo: { name: "callcenter-gateway", version: "1.0.0" },
+          ...(connectionRequest ? {
+            _meta: {
+              [PROVIDER_CONNECTION_META_KEY]: {
+                schemaVersion: 2,
+                connectionId: mintProviderConnectionId(scope, connectionRequest),
+                connectionEpoch: connectionRequest.connectionEpoch,
+                providerSessionIdSha256: connectionRequest.providerSessionIdSha256,
+              },
+            },
+          } : {}),
         },
         { "MCP-Session-Id": mintMcpSessionId(scope) }
       );
@@ -359,12 +538,25 @@ export async function POST(req: Request) {
           400
         );
       }
+      const provenance = scope.aud === "mcp"
+        ? providerProvenanceV2(rpc.params, scope, providerToolCallId)
+        : null;
+      if (scope.aud === "mcp" && !provenance) {
+        return rpcError(
+          rpc.id,
+          -32602,
+          `tools/call requires exact v2 params._meta[${JSON.stringify(PROVIDER_PROVENANCE_META_KEY)}] authority`,
+          400
+        );
+      }
       // Only client-owned top-level params._meta supplies provider identity.
       // arguments._meta remains ordinary, untrusted model input. Catalog
       // authority is host-owned, and JSON-RPC ids correlate transport
       // responses without ever determining durable receipts.
       const outcome = await callActiveCapability(scope, name, args, {
-        invocationId: providerInvocationId(scope, providerToolCallId),
+        invocationId: provenance
+          ? providerInvocationIdV2(scope, providerToolCallId, provenance)
+          : providerInvocationId(scope, providerToolCallId),
         expectedCatalog,
       });
       let currentCatalog: ActiveCapabilityCatalog;
