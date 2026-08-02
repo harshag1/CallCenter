@@ -97,13 +97,24 @@ export function createBridgeServer({
     }
 
     const signature = request.headers["x-twilio-signature"];
-    const authenticated = config.allowInsecureLocalTests
+    let authenticated = config.allowInsecureLocalTests
       ? loopbackAddress(request.socket.remoteAddress)
-      : verifyTwilioSignature({
-        authToken: config.twilioAuthToken,
-        configuredUrl: config.publicStreamUrl,
-        signatureHeader: typeof signature === "string" ? signature : undefined,
-      });
+      : false;
+    if (!config.allowInsecureLocalTests) {
+      // Validate every configured token even after a match. During an Auth Token
+      // rotation Twilio signs with the old primary before promotion and the new
+      // primary immediately after promotion; accepting both avoids a deployment
+      // race without changing any request-derived authority.
+      for (const authToken of [config.twilioAuthToken, config.twilioAuthTokenNext]) {
+        if (authToken === null || authToken === undefined) continue;
+        const valid = verifyTwilioSignature({
+          authToken,
+          configuredUrl: config.publicStreamUrl,
+          signatureHeader: typeof signature === "string" ? signature : undefined,
+        });
+        authenticated = valid || authenticated;
+      }
+    }
     if (!authenticated) {
       logger.warn("bridge_upgrade_rejected", { code: "twilio_signature_invalid" });
       return rejectUpgrade(socket, 401, "Unauthorized");

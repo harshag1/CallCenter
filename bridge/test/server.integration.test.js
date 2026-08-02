@@ -38,9 +38,9 @@ function quietLogger() {
   return createLogger({ sink, now: () => "2026-07-16T00:00:00.000Z" });
 }
 
-function signature(config) {
+function signature(config, authToken = config.twilioAuthToken) {
   return computeTwilioSignature({
-    authToken: config.twilioAuthToken,
+    authToken,
     configuredUrl: config.publicStreamUrl,
   });
 }
@@ -328,6 +328,7 @@ describe("bridge server integration", () => {
 
   it("authenticates the exact public Twilio URL, caps pre-start sockets, and reaps loiterers", async (t) => {
     const config = bridgeConfig({
+      twilioAuthTokenNext: "next-twilio-auth-token-with-enough-entropy",
       limits: { maximumConcurrentSessions: 1, twilioStartMs: 30, shutdownMs: 100 },
     });
     const bridge = createBridgeServer({ config, logger: quietLogger() });
@@ -338,7 +339,7 @@ describe("bridge server integration", () => {
     await assert.rejects(rejectedClient(url), /401/);
     assert.equal(bridge.sessions.size, 0);
 
-    const loiterer = await openClient(url, signature(config));
+    const loiterer = await openClient(url, signature(config, config.twilioAuthTokenNext));
     const closed = closeResult(loiterer);
     await waitFor(() => bridge.sessions.size === 1, "pre-start session registration");
     await assert.rejects(rejectedClient(url, signature(config)), /503/);

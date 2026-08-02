@@ -30,6 +30,7 @@ The Node server does not terminate TLS. Put it behind an edge that terminates HT
 | `BRIDGE_PUBLIC_STREAM_URL` | required | Canonical `wss://.../stream`; exact path `/stream`, no credentials, query, fragment, or backslash. `ws://` is allowed only for explicit non-production loopback tests. |
 | `TWILIO_ACCOUNT_SID` | required | Canonical `AC` followed by 32 hexadecimal characters. Start frames for any other account fail closed. |
 | `TWILIO_AUTH_TOKEN` | required | At least 20 control-free characters. Used only to validate Twilio's upgrade signature. |
+| `TWILIO_AUTH_TOKEN_NEXT` | optional | A distinct replacement token accepted only for Twilio upgrade-signature validation during a bounded rotation window. Configure the secondary token here before promoting it, verify traffic after promotion, then move it to `TWILIO_AUTH_TOKEN` and remove this variable. |
 | `OPENAI_API_KEY` | optional | Local bridge credential, maximum 8,192 control-free bytes. Required when bootstrap selects `openai`. |
 | `XAI_API_KEY` | optional | Local bridge credential, maximum 8,192 control-free bytes. Required when bootstrap selects `xai`. |
 | `BRIDGE_INSTANCE_ID` | generated | `1..128` characters from letters, digits, `_`, `.`, `:`, or `-`; journal/bootstrap correlation only. |

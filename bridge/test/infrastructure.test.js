@@ -20,6 +20,7 @@ const ENV = {
   BRIDGE_PUBLIC_STREAM_URL: "wss://bridge.example.test/stream",
   TWILIO_ACCOUNT_SID: ACCOUNT_SID,
   TWILIO_AUTH_TOKEN: "twilio-auth-token-with-enough-entropy",
+  TWILIO_AUTH_TOKEN_NEXT: "next-twilio-auth-token-with-enough-entropy",
   OPENAI_API_KEY: "openai-test-key",
   BRIDGE_INSTANCE_ID: "bridge-config-test",
 };
@@ -110,6 +111,7 @@ describe("bridge infrastructure boundaries", () => {
     assert.equal(config.publicStreamUrl, "wss://bridge.example.test/stream");
     assert.equal(config.appOrigin, ENV.APP_ORIGIN);
     assert.equal(config.strictTwilioProtocol, true);
+    assert.equal(config.twilioAuthTokenNext, ENV.TWILIO_AUTH_TOKEN_NEXT);
     assert.equal(config.allowedClientTools.join(","), "capability_gateway");
     assert.equal(config.limits.playbackMarkBytes, 800);
     assert.equal(config.limits.maximumConcurrentSessions, 1_000);
@@ -129,6 +131,8 @@ describe("bridge infrastructure boundaries", () => {
       { BRIDGE_SESSION_PATH: "https://attacker.example/session" },
       { BRIDGE_EVENTS_PATH: "/api/../escape" },
       { TWILIO_ACCOUNT_SID: CALL_SID },
+      { TWILIO_AUTH_TOKEN_NEXT: "too-short" },
+      { TWILIO_AUTH_TOKEN_NEXT: ENV.TWILIO_AUTH_TOKEN },
       { BRIDGE_ALLOWED_CLIENT_TOOLS: "capability_gateway,capability_gateway" },
     ]) {
       assert.throws(() => loadBridgeConfig({ ...ENV, ...patch }));

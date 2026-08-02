@@ -102,12 +102,22 @@ export function loadBridgeConfig(env = process.env) {
   const instanceId = env.BRIDGE_INSTANCE_ID ?? `bridge-${randomUUID()}`;
   if (!SAFE_ID.test(instanceId)) throw new Error("BRIDGE_INSTANCE_ID is malformed");
 
+  const twilioAuthToken = required(env, "TWILIO_AUTH_TOKEN", 20);
+  const twilioAuthTokenNext = optionalCredential(env, "TWILIO_AUTH_TOKEN_NEXT");
+  if (twilioAuthTokenNext !== null && twilioAuthTokenNext.length < 20) {
+    throw new Error("TWILIO_AUTH_TOKEN_NEXT must contain at least 20 characters when configured");
+  }
+  if (twilioAuthTokenNext === twilioAuthToken) {
+    throw new Error("TWILIO_AUTH_TOKEN_NEXT must differ from TWILIO_AUTH_TOKEN");
+  }
+
   const config = {
     port: integerEnv(env, "PORT", 8080, 1, 65_535),
     appOrigin: originUrl(required(env, "APP_ORIGIN"), { allowInsecure: allowInsecureLocalTests }),
     publicStreamUrl: streamUrl(required(env, "BRIDGE_PUBLIC_STREAM_URL"), { allowInsecure: allowInsecureLocalTests }),
     twilioAccountSid: required(env, "TWILIO_ACCOUNT_SID"),
-    twilioAuthToken: required(env, "TWILIO_AUTH_TOKEN", 20),
+    twilioAuthToken,
+    twilioAuthTokenNext,
     providerKeys: Object.freeze({
       openai: optionalCredential(env, "OPENAI_API_KEY"),
       xai: optionalCredential(env, "XAI_API_KEY"),

@@ -69,6 +69,7 @@ export function bridgeConfig(overrides = {}) {
     publicStreamUrl: "wss://bridge.example.test/stream",
     twilioAccountSid: ACCOUNT_SID,
     twilioAuthToken: "twilio-auth-token-with-enough-entropy",
+    twilioAuthTokenNext: null,
     providerKeys: { openai: "openai-test-key", xai: "xai-test-key" },
     instanceId: "bridge-test-instance",
     allowInsecureLocalTests: false,

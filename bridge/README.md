@@ -78,6 +78,8 @@ export APP_ORIGIN=https://app.example.com
 export BRIDGE_PUBLIC_STREAM_URL=wss://bridge.example.com/stream
 export TWILIO_ACCOUNT_SID=AC00000000000000000000000000000000
 export TWILIO_AUTH_TOKEN='replace-with-the-real-auth-token'
+# Rotation only: stage Twilio's secondary token before promoting it.
+# export TWILIO_AUTH_TOKEN_NEXT='replace-with-the-secondary-auth-token'
 export OPENAI_API_KEY='replace-with-the-provider-key'
 # or: export XAI_API_KEY='replace-with-the-provider-key'
 
@@ -85,6 +87,12 @@ npm start
 ```
 
 `APP_ORIGIN` must be an exact HTTPS origin. `BRIDGE_PUBLIC_STREAM_URL` must be a canonical `wss://` URL ending in exactly `/stream`, without credentials, query, or fragment. TLS terminates at the deployment edge; the Node process serves HTTP/WebSocket internally.
+
+For zero-downtime Auth Token rotation, deploy the secondary token as
+`TWILIO_AUTH_TOKEN_NEXT` while the current primary remains in
+`TWILIO_AUTH_TOKEN`. Promote the secondary token in Twilio only after the bridge
+is running with both. After signed traffic succeeds with the promoted token,
+move it to `TWILIO_AUTH_TOKEN`, remove `TWILIO_AUTH_TOKEN_NEXT`, and redeploy.
 
 TwiML should be equivalent to:
 
