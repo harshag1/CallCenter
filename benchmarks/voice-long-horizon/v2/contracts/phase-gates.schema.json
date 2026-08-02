@@ -7,7 +7,7 @@
   "required": ["schema_version", "protocol_id", "example_only", "serial", "stop_on_failed_or_ambiguous", "phases"],
   "properties": {
     "schema_version": { "const": 1 },
-    "protocol_id": { "const": "hacc-proof-v1" },
+    "protocol_id": { "const": "HACC-Proof-v1" },
     "example_only": { "type": "boolean" },
     "serial": { "const": true },
     "stop_on_failed_or_ambiguous": { "const": true },

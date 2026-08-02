@@ -440,7 +440,7 @@ export function generateBenchmarkReportV2(input: Readonly<{
     && eligibilityReceipt.provider_allocations.every((allocation, index) => (
       allocation.provider === expectedC108Providers[index] && allocation.pairs === 36
     ));
-  const c108EndpointParameters = input.registration.protocol_id === "hacc-proof-v1"
+  const c108EndpointParameters = input.registration.protocol_id === "HACC-Proof-v1"
     && input.registration.expected_pair_count === 108
     && input.registration.providers.length === expectedC108Providers.length
     && input.registration.providers.every((provider, index) => provider === expectedC108Providers[index])

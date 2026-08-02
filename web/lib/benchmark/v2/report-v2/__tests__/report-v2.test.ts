@@ -45,7 +45,7 @@ function eligibilityReceipt(artifacts: ConfirmatoryClaimArtifacts): ClaimEligibi
     schema_version: 2 as const,
     receipt_type: "hacc_claim_eligibility_receipt" as const,
     receipt_id: "c108-eligibility-test",
-    protocol_id: "hacc-proof-v1",
+    protocol_id: "HACC-Proof-v1",
     endpoint_contract_id: "hacc-proof-v1-endpoints",
     endpoint_contract_sha256: artifacts.endpoint_contract.endpoint_contract_sha256,
     endpoint_contract_example_only: false as const,
@@ -328,7 +328,7 @@ function registration(
   const artifacts = claimArtifacts(fixtures.length === 108 ? fixtures : pairs((arm) => arm === "hacc"));
   return Object.freeze({
     report_id: "report-v2-test",
-    protocol_id: "hacc-proof-v1",
+    protocol_id: "HACC-Proof-v1",
     phase: "confirmatory" as const,
     generated_at: "2026-08-02T12:00:00.000Z",
     providers: PROVIDERS,
