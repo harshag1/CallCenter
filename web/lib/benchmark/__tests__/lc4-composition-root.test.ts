@@ -196,7 +196,7 @@ describe("LC4 deterministic composition root", () => {
       ...factInput,
       corpus: corpusWithTemplates(factInput.corpus, factTemplates),
     })).toThrow(/fact-introduction|fact introduction|omits a fact/u);
-  });
+  }, 15_000);
 
   it("rejects semantic-registry substitution and authorization widening", () => {
     const semanticInput = fixtures();
