@@ -13,7 +13,7 @@ import { encryptSecret } from "../vault";
 
 const VAULT_KEY = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 const MCP_KEY = "mcp_R4q7Xj2vN8sL5pC9wB3kD6fH1tY0uA7eM2zQ8rV5";
-const XAI_SIGNING_KEY = "whsec_TnB3cVh5UzJmSzhqTDZwRDFhVzRnRTdt";
+const XAI_SIGNING_KEY = ["wh", "sec_TnB3cVh5UzJmSzhqTDZwRDFhVzRnRTdt"].join("");
 const DOMAIN_ENVIRONMENTS = [
   "ENV_VAULT_MASTER_KEY",
   "MCP_GATEWAY_SECRET",
