@@ -720,6 +720,15 @@ describe("browser capability rotation", () => {
       body: { schema_version: 1, call_id: callId, rotation: 1 },
     });
     expect(initialize).toBe(2);
+    const initializeRequests = observed.filter((entry) => entry.body.method === "initialize");
+    const connectionNonces = initializeRequests.map((entry) => {
+      const params = entry.body.params as Record<string, unknown>;
+      const metadata = params._meta as Record<string, unknown>;
+      const connection = metadata["com.harsha.callcenter/provider-connection"] as Record<string, unknown>;
+      return connection.connectionNonce;
+    });
+    expect(connectionNonces).toHaveLength(2);
+    expect(connectionNonces[0]).toBe(connectionNonces[1]);
     const toolAuthorizations = observed
       .filter((entry) => entry.body.method === "tools/call")
       .map((entry) => entry.authorization);
@@ -728,6 +737,15 @@ describe("browser capability rotation", () => {
       `Bearer ${nextMcp}`,
       `Bearer ${nextMcp}`,
     ]);
+    const durableConnectionIds = observed
+      .filter((entry) => entry.body.method === "tools/call")
+      .map((entry) => {
+        const params = entry.body.params as Record<string, unknown>;
+        const metadata = params._meta as Record<string, unknown>;
+        const provenance = metadata[PROVIDER_PROVENANCE_META_KEY] as Record<string, unknown>;
+        return provenance.providerConnectionId;
+      });
+    expect(new Set(durableConnectionIds).size).toBe(1);
     gateway.close();
   });
 

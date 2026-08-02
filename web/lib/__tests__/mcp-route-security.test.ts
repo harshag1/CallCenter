@@ -822,12 +822,15 @@ describe("MCP gateway request boundary", () => {
 
   it("rejects provider-connection provenance downgrade and attestation tamper", async () => {
     const sessionId = await initialize();
+    const connectionId = providerConnectionIds.get("valid-token")!;
+    const tagStart = connectionId.lastIndexOf(".") + 1;
+    const wrongAuthenticator = `${connectionId.slice(0, tagStart)}${connectionId[tagStart] === "A" ? "B" : "A"}${connectionId.slice(tagStart + 1)}`;
     const candidates = [
       { schemaVersion: 1 },
       { providerConnectionEpoch: 2 },
       { providerSessionIdSha256: "f".repeat(64) },
       { provider: "openai" },
-      { providerConnectionId: `${providerConnectionIds.get("valid-token")!.slice(0, -1)}!` },
+      { providerConnectionId: wrongAuthenticator },
     ];
     for (const override of candidates) {
       const candidate = toolCall("provider-provenance-tamper");
