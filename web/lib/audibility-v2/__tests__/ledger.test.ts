@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   applyAudibilityLedgerEvent,
   applyAudibilityLedgerEvents,
+  classifyTerminalClaimSemantics,
   createAudibilityLedger,
   projectAudibleConversationEvidence,
+  reopenVerifiedClaimGrantAuthority,
   type AudibilityEvidenceSource,
   type AudibilityLedger,
   type AudibilityLedgerEvent,
@@ -19,6 +21,30 @@ const SESSION_ID = "session-1";
 
 function hash(value: number): string {
   return value.toString(16).padStart(64, "0");
+}
+
+function verifiedAuthority(
+  responseId: string,
+  claimId: string,
+  authorityReceiptSha256: string,
+  claimContentSha256 = hash(103)
+) {
+  return reopenVerifiedClaimGrantAuthority({
+    responseId,
+    claimId,
+    claimContentSha256,
+    authorityRevision: 42,
+    authorityReceiptSha256,
+    reopenedReceiptSha256: hash(90),
+    turnContractSha256: hash(91),
+    semanticBindingSha256: hash(92),
+  }, {
+    verifyReopenedReceiptAndTurnContract: () => ({
+      ok: true,
+      verifierId: "test-host-verifier",
+      hostVerificationSha256: hash(93),
+    }),
+  });
 }
 
 function event(
@@ -111,18 +137,21 @@ describe("audibility v2 ledger", () => {
       responseId: "response-1",
       evidenceStatus: "unverifiable",
       audibleRanges: [],
+      verifiedNotPlayedRanges: [],
+      unknownRanges: [{ startSample: 0, endSample: 600 }],
       pcmEvidence: [],
       terminalClaims: [{
         claimId: "claim-booked",
         status: "unverifiable",
         acknowledgedRanges: [],
-        missingRanges: [{ startSample: 700, endSample: 900 }],
+        verifiedNotPlayedRanges: [],
+        unknownRanges: [{ startSample: 700, endSample: 900 }],
         grantId: null,
         authorityReceiptSha256: null,
       }],
       unverifiableReasons: [
-        "no_playback_acknowledgement_or_terminal_clear",
-        "released_audio_has_no_playback_evidence",
+        "no_positive_playback_or_delivery_clear_evidence",
+        "released_audio_has_unknown_delivery_ranges",
       ],
     });
   });
@@ -148,10 +177,8 @@ describe("audibility v2 ledger", () => {
         type: "claim_grant_issued",
         eventId: "grant-event",
         responseId: "response-1",
-        claimId: "claim-booked",
         grantId: "grant-booked",
-        authorityRevision: 42,
-        authorityReceiptSha256: hash(7),
+        authority: verifiedAuthority("response-1", "claim-booked", hash(7)),
       }),
       event(8, "release_controller", {
         type: "release_requested",
@@ -176,10 +203,8 @@ describe("audibility v2 ledger", () => {
         type: "claim_grant_issued",
         eventId: "grant-event",
         responseId: "response-1",
-        claimId: "claim-booked",
         grantId: "grant-booked",
-        authorityRevision: 42,
-        authorityReceiptSha256: hash(6),
+        authority: verifiedAuthority("response-1", "claim-booked", hash(6)),
       }),
       event(7, "release_controller", {
         type: "release_requested",
@@ -200,8 +225,12 @@ describe("audibility v2 ledger", () => {
     ]);
 
     expect(projectAudibleConversationEvidence(state).responses[0]).toMatchObject({
-      evidenceStatus: "verified_audible",
+      evidenceStatus: "unverifiable",
       audibleRanges: [{ startSample: 200, endSample: 800 }],
+      unknownRanges: [
+        { startSample: 0, endSample: 200 },
+        { startSample: 800, endSample: 1_000 },
+      ],
       pcmEvidence: [
         {
           chunkId: "chunk-1",
@@ -220,9 +249,10 @@ describe("audibility v2 ledger", () => {
       ],
       terminalClaims: [expect.objectContaining({
         claimId: "claim-booked",
-        status: "partially_audible",
+        status: "unverifiable",
         acknowledgedRanges: [{ startSample: 700, endSample: 800 }],
-        missingRanges: [{ startSample: 800, endSample: 900 }],
+        verifiedNotPlayedRanges: [],
+        unknownRanges: [{ startSample: 800, endSample: 900 }],
         grantId: "grant-booked",
         authorityReceiptSha256: hash(6),
       })],
@@ -272,10 +302,12 @@ describe("audibility v2 ledger", () => {
       truncations: [{ retainedThroughSample: 0 }],
     });
     expect(projectAudibleConversationEvidence(cleared).responses[0]).toMatchObject({
-      evidenceStatus: "verified_not_audible",
+      evidenceStatus: "unverifiable",
       audibleRanges: [],
+      verifiedNotPlayedRanges: [],
+      unknownRanges: [{ startSample: 0, endSample: 600 }],
       pcmEvidence: [],
-      terminalClaims: [{ status: "not_audible" }],
+      terminalClaims: [{ status: "unverifiable" }],
     });
 
     const lateAck = applyAudibilityLedgerEvent(cleared, event(10, "playback_device", {
@@ -287,6 +319,79 @@ describe("audibility v2 ledger", () => {
       releaseDecisionIds: ["release-safe"],
     }));
     expect(lateAck).toMatchObject({ ok: false, code: "stale_release_epoch" });
+
+    const positivelyCleared = reduce([event(10, "playback_device", {
+      type: "delivery_clear_confirmed",
+      eventId: "delivery-clear-event",
+      responseId: "response-1",
+      confirmationId: "delivery-clear-1",
+      clearId: "clear-1",
+      confirmedNotPlayedRanges: [{ startSample: 0, endSample: 600 }],
+    })], cleared);
+    expect(projectAudibleConversationEvidence(positivelyCleared).responses[0]).toMatchObject({
+      evidenceStatus: "verified_not_audible",
+      audibleRanges: [],
+      verifiedNotPlayedRanges: [{ startSample: 0, endSample: 600 }],
+      unknownRanges: [],
+    });
+  });
+
+  it("requires an opaque host-reopened receipt authority and fails closed on unknown semantics", () => {
+    const state = reduce(baseResponseEvents());
+    const literalGrant = applyAudibilityLedgerEvent(state, event(6, "effect_receipt", {
+      type: "claim_grant_issued",
+      eventId: "literal-grant-event",
+      responseId: "response-1",
+      grantId: "literal-grant",
+      authority: {
+        responseId: "response-1",
+        claimId: "claim-booked",
+        claimContentSha256: hash(103),
+        authorityRevision: 42,
+        authorityReceiptSha256: hash(6),
+        reopenedReceiptSha256: hash(90),
+        turnContractSha256: hash(91),
+        semanticBindingSha256: hash(92),
+        verifierId: "forged",
+        hostVerificationSha256: hash(93),
+      },
+    } as unknown as EventInput));
+    expect(literalGrant).toMatchObject({ ok: false, code: "invalid_event" });
+
+    const paraphrase = classifyTerminalClaimSemantics({
+      responseId: "response-1",
+      spanId: "paraphrase",
+      text: "Your reservation is locked in for Tuesday.",
+      contentSha256: hash(110),
+      turnContractSha256: hash(91),
+    }, {
+      classify: () => ({
+        decision: "terminal_claim",
+        kind: "external_effect",
+        classifierId: "offline-semantic-fixture",
+        evidenceSha256: hash(111),
+      }),
+    });
+    expect(paraphrase).toMatchObject({ requiresClaimGrant: true });
+
+    const unknown = classifyTerminalClaimSemantics({
+      responseId: "response-1",
+      spanId: "ambiguous-paraphrase",
+      text: "Looks like that should be all set.",
+      contentSha256: hash(112),
+      turnContractSha256: hash(91),
+    }, {
+      classify: () => ({
+        decision: "unknown",
+        kind: null,
+        classifierId: "offline-semantic-fixture",
+        evidenceSha256: hash(113),
+      }),
+    });
+    expect(unknown).toMatchObject({
+      requiresClaimGrant: true,
+      classification: { decision: "unknown" },
+    });
   });
 
   it("rejects fabricated playback and preserves exact retry/conflict semantics", () => {
@@ -378,10 +483,13 @@ describe("audibility v2 ledger", () => {
           type: "claim_grant_issued",
           eventId: `grant-event-${schedule}`,
           responseId,
-          claimId: `claim-${schedule}`,
           grantId: `grant-${schedule}`,
-          authorityRevision: schedule + 1,
-          authorityReceiptSha256: hash(sequence + 1),
+          authority: verifiedAuthority(
+            responseId,
+            `claim-${schedule}`,
+            hash(sequence + 1),
+            hash(20_000 + schedule)
+          ),
         }),
         next("release_controller", {
           type: "release_requested",
@@ -392,57 +500,106 @@ describe("audibility v2 ledger", () => {
           claimGrantIds: [`grant-${schedule}`],
         }),
       ];
-      if (playedThrough > 0) {
-        events.push(next("playback_device", {
+      let ledger = reduce(events, createAudibilityLedger(sessionId));
+      const applyGood = (source: AudibilityEvidenceSource, input: EventInput): void => {
+        const result = applyAudibilityLedgerEvent(ledger, event(ledger.revision + 1, source, input, sessionId));
+        if (!result.ok) throw new Error(`${result.code}: ${result.error}`);
+        ledger = result.state;
+      };
+      const mode = schedule % 5;
+      if (playedThrough > 0 && mode !== 2) {
+        const acknowledgedRanges = mode === 1 && playedThrough >= 6
+          ? [
+              { startSample: 0, endSample: Math.floor(playedThrough / 3) },
+              { startSample: Math.floor((playedThrough * 2) / 3), endSample: playedThrough },
+            ]
+          : [{ startSample: 0, endSample: playedThrough }];
+        applyGood("playback_device", {
           type: "playback_acknowledged",
           eventId: `ack-event-${schedule}`,
           responseId,
           acknowledgementId: `ack-${schedule}`,
-          ranges: [{ startSample: 0, endSample: playedThrough }],
+          ranges: acknowledgedRanges,
           releaseDecisionIds: [`release-${schedule}`],
-        }));
+        });
       }
-      events.push(
-        next("transport_control", {
-          type: "playback_cleared",
-          eventId: `clear-event-${schedule}`,
+      const clearReason = mode === 2 || mode === 3 ? "disconnect" as const : "barge_in" as const;
+      applyGood("transport_control", {
+        type: "playback_cleared",
+        eventId: `clear-event-${schedule}`,
+        responseId,
+        clearId: `clear-${schedule}`,
+        reason: clearReason,
+      });
+
+      if (mode === 2) {
+        const late = applyAudibilityLedgerEvent(ledger, event(ledger.revision + 1, "playback_device", {
+          type: "playback_acknowledged",
+          eventId: `delayed-ack-event-${schedule}`,
           responseId,
+          acknowledgementId: `delayed-ack-${schedule}`,
+          ranges: [{ startSample: 0, endSample: Math.max(1, playedThrough) }],
+          releaseDecisionIds: [`release-${schedule}`],
+        }, sessionId));
+        expect(late).toMatchObject({ ok: false, code: "stale_release_epoch" });
+      }
+
+      const clear = ledger.responses[responseId].clears.at(-1);
+      if (mode === 4 && clear && clear.clearedRanges.length > 0) {
+        applyGood("playback_device", {
+          type: "delivery_clear_confirmed",
+          eventId: `delivery-clear-event-${schedule}`,
+          responseId,
+          confirmationId: `delivery-clear-${schedule}`,
           clearId: `clear-${schedule}`,
-          reason: "barge_in",
-        }),
-        next("transport_control", {
+          confirmedNotPlayedRanges: clear.clearedRanges,
+        });
+      }
+      if (clearReason === "barge_in") {
+        applyGood("transport_control", {
           type: "barge_in_recorded",
           eventId: `barge-event-${schedule}`,
           responseId,
           bargeInId: `barge-${schedule}`,
           clearId: `clear-${schedule}`,
-        }),
-        next("provider_history", {
-          type: "provider_history_truncated",
-          eventId: `truncate-event-${schedule}`,
-          responseId,
-          truncationId: `truncate-${schedule}`,
-          retainedThroughSample: playedThrough,
-        })
-      );
+        });
+      }
+      applyGood("provider_history", {
+        type: "provider_history_truncated",
+        eventId: `truncate-event-${schedule}`,
+        responseId,
+        truncationId: `truncate-${schedule}`,
+        retainedThroughSample: playedThrough,
+      });
 
-      const ledger = reduce(events, createAudibilityLedger(sessionId));
       const response = ledger.responses[responseId];
       expect(response.releaseDecisions.map(({ outcome }) => outcome)).toEqual(["blocked", "released"]);
       expect(response.releaseDecisions[0].reason).toBe("missing_claim_grant");
-      expect(response.acknowledgedPlayedRanges).toEqual(
-        playedThrough === 0 ? [] : [{ startSample: 0, endSample: playedThrough }]
-      );
       const projected = projectAudibleConversationEvidence(ledger).responses[0];
-      expect(projected.audibleRanges).toEqual(
-        playedThrough === 0 ? [] : [{ startSample: 0, endSample: playedThrough }]
-      );
       expect(projected.pcmEvidence.every(({ status }) => status === "acknowledged_played")).toBe(true);
-      const expectedClaimStatus = playedThrough >= 900
+      const measuredSamples = [
+        ...projected.audibleRanges,
+        ...projected.verifiedNotPlayedRanges,
+        ...projected.unknownRanges,
+      ].reduce((total, range) => total + range.endSample - range.startSample, 0);
+      expect(measuredSamples).toBe(1_000);
+      expect(projected.evidenceStatus).toBe(
+        projected.unknownRanges.length > 0
+          ? "unverifiable"
+          : projected.audibleRanges.length > 0
+            ? "verified_audible"
+            : "verified_not_audible"
+      );
+      const claim = projected.terminalClaims[0];
+      const acknowledgedClaimSamples = claim.acknowledgedRanges
+        .reduce((total, range) => total + range.endSample - range.startSample, 0);
+      const notPlayedClaimSamples = claim.verifiedNotPlayedRanges
+        .reduce((total, range) => total + range.endSample - range.startSample, 0);
+      const expectedClaimStatus = acknowledgedClaimSamples === 200
         ? "fully_audible"
-        : playedThrough > 700
-          ? "partially_audible"
-          : "not_audible";
+        : notPlayedClaimSamples === 200
+          ? "verified_not_audible"
+          : "unverifiable";
       expect(projected.terminalClaims[0]).toMatchObject({
         status: expectedClaimStatus,
         grantId: `grant-${schedule}`,

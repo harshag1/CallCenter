@@ -47,6 +47,126 @@ type EventBase = Readonly<{
   evidence: AudibilityEvidenceReference;
 }>;
 
+const VERIFIED_CLAIM_GRANT = Symbol("hacc.verified-claim-grant-authority");
+const verifiedClaimGrantAuthorities = new WeakSet<object>();
+
+export type ClaimGrantAuthorityInput = Readonly<{
+  responseId: string;
+  claimId: string;
+  claimContentSha256: string;
+  authorityRevision: number;
+  authorityReceiptSha256: string;
+  reopenedReceiptSha256: string;
+  turnContractSha256: string;
+  semanticBindingSha256: string;
+}>;
+
+export type HostClaimGrantVerification = Readonly<{
+  ok: true;
+  verifierId: string;
+  hostVerificationSha256: string;
+}> | Readonly<{
+  ok: false;
+  reason: string;
+}>;
+
+/** Host-owned verifier; implementations must reopen the receipt and verify its
+ * effect semantic against the exact turn contract rather than trust request
+ * fields. Keeping verification injected makes this module provider-neutral. */
+export interface ClaimGrantHostVerifier {
+  verifyReopenedReceiptAndTurnContract(input: ClaimGrantAuthorityInput): HostClaimGrantVerification;
+}
+
+export type VerifiedClaimGrantAuthority = Readonly<ClaimGrantAuthorityInput & {
+  verifierId: string;
+  hostVerificationSha256: string;
+  [VERIFIED_CLAIM_GRANT]: true;
+}>;
+
+export function reopenVerifiedClaimGrantAuthority(
+  input: ClaimGrantAuthorityInput,
+  hostVerifier: ClaimGrantHostVerifier
+): VerifiedClaimGrantAuthority {
+  if (!isId(input.responseId)
+    || !isId(input.claimId)
+    || !isSha256(input.claimContentSha256)
+    || !isSafeInteger(input.authorityRevision, 1)
+    || !isSha256(input.authorityReceiptSha256)
+    || !isSha256(input.reopenedReceiptSha256)
+    || !isSha256(input.turnContractSha256)
+    || !isSha256(input.semanticBindingSha256)) {
+    throw new Error("claim grant authority input is malformed");
+  }
+  const verification = hostVerifier.verifyReopenedReceiptAndTurnContract(input);
+  if (!verification.ok) throw new Error(`host claim-grant verification failed: ${verification.reason}`);
+  if (!isId(verification.verifierId) || !isSha256(verification.hostVerificationSha256)) {
+    throw new Error("host claim-grant verification receipt is malformed");
+  }
+  const prepared = {
+    ...input,
+    verifierId: verification.verifierId,
+    hostVerificationSha256: verification.hostVerificationSha256,
+    [VERIFIED_CLAIM_GRANT]: true as const,
+  };
+  verifiedClaimGrantAuthorities.add(prepared);
+  return prepared;
+}
+
+export type TerminalClaimSemanticInput = Readonly<{
+  responseId: string;
+  spanId: string;
+  text: string;
+  contentSha256: string;
+  turnContractSha256: string;
+}>;
+
+export type TerminalClaimSemanticClassification = Readonly<{
+  decision: "terminal_claim" | "not_terminal_claim" | "unknown";
+  kind: TerminalClaim["kind"] | null;
+  classifierId: string;
+  evidenceSha256: string;
+}>;
+
+/** Synchronous by design: release admission never performs a model/network call. */
+export interface TerminalClaimSemanticClassifier {
+  classify(input: TerminalClaimSemanticInput): TerminalClaimSemanticClassification;
+}
+
+export type TerminalClaimSemanticDecision = Readonly<{
+  classification: TerminalClaimSemanticClassification;
+  requiresClaimGrant: boolean;
+}>;
+
+export function classifyTerminalClaimSemantics(
+  input: TerminalClaimSemanticInput,
+  classifier: TerminalClaimSemanticClassifier
+): TerminalClaimSemanticDecision {
+  if (!isId(input.responseId)
+    || !isId(input.spanId)
+    || typeof input.text !== "string"
+    || input.text.length === 0
+    || input.text.length > 16_384
+    || !isSha256(input.contentSha256)
+    || !isSha256(input.turnContractSha256)) {
+    throw new Error("terminal-claim semantic input is malformed");
+  }
+  const classification = classifier.classify(input);
+  if (!isId(classification.classifierId)
+    || !isSha256(classification.evidenceSha256)
+    || !["terminal_claim", "not_terminal_claim", "unknown"].includes(classification.decision)
+    || (classification.decision === "terminal_claim"
+      ? !["external_effect", "authorization", "handoff", "policy_outcome"].includes(classification.kind ?? "")
+      : classification.kind !== null)) {
+    throw new Error("terminal-claim classifier returned malformed evidence");
+  }
+  return {
+    classification,
+    // Unknown semantics fail closed. An adapter may register this as the most
+    // conservative terminal-claim kind until an offline classifier resolves it.
+    requiresClaimGrant: classification.decision !== "not_terminal_claim",
+  };
+}
+
 export type AudibilityLedgerEvent =
   | (EventBase & Readonly<{
       type: "response_registered";
@@ -73,10 +193,8 @@ export type AudibilityLedgerEvent =
     }>)
   | (EventBase & Readonly<{
       type: "claim_grant_issued";
-      claimId: string;
       grantId: string;
-      authorityRevision: number;
-      authorityReceiptSha256: string;
+      authority: VerifiedClaimGrantAuthority;
     }>)
   | (EventBase & Readonly<{
       type: "release_requested";
@@ -94,6 +212,12 @@ export type AudibilityLedgerEvent =
       type: "playback_cleared";
       clearId: string;
       reason: "barge_in" | "disconnect" | "cancelled" | "superseded" | "other";
+    }>)
+  | (EventBase & Readonly<{
+      type: "delivery_clear_confirmed";
+      confirmationId: string;
+      clearId: string;
+      confirmedNotPlayedRanges: readonly SampleRange[];
     }>)
   | (EventBase & Readonly<{
       type: "barge_in_recorded";
@@ -128,6 +252,11 @@ export type ClaimGrant = Readonly<{
   claimId: string;
   authorityRevision: number;
   authorityReceiptSha256: string;
+  reopenedReceiptSha256: string;
+  turnContractSha256: string;
+  semanticBindingSha256: string;
+  verifierId: string;
+  hostVerificationSha256: string;
   evidence: AudibilityEvidenceReference;
 }>;
 
@@ -154,6 +283,13 @@ export type PlaybackClear = Readonly<{
   reason: "barge_in" | "disconnect" | "cancelled" | "superseded" | "other";
   clearedRanges: readonly SampleRange[];
   closedQueueEpoch: number;
+  evidence: AudibilityEvidenceReference;
+}>;
+
+export type DeliveryClearConfirmation = Readonly<{
+  confirmationId: string;
+  clearId: string;
+  confirmedNotPlayedRanges: readonly SampleRange[];
   evidence: AudibilityEvidenceReference;
 }>;
 
@@ -184,6 +320,7 @@ export type AudibilityResponseLedger = Readonly<{
   playbackAcknowledgements: readonly PlaybackAcknowledgement[];
   acknowledgedPlayedRanges: readonly SampleRange[];
   clears: readonly PlaybackClear[];
+  deliveryClearConfirmations: readonly DeliveryClearConfirmation[];
   bargeIns: readonly BargeInRecord[];
   truncations: readonly ProviderHistoryTruncation[];
   queueEpoch: number;
@@ -218,6 +355,7 @@ export type AudibilityLedgerErrorCode =
   | "playback_not_released"
   | "stale_release_epoch"
   | "clear_conflict"
+  | "delivery_clear_conflict"
   | "barge_in_conflict"
   | "truncation_conflict";
 
@@ -239,15 +377,15 @@ export type AudiblePcmEvidenceRange = Readonly<{
 
 export type ClaimAudibilityStatus =
   | "fully_audible"
-  | "partially_audible"
-  | "not_audible"
+  | "verified_not_audible"
   | "unverifiable";
 
 export type TerminalClaimAudibility = Readonly<{
   claimId: string;
   status: ClaimAudibilityStatus;
   acknowledgedRanges: readonly SampleRange[];
-  missingRanges: readonly SampleRange[];
+  verifiedNotPlayedRanges: readonly SampleRange[];
+  unknownRanges: readonly SampleRange[];
   grantId: string | null;
   authorityReceiptSha256: string | null;
 }>;
@@ -260,6 +398,8 @@ export type AudibleConversationEvidence = Readonly<{
     responseId: string;
     evidenceStatus: "verified_audible" | "verified_not_audible" | "unverifiable";
     audibleRanges: readonly SampleRange[];
+    verifiedNotPlayedRanges: readonly SampleRange[];
+    unknownRanges: readonly SampleRange[];
     pcmEvidence: readonly AudiblePcmEvidenceRange[];
     terminalClaims: readonly TerminalClaimAudibility[];
     unverifiableReasons: readonly string[];
@@ -338,6 +478,7 @@ function eventSource(type: AudibilityLedgerEvent["type"]): AudibilityEvidenceSou
     case "release_requested":
       return "release_controller";
     case "playback_acknowledged":
+    case "delivery_clear_confirmed":
       return "playback_device";
     case "playback_cleared":
     case "barge_in_recorded":
@@ -366,6 +507,7 @@ function validateEvent(input: unknown): input is AudibilityLedgerEvent {
     "release_requested",
     "playback_acknowledged",
     "playback_cleared",
+    "delivery_clear_confirmed",
     "barge_in_recorded",
     "provider_history_truncated",
   ];
@@ -391,11 +533,10 @@ function validateEvent(input: unknown): input is AudibilityLedgerEvent {
         && isRange(input.range)
         && isSha256(input.contentSha256);
     case "claim_grant_issued":
-      return isId(input.claimId)
-        && isId(input.grantId)
-        && isSafeInteger(input.authorityRevision, 1)
-        && isSha256(input.authorityReceiptSha256)
-        && input.authorityReceiptSha256 === input.evidence.sha256;
+      return isId(input.grantId)
+        && isRecord(input.authority)
+        && verifiedClaimGrantAuthorities.has(input.authority)
+        && input.authority.authorityReceiptSha256 === input.evidence.sha256;
     case "release_requested":
       return isId(input.decisionId)
         && isRange(input.range)
@@ -417,6 +558,13 @@ function validateEvent(input: unknown): input is AudibilityLedgerEvent {
     case "playback_cleared":
       return isId(input.clearId)
         && ["barge_in", "disconnect", "cancelled", "superseded", "other"].includes(input.reason as string);
+    case "delivery_clear_confirmed":
+      return isId(input.confirmationId)
+        && isId(input.clearId)
+        && Array.isArray(input.confirmedNotPlayedRanges)
+        && input.confirmedNotPlayedRanges.length > 0
+        && input.confirmedNotPlayedRanges.length <= MAX_RANGES_PER_EVENT
+        && input.confirmedNotPlayedRanges.every(isRange);
     case "barge_in_recorded":
       return isId(input.bargeInId) && isId(input.clearId);
     case "provider_history_truncated":
@@ -576,6 +724,7 @@ export function applyAudibilityLedgerEvent(
       playbackAcknowledgements: [],
       acknowledgedPlayedRanges: [],
       clears: [],
+      deliveryClearConfirmations: [],
       bargeIns: [],
       truncations: [],
       queueEpoch: 0,
@@ -639,7 +788,15 @@ export function applyAudibilityLedgerEvent(
   }
 
   if (event.type === "claim_grant_issued") {
-    if (!current.claims[event.claimId]) return failure(state, "unknown_claim", `claim ${event.claimId} is not registered`);
+    const authority = event.authority;
+    if (authority.responseId !== event.responseId) {
+      return failure(state, "grant_conflict", "claim grant authority is bound to a different response");
+    }
+    const claim = current.claims[authority.claimId];
+    if (!claim) return failure(state, "unknown_claim", `claim ${authority.claimId} is not registered`);
+    if (claim.contentSha256 !== authority.claimContentSha256) {
+      return failure(state, "grant_conflict", "claim grant authority is bound to different claim semantics");
+    }
     if (current.grants[event.grantId]) return failure(state, "grant_conflict", `grant ${event.grantId} is already registered`);
     return applyResponse(state, event, {
       ...current,
@@ -647,9 +804,14 @@ export function applyAudibilityLedgerEvent(
         ...current.grants,
         [event.grantId]: {
           grantId: event.grantId,
-          claimId: event.claimId,
-          authorityRevision: event.authorityRevision,
-          authorityReceiptSha256: event.authorityReceiptSha256,
+          claimId: authority.claimId,
+          authorityRevision: authority.authorityRevision,
+          authorityReceiptSha256: authority.authorityReceiptSha256,
+          reopenedReceiptSha256: authority.reopenedReceiptSha256,
+          turnContractSha256: authority.turnContractSha256,
+          semanticBindingSha256: authority.semanticBindingSha256,
+          verifierId: authority.verifierId,
+          hostVerificationSha256: authority.hostVerificationSha256,
           evidence: event.evidence,
         },
       },
@@ -754,6 +916,26 @@ export function applyAudibilityLedgerEvent(
     });
   }
 
+  if (event.type === "delivery_clear_confirmed") {
+    if (findById(current.deliveryClearConfirmations, "confirmationId", event.confirmationId)) {
+      return failure(state, "delivery_clear_conflict", `delivery clear confirmation ${event.confirmationId} already exists`);
+    }
+    const clear = findById(current.clears, "clearId", event.clearId);
+    if (!clear) return failure(state, "delivery_clear_conflict", "delivery clear confirmation references an unknown clear");
+    if (event.confirmedNotPlayedRanges.some((range) => !coversRange(clear.clearedRanges, range))) {
+      return failure(state, "delivery_clear_conflict", "confirmed not-played range exceeds the queue clear range");
+    }
+    return applyResponse(state, event, {
+      ...current,
+      deliveryClearConfirmations: [...current.deliveryClearConfirmations, {
+        confirmationId: event.confirmationId,
+        clearId: event.clearId,
+        confirmedNotPlayedRanges: normalizeSampleRanges(event.confirmedNotPlayedRanges),
+        evidence: event.evidence,
+      }],
+    });
+  }
+
   if (event.type === "barge_in_recorded") {
     if (findById(current.bargeIns, "bargeInId", event.bargeInId)) {
       return failure(state, "barge_in_conflict", `barge-in ${event.bargeInId} already exists`);
@@ -827,22 +1009,38 @@ export function projectAudibleConversationEvidence(
     responses: ledger.responseOrder.map((responseId) => {
       const response = ledger.responses[responseId];
       const audibleRanges = normalizeSampleRanges(response.acknowledgedPlayedRanges);
+      const releasedRanges = normalizeSampleRanges(response.releaseDecisions
+        .filter((decision) => decision.outcome === "released")
+        .map((decision) => decision.range));
+      const verifiedNotPlayedRanges = subtractRanges(
+        normalizeSampleRanges(response.deliveryClearConfirmations
+          .flatMap((confirmation) => confirmation.confirmedNotPlayedRanges)),
+        audibleRanges
+      );
+      const unknownRanges = subtractRanges(releasedRanges, [
+        ...audibleRanges,
+        ...verifiedNotPlayedRanges,
+      ]);
       const terminalClaims = Object.values(response.claims)
         .sort((left, right) => left.range.startSample - right.range.startSample || left.claimId.localeCompare(right.claimId))
         .map((claim): TerminalClaimAudibility => {
           const acknowledgedRanges = intersectRanges(audibleRanges, [claim.range]);
-          const missingRanges = subtractRanges([claim.range], acknowledgedRanges);
+          const claimVerifiedNotPlayedRanges = intersectRanges(verifiedNotPlayedRanges, [claim.range]);
+          const claimUnknownRanges = subtractRanges([claim.range], [
+            ...acknowledgedRanges,
+            ...claimVerifiedNotPlayedRanges,
+          ]);
           const grant = Object.values(response.grants).find((candidate) => candidate.claimId === claim.claimId) ?? null;
           let status: ClaimAudibilityStatus;
-          if (missingRanges.length === 0) status = "fully_audible";
-          else if (acknowledgedRanges.length > 0) status = "partially_audible";
-          else if (response.playbackSealed) status = "not_audible";
+          if (coversRange(acknowledgedRanges, claim.range)) status = "fully_audible";
+          else if (coversRange(claimVerifiedNotPlayedRanges, claim.range)) status = "verified_not_audible";
           else status = "unverifiable";
           return {
             claimId: claim.claimId,
             status,
             acknowledgedRanges,
-            missingRanges,
+            verifiedNotPlayedRanges: claimVerifiedNotPlayedRanges,
+            unknownRanges: claimUnknownRanges,
             grantId: grant?.grantId ?? null,
             authorityReceiptSha256: grant?.authorityReceiptSha256 ?? null,
           };
@@ -858,23 +1056,26 @@ export function projectAudibleConversationEvidence(
         }))
       ));
       const unverifiableReasons: string[] = [];
-      if (audibleRanges.length === 0 && !response.playbackSealed) {
-        unverifiableReasons.push("no_playback_acknowledgement_or_terminal_clear");
+      if (audibleRanges.length === 0 && verifiedNotPlayedRanges.length === 0) {
+        unverifiableReasons.push("no_positive_playback_or_delivery_clear_evidence");
       }
-      if (response.releaseDecisions.some((decision) => decision.outcome === "released")
-        && response.playbackAcknowledgements.length === 0
-        && !response.playbackSealed) {
-        unverifiableReasons.push("released_audio_has_no_playback_evidence");
+      if (unknownRanges.length > 0) {
+        unverifiableReasons.push("released_audio_has_unknown_delivery_ranges");
       }
-      const evidenceStatus = audibleRanges.length > 0
+      if (audibleRanges.length > 0 && unknownRanges.length > 0) {
+        unverifiableReasons.push("partial_playback_acknowledgement");
+      }
+      const evidenceStatus = unknownRanges.length === 0 && audibleRanges.length > 0
         ? "verified_audible" as const
-        : response.playbackSealed
+        : unknownRanges.length === 0 && audibleRanges.length === 0 && verifiedNotPlayedRanges.length > 0
           ? "verified_not_audible" as const
           : "unverifiable" as const;
       return {
         responseId,
         evidenceStatus,
         audibleRanges,
+        verifiedNotPlayedRanges,
+        unknownRanges,
         pcmEvidence,
         terminalClaims,
         unverifiableReasons,
