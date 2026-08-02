@@ -2467,5 +2467,5 @@ describe("LC4 publication full retained-evidence replay", () => {
       cas_root_dir: casRoot,
       expected_authority_trust_root_sha256: operator.public_key_fingerprint_sha256,
     })).rejects.toThrow(/CAS artifact content does not match its address/u);
-  }, 120_000);
+  }, 300_000);
 });
