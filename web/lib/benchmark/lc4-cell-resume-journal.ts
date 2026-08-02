@@ -25,6 +25,7 @@ import type { Lc4DevRunLease } from "./lc4-development-budget";
 
 export const LC4_CELL_RESUME_JOURNAL_VERSION =
   "HACC-LC4-CELL-RESUME-JOURNAL-v1" as const;
+export const LC4_CELL_OWNER_LEASE_MS = 30_000 as const;
 
 const PLAN_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-plan/v1\n";
 const EVENT_DOMAIN = "harshas-amazing-call-center/lc4-cell-resume-event/v1\n";
@@ -105,7 +106,8 @@ type JournalEventType =
   | "cell.resume_claimed"
   | "cell.network_emission_started"
   | "cell.completed"
-  | "cell.ambiguous_quarantined";
+  | "cell.ambiguous_quarantined"
+  | "cell.custody_quarantined";
 
 type JournalEvent = Readonly<{
   sequence: number;
@@ -145,6 +147,8 @@ export type Lc4CellResumeStatus = Readonly<{
   automatic_resume_available: boolean;
   all_cells_completed: boolean;
   scoring_available: boolean;
+  active_owner_expires_at: string | null;
+  expired_pre_network_owner_recoverable: boolean;
 }>;
 
 export type Lc4CellResumeCustodyBinding = Readonly<{
@@ -440,6 +444,8 @@ function verifyFile(file: JournalFile): void {
       if (prior !== "cell.network_emission_started") fail("cell completion lacks a network admission");
     } else if (event.event_type === "cell.ambiguous_quarantined") {
       if (prior !== "cell.network_emission_started") fail("only a network-admitted cell can be quarantined");
+    } else if (event.event_type === "cell.custody_quarantined") {
+      if (prior !== undefined || states.size !== 0) fail("missing-journal custody quarantine must be the first cell event");
     }
     states.set(event.cell_id, event.event_type);
     head = claimed;
@@ -521,7 +527,7 @@ async function withLock<T>(path: string, operation: () => Promise<T>): Promise<T
   }
 }
 
-function stateFor(file: JournalFile): Lc4CellResumeStatus {
+function stateFor(file: JournalFile, now: Date = new Date()): Lc4CellResumeStatus {
   const latest = new Map<string, JournalEvent>();
   for (const event of file.events) latest.set(event.cell_id, event);
   const completed = file.plan.cells.filter((cell) => latest.get(cell.cell_id)?.event_type === "cell.completed").map((cell) => cell.cell_id);
@@ -531,10 +537,14 @@ function stateFor(file: JournalFile): Lc4CellResumeStatus {
       ? [Object.freeze({ cell_id: cell.cell_id, artifact_sha256: event.evidence_sha256 })]
       : [];
   });
-  const quarantined = file.plan.cells.filter((cell) => latest.get(cell.cell_id)?.event_type === "cell.ambiguous_quarantined").map((cell) => cell.cell_id);
+  const quarantined = file.plan.cells.filter((cell) => {
+    const event = latest.get(cell.cell_id)?.event_type;
+    return event === "cell.ambiguous_quarantined" || event === "cell.custody_quarantined";
+  }).map((cell) => cell.cell_id);
   const active = file.plan.cells.find((cell) => {
     const event = latest.get(cell.cell_id)?.event_type;
-    return event !== undefined && event !== "cell.completed" && event !== "cell.ambiguous_quarantined";
+    return event !== undefined && event !== "cell.completed"
+      && event !== "cell.ambiguous_quarantined" && event !== "cell.custody_quarantined";
   });
   const next = file.plan.cells.find((cell) => !latest.has(cell.cell_id));
   const activeType = active ? latest.get(active.cell_id)!.event_type : null;
@@ -565,6 +575,10 @@ function stateFor(file: JournalFile): Lc4CellResumeStatus {
     // run package must also replay authority, budget settlement, 36 sessions,
     // and all 360 opportunities.
     scoring_available: false,
+    active_owner_expires_at: active ? latest.get(active.cell_id)!.owner_expires_at : null,
+    expired_pre_network_owner_recoverable: state === "owned_before_network"
+      && activeType !== "cell.network_emission_started"
+      && Date.parse(latest.get(active!.cell_id)!.owner_expires_at) <= now.getTime(),
   });
 }
 
@@ -595,12 +609,13 @@ export async function initializeLc4CellResumeJournal(input: Readonly<{
 export async function inspectLc4CellResumeJournal(input: Readonly<{
   journal_path: string;
   expected_plan?: Lc4CellResumePlan;
+  now?: () => Date;
 }>): Promise<Lc4CellResumeStatus> {
   const file = await readJournal(input.journal_path);
   if (input.expected_plan && file.plan_sha256 !== lc4CellResumePlanSha256(input.expected_plan)) {
     fail("source, model, corpus, schedule, credentials, or authorization binding changed");
   }
-  return stateFor(file);
+  return stateFor(file, input.now?.() ?? new Date());
 }
 
 async function mutateJournal(input: Readonly<{
@@ -694,6 +709,76 @@ export async function pauseLc4CellBeforeNetwork(input: Readonly<{
       owner_expires_at: last.owner_expires_at,
       evidence_sha256: input.evidence_sha256,
       budget_ledger_head_sha256: pause.snapshot.head_sha256,
+    });
+  }});
+}
+
+export async function recoverExpiredLc4CellBeforeNetwork(input: Readonly<{
+  journal_path: string;
+  expected_head_sha256: string;
+  expected_plan: Lc4CellResumePlan;
+  evidence_sha256: string;
+  now: () => Date;
+}>): Promise<Lc4CellResumeStatus> {
+  requireHash(input.evidence_sha256, "evidence_sha256");
+  return mutateJournal({ ...input, event: async (file) => {
+    const last = file.events.at(-1);
+    if (!last || (last.event_type !== "cell.intent_fsynced" && last.event_type !== "cell.resume_claimed")) {
+      fail("expired-owner recovery requires an unopened pre-network cell");
+    }
+    if (Date.parse(last.owner_expires_at) > input.now().getTime()) {
+      fail("pre-network owner lease has not expired");
+    }
+    const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
+    if (ledger.paused || ledger.ledger_id !== file.plan.budget_ledger_id) {
+      fail("expired-owner recovery requires the exact open budget ledger");
+    }
+    const pause = await setFilesystemBudgetPaused({
+      ledgerPath: file.plan.budget_ledger_path,
+      operationId: `lc4cell-expired-owner-pause:${last.cell_id}:${file.sequence + 1}`,
+      paused: true,
+      reasonCode: "expired_pre_network_owner_recovery",
+      evidenceSha256: input.evidence_sha256,
+      expectedLedgerId: file.plan.budget_ledger_id,
+      expectedHeadSha256: ledger.head_sha256,
+      now: input.now,
+    });
+    return appendEvent(file, {
+      occurred_at: input.now().toISOString(),
+      event_type: "cell.paused_before_network",
+      cell_id: last.cell_id,
+      owner_id: last.owner_id,
+      owner_token_sha256: last.owner_token_sha256,
+      owner_expires_at: last.owner_expires_at,
+      evidence_sha256: input.evidence_sha256,
+      budget_ledger_head_sha256: pause.snapshot.head_sha256,
+    });
+  }});
+}
+
+export async function quarantineLc4MissingJournalCustody(input: Readonly<{
+  journal_path: string;
+  expected_head_sha256: string;
+  expected_plan: Lc4CellResumePlan;
+  failure_evidence_sha256: string;
+  now: () => Date;
+}>): Promise<Lc4CellResumeStatus> {
+  requireHash(input.failure_evidence_sha256, "failure_evidence_sha256");
+  return mutateJournal({ ...input, event: async (file) => {
+    const status = stateFor(file, input.now());
+    if (status.state !== "ready" || !status.next_cell_id || file.events.length !== 0) {
+      fail("missing-journal custody quarantine requires a fresh exact journal");
+    }
+    const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
+    return appendEvent(file, {
+      occurred_at: input.now().toISOString(),
+      event_type: "cell.custody_quarantined",
+      cell_id: status.next_cell_id,
+      owner_id: "missing-journal-custody",
+      owner_token_sha256: input.failure_evidence_sha256,
+      owner_expires_at: input.now().toISOString(),
+      evidence_sha256: input.failure_evidence_sha256,
+      budget_ledger_head_sha256: ledger.head_sha256,
     });
   }});
 }

@@ -16,6 +16,8 @@ import {
   pauseLc4CellBeforeNetwork,
   quarantineLc4CellAfterNetwork,
   quarantineLc4InterruptedNetworkCell,
+  quarantineLc4MissingJournalCustody,
+  recoverExpiredLc4CellBeforeNetwork,
   type Lc4CellResumePlan,
   type Lc4ProviderCreditFailure,
 } from "../lc4-cell-resume-journal";
@@ -254,6 +256,47 @@ describe("LC4 whole-cell paid resume journal", () => {
       now: value.now,
     });
     expect((await inspectLc4CellResumeJournal({ journal_path: value.journalPath })).automatic_resume_available).toBe(true);
+  });
+
+  it("lets a new process recover an expired pre-network owner without its random token", async () => {
+    const value = await fixture();
+    let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    status = await begin(value, status.head_sha256, 0);
+    const afterExpiry = () => new Date(BASE_TIME + 6 * 60_000);
+    status = await recoverExpiredLc4CellBeforeNetwork({
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      evidence_sha256: hash("expired-owner-no-network-event"),
+      now: afterExpiry,
+    });
+    expect(status).toMatchObject({ state: "paused_before_network", automatic_resume_available: true });
+    await expect(claimLc4PausedCell({
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      cell_id: value.plan.cells[0]!.cell_id,
+      ...owner(9),
+      owner_expires_at: new Date(BASE_TIME + 10 * 60_000).toISOString(),
+      now: afterExpiry,
+    })).resolves.toMatchObject({ state: "owned_before_network" });
+  });
+
+  it("creates an explicit absorbing custody quarantine for an unsafe missing-journal reconstruction", async () => {
+    const value = await fixture();
+    const ready = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    const status = await quarantineLc4MissingJournalCustody({
+      journal_path: value.journalPath,
+      expected_head_sha256: ready.head_sha256,
+      expected_plan: value.plan,
+      failure_evidence_sha256: hash("missing-journal-after-boundary"),
+      now: value.now,
+    });
+    expect(status).toMatchObject({
+      state: "network_ambiguous",
+      quarantined_cell_ids: [value.plan.cells[0]!.cell_id],
+      scoring_available: false,
+    });
   });
 
   it("quarantines a crash after network admission and cannot resume it automatically", async () => {

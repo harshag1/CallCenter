@@ -86,6 +86,7 @@ import {
 } from "./lc4-development-budget";
 import {
   beginLc4Cell,
+  LC4_CELL_OWNER_LEASE_MS,
   claimLc4PausedCell,
   completeLc4Cell,
   createLc4CellResumeCustodyBinding,
@@ -94,6 +95,8 @@ import {
   inspectLc4CellResumeJournal,
   markLc4CellNetworkEmissionStarted,
   quarantineLc4InterruptedNetworkCell,
+  quarantineLc4MissingJournalCustody,
+  recoverExpiredLc4CellBeforeNetwork,
   type Lc4CellResumePlan,
   type Lc4CellResumeStatus,
 } from "./lc4-cell-resume-journal";
@@ -190,6 +193,7 @@ export type Lc4DevOperatorDependencies = Readonly<{
   replay_budget_evidence?: typeof replayLc4DevBudgetEvidence;
   runtime?: Lc4DevOperatorRuntime;
   create_runtime?(config: Lc4DevDefaultRuntimeConfig): Promise<Lc4DevOperatorRuntime>;
+  inspect_cell_custody?(journalPath: string): Promise<ReturnType<typeof createLc4CellResumeCustodyBinding>>;
 }>;
 
 type Lc4DevTerminalRunCustodyResult = Readonly<{
@@ -751,6 +755,32 @@ function cellPrefixPath(root: string, ordinal: number, cellId: string): string {
   return resolve(artifactPath(root, "cell_prefixes"), `${String(ordinal).padStart(2, "0")}-${cellId}.json`);
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
+
+async function missingJournalCrossedBoundary(input: Readonly<{
+  evidence_root: string;
+  lease: Lc4DevRunLease;
+  now: () => Date;
+}>): Promise<boolean> {
+  const budget = await inspectFilesystemBudgetLedger({
+    ledgerPath: input.lease.ledger_path,
+    now: input.now,
+  });
+  const budgetCrossed = budget.reservations.some((reservation) => reservation.status !== "reserved");
+  const artifactCrossed = (await Promise.all([
+    artifactPath(input.evidence_root, "ledger"),
+    `${artifactPath(input.evidence_root, "ledger")}.intent.json`,
+    artifactPath(input.evidence_root, "cell_prefixes"),
+    artifactPath(input.evidence_root, "cas"),
+  ].map(pathExists))).some(Boolean);
+  return budgetCrossed || artifactCrossed;
+}
+
 async function loadLc4DevCompletedPrefix(input: Readonly<{
   evidence_root: string;
   prepare: Lc4DevLivePrepareArtifact;
@@ -1100,29 +1130,52 @@ export async function runLc4DevelopmentOperatorCli(
           throw error;
         });
       if (terminalExists) {
-        const [prepare, preflight, run, lease, evidence, runPackage, cellResume] = await Promise.all([
+        const [prepare, preflight, run, lease] = await Promise.all([
           readBoundedJson<Lc4DevLivePrepareArtifact>(artifactPath(evidenceRoot, "prepare"), "LC4-DEV prepare artifact"),
           readBoundedJson<Lc4DevLivePreflightArtifact>(artifactPath(evidenceRoot, "preflight"), "LC4-DEV preflight artifact"),
           readBoundedJson<Lc4DevLiveRunArtifact>(artifactPath(evidenceRoot, "run"), "LC4-DEV terminal run artifact"),
           readBoundedJson<Lc4DevRunLease>(artifactPath(evidenceRoot, "budget_lease"), "LC4-DEV budget lease"),
-          readBoundedJson<Lc4DevBudgetEvidence>(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV terminal budget evidence"),
-          readBoundedJson<Lc4DevRunPackage>(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package"),
-          inspectLc4CellResumeJournal({ journal_path: artifactPath(evidenceRoot, "cell_resume_journal") }),
         ]);
         assertLc4DevLivePrepareArtifact(prepare);
         assertLc4DevLivePreflightArtifact(preflight, prepare, new Date(preflight.checked_at));
+        const evidenceExists = await pathExists(artifactPath(evidenceRoot, "budget_evidence"));
+        const packageExists = await pathExists(artifactPath(evidenceRoot, "run_package"));
+        if (packageExists && !evidenceExists) {
+          throw new Error("LC4-DEV terminal package exists without its prior budget evidence commit marker");
+        }
+        const evidence = evidenceExists
+          ? await readBoundedJson<Lc4DevBudgetEvidence>(artifactPath(evidenceRoot, "budget_evidence"), "LC4-DEV terminal budget evidence")
+          : await finalizeLc4DevRunBudget({ lease, binding: { prepare, preflight }, run, now: io.now });
         await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({
           lease,
           binding: { prepare, preflight },
           evidence,
           now: io.now,
         });
+        const custody = dependencies.inspect_cell_custody
+          ? await dependencies.inspect_cell_custody(artifactPath(evidenceRoot, "cell_resume_journal"))
+          : createLc4CellResumeCustodyBinding(await inspectLc4CellResumeJournal({
+              journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+            }));
+        const runPackage = packageExists
+          ? await readBoundedJson<Lc4DevRunPackage>(artifactPath(evidenceRoot, "run_package"), "LC4-DEV run package")
+          : createLc4DevRunPackage({ lease, evidence, run, cell_custody: custody });
+        if (!evidenceExists) {
+          await writeImmutableJsonPair({
+            first_path: artifactPath(evidenceRoot, "budget_evidence"),
+            first_value: evidence,
+            second_path: artifactPath(evidenceRoot, "run_package"),
+            second_value: runPackage,
+          });
+        } else if (!packageExists) {
+          await writeImmutableJson(artifactPath(evidenceRoot, "run_package"), runPackage);
+        }
         assertLc4DevRunPackage({
           package: runPackage,
           lease,
           evidence,
           run,
-          cell_custody: createLc4CellResumeCustodyBinding(cellResume),
+          cell_custody: custody,
         });
         io.stdout(canonicalJson({
           command: "run",
@@ -1214,15 +1267,45 @@ export async function runLc4DevelopmentOperatorCli(
           asr_contract_sha256: roots.asr_contract_sha256,
         })),
       });
-      let resumeStatus = existingLease
-        ? await inspectLc4CellResumeJournal({
+      let missingJournalBoundaryCrossed = false;
+      let resumeStatus: Lc4CellResumeStatus;
+      if (existingLease) {
+        try {
+          resumeStatus = await inspectLc4CellResumeJournal({
             journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
             expected_plan: resumePlan,
-          })
-        : await initializeLc4CellResumeJournal({
+            now: io.now,
+          });
+        } catch (error) {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+          missingJournalBoundaryCrossed = await missingJournalCrossedBoundary({
+            evidence_root: evidenceRoot,
+            lease: budgetLease,
+            now: io.now,
+          });
+          resumeStatus = await initializeLc4CellResumeJournal({
             journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
             plan: resumePlan,
           });
+          if (missingJournalBoundaryCrossed) {
+            resumeStatus = await quarantineLc4MissingJournalCustody({
+              journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+              expected_head_sha256: resumeStatus.head_sha256,
+              expected_plan: resumePlan,
+              failure_evidence_sha256: sha256Hex(canonicalJson({
+                execution_id: prepare.execution_id,
+                reason: "existing_lease_missing_journal_after_runtime_or_budget_boundary",
+              })),
+              now: io.now,
+            });
+          }
+        }
+      } else {
+        resumeStatus = await initializeLc4CellResumeJournal({
+          journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+          plan: resumePlan,
+        });
+      }
       let completedPrefix = await loadLc4DevCompletedPrefix({
         evidence_root: evidenceRoot,
         prepare,
@@ -1263,7 +1346,9 @@ export async function runLc4DevelopmentOperatorCli(
           failure_evidence_sha256: ambiguityEvidenceSha256,
         });
         await writeImmutableJson(artifactPath(evidenceRoot, "run"), run);
-        await chmod(artifactPath(evidenceRoot, "ledger"), 0o400);
+        await chmod(artifactPath(evidenceRoot, "ledger"), 0o400).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
         const budgetEvidence = await finalizeLc4DevRunBudget({
           lease: budgetLease,
           binding: { prepare, preflight },
@@ -1302,7 +1387,29 @@ export async function runLc4DevelopmentOperatorCli(
         return 2;
       }
       if (resumeStatus.state === "owned_before_network") {
-        throw new Error("LC4-DEV pre-network owner is still nonterminal; use the explicit pause/claim recovery before continuing");
+        if (!resumeStatus.expired_pre_network_owner_recoverable) {
+          io.stdout(canonicalJson({
+            command: "run",
+            execution_id: prepare.execution_id,
+            status: "waiting_for_pre_network_owner_expiry",
+            active_cell_id: resumeStatus.active_cell_id,
+            owner_expires_at: resumeStatus.active_owner_expires_at,
+            provider_calls_made: completedPrefix?.provider_calls_started ?? 0,
+          }));
+          return 3;
+        }
+        resumeStatus = await recoverExpiredLc4CellBeforeNetwork({
+          journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+          expected_head_sha256: resumeStatus.head_sha256,
+          expected_plan: resumePlan,
+          evidence_sha256: sha256Hex(canonicalJson({
+            execution_id: prepare.execution_id,
+            cell_id: resumeStatus.active_cell_id,
+            owner_expires_at: resumeStatus.active_owner_expires_at,
+            proof: "journal_has_no_network_emission_event_and_owner_lease_expired",
+          })),
+          now: io.now,
+        });
       }
       const budgetAuthority = new Lc4DevBudgetLifecycle({
         lease: budgetLease,
@@ -1335,7 +1442,10 @@ export async function runLc4DevelopmentOperatorCli(
                   expected_plan: resumePlan,
                   cell_id: episode.episode_id,
                   ...owner,
-                  owner_expires_at: budgetLease.hard_deadline_at,
+                  owner_expires_at: new Date(Math.min(
+                    Date.parse(budgetLease.hard_deadline_at),
+                    io.now().getTime() + LC4_CELL_OWNER_LEASE_MS,
+                  )).toISOString(),
                   now: io.now,
                 })
               : await beginLc4Cell({
@@ -1344,7 +1454,10 @@ export async function runLc4DevelopmentOperatorCli(
                   expected_plan: resumePlan,
                   cell_id: episode.episode_id,
                   ...owner,
-                  owner_expires_at: budgetLease.hard_deadline_at,
+                  owner_expires_at: new Date(Math.min(
+                    Date.parse(budgetLease.hard_deadline_at),
+                    io.now().getTime() + LC4_CELL_OWNER_LEASE_MS,
+                  )).toISOString(),
                   now: io.now,
                 });
             resumeStatus = await markLc4CellNetworkEmissionStarted({
@@ -1493,12 +1606,17 @@ export async function runLc4DevelopmentOperatorCli(
         throw new Error("LC4-DEV report run differs from its prepare/preflight custody chain");
       }
       await (dependencies.replay_budget_evidence ?? replayLc4DevBudgetEvidence)({ lease: budgetLease, binding: { prepare, preflight }, evidence: budgetEvidence, now: io.now });
+      const currentCellCustody = dependencies.inspect_cell_custody
+        ? await dependencies.inspect_cell_custody(artifactPath(evidenceRoot, "cell_resume_journal"))
+        : createLc4CellResumeCustodyBinding(await inspectLc4CellResumeJournal({
+            journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+          }));
       assertLc4DevRunPackage({
         package: runPackage,
         lease: budgetLease,
         evidence: budgetEvidence,
         run,
-        cell_custody: runPackage.cell_custody,
+        cell_custody: currentCellCustody,
       });
       const authority = await (dependencies.replay_authority_report ?? replayLc4DevAuthorityReport)({
         run,

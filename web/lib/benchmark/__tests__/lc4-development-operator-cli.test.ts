@@ -213,6 +213,7 @@ async function runReportCase(run: Lc4DevLiveRunArtifact, authority: AuthorityRep
       async inspect_source() { throw new Error("report must not inspect source or call providers"); },
       async replay_authority_report(value) { calls.push(value); return authority; },
       async replay_budget_evidence() {},
+      async inspect_cell_custody() { return runPackage.cell_custody; },
     },
   );
   return {
