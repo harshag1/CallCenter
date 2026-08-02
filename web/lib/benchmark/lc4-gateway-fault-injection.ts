@@ -7,6 +7,7 @@ import {
 import {
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
   Lc4DevGatewayTurnCoordinator,
+  createLc4DevProviderConnectionScope,
   type Lc4DevGatewayAuthorityProjection,
   type Lc4DevGatewayExecutionInput,
   type Lc4DevGatewayExecutor,
@@ -243,6 +244,10 @@ function createExecutor(inputs: Lc4DevGatewayExecutionInput[]): Lc4DevGatewayExe
         semantic_intent: input.semantic_intent,
         target_tool: input.target_tool,
         provider_call_id_sha256: sha256Hex(input.provider_call_id),
+        provider_invocation_id_sha256: sha256Hex(input.provider_invocation_id),
+        provider_connection_scope_sha256: input.provider_connection_scope_sha256,
+        provider_connection_epoch: input.provider_connection_epoch,
+        provider_session_id_sha256: input.provider_session_id_sha256,
         provider_response_id_sha256: sha256Hex(input.provider_response_id),
         request_sha256: input.request_sha256,
         provider_provenance_sha256: input.provider_provenance_sha256,
@@ -298,6 +303,16 @@ function eventFor(
         responseId: options.tamperProvenance && index === 0
           ? `${responseId}-forged`
           : responseId,
+        causalBinding: {
+          connectionEpoch: 1,
+          inputTurn: 1,
+          trigger: "client_content" as const,
+          clientMessageOrdinal: index + 1,
+          providerCallId: call.call_id,
+          localResponseId: options.tamperProvenance && index === 0
+            ? `${responseId}-forged`
+            : responseId,
+        },
         terminalWireType: "toolCall",
       })),
     };
@@ -311,12 +326,14 @@ function eventFor(
     gateway: "capability_gateway",
     dispatches: calls.map((call, index) => {
       const provenance = Object.freeze({
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         provider,
         nativeCallId: options.tamperProvenance && index === 0
           ? `${call.call_id}-forged`
           : call.call_id,
         nativeResponseId: responseId,
+        connectionEpoch: 1,
+        providerSessionIdSha256: sha256Hex(`fault-session-${provider}`),
         terminalWireType: "response.function_call_arguments.done",
       });
       return {
@@ -384,6 +401,16 @@ function coordinatorRun(
   const coordinator = new Lc4DevGatewayTurnCoordinator({
     client,
     executor: createExecutor(executorInputs),
+    connectionScope: createLc4DevProviderConnectionScope({
+      episode_id: episode(provider).episode_id,
+      provider,
+      arm: "hacc",
+      segment_ordinal: 1,
+      session_ordinal: 1,
+      connection_epoch: 1,
+      previous_rotation_receipt_sha256: null,
+      rotation_context_sha256: sha256Hex("lc4-gateway-fault-injection-rotation-context"),
+    }),
     onFatal: (error) => fatalErrors.push(error),
   });
   coordinator.beginOpportunity({

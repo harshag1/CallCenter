@@ -38,6 +38,78 @@ const RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-rec
 const REJECTION_RECEIPT_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-rejection-receipt/v2\n";
 const RECEIPT_SET_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-dispatch-receipt-set/v3\n";
 const AUTHORITY_PROJECTION_DOMAIN = "harshas-amazing-call-center/lc4-dev-gateway-authority-projection/v2\n";
+const CONNECTION_SCOPE_DOMAIN = "harshas-amazing-call-center/lc4-dev-provider-connection-scope/v1\n";
+const PROVIDER_INVOCATION_DOMAIN = "harshas-amazing-call-center/lc4-dev-provider-invocation/v1\n";
+
+export type Lc4DevProviderConnectionScope = Readonly<{
+  schema_version: 1;
+  episode_id: string;
+  provider: Lc4DevLiveEpisodePlan["provider"];
+  arm: Arm;
+  segment_ordinal: number;
+  session_ordinal: number;
+  connection_epoch: number;
+  previous_rotation_receipt_sha256: string | null;
+  rotation_context_sha256: string;
+  connection_scope_sha256: string;
+}>;
+
+export function createLc4DevProviderConnectionScope(input: Readonly<{
+  episode_id: string;
+  provider: Lc4DevLiveEpisodePlan["provider"];
+  arm: Arm;
+  segment_ordinal: number;
+  session_ordinal: number;
+  connection_epoch: number;
+  previous_rotation_receipt_sha256: string | null;
+  rotation_context_sha256: string;
+}>): Lc4DevProviderConnectionScope {
+  if (!input.episode_id.trim()
+    || !Number.isSafeInteger(input.segment_ordinal) || input.segment_ordinal < 1
+    || !Number.isSafeInteger(input.session_ordinal) || input.session_ordinal < 1
+    || !Number.isSafeInteger(input.connection_epoch) || input.connection_epoch < 1
+    || (input.previous_rotation_receipt_sha256 !== null
+      && !HASH.test(input.previous_rotation_receipt_sha256))
+    || !HASH.test(input.rotation_context_sha256)) {
+    throw new Error("LC4-DEV provider connection scope input is invalid");
+  }
+  const body = Object.freeze({
+    schema_version: 1 as const,
+    episode_id: input.episode_id,
+    provider: input.provider,
+    arm: input.arm,
+    segment_ordinal: input.segment_ordinal,
+    session_ordinal: input.session_ordinal,
+    connection_epoch: input.connection_epoch,
+    previous_rotation_receipt_sha256: input.previous_rotation_receipt_sha256,
+    rotation_context_sha256: input.rotation_context_sha256,
+  });
+  return Object.freeze({
+    ...body,
+    connection_scope_sha256: sha256Hex(`${CONNECTION_SCOPE_DOMAIN}${canonicalJson(body)}`),
+  });
+}
+
+function assertProviderConnectionScope(scope: Lc4DevProviderConnectionScope): void {
+  const expected = createLc4DevProviderConnectionScope(scope);
+  if (canonicalJson(expected) !== canonicalJson(scope)) {
+    throw new Error("LC4-DEV provider connection scope is hash-invalid");
+  }
+}
+
+export function lc4DevProviderInvocationId(
+  scope: Lc4DevProviderConnectionScope,
+  nativeCallId: string,
+): string {
+  assertProviderConnectionScope(scope);
+  if (!nativeCallId || Buffer.byteLength(nativeCallId, "utf8") > 256) {
+    throw new Error("LC4-DEV provider native call ID is invalid");
+  }
+  return `pcall.${sha256Hex(`${PROVIDER_INVOCATION_DOMAIN}${canonicalJson({
+    connection_scope_sha256: scope.connection_scope_sha256,
+    native_call_id: nativeCallId,
+  })}`)}`;
+}
 
 export const LC4_DEV_SEMANTIC_INTENTS = Object.freeze([
   "launch_async_worker",
@@ -219,7 +291,14 @@ export type Lc4DevGatewayExecutionInput = Readonly<{
   opportunity_index: number;
   provider: Lc4DevLiveEpisodePlan["provider"];
   arm: Arm;
+  /** Raw provider correlation ID; never use for host idempotency. */
   provider_call_id: string;
+  /** Host-scoped identity used by the control plane and exactly-once ledger. */
+  provider_invocation_id: string;
+  provider_connection_scope: Lc4DevProviderConnectionScope;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   provider_response_id: string;
   semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
@@ -271,6 +350,10 @@ export type Lc4DevGatewayAuthorityProjection = Readonly<{
   semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   provider_call_id_sha256: string;
+  provider_invocation_id_sha256: string;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   provider_response_id_sha256: string;
   request_sha256: string;
   provider_provenance_sha256: string;
@@ -302,6 +385,10 @@ export type Lc4DevSanitizedGatewayReceipt = Readonly<{
   semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
   provider_call_id_sha256: string;
+  provider_invocation_id_sha256: string;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   provider_response_id_sha256: string;
   request_sha256: string;
   provider_provenance_sha256: string;
@@ -344,6 +431,10 @@ export type Lc4DevSanitizedGatewayRejection = Readonly<{
   call_ordinal: number;
   rejection_code: Lc4DevPreDispatchRejectionCode;
   provider_call_id_sha256: string;
+  provider_invocation_id_sha256: string;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   provider_response_id_sha256: string;
   request_sha256: string;
   provider_provenance_sha256: string;
@@ -432,6 +523,10 @@ export type Lc4DevRotationReplayEnvelopeProjection = Readonly<{
 
 type ExecutableCall = Readonly<{
   call_id: string;
+  provider_invocation_id: string;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   response_id: string;
   semantic_intent: Lc4DevSemanticIntent;
   target_tool: string;
@@ -444,6 +539,10 @@ type ExecutableCall = Readonly<{
 
 type CandidateCall = Readonly<{
   call_id: string;
+  provider_invocation_id: string;
+  provider_connection_scope_sha256: string;
+  provider_connection_epoch: number;
+  provider_session_id_sha256: string | null;
   response_id: string;
   gateway_tool_name: typeof LOCAL_TOOL_PROXY_FUNCTION_NAME;
   semantic_input: Readonly<Record<string, JsonValue>>;
@@ -539,6 +638,10 @@ export function assertLc4DevGatewayReceiptSet(
       "semantic_intent",
       "target_tool",
       "provider_call_id_sha256",
+      "provider_invocation_id_sha256",
+      "provider_connection_scope_sha256",
+      "provider_connection_epoch",
+      "provider_session_id_sha256",
       "provider_response_id_sha256",
       "request_sha256",
       "provider_provenance_sha256",
@@ -558,6 +661,13 @@ export function assertLc4DevGatewayReceiptSet(
     ], "LC4-DEV gateway authority projection");
     const claimed = String(authority.projection_sha256);
     requireHash(claimed, "LC4-DEV gateway authority projection");
+    requireHash(String(authority.provider_call_id_sha256), "LC4-DEV gateway native call identity");
+    requireHash(String(authority.provider_invocation_id_sha256), "LC4-DEV gateway scoped invocation identity");
+    requireHash(String(authority.provider_connection_scope_sha256), "LC4-DEV gateway connection scope");
+    gatewayOrdinal(authority.provider_connection_epoch, "LC4-DEV gateway connection epoch");
+    if (authority.provider_session_id_sha256 !== null) {
+      requireHash(String(authority.provider_session_id_sha256), "LC4-DEV gateway provider session identity");
+    }
     const body = gatewayBodyWithout(authority, new Set(["projection_sha256"]));
     if (authority.schema_version !== 2
       || authority.bridge_version !== LC4_DEV_GATEWAY_BRIDGE_VERSION
@@ -590,6 +700,10 @@ export function assertLc4DevGatewayReceiptSet(
       "semantic_intent",
       "target_tool",
       "provider_call_id_sha256",
+      "provider_invocation_id_sha256",
+      "provider_connection_scope_sha256",
+      "provider_connection_epoch",
+      "provider_session_id_sha256",
       "provider_response_id_sha256",
       "request_sha256",
       "provider_provenance_sha256",
@@ -606,6 +720,9 @@ export function assertLc4DevGatewayReceiptSet(
     const authoritySha256 = String(receipt.authority_projection_sha256);
     requireHash(claimed, "LC4-DEV gateway dispatch receipt");
     requireHash(authoritySha256, "LC4-DEV gateway dispatch authority projection");
+    requireHash(String(receipt.provider_invocation_id_sha256), "LC4-DEV gateway scoped invocation identity");
+    requireHash(String(receipt.provider_connection_scope_sha256), "LC4-DEV gateway connection scope");
+    gatewayOrdinal(receipt.provider_connection_epoch, "LC4-DEV gateway connection epoch");
     const body = gatewayBodyWithout(receipt, new Set(["receipt_sha256"]));
     const batch = gatewayOrdinal(receipt.batch_ordinal, "LC4-DEV gateway receipt batch ordinal");
     const call = gatewayOrdinal(receipt.call_ordinal, "LC4-DEV gateway receipt call ordinal");
@@ -623,6 +740,10 @@ export function assertLc4DevGatewayReceiptSet(
       || receipt.semantic_intent !== authority.semantic_intent
       || receipt.target_tool !== authority.target_tool
       || receipt.provider_call_id_sha256 !== authority.provider_call_id_sha256
+      || receipt.provider_invocation_id_sha256 !== authority.provider_invocation_id_sha256
+      || receipt.provider_connection_scope_sha256 !== authority.provider_connection_scope_sha256
+      || receipt.provider_connection_epoch !== authority.provider_connection_epoch
+      || receipt.provider_session_id_sha256 !== authority.provider_session_id_sha256
       || receipt.provider_response_id_sha256 !== authority.provider_response_id_sha256
       || receipt.request_sha256 !== authority.request_sha256
       || receipt.provider_provenance_sha256 !== authority.provider_provenance_sha256
@@ -665,6 +786,10 @@ export function assertLc4DevGatewayReceiptSet(
       "call_ordinal",
       "rejection_code",
       "provider_call_id_sha256",
+      "provider_invocation_id_sha256",
+      "provider_connection_scope_sha256",
+      "provider_connection_epoch",
+      "provider_session_id_sha256",
       "provider_response_id_sha256",
       "request_sha256",
       "provider_provenance_sha256",
@@ -676,6 +801,13 @@ export function assertLc4DevGatewayReceiptSet(
     ], "LC4-DEV gateway rejection receipt");
     const claimed = String(rejection.rejection_receipt_sha256);
     requireHash(claimed, "LC4-DEV gateway rejection receipt");
+    requireHash(String(rejection.provider_call_id_sha256), "LC4-DEV gateway rejection native call identity");
+    requireHash(String(rejection.provider_invocation_id_sha256), "LC4-DEV gateway rejection scoped invocation identity");
+    requireHash(String(rejection.provider_connection_scope_sha256), "LC4-DEV gateway rejection connection scope");
+    gatewayOrdinal(rejection.provider_connection_epoch, "LC4-DEV gateway rejection connection epoch");
+    if (rejection.provider_session_id_sha256 !== null) {
+      requireHash(String(rejection.provider_session_id_sha256), "LC4-DEV gateway rejection provider session identity");
+    }
     requireHash(String(rejection.model_arguments_sha256), "LC4-DEV gateway rejection model arguments");
     requireHash(String(rejection.provider_output_sha256), "LC4-DEV gateway rejection provider output");
     const sourceBody = gatewayBodyWithout(
@@ -931,20 +1063,40 @@ function defaultRotationReplayEnvelopeSnapshot(
   });
 }
 
-function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
+function assertEventConnectionEpoch(
+  event: NormalizedRealtimeEvent,
+  expectedEpoch: number,
+): void {
+  if (event.wireObservation?.availability === "observed"
+    && event.wireObservation.connectionEpoch !== expectedEpoch) {
+    throw new Lc4DevGatewayProvenanceError(
+      "LC4-DEV provider event belongs to a stale connection epoch",
+    );
+  }
+}
+
+function candidateCallsFromEvent(
+  event: NormalizedRealtimeEvent,
+  connectionScope: Lc4DevProviderConnectionScope,
+): Readonly<{
   provider: Lc4DevLiveEpisodePlan["provider"];
   response_id: string;
   calls: readonly CandidateCall[];
 }> | null {
   if (event.type === "tool.dispatch") {
+    assertEventConnectionEpoch(event, connectionScope.connection_epoch);
     return Object.freeze({
       provider: event.provider,
       response_id: event.responseId,
       calls: Object.freeze(event.dispatches.map((dispatch) => {
         const metadata = dispatch.request.params._meta;
-        if (dispatch.provenance.provider !== event.provider
+        if (dispatch.provenance.schemaVersion !== 2
+          || dispatch.provenance.provider !== event.provider
           || dispatch.provenance.nativeCallId !== dispatch.callId
           || dispatch.provenance.nativeResponseId !== event.responseId
+          || dispatch.provenance.connectionEpoch !== connectionScope.connection_epoch
+          || (dispatch.provenance.providerSessionIdSha256 !== null
+            && !HASH.test(dispatch.provenance.providerSessionIdSha256))
           || metadata[LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY] !== dispatch.callId
           || canonicalJson(metadata[PROVIDER_PROVENANCE_META_KEY]) !== canonicalJson(dispatch.provenance)) {
           throw new Lc4DevGatewayProvenanceError(
@@ -953,6 +1105,10 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
         }
         return freeze({
           call_id: dispatch.callId,
+          provider_invocation_id: lc4DevProviderInvocationId(connectionScope, dispatch.callId),
+          provider_connection_scope_sha256: connectionScope.connection_scope_sha256,
+          provider_connection_epoch: dispatch.provenance.connectionEpoch,
+          provider_session_id_sha256: dispatch.provenance.providerSessionIdSha256,
           response_id: event.responseId,
           gateway_tool_name: event.gateway,
           semantic_input: normalizedModelArguments({
@@ -966,10 +1122,19 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
     });
   }
   if (event.type === "tool.calls" && event.provider === "gemini") {
+    assertEventConnectionEpoch(event, connectionScope.connection_epoch);
     return Object.freeze({
       provider: event.provider,
       response_id: event.responseId,
       calls: Object.freeze(event.calls.map((call) => {
+        if (!call.causalBinding
+          || call.causalBinding.connectionEpoch !== connectionScope.connection_epoch
+          || call.causalBinding.providerCallId !== call.callId
+          || call.causalBinding.localResponseId !== call.responseId) {
+          throw new Lc4DevGatewayProvenanceError(
+            "LC4-DEV Gemini call lacks its exact connection-scoped causal binding",
+          );
+        }
         if (call.name !== "capability_gateway") {
           throw new Error("LC4-DEV Gemini attempted a function outside capability_gateway");
         }
@@ -982,6 +1147,19 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
         };
         const provenance = {
           provider: "gemini" as const,
+          connection_scope_sha256: connectionScope.connection_scope_sha256,
+          causal_binding: call.causalBinding
+            ? {
+                connection_epoch: call.causalBinding.connectionEpoch,
+                input_turn: call.causalBinding.inputTurn,
+                trigger: call.causalBinding.trigger,
+                client_message_ordinal: call.causalBinding.clientMessageOrdinal,
+                trigger_observation_sha256:
+                  call.causalBinding.triggerObservationSha256 ?? null,
+                provider_call_id: call.causalBinding.providerCallId,
+                local_response_id: call.causalBinding.localResponseId,
+              }
+            : null,
           response_id: call.responseId,
           call_id: call.callId,
           item_id: call.itemId ?? null,
@@ -990,6 +1168,10 @@ function candidateCallsFromEvent(event: NormalizedRealtimeEvent): Readonly<{
         };
         return freeze({
           call_id: call.callId,
+          provider_invocation_id: lc4DevProviderInvocationId(connectionScope, call.callId),
+          provider_connection_scope_sha256: connectionScope.connection_scope_sha256,
+          provider_connection_epoch: call.causalBinding.connectionEpoch,
+          provider_session_id_sha256: null,
           response_id: call.responseId,
           gateway_tool_name: LOCAL_TOOL_PROXY_FUNCTION_NAME,
           semantic_input: normalizedModelArguments(call.argumentsJson),
@@ -1031,6 +1213,10 @@ function classifySemanticCall(candidate: CandidateCall):
     ok: true,
     call: freeze({
       call_id: candidate.call_id,
+      provider_invocation_id: candidate.provider_invocation_id,
+      provider_connection_scope_sha256: candidate.provider_connection_scope_sha256,
+      provider_connection_epoch: candidate.provider_connection_epoch,
+      provider_session_id_sha256: candidate.provider_session_id_sha256,
       response_id: candidate.response_id,
       semantic_intent: parsed.semantic_intent,
       target_tool: parsed.target_tool,
@@ -1054,6 +1240,7 @@ export class Lc4DevGatewayTurnCoordinator {
   readonly #executor: Lc4DevGatewayExecutor;
   readonly #onFatal: (error: Error) => void;
   readonly #rotationReplayEnvelope: Lc4DevRotationReplayEnvelopeAuthority;
+  readonly #connectionScope: Lc4DevProviderConnectionScope;
   #context: OpportunityContext | null = null;
   #queue: Promise<void> = Promise.resolve();
   #fatal: Error | null = null;
@@ -1074,6 +1261,7 @@ export class Lc4DevGatewayTurnCoordinator {
   constructor(input: Readonly<{
     client: NormalizedRealtimeClient;
     executor: Lc4DevGatewayExecutor;
+    connectionScope: Lc4DevProviderConnectionScope;
     onFatal(error: Error): void;
     rotationReplayEnvelope?: Lc4DevRotationReplayEnvelopeAuthority;
   }>) {
@@ -1081,6 +1269,8 @@ export class Lc4DevGatewayTurnCoordinator {
     this.#client = input.client;
     this.#executor = input.executor;
     this.#onFatal = input.onFatal;
+    assertProviderConnectionScope(input.connectionScope);
+    this.#connectionScope = Object.freeze({ ...input.connectionScope });
     this.#rotationReplayEnvelope = input.rotationReplayEnvelope ?? Object.freeze({
       snapshot: defaultRotationReplayEnvelopeSnapshot,
     });
@@ -1107,6 +1297,11 @@ export class Lc4DevGatewayTurnCoordinator {
       ...context,
       phase: context.phase ?? "canonical",
     });
+    if (this.#connectionScope.episode_id !== normalizedContext.episode.episode_id
+      || this.#connectionScope.provider !== normalizedContext.episode.provider
+      || this.#connectionScope.arm !== normalizedContext.episode.arm) {
+      throw new Error("LC4-DEV provider connection scope differs from the active episode");
+    }
     try {
       const snapshot = Object.freeze(
         this.#rotationReplayEnvelope.snapshot(normalizedContext),
@@ -1129,7 +1324,7 @@ export class Lc4DevGatewayTurnCoordinator {
   observe(event: NormalizedRealtimeEvent): void {
     let batch: ReturnType<typeof candidateCallsFromEvent>;
     try {
-      batch = candidateCallsFromEvent(event);
+      batch = candidateCallsFromEvent(event, this.#connectionScope);
     } catch (error) {
       this.#fail(error, error instanceof Lc4DevGatewayProvenanceError ? "provenance" : "parse");
       return;
@@ -1323,6 +1518,10 @@ export class Lc4DevGatewayTurnCoordinator {
         call_ordinal: index + 1,
         rejection_code: call.rejection_code,
         provider_call_id_sha256: sha256Hex(call.candidate.call_id),
+        provider_invocation_id_sha256: sha256Hex(call.candidate.provider_invocation_id),
+        provider_connection_scope_sha256: call.candidate.provider_connection_scope_sha256,
+        provider_connection_epoch: call.candidate.provider_connection_epoch,
+        provider_session_id_sha256: call.candidate.provider_session_id_sha256,
         provider_response_id_sha256: sha256Hex(call.candidate.response_id),
         request_sha256: call.candidate.request_sha256,
         provider_provenance_sha256: call.candidate.provider_provenance_sha256,
@@ -1385,6 +1584,11 @@ export class Lc4DevGatewayTurnCoordinator {
         provider: context.episode.provider,
         arm: context.episode.arm,
         provider_call_id: call.call_id,
+        provider_invocation_id: call.provider_invocation_id,
+        provider_connection_scope: this.#connectionScope,
+        provider_connection_scope_sha256: call.provider_connection_scope_sha256,
+        provider_connection_epoch: call.provider_connection_epoch,
+        provider_session_id_sha256: call.provider_session_id_sha256,
         provider_response_id: call.response_id,
         semantic_intent: call.semantic_intent,
         target_tool: call.target_tool,
@@ -1440,6 +1644,10 @@ export class Lc4DevGatewayTurnCoordinator {
         || outcome.authority_projection.episode_id !== context.episode.episode_id
         || outcome.authority_projection.opportunity_id !== context.opportunity.id
         || outcome.authority_projection.provider_call_id_sha256 !== sha256Hex(call.call_id)
+        || outcome.authority_projection.provider_invocation_id_sha256 !== sha256Hex(call.provider_invocation_id)
+        || outcome.authority_projection.provider_connection_scope_sha256 !== call.provider_connection_scope_sha256
+        || outcome.authority_projection.provider_connection_epoch !== call.provider_connection_epoch
+        || outcome.authority_projection.provider_session_id_sha256 !== call.provider_session_id_sha256
         || outcome.authority_projection.provider_response_id_sha256 !== sha256Hex(call.response_id)
         || outcome.authority_projection.request_sha256 !== call.request_sha256
         || outcome.authority_projection.provider_provenance_sha256 !== call.provider_provenance_sha256
@@ -1466,6 +1674,10 @@ export class Lc4DevGatewayTurnCoordinator {
         semantic_intent: call.semantic_intent,
         target_tool: call.target_tool,
         provider_call_id_sha256: sha256Hex(call.call_id),
+        provider_invocation_id_sha256: sha256Hex(call.provider_invocation_id),
+        provider_connection_scope_sha256: call.provider_connection_scope_sha256,
+        provider_connection_epoch: call.provider_connection_epoch,
+        provider_session_id_sha256: call.provider_session_id_sha256,
         provider_response_id_sha256: sha256Hex(call.response_id),
         request_sha256: call.request_sha256,
         provider_provenance_sha256: call.provider_provenance_sha256,

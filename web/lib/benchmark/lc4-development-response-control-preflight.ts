@@ -3,7 +3,9 @@ import type { Lc4DevMunicipalControlPlane } from "./lc4-development-control-plan
 import type { Lc4DevLiveEpisodePlan } from "./lc4-development-live-runner";
 import {
   appendLc4DevNativeGatewayContract,
+  createLc4DevProviderConnectionScope,
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
+  lc4DevProviderInvocationId,
   renderLc4DevHaccResponsePlan,
 } from "./lc4-development-gateway-bridge";
 import {
@@ -133,6 +135,20 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         input.opportunity_id,
         sequence,
       ].join(":");
+      const providerCallId = `${requestLabel}:call`;
+      const segmentOrdinal = Math.ceil(input.opportunity_index / 10);
+      const connectionScope = createLc4DevProviderConnectionScope({
+        episode_id: input.episode.episode_id,
+        provider: input.episode.provider,
+        arm: input.episode.arm,
+        segment_ordinal: segmentOrdinal,
+        session_ordinal: segmentOrdinal,
+        connection_epoch: 1,
+        previous_rotation_receipt_sha256: segmentOrdinal === 1
+          ? null
+          : sha256Hex(`preflight-rotation-${input.episode.episode_id}-${segmentOrdinal - 1}`),
+        rotation_context_sha256: sha256Hex(`preflight-rotation-context-${input.episode.episode_id}-${segmentOrdinal}`),
+      });
       const result = await input.control.gateway_executor.execute({
         bridge_version: LC4_DEV_GATEWAY_BRIDGE_VERSION,
         episode_id: input.episode.episode_id,
@@ -140,7 +156,12 @@ async function drainRegisteredGatewayDispatches(input: Readonly<{
         opportunity_index: input.opportunity_index,
         provider: input.episode.provider,
         arm: input.episode.arm,
-        provider_call_id: `${requestLabel}:call`,
+        provider_call_id: providerCallId,
+        provider_invocation_id: lc4DevProviderInvocationId(connectionScope, providerCallId),
+        provider_connection_scope: connectionScope,
+        provider_connection_scope_sha256: connectionScope.connection_scope_sha256,
+        provider_connection_epoch: connectionScope.connection_epoch,
+        provider_session_id_sha256: null,
         provider_response_id: `${requestLabel}:response`,
         semantic_intent: call.semantic_intent,
         target_tool: call.target_tool,

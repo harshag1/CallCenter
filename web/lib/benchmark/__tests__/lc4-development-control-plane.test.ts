@@ -13,6 +13,8 @@ import {
   type Lc4DevAudioRenderer,
 } from "../lc4-development-audio-materializer";
 import {
+  createLc4DevProviderConnectionScope,
+  lc4DevProviderInvocationId,
   renderLc4DevHaccResponsePlan,
 } from "../lc4-development-gateway-bridge";
 import {
@@ -75,6 +77,34 @@ function episode(arm: "native" | "hacc"): Lc4DevLiveEpisodePlan {
     maximum_micro_usd: 1_000_000,
     opportunity_binding_set_sha256: "b".repeat(64),
   });
+}
+
+function scopedProviderCall(
+  plan: Lc4DevLiveEpisodePlan,
+  opportunityIndex: number,
+  providerCallId: string,
+) {
+  const segmentOrdinal = Math.ceil(opportunityIndex / 10);
+  const scope = createLc4DevProviderConnectionScope({
+    episode_id: plan.episode_id,
+    provider: plan.provider,
+    arm: plan.arm,
+    segment_ordinal: segmentOrdinal,
+    session_ordinal: segmentOrdinal,
+    connection_epoch: 1,
+    previous_rotation_receipt_sha256: segmentOrdinal === 1
+      ? null
+      : sha256Hex(`test-rotation-${plan.episode_id}-${segmentOrdinal - 1}`),
+    rotation_context_sha256: sha256Hex(`test-rotation-context-${plan.episode_id}-${segmentOrdinal}`),
+  });
+  return {
+    provider_call_id: providerCallId,
+    provider_invocation_id: lc4DevProviderInvocationId(scope, providerCallId),
+    provider_connection_scope: scope,
+    provider_connection_scope_sha256: scope.connection_scope_sha256,
+    provider_connection_epoch: scope.connection_epoch,
+    provider_session_id_sha256: null,
+  } as const;
 }
 
 beforeAll(async () => {
@@ -212,7 +242,11 @@ describe("LC4-DEV municipal executable control plane", () => {
                 opportunity_index: opportunity.index,
                 provider: plan.provider,
                 arm: plan.arm,
-                provider_call_id: `test.${plan.arm}.${opportunity.id}.hidden.${callSequence}`,
+                ...scopedProviderCall(
+                  plan,
+                  opportunity.index,
+                  `test.${plan.arm}.${opportunity.id}.hidden.${callSequence}`,
+                ),
                 provider_response_id: `response.${plan.arm}.${opportunity.id}`,
                 semantic_intent: call.semantic_intent,
                 target_tool: call.target_tool,
@@ -233,7 +267,11 @@ describe("LC4-DEV municipal executable control plane", () => {
               opportunity_index: opportunity.index,
               provider: plan.provider,
               arm: plan.arm,
-              provider_call_id: `test.${plan.arm}.${opportunity.id}.${callSequence}`,
+              ...scopedProviderCall(
+                plan,
+                opportunity.index,
+                `test.${plan.arm}.${opportunity.id}.${callSequence}`,
+              ),
               provider_response_id: `response.${plan.arm}.${opportunity.id}`,
               semantic_intent: call.semantic_intent,
               target_tool: call.target_tool,
@@ -299,7 +337,7 @@ describe("LC4-DEV municipal executable control plane", () => {
               // The retained paid op08 result was 9,187 bytes because it
               // embedded the rebound plan twice. The compact tool outcome is
               // byte-stable while the full plan remains in host evidence.
-              expect(haccOp08ProviderOutputBytes).toBe(821);
+              expect(haccOp08ProviderOutputBytes).toBe(866);
               expect(haccOp08ProviderOutputBytes).toBeLessThan(9_187);
             }
             if ([30, 35, 42, 43].includes(opportunity.index)) {
@@ -514,7 +552,11 @@ describe("LC4-DEV municipal executable control plane", () => {
           opportunity_index: opportunity.index,
           provider: plan.provider,
           arm: plan.arm,
-          provider_call_id: `test.missing-mutation.late-submit.${callSequence}`,
+          ...scopedProviderCall(
+            plan,
+            opportunity.index,
+            `test.missing-mutation.late-submit.${callSequence}`,
+          ),
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
           semantic_intent: "submit_accessible_transcript",
           target_tool: "archive.submit_transcript_request",
@@ -530,7 +572,11 @@ describe("LC4-DEV municipal executable control plane", () => {
           opportunity_index: opportunity.index,
           provider: plan.provider,
           arm: plan.arm,
-          provider_call_id: `test.missing-mutation.reconcile.${callSequence}`,
+          ...scopedProviderCall(
+            plan,
+            opportunity.index,
+            `test.missing-mutation.reconcile.${callSequence}`,
+          ),
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
           semantic_intent: "reconcile_accessible_transcript",
           target_tool: "archive.reconcile_transcript_request",
@@ -551,7 +597,11 @@ describe("LC4-DEV municipal executable control plane", () => {
           opportunity_index: opportunity.index,
           provider: plan.provider,
           arm: plan.arm,
-          provider_call_id: `test.missing-mutation.${opportunity.id}.${callSequence}`,
+          ...scopedProviderCall(
+            plan,
+            opportunity.index,
+            `test.missing-mutation.${opportunity.id}.${callSequence}`,
+          ),
           provider_response_id: `response.missing-mutation.${opportunity.id}`,
           semantic_intent: call.semantic_intent,
           target_tool: call.target_tool,
@@ -607,7 +657,7 @@ describe("LC4-DEV municipal executable control plane", () => {
           opportunity_index: opportunity.index,
           provider: plan.provider,
           arm: plan.arm,
-          provider_call_id: "test.rejected-pre-dispatch.op35",
+          ...scopedProviderCall(plan, opportunity.index, "test.rejected-pre-dispatch.op35"),
           provider_response_id: "response.rejected-pre-dispatch.op35",
           semantic_intent: "submit_accessible_transcript",
           target_tool: "archive.submit_transcript_request",

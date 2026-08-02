@@ -3366,10 +3366,12 @@ describe("OpenAI-compatible realtime client", () => {
             _meta: {
               [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "call_native",
               [PROVIDER_PROVENANCE_META_KEY]: {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 provider: "openai",
                 nativeCallId: "call_native",
                 nativeResponseId: "resp_native",
+                connectionEpoch: 1,
+                providerSessionIdSha256: createHash("sha256").update("sess_1").digest("hex"),
                 nativeItemId: "item_native",
                 terminalEventId: "evt_terminal_native",
                 terminalWireType: "response.done",

@@ -38,6 +38,7 @@ import {
   appendLc4DevNativeGatewayContract,
   LC4_DEV_GATEWAY_BRIDGE_VERSION,
   LC4_DEV_INTENT_ACTION_MAP,
+  lc4DevProviderInvocationId,
   lc4DevSemanticIntentForAction,
   renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayExecutor,
@@ -1114,6 +1115,21 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       if (!opportunity || opportunity.id !== request.opportunity_id) {
         throw new Error("LC4-DEV gateway call references a non-current corpus opportunity");
       }
+      if (request.provider_connection_scope.episode_id !== request.episode_id
+        || request.provider_connection_scope.provider !== request.provider
+        || request.provider_connection_scope.arm !== request.arm
+        || request.provider_connection_scope.connection_scope_sha256
+          !== request.provider_connection_scope_sha256
+        || request.provider_connection_scope.connection_epoch
+          !== request.provider_connection_epoch
+        || (request.provider_session_id_sha256 !== null
+          && !/^[a-f0-9]{64}$/u.test(request.provider_session_id_sha256))
+        || lc4DevProviderInvocationId(
+          request.provider_connection_scope,
+          request.provider_call_id,
+        ) !== request.provider_invocation_id) {
+        throw new Error("LC4-DEV gateway scoped provider invocation identity is invalid");
+      }
       const targetArguments = valueJson(request.target_arguments) as Record<string, JsonValue>;
       const mappedAction = LC4_DEV_INTENT_ACTION_MAP[request.semantic_intent];
       const exactOpportunityAction = request.target_tool === "archive.submit_transcript_request"
@@ -1171,7 +1187,7 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
       } else if (state.episode.arm === "native") {
         if (hostBoundArguments === null) throw new Error("LC4-DEV Native intent has no host-bound action payload");
         const execution = executeTool(LC4_DEV_MUNICIPAL_SCENARIO, state.world, {
-          invocation_id: `native.${state.episode.episode_id}.${opportunity.id}.${sha256Hex(request.provider_call_id).slice(0, 12)}`,
+          invocation_id: `native.${state.episode.episode_id}.${opportunity.id}.${sha256Hex(request.provider_invocation_id).slice(0, 12)}`,
           tool: request.target_tool,
           arguments: hostBoundArguments,
           turn: opportunity.index,
@@ -1202,13 +1218,15 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
           previous_head_sha256: state.nativeTranscriptHead,
           opportunity_id: opportunity.id,
           provider_call_id_sha256: sha256Hex(request.provider_call_id),
+          provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
+          provider_connection_scope_sha256: request.provider_connection_scope_sha256,
           request_sha256: request.request_sha256,
           world_receipt_sha256: sha256Hex(canonicalJson(execution.receipt)),
         });
       } else {
         if (hostBoundArguments === null) throw new Error("LC4-DEV HACC intent has no host-bound action payload");
         const execution = gatewayExecute(state, {
-          providerCallId: request.provider_call_id,
+          providerCallId: request.provider_invocation_id,
           action: request.target_tool,
           arguments: request.target_tool === "archive.reconcile_transcript_request"
             ? {}
@@ -1317,6 +1335,10 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         episode_id: state.episode.episode_id,
         opportunity_id: opportunity.id,
         provider_call_id_sha256: sha256Hex(request.provider_call_id),
+        provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
+        provider_connection_scope_sha256: request.provider_connection_scope_sha256,
+        provider_connection_epoch: request.provider_connection_epoch,
+        provider_session_id_sha256: request.provider_session_id_sha256,
         request_sha256: request.request_sha256,
         provider_provenance_sha256: request.provider_provenance_sha256,
         authoritative_receipt: authoritativeReceipt,
@@ -1348,6 +1370,10 @@ export function createLc4DevMunicipalControlPlane(input: Readonly<{
         semantic_intent: request.semantic_intent,
         target_tool: request.target_tool,
         provider_call_id_sha256: sha256Hex(request.provider_call_id),
+        provider_invocation_id_sha256: sha256Hex(request.provider_invocation_id),
+        provider_connection_scope_sha256: request.provider_connection_scope_sha256,
+        provider_connection_epoch: request.provider_connection_epoch,
+        provider_session_id_sha256: request.provider_session_id_sha256,
         provider_response_id_sha256: sha256Hex(request.provider_response_id),
         request_sha256: request.request_sha256,
         provider_provenance_sha256: request.provider_provenance_sha256,

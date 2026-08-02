@@ -1706,7 +1706,12 @@ export class OpenAICompatibleRealtimeClient implements NormalizedRealtimeClient 
           break;
         }
         const localDispatch = this.localToolProxyEnabled
-          ? buildLocalToolProxyDispatchEvent(event, this.provider)
+          ? buildLocalToolProxyDispatchEvent(event, this.provider, {
+              connectionEpoch: this.connectionEpoch,
+              providerSessionIdSha256: this.providerSessionId
+                ? sha256Text(this.providerSessionId)
+                : null,
+            })
           : undefined;
         if (localDispatch && !localDispatch.ok) {
           this.emit({
@@ -4496,6 +4501,10 @@ const LOCAL_PROXY_PROVIDER_CALL_ID_MAX_BYTES = 256;
 function buildLocalToolProxyDispatchEvent(
   event: Extract<NormalizedRealtimeEvent, { type: "tool.calls" }>,
   provider: OpenAICompatibleProvider,
+  connection: Readonly<{
+    connectionEpoch: number;
+    providerSessionIdSha256: string | null;
+  }>,
 ): LocalDispatchBuildResult {
   const dispatches: Array<{
     callId: string;
@@ -4561,10 +4570,12 @@ function buildLocalToolProxyDispatchEvent(
       return { ok: false, message: `Local gateway call ${call.callId} ${targetArgumentsError}` };
     }
     const provenance = deepFreeze<ProviderToolCallProvenance>({
-      schemaVersion: 1,
+      schemaVersion: 2,
       provider,
       nativeCallId: call.callId,
       nativeResponseId: call.responseId,
+      connectionEpoch: connection.connectionEpoch,
+      providerSessionIdSha256: connection.providerSessionIdSha256,
       ...optional("nativeItemId", call.itemId),
       ...optional("terminalEventId", call.terminalEventId),
       terminalWireType: call.terminalWireType,

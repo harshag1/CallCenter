@@ -68,6 +68,7 @@ import {
   LC4_DEV_ROTATION_REPLAY_MAX_UTF8_BYTES,
   LC4_DEV_SEMANTIC_GATEWAY_FUNCTION,
   Lc4DevGatewayTurnCoordinator,
+  createLc4DevProviderConnectionScope,
   renderLc4DevHaccResponsePlan,
   type Lc4DevGatewayConversationToolCall,
   type Lc4DevGatewayConversationToolBatch,
@@ -2697,6 +2698,22 @@ export class Lc4RealtimeProviderBridge {
       ? new Lc4DevGatewayTurnCoordinator({
           client,
           executor: input.dev_gateway.executor,
+          connectionScope: createLc4DevProviderConnectionScope({
+            episode_id: input.dev_gateway.episode.episode_id,
+            provider: input.dev_gateway.episode.provider,
+            arm: input.dev_gateway.episode.arm,
+            segment_ordinal: input.segment.ordinal,
+            session_ordinal: this.#sessionOrdinal + 1,
+            // A new normalized client is constructed for every planned segment.
+            connection_epoch: 1,
+            previous_rotation_receipt_sha256: this.#previousRotationReceiptSha256,
+            rotation_context_sha256: sha256Hex(canonicalJson({
+              kind: rotationContext.kind,
+              packet_sha256: rotationContext.packet_sha256,
+              conversation_replay_sha256: rotationContext.conversation_replay_sha256,
+              provider_visible_history_sha256: rotationContext.provider_visible_history_sha256,
+            })),
+          }),
           rotationReplayEnvelope:
             input.dev_gateway.rotation_replay_envelope,
           onFatal: (error) => {

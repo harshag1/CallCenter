@@ -1191,6 +1191,14 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
               argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
               argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
               responseId,
+              causalBinding: {
+                connectionEpoch: 1,
+                inputTurn: 1,
+                trigger: "client_content" as const,
+                clientMessageOrdinal: 2,
+                providerCallId: "call-2",
+                localResponseId: responseId,
+              },
               terminalWireType: "toolCall",
             }],
           });
@@ -1244,15 +1252,25 @@ class FakeRealtimeClient implements NormalizedRealtimeClient {
               argumentsText: JSON.stringify({ tool_name: "complete_current_stage", arguments: {} }),
               argumentsJson: { tool_name: "complete_current_stage", arguments: {} },
               responseId,
+              causalBinding: {
+                connectionEpoch: 1,
+                inputTurn: 1,
+                trigger: "client_content" as const,
+                clientMessageOrdinal: 1,
+                providerCallId: "call-1",
+                localResponseId: responseId,
+              },
               terminalWireType: "toolCall",
             }],
           });
         } else {
           const provenance = {
-            schemaVersion: 1 as const,
+            schemaVersion: 2 as const,
             provider: this.provider,
             nativeCallId: "call-1",
             nativeResponseId: responseId,
+            connectionEpoch: 1,
+            providerSessionIdSha256: sha256Hex(`fixture-session-${this.provider}`),
             terminalWireType: "response.function_call_arguments.done",
           };
           this.emit({
@@ -1624,10 +1642,12 @@ class GatewayParseRealtimeClient extends FakeRealtimeClient {
         dispatches: [{
           callId: "raw-provider-call-SENTINEL",
           provenance: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             provider: "openai",
             nativeCallId: "raw-provider-call-SENTINEL",
             nativeResponseId: responseId,
+            connectionEpoch: 1,
+            providerSessionIdSha256: sha256Hex("fixture-session-openai"),
             terminalWireType: "response.function_call_arguments.done",
           },
           request: {
@@ -1638,10 +1658,12 @@ class GatewayParseRealtimeClient extends FakeRealtimeClient {
               _meta: {
                 [LOCAL_PROXY_PROVIDER_CALL_ID_META_KEY]: "raw-provider-call-SENTINEL",
                 [PROVIDER_PROVENANCE_META_KEY]: {
-                  schemaVersion: 1,
+                  schemaVersion: 2,
                   provider: "openai",
                   nativeCallId: "raw-provider-call-SENTINEL",
                   nativeResponseId: responseId,
+                  connectionEpoch: 1,
+                  providerSessionIdSha256: sha256Hex("fixture-session-openai"),
                   terminalWireType: "response.function_call_arguments.done",
                 },
               },
@@ -4226,6 +4248,10 @@ describe("LC4 production realtime adapter bridge", () => {
           semantic_intent: input.semantic_intent,
           target_tool: input.target_tool,
           provider_call_id_sha256: sha256Hex(input.provider_call_id),
+          provider_invocation_id_sha256: sha256Hex(input.provider_invocation_id),
+          provider_connection_scope_sha256: input.provider_connection_scope_sha256,
+          provider_connection_epoch: input.provider_connection_epoch,
+          provider_session_id_sha256: input.provider_session_id_sha256,
           provider_response_id_sha256: sha256Hex(input.provider_response_id),
           request_sha256: input.request_sha256,
           provider_provenance_sha256: input.provider_provenance_sha256,

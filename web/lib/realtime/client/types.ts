@@ -109,8 +109,7 @@ export function isSafeLocalToolProxyFunction(value: unknown): boolean {
     && Object.keys(arguments_.properties).length === 0;
 }
 
-export type ProviderToolCallProvenance = Readonly<{
-  schemaVersion: 1;
+type ProviderToolCallProvenanceBase = Readonly<{
   provider: Extract<ServerRealtimeProvider, "openai" | "xai">;
   /** Opaque provider-native function call ID. Never derived from model arguments. */
   nativeCallId: string;
@@ -119,6 +118,19 @@ export type ProviderToolCallProvenance = Readonly<{
   terminalEventId?: string;
   terminalWireType: string;
 }>;
+
+export type ProviderToolCallProvenance =
+  | (ProviderToolCallProvenanceBase & Readonly<{
+      /** Legacy adapters did not bind calls to a physical provider connection. */
+      schemaVersion: 1;
+    }>)
+  | (ProviderToolCallProvenanceBase & Readonly<{
+      schemaVersion: 2;
+      /** Client-local socket epoch. Durable callers must combine this with a host connection scope. */
+      connectionEpoch: number;
+      /** SHA-256 of the provider-acknowledged session ID, or null when the provider omitted one. */
+      providerSessionIdSha256: string | null;
+    }>);
 
 export type LocalToolProxyDispatch = Readonly<{
   method: "tools/call";
