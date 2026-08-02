@@ -447,6 +447,7 @@ export class Lc4DevBudgetLifecycle {
   readonly #lease: Lc4DevRunLease;
   readonly #binding: Lc4DevBudgetBinding;
   readonly #now: () => Date;
+  readonly #continuationAlreadyAdmitted: boolean;
   readonly #intendedSegments = new Set<string>();
   readonly #openedSegments = new Set<string>();
   readonly #nextSegmentByEpisode = new Map<string, number>();
@@ -456,11 +457,13 @@ export class Lc4DevBudgetLifecycle {
     binding: Lc4DevBudgetBinding;
     now: () => Date;
     completed_episode_ids?: readonly string[];
+    continuation_already_admitted?: boolean;
   }>) {
-    assertLc4DevRunLease({ ...input, now: input.now(), admission: true });
+    assertLc4DevRunLease({ ...input, now: input.now(), admission: input.continuation_already_admitted !== true });
     this.#lease = input.lease;
     this.#binding = input.binding;
     this.#now = input.now;
+    this.#continuationAlreadyAdmitted = input.continuation_already_admitted === true;
     const completed = input.completed_episode_ids ?? [];
     if (canonicalJson(completed) !== canonicalJson(
       input.binding.prepare.episodes.slice(0, completed.length).map((episode) => episode.episode_id),
@@ -481,7 +484,12 @@ export class Lc4DevBudgetLifecycle {
   }
 
   assertProviderConstructionAuthorized(): void {
-    assertLc4DevRunLease({ lease: this.#lease, binding: this.#binding, now: this.#now(), admission: true });
+    assertLc4DevRunLease({
+      lease: this.#lease,
+      binding: this.#binding,
+      now: this.#now(),
+      admission: !this.#continuationAlreadyAdmitted,
+    });
   }
 
   assertWithinHardDeadline(): void {

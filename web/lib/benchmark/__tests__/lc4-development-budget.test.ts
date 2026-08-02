@@ -197,6 +197,18 @@ describe("LC4-DEV hard aggregate budget authority", () => {
       root: expiredRecoveryRoot, binding: bindingValue, now: afterPreflightExpiry,
     });
     expect(recoveredExpired.reservations).toHaveLength(6);
+    const continuation = new Lc4DevBudgetLifecycle({
+      lease: recoveredExpired,
+      binding: bindingValue,
+      now: afterPreflightExpiry,
+      continuation_already_admitted: true,
+    });
+    expect(() => continuation.assertProviderConstructionAuthorized()).not.toThrow();
+    await expect(continuation.beforeEpisodeSocketOpen(bindingValue.prepare.episodes[0]!, 1))
+      .resolves.toBeUndefined();
+    expect(() => new Lc4DevBudgetLifecycle({
+      lease: recoveredExpired, binding: bindingValue, now: afterPreflightExpiry,
+    })).toThrow("after preflight expiry");
   });
 
   it("admits before preflight expiry, continues planned cells under the consumed lease, and rejects replay/reconnect", async () => {

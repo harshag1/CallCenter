@@ -1,5 +1,6 @@
 import {
   claimLc4PausedCell,
+  pauseLc4CellBeforeNetwork,
   recoverExpiredLc4CellBeforeNetwork,
   type Lc4CellResumePlan,
 } from "../../lc4-cell-resume-journal";
@@ -14,6 +15,7 @@ type Payload = Readonly<{
   owner_token_sha256?: string;
   owner_expires_at?: string;
   now: string;
+  reason_code?: "local_pre_network_admission_blocked" | "operator_interruption";
 }>;
 
 const mode = process.argv[2];
@@ -24,7 +26,19 @@ const afterBudgetMutation = async () => {
 };
 
 async function main(): Promise<void> {
-if (mode === "recover") {
+if (mode === "pause") {
+  await pauseLc4CellBeforeNetwork({
+    journal_path: payload.journal_path,
+    expected_head_sha256: payload.expected_head_sha256,
+    expected_plan: payload.expected_plan,
+    cell_id: payload.cell_id!,
+    owner_id: payload.owner_id!,
+    owner_token_sha256: payload.owner_token_sha256!,
+    reason_code: payload.reason_code!,
+    evidence_sha256: payload.evidence_sha256!,
+    now: () => new Date(payload.now),
+  }, { afterBudgetMutation });
+} else if (mode === "recover") {
   await recoverExpiredLc4CellBeforeNetwork({
     journal_path: payload.journal_path,
     expected_head_sha256: payload.expected_head_sha256,

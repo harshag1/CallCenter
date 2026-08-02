@@ -811,6 +811,45 @@ async function loadLc4DevCompletedPrefix(input: Readonly<{
   return prior;
 }
 
+export async function claimLc4PausedCellForOperatorRestart(input: Readonly<{
+  journal_path: string;
+  status: Lc4CellResumeStatus;
+  plan: Lc4CellResumePlan;
+  cell_id: string;
+  lease_hard_deadline_at: string;
+  now: () => Date;
+}>): Promise<Readonly<{
+  status: Lc4CellResumeStatus;
+  owner: Readonly<{ owner_id: string; owner_token_sha256: string }>;
+}>> {
+  const proposedOwner = Object.freeze({
+    owner_id: `lc4dev-${process.pid}-${input.cell_id}`,
+    owner_token_sha256: sha256Hex(randomBytes(32)),
+  });
+  const status = await claimLc4PausedCell({
+    journal_path: input.journal_path,
+    expected_head_sha256: input.status.head_sha256,
+    expected_plan: input.plan,
+    cell_id: input.cell_id,
+    ...proposedOwner,
+    owner_expires_at: new Date(Math.min(
+      Date.parse(input.lease_hard_deadline_at),
+      input.now().getTime() + LC4_CELL_OWNER_LEASE_MS,
+    )).toISOString(),
+    now: input.now,
+  });
+  if (!status.active_owner_id || !status.active_owner_token_sha256) {
+    throw new Error("LC4-DEV durable takeover intent did not yield one exact owner");
+  }
+  return Object.freeze({
+    status,
+    owner: Object.freeze({
+      owner_id: status.active_owner_id,
+      owner_token_sha256: status.active_owner_token_sha256,
+    }),
+  });
+}
+
 export async function runLc4DevelopmentOperatorCli(
   args: readonly string[],
   io: Io = {
@@ -1423,6 +1462,7 @@ export async function runLc4DevelopmentOperatorCli(
         binding: { prepare, preflight },
         now: io.now,
         completed_episode_ids: completedPrefix?.completed_episode_ids,
+        continuation_already_admitted: existingLease || recoveringConsumedLease,
       });
       budgetAuthority.assertProviderConstructionAuthorized();
       const bundle = await runtime.build({ prepare, preflight, audio_manifest: audio.manifest, repair_manifest: audio.repair_manifest, audio_root: parsed["--audio-root"]!, evidence_root: evidenceRoot, credentials, signer, budget_authority: budgetAuthority, completed_prefix: completedPrefix });
@@ -1437,25 +1477,23 @@ export async function runLc4DevelopmentOperatorCli(
             episode: Lc4DevLivePrepareArtifact["episodes"][number];
             prior_run_ledger_head_sha256: string | null;
           }>) => {
-            const owner = Object.freeze({
+            let owner: Readonly<{ owner_id: string; owner_token_sha256: string }> = Object.freeze({
               owner_id: `lc4dev-${process.pid}-${episode.episode_id}`,
               owner_token_sha256: sha256Hex(randomBytes(32)),
             });
-            cellOwners.set(episode.episode_id, owner);
-            resumeStatus = resumeStatus.state === "paused_before_network"
-              ? await claimLc4PausedCell({
-                  journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
-                  expected_head_sha256: resumeStatus.head_sha256,
-                  expected_plan: resumePlan,
-                  cell_id: episode.episode_id,
-                  ...owner,
-                  owner_expires_at: new Date(Math.min(
-                    Date.parse(budgetLease.hard_deadline_at),
-                    io.now().getTime() + LC4_CELL_OWNER_LEASE_MS,
-                  )).toISOString(),
-                  now: io.now,
-                })
-              : await beginLc4Cell({
+            if (resumeStatus.state === "paused_before_network") {
+              const claimed = await claimLc4PausedCellForOperatorRestart({
+                journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
+                status: resumeStatus,
+                plan: resumePlan,
+                cell_id: episode.episode_id,
+                lease_hard_deadline_at: budgetLease.hard_deadline_at,
+                now: io.now,
+              });
+              resumeStatus = claimed.status;
+              owner = claimed.owner;
+            } else {
+              resumeStatus = await beginLc4Cell({
                   journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
                   expected_head_sha256: resumeStatus.head_sha256,
                   expected_plan: resumePlan,
@@ -1467,6 +1505,8 @@ export async function runLc4DevelopmentOperatorCli(
                   )).toISOString(),
                   now: io.now,
                 });
+            }
+            cellOwners.set(episode.episode_id, owner);
             resumeStatus = await markLc4CellNetworkEmissionStarted({
               journal_path: artifactPath(evidenceRoot, "cell_resume_journal"),
               expected_head_sha256: resumeStatus.head_sha256,

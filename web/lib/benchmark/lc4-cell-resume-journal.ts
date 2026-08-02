@@ -107,6 +107,7 @@ export type Lc4ProviderCreditClassification = Readonly<{
 type JournalEventType =
   | "cell.intent_fsynced"
   | "cell.paused_before_network"
+  | "cell.takeover_intent_fsynced"
   | "cell.resume_claimed"
   | "cell.network_emission_started"
   | "cell.completed"
@@ -151,6 +152,8 @@ export type Lc4CellResumeStatus = Readonly<{
   automatic_resume_available: boolean;
   all_cells_completed: boolean;
   scoring_available: boolean;
+  active_owner_id: string | null;
+  active_owner_token_sha256: string | null;
   active_owner_expires_at: string | null;
   expired_pre_network_owner_recoverable: boolean;
 }>;
@@ -440,8 +443,12 @@ function verifyFile(file: JournalFile): void {
       if (prior !== undefined) fail("cell intent is duplicated");
     } else if (event.event_type === "cell.paused_before_network") {
       if (prior !== "cell.intent_fsynced" && prior !== "cell.resume_claimed") fail("only a pre-network owner can pause");
+    } else if (event.event_type === "cell.takeover_intent_fsynced") {
+      if (prior !== "cell.paused_before_network" && prior !== "cell.takeover_intent_fsynced") {
+        fail("takeover intent requires one paused unopened cell");
+      }
     } else if (event.event_type === "cell.resume_claimed") {
-      if (prior !== "cell.paused_before_network") fail("only a paused unopened cell can resume");
+      if (prior !== "cell.takeover_intent_fsynced") fail("only a durable takeover intent can resume");
     } else if (event.event_type === "cell.network_emission_started") {
       if (prior !== "cell.intent_fsynced" && prior !== "cell.resume_claimed") fail("network admission lacks an unopened-cell owner");
     } else if (event.event_type === "cell.completed") {
@@ -580,7 +587,7 @@ function stateFor(file: JournalFile, now: Date = new Date()): Lc4CellResumeStatu
     ? "network_ambiguous" as const
     : completed.length === 6
       ? "completed" as const
-      : activeType === "cell.paused_before_network"
+      : activeType === "cell.paused_before_network" || activeType === "cell.takeover_intent_fsynced"
         ? "paused_before_network" as const
         : activeType === "cell.network_emission_started"
           ? "network_ambiguous" as const
@@ -603,6 +610,8 @@ function stateFor(file: JournalFile, now: Date = new Date()): Lc4CellResumeStatu
     // run package must also replay authority, budget settlement, 36 sessions,
     // and all 360 opportunities.
     scoring_available: false,
+    active_owner_id: active ? latest.get(active.cell_id)!.owner_id : null,
+    active_owner_token_sha256: active ? latest.get(active.cell_id)!.owner_token_sha256 : null,
     active_owner_expires_at: active ? latest.get(active.cell_id)!.owner_expires_at : null,
     expired_pre_network_owner_recoverable: state === "owned_before_network"
       && activeType !== "cell.network_emission_started"
@@ -709,7 +718,7 @@ export async function pauseLc4CellBeforeNetwork(input: Readonly<{
   reason_code: "local_pre_network_admission_blocked" | "operator_interruption";
   evidence_sha256: string;
   now: () => Date;
-}>): Promise<Lc4CellResumeStatus> {
+}>, hooks: Readonly<{ afterBudgetMutation?: () => Promise<void> }> = {}): Promise<Lc4CellResumeStatus> {
   requireHash(input.evidence_sha256, "evidence_sha256");
   return mutateJournal({ ...input, event: async (file) => {
     const last = file.events.at(-1);
@@ -718,16 +727,33 @@ export async function pauseLc4CellBeforeNetwork(input: Readonly<{
       || last.owner_id !== input.owner_id
       || last.owner_token_sha256 !== input.owner_token_sha256) fail("only the current pre-network owner can pause");
     const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
-    const pause = await setFilesystemBudgetPaused({
-      ledgerPath: file.plan.budget_ledger_path,
-      operationId: `lc4cell-pause:${input.cell_id}:${file.sequence + 1}`,
-      paused: true,
-      reasonCode: input.reason_code,
-      evidenceSha256: input.evidence_sha256,
-      expectedLedgerId: file.plan.budget_ledger_id,
-      expectedHeadSha256: ledger.head_sha256,
-      now: input.now,
-    });
+    if (ledger.ledger_id !== file.plan.budget_ledger_id) fail("pause requires the exact budget ledger");
+    const operationId = `lc4cell-pause:${input.cell_id}:${file.sequence + 1}`;
+    let pauseHead: string;
+    if (ledger.paused) {
+      const event = (await inspectFilesystemBudgetLedgerEvents({ ledgerPath: file.plan.budget_ledger_path, now: input.now })).at(-1);
+      if (!event || event.event_type !== "ledger.paused" || event.operation_id !== operationId
+        || event.previous_event_sha256 !== last.budget_ledger_head_sha256
+        || event.event_sha256 !== ledger.head_sha256
+        || !("reason_code" in event.payload) || event.payload.reason_code !== input.reason_code
+        || !("evidence_sha256" in event.payload) || event.payload.evidence_sha256 !== input.evidence_sha256) {
+        fail("paused budget ledger does not match the exact interrupted owner pause");
+      }
+      pauseHead = event.event_sha256;
+    } else {
+      const pause = await setFilesystemBudgetPaused({
+        ledgerPath: file.plan.budget_ledger_path,
+        operationId,
+        paused: true,
+        reasonCode: input.reason_code,
+        evidenceSha256: input.evidence_sha256,
+        expectedLedgerId: file.plan.budget_ledger_id,
+        expectedHeadSha256: ledger.head_sha256,
+        now: input.now,
+      });
+      pauseHead = pause.snapshot.head_sha256;
+      await hooks.afterBudgetMutation?.();
+    }
     return appendEvent(file, {
       occurred_at: input.now().toISOString(),
       event_type: "cell.paused_before_network",
@@ -736,7 +762,7 @@ export async function pauseLc4CellBeforeNetwork(input: Readonly<{
       owner_token_sha256: input.owner_token_sha256,
       owner_expires_at: last.owner_expires_at,
       evidence_sha256: input.evidence_sha256,
-      budget_ledger_head_sha256: pause.snapshot.head_sha256,
+      budget_ledger_head_sha256: pauseHead,
     });
   }});
 }
@@ -838,24 +864,54 @@ export async function claimLc4PausedCell(input: Readonly<{
   requireId(input.owner_id, "owner_id");
   requireHash(input.owner_token_sha256, "owner_token_sha256");
   requireTimestamp(input.owner_expires_at, "owner_expires_at");
-  return mutateJournal({ ...input, event: async (file) => {
+  const intentStatus = await mutateJournal({ ...input, event: async (file) => {
     const status = stateFor(file);
     const last = file.events.at(-1);
     const now = input.now();
     if (status.state !== "paused_before_network" || status.active_cell_id !== input.cell_id
-      || last?.event_type !== "cell.paused_before_network") fail("cell is not paused before network emission");
+      || (last?.event_type !== "cell.paused_before_network" && last?.event_type !== "cell.takeover_intent_fsynced")) {
+      fail("cell is not paused before network emission");
+    }
+    if (last.event_type === "cell.takeover_intent_fsynced") {
+      if (Date.parse(last.owner_expires_at) > now.getTime()) return file;
+      const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
+      if (!ledger.paused) return file;
+    }
     if (now.getTime() >= Date.parse(file.plan.lease_hard_deadline_at)
       || now.getTime() >= Date.parse(input.owner_expires_at)) fail("authorization or owner lease expired before resume");
+    const pausedEvidenceSha256 = last.event_type === "cell.paused_before_network"
+      ? last.evidence_sha256
+      : last.evidence_sha256;
     const takeoverEvidenceSha256 = sha256Hex(`${TAKEOVER_DOMAIN}${canonicalJson({
       cell_id: input.cell_id,
       owner_id: input.owner_id,
       owner_token_sha256: input.owner_token_sha256,
       owner_expires_at: input.owner_expires_at,
-      paused_evidence_sha256: last.evidence_sha256,
+      paused_evidence_sha256: pausedEvidenceSha256,
     })}`);
+    return appendEvent(file, {
+      occurred_at: now.toISOString(),
+      event_type: "cell.takeover_intent_fsynced",
+      cell_id: input.cell_id,
+      owner_id: input.owner_id,
+      owner_token_sha256: input.owner_token_sha256,
+      owner_expires_at: input.owner_expires_at,
+      evidence_sha256: takeoverEvidenceSha256,
+      budget_ledger_head_sha256: last.budget_ledger_head_sha256,
+    });
+  }});
+  return mutateJournal({
+    ...input,
+    expected_head_sha256: intentStatus.head_sha256,
+    event: async (file) => {
+    const last = file.events.at(-1);
+    const now = input.now();
+    if (!last || last.event_type !== "cell.takeover_intent_fsynced" || last.cell_id !== input.cell_id) {
+      fail("durable takeover intent disappeared before budget resume");
+    }
     const ledger = await inspectFilesystemBudgetLedger({ ledgerPath: file.plan.budget_ledger_path, now: input.now });
     if (ledger.ledger_id !== file.plan.budget_ledger_id) fail("paused budget ledger differs from journal custody");
-    const operationId = `lc4cell-resume:${input.cell_id}:${file.sequence + 1}`;
+    const operationId = `lc4cell-resume:${input.cell_id}:${last.sequence}`;
     let resumedHead: string;
     if (!ledger.paused) {
       const event = (await inspectFilesystemBudgetLedgerEvents({ ledgerPath: file.plan.budget_ledger_path, now: input.now })).at(-1);
@@ -863,7 +919,7 @@ export async function claimLc4PausedCell(input: Readonly<{
         || event.previous_event_sha256 !== last.budget_ledger_head_sha256
         || event.event_sha256 !== ledger.head_sha256
         || !("reason_code" in event.payload) || event.payload.reason_code !== "credit_restored_exact_cell"
-        || !("evidence_sha256" in event.payload) || event.payload.evidence_sha256 !== takeoverEvidenceSha256) {
+        || !("evidence_sha256" in event.payload) || event.payload.evidence_sha256 !== last.evidence_sha256) {
         fail("open budget ledger does not match the exact interrupted owner takeover");
       }
       resumedHead = event.event_sha256;
@@ -874,7 +930,7 @@ export async function claimLc4PausedCell(input: Readonly<{
         operationId,
         paused: false,
         reasonCode: "credit_restored_exact_cell",
-        evidenceSha256: takeoverEvidenceSha256,
+        evidenceSha256: last.evidence_sha256,
         expectedLedgerId: file.plan.budget_ledger_id,
         expectedHeadSha256: ledger.head_sha256,
         now: input.now,
@@ -886,9 +942,9 @@ export async function claimLc4PausedCell(input: Readonly<{
       occurred_at: now.toISOString(),
       event_type: "cell.resume_claimed",
       cell_id: input.cell_id,
-      owner_id: input.owner_id,
-      owner_token_sha256: input.owner_token_sha256,
-      owner_expires_at: input.owner_expires_at,
+      owner_id: last.owner_id,
+      owner_token_sha256: last.owner_token_sha256,
+      owner_expires_at: last.owner_expires_at,
       evidence_sha256: last.evidence_sha256,
       budget_ledger_head_sha256: resumedHead,
     });

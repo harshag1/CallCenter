@@ -20,10 +20,14 @@ import {
   quarantineLc4MissingJournalCustody,
   recoverExpiredLc4CellBeforeNetwork,
   type Lc4CellResumePlan,
+  type Lc4CellResumeStatus,
   type Lc4ProviderCreditFailure,
 } from "../lc4-cell-resume-journal";
 import { initializeFilesystemBudgetLedger } from "../filesystem-budget-ledger";
-import { runLc4DevelopmentOperatorCli } from "../lc4-development-operator-cli";
+import {
+  claimLc4PausedCellForOperatorRestart,
+  runLc4DevelopmentOperatorCli,
+} from "../lc4-development-operator-cli";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -31,7 +35,7 @@ afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recur
 const BASE_TIME = Date.parse("2026-08-01T18:00:00.000Z");
 const hash = (value: string) => sha256Hex(`lc4-cell-resume-test\n${value}`);
 
-async function killAfterBudgetMutation(mode: "recover" | "claim", payload: object): Promise<void> {
+async function killAfterBudgetMutation(mode: "pause" | "recover" | "claim", payload: object): Promise<void> {
   const helper = resolve(process.cwd(), "lib/benchmark/__tests__/helpers/lc4-cell-resume-crash-worker.ts");
   await new Promise<void>((resolveWorker, rejectWorker) => {
     const child = spawn(process.execPath, ["--import", "tsx", helper, mode, JSON.stringify(payload)], {
@@ -331,6 +335,25 @@ describe("LC4 whole-cell paid resume journal", () => {
     })).resolves.toMatchObject({ state: "paused_before_network" });
   }, 30_000);
 
+  it("reconciles exported owner pause after child death at its distinct budget operation", async () => {
+    const value = await fixture();
+    let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
+    status = await begin(value, status.head_sha256, 0);
+    const pause = {
+      journal_path: value.journalPath,
+      expected_head_sha256: status.head_sha256,
+      expected_plan: value.plan,
+      cell_id: value.plan.cells[0]!.cell_id,
+      ...owner(1),
+      reason_code: "operator_interruption" as const,
+      evidence_sha256: hash("process-kill-owner-pause"),
+      now: value.now().toISOString(),
+    };
+    await killAfterBudgetMutation("pause", pause);
+    await expect(pauseLc4CellBeforeNetwork({ ...pause, now: value.now }))
+      .resolves.toMatchObject({ state: "paused_before_network" });
+  }, 30_000);
+
   it("reconciles child-process death after budget unpause but before owner-takeover append", async () => {
     const value = await fixture();
     let status = await inspectLc4CellResumeJournal({ journal_path: value.journalPath });
@@ -352,11 +375,30 @@ describe("LC4 whole-cell paid resume journal", () => {
       now: new Date(BASE_TIME).toISOString(),
     };
     await killAfterBudgetMutation("claim", takeover);
-    expect((await inspectLc4CellResumeJournal({ journal_path: value.journalPath })).state).toBe("paused_before_network");
-    await expect(claimLc4PausedCell({ ...takeover, ...owner(8), now: value.now }))
-      .rejects.toThrow("exact interrupted owner takeover");
-    await expect(claimLc4PausedCell({ ...takeover, now: value.now }))
-      .resolves.toMatchObject({ state: "owned_before_network" });
+    const stdout: string[] = [];
+    const cliCode = await runLc4DevelopmentOperatorCli([
+      "resume-status", "--evidence-root", value.root,
+    ], {
+      stdout: (line) => stdout.push(line), stderr: () => undefined, now: value.now,
+    });
+    expect(cliCode).toBe(0);
+    const restarted = (JSON.parse(stdout[0]!) as { resume: Lc4CellResumeStatus }).resume;
+    expect(restarted.state).toBe("paused_before_network");
+    const reconciled = await claimLc4PausedCellForOperatorRestart({
+      journal_path: value.journalPath,
+      status: restarted,
+      plan: value.plan,
+      cell_id: value.plan.cells[0]!.cell_id,
+      lease_hard_deadline_at: value.plan.lease_hard_deadline_at,
+      now: value.now,
+    });
+    expect(reconciled).toMatchObject({
+      status: { state: "owned_before_network" },
+      owner: {
+        owner_id: takeover.owner_id,
+        owner_token_sha256: takeover.owner_token_sha256,
+      },
+    });
   }, 30_000);
 
   it("creates an explicit absorbing custody quarantine for an unsafe missing-journal reconstruction", async () => {
