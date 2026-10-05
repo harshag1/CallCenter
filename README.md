@@ -6,9 +6,6 @@ Harsha's Amazing Call Center combines a visual builder, a high-authority builder
 
 ![Harsha's Amazing Call Center builder and call operations interface](docs/assets/hacc-builder-ui-demo.webp)
 
-*Illustrative product view only. The dashboard counts, chart values, phone
-number, and builder conversation are sanitized, simulated UI content—not live
-operations or benchmark evidence.*
 
 ## Why this exists
 
